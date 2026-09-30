@@ -16,11 +16,11 @@ use aeris_application::{
 use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
-    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, EMA_RIBBON_DEFAULT_PERIODS,
-    FinancialAppearance, FinancialDrag, FinancialLegendIdentity, FinancialLegendRequest,
-    FinancialLegendTone, FinancialNavigation, HostLegendSeries, IndicatorChromeOptions,
-    IndicatorKind, NativePrimitiveId, PriceScaleMode, PriceScaleTarget, SeriesChromeFlag,
-    TradingIntent, TradingSnapshot,
+    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, DrawingTextEditKey,
+    EMA_RIBBON_DEFAULT_PERIODS, FinancialAppearance, FinancialDrag, FinancialLegendIdentity,
+    FinancialLegendRequest, FinancialLegendTone, FinancialNavigation, HostLegendSeries,
+    IndicatorChromeOptions, IndicatorKind, NativePrimitiveId, PriceScaleMode, PriceScaleTarget,
+    SeriesChromeFlag, TradingIntent, TradingSnapshot,
 };
 pub use aeris_charts_engine::{
     ExternalStudyError as ChartStudyOutputError,
@@ -137,8 +137,6 @@ fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySna
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
-const TEXT_CARET_PERIOD: Duration = Duration::from_secs(1);
-const TEXT_EDIT_PAD: f32 = 4.0;
 
 fn text_edit_char(event: &KeyDownEvent) -> Option<char> {
     if let Some(text) = event.keystroke.key_char.as_deref() {
@@ -2625,30 +2623,6 @@ fn legend_palette(theme: ChartTheme, bullish: &str, bearish: &str) -> LegendPale
     }
 }
 
-fn text_caret_geometry(
-    anchor_x: f32,
-    anchor_y: f32,
-    text_width: f32,
-    size: f32,
-    horizontal: &str,
-    vertical: &str,
-    empty: bool,
-) -> (f32, f32, f32) {
-    let run_width = if empty { size } else { text_width };
-    let left = match horizontal {
-        "left" => anchor_x + TEXT_EDIT_PAD,
-        "right" => anchor_x - TEXT_EDIT_PAD - run_width,
-        _ => anchor_x - run_width / 2.0,
-    };
-    let run_y = match vertical {
-        "top" => anchor_y - TEXT_EDIT_PAD - size / 2.0,
-        "bottom" => anchor_y + TEXT_EDIT_PAD + size / 2.0,
-        _ => anchor_y,
-    };
-    let caret_x = if empty { left } else { left + text_width };
-    (caret_x, run_y - size * 0.6, size * 1.2)
-}
-
 fn chart_legend_layers(
     chart: &Entity<AerisChartView>,
     rows: &[LegendRow],
@@ -2895,7 +2869,7 @@ fn legend_control_element_id(item: LegendItem, control: LegendControl) -> (&'sta
 }
 
 impl Render for AerisChartView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_clock_tick(cx);
         let mutation = self.apply_pending_data();
         let entity: Entity<Self> = cx.entity();
@@ -2917,7 +2891,6 @@ impl Render for AerisChartView {
             &bearish,
             self.asset_loading.is_present(),
         );
-        let text_caret = self.text_caret_overlay(window);
 
         div()
             .id(("aeris_chart_surface", cx.entity_id()))
@@ -2966,7 +2939,6 @@ impl Render for AerisChartView {
                 )
                 .size_full(),
             )
-            .children(text_caret)
             .children(legends)
     }
 }

@@ -1,6 +1,9 @@
 //! Drawings.
 
-use super::*;
+use super::{
+    AerisChartView, ChartDrawingTool, CursorStyle, DrawingId, DrawingKind, DrawingModifiers,
+    DrawingTextEditKey, DrawingsLockSummary, KeyDownEvent, Modifiers, text_edit_char,
+};
 
 impl AerisChartView {
     /// Returns the drawing tool currently armed on the chart surface.
@@ -29,142 +32,83 @@ impl AerisChartView {
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
     }
-    /// Whether the host is editing a Aeris Charts text drawing.
+    /// Whether Aeris Charts is editing text on a drawing.
     #[must_use]
     pub fn is_editing_text(&self) -> bool {
-        self.engine.editing_drawing().is_some()
+        self.engine.drawing_text_edit().is_some()
     }
     pub(super) fn begin_text_edit(&mut self, id: aeris_charts_engine::DrawingId) {
-        self.engine.set_editing_drawing(Some(id));
-        self.engine.set_selected_drawing(Some(id));
-        self.invalidate_series_frame();
+        if self.engine.begin_drawing_text_edit(id, true) {
+            self.engine.set_selected_drawing(Some(id));
+            self.invalidate_series_frame();
+        }
     }
-    /// Commit or discard the active text edit. Empty text drawings are removed.
+    /// Commit the active text edit. The engine removes empty standalone text, but keeps an
+    /// unlabeled trend line.
     pub fn finish_text_edit(&mut self) -> bool {
-        let Some(id) = self.engine.editing_drawing() else {
+        let Some((id, _, _)) = self.engine.drawing_text_edit() else {
             return false;
         };
-        self.engine.set_editing_drawing(None);
-        let empty = self
-            .engine
-            .drawings()
-            .iter()
-            .find(|drawing| drawing.id == id)
-            .is_some_and(|drawing| drawing.text.is_empty());
-        if empty {
-            self.engine.set_selected_drawing(Some(id));
-            let _ = self.engine.remove_selected_drawing();
+        if self.engine.commit_drawing_text_edit() {
+            if self.engine.drawing(id).is_none() {
+                self.locked_drawings.remove(&id);
+            }
+        } else {
+            return false;
+        }
+        self.invalidate_series_frame();
+        self.mark_user_state_changed();
+        true
+    }
+    pub(super) fn cancel_text_edit(&mut self) -> bool {
+        let Some((id, _, _)) = self.engine.drawing_text_edit() else {
+            return false;
+        };
+        if !self.engine.cancel_drawing_text_edit() {
+            return false;
+        }
+        if self.engine.drawing(id).is_none() {
             self.locked_drawings.remove(&id);
         }
         self.invalidate_series_frame();
         self.mark_user_state_changed();
         true
     }
-    pub(super) fn editing_text_value(&self) -> Option<String> {
-        let id = self.engine.editing_drawing()?;
-        self.engine
-            .drawings()
-            .iter()
-            .find(|drawing| drawing.id == id)
-            .map(|drawing| drawing.text.clone())
-    }
-    pub(super) fn set_editing_text_value(&mut self, text: &str) -> bool {
-        let Some(id) = self.engine.editing_drawing() else {
-            return false;
-        };
-        let Ok(encoded) = serde_json::to_string(text) else {
-            return false;
-        };
-        let json = format!(r#"{{"text":{encoded}}}"#);
-        if !self.engine.drawing_apply_options(id, &json) {
-            return false;
-        }
-        self.invalidate_series_frame();
-        true
-    }
-    pub(super) fn text_caret_overlay(&self, window: &Window) -> Option<AnyElement> {
-        let id = self.engine.editing_drawing()?;
-        let drawing = self
-            .engine
-            .drawings()
-            .iter()
-            .find(|drawing| drawing.id == id)?;
-        let (anchor_x, anchor_y) = self.engine.drawing_point_to_coordinate(id, 0)?;
-        let layout = &self.engine.options.get().layout;
-        let size = drawing.resolved_text_size(layout.font_size).to_f32()?;
-        let metrics = measure_text(
-            window,
-            &drawing.text,
-            &layout.font_family,
-            size,
-            drawing.text_weight.unwrap_or(400),
-            drawing.text_italic,
-        );
-        let options: serde_json::Value =
-            serde_json::from_str(&self.engine.drawing_options_json(id)?).ok()?;
-        let (left, top, height) = text_caret_geometry(
-            anchor_x.to_f32()? + self.engine.pane_left.to_f32()?,
-            anchor_y.to_f32()?,
-            metrics.width,
-            size,
-            options["text_h_align"].as_str().unwrap_or("center"),
-            options["text_v_align"].as_str().unwrap_or("middle"),
-            drawing.text.is_empty(),
-        );
-        let color = gpui_theme_color(platform_theme(self.theme).colors.text_primary);
-        Some(
-            div()
-                .id(("chart_text_caret", id))
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .w(px(1.5))
-                .h(px(height))
-                .bg(color)
-                .with_animation(
-                    ("chart_text_caret_blink", id),
-                    Animation::new(TEXT_CARET_PERIOD).repeat(),
-                    |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
-                )
-                .into_any_element(),
-        )
-    }
     pub(super) fn apply_text_edit_key(&mut self, event: &KeyDownEvent) -> bool {
         if !self.is_editing_text() {
             return false;
         }
         let modifiers = event.keystroke.modifiers;
-        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
-            return false;
+        let word = modifiers.control || modifiers.alt || modifiers.platform;
+        let key = match event.keystroke.key.as_str() {
+            "escape" => return self.cancel_text_edit(),
+            "enter" => return self.finish_text_edit(),
+            "a" if word => {
+                return self.engine.drawing_text_edit_select_all() || self.is_editing_text();
+            }
+            "backspace" if word => Some(DrawingTextEditKey::DeleteWordBackward),
+            "delete" if word => Some(DrawingTextEditKey::DeleteWordForward),
+            "backspace" => Some(DrawingTextEditKey::Backspace),
+            "delete" => Some(DrawingTextEditKey::Delete),
+            "left" if word => Some(DrawingTextEditKey::WordLeft),
+            "right" if word => Some(DrawingTextEditKey::WordRight),
+            "left" => Some(DrawingTextEditKey::Left),
+            "right" => Some(DrawingTextEditKey::Right),
+            "home" => Some(DrawingTextEditKey::Home),
+            "end" => Some(DrawingTextEditKey::End),
+            _ => None,
+        };
+        if let Some(key) = key {
+            let _ = self.engine.drawing_text_edit_key(key, modifiers.shift);
+            self.invalidate_series_frame();
+        } else if !word
+            && !modifiers.function
+            && let Some(ch) = text_edit_char(event)
+        {
+            let _ = self.engine.drawing_text_edit_insert(&ch.to_string());
+            self.invalidate_series_frame();
         }
-        match event.keystroke.key.as_str() {
-            "escape" | "enter" => self.finish_text_edit(),
-            "backspace" => {
-                let Some(mut text) = self.editing_text_value() else {
-                    return false;
-                };
-                text.pop();
-                self.set_editing_text_value(&text)
-            }
-            "delete" => {
-                // Host typing mode treats Delete like Backspace for the caret-at-end model.
-                let Some(mut text) = self.editing_text_value() else {
-                    return false;
-                };
-                text.pop();
-                self.set_editing_text_value(&text)
-            }
-            _ => {
-                let Some(ch) = text_edit_char(event) else {
-                    return false;
-                };
-                let Some(mut text) = self.editing_text_value() else {
-                    return false;
-                };
-                text.push(ch);
-                self.set_editing_text_value(&text)
-            }
-        }
+        true
     }
     /// Returns the number of committed drawings.
     #[must_use]
@@ -249,7 +193,7 @@ impl AerisChartView {
     /// Removes every committed drawing.
     pub fn clear_drawings(&mut self) {
         let changed = !self.engine.drawings().is_empty();
-        self.engine.set_editing_drawing(None);
+        let _ = self.finish_text_edit();
         self.cancel_drawing_gesture();
         self.engine.clear_drawings();
         self.locked_drawings.clear();
@@ -389,7 +333,7 @@ impl AerisChartView {
             let editing = self.engine.editing_drawing();
             let hit_id = self.engine.hit_test_drawing(pane_x, y).map(|hit| hit.id);
             if click_count >= 2
-                && let Some(id) = hit_id.filter(|&id| self.drawing_is_text(id))
+                && let Some(id) = hit_id.filter(|&id| self.drawing_accepts_text(id))
             {
                 self.begin_text_edit(id);
                 return true;
@@ -397,7 +341,8 @@ impl AerisChartView {
             if hit_id != editing {
                 let _ = self.finish_text_edit();
             } else if hit_id.is_some() {
-                // Keep typing focus on the current text drawing; avoid starting a drag.
+                let _ = self.engine.drawing_text_edit_caret_at(pane_x, y);
+                self.invalidate_series_frame();
                 return true;
             }
         }
@@ -407,7 +352,7 @@ impl AerisChartView {
                 let hit = self.engine.hit_test_drawing(pane_x, y);
                 if click_count >= 2
                     && let Some(hit) = hit
-                    && self.drawing_is_text(hit.id)
+                    && self.drawing_accepts_text(hit.id)
                 {
                     self.begin_text_edit(hit.id);
                     return true;
@@ -448,11 +393,10 @@ impl AerisChartView {
             }
         }
     }
-    pub(super) fn drawing_is_text(&self, id: DrawingId) -> bool {
-        self.engine
-            .drawings()
-            .iter()
-            .any(|drawing| drawing.id == id && drawing.kind == DrawingKind::Text)
+    pub(super) fn drawing_accepts_text(&self, id: DrawingId) -> bool {
+        self.engine.drawings().iter().any(|drawing| {
+            drawing.id == id && matches!(drawing.kind, DrawingKind::Text | DrawingKind::TrendLine)
+        })
     }
     pub(super) fn drawing_pointer_move(
         &mut self,

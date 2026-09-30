@@ -3110,12 +3110,55 @@ fn text_tool_place_enters_edit_mode_and_keeps_typed_label() {
     assert!(chart.is_editing_text());
     assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
 
-    assert!(chart.set_editing_text_value("NQ"));
-    assert_eq!(chart.editing_text_value().as_deref(), Some("NQ"));
+    assert!(chart.engine.drawing_text_edit_insert("NQ"));
+    assert_eq!(
+        chart.engine.drawing_text_edit().map(|(_, text, _)| text),
+        Some("NQ")
+    );
     assert!(chart.finish_text_edit());
     assert!(!chart.is_editing_text());
     assert_eq!(chart.drawing_count(), 1);
     assert_eq!(chart.engine.drawings()[0].text, "NQ");
+}
+
+#[test]
+fn trend_line_double_click_edits_label_without_replacing_the_line() {
+    let mut chart = interactive_chart();
+    chart.set_drawing_tool(ChartDrawingTool::TrendLine);
+    assert!(chart.drawing_pointer_down(260.0, 160.0, DrawingModifiers::default(), 1));
+    assert!(chart.drawing_pointer_down(340.0, 160.0, DrawingModifiers::default(), 1));
+    let id = chart.engine.drawings()[0].id;
+    assert!(chart.drawing_accepts_text(id));
+
+    assert!(chart.drawing_pointer_down(300.0, 160.0, DrawingModifiers::default(), 2));
+    assert_eq!(
+        chart
+            .engine
+            .drawing_text_edit()
+            .map(|(editing, _, _)| editing),
+        Some(id)
+    );
+    assert!(chart.engine.drawing_text_edit_insert("Breakout"));
+    assert!(chart.finish_text_edit());
+    assert_eq!(
+        chart
+            .engine
+            .drawing(id)
+            .map(|drawing| drawing.text.as_str()),
+        Some("Breakout")
+    );
+
+    chart.begin_text_edit(id);
+    assert!(chart.engine.set_drawing_text_edit("", 0));
+    assert!(chart.finish_text_edit());
+    assert_eq!(chart.drawing_count(), 1);
+    assert_eq!(
+        chart
+            .engine
+            .drawing(id)
+            .map(|drawing| drawing.text.as_str()),
+        Some("")
+    );
 }
 
 #[test]
@@ -3127,19 +3170,10 @@ fn pointer_exit_keeps_the_active_text_edit_session() {
     chart.cancel_pointer_gesture();
 
     assert!(chart.is_editing_text());
-    assert!(chart.set_editing_text_value("ES"));
-    assert_eq!(chart.editing_text_value().as_deref(), Some("ES"));
-}
-
-#[test]
-fn text_caret_tracks_the_end_of_centered_and_empty_labels() {
+    assert!(chart.engine.drawing_text_edit_insert("ES"));
     assert_eq!(
-        text_caret_geometry(100.0, 100.0, 40.0, 20.0, "center", "middle", false,),
-        (120.0, 88.0, 24.0)
-    );
-    assert_eq!(
-        text_caret_geometry(100.0, 100.0, 0.0, 20.0, "center", "middle", true,),
-        (90.0, 88.0, 24.0)
+        chart.engine.drawing_text_edit().map(|(_, text, _)| text),
+        Some("ES")
     );
 }
 
