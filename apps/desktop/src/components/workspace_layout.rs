@@ -521,6 +521,7 @@ fn project_working_order_markers(
             Some(aeris_terminal_ui::OrderBookWorkingOrder {
                 price: price.units(),
                 side,
+                order_side: order.side,
                 quantity: order.quantity.units(),
                 quantity_scale: order.quantity.scale(),
             })

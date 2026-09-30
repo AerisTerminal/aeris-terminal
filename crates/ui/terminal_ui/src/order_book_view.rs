@@ -1,23 +1,28 @@
-#[cfg(test)]
 use crate::OrderBookRow;
 use crate::order_book::{compact_quantity_text, grouped_fixed_point_text};
 use crate::{OrderBookColumnLevel, OrderBookFrame};
 use aeris_design_system::{
-    AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_typography,
+    AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family, platform_typography,
 };
 use aeris_market_data::{AggressorTradeVolumes, OrderBookRecoveryReason, OrderBookState};
-use aeris_trading::{FixedPoint, project_unrealized_pnl};
+use aeris_trading::{FixedPoint, OrderSide, project_unrealized_pnl};
 use gpui::{
     AnyElement, Context, Div, Entity, EventEmitter, Hsla, IntoElement, Render, ScrollStrategy,
     UniformListScrollHandle, Window, div, prelude::*, px, relative, uniform_list,
 };
 #[cfg(test)]
 use std::cmp::Ordering;
-use std::{sync::Arc, time::Instant};
+use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const HEADER_HEIGHT: f32 = 28.0;
 const ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 11.0;
+/// How long a level shows its `book-*-flash` fill after its resting size changes.
+const LEVEL_FLASH_DURATION: Duration = Duration::from_millis(350);
 const MAXIMUM_TRADE_PRICES_FOR_GRID_INFERENCE: usize = 64;
 // Match the reference ladder's four-significant-figure Hyperliquid grouping.
 // Derive this from price magnitude rather than the current top-20 snapshot's
@@ -63,7 +68,10 @@ pub struct OrderBookLevelDrop {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderBookWorkingOrder {
     pub price: i64,
+    /// Ladder side the order rests on; a buy stop rests on the ask side.
     pub side: OrderBookLevelSide,
+    /// Buy or sell direction of the order itself, independent of its ladder side.
+    pub order_side: OrderSide,
     pub quantity: i64,
     pub quantity_scale: u8,
 }
@@ -242,6 +250,8 @@ pub struct ReadOnlyOrderBookView {
     follow_center: bool,
     columns: OrderBookColumnVisibility,
     render_metrics: OrderBookRenderMetrics,
+    level_flash: Arc<LevelFlash>,
+    level_flash_generation: u64,
 }
 
 impl EventEmitter<OrderBookLevelClick> for ReadOnlyOrderBookView {}
@@ -261,6 +271,8 @@ impl ReadOnlyOrderBookView {
             follow_center: true,
             columns: OrderBookColumnVisibility::default(),
             render_metrics: OrderBookRenderMetrics::default(),
+            level_flash: Arc::default(),
+            level_flash_generation: 0,
         }
     }
 
@@ -363,7 +375,27 @@ impl ReadOnlyOrderBookView {
     }
 
     fn discard_frames(&mut self) -> bool {
+        self.level_flash = Arc::default();
         self.frame.take().is_some()
+    }
+
+    /// Highlights levels whose resting size changed, then clears them after
+    /// `LEVEL_FLASH_DURATION`. A newer flash supersedes the pending clear.
+    fn flash_levels(&mut self, flash: LevelFlash, cx: &mut Context<Self>) {
+        self.level_flash = Arc::new(flash);
+        self.level_flash_generation = self.level_flash_generation.wrapping_add(1);
+        let generation = self.level_flash_generation;
+        let expiry = cx.background_executor().timer(LEVEL_FLASH_DURATION);
+        cx.spawn(async move |order_book, cx| {
+            expiry.await;
+            let _ = order_book.update(cx, |order_book, order_book_cx| {
+                if order_book.level_flash_generation == generation {
+                    order_book.level_flash = Arc::default();
+                    order_book_cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Updates the connectivity banner without discarding the last valid book.
@@ -390,6 +422,12 @@ impl ReadOnlyOrderBookView {
         if recenter {
             self.ladder_scroll = UniformListScrollHandle::new();
             self.follow_center = true;
+            self.level_flash = Arc::default();
+        } else if let Some(current) = self.frame.as_deref() {
+            let flash = LevelFlash::between(current, frame.as_ref());
+            if !flash.is_empty() {
+                self.flash_levels(flash, cx);
+            }
         }
         let recenter_index = self
             .follow_center
@@ -403,6 +441,59 @@ impl ReadOnlyOrderBookView {
         }
         cx.notify();
     }
+}
+
+/// Prices whose resting size changed between two frames of the same book. Bounded
+/// by the frame's own level count.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct LevelFlash {
+    bids: BTreeSet<i64>,
+    asks: BTreeSet<i64>,
+}
+
+impl LevelFlash {
+    fn between(previous: &OrderBookFrame, next: &OrderBookFrame) -> Self {
+        Self {
+            bids: changed_prices(previous, next, |row| row.bid.as_ref()),
+            asks: changed_prices(previous, next, |row| row.ask.as_ref()),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bids.is_empty() && self.asks.is_empty()
+    }
+
+    fn contains(&self, side: BookColumnSide, price: i64) -> bool {
+        match side {
+            BookColumnSide::Bid => self.bids.contains(&price),
+            BookColumnSide::Ask => self.asks.contains(&price),
+        }
+    }
+}
+
+/// Only levels present in both frames flash: a level appearing or leaving is a
+/// book-shape change, not a size change.
+fn changed_prices(
+    previous: &OrderBookFrame,
+    next: &OrderBookFrame,
+    level: fn(&OrderBookRow) -> Option<&OrderBookColumnLevel>,
+) -> BTreeSet<i64> {
+    let previous_sizes: BTreeMap<i64, i64> = previous
+        .rows
+        .iter()
+        .filter_map(level)
+        .map(|level| (level.price, level.quantity))
+        .collect();
+    next.rows
+        .iter()
+        .filter_map(level)
+        .filter(|level| {
+            previous_sizes
+                .get(&level.price)
+                .is_some_and(|quantity| *quantity != level.quantity)
+        })
+        .map(|level| level.price)
+        .collect()
 }
 
 fn should_recenter_ladder(current: Option<&OrderBookFrame>, next: &OrderBookFrame) -> bool {
@@ -488,6 +579,7 @@ impl Render for ReadOnlyOrderBookView {
                         &ladder_scroll,
                         LadderInteraction {
                             theme: &self.theme,
+                            level_flash: &self.level_flash,
                             order_book: &order_book,
                             working_orders: &working_orders,
                             position_marker: position_marker.as_ref(),
@@ -506,37 +598,17 @@ fn connection_status_banner(
     unavailable: bool,
     theme: &AerisTheme,
 ) -> Option<impl IntoElement + use<>> {
-    let (label, color): (&str, StatusColor) = match state {
+    let label = match state {
         OrderBookConnectionState::Online => return None,
-        OrderBookConnectionState::Offline => {
-            ("Order Book offline · internet disconnected", |theme| {
-                theme.colors.danger
-            })
-        }
+        OrderBookConnectionState::Offline => "Order Book offline · internet disconnected",
         // Discovering/authenticating and the first provider snapshot all flow
         // through Recovering at the desktop boundary. Until a concrete book
         // has actually been presented, that is ordinary loading rather than
         // a reconnect/failure and the ladder's neutral loading copy is enough.
         OrderBookConnectionState::Recovering if !has_frame && !unavailable => return None,
-        OrderBookConnectionState::Recovering => (
-            "Order Book reconnecting · awaiting fresh snapshot",
-            |theme| theme.colors.danger,
-        ),
+        OrderBookConnectionState::Recovering => "Order Book reconnecting · awaiting fresh snapshot",
     };
-    Some(
-        div()
-            .h(px(ROW_HEIGHT))
-            .flex_none()
-            .flex()
-            .items_center()
-            .px_2()
-            .border_b_1()
-            .border_color(gpui_color(theme.colors.border))
-            .bg(gpui_color(color(theme).with_alpha(0.12)))
-            .text_size(px(TEXT_SIZE))
-            .text_color(gpui_color(color(theme)))
-            .child(label),
-    )
+    Some(banner_row(label.to_owned(), BannerTone::Failure, theme))
 }
 
 fn render_header(
@@ -548,7 +620,7 @@ fn render_header(
         .flex_none()
         .flex()
         .items_center()
-        .border_b_1()
+        .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(theme.colors.border))
         .text_size(px(TEXT_SIZE))
         .text_color(gpui_color(theme.colors.text_secondary))
@@ -638,6 +710,7 @@ fn render_virtualized_ladder_list(
 ) -> AnyElement {
     let list_frame = Arc::clone(frame);
     let list_theme = *interaction.theme;
+    let list_level_flash = interaction.level_flash.clone();
     let list_order_book = interaction.order_book.clone();
     let scroll_order_book = interaction.order_book.clone();
     let fallback_scroll_order_book = interaction.order_book.clone();
@@ -663,6 +736,7 @@ fn render_virtualized_ladder_list(
                             maximum_trade_quantity,
                             LadderInteraction {
                                 theme: &list_theme,
+                                level_flash: &list_level_flash,
                                 order_book: &list_order_book,
                                 working_orders: &list_working_orders,
                                 position_marker: list_position_marker.as_ref(),
@@ -702,6 +776,7 @@ fn render_virtualized_ladder_list(
                         maximum_trade_quantity,
                         LadderInteraction {
                             theme: &list_theme,
+                            level_flash: &list_level_flash,
                             order_book: &list_order_book,
                             working_orders: &list_working_orders,
                             position_marker: list_position_marker.as_ref(),
@@ -1362,6 +1437,7 @@ enum BookColumnSide {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct OrderBookSideAppearance {
     fill: ThemeColor,
+    flash: ThemeColor,
     text: ThemeColor,
 }
 
@@ -1371,10 +1447,12 @@ fn order_book_side_appearance(theme: &AerisTheme, side: BookColumnSide) -> Order
     match side {
         BookColumnSide::Bid => OrderBookSideAppearance {
             fill: theme.colors.book_bid_fill,
+            flash: theme.colors.book_bid_flash,
             text: theme.colors.book_bid_text,
         },
         BookColumnSide::Ask => OrderBookSideAppearance {
             fill: theme.colors.book_ask_fill,
+            flash: theme.colors.book_ask_flash,
             text: theme.colors.book_ask_text,
         },
     }
@@ -1390,6 +1468,7 @@ const fn order_book_level_side(side: BookColumnSide) -> OrderBookLevelSide {
 #[derive(Clone, Copy)]
 struct LadderInteraction<'a> {
     theme: &'a AerisTheme,
+    level_flash: &'a LevelFlash,
     order_book: &'a Entity<ReadOnlyOrderBookView>,
     working_orders: &'a [OrderBookWorkingOrder],
     position_marker: Option<&'a OrderBookPositionMarker>,
@@ -1399,6 +1478,7 @@ struct LadderInteraction<'a> {
 struct OrderBookLevelDrag {
     price: i64,
     side: OrderBookLevelSide,
+    order_side: OrderSide,
     label: String,
     theme: AerisTheme,
 }
@@ -1406,19 +1486,20 @@ struct OrderBookLevelDrag {
 impl Render for OrderBookLevelDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let colors = self.theme.colors;
-        let color = match self.side {
-            OrderBookLevelSide::Bid => colors.primary,
-            OrderBookLevelSide::Ask => colors.danger,
+        // Buy reads as the bid color and sell as the ask color, whichever row it rests on.
+        let color = match self.order_side {
+            OrderSide::Buy => colors.book_bid_text,
+            OrderSide::Sell => colors.book_ask_text,
         };
         div()
             .h(px(ROW_HEIGHT + 6.0))
             .px_2()
             .flex()
             .items_center()
-            .rounded(px(3.0))
-            .border_1()
+            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+            .border(px(self.theme.dimensions.border_width))
             .border_color(gpui_color(color))
-            .bg(gpui_color(colors.surface.with_alpha(0.96)))
+            .bg(gpui_color(colors.surface))
             .text_size(px(TEXT_SIZE))
             .text_color(gpui_color(color))
             .child(self.label.clone())
@@ -1486,6 +1567,7 @@ fn render_level_row(
     let theme = interaction.theme;
     let colors = theme.colors;
     let appearance = order_book_side_appearance(theme, side);
+    let flashing = interaction.level_flash.contains(side, level.price);
     let row_id = match side {
         BookColumnSide::Bid => "order_book_bid_row",
         BookColumnSide::Ask => "order_book_ask_row",
@@ -1530,12 +1612,13 @@ fn render_level_row(
         .items_center()
         .relative()
         .overflow_hidden()
-        .border_b_1()
+        .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
         .font_family(platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .font_features(platform_tabular_numerals())
         .text_size(px(TEXT_SIZE))
+        .when(flashing, |row| row.bg(gpui_color(appearance.flash)))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
         .on_click(move |_, _, cx| {
             order_book.update(cx, |_, order_book_cx| {
@@ -1607,7 +1690,7 @@ fn render_empty_price_tick(
         .items_center()
         .relative()
         .overflow_hidden()
-        .border_b_1()
+        .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
         .font_family(platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
@@ -1664,13 +1747,14 @@ fn working_order_drag(
     price_scale: u8,
     theme: &AerisTheme,
 ) -> OrderBookLevelDrag {
-    let side = match order.side {
-        OrderBookLevelSide::Bid => "SELL",
-        OrderBookLevelSide::Ask => "BUY",
+    let side = match order.order_side {
+        OrderSide::Buy => "BUY",
+        OrderSide::Sell => "SELL",
     };
     OrderBookLevelDrag {
         price,
         side: order.side,
+        order_side: order.order_side,
         label: format!(
             "{side} {} @ {}",
             compact_quantity_text(order.quantity, order.quantity_scale),
@@ -1755,7 +1839,7 @@ fn price_grid_center_row(frame: &OrderBookFrame, theme: &AerisTheme) -> AnyEleme
         .w_full()
         .h(px(ROW_HEIGHT))
         .flex_none()
-        .border_b_1()
+        .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(theme.colors.border))
         .bg(gpui_color(theme.colors.surface_secondary))
         .into_any_element()
@@ -2049,6 +2133,7 @@ fn column_rails(
     theme: &AerisTheme,
 ) -> impl Iterator<Item = gpui::AnyElement> + use<> {
     let border = gpui_color(theme.colors.border);
+    let border_width = theme.dimensions.border_width;
     let mut edge = 0.0;
     OrderBookColumn::ALL
         .into_iter()
@@ -2065,7 +2150,7 @@ fn column_rails(
                 .top_0()
                 .bottom_0()
                 .left(relative(edge))
-                .w(px(1.0))
+                .w(px(border_width))
                 .bg(border)
                 .into_any_element()
         })
@@ -2086,7 +2171,7 @@ fn spread_row(
             .flex()
             .items_center()
             .justify_center()
-            .border_b_1()
+            .border_b(px(theme.dimensions.border_width))
             .border_color(gpui_color(theme.colors.border))
             .bg(gpui_color(theme.colors.surface_secondary))
             .font_family(platform_font_family())
@@ -2103,31 +2188,49 @@ fn status_banner(
     watermark: u64,
     theme: &AerisTheme,
 ) -> Option<impl IntoElement + use<>> {
-    let (label, color) = status_presentation(state, watermark)?;
-    Some(
-        div()
-            .h(px(ROW_HEIGHT))
-            .flex_none()
-            .flex()
-            .items_center()
-            .px_2()
-            .border_b_1()
-            .border_color(gpui_color(theme.colors.border))
-            .bg(gpui_color(color(theme).with_alpha(0.12)))
-            .text_size(px(TEXT_SIZE))
-            .text_color(gpui_color(color(theme)))
-            .child(label),
-    )
+    let (label, tone) = status_presentation(state, watermark)?;
+    Some(banner_row(label, tone, theme))
 }
 
-type StatusColor = fn(&AerisTheme) -> ThemeColor;
+/// Banner fill and text travel as declared token pairs, never as an ad-hoc
+/// alpha tint of a solid color.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BannerTone {
+    Neutral,
+    Failure,
+}
 
-fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String, StatusColor)> {
+impl BannerTone {
+    const fn colors(self, theme: &AerisTheme) -> (ThemeColor, ThemeColor) {
+        match self {
+            Self::Neutral => (theme.colors.surface_secondary, theme.colors.text_secondary),
+            Self::Failure => (theme.colors.negative_subtle, theme.colors.text_negative),
+        }
+    }
+}
+
+fn banner_row(label: String, tone: BannerTone, theme: &AerisTheme) -> Div {
+    let (fill, text) = tone.colors(theme);
+    div()
+        .h(px(ROW_HEIGHT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .px_2()
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(theme.colors.border))
+        .bg(gpui_color(fill))
+        .text_size(px(TEXT_SIZE))
+        .text_color(gpui_color(text))
+        .child(label)
+}
+
+fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String, BannerTone)> {
     match state {
         OrderBookState::Ready => None,
         OrderBookState::Stale => Some((
             format!("Order Book stale · last sequence {watermark}"),
-            |theme| theme.colors.danger,
+            BannerTone::Failure,
         )),
         // Awaiting the first snapshot is still loading, not a failure, so
         // it renders neutral. Red is reserved for a book that broke.
@@ -2136,11 +2239,11 @@ fn status_presentation(state: OrderBookState, watermark: u64) -> Option<(String,
                 "Order Book recovering · {}",
                 recovery_label(OrderBookRecoveryReason::AwaitingSnapshot)
             ),
-            |theme| theme.colors.text_secondary,
+            BannerTone::Neutral,
         )),
         OrderBookState::Recovering(reason) => Some((
             format!("Order Book recovering · {}", recovery_label(reason)),
-            |theme| theme.colors.danger,
+            BannerTone::Failure,
         )),
     }
 }
@@ -2170,6 +2273,7 @@ mod tests {
                 order_book_side_appearance(&theme, BookColumnSide::Bid),
                 OrderBookSideAppearance {
                     fill: theme.colors.book_bid_fill,
+                    flash: theme.colors.book_bid_flash,
                     text: theme.colors.book_bid_text,
                 }
             );
@@ -2177,6 +2281,7 @@ mod tests {
                 order_book_side_appearance(&theme, BookColumnSide::Ask),
                 OrderBookSideAppearance {
                     fill: theme.colors.book_ask_fill,
+                    flash: theme.colors.book_ask_flash,
                     text: theme.colors.book_ask_text,
                 }
             );
@@ -2231,6 +2336,36 @@ mod tests {
     }
 
     #[test]
+    fn only_levels_whose_resting_size_changed_flash() {
+        let book = |bids: &[(i64, i64)], asks: &[(i64, i64)]| {
+            let mut book = frame(1, 1, 1, OrderBookState::Ready, false);
+            book.rows = (0..bids.len().max(asks.len()))
+                .map(|index| OrderBookRow {
+                    bid: bids
+                        .get(index)
+                        .map(|&(price, size)| grid_level(price, size)),
+                    ask: asks
+                        .get(index)
+                        .map(|&(price, size)| grid_level(price, size)),
+                })
+                .collect();
+            book
+        };
+        let previous = book(&[(100, 5), (99, 3)], &[(101, 4), (102, 7)]);
+        let next = book(&[(100, 5), (99, 8), (98, 1)], &[(101, 2)]);
+
+        let flash = LevelFlash::between(&previous, &next);
+
+        // 99 bid changed size; 100 unchanged; 98 is new, 102 left the book.
+        assert!(flash.contains(BookColumnSide::Bid, 99));
+        assert!(!flash.contains(BookColumnSide::Bid, 100));
+        assert!(!flash.contains(BookColumnSide::Bid, 98));
+        assert!(flash.contains(BookColumnSide::Ask, 101));
+        assert!(!flash.contains(BookColumnSide::Ask, 102));
+        assert!(LevelFlash::between(&next, &next).is_empty());
+    }
+
+    #[test]
     fn retiring_a_book_discards_the_displayed_frame() {
         let mut view = ReadOnlyOrderBookView::new(AerisTheme::dark());
         view.frame = Some(Arc::new(frame(1, 8, 40, OrderBookState::Ready, true)));
@@ -2263,6 +2398,7 @@ mod tests {
         let order = OrderBookWorkingOrder {
             price: 20_000,
             side: OrderBookLevelSide::Ask,
+            order_side: OrderSide::Sell,
             quantity: 2,
             quantity_scale: 0,
         };
@@ -2270,7 +2406,23 @@ mod tests {
 
         assert_eq!(drag.price, 20_000);
         assert_eq!(drag.side, OrderBookLevelSide::Ask);
-        assert_eq!(drag.label, "BUY 2 @ 200.00");
+        assert_eq!(drag.label, "SELL 2 @ 200.00");
+    }
+
+    #[test]
+    fn working_order_drag_labels_the_order_direction_not_the_ladder_side() {
+        // A buy stop rests on the ask side of the ladder but is still a buy.
+        let buy_stop = OrderBookWorkingOrder {
+            price: 20_000,
+            side: OrderBookLevelSide::Ask,
+            order_side: OrderSide::Buy,
+            quantity: 1,
+            quantity_scale: 0,
+        };
+        let drag = working_order_drag(&buy_stop, buy_stop.price, 2, &AerisTheme::dark());
+
+        assert_eq!(drag.side, OrderBookLevelSide::Ask);
+        assert_eq!(drag.label, "BUY 1 @ 200.00");
     }
 
     #[test]
@@ -2298,6 +2450,11 @@ mod tests {
                         OrderBookLevelSide::Ask
                     } else {
                         OrderBookLevelSide::Bid
+                    },
+                    order_side: if index % 2 == 0 {
+                        OrderSide::Sell
+                    } else {
+                        OrderSide::Buy
                     },
                     quantity: i64::from(index + 1),
                     quantity_scale: 0,
@@ -2442,7 +2599,6 @@ mod tests {
         }
         // Awaiting the first snapshot is loading, not failure: it must not
         // share the failure color used by stale and broken books.
-        let theme = AerisTheme::default();
         let awaiting = status_presentation(
             OrderBookState::Recovering(OrderBookRecoveryReason::AwaitingSnapshot),
             0,
@@ -2454,9 +2610,14 @@ mod tests {
             0,
         )
         .expect("gap banner");
-        assert_ne!(awaiting.1(&theme), stale.1(&theme));
-        assert_ne!(awaiting.1(&theme), gap.1(&theme));
-        assert_eq!(stale.1(&theme), gap.1(&theme));
+        assert_eq!(awaiting.1, BannerTone::Neutral);
+        assert_eq!(stale.1, BannerTone::Failure);
+        assert_eq!(gap.1, BannerTone::Failure);
+        let theme = AerisTheme::default();
+        assert_eq!(
+            BannerTone::Failure.colors(&theme),
+            (theme.colors.negative_subtle, theme.colors.text_negative)
+        );
     }
 
     #[test]

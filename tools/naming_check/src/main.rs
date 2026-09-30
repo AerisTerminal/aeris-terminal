@@ -16,7 +16,7 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "target",
     "third_party",
 ];
-const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md"];
+const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md"];
 const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     "Cargo.lock",
     "Cargo.toml",

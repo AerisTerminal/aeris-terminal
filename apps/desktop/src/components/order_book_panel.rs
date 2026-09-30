@@ -93,7 +93,7 @@ fn order_book_column_menu_layer(
         .w(px(196.0))
         .occlude()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
+        .border(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
         .text_color(gpui_color(colors.text_primary))
