@@ -935,6 +935,7 @@ fn chart_settings_title_bar(
     let grab_terminal = terminal.clone();
     div()
         .id("chart_settings_title_bar")
+        .relative()
         .h(design_rems(CHART_SETTINGS_TITLE_BAR_HEIGHT))
         .flex_none()
         .pl_4()
@@ -955,34 +956,39 @@ fn chart_settings_title_bar(
         })
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(chart_settings_drag_grip(theme))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_primary))
-                        .child("Chart settings"),
-                ),
+                .text_sm()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(colors.text_primary))
+                .child("Chart settings"),
         )
+        .child(chart_settings_drag_grip(theme))
         .child(chart_settings_actions(terminal, menu, theme))
 }
 
 fn chart_settings_drag_grip(theme: &AerisTheme) -> Div {
-    let mut grip = div().flex().flex_col().gap_0p5();
+    let mut grip = div()
+        .absolute()
+        .left(relative(0.5))
+        .top(relative(0.5))
+        .ml(design_rems(-21.0))
+        .mt(design_rems(-11.0))
+        .w(design_rems(42.0))
+        .h(design_rems(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(theme.colors.border_secondary))
+        .bg(gpui_color(theme.colors.surface_secondary));
     for _ in 0..3 {
-        let mut row = div().flex().gap_0p5();
-        for _ in 0..2 {
-            row = row.child(
-                div()
-                    .size(design_rems(3.0))
-                    .rounded_full()
-                    .bg(gpui_color(theme.colors.text_muted)),
-            );
-        }
-        grip = grip.child(row);
+        grip = grip.child(
+            div()
+                .size(design_rems(3.0))
+                .rounded_full()
+                .bg(gpui_color(theme.colors.text_muted)),
+        );
     }
     grip
 }
@@ -2335,7 +2341,7 @@ fn settings_choice_row(
         .items_center()
         .gap_1()
         .p(design_rems(2.0))
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
