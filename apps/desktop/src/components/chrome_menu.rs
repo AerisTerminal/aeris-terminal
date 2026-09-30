@@ -173,7 +173,7 @@ pub(super) fn chrome_icon_button<F: Fn(&mut Window, &mut App) + 'static>(
     tone: ChromeIconButtonTone,
     theme: &AerisTheme,
     on_activate: F,
-) -> impl IntoElement + use<F> {
+) -> Stateful<Div> {
     let colors = theme.colors;
     round_icon_button(id, icon, label)
         .text_color(gpui_color(colors.icon))

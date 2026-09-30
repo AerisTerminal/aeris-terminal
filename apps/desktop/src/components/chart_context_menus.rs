@@ -1044,13 +1044,16 @@ fn chart_settings_actions(
     let close_terminal = terminal.clone();
     let reset_terminal = terminal.clone();
     let reset_menu = menu.clone();
+    let reset_tooltip = TooltipSpec::new(
+        "Reset this chart's appearance and trading overlays to defaults",
+        theme,
+    )
+    .show_delay(TOOLTIP_OPEN_DELAY);
     div()
         .flex()
         .items_center()
         .gap_1()
-        .child(chrome_tooltip(
-            "chart_settings_reset_tooltip",
-            "Reset this chart's appearance and trading overlays to defaults",
+        .child(
             chrome_icon_button(
                 "chart_settings_reset",
                 HugeIcon::Refresh,
@@ -1062,9 +1065,10 @@ fn chart_settings_actions(
                         terminal.reset_chart_settings(&reset_menu, terminal_cx);
                     });
                 },
-            ),
-            theme,
-        ))
+            )
+            .tooltip(reset_tooltip.builder())
+            .tooltip_show_delay(reset_tooltip.delay()),
+        )
         .child(chrome_icon_button(
             "chart_settings_close",
             HugeIcon::Close,
