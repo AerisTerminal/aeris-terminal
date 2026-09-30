@@ -2070,8 +2070,6 @@ fn settings_content_header(
         .flex_col()
         .gap_1()
         .pb_3()
-        .border_b_1()
-        .border_color(gpui_color(theme.colors.border_secondary))
         .child(
             div()
                 .text_base()
@@ -2129,8 +2127,6 @@ fn settings_toggle_row(
         .flex()
         .items_center()
         .justify_between()
-        .border_b_1()
-        .border_color(gpui_color(colors.border_secondary))
         .child(
             div()
                 .text_sm()
@@ -2197,62 +2193,55 @@ fn settings_color_row(
     let current_for_toggle = value.to_string();
     let color = chart_css_color(value, colors.text_secondary);
     let open = open_picker.is_some_and(|picker| picker.setting == setting);
-    let mut row = div()
-        .relative()
-        .w_full()
-        .flex()
-        .flex_col()
-        .border_b_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .child(
-            div()
-                .h(design_rems(38.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(gpui_color(colors.text_secondary))
-                        .child(setting.label()),
-                )
-                .child(
-                    div()
-                        .id(("chart_color_picker", setting as usize))
-                        .h(design_rems(30.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                        .border(platform_border_width(theme))
-                        .border_color(gpui_color(colors.border_secondary))
-                        .bg(gpui_color(colors.surface_secondary))
-                        .cursor_pointer()
-                        .hover(|button| button.bg(gpui_color(colors.hover_bg)))
-                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, window, cx| {
-                            terminal_for_toggle.update(cx, |terminal, terminal_cx| {
-                                terminal.toggle_chart_color_picker(
-                                    setting,
-                                    &current_for_toggle,
-                                    window,
-                                    terminal_cx,
-                                );
-                            });
-                            cx.stop_propagation();
-                        })
-                        .child(div().size(design_rems(16.0)).rounded_full().bg(color))
-                        .child(
-                            div()
-                                .w(design_rems(62.0))
-                                .font_family(aeris_design_system::platform_font_family())
-                                .text_xs()
-                                .text_color(gpui_color(colors.text_muted))
-                                .child(value.to_ascii_uppercase()),
-                        ),
-                ),
-        );
+    let mut row = div().relative().w_full().flex().flex_col().child(
+        div()
+            .h(design_rems(38.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(setting.label()),
+            )
+            .child(
+                div()
+                    .id(("chart_color_picker", setting as usize))
+                    .h(design_rems(30.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                    .border(platform_border_width(theme))
+                    .border_color(gpui_color(colors.border_secondary))
+                    .bg(gpui_color(colors.surface_secondary))
+                    .cursor_pointer()
+                    .hover(|button| button.bg(gpui_color(colors.hover_bg)))
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, window, cx| {
+                        terminal_for_toggle.update(cx, |terminal, terminal_cx| {
+                            terminal.toggle_chart_color_picker(
+                                setting,
+                                &current_for_toggle,
+                                window,
+                                terminal_cx,
+                            );
+                        });
+                        cx.stop_propagation();
+                    })
+                    .child(div().size(design_rems(16.0)).rounded_full().bg(color))
+                    .child(
+                        div()
+                            .w(design_rems(62.0))
+                            .font_family(aeris_design_system::platform_font_family())
+                            .text_xs()
+                            .text_color(gpui_color(colors.text_muted))
+                            .child(value.to_ascii_uppercase()),
+                    ),
+            ),
+    );
     if open && let Some(picker) = open_picker {
         let apply = terminal.clone();
         let apply_menu = menu.clone();
@@ -2385,8 +2374,6 @@ fn settings_choice_row(
         .items_center()
         .justify_between()
         .gap_3()
-        .border_b_1()
-        .border_color(gpui_color(colors.border_secondary))
         .child(
             div()
                 .text_sm()

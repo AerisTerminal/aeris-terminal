@@ -339,27 +339,25 @@ pub(super) fn side_panel_header_button<F: Fn(&mut gpui::App) + 'static>(
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    chrome_tooltip(
-        id,
-        label,
-        round_icon_button(id, icon, label)
-            .text_color(gpui_color(if active {
-                colors.icon_active
-            } else {
-                colors.icon
-            }))
-            .cursor_pointer()
-            .when(active, |button| {
-                button.bg(gpui_color(colors.active_bg.over(colors.surface)))
-            })
-            .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                on_press(cx);
-                cx.stop_propagation();
-            }),
-        theme,
-    )
-    .into_any_element()
+    let tooltip = TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY);
+    round_icon_button(id, icon, label)
+        .text_color(gpui_color(if active {
+            colors.icon_active
+        } else {
+            colors.icon
+        }))
+        .cursor_pointer()
+        .when(active, |button| {
+            button.bg(gpui_color(colors.active_bg.over(colors.surface)))
+        })
+        .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            on_press(cx);
+            cx.stop_propagation();
+        })
+        .tooltip(tooltip.builder())
+        .tooltip_show_delay(tooltip.delay())
+        .into_any_element()
 }
 
 #[derive(Clone)]

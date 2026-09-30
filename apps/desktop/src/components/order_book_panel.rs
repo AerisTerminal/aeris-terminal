@@ -28,6 +28,7 @@ pub(super) fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
     let app = ticket.app.clone();
     let theme = ticket.theme;
     let settings_app = app.clone();
+    let recenter_order_book = order_book.clone();
     div()
         .relative()
         .flex()
@@ -38,16 +39,28 @@ pub(super) fn order_book_side_panel(state: &OrderBookPanelState<'_>) -> Div {
         .child(side_panel_header(
             SidePanel::OrderBook,
             app.clone(),
-            [side_panel_header_button(
-                "order_book_column_settings",
-                "Choose order-book columns",
-                HugeIcon::Settings,
-                column_menu_open,
-                move |cx| {
-                    settings_app.update(cx, WorkspaceSurface::toggle_order_book_column_menu);
-                },
-                theme,
-            )],
+            [
+                side_panel_header_button(
+                    "order_book_recenter",
+                    "Center order book on the current spread",
+                    HugeIcon::Refresh,
+                    false,
+                    move |cx| {
+                        recenter_order_book.update(cx, ReadOnlyOrderBookView::recenter_ladder);
+                    },
+                    theme,
+                ),
+                side_panel_header_button(
+                    "order_book_column_settings",
+                    "Choose order-book columns",
+                    HugeIcon::Settings,
+                    column_menu_open,
+                    move |cx| {
+                        settings_app.update(cx, WorkspaceSurface::toggle_order_book_column_menu);
+                    },
+                    theme,
+                ),
+            ],
             theme,
         ))
         .child(

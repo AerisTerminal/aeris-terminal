@@ -239,6 +239,7 @@ pub struct ReadOnlyOrderBookView {
     connection_state: OrderBookConnectionState,
     theme: AerisTheme,
     ladder_scroll: UniformListScrollHandle,
+    follow_center: bool,
     columns: OrderBookColumnVisibility,
     render_metrics: OrderBookRenderMetrics,
 }
@@ -257,6 +258,7 @@ impl ReadOnlyOrderBookView {
             connection_state: OrderBookConnectionState::Online,
             theme,
             ladder_scroll: UniformListScrollHandle::new(),
+            follow_center: true,
             columns: OrderBookColumnVisibility::default(),
             render_metrics: OrderBookRenderMetrics::default(),
         }
@@ -302,6 +304,21 @@ impl ReadOnlyOrderBookView {
 
     pub fn toggle_column(&mut self, column: OrderBookColumn, cx: &mut Context<Self>) {
         if self.columns.toggle(column) {
+            cx.notify();
+        }
+    }
+
+    /// A deliberate ladder scroll suspends automatic spread following until reset.
+    fn pause_auto_center(&mut self) {
+        self.follow_center = false;
+    }
+
+    /// Returns to the current spread and resumes following live book updates.
+    pub fn recenter_ladder(&mut self, cx: &mut Context<Self>) {
+        self.follow_center = true;
+        if let Some(index) = self.frame.as_deref().and_then(ladder_recenter_index) {
+            self.ladder_scroll
+                .scroll_to_item_strict(index, ScrollStrategy::Center);
             cx.notify();
         }
     }
@@ -370,11 +387,17 @@ impl ReadOnlyOrderBookView {
 
     fn install_frame(&mut self, frame: Arc<OrderBookFrame>, cx: &mut Context<Self>) {
         let recenter = should_recenter_ladder(self.frame.as_deref(), frame.as_ref());
-        let recenter_index = recenter.then(|| ladder_recenter_index(frame.as_ref()));
+        if recenter {
+            self.ladder_scroll = UniformListScrollHandle::new();
+            self.follow_center = true;
+        }
+        let recenter_index = self
+            .follow_center
+            .then(|| ladder_recenter_index(frame.as_ref()))
+            .flatten();
         self.frame = Some(frame);
         self.unavailable = false;
-        if let Some(Some(index)) = recenter_index {
-            self.ladder_scroll = UniformListScrollHandle::new();
+        if let Some(index) = recenter_index {
             self.ladder_scroll
                 .scroll_to_item_strict(index, ScrollStrategy::Center);
         }
@@ -616,6 +639,8 @@ fn render_virtualized_ladder_list(
     let list_frame = Arc::clone(frame);
     let list_theme = *interaction.theme;
     let list_order_book = interaction.order_book.clone();
+    let scroll_order_book = interaction.order_book.clone();
+    let fallback_scroll_order_book = interaction.order_book.clone();
     let list_working_orders = interaction.working_orders.to_vec();
     let list_position_marker = interaction.position_marker.cloned();
     if let Some(grid) = price_grid_layout(frame.as_ref()) {
@@ -648,6 +673,11 @@ fn render_virtualized_ladder_list(
             },
         )
         .track_scroll(ladder_scroll)
+        .on_scroll_wheel(move |event, window, cx| {
+            if event.delta.pixel_delta(window.line_height()).y != px(0.0) {
+                scroll_order_book.update(cx, |order_book, _| order_book.pause_auto_center());
+            }
+        })
         .size_full()
         .into_any_element();
     }
@@ -682,6 +712,11 @@ fn render_virtualized_ladder_list(
         },
     )
     .track_scroll(ladder_scroll)
+    .on_scroll_wheel(move |event, window, cx| {
+        if event.delta.pixel_delta(window.line_height()).y != px(0.0) {
+            fallback_scroll_order_book.update(cx, |order_book, _| order_book.pause_auto_center());
+        }
+    })
     .size_full()
     .into_any_element()
 }
@@ -2460,6 +2495,64 @@ mod tests {
         let mut replacement = depth.clone();
         replacement.selection_generation += 1;
         assert!(should_recenter_ladder(Some(&depth), &replacement));
+    }
+
+    #[gpui::test]
+    fn ladder_follows_live_frames_until_scroll_and_reset_resumes_following(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, _| ReadOnlyOrderBookView::new(AerisTheme::dark()));
+        let first = price_grid_frame();
+        let center = ladder_recenter_index(&first).expect("price grid has a spread");
+        view.update(cx, |view, view_cx| {
+            view.install_frame(Arc::new(first.clone()), view_cx);
+            let queued = view
+                .ladder_scroll
+                .0
+                .borrow_mut()
+                .deferred_scroll_to_item
+                .take();
+            assert_eq!(queued.map(|scroll| scroll.item_index), Some(center));
+        });
+
+        let mut next = first.clone();
+        next.revision += 1;
+        next.source_watermark += 1;
+        next.trade_source_watermark += 1;
+        assert!(!should_recenter_ladder(Some(&first), &next));
+        view.update(cx, |view, view_cx| {
+            view.install_frame(Arc::new(next.clone()), view_cx);
+            let queued = view
+                .ladder_scroll
+                .0
+                .borrow_mut()
+                .deferred_scroll_to_item
+                .take();
+            assert_eq!(queued.map(|scroll| scroll.item_index), Some(center));
+
+            view.pause_auto_center();
+            let mut scrolled_frame = next.clone();
+            scrolled_frame.revision += 1;
+            scrolled_frame.source_watermark += 1;
+            scrolled_frame.trade_source_watermark += 1;
+            view.install_frame(Arc::new(scrolled_frame), view_cx);
+            assert!(
+                view.ladder_scroll
+                    .0
+                    .borrow()
+                    .deferred_scroll_to_item
+                    .is_none()
+            );
+
+            view.recenter_ladder(view_cx);
+            let queued = view
+                .ladder_scroll
+                .0
+                .borrow_mut()
+                .deferred_scroll_to_item
+                .take();
+            assert_eq!(queued.map(|scroll| scroll.item_index), Some(center));
+        });
     }
 
     #[test]
