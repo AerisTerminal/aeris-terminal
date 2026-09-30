@@ -543,24 +543,24 @@ fn trade_history_column_header(show_account: bool, theme: &AerisTheme) -> impl I
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border_subtle))
         .text_color(gpui_color(colors.text_secondary))
-        .child(trade_history_cell_fixed(TRADE_HISTORY_TIME_WIDTH).child("Time"))
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Time"))
         .when(show_account, |row| {
-            row.child(trade_history_cell_fixed(TRADE_HISTORY_ACCOUNT_WIDTH).child("Account"))
+            row.child(trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH).child("Account"))
         })
-        .child(trade_history_cell_fixed(TRADE_HISTORY_SYMBOL_WIDTH).child("Symbol"))
-        .child(trade_history_cell_fixed(TRADE_HISTORY_SIDE_WIDTH).child("Side"))
+        .child(trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH).child("Symbol"))
+        .child(trade_history_cell(TRADE_HISTORY_SIDE_WIDTH).child("Side"))
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_QUANTITY_WIDTH)
+            trade_history_cell(TRADE_HISTORY_QUANTITY_WIDTH)
                 .text_right()
                 .child("Quantity"),
         )
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_PRICE_WIDTH)
+            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
                 .text_right()
                 .child("Price"),
         )
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_PNL_WIDTH)
+            trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
                 .text_right()
                 .child("Final P&L"),
         )
@@ -657,24 +657,24 @@ fn trade_history_row(
         .id(("trade_history_row", index))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
         .text_color(gpui_color(colors.text_default))
-        .child(trade_history_cell_fixed(TRADE_HISTORY_TIME_WIDTH).child(time))
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(time))
         .when(show_account, |row| {
             row.child(
-                trade_history_cell_fixed(TRADE_HISTORY_ACCOUNT_WIDTH)
+                trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH)
                     .child(history.account_name(fill.account_id.as_str())),
             )
         })
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_SYMBOL_WIDTH)
+            trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH)
                 .child(history.symbol(&fill.instrument_id)),
         )
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_SIDE_WIDTH)
+            trade_history_cell(TRADE_HISTORY_SIDE_WIDTH)
                 .text_color(gpui_color(side_color))
                 .child(side),
         )
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_QUANTITY_WIDTH)
+            trade_history_cell(TRADE_HISTORY_QUANTITY_WIDTH)
                 .text_right()
                 .child(market_price_text(
                     fill.quantity.units(),
@@ -682,7 +682,7 @@ fn trade_history_row(
                 )),
         )
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_PRICE_WIDTH)
+            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
                 .text_right()
                 .child(market_price_text(
                     fill.price.units(),
@@ -690,7 +690,7 @@ fn trade_history_row(
                 )),
         )
         .child(
-            trade_history_cell_fixed(TRADE_HISTORY_PNL_WIDTH)
+            trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
                 .text_right()
                 .text_color(gpui_color(pnl_color))
                 .child(pnl_text),
@@ -711,8 +711,8 @@ fn trade_history_row_frame() -> Div {
         .font_features(platform_tabular_numerals())
 }
 
-fn trade_history_cell_fixed(width: f32) -> Div {
-    div().w(px(width)).flex_none().truncate()
+fn trade_history_cell(width: f32) -> Div {
+    div().min_w(px(width)).flex_1().truncate()
 }
 
 #[cfg(test)]
