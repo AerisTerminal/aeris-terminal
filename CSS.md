@@ -87,6 +87,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --primary-subtle: #e1f0ff;
   --primary-foreground: #ffffff;
   --danger: #f7525f;
+  --danger-hover: #e5404d;
+  --danger-active: #c9303c;
   --danger-disabled: #ffc9c9;
   --danger-disabled-foreground: #ffa2a2;
   --danger-ring: #ffc9c9;
@@ -207,6 +209,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --primary-subtle: #0050b2;
   --primary-foreground: #ffffff;
   --danger: #f7525f;
+  --danger-hover: #f96a75;
+  --danger-active: #fb838c;
   --danger-disabled: #9f0712;
   --danger-disabled-foreground: #ff6467;
   --danger-ring: #c10007;

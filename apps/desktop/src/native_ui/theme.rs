@@ -39,10 +39,7 @@ pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> B
     };
     let (hover, active) = match variant {
         ButtonVariant::Filled => (colors.button_fill_hover, colors.button_fill_active),
-        ButtonVariant::Destructive => (
-            colors.danger.with_alpha(0.90),
-            colors.danger.with_alpha(0.85),
-        ),
+        ButtonVariant::Destructive => (colors.danger_hover, colors.danger_active),
         ButtonVariant::Secondary | ButtonVariant::Ghost => (colors.hover_bg, colors.active_bg),
     };
     let (disabled_fill, disabled_foreground, focus_ring) = match variant {
@@ -162,8 +159,8 @@ mod tests {
             let destructive = button_appearance(&theme, ButtonVariant::Destructive);
             assert_eq!(destructive.fill, theme.colors.danger);
             assert_eq!(destructive.foreground, theme.colors.danger_foreground);
-            assert_eq!(destructive.hover, theme.colors.danger.with_alpha(0.90));
-            assert_eq!(destructive.active, theme.colors.danger.with_alpha(0.85));
+            assert_eq!(destructive.hover, theme.colors.danger_hover);
+            assert_eq!(destructive.active, theme.colors.danger_active);
             assert_eq!(
                 destructive.disabled_fill,
                 Some(theme.colors.danger_disabled)

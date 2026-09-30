@@ -54,6 +54,8 @@ macro_rules! platform_color_registry {
             primary_subtle => "primary-subtle",
             primary_foreground => "primary-foreground",
             danger => "danger",
+            danger_hover => "danger-hover",
+            danger_active => "danger-active",
             danger_disabled => "danger-disabled",
             danger_disabled_foreground => "danger-disabled-foreground",
             danger_ring => "danger-ring",

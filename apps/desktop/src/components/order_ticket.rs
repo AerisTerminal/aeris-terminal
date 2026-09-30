@@ -197,8 +197,8 @@ fn account_selector_menu(state: &TradingOrderControlsState<'_>) -> Stateful<Div>
             })
             .active(move |button| {
                 button
-                    .border_color(gpui_color(colors.danger.with_alpha(0.85)))
-                    .bg(gpui_color(colors.danger.with_alpha(0.85)))
+                    .border_color(gpui_color(colors.danger_active))
+                    .bg(gpui_color(colors.danger_active))
                     .text_color(gpui_color(colors.danger_foreground))
             })
             .child(header_icon(HugeIcon::Trash).with_size(px(14.0)))
