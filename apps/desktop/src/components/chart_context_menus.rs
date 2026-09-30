@@ -937,8 +937,8 @@ fn chart_settings_title_bar(
         .id("chart_settings_title_bar")
         .h(design_rems(CHART_SETTINGS_TITLE_BAR_HEIGHT))
         .flex_none()
-        .pl_3()
-        .pr_2()
+        .pl_4()
+        .pr_3()
         .flex()
         .items_center()
         .justify_between()
@@ -955,15 +955,39 @@ fn chart_settings_title_bar(
         })
         .child(
             div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_primary))
-                .child("Chart settings"),
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(chart_settings_drag_grip(theme))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(platform_font_weight(TypographyRole::Strong))
+                        .text_color(gpui_color(colors.text_primary))
+                        .child("Chart settings"),
+                ),
         )
         .child(chart_settings_actions(terminal, menu, theme))
 }
 
-/// Sidebar, content surface and template dialog, laid out at the panel's scaled rem.
+fn chart_settings_drag_grip(theme: &AerisTheme) -> Div {
+    let mut grip = div().flex().flex_col().gap_0p5();
+    for _ in 0..3 {
+        let mut row = div().flex().gap_0p5();
+        for _ in 0..2 {
+            row = row.child(
+                div()
+                    .size(design_rems(3.0))
+                    .rounded_full()
+                    .bg(gpui_color(theme.colors.text_muted)),
+            );
+        }
+        grip = grip.child(row);
+    }
+    grip
+}
+
+/// Sidebar, content and template dialog, laid out at the panel's scaled rem.
 fn chart_settings_panel_body(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
@@ -971,7 +995,6 @@ fn chart_settings_panel_body(
     view: ChartSettingsView<'_>,
     theme: &AerisTheme,
 ) -> Div {
-    let colors = theme.colors;
     div()
         .relative()
         .size_full()
@@ -984,27 +1007,15 @@ fn chart_settings_panel_body(
             theme,
         ))
         .child(
-            div().flex_1().min_w_0().min_h_0().p_2().child(
-                div()
-                    .id("chart_settings_content_surface")
-                    .relative()
-                    .size_full()
-                    .min_h_0()
-                    .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                    .border_1()
-                    .border_color(gpui_color(colors.border_secondary))
-                    .bg(gpui_color(colors.surface_secondary))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .id("chart_settings_content_scroll")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .px_4()
-                            .py_3()
-                            .child(content),
-                    ),
-            ),
+            div()
+                .id("chart_settings_content_scroll")
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px_6()
+                .py_4()
+                .child(content),
         )
         .children(
             (view.templates.overlay == ChartSettingsTemplateOverlay::SaveDialog).then(|| {
@@ -1112,9 +1123,6 @@ fn chart_settings_sidebar(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels())
-        - theme.dimensions.border_width)
-        .max(0.0));
     let mut sections = div().flex_1().min_h_0().flex().flex_col().gap_0p5();
     for section in ChartSettingsSection::ALL {
         let active = selected == section;
@@ -1123,11 +1131,11 @@ fn chart_settings_sidebar(
             div()
                 .id(("chart_settings_section", section as usize))
                 .w_full()
-                .h(design_rems(32.0))
-                .px_2()
+                .h(design_rems(36.0))
+                .px_3()
                 .flex()
                 .items_center()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                 .role(Role::Button)
                 .cursor_pointer()
                 .when(active, |item| {
@@ -1162,10 +1170,10 @@ fn chart_settings_sidebar(
         .flex_none()
         .flex()
         .flex_col()
-        .p_2()
-        .rounded_tl(inner_radius)
-        .rounded_bl(inner_radius)
-        .bg(gpui_color(colors.surface))
+        .gap_3()
+        .p_3()
+        .border_r_1()
+        .border_color(gpui_color(colors.border_secondary))
         .child(sections)
         .child(chart_settings_template_control(
             terminal, menu, templates, theme,
@@ -1183,6 +1191,9 @@ fn chart_settings_template_control(
     let mut control = div()
         .relative()
         .w_full()
+        .pt_3()
+        .border_t_1()
+        .border_color(gpui_color(colors.border_secondary))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
         .child(
             Button::new("chart_settings_templates")
@@ -2042,8 +2053,10 @@ fn settings_content_header(
     div()
         .flex()
         .flex_col()
-        .gap_2()
-        .pr(design_rems(72.0))
+        .gap_1()
+        .pb_3()
+        .border_b_1()
+        .border_color(gpui_color(theme.colors.border_secondary))
         .child(
             div()
                 .text_base()
@@ -2053,7 +2066,6 @@ fn settings_content_header(
         )
         .child(
             div()
-                .mb_2()
                 .text_xs()
                 .text_color(gpui_color(theme.colors.text_muted))
                 .child(description),
@@ -2067,7 +2079,7 @@ fn settings_group_heading(
 ) -> impl IntoElement {
     div()
         .mt_3()
-        .mb_1()
+        .mb_2()
         .flex()
         .flex_col()
         .gap_0p5()
@@ -2323,7 +2335,7 @@ fn settings_choice_row(
         .items_center()
         .gap_1()
         .p(design_rems(2.0))
-        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
         .border_1()
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
