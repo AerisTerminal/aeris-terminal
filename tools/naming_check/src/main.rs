@@ -208,6 +208,22 @@ mod tests {
         contents
     }
 
+    fn contains_identifier(source: &str, identifier: &str) -> bool {
+        source
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .any(|token| token == identifier)
+    }
+
+    #[test]
+    fn account_boundary_matches_complete_identifiers() {
+        assert!(contains_identifier("let account: AccountId", "AccountId"));
+        assert!(!contains_identifier(
+            "aeris_trading::TradingAccountId",
+            "AccountId"
+        ));
+        assert!(!contains_identifier("AccountIdentity", "AccountId"));
+    }
+
     fn declared_trait_name(line: &str) -> Option<&str> {
         let line = line.trim();
         let declaration = line
@@ -1946,10 +1962,13 @@ mod tests {
                 .iter()
                 .any(|prefix| relative.starts_with(prefix));
             if !allowed {
-                for identifier in ACCOUNT_IDENTIFIERS
-                    .iter()
-                    .chain(["pkce", "PKCE", "openid", "oidc", "OIDC"].iter())
-                {
+                for identifier in ACCOUNT_IDENTIFIERS {
+                    assert!(
+                        !contains_identifier(production, identifier),
+                        "{relative} owns account surface {identifier} outside its boundary"
+                    );
+                }
+                for identifier in ["pkce", "PKCE", "openid", "oidc", "OIDC"] {
                     assert!(
                         !production.contains(identifier),
                         "{relative} owns account surface {identifier} outside its boundary"
