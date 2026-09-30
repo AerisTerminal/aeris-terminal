@@ -134,8 +134,10 @@ impl TerminalApp {
     ) {
         let surface = self.active_surface();
         match command {
-            CommandId::ConnectBroker | CommandId::DisconnectBroker => {
-                self.run_broker_connection_command(command == CommandId::DisconnectBroker, cx);
+            CommandId::ConnectBroker
+            | CommandId::DisconnectBroker
+            | CommandId::VerifyBrokerFeed => {
+                self.run_broker_connection_command(command, cx);
             }
             CommandId::OpenPalette => self.open_command_palette(&OpenCommandPalette, window, cx),
             CommandId::ToggleContext => surface.update(cx, WorkspaceSurface::toggle_context_panel),
@@ -245,29 +247,29 @@ impl TerminalApp {
         self.execute_registered_command(command, window, cx);
         if !matches!(
             command,
-            CommandId::ConnectBroker | CommandId::DisconnectBroker
+            CommandId::ConnectBroker | CommandId::DisconnectBroker | CommandId::VerifyBrokerFeed
         ) {
             self.close_command_palette(window, cx);
         }
     }
 
-    fn run_broker_connection_command(&mut self, disconnect: bool, cx: &mut Context<Self>) {
+    fn run_broker_connection_command(&mut self, command: CommandId, cx: &mut Context<Self>) {
         if self.broker_connection_task.is_some() {
             self.command_palette_message = Some("A broker connection operation is already running. Complete or close the browser login and wait for its result.".to_string());
             cx.notify();
             return;
         }
-        self.command_palette_message = Some(if disconnect {
-            "Removing tastytrade connection…"
-        } else {
-            "Opening tastytrade authorization. Complete login in your browser; Aeris will check your market-data access."
+        self.command_palette_message = Some(match command {
+            CommandId::DisconnectBroker => "Removing tastytrade connection…",
+            CommandId::VerifyBrokerFeed => "Checking the current ES contract and DXLink feed. This takes about 30 seconds…",
+            _ => "Opening tastytrade authorization. Complete login in your browser; Aeris will check your market-data access.",
         }.to_string());
         let work = cx.background_executor().spawn(async move {
             let market = engine_market_worker::shared_market_runtime()?;
-            if disconnect {
-                market.disconnect_provider("tastytrade")
-            } else {
-                market.connect_provider("tastytrade")
+            match command {
+                CommandId::DisconnectBroker => market.disconnect_provider("tastytrade"),
+                CommandId::VerifyBrokerFeed => market.verify_provider_feed("tastytrade"),
+                _ => market.connect_provider("tastytrade"),
             }
         });
         self.broker_connection_task = Some(cx.spawn(async move |terminal, cx| {

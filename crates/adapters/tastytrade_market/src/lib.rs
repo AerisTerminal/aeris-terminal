@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
+mod catalog;
+mod dxlink;
+pub use catalog::FutureInstrument;
+pub use dxlink::{FeedVerification, verify_live_feed};
+
 /// Broker authorization service; separate from Aeris account authentication.
 pub const TASTYTRADE_BROKER_ORIGIN: &str = "https://app.aeristerminal.com";
 const MAXIMUM_RESPONSE_BYTES: usize = 512 * 1024;
@@ -226,6 +231,43 @@ impl TastytradeBrokerClient {
             return Err("Broker quote-token response is invalid".to_string());
         }
         Ok(token)
+    }
+
+    /// Discovers contracts using provider-supplied streamer symbols.
+    ///
+    /// # Errors
+    /// Rejects malformed catalogs, unsafe filters, or service errors.
+    pub fn futures_for_product(
+        &mut self,
+        capability: &ConnectionCapability,
+        product: &str,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<Vec<FutureInstrument>, String> {
+        #[derive(Serialize)]
+        struct Request<'a> {
+            #[serde(flatten)]
+            capability: &'a ConnectionCapability,
+            kind: &'static str,
+            page: u32,
+            product_code: &'a str,
+        }
+        if product.is_empty()
+            || product.len() > 16
+            || !product.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err("Futures product filter is invalid".to_string());
+        }
+        let page: catalog::CatalogPage = self.post(
+            "instruments",
+            &Request {
+                capability,
+                kind: "futures",
+                page: 0,
+                product_code: product,
+            },
+            stop,
+        )?;
+        page.validated(product)
     }
 
     fn post<T: DeserializeOwned>(

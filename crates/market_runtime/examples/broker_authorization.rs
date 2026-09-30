@@ -1,17 +1,18 @@
 //! Exercises the same runtime-owned browser/vault path as the desktop command.
 //! Client secrets are configured privately in AWS; never accepted as arguments.
+//! Close the desktop before running this example so only one runtime owns sessions.
 
 use aeris_market_runtime::MarketService;
 use std::{process::ExitCode, time::Duration};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).take(2).collect();
-    let disconnect = match arguments.as_slice() {
-        [] => false,
-        [action] if action == "disconnect" => true,
+    let action = match arguments.as_slice() {
+        [] => "connect",
+        [action] if matches!(action.as_str(), "disconnect" | "verify") => action.as_str(),
         _ => {
             eprintln!(
-                "Usage: cargo run -p aeris_market_runtime --example broker_authorization --locked -- [disconnect]"
+                "Usage: cargo run -p aeris_market_runtime --example broker_authorization --locked -- [disconnect|verify]"
             );
             return ExitCode::FAILURE;
         }
@@ -23,11 +24,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = if disconnect {
-        market.disconnect_provider("tastytrade")
-    } else {
-        println!("Complete tastytrade authorization in your system browser when it opens.");
-        market.connect_provider("tastytrade")
+    let result = match action {
+        "disconnect" => market.disconnect_provider("tastytrade"),
+        "verify" => market.verify_provider_feed("tastytrade"),
+        _ => {
+            println!("Complete tastytrade authorization in your system browser when it opens.");
+            market.connect_provider("tastytrade")
+        }
     };
     let shutdown = market.shutdown(Duration::from_secs(5));
     let mut succeeded = true;

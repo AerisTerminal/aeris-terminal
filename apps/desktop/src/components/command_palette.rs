@@ -182,7 +182,9 @@ fn command_row(
                 terminal.execute_registered_command(command, window, terminal_cx);
                 if !matches!(
                     command,
-                    CommandId::ConnectBroker | CommandId::DisconnectBroker
+                    CommandId::ConnectBroker
+                        | CommandId::DisconnectBroker
+                        | CommandId::VerifyBrokerFeed
                 ) {
                     terminal.close_command_palette(window, terminal_cx);
                 }

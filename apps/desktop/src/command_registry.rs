@@ -29,10 +29,11 @@ pub enum CommandId {
     KillSwitch,
     ConnectBroker,
     DisconnectBroker,
+    VerifyBrokerFeed,
 }
 
 impl CommandId {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::OpenPalette,
         Self::ToggleContext,
         Self::ToggleOrderBook,
@@ -59,6 +60,7 @@ impl CommandId {
         Self::KillSwitch,
         Self::ConnectBroker,
         Self::DisconnectBroker,
+        Self::VerifyBrokerFeed,
     ];
 }
 
@@ -71,6 +73,12 @@ pub struct CommandSpec {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: CommandId::VerifyBrokerFeed,
+        title: "Verify tastytrade feed",
+        keywords: "broker market data test dxlink cme",
+        chord: None,
+    },
     CommandSpec {
         id: CommandId::ConnectBroker,
         title: "Connect tastytrade",

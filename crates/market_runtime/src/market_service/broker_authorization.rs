@@ -22,9 +22,15 @@ const AUTHORIZATION_LIMIT: Duration = Duration::from_mins(10);
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const WORKER_POLL: Duration = Duration::from_millis(100);
 
-enum BrokerCommand {
-    Connect(Reply<String>),
-    Disconnect(Reply<String>),
+#[derive(Clone, Copy)]
+enum Operation {
+    Connect,
+    Disconnect,
+    VerifyFeed,
+}
+struct BrokerCommand {
+    operation: Operation,
+    reply: Reply<String>,
 }
 
 pub(super) struct BrokerAuthorization {
@@ -45,7 +51,7 @@ impl BrokerAuthorization {
         Ok((Self { commands, busy }, worker))
     }
 
-    fn request(&self, disconnect: bool, stop: &AtomicBool) -> Result<String, String> {
+    fn request(&self, operation: Operation, stop: &AtomicBool) -> Result<String, String> {
         if stop.load(Ordering::Acquire) {
             return Err("Market runtime is shutting down".to_string());
         }
@@ -53,11 +59,7 @@ impl BrokerAuthorization {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| "A broker connection operation is already running".to_string())?;
         let (reply, result) = mpsc::sync_channel(1);
-        let command = if disconnect {
-            BrokerCommand::Disconnect(reply)
-        } else {
-            BrokerCommand::Connect(reply)
-        };
+        let command = BrokerCommand { operation, reply };
         if let Err(error) = self.commands.try_send(command) {
             self.busy.store(false, Ordering::Release);
             return Err(match error {
@@ -86,7 +88,7 @@ impl MarketService {
         }
         self.runtime
             .broker_authorization
-            .request(false, &self.runtime.shutdown)
+            .request(Operation::Connect, &self.runtime.shutdown)
     }
 
     /// Deletes the hosted broker connection and its protected desktop capability.
@@ -100,7 +102,21 @@ impl MarketService {
         }
         self.runtime
             .broker_authorization
-            .request(true, &self.runtime.shutdown)
+            .request(Operation::Disconnect, &self.runtime.shutdown)
+    }
+
+    /// Checks an existing authorization against one bounded public feed session.
+    /// Call from a background worker. Results contain no credentials or raw events.
+    ///
+    /// # Errors
+    /// Rejects unsupported providers, missing login, overload, or feed failures.
+    pub fn verify_provider_feed(&self, provider: &str) -> Result<String, String> {
+        if provider != "tastytrade" {
+            return Err("Provider does not support this feed verification".to_string());
+        }
+        self.runtime
+            .broker_authorization
+            .request(Operation::VerifyFeed, &self.runtime.shutdown)
     }
 }
 
@@ -112,18 +128,13 @@ fn run(requests: &Receiver<BrokerCommand>, stop: &Arc<AtomicBool>, busy: &Atomic
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let (disconnecting, reply) = match command {
-            BrokerCommand::Connect(reply) => (false, reply),
-            BrokerCommand::Disconnect(reply) => (true, reply),
-        };
+        let BrokerCommand { operation, reply } = command;
         let result = NativeCredentialVault::new(VAULT_SERVICE)
             .map_err(|_| "Protected broker credential storage is unavailable".to_string())
-            .and_then(|vault| {
-                if disconnecting {
-                    disconnect(&mut client, &vault, stop)
-                } else {
-                    connect(&mut client, &vault, stop)
-                }
+            .and_then(|vault| match operation {
+                Operation::Disconnect => disconnect(&mut client, &vault, stop),
+                Operation::Connect => connect(&mut client, &vault, stop),
+                Operation::VerifyFeed => verify_feed(&mut client, &vault, stop),
             });
         busy.store(false, Ordering::Release);
         // A dropped request cannot change ownership or start another transaction.
@@ -213,6 +224,63 @@ fn disconnect(
     Ok("Tastytrade connection removed. You can revoke Aeris access in tastytrade's authorized applications.".to_string())
 }
 
+fn verify_feed(
+    client: &mut TastytradeBrokerClient,
+    vault: &NativeCredentialVault,
+    stop: &Arc<AtomicBool>,
+) -> Result<String, String> {
+    let capability = load(vault)?.ok_or("Connect tastytrade before checking the feed")?;
+    let instruments = client.futures_for_product(&capability, "ES", stop)?;
+    let instrument = instruments
+        .iter()
+        .filter(|item| item.active && item.exchange == "CME")
+        .min_by_key(|item| (!item.active_month, &item.expiration_date))
+        .ok_or("Tastytrade did not return an active CME ES contract")?;
+    // Respect the hosted connection's two-second request cooldown; no retry storm.
+    wait_until(Instant::now() + POLL_INTERVAL, stop)?;
+    let token = client.quote_token(&capability, stop)?;
+    let report = aeris_tastytrade_market_adapter::verify_live_feed(
+        &token,
+        &instrument.streamer_symbol,
+        stop,
+    )?;
+    let observed_now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "System clock is invalid")?;
+    let observed_ms =
+        u64::try_from(observed_now.as_millis()).map_err(|_| "System clock overflowed")?;
+    let quote_age = timestamp_age(report.newest_quote_time_ms, observed_ms);
+    let trade_age = timestamp_age(report.newest_trade_time_ms, observed_ms);
+    Ok(format!(
+        "{} feed check: {} usable quote updates, {} candle rows, {} new trades ({} buy, {} sell, {} unknown side). TimeAndSale fields: {}. Latest quote age: {quote_age}. Latest trade age: {trade_age}. Live charts remain disconnected.",
+        instrument.symbol,
+        report.usable_quotes,
+        report.usable_candles,
+        report.new_trades,
+        report.buy_trades,
+        report.sell_trades,
+        report.unknown_side_trades,
+        if report.time_and_sale_fields {
+            "confirmed"
+        } else {
+            "unavailable"
+        }
+    ))
+}
+
+fn timestamp_age(provider_ms: Option<u64>, observed_ms: u64) -> String {
+    match provider_ms {
+        Some(time) if time <= observed_ms => {
+            format!("{} ms against this machine's clock", observed_ms - time)
+        }
+        Some(time) => format!(
+            "provider timestamp is {} ms ahead of this machine's clock",
+            time - observed_ms
+        ),
+        None => "provider timestamp unavailable".to_string(),
+    }
+}
+
 fn delete_local(vault: &NativeCredentialVault) -> Result<(), String> {
     vault
         .delete(VAULT_KEY)
@@ -252,13 +320,13 @@ mod tests {
         };
         assert!(
             owner
-                .request(false, &AtomicBool::new(false))
+                .request(Operation::Connect, &AtomicBool::new(false))
                 .unwrap_err()
                 .contains("already running")
         );
         assert!(
             owner
-                .request(false, &AtomicBool::new(true))
+                .request(Operation::Connect, &AtomicBool::new(true))
                 .unwrap_err()
                 .contains("shutting down")
         );
@@ -267,5 +335,18 @@ mod tests {
     #[test]
     fn pending_browser_wait_observes_shutdown() {
         assert!(wait_until(Instant::now() + POLL_INTERVAL, &AtomicBool::new(true)).is_err());
+    }
+
+    #[test]
+    fn feed_age_keeps_missing_and_future_timestamps_explicit() {
+        assert_eq!(
+            timestamp_age(Some(1000), 1200),
+            "200 ms against this machine's clock"
+        );
+        assert_eq!(
+            timestamp_age(Some(1200), 1000),
+            "provider timestamp is 200 ms ahead of this machine's clock"
+        );
+        assert_eq!(timestamp_age(None, 1000), "provider timestamp unavailable");
     }
 }
