@@ -4188,6 +4188,7 @@ struct TerminalApp {
     command_palette_open: bool,
     command_palette_selection: usize,
     command_palette_message: Option<String>,
+    broker_connection_task: Option<gpui::Task<()>>,
     linked_sync_revisions: BTreeMap<String, u64>,
     event_risk_dispatches: BTreeMap<String, i64>,
     next_event_risk_check: Instant,

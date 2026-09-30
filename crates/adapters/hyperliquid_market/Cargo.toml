@@ -14,9 +14,6 @@ serde.workspace = true
 # `serde_json` behavior. The adapter needs it to decode provider decimals
 # from raw source text without any `f64` conversion.
 serde_json = { workspace = true, features = ["raw_value"] }
-tungstenite.workspace = true
-rustls.workspace = true
-webpki-roots.workspace = true
 ureq.workspace = true
 
 [lints]

@@ -883,25 +883,34 @@ impl MarketService {
             },
             Arc::clone(&shutdown),
         )?];
-        let service =
-            Self::build_market_service(command_tx, shutdown, active_provider_workers, workers);
-        Ok(service)
+        Self::build_market_service(command_tx, shutdown, active_provider_workers, workers)
     }
 
     fn build_market_service(
         commands: SyncSender<Command>,
         shutdown: Arc<AtomicBool>,
         active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
-        workers: Vec<thread::JoinHandle<()>>,
-    ) -> Self {
-        Self {
+        mut workers: Vec<thread::JoinHandle<()>>,
+    ) -> Result<Self, String> {
+        let (broker_authorization, worker) =
+            match super::broker_authorization::BrokerAuthorization::start(&shutdown) {
+                Ok(started) => started,
+                Err(error) => {
+                    shutdown.store(true, Ordering::Release);
+                    join_runtime_workers(workers);
+                    return Err(error);
+                }
+            };
+        workers.push(worker);
+        Ok(Self {
             commands,
             runtime: Arc::new(MarketRuntime {
                 shutdown,
+                broker_authorization,
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
             }),
-        }
+        })
     }
 
     /// Cancels provider work, drains accepted provider events, and joins owned workers.
@@ -1509,14 +1518,13 @@ mod tests {
     #[test]
     fn queued_request_deadline_cancels_execution_without_waiting_for_coordinator() {
         let (commands, receiver) = mpsc::sync_channel(1);
-        let service = MarketService {
+        let service = MarketService::build_market_service(
             commands,
-            runtime: Arc::new(MarketRuntime {
-                shutdown: Arc::new(AtomicBool::new(false)),
-                active_provider_workers: Arc::new(Mutex::new(BTreeSet::new())),
-                workers: Mutex::new(None),
-            }),
-        };
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(BTreeSet::new())),
+            Vec::new(),
+        )
+        .expect("test runtime starts");
         let result =
             service.request_with_timeout(|reply| Ok(Command::Status(reply)), Duration::ZERO);
         assert!(result.unwrap_err().contains("cancelled before execution"));
@@ -1524,6 +1532,9 @@ mod tests {
             panic!("request envelope");
         };
         assert!(!state.start());
+        service
+            .shutdown(Duration::from_secs(1))
+            .expect("test runtime stops");
     }
 
     #[test]

@@ -180,7 +180,12 @@ fn command_row(
         .on_click(move |_, window, cx| {
             execute.update(cx, |terminal, terminal_cx| {
                 terminal.execute_registered_command(command, window, terminal_cx);
-                terminal.close_command_palette(window, terminal_cx);
+                if !matches!(
+                    command,
+                    CommandId::ConnectBroker | CommandId::DisconnectBroker
+                ) {
+                    terminal.close_command_palette(window, terminal_cx);
+                }
             });
         })
         .into_any_element()

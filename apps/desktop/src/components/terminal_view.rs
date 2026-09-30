@@ -134,6 +134,9 @@ impl TerminalApp {
     ) {
         let surface = self.active_surface();
         match command {
+            CommandId::ConnectBroker | CommandId::DisconnectBroker => {
+                self.run_broker_connection_command(command == CommandId::DisconnectBroker, cx);
+            }
             CommandId::OpenPalette => self.open_command_palette(&OpenCommandPalette, window, cx),
             CommandId::ToggleContext => surface.update(cx, WorkspaceSurface::toggle_context_panel),
             CommandId::ToggleOrderBook => surface.update(cx, WorkspaceSurface::toggle_order_book),
@@ -240,7 +243,45 @@ impl TerminalApp {
             return;
         };
         self.execute_registered_command(command, window, cx);
-        self.close_command_palette(window, cx);
+        if !matches!(
+            command,
+            CommandId::ConnectBroker | CommandId::DisconnectBroker
+        ) {
+            self.close_command_palette(window, cx);
+        }
+    }
+
+    fn run_broker_connection_command(&mut self, disconnect: bool, cx: &mut Context<Self>) {
+        if self.broker_connection_task.is_some() {
+            self.command_palette_message = Some("A broker connection operation is already running. Complete or close the browser login and wait for its result.".to_string());
+            cx.notify();
+            return;
+        }
+        self.command_palette_message = Some(if disconnect {
+            "Removing tastytrade connection…"
+        } else {
+            "Opening tastytrade authorization. Complete login in your browser; Aeris will check your market-data access."
+        }.to_string());
+        let work = cx.background_executor().spawn(async move {
+            let market = engine_market_worker::shared_market_runtime()?;
+            if disconnect {
+                market.disconnect_provider("tastytrade")
+            } else {
+                market.connect_provider("tastytrade")
+            }
+        });
+        self.broker_connection_task = Some(cx.spawn(async move |terminal, cx| {
+            let result = work.await;
+            let _ = terminal.update(cx, |terminal, cx| {
+                terminal.command_palette_message = Some(match result {
+                    Ok(message) => message,
+                    Err(error) => error,
+                });
+                terminal.broker_connection_task = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn dispatch_due_economic_event_rules(&mut self, cx: &mut Context<Self>) {

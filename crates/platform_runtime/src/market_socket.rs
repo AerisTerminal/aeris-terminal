@@ -1,12 +1,13 @@
-//! Blocking WebSocket transport for the public Hyperliquid market feed.
+//! Blocking WebSocket transport shared by market-data provider adapters.
 //!
-//! Exactly one market-runtime-owned thread drives one of these sockets at a time:
-//! connect with bounded TCP/TLS setup, exchange bounded text frames, and
+//! Exactly one market-runtime-owned thread drives one of these sockets at a
+//! time: connect with bounded TCP/TLS setup, exchange bounded text frames, and
 //! shut the socket down from another thread for prompt cancellation. Only
-//! text frames are accepted; the public feed is text JSON, so a binary frame
+//! text frames are accepted; provider feeds are text JSON, so a binary frame
 //! fails the connection rather than entering the decoders.
 
 use std::{
+    fmt,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     sync::{
@@ -20,8 +21,8 @@ use tungstenite::{
     Connector, Message, WebSocket, protocol::WebSocketConfig, stream::MaybeTlsStream,
 };
 
-/// Largest single WebSocket message accepted from the public feed.
-pub const MAXIMUM_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+/// Largest single WebSocket message accepted from a provider feed.
+pub const MAXIMUM_MARKET_SOCKET_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// How long one socket read or write waits before the worker re-checks its
 /// controls, heartbeat, and cancellation flag.
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -34,20 +35,72 @@ const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 /// force a spurious reconnect right when the feed is merely idle.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Redacted socket failure. Only [`MarketSocketError::TimedOut`] means the
+/// connection is healthy but quiet; every other variant means the owning
+/// worker must reconnect or stop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketSocketError {
+    InvalidUrl,
+    DeadlineOverflow,
+    Cancelled,
+    Resolution,
+    Connect,
+    Setup,
+    Tls,
+    Handshake,
+    Send,
+    TimedOut,
+    Read,
+    Binary,
+    Pong,
+    Closed,
+}
+
+impl MarketSocketError {
+    /// Whether a read only lapsed its deadline on a healthy, quiet socket.
+    #[must_use]
+    pub const fn is_read_timeout(self) -> bool {
+        matches!(self, Self::TimedOut)
+    }
+}
+
+impl fmt::Display for MarketSocketError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidUrl => "market socket URL is invalid",
+            Self::DeadlineOverflow => "market socket deadline overflowed",
+            Self::Cancelled => "market socket cancelled",
+            Self::Resolution => "market socket resolution failed",
+            Self::Connect => "market socket connect failed",
+            Self::Setup => "market socket setup failed",
+            Self::Tls => "market socket TLS setup failed",
+            Self::Handshake => "market socket handshake failed",
+            Self::Send => "market socket send failed",
+            Self::TimedOut => "market socket read timed out",
+            Self::Read => "market socket read failed",
+            Self::Binary => "market socket sent binary",
+            Self::Pong => "market socket pong failed",
+            Self::Closed => "market socket closed",
+        })
+    }
+}
+
+impl std::error::Error for MarketSocketError {}
+
 /// One blocking market-feed connection with an explicit operation deadline.
-pub struct HyperliquidSocket {
+pub struct MarketSocket {
     socket: WebSocket<MaybeTlsStream<DeadlineTcpStream>>,
-    shutdown: HyperliquidSocketShutdown,
+    shutdown: MarketSocketShutdown,
 }
 
 /// Closes the underlying TCP stream from any thread to unblock a pending
 /// socket read or write without waiting out its deadline.
 #[derive(Clone)]
-pub struct HyperliquidSocketShutdown {
+pub struct MarketSocketShutdown {
     stream: Arc<TcpStream>,
 }
 
-impl HyperliquidSocketShutdown {
+impl MarketSocketShutdown {
     /// Unblocks a pending socket operation; the owning worker observes its
     /// stop flag next and exits.
     pub fn shutdown(&self) {
@@ -57,14 +110,14 @@ impl HyperliquidSocketShutdown {
 
 /// One event read from the market feed.
 #[derive(Debug, PartialEq, Eq)]
-pub enum SocketEvent {
+pub enum MarketSocketEvent {
     /// One complete text message, still raw for the fixed-point decoders.
     Text(String),
     /// A heartbeat reply; the worker measures liveness from these.
     Pong,
 }
 
-impl HyperliquidSocket {
+impl MarketSocket {
     /// Opens the feed socket with a bounded TCP/TLS handshake.
     ///
     /// DNS uses the shared bounded platform resolver; the overall deadline
@@ -78,16 +131,16 @@ impl HyperliquidSocket {
         url: &str,
         timeout: Duration,
         stop: &Arc<AtomicBool>,
-    ) -> Result<(Self, HyperliquidSocketShutdown), String> {
+    ) -> Result<(Self, MarketSocketShutdown), MarketSocketError> {
         let (host, port) = split_host_port(url)?;
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| "hyperliquid socket deadline overflowed".to_string())?;
+            .ok_or(MarketSocketError::DeadlineOverflow)?;
         let stream = connect_tcp(&host, port, deadline, stop)?;
         stream
             .set_nodelay(true)
-            .map_err(|_| "hyperliquid socket setup failed".to_string())?;
-        let shutdown = HyperliquidSocketShutdown {
+            .map_err(|_| MarketSocketError::Setup)?;
+        let shutdown = MarketSocketShutdown {
             stream: Arc::clone(&stream),
         };
         let tcp = DeadlineTcpStream {
@@ -98,15 +151,15 @@ impl HyperliquidSocket {
         };
         let websocket_config = WebSocketConfig::default()
             .read_buffer_size(64 * 1024)
-            .max_message_size(Some(MAXIMUM_MESSAGE_BYTES))
-            .max_frame_size(Some(MAXIMUM_MESSAGE_BYTES));
+            .max_message_size(Some(MAXIMUM_MARKET_SOCKET_MESSAGE_BYTES))
+            .max_frame_size(Some(MAXIMUM_MARKET_SOCKET_MESSAGE_BYTES));
         let (socket, _) = tungstenite::client_tls_with_config(
             url,
             tcp,
             Some(websocket_config),
             Some(Connector::Rustls(Arc::new(tls_config()?))),
         )
-        .map_err(|_| "hyperliquid socket handshake failed".to_string())?;
+        .map_err(|_| MarketSocketError::Handshake)?;
         Ok((
             Self {
                 socket,
@@ -118,7 +171,7 @@ impl HyperliquidSocket {
 
     /// Returns the handle that unblocks a pending socket operation.
     #[must_use]
-    pub fn shutdown_handle(&self) -> HyperliquidSocketShutdown {
+    pub fn shutdown_handle(&self) -> MarketSocketShutdown {
         self.shutdown.clone()
     }
 
@@ -131,18 +184,18 @@ impl HyperliquidSocket {
     /// # Errors
     ///
     /// Returns an error when the socket write fails or is cancelled.
-    pub fn send_text(&mut self, text: &str) -> Result<(), String> {
+    pub fn send_text(&mut self, text: &str) -> Result<(), MarketSocketError> {
         self.set_write_deadline(write_deadline());
         self.socket
             .send(Message::Text(text.to_owned().into()))
-            .map_err(|_| "hyperliquid socket send failed".to_string())
+            .map_err(|_| MarketSocketError::Send)
     }
 
     /// Reads one feed event, waiting at most until `deadline`.
     ///
     /// Ping frames are answered in place and never surface; only text and
-    /// pong reach the caller. A quiet socket fails with the timeout error
-    /// recognized by [`is_read_timeout`] (the worker heartbeats and waits
+    /// pong reach the caller. A quiet socket fails with
+    /// [`MarketSocketError::TimedOut`] (the worker heartbeats and waits
     /// again); every other failure means the connection is broken and the
     /// worker must reconnect.
     ///
@@ -150,24 +203,27 @@ impl HyperliquidSocket {
     ///
     /// Returns an error on close frames, binary frames, oversized messages,
     /// I/O failure, deadline expiry, or cancellation.
-    pub fn read_event(&mut self, deadline: Instant) -> Result<SocketEvent, String> {
+    pub fn read_event(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<MarketSocketEvent, MarketSocketError> {
         self.set_read_deadline(deadline);
         loop {
             let message = self.socket.read().map_err(map_read_error)?;
             match message {
-                Message::Text(text) => return Ok(SocketEvent::Text(text.as_str().to_owned())),
-                Message::Binary(_) => return Err("hyperliquid socket sent binary".to_string()),
+                Message::Text(text) => {
+                    return Ok(MarketSocketEvent::Text(text.as_str().to_owned()));
+                }
+                Message::Binary(_) => return Err(MarketSocketError::Binary),
                 Message::Ping(_) => {
                     // Tungstenite queues the matching pong automatically. Its
                     // flush needs a fresh write deadline even when the socket
                     // has been reading since the last application ping.
                     self.set_write_deadline(write_deadline());
-                    self.socket
-                        .flush()
-                        .map_err(|_| "hyperliquid socket pong failed".to_string())?;
+                    self.socket.flush().map_err(|_| MarketSocketError::Pong)?;
                 }
-                Message::Pong(_) => return Ok(SocketEvent::Pong),
-                Message::Close(_) => return Err("hyperliquid socket closed".to_string()),
+                Message::Pong(_) => return Ok(MarketSocketEvent::Pong),
+                Message::Close(_) => return Err(MarketSocketError::Closed),
                 Message::Frame(_) => {}
             }
         }
@@ -206,7 +262,7 @@ fn write_deadline() -> Instant {
         .unwrap_or_else(Instant::now)
 }
 
-fn map_read_error(error: tungstenite::Error) -> String {
+fn map_read_error(error: tungstenite::Error) -> MarketSocketError {
     match error {
         tungstenite::Error::Io(error)
             if matches!(
@@ -214,7 +270,7 @@ fn map_read_error(error: tungstenite::Error) -> String {
                 std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
             ) =>
         {
-            "hyperliquid socket read timed out".to_string()
+            MarketSocketError::TimedOut
         }
         tungstenite::Error::Io(error)
             if matches!(
@@ -222,21 +278,13 @@ fn map_read_error(error: tungstenite::Error) -> String {
                 std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
             ) =>
         {
-            "hyperliquid socket cancelled".to_string()
+            MarketSocketError::Cancelled
         }
-        _ => "hyperliquid socket read failed".to_string(),
+        _ => MarketSocketError::Read,
     }
 }
 
-/// Distinguishes a quiet socket (caller retries with a fresh deadline) from
-/// a broken one (caller reconnects). Only the timeout spellings land here;
-/// every other failure already returned `Err` above.
-#[must_use]
-pub fn is_read_timeout(error: &str) -> bool {
-    error == "hyperliquid socket read timed out"
-}
-
-fn tls_config() -> Result<rustls::ClientConfig, String> {
+fn tls_config() -> Result<rustls::ClientConfig, MarketSocketError> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -244,11 +292,11 @@ fn tls_config() -> Result<rustls::ClientConfig, String> {
     ))
     .with_safe_default_protocol_versions()
     .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
-    .map_err(|_| "hyperliquid TLS setup failed".to_string())
+    .map_err(|_| MarketSocketError::Tls)
 }
 
-fn split_host_port(url: &str) -> Result<(String, u16), String> {
-    let invalid = || "hyperliquid socket URL is invalid".to_string();
+fn split_host_port(url: &str) -> Result<(String, u16), MarketSocketError> {
+    let invalid = || MarketSocketError::InvalidUrl;
     let (scheme, rest) = url.split_once("://").ok_or_else(invalid)?;
     let default_port = match scheme {
         "wss" => 443,
@@ -259,7 +307,7 @@ fn split_host_port(url: &str) -> Result<(String, u16), String> {
     if authority.is_empty() {
         return Err(invalid());
     }
-    // Strip optional userinfo; the public feed never authenticates.
+    // Strip optional userinfo; provider feeds authenticate in-band, never in the URL.
     let authority = authority.rsplit('@').next().ok_or_else(invalid)?;
     if let Some((host, port)) = authority.rsplit_once(':') {
         let port: u16 = port.parse().map_err(|_| invalid())?;
@@ -277,18 +325,18 @@ fn connect_tcp(
     port: u16,
     deadline: Instant,
     stop: &AtomicBool,
-) -> Result<Arc<TcpStream>, String> {
+) -> Result<Arc<TcpStream>, MarketSocketError> {
     if stop.load(Ordering::Acquire) {
-        return Err("hyperliquid socket cancelled".to_string());
+        return Err(MarketSocketError::Cancelled);
     }
-    let addresses = aeris_platform_runtime::resolve_addresses(host, port, deadline, Some(stop))
-        .map_err(|error| format!("hyperliquid socket resolution failed: {:?}", error.kind()))?;
+    let addresses = crate::resolve_addresses(host, port, deadline, Some(stop))
+        .map_err(|_| MarketSocketError::Resolution)?;
     if addresses.is_empty() {
-        return Err("hyperliquid socket resolution failed".to_string());
+        return Err(MarketSocketError::Resolution);
     }
     for address in addresses {
         if stop.load(Ordering::Acquire) {
-            return Err("hyperliquid socket cancelled".to_string());
+            return Err(MarketSocketError::Cancelled);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -297,12 +345,12 @@ fn connect_tcp(
         match TcpStream::connect_timeout(&address, remaining.min(CONNECT_ATTEMPT_TIMEOUT)) {
             Ok(stream) => return Ok(Arc::new(stream)),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                return Err("hyperliquid socket cancelled".to_string());
+                return Err(MarketSocketError::Cancelled);
             }
             Err(_) => {}
         }
     }
-    Err("hyperliquid socket connect failed".to_string())
+    Err(MarketSocketError::Connect)
 }
 
 /// Blocking TCP stream with independent read and write operation deadlines.
@@ -466,15 +514,37 @@ mod tests {
         });
         let stop = Arc::new(AtomicBool::new(false));
         let (mut socket, _) =
-            HyperliquidSocket::connect(&format!("ws://{address}/"), Duration::from_secs(3), &stop)
+            MarketSocket::connect(&format!("ws://{address}/"), Duration::from_secs(3), &stop)
                 .expect("client connects");
         socket.set_write_deadline(past());
         assert_eq!(
             socket
                 .read_event(Instant::now() + Duration::from_secs(3))
                 .expect("ping does not disconnect the client"),
-            SocketEvent::Text("still connected".to_string())
+            MarketSocketEvent::Text("still connected".to_string())
         );
+        server.join().expect("server finishes");
+    }
+
+    #[test]
+    fn quiet_socket_reports_only_a_read_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let address = listener.local_addr().expect("loopback address");
+        let (release, wait) = std::sync::mpsc::sync_channel::<()>(1);
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client connects");
+            let _socket = tungstenite::accept(stream).expect("websocket handshake");
+            let _ = wait.recv_timeout(Duration::from_secs(3));
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut socket, _) =
+            MarketSocket::connect(&format!("ws://{address}/"), Duration::from_secs(3), &stop)
+                .expect("client connects");
+        let error = socket
+            .read_event(Instant::now() + Duration::from_millis(50))
+            .expect_err("quiet socket times out");
+        assert!(error.is_read_timeout());
+        release.send(()).expect("server released");
         server.join().expect("server finishes");
     }
 
@@ -487,76 +557,24 @@ mod tests {
             .expect_err("cancelled write reports");
         assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
     }
+
     #[test]
-    #[ignore = "drives the live Hyperliquid public WebSocket"]
-    fn live_public_socket_connects_and_receives_aggregated_book() {
-        let stop = Arc::new(AtomicBool::new(false));
-        let (mut socket, _) =
-            HyperliquidSocket::connect(crate::HYPERLIQUID_WS_URL, Duration::from_secs(10), &stop)
-                .expect("live Hyperliquid socket connects");
-        socket
-            .send_text(
-                &crate::build_aggregated_l2_subscription("BTC", 4, None)
-                    .expect("subscription encodes"),
-            )
-            .expect("book subscription sends");
-        socket
-            .send_text(&crate::build_bbo_subscription("BTC").expect("subscription encodes"))
-            .expect("BBO subscription sends");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let mut books = 0;
-        let mut quotes = 0;
-        let mut sequence = 1;
-        while books < 3 || quotes < 3 {
-            assert!(Instant::now() < deadline, "live Hyperliquid book timed out");
-            match socket.read_event(Instant::now() + Duration::from_secs(5)) {
-                Ok(SocketEvent::Text(text)) => {
-                    match crate::parse_ws_frame(&text).expect("provider frame") {
-                        crate::WsClientEvent::Book { coin, book } => {
-                            let decoded = crate::decode_book_snapshot(
-                                &book,
-                                &coin,
-                                "hyperliquid:perp:BTC",
-                                "hyperliquid:public",
-                                1,
-                                sequence,
-                                1,
-                            )
-                            .expect("valid live depth");
-                            assert!(decoded.snapshot.bids.len() > 5);
-                            assert!(decoded.snapshot.asks.len() > 5);
-                            assert!(
-                                decoded.snapshot.bids.len()
-                                    <= crate::MAXIMUM_HYPERLIQUID_BOOK_LEVELS
-                            );
-                            assert!(
-                                decoded.snapshot.asks.len()
-                                    <= crate::MAXIMUM_HYPERLIQUID_BOOK_LEVELS
-                            );
-                            books += 1;
-                        }
-                        crate::WsClientEvent::Bbo { coin, bbo } => {
-                            crate::decode_bbo_quote(
-                                &bbo,
-                                &coin,
-                                "hyperliquid:perp:BTC",
-                                "hyperliquid:public",
-                                1,
-                                sequence,
-                                1,
-                            )
-                            .expect("valid live quote");
-                            quotes += 1;
-                        }
-                        _ => {}
-                    }
-                    sequence += 1;
-                }
-                Ok(_) => {}
-                Err(error) if is_read_timeout(&error) => {}
-                Err(error) => panic!("live Hyperliquid socket failed: {error}"),
-            }
-        }
-        eprintln!("received {books} standard L2 books and {quotes} validated BBO updates");
+    fn socket_urls_require_websocket_schemes_and_hosts() {
+        assert_eq!(
+            split_host_port("wss://example.test/realtime"),
+            Ok(("example.test".to_string(), 443))
+        );
+        assert_eq!(
+            split_host_port("ws://127.0.0.1:9000/"),
+            Ok(("127.0.0.1".to_string(), 9000))
+        );
+        assert_eq!(
+            split_host_port("https://example.test"),
+            Err(MarketSocketError::InvalidUrl)
+        );
+        assert_eq!(
+            split_host_port("wss://:443/"),
+            Err(MarketSocketError::InvalidUrl)
+        );
     }
 }

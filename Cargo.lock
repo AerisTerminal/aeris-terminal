@@ -258,12 +258,9 @@ version = "0.2.3"
 dependencies = [
  "aeris_market_data",
  "aeris_platform_runtime",
- "rustls",
  "serde",
  "serde_json",
- "tungstenite",
  "ureq",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -294,6 +291,7 @@ dependencies = [
  "aeris_platform_runtime",
  "aeris_provider_history",
  "aeris_rithmic_protocol_adapter",
+ "aeris_tastytrade_market_adapter",
  "serde_json",
  "zeroize",
 ]
@@ -316,6 +314,7 @@ dependencies = [
  "embed-resource",
  "keyring",
  "notify-rust",
+ "rustls",
  "same-file",
  "semver",
  "serde",
@@ -323,9 +322,11 @@ dependencies = [
  "sha2 0.11.0",
  "signal-hook",
  "sysinfo 0.39.6",
+ "tungstenite",
  "ureq",
  "wayland-client",
  "wayland-protocols",
+ "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
  "zbus",
 ]
@@ -366,6 +367,21 @@ dependencies = [
  "aeris_market_data",
  "aeris_market_runtime",
  "num-traits",
+]
+
+[[package]]
+name = "aeris_tastytrade_market_adapter"
+version = "0.2.3"
+dependencies = [
+ "aeris_platform_runtime",
+ "base64 0.23.1",
+ "chrono",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "ureq",
+ "zeroize",
 ]
 
 [[package]]

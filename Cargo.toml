@@ -3,6 +3,7 @@ members = [
     "apps/desktop",
     "crates/adapters/rithmic_protocol",
     "crates/adapters/hyperliquid_market",
+    "crates/adapters/tastytrade_market",
     "crates/application",
     "crates/account_runtime",
     "crates/market_engine",

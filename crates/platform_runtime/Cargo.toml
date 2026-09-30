@@ -12,10 +12,13 @@ ed25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true
+rustls.workspace = true
 same-file.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
+tungstenite.workspace = true
 ureq.workspace = true
+webpki-roots.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client.workspace = true

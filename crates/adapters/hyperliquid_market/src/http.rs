@@ -52,7 +52,8 @@ pub fn post_info(
     }
     // Catalog requests use the same bounded DNS/transport implementation.
     // This shared agent has no mutable request token; history owns its own client.
-    let agent = AGENT.get_or_init(|| crate::HyperliquidHttpClient::default().agent);
+    let agent =
+        AGENT.get_or_init(|| aeris_platform_runtime::CancellableHttpClient::default().into_agent());
     post_with_agent(agent, raw, config)
 }
 
@@ -322,13 +323,17 @@ pub struct CandleSnapshotRequest<'a> {
 pub fn fetch_candle_snapshot(
     request: &CandleSnapshotRequest<'_>,
 ) -> Result<HyperliquidCandlePage, String> {
-    crate::HyperliquidHttpClient::default().fetch_candle_snapshot(
+    HyperliquidHttpClient::default().fetch_candle_snapshot(
         request,
         &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
 }
 
-impl crate::HyperliquidHttpClient {
+/// Exclusive reusable HTTP client owned by the Hyperliquid history worker.
+#[derive(Default)]
+pub struct HyperliquidHttpClient(aeris_platform_runtime::CancellableHttpClient);
+
+impl HyperliquidHttpClient {
     /// Fetches a bounded candle page with cancellation through DNS, TLS and HTTP I/O.
     ///
     /// # Errors
@@ -338,7 +343,7 @@ impl crate::HyperliquidHttpClient {
         request: &CandleSnapshotRequest<'_>,
         stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<HyperliquidCandlePage, String> {
-        self.set_cancellation(stop);
+        self.0.set_cancellation(stop);
         if request.wire_coin.trim().is_empty()
             || request.wire_coin.len() > 96
             || request.start_millis < 0
@@ -348,7 +353,7 @@ impl crate::HyperliquidHttpClient {
         }
         let interval = hyperliquid_interval_for_period(request.period)?;
         let bytes = post_with_agent(
-            &self.agent,
+            self.0.agent(),
             serde_json::json!({
                 "type": "candleSnapshot",
                 "req": {

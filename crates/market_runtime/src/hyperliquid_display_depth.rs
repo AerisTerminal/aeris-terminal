@@ -9,11 +9,11 @@ use std::{
 };
 
 use aeris_hyperliquid_market_adapter::{
-    HYPERLIQUID_WS_URL, HyperliquidSocket, SocketEvent, WsClientEvent,
-    build_aggregated_l2_subscription, build_ping, build_unsubscribe, decode_book_snapshot,
-    parse_ws_frame,
+    HYPERLIQUID_WS_URL, WsClientEvent, build_aggregated_l2_subscription, build_ping,
+    build_unsubscribe, decode_book_snapshot, parse_ws_frame,
 };
 use aeris_market_data::DepthSnapshot;
+use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::{
     hyperliquid_realtime::HyperliquidInstrumentDemand, market_service::ProviderCoordinatorWake,
@@ -111,7 +111,7 @@ pub(crate) fn run(
             return;
         }
         if let Ok((mut socket, _shutdown)) =
-            HyperliquidSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop)
+            MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop)
         {
             match run_session(
                 &mut socket,
@@ -148,7 +148,7 @@ fn drain_idle_controls(
 }
 
 fn run_session(
-    socket: &mut HyperliquidSocket,
+    socket: &mut MarketSocket,
     display_generation: u64,
     demand: &mut HyperliquidDisplayDepthDemand,
     controls: &Receiver<HyperliquidDisplayDepthControl>,
@@ -203,7 +203,7 @@ fn run_session(
             state.pending_ping = Some(now);
         }
         match socket.read_event(now + READ_TIMEOUT) {
-            Ok(SocketEvent::Text(text)) => {
+            Ok(MarketSocketEvent::Text(text)) => {
                 state.last_inbound = Instant::now();
                 if handle_frame(&text, display_generation, &mut state).is_err() {
                     state.decode_failures = state.decode_failures.saturating_add(1);
@@ -212,8 +212,8 @@ fn run_session(
                     }
                 }
             }
-            Ok(SocketEvent::Pong) => state.last_inbound = Instant::now(),
-            Err(error) if is_read_timeout(&error) => {}
+            Ok(MarketSocketEvent::Pong) => state.last_inbound = Instant::now(),
+            Err(error) if error.is_read_timeout() => {}
             Err(_) => return SessionExit::Reconnect,
         }
     }
@@ -238,7 +238,7 @@ fn drain_session_controls(
 }
 
 fn reconcile_subscriptions(
-    socket: &mut HyperliquidSocket,
+    socket: &mut MarketSocket,
     demand: &HyperliquidDisplayDepthDemand,
     state: &mut SessionState,
 ) -> Result<(), String> {
@@ -268,13 +268,15 @@ fn reconcile_subscriptions(
             && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&frame)
             && let Some(subscription) = raw.get("subscription")
         {
-            socket.send_text(&build_unsubscribe(subscription))?;
+            socket
+                .send_text(&build_unsubscribe(subscription))
+                .map_err(|error| error.to_string())?;
         }
         state.sequences.remove(&coin);
     }
     for (coin, frame) in &desired {
         if !state.active.contains_key(coin) {
-            socket.send_text(frame)?;
+            socket.send_text(frame).map_err(|error| error.to_string())?;
             state.active.insert(coin.clone(), frame.clone());
         }
     }
@@ -373,10 +375,6 @@ fn sleep_cancellable(delay: Duration, stop: &AtomicBool) {
             Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())),
         );
     }
-}
-
-fn is_read_timeout(error: &str) -> bool {
-    error.contains("timed out") || error.contains("WouldBlock")
 }
 
 fn unix_nanos_now() -> i64 {

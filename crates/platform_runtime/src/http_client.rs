@@ -1,3 +1,5 @@
+//! Cancellable HTTPS client shared by provider adapters.
+//!
 //! Cancellation reaches DNS, TCP, TLS and response reads. One exclusive client
 //! owns the request token and its keep-alive pool; transports never outlive it.
 use std::{
@@ -38,12 +40,12 @@ impl Cancellation {
     }
 }
 
-/// Exclusive reusable HTTP client for a provider-owned history worker.
-pub struct HyperliquidHttpClient {
-    pub(crate) agent: ureq::Agent,
+/// Exclusive reusable HTTP client for one provider-owned worker.
+pub struct CancellableHttpClient {
+    agent: ureq::Agent,
     cancellation: Cancellation,
 }
-impl Default for HyperliquidHttpClient {
+impl Default for CancellableHttpClient {
     fn default() -> Self {
         let cancellation = Cancellation(Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))));
         let connector =
@@ -64,13 +66,27 @@ impl Default for HyperliquidHttpClient {
         }
     }
 }
-impl HyperliquidHttpClient {
-    pub(crate) fn set_cancellation(&mut self, stop: &Arc<AtomicBool>) {
+impl CancellableHttpClient {
+    /// Binds every subsequent request to `stop`; setting it aborts DNS, TCP,
+    /// TLS, and response reads of an in-flight request.
+    pub fn set_cancellation(&mut self, stop: &Arc<AtomicBool>) {
         *self
             .cancellation
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(stop);
+    }
+
+    /// The cancellable agent that issues requests for this client.
+    #[must_use]
+    pub const fn agent(&self) -> &ureq::Agent {
+        &self.agent
+    }
+
+    /// Releases the agent for a process-wide client that is never cancelled.
+    #[must_use]
+    pub fn into_agent(self) -> ureq::Agent {
+        self.agent
     }
 }
 
@@ -113,12 +129,8 @@ impl Resolver for CancellableResolver {
             } else {
                 443
             });
-        let addresses = aeris_platform_runtime::resolve_addresses(
-            host,
-            port,
-            deadline(timeout),
-            Some(&self.0.token()),
-        )?;
+        let addresses =
+            crate::resolve_addresses(host, port, deadline(timeout), Some(&self.0.token()))?;
         if addresses.is_empty() {
             return Err(ureq::Error::HostNotFound);
         }
@@ -252,10 +264,10 @@ mod tests {
         let worker_stop = Arc::clone(&stop);
         let (result, received) = mpsc::sync_channel(1);
         let worker = thread::spawn(move || {
-            let mut client = HyperliquidHttpClient::default();
+            let mut client = CancellableHttpClient::default();
             client.set_cancellation(&worker_stop);
             let response = client
-                .agent
+                .agent()
                 .post(format!("http://{address}"))
                 .config()
                 .timeout_global(Some(Duration::from_secs(15)))

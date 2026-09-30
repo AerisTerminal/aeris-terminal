@@ -302,6 +302,7 @@ mod tests {
             "crates/domain/market_data/Cargo.toml",
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
+            "crates/adapters/tastytrade_market/Cargo.toml",
         ] {
             assert_excludes(relative, &ui);
         }
@@ -310,6 +311,7 @@ mod tests {
             &[
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
+                "aeris_tastytrade_market_adapter",
             ],
         );
     }
@@ -430,6 +432,7 @@ mod tests {
                 "aeris_chart_integration",
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
+                "aeris_tastytrade_market_adapter",
                 "aeris_charts_engine",
                 "aeris_charts_render",
                 "aeris_charts_render_gpui",
@@ -458,6 +461,7 @@ mod tests {
                 &[
                     "aeris_rithmic_protocol_adapter",
                     "aeris_hyperliquid_market_adapter",
+                    "aeris_tastytrade_market_adapter",
                     "aeris_local_history",
                     "aeris_local_storage",
                     "aeris_market_engine",
@@ -569,6 +573,7 @@ mod tests {
                 "aeris_desktop_provider_runtime",
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
+                "aeris_tastytrade_market_adapter",
                 "aeris_provider_history",
                 "aeris_local_storage",
                 "aeris_local_history",
@@ -1014,6 +1019,7 @@ mod tests {
         for relative in [
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
+            "crates/adapters/tastytrade_market/Cargo.toml",
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
@@ -1037,6 +1043,7 @@ mod tests {
         for dependency in [
             "aeris_rithmic_protocol_adapter",
             "aeris_hyperliquid_market_adapter",
+            "aeris_tastytrade_market_adapter",
             "aeris_market_engine",
             "aeris_provider_history",
             "aeris_platform_runtime",
@@ -1149,7 +1156,11 @@ mod tests {
             for path in production_sources_under(root) {
                 let contents = fs::read_to_string(&path).expect("source");
                 let production = production_prefix(&contents);
-                for boundary in ["hyperliquid_market_adapter::", "rithmic_protocol_adapter::"] {
+                for boundary in [
+                    "hyperliquid_market_adapter::",
+                    "rithmic_protocol_adapter::",
+                    "tastytrade_market_adapter::",
+                ] {
                     assert!(
                         !production.contains(boundary),
                         "{} bypasses market_runtime through {boundary}",

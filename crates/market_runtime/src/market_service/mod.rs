@@ -133,6 +133,7 @@ pub struct MarketServiceStatus {
 
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
+    broker_authorization: broker_authorization::BrokerAuthorization,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
 }
@@ -779,6 +780,7 @@ enum ProviderRuntimeEvent {
     HyperliquidCatalog(HyperliquidCatalogEvent),
 }
 
+mod broker_authorization;
 mod runtime;
 use runtime::join_runtime_workers;
 

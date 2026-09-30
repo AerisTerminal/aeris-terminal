@@ -28,10 +28,11 @@ use aeris_contracts::{
 };
 use aeris_hyperliquid_market_adapter::{
     HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig, HyperliquidLiveCandle,
-    HyperliquidSocket, SocketEvent, WsClientEvent, decode_book_snapshot, decode_live_candle,
-    decode_trades_batch, fetch_meta_bundle, is_read_timeout, parse_ws_frame,
+    WsClientEvent, decode_book_snapshot, decode_live_candle, decode_trades_batch,
+    fetch_meta_bundle, parse_ws_frame,
 };
 use aeris_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
+use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 
@@ -527,7 +528,7 @@ pub(crate) fn run(
             thread_sleep(reconnect_delay, stop);
             continue;
         }
-        match HyperliquidSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
+        match MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
             Ok((mut socket, _shutdown)) => match run_session(
                 &mut socket,
                 generation,
@@ -693,7 +694,7 @@ struct SessionState {
 }
 
 fn run_session(
-    socket: &mut HyperliquidSocket,
+    socket: &mut MarketSocket,
     generation: u64,
     demand: &mut HyperliquidDemand,
     controls: &Receiver<HyperliquidRealtimeControl>,
@@ -739,7 +740,7 @@ fn run_session(
             return SessionExit::Reconnect(reason.to_string());
         }
         match socket.read_event(now + READ_TIMEOUT) {
-            Ok(SocketEvent::Text(text)) => {
+            Ok(MarketSocketEvent::Text(text)) => {
                 let received_at = Instant::now();
                 state.last_inbound = received_at;
                 match handle_frame(
@@ -783,7 +784,7 @@ fn run_session(
                     }
                 }
             }
-            Ok(SocketEvent::Pong) => {
+            Ok(MarketSocketEvent::Pong) => {
                 state.last_inbound = Instant::now();
                 if state.connected
                     && sink.send(HyperliquidRealtimeEvent::Heartbeat(generation, None))
@@ -791,8 +792,8 @@ fn run_session(
                     return SessionExit::Closed;
                 }
             }
-            Err(error) if is_read_timeout(&error) => {}
-            Err(error) => return SessionExit::Reconnect(error),
+            Err(error) if error.is_read_timeout() => {}
+            Err(error) => return SessionExit::Reconnect(error.to_string()),
         }
     }
 }
@@ -825,7 +826,7 @@ enum FrameOutcome {
 /// Sends a heartbeat ping when the feed has been quiet, and reports a dead
 /// socket after sustained silence. Returns true when the session must end.
 fn heartbeat(
-    socket: &mut HyperliquidSocket,
+    socket: &mut MarketSocket,
     state: &mut SessionState,
     now: Instant,
 ) -> Option<&'static str> {
@@ -892,7 +893,7 @@ fn insert_subscription(
 
 /// Diffs the demanded set against live subscriptions without reconnecting.
 fn reconcile_subscriptions(
-    socket: &mut HyperliquidSocket,
+    socket: &mut MarketSocket,
     demand: &HyperliquidDemand,
     state: &mut SessionState,
 ) -> Result<(), String> {
@@ -961,6 +962,31 @@ fn reconcile_subscriptions(
         );
         instruments.insert(book.wire_coin.clone(), book.clone());
     }
+    remove_retired_subscriptions(socket, &desired, state)?;
+    state.book_sequences.retain(|coin, _| {
+        desired.keys().any(|key| match key {
+            SubscriptionKey::Book { coin: active } => active == coin,
+            _ => false,
+        })
+    });
+    for (key, frame) in &desired {
+        if !state.active.contains_key(key) {
+            socket.send_text(frame).map_err(|error| error.to_string())?;
+            state.active.insert(key.clone(), frame.clone());
+            state
+                .pending_subscriptions
+                .insert(key.clone(), Instant::now());
+        }
+    }
+    state.instruments = instruments;
+    Ok(())
+}
+
+fn remove_retired_subscriptions(
+    socket: &mut MarketSocket,
+    desired: &BTreeMap<SubscriptionKey, String>,
+    state: &mut SessionState,
+) -> Result<(), String> {
     // Unsubscribe first so a replaced feed never double-delivers.
     let removed = state
         .active
@@ -974,27 +1000,13 @@ fn reconcile_subscriptions(
             && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&frame)
             && let Some(subscription) = raw.get("subscription")
         {
-            socket.send_text(&aeris_hyperliquid_market_adapter::build_unsubscribe(
-                subscription,
-            ))?;
+            socket
+                .send_text(&aeris_hyperliquid_market_adapter::build_unsubscribe(
+                    subscription,
+                ))
+                .map_err(|error| error.to_string())?;
         }
     }
-    state.book_sequences.retain(|coin, _| {
-        desired.keys().any(|key| match key {
-            SubscriptionKey::Book { coin: active } => active == coin,
-            _ => false,
-        })
-    });
-    for (key, frame) in &desired {
-        if !state.active.contains_key(key) {
-            socket.send_text(frame)?;
-            state.active.insert(key.clone(), frame.clone());
-            state
-                .pending_subscriptions
-                .insert(key.clone(), Instant::now());
-        }
-    }
-    state.instruments = instruments;
     Ok(())
 }
 

@@ -8,9 +8,11 @@ mod capability;
 mod credential_vault;
 mod display_timing;
 mod dns;
+mod http_client;
 mod io_cancellation;
 mod lifecycle;
 mod live_market_gate;
+mod market_socket;
 mod network_notifications;
 mod power_notifications;
 mod release_delivery;
@@ -29,6 +31,7 @@ pub use display_timing::{
 #[cfg(target_os = "windows")]
 pub use display_timing::{WindowsCompositionProbe, WindowsCompositionTiming};
 pub use dns::resolve_addresses;
+pub use http_client::CancellableHttpClient;
 pub use io_cancellation::cancel_tcp_stream_io;
 #[cfg(target_os = "windows")]
 pub use lifecycle::verify_windows_publisher_signature;
@@ -47,6 +50,10 @@ pub use live_market_gate::{
     LIVE_MARKET_GATE_MAXIMUM_DETAIL_BYTES, LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES,
     LIVE_MARKET_GATE_SCHEMA_VERSION, LiveMarketGateCompletion, LiveMarketGateEvidence,
     LiveMarketGateOutcome, LiveMarketGateRecorder,
+};
+pub use market_socket::{
+    MAXIMUM_MARKET_SOCKET_MESSAGE_BYTES, MarketSocket, MarketSocketError, MarketSocketEvent,
+    MarketSocketShutdown,
 };
 pub use network_notifications::{
     NativeNetworkMonitor, NativeNetworkMonitorCancellation, NetworkEvent, NetworkNotificationError,

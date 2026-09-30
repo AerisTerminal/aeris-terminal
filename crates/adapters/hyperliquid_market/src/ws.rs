@@ -522,4 +522,82 @@ mod tests {
     fn heartbeat_frame_has_the_documented_shape() {
         assert_eq!(build_ping(), r#"{"method":"ping"}"#);
     }
+
+    #[test]
+    #[ignore = "drives the live Hyperliquid public WebSocket"]
+    fn live_public_socket_connects_and_receives_aggregated_book() {
+        use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
+        use std::{
+            sync::{Arc, atomic::AtomicBool},
+            time::{Duration, Instant},
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut socket, _) =
+            MarketSocket::connect(crate::HYPERLIQUID_WS_URL, Duration::from_secs(10), &stop)
+                .expect("live Hyperliquid socket connects");
+        socket
+            .send_text(
+                &crate::build_aggregated_l2_subscription("BTC", 4, None)
+                    .expect("subscription encodes"),
+            )
+            .expect("book subscription sends");
+        socket
+            .send_text(&crate::build_bbo_subscription("BTC").expect("subscription encodes"))
+            .expect("BBO subscription sends");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut books = 0;
+        let mut quotes = 0;
+        let mut sequence = 1;
+        while books < 3 || quotes < 3 {
+            assert!(Instant::now() < deadline, "live Hyperliquid book timed out");
+            match socket.read_event(Instant::now() + Duration::from_secs(5)) {
+                Ok(MarketSocketEvent::Text(text)) => {
+                    match crate::parse_ws_frame(&text).expect("provider frame") {
+                        crate::WsClientEvent::Book { coin, book } => {
+                            let decoded = crate::decode_book_snapshot(
+                                &book,
+                                &coin,
+                                "hyperliquid:perp:BTC",
+                                "hyperliquid:public",
+                                1,
+                                sequence,
+                                1,
+                            )
+                            .expect("valid live depth");
+                            assert!(decoded.snapshot.bids.len() > 5);
+                            assert!(decoded.snapshot.asks.len() > 5);
+                            assert!(
+                                decoded.snapshot.bids.len()
+                                    <= crate::MAXIMUM_HYPERLIQUID_BOOK_LEVELS
+                            );
+                            assert!(
+                                decoded.snapshot.asks.len()
+                                    <= crate::MAXIMUM_HYPERLIQUID_BOOK_LEVELS
+                            );
+                            books += 1;
+                        }
+                        crate::WsClientEvent::Bbo { coin, bbo } => {
+                            crate::decode_bbo_quote(
+                                &bbo,
+                                &coin,
+                                "hyperliquid:perp:BTC",
+                                "hyperliquid:public",
+                                1,
+                                sequence,
+                                1,
+                            )
+                            .expect("valid live quote");
+                            quotes += 1;
+                        }
+                        _ => {}
+                    }
+                    sequence += 1;
+                }
+                Ok(MarketSocketEvent::Pong) => {}
+                Err(error) if error.is_read_timeout() => {}
+                Err(error) => panic!("live Hyperliquid socket failed: {error}"),
+            }
+        }
+        eprintln!("received {books} standard L2 books and {quotes} validated BBO updates");
+    }
 }
