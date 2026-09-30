@@ -537,6 +537,41 @@ fn host_chart_type_survives_snapshot_install() {
 }
 
 #[test]
+fn line_with_markers_survives_replay_and_appearance_reset_without_leaking_to_other_types() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut chart = AerisChartView::empty();
+
+    assert_eq!(
+        ChartType::from_identifier("line_with_markers"),
+        Some(ChartType::LineWithMarkers)
+    );
+    assert!(ChartType::ALL.contains(&ChartType::LineWithMarkers));
+    chart.set_chart_type(ChartType::LineWithMarkers);
+    assert_eq!(
+        series_entry(&chart, 0).kind,
+        aeris_charts_engine::SeriesKind::Line
+    );
+    assert!(series_entry(&chart, 0).point_markers);
+
+    chart.load_replay(&replay).expect("snapshot installs");
+    assert_eq!(chart.chart_type(), ChartType::LineWithMarkers);
+    assert!(series_entry(&chart, 0).point_markers);
+    let bars = chart.engine.series_data(0).len();
+
+    chart.reset_appearance_settings();
+    assert!(series_entry(&chart, 0).point_markers);
+    chart.set_chart_type(ChartType::Line);
+    assert!(!series_entry(&chart, 0).point_markers);
+    chart.set_chart_type(ChartType::LineWithMarkers);
+    assert!(series_entry(&chart, 0).point_markers);
+    chart.set_chart_type(ChartType::Candles);
+    assert!(!series_entry(&chart, 0).point_markers);
+    assert_eq!(chart.engine.series_data(0).len(), bars);
+}
+
+#[test]
 fn session_plan_levels_are_bounded_transient_lines_restored_with_the_price_series() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })

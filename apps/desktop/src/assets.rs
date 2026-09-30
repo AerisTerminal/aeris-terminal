@@ -193,16 +193,18 @@ pub enum SeriesIcon {
     Candlestick,
     OhlcBar,
     Line,
+    LineWithMarkers,
     Area,
     HeikinAshi,
     BrushableArea,
 }
 
 impl SeriesIcon {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Candlestick,
         Self::OhlcBar,
         Self::Line,
+        Self::LineWithMarkers,
         Self::Area,
         Self::HeikinAshi,
         Self::BrushableArea,
@@ -214,6 +216,7 @@ impl SeriesIcon {
             Self::Candlestick => "candlestick-chart.svg",
             Self::OhlcBar => "ohlc-bar-chart.svg",
             Self::Line => "line-chart-type.svg",
+            Self::LineWithMarkers => "line-with-markers-chart.svg",
             Self::Area => "area-chart-type.svg",
             Self::HeikinAshi => "heikin-ashi-chart.svg",
             Self::BrushableArea => "brushable-area-chart.svg",
@@ -356,6 +359,9 @@ fn series_asset(path: &str) -> Option<&'static [u8]> {
         "candlestick-chart.svg" => include_bytes!("../assets/icons/series/candlestick-chart.svg"),
         "ohlc-bar-chart.svg" => include_bytes!("../assets/icons/series/ohlc-bar-chart.svg"),
         "line-chart-type.svg" => include_bytes!("../assets/icons/series/line-chart-type.svg"),
+        "line-with-markers-chart.svg" => {
+            include_bytes!("../assets/icons/series/line-with-markers-chart.svg")
+        }
         "area-chart-type.svg" => include_bytes!("../assets/icons/series/area-chart-type.svg"),
         "heikin-ashi-chart.svg" => include_bytes!("../assets/icons/series/heikin-ashi-chart.svg"),
         "brushable-area-chart.svg" => {

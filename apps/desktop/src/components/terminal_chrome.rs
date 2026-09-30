@@ -880,6 +880,7 @@ pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
         ChartType::Candles | ChartType::Footprint => assets::SeriesIcon::Candlestick,
         ChartType::Bars => assets::SeriesIcon::OhlcBar,
         ChartType::Line | ChartType::Baseline => assets::SeriesIcon::Line,
+        ChartType::LineWithMarkers => assets::SeriesIcon::LineWithMarkers,
         ChartType::Area => assets::SeriesIcon::Area,
         ChartType::BrushableArea => assets::SeriesIcon::BrushableArea,
     }

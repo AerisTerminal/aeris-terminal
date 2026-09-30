@@ -728,6 +728,14 @@ mod tests {
         );
         remove_chart_chrome_test_files(&path);
         assert_eq!(restored, hidden);
+        let marked_line = ChartChromePreferences {
+            chart_type: ChartType::LineWithMarkers,
+            ..hidden
+        };
+        assert_eq!(
+            parse_chart_chrome_preferences(&encode_chart_chrome_preferences(marked_line)),
+            marked_line
+        );
     }
 
     #[test]

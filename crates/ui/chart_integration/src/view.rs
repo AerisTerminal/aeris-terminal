@@ -2,9 +2,10 @@
 
 use crate::bridge::{ChartBridgeMetrics, ChartDataBridge};
 use crate::engine_bridge::{
-    ProductPriceBars, apply_merged_chart_data, chart_data_queue_capacity,
-    install_product_price_series, install_replay, install_volume_series, price_display_precision,
-    replay_display_precision, replay_legend_title, replay_price_divisor, replay_quantity_divisor,
+    ProductPriceBars, apply_merged_chart_data, apply_product_series_markers,
+    chart_data_queue_capacity, install_product_price_series, install_replay, install_volume_series,
+    price_display_precision, replay_display_precision, replay_legend_title, replay_price_divisor,
+    replay_quantity_divisor,
 };
 use crate::provenance::DisplayedProvenance;
 use aeris_application::ReplayRecoveryCommand;
@@ -347,6 +348,7 @@ pub enum ChartType {
     Footprint,
     Bars,
     Line,
+    LineWithMarkers,
     Area,
     Baseline,
     BrushableArea,
@@ -429,11 +431,12 @@ impl ChartType {
     }
 
     /// Built-in OHLC chart types Aeris Charts can render from the product price series.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Candles,
         Self::Footprint,
         Self::Bars,
         Self::Line,
+        Self::LineWithMarkers,
         Self::Area,
         Self::Baseline,
         Self::BrushableArea,
@@ -447,6 +450,7 @@ impl ChartType {
             Self::Footprint => "Footprint",
             Self::Bars => "Bars",
             Self::Line => "Line",
+            Self::LineWithMarkers => "Line with markers",
             Self::Area => "Area",
             Self::Baseline => "Baseline",
             Self::BrushableArea => "Brushable area",
@@ -461,6 +465,7 @@ impl ChartType {
             Self::Footprint => "footprint",
             Self::Bars => "bars",
             Self::Line => "line",
+            Self::LineWithMarkers => "line_with_markers",
             Self::Area => "area",
             Self::Baseline => "baseline",
             Self::BrushableArea => "brushable_area",
@@ -481,7 +486,7 @@ impl ChartType {
             // price series draws them as candles and hands its tail to the footprint.
             Self::Candles | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
-            Self::Line => aeris_charts_engine::SeriesKind::Line,
+            Self::Line | Self::LineWithMarkers => aeris_charts_engine::SeriesKind::Line,
             Self::Area | Self::BrushableArea => aeris_charts_engine::SeriesKind::Area,
             Self::Baseline => aeris_charts_engine::SeriesKind::Baseline,
         }
@@ -1897,6 +1902,7 @@ impl AerisChartView {
     /// remain owned and preserved by Aeris Charts.
     pub fn reset_appearance_settings(&mut self) {
         self.engine.reset_style_to_defaults();
+        apply_product_series_markers(&mut self.engine, self.chart_type);
         self.invalidate_series_layout();
         self.mark_user_state_changed();
     }

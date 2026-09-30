@@ -298,6 +298,18 @@ pub(crate) fn install_product_price_series(
 
 fn apply_product_series_kind(engine: &mut ChartEngine, chart_type: ChartType) {
     engine.convert_series_kind(0, chart_type.series_kind());
+    apply_product_series_markers(engine, chart_type);
+}
+
+pub(crate) fn apply_product_series_markers(engine: &mut ChartEngine, chart_type: ChartType) {
+    let primary = engine
+        .series
+        .iter_mut()
+        .find(|series| series.id == 0 && !series.removed);
+    match primary {
+        Some(series) => series.point_markers = chart_type == ChartType::LineWithMarkers,
+        None => panic!("the product price series must exist when applying its chart type"),
+    }
 }
 
 pub(crate) fn install_replay_with_deltas(

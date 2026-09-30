@@ -1386,14 +1386,16 @@ fn chart_series_settings(
         ChartType::Bars => {
             bar_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
         }
-        ChartType::Line | ChartType::BrushableArea => line_series_settings(
-            terminal,
-            menu,
-            &snapshot.appearance,
-            color_picker,
-            snapshot.chart_type == ChartType::BrushableArea,
-            theme,
-        ),
+        ChartType::Line | ChartType::LineWithMarkers | ChartType::BrushableArea => {
+            line_series_settings(
+                terminal,
+                menu,
+                &snapshot.appearance,
+                color_picker,
+                snapshot.chart_type == ChartType::BrushableArea,
+                theme,
+            )
+        }
         ChartType::Area => {
             area_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
         }
