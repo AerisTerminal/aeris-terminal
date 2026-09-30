@@ -3021,6 +3021,30 @@ fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
 }
 
 #[test]
+fn ctrl_magnet_snaps_the_cursor_crosshair_without_arming_a_drawing() {
+    let mut chart = interactive_chart();
+    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+
+    let x = chart.engine.time_scale.logical_to_coordinate(32.0);
+    let y = 200.0;
+    chart.update_crosshair(x, y);
+    let free = chart.engine.build_frame();
+    chart.update_crosshair_magnet(true);
+    let snapped = chart.engine.build_frame();
+    let crosshair_color = Color::parse_css(&chart.engine.options.get().crosshair.horz_line.color)
+        .expect("the package crosshair color is valid");
+    let crosshair_y = |frame: &ChartFrame| {
+        frame.panes[0].main.iter().find_map(|prim| match prim {
+            Prim::HLine { y, color, .. } if *color == crosshair_color => Some(*y),
+            _ => None,
+        })
+    };
+
+    assert_ne!(crosshair_y(&free), crosshair_y(&snapped));
+    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+}
+
+#[test]
 fn armed_ctrl_magnet_snaps_the_crosshair_without_a_preview_dot() {
     let mut chart = interactive_chart();
     chart.set_drawing_tool(ChartDrawingTool::TrendLine);

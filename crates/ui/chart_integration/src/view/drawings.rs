@@ -17,9 +17,6 @@ impl AerisChartView {
         let _ = self.finish_text_edit();
         self.cancel_drawing_gesture();
         self.drawing_tool = tool;
-        if tool.drawing_kind().is_none() {
-            let _ = self.engine.set_crosshair_ohlc_magnet(false);
-        }
         self.cursor_style = CursorStyle::Crosshair;
         self.invalidate_series_frame();
     }

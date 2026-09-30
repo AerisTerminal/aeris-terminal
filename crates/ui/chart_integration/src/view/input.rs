@@ -70,8 +70,7 @@ impl AerisChartView {
             && y <= self.viewport_origin.1 + height
     }
     pub(super) fn update_crosshair_magnet(&mut self, magnet: bool) {
-        let enabled = magnet && self.drawing_tool.drawing_kind().is_some();
-        if self.engine.set_crosshair_ohlc_magnet(enabled) {
+        if self.engine.set_crosshair_ohlc_magnet(magnet) {
             self.invalidate_series_frame();
         }
     }
