@@ -25,6 +25,13 @@ pub(super) fn provider_exchange_mark(
     }
 }
 
+fn show_hosted_broker_connect_prompt(provider: TerminalProvider, disconnected: bool) -> bool {
+    disconnected
+        && super::provider_presentation(provider).is_some_and(|descriptor| {
+            descriptor.connection_kind == ProviderConnectionKind::HostedBroker
+        })
+}
+
 pub(super) fn instrument_selector(
     app: Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
@@ -172,10 +179,7 @@ pub(super) fn instrument_dialog_content(
             |input| instrument_search_header(input, theme, app, state, extent).into_any_element(),
         ))
         .when(
-            super::provider_presentation(state.menu_provider).is_some_and(|descriptor| {
-                descriptor.connection_kind == ProviderConnectionKind::Credentials
-                    && state.tastytrade_disconnected
-            }),
+            show_hosted_broker_connect_prompt(state.menu_provider, state.tastytrade_disconnected),
             |menu| {
                 let accounts = app.clone();
                 menu.child(
@@ -307,4 +311,29 @@ pub(super) fn instrument_search_header(
                 .flex_1(),
         )
         .child(chrome_menu_close_button(app, theme))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnected_hosted_broker_keeps_the_accounts_prompt() {
+        assert!(show_hosted_broker_connect_prompt(
+            TerminalProvider::Tastytrade,
+            true,
+        ));
+        assert!(!show_hosted_broker_connect_prompt(
+            TerminalProvider::Tastytrade,
+            false,
+        ));
+        assert!(!show_hosted_broker_connect_prompt(
+            TerminalProvider::Rithmic,
+            true,
+        ));
+        assert!(!show_hosted_broker_connect_prompt(
+            TerminalProvider::Hyperliquid,
+            true,
+        ));
+    }
 }
