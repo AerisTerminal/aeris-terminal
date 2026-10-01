@@ -4119,3 +4119,36 @@ fn study_line_width_applies_to_current_and_later_outputs_and_clears_on_removal()
     assert!(chart.remove_study_outputs(&[9]));
     assert_eq!(chart.study_line_width(9), DEFAULT_STUDY_LINE_WIDTH);
 }
+
+#[test]
+fn appearance_reset_keeps_host_study_line_widths() {
+    let mut chart = AerisChartView::empty();
+    let timestamps = [60_i64 * 1_000_000_000, 120_i64 * 1_000_000_000];
+    let values = [Some(10.0), Some(11.0)];
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "Ribbon",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::BARS,
+    };
+    chart.set_study_line_width(9, 1);
+    assert_eq!(
+        chart.install_study_output(9, 0, descriptor, 1, &timestamps, &values),
+        Ok(true)
+    );
+    let series_id = study_output(&chart, 9, 0).series_id;
+    assert_eq!(series_entry(&chart, series_id).line_width, Some(1.0));
+
+    chart.reset_appearance_settings();
+
+    assert_eq!(
+        series_entry(&chart, series_id).line_width,
+        Some(1.0),
+        "resetting chart styling must not revert a study to the engine's default stroke"
+    );
+}

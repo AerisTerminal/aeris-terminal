@@ -1767,6 +1767,7 @@ impl AerisChartView {
     pub fn reset_appearance_settings(&mut self) {
         self.engine.reset_style_to_defaults();
         apply_product_series_markers(&mut self.engine, self.chart_type);
+        self.reapply_study_line_widths();
         self.invalidate_series_layout();
         self.mark_user_state_changed();
     }

@@ -104,6 +104,16 @@ impl AerisChartView {
         changed
     }
 
+    /// Restores every study's host-chosen stroke width after the engine restyles its series.
+    pub(super) fn reapply_study_line_widths(&mut self) {
+        for output in self.engine.external_study_outputs() {
+            if let Some(width) = self.study_line_widths.get(&output.study_id).copied() {
+                self.engine
+                    .series_apply_options_json(output.series_id, &study_line_width_patch(width));
+            }
+        }
+    }
+
     #[must_use]
     pub fn study_line_width(&self, study_id: u64) -> u8 {
         self.study_line_widths
