@@ -2614,6 +2614,14 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         super::default_listing_query(super::TerminalProvider::Tastytrade),
         "/ES"
     );
+    assert_eq!(
+        super::provider_connection_message(super::TerminalProvider::Tastytrade),
+        "Connecting to tastytrade hosted markets"
+    );
+    assert_eq!(
+        super::provider_connection_message(super::TerminalProvider::Hyperliquid),
+        "Connecting to Hyperliquid public markets"
+    );
     assert!(
         !super::provider_intervals(super::TerminalProvider::Rithmic)
             .contains(&ChartInterval::Tick100)

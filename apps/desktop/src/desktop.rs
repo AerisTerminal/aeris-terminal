@@ -90,15 +90,15 @@ use aeris_chart_integration::{
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderInstrumentSearchResult,
-    ProviderInstrumentSummary, SearchProviderInstruments, SelectProviderInstrument, SeriesCadence,
-    SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
-    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceLayoutState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionKind,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartAppearanceState,
+    WorkspaceChartIndicatorState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
+    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
@@ -3100,18 +3100,29 @@ fn terminal_startup_state(
                 worker_label: startup.worker_label,
                 subscription_id: startup.subscription_id,
                 connection_state: Some(FeedConnectionState::Discovering),
-                connection_message: Some(match provider {
-                    TerminalProvider::Tastytrade => {
-                        "Connecting to authorized tastytrade markets".into()
-                    }
-                    TerminalProvider::Rithmic => "Connecting to Rithmic public markets".to_string(),
-                    TerminalProvider::Hyperliquid => {
-                        "Connecting to Hyperliquid public markets".to_string()
-                    }
-                }),
+                connection_message: Some(provider_connection_message(provider)),
                 provider,
                 product: Some(startup.product),
             }
+        }
+    }
+}
+
+fn provider_connection_message(provider: TerminalProvider) -> String {
+    let descriptor = provider_presentation(provider);
+    let display_name = descriptor.map_or_else(
+        || terminal_provider_id(provider),
+        |value| value.display_name,
+    );
+    match descriptor.map(|value| value.connection_kind) {
+        Some(ProviderConnectionKind::Credentials) => {
+            format!("Connecting to authorized {display_name} markets")
+        }
+        Some(ProviderConnectionKind::HostedBroker) => {
+            format!("Connecting to {display_name} hosted markets")
+        }
+        Some(ProviderConnectionKind::Public) | None => {
+            format!("Connecting to {display_name} public markets")
         }
     }
 }

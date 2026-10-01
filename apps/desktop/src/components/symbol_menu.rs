@@ -172,7 +172,10 @@ pub(super) fn instrument_dialog_content(
             |input| instrument_search_header(input, theme, app, state, extent).into_any_element(),
         ))
         .when(
-            state.menu_provider == TerminalProvider::Tastytrade && state.tastytrade_disconnected,
+            super::provider_presentation(state.menu_provider).is_some_and(|descriptor| {
+                descriptor.connection_kind == ProviderConnectionKind::Credentials
+                    && state.tastytrade_disconnected
+            }),
             |menu| {
                 let accounts = app.clone();
                 menu.child(
