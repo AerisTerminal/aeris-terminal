@@ -177,6 +177,27 @@ fn percentile(values: &[u128], percentile: usize) -> u128 {
     let index = (values.len() - 1) * percentile / 100;
     values[index]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{IntervalSamples, LIVE_TIMING_SAMPLE_CAPACITY, percentile};
+
+    #[test]
+    fn interval_samples_are_bounded() {
+        let mut samples = IntervalSamples::default();
+        for _ in 0..=LIVE_TIMING_SAMPLE_CAPACITY {
+            samples.record();
+        }
+        assert_eq!(samples.intervals_ms.len(), LIVE_TIMING_SAMPLE_CAPACITY);
+    }
+
+    #[test]
+    fn percentile_uses_nearest_lower_rank() {
+        assert_eq!(percentile(&[10, 20, 30, 40], 50), 20);
+        assert_eq!(percentile(&[10, 20, 30, 40], 99), 30);
+    }
+}
+
 fn report_tape(tape: &MarketTradeTapeSnapshot, trades: &mut usize) {
     if *trades == 0 || tape.trades.len() >= *trades + 1024 {
         *trades = tape.trades.len();
