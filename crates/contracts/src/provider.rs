@@ -29,6 +29,7 @@ pub struct ProviderPresentationDescriptor {
     pub logo_key: &'static str,
     pub catalog_symbol: ProviderCatalogSymbol,
     pub selection_entitlement_id: &'static str,
+    pub catalog_refresh_on_startup: bool,
     pub depth_available: bool,
     pub connection_kind: ProviderConnectionKind,
 }

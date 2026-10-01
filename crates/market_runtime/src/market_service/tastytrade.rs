@@ -37,6 +37,7 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         logo_key: "tastytrade",
         catalog_symbol: aeris_contracts::ProviderCatalogSymbol::DisplaySymbol,
         selection_entitlement_id: "tastytrade-authorized",
+        catalog_refresh_on_startup: true,
         depth_available: false,
         connection_kind: aeris_contracts::ProviderConnectionKind::HostedBroker,
     };

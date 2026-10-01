@@ -67,10 +67,7 @@ pub(super) fn time_sales_panel(
             [symbol],
             theme,
         ))
-        .children(
-            tape.filter(|snapshot| snapshot.provider_id == "tastytrade")
-                .map(|snapshot| tick_history_header(snapshot, theme)),
-        )
+        .children(tape.map(|snapshot| tick_history_header(snapshot, theme)))
         .child(
             div()
                 .p_1()

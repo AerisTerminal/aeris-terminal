@@ -65,6 +65,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             logo_key: "fourth-provider",
             catalog_symbol: aeris_contracts::ProviderCatalogSymbol::ProviderSymbol,
             selection_entitlement_id: "fourth-provider",
+            catalog_refresh_on_startup: false,
             depth_available: false,
             connection_kind: aeris_contracts::ProviderConnectionKind::Public,
         };

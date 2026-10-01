@@ -69,10 +69,11 @@ pub(super) fn initialize_endpoint(
 
     // Restored provider metadata (price increment, session) is never trusted:
     // the live catalog re-resolves it before any market data reaches the chart.
-    if matches!(
-        record.product.provider.as_str(),
-        "hyperliquid" | "tastytrade"
-    ) {
+    let refresh_catalog = aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .find(|descriptor| descriptor.id == record.product.provider)
+        .is_some_and(|descriptor| descriptor.catalog_refresh_on_startup);
+    if refresh_catalog {
         let requested = record.product.clone();
         record.startup_resolution = Some(StartupResolution::Searching(requested.clone()));
         let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
