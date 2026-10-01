@@ -6,6 +6,7 @@ const UI_ASSET_PREFIX: &str = "aeris/icons/ui/";
 const SERIES_ASSET_PREFIX: &str = "aeris/icons/series/";
 const BRAND_ASSET_PREFIX: &str = "aeris/brand/";
 const EXCHANGE_ASSET_PREFIX: &str = "aeris/exchange_logo/";
+const PROVIDER_ASSET_PREFIX: &str = "aeris/provider_logo/";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiIcon {
@@ -268,6 +269,33 @@ impl ExchangeLogo {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderLogo {
+    TastytradeLight,
+    TastytradeDark,
+}
+
+impl ProviderLogo {
+    pub const ALL: [Self; 2] = [Self::TastytradeLight, Self::TastytradeDark];
+
+    #[must_use]
+    pub fn for_theme(mode: aeris_design_system::ThemeMode) -> Self {
+        match mode {
+            aeris_design_system::ThemeMode::Light => Self::TastytradeDark,
+            aeris_design_system::ThemeMode::Dark => Self::TastytradeLight,
+        }
+    }
+
+    #[must_use]
+    pub fn path(self) -> SharedString {
+        let name = match self {
+            Self::TastytradeLight => "tastytrades_light.png",
+            Self::TastytradeDark => "tastytrades_dark.png",
+        };
+        format!("{PROVIDER_ASSET_PREFIX}{name}").into()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AerisAssets;
 
@@ -278,6 +306,7 @@ impl AssetSource for AerisAssets {
             .or_else(|| series_asset(path))
             .or_else(|| brand_asset(path))
             .or_else(|| exchange_asset(path))
+            .or_else(|| provider_asset(path))
             .map(Cow::Borrowed))
     }
 
@@ -289,6 +318,7 @@ impl AssetSource for AerisAssets {
             .chain(SeriesIcon::ALL.into_iter().map(SeriesIcon::path))
             .chain(BrandAsset::ALL.into_iter().map(BrandAsset::path))
             .chain(ExchangeLogo::ALL.into_iter().map(ExchangeLogo::path))
+            .chain(ProviderLogo::ALL.into_iter().map(ProviderLogo::path))
             .filter(|asset| path.is_empty() || asset.starts_with(path))
             .collect())
     }
@@ -391,6 +421,18 @@ fn exchange_asset(path: &str) -> Option<&'static [u8]> {
     })
 }
 
+fn provider_asset(path: &str) -> Option<&'static [u8]> {
+    Some(match path.strip_prefix(PROVIDER_ASSET_PREFIX)? {
+        "tastytrades_light.png" => {
+            include_bytes!("../assets/exchange_assets/provider_logo/tastytrades_light.png")
+        }
+        "tastytrades_dark.png" => {
+            include_bytes!("../assets/exchange_assets/provider_logo/tastytrades_dark.png")
+        }
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +523,7 @@ mod tests {
                 + SeriesIcon::ALL.len()
                 + BrandAsset::ALL.len()
                 + ExchangeLogo::ALL.len()
+                + ProviderLogo::ALL.len()
         );
         assert_eq!(
             assets
@@ -514,6 +557,18 @@ mod tests {
             assert!(svg.contains("viewBox=\"0 0 24 24\""));
             assert!(svg.contains("currentColor"));
             assert!(!svg.contains('#'));
+        }
+    }
+
+    #[test]
+    fn provider_wordmarks_are_embedded_as_png_assets() {
+        let assets = AerisAssets;
+        for logo in ProviderLogo::ALL {
+            let bytes = assets
+                .load(logo.path().as_ref())
+                .unwrap()
+                .expect("provider wordmark");
+            assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{}", logo.path());
         }
     }
 

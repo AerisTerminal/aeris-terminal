@@ -26,6 +26,7 @@ pub(super) fn accounts_panel_content(
         .p_3()
         .child(section_label("Data connections", theme))
         .child(tastytrade_card(connection, theme))
+        .child(tastytrade_attribution(theme))
         .child(public_feed_card(theme))
         .child(
             div()
@@ -42,6 +43,22 @@ pub(super) fn accounts_panel_content(
                     "tastytrade provides market data only. Orders are placed on Aeris practice \
                      accounts with simulated funds.",
                 ),
+        )
+}
+
+fn tastytrade_attribution(theme: &AerisTheme) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_xs()
+        .text_color(gpui_color(theme.colors.text_muted))
+        .child("Market data provided by")
+        .child(
+            img(assets::ProviderLogo::for_theme(theme.mode).path())
+                .w(px(112.0))
+                .h(px(20.0))
+                .object_fit(ObjectFit::Contain),
         )
 }
 

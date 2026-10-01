@@ -195,8 +195,9 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   streaming state mark the book unavailable while Rithmic and Hyperliquid retain live depth.
 - [x] Durable local state keeps loading existing Rithmic, Hyperliquid and tastytrade selections;
   sanitizer regression coverage exercises all three provider identities and entitlement routes.
-- [ ] tastytrade logo and attribution ("Market data provided by tastytrade") per tastytrade's
-  brand guidelines, once the assets are received.
+- [x] tastytrade logo and attribution ("Market data provided by tastytrade") per tastytrade's
+  brand guidelines, using the supplied light/dark wordmarks embedded in the native asset registry
+  and shown in the Accounts panel.
 - [x] Gates and commit.
 
 Maintainer-only: visual check of the symbol menu, depth-unavailable state and attribution.
