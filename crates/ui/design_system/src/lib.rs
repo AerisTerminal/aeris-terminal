@@ -562,6 +562,13 @@ mod tests {
             token_source(&light_tokens, "ring"),
             "color-mix(in srgb, #c2c2c2 50%, transparent)"
         );
+        assert_eq!(
+            token_source(&light_tokens, "ring-primary"),
+            "var(--primary)"
+        );
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            assert_eq!(theme.colors.ring_primary, theme.colors.primary);
+        }
     }
 
     #[test]

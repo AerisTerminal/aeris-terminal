@@ -88,6 +88,8 @@ macro_rules! platform_color_registry {
             /// Order-book ask price text; passes 4.5:1 on `book_ask_fill`.
             book_ask_text => "book-ask-text",
             ring => "ring",
+            /// Brand focus ring; always the `primary` color.
+            ring_primary => "ring-primary",
             /// Chart candles and volume only. Aeris Charts remains authoritative for chart rendering.
             bullish => "bullish",
             /// Chart candles and volume only. Aeris Charts remains authoritative for chart rendering.
