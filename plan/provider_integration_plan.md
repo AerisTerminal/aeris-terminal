@@ -235,11 +235,16 @@ Maintainer-only: visual check that inputs, buttons and switches behave identical
 
 ## Phase 6 — `naming_check` review
 
-- [ ] Keep every ownership, dependency-direction, boundedness and security rule.
-- [ ] Replace brittle function-name/string-presence assertions with equal-or-stricter structural or
-  behavioral checks.
-- [ ] List removal candidates (rules whose original reason appears gone) with evidence; delete nothing.
-- [ ] Commit.
+- [x] Keep every ownership, dependency-direction, boundedness and security rule; the naming gate
+  passes 57 tests after the module-pruning review.
+- [x] Replace brittle function-name/string-presence assertions with equal-or-stricter structural or
+  behavioral checks for the provider-runtime ownership test; remaining source checks protect active
+  lifecycle boundaries and current security contracts rather than removed names.
+- [x] List removal candidates (rules whose original reason appears gone) with evidence; delete nothing.
+  - [x] No rule met the removal threshold: provider ownership, bounded queues, credential scope,
+    process topology, and release lifecycle checks all still have live code paths and regression
+    evidence.
+- [x] Commit.
 
 ---
 

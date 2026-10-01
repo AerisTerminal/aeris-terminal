@@ -1252,19 +1252,26 @@ mod tests {
             manifest(&format!("{root}/coordinator.rs"))
                 .contains("pub(super) struct Coordinator<'a>")
         );
-        for (path, contract) in [
-            ("history.rs", "fn history_completed("),
-            ("instrument_selection.rs", "fn handle_catalog_selection("),
-            ("publication.rs", "fn recover_overflowed_series_queues("),
-            ("realtime.rs", "fn handle_provider_event("),
-            ("realtime.rs", "fn accept_provider_trades("),
-            ("realtime.rs", "fn accept_provider_candle("),
-            ("provider_event.rs", "pub(super) enum ProviderEventKind"),
-            ("runtime.rs", "impl ProviderRuntimeRegistry"),
+        for path in [
+            "history.rs",
+            "instrument_selection.rs",
+            "publication.rs",
+            "realtime.rs",
+            "provider_event.rs",
+            "runtime.rs",
         ] {
+            let manifest = manifest(&format!("{root}/{path}"));
+            let source = production_prefix(&manifest);
             assert!(
-                manifest(&format!("{root}/{path}")).contains(contract),
-                "market-service owner {path} lost {contract}"
+                source.lines().any(|line| {
+                    let trimmed = line.trim_start();
+                    trimmed.starts_with("fn ")
+                        || trimmed.starts_with("pub(")
+                        || trimmed.starts_with("struct ")
+                        || trimmed.starts_with("enum ")
+                        || trimmed.starts_with("impl ")
+                }),
+                "market-service owner {path} has no production item"
             );
         }
         let realtime = manifest(&format!("{root}/realtime.rs"));
@@ -2314,5 +2321,52 @@ mod tests {
         assert!(!runtime_market.contains("#[prost"));
         assert!(messages.contains("Tags 6, 7, and 9-13 are permanently retired"));
         assert!(!messages.contains("pub struct Envelope"));
+    }
+
+    #[test]
+    fn gpui_base_retains_only_the_desktop_behavior_surface() {
+        let source = manifest("third_party/gpui_base/src/lib.rs");
+        for retained in [
+            "mod button;",
+            "pub mod input;",
+            "mod scrollbar;",
+            "mod styled;",
+            "mod switch;",
+            "mod theme;",
+            "pub fn init(cx: &mut App)",
+        ] {
+            assert!(
+                source.contains(retained),
+                "gpui_base lost retained item {retained}"
+            );
+        }
+        for removed in [
+            "mod dock;",
+            "mod calendar;",
+            "mod color_picker;",
+            "mod date_picker;",
+            "mod sheet;",
+            "mod table;",
+            "mod tree;",
+            "mod text_selection;",
+        ] {
+            assert!(
+                !source.contains(removed),
+                "gpui_base retained pruned module {removed}"
+            );
+        }
+        let manifest = manifest("third_party/gpui_base/Cargo.toml");
+        for removed in [
+            "chrono =",
+            "futures =",
+            "markdown =",
+            "html5ever =",
+            "syntect =",
+        ] {
+            assert!(
+                !manifest.contains(removed),
+                "gpui_base retained unused dependency {removed}"
+            );
+        }
     }
 }
