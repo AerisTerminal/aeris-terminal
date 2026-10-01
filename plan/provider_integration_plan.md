@@ -198,7 +198,8 @@ Maintainer-only: visual check of the symbol menu, depth-unavailable state and at
 
 ## Phase 4 — Split large files (mechanical, no logic changes)
 
-- [ ] `crates/market_runtime/src/study.rs` (7.7k lines)
+- [x] `crates/market_runtime/src/study.rs` (7.7k lines) — moved its test module to
+  `crates/market_runtime/src/study/tests.rs`; production code remains in the public module.
 - [ ] `apps/desktop/src/desktop/workspace_surface.rs` (6k)
 - [ ] `crates/account_runtime/src/account_service/mod.rs` (5.7k)
 - [ ] `apps/desktop/src/desktop.rs` (5k)
