@@ -12,16 +12,16 @@ pub(super) fn provider_exchange_mark(
     well: bool,
     colors: &aeris_design_system::ThemeColors,
 ) -> AnyElement {
-    match provider {
-        TerminalProvider::Tastytrade => header_icon(HugeIcon::Chart)
-            .with_size(size)
-            .into_any_element(),
-        TerminalProvider::Rithmic => {
+    match super::provider_presentation(provider).map(|descriptor| descriptor.logo_key) {
+        Some("rithmic") => {
             exchange_mark(assets::ExchangeLogo::Rithmic, size, well, colors).into_any_element()
         }
-        TerminalProvider::Hyperliquid => {
+        Some("hyperliquid") => {
             exchange_mark(assets::ExchangeLogo::Hyperliquid, size, well, colors).into_any_element()
         }
+        _ => header_icon(HugeIcon::Chart)
+            .with_size(size)
+            .into_any_element(),
     }
 }
 
@@ -62,11 +62,7 @@ pub(super) fn instrument_selector(
         "instrument_selector",
         format!(
             "Search or select a {} market",
-            match state.provider {
-                TerminalProvider::Rithmic => "Rithmic",
-                TerminalProvider::Hyperliquid => "Hyperliquid",
-                TerminalProvider::Tastytrade => "tastytrade",
-            }
+            terminal_provider_display(state.provider)
         ),
         button_activation_at(
             trigger.loading(state.availability.selection_pending),
@@ -137,30 +133,30 @@ pub(super) fn instrument_dialog_content(
                 }),
         );
     }
-    let provider_buttons = [
-        TerminalProvider::Tastytrade,
-        TerminalProvider::Hyperliquid,
-        TerminalProvider::Rithmic,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, provider)| {
-        let app = app.clone();
-        Button::new(("symbol_provider", index))
-            .label(terminal_provider_display(provider))
-            .theme(theme)
-            .text_color(gpui_color(if provider == state.menu_provider {
-                colors.text_primary
-            } else {
-                colors.text_muted
-            }))
-            .disabled(state.availability.selection_pending)
-            .on_click(move |_, window, cx| {
-                app.update(cx, |surface, surface_cx| {
-                    surface.choose_symbol_provider(provider, window, surface_cx);
-                });
-            })
-    });
+    let provider_buttons = aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .filter_map(|descriptor| {
+            let provider = terminal_provider_from_id(descriptor.id);
+            (terminal_provider_id(provider) == descriptor.id).then_some(provider)
+        })
+        .enumerate()
+        .map(|(index, provider)| {
+            let app = app.clone();
+            Button::new(("symbol_provider", index))
+                .label(terminal_provider_display(provider))
+                .theme(theme)
+                .text_color(gpui_color(if provider == state.menu_provider {
+                    colors.text_primary
+                } else {
+                    colors.text_muted
+                }))
+                .disabled(state.availability.selection_pending)
+                .on_click(move |_, window, cx| {
+                    app.update(cx, |surface, surface_cx| {
+                        surface.choose_symbol_provider(provider, window, surface_cx);
+                    });
+                })
+        });
     chrome_menu_surface(&colors, extent)
         .child(
             div()

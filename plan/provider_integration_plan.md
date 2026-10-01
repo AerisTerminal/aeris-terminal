@@ -176,7 +176,8 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   `desktop/workspace_surface.rs`, `components/{symbol_menu,terminal_view,watchlist_panel,time_sales_panel}.rs`,
   `engine_market_worker*.rs`, `market_worker.rs` and `desktop/local_state.rs` with descriptors.
   - [~] Desktop display names and default listing queries now read from the runtime descriptor registry;
-    search hints now do as well; selection, interval, connection, and component branches remain to
+    search hints and chart interval tables do as well; symbol-menu and watchlist provider marks now
+    consume descriptor metadata. Selection, connection, and remaining component branches remain to
     be migrated.
 - [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.

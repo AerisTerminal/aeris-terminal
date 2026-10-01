@@ -30,8 +30,7 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         id: "tastytrade",
         display_name: "tastytrade",
         chart_interval_labels: &[
-            "100t", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D",
-            "1W", "1M",
+            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "1W", "1M",
         ],
         default_listing: "/ES",
         search_hint: "Search futures or equities",

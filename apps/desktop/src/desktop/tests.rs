@@ -2615,12 +2615,12 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         "/ES"
     );
     assert!(
-        super::provider_intervals(super::TerminalProvider::Rithmic)
+        !super::provider_intervals(super::TerminalProvider::Rithmic)
             .contains(&ChartInterval::Tick100)
     );
     assert!(
-        !super::provider_intervals(super::TerminalProvider::Hyperliquid)
-            .contains(&ChartInterval::Tick100)
+        super::provider_intervals(super::TerminalProvider::Hyperliquid)
+            .contains(&ChartInterval::Day3)
     );
     assert!(
         super::provider_intervals(super::TerminalProvider::Tastytrade)
