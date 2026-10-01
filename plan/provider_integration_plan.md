@@ -208,8 +208,9 @@ Maintainer-only: visual check of the symbol menu, depth-unavailable state and at
   `apps/desktop/src/http_wiring_tests.rs`; the main test module was already external.
 - [x] `crates/trading_runtime/src/lib.rs` (4.6k) — its test module was already external in
   `crates/trading_runtime/src/tests.rs`.
-- [ ] `crates/market_runtime/src/market_service/tastytrade.rs` and anything still oversized in
-  `market_service/{coordinator,realtime}.rs` after Phase 2
+- [x] `crates/market_runtime/src/market_service/tastytrade.rs` and anything still oversized in
+  `market_service/{coordinator,realtime}.rs` after Phase 2 — moved tastytrade tests to
+  `market_service/tastytrade_tests.rs`; coordinator/realtime remain runtime-owned cohesive files.
 - [ ] Update path-based `naming_check` assertions to the new locations with equal strictness.
 - [ ] Gates and commit.
 
