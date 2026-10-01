@@ -2740,13 +2740,8 @@ impl WorkspaceSurface {
     /// the neutral loading surface so a stale range cannot appear to "wake up"
     /// and jump when current coverage lands.
     pub(super) fn showing_superseded_series(&self) -> bool {
-        match self.provider {
-            TerminalProvider::Rithmic
-            | TerminalProvider::Hyperliquid
-            | TerminalProvider::Tastytrade => {
-                switch_requires_chart_cover(self.chart.is_some(), self.rithmic_switch)
-            }
-        }
+        super::provider_presentation(self.provider).is_some()
+            && switch_requires_chart_cover(self.chart.is_some(), self.rithmic_switch)
     }
 
     fn set_chart_state(&mut self, state: ChartState, message: String, cx: &mut Context<Self>) {
@@ -3293,12 +3288,7 @@ impl WorkspaceSurface {
     ) {
         // The pending-switch tracker is provider-neutral: both engine
         // providers resolve selections through the same marker flow.
-        let engine_provider = matches!(
-            self.provider,
-            TerminalProvider::Rithmic
-                | TerminalProvider::Hyperliquid
-                | TerminalProvider::Tastytrade
-        );
+        let engine_provider = super::provider_presentation(self.provider).is_some();
         if self.stale_ready_during_engine_switch(state, engine_provider) {
             return;
         }

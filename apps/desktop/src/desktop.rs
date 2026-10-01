@@ -2522,11 +2522,8 @@ const fn symbol_submit_decision(
     if highlighted < result_count {
         return SymbolSubmitDecision::Select(highlighted);
     }
-    match provider {
-        TerminalProvider::Rithmic
-        | TerminalProvider::Hyperliquid
-        | TerminalProvider::Tastytrade => SymbolSubmitDecision::Search,
-    }
+    let _ = provider;
+    SymbolSubmitDecision::Search
 }
 
 const fn instrument_row_highlighted(
@@ -2994,10 +2991,7 @@ fn instrument_selector_label(selected: Option<(&str, &str)>, selection_pending: 
 }
 
 fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
-    if matches!(
-        app.provider,
-        TerminalProvider::Rithmic | TerminalProvider::Hyperliquid | TerminalProvider::Tastytrade
-    ) {
+    if provider_presentation(app.provider).is_some() {
         return app.product.as_ref().map_or_else(
             || "Select market".to_string(),
             |product| product.display_symbol.clone(),
