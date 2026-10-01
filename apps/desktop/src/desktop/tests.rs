@@ -7,10 +7,10 @@ use super::{
     ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
     InstrumentMenuSelection, MarketSummaryEntry, MenuScale, OVERLAY_EDGE_MARGIN,
     PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
-    ProviderConnectionPresentation, RITHMIC_ENTITLEMENT_ID, RITHMIC_INTERVALS, RithmicSwitchState,
-    SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision,
-    TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider,
-    TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
+    ProviderConnectionPresentation, RITHMIC_INTERVALS, RITHMIC_TEST_ENTITLEMENT_ID,
+    RithmicSwitchState, SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget,
+    SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
+    TerminalProvider, TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
     WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
     WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
     active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
@@ -1366,7 +1366,7 @@ fn persisted_calendar_series_keep_week_and_month_identity() {
     let instrument = InstallProviderInstrument {
         provider: "rithmic".to_string(),
         instrument_id: "instrument:rithmic:btc:usd".to_string(),
-        entitlement_id: RITHMIC_ENTITLEMENT_ID.to_string(),
+        entitlement_id: RITHMIC_TEST_ENTITLEMENT_ID.to_string(),
         ..InstallProviderInstrument::default()
     };
     let week = workspace_series(ChartInterval::Week1, &instrument);

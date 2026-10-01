@@ -1008,6 +1008,58 @@ mod tests {
     }
 
     #[test]
+    fn workspace_sanitizer_preserves_supported_provider_selections() {
+        for (provider, instrument_id, symbol, entitlement) in [
+            (
+                "rithmic",
+                "rithmic-test:CME:MNQ",
+                "MNQ",
+                "rithmic-test:CME:MNQ",
+            ),
+            (
+                "hyperliquid",
+                "hyperliquid:perp:BTC",
+                "BTC",
+                "hyperliquid-public",
+            ),
+            (
+                "tastytrade",
+                "tastytrade:Future:/ESZ6",
+                "/ESZ26:XCME",
+                "tastytrade-authorized",
+            ),
+        ] {
+            let mut workspace = default_workspace();
+            workspace.provider = provider.to_string();
+            workspace.market = symbol.to_string();
+            let pane = workspace.workspace_tabs[0].panes.first_mut().expect("pane");
+            let instrument = pane.instrument.as_mut().expect("instrument");
+            instrument.provider = provider.to_string();
+            instrument.instrument_id = instrument_id.to_string();
+            instrument.provider_symbol = symbol.to_string();
+            instrument.display_symbol = symbol.to_string();
+            instrument.entitlement_id = entitlement.to_string();
+            let series = pane.series.as_mut().expect("series");
+            series.provider = provider.to_string();
+            series.instrument_id = instrument_id.to_string();
+            series.entitlement_id = entitlement.to_string();
+
+            let sanitized = sanitize_workspace(workspace);
+            let pane = sanitized.workspace_tabs[0].panes.first().expect("pane");
+            assert_eq!(sanitized.provider, provider);
+            assert_eq!(
+                pane.instrument.as_ref().expect("instrument").provider,
+                provider
+            );
+            assert_eq!(
+                pane.instrument.as_ref().expect("instrument").entitlement_id,
+                entitlement
+            );
+            assert_eq!(pane.series.as_ref().expect("series").provider, provider);
+        }
+    }
+
+    #[test]
     fn workspace_sanitizer_rebases_process_local_instrument_generations() {
         let mut workspace = default_workspace();
         let pane = &mut workspace.workspace_tabs[0].panes[0];
