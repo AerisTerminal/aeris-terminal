@@ -576,12 +576,10 @@ fn spawn_group(
 
 /// User-visible provider name for worker status and error messages.
 fn provider_display_name(provider: &str) -> &str {
-    match provider {
-        "rithmic" => "Rithmic",
-        "hyperliquid" => "Hyperliquid",
-        "tastytrade" => "tastytrade",
-        _ => provider,
-    }
+    aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .find(|descriptor| descriptor.id == provider)
+        .map_or(provider, |descriptor| descriptor.display_name)
 }
 
 /// Identity every pushed engine event is checked against.
