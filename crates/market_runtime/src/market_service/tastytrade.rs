@@ -1336,6 +1336,7 @@ struct Worker {
     paused: bool,
     trade_batches: BTreeMap<String, (bool, Vec<IndexedTradeMutation>)>,
     candle_batches: BTreeMap<String, (bool, Vec<(MarketBar, u64)>)>,
+    quotes: BTreeMap<String, TopOfBookQuote>,
 }
 impl Worker {
     fn new(ports: WorkerPorts) -> Self {
@@ -1363,6 +1364,7 @@ impl Worker {
             paused: false,
             trade_batches: BTreeMap::new(),
             candle_batches: BTreeMap::new(),
+            quotes: BTreeMap::new(),
         }
     }
     fn epoch(&self) -> u64 {
@@ -1822,6 +1824,7 @@ impl Worker {
                     ask: ask.map(level),
                 };
                 quote.validate().map_err(|e| e.to_string())?;
+                self.quotes.insert(symbol, quote.clone());
                 self.publish(RealtimeEvent::Quote(epoch, quote))?;
             }
             FeedEvent::Trade {
@@ -1832,7 +1835,7 @@ impl Worker {
                 flags,
                 trade,
                 ..
-            } => self.accept_trade(symbol, index, &kind, flags, trade)?,
+            } => self.accept_trade(symbol, index, &kind, flags, trade.as_ref())?,
             FeedEvent::Candle {
                 channel: 3,
                 symbol,
@@ -1851,7 +1854,7 @@ impl Worker {
         index: String,
         kind: &str,
         flags: u32,
-        print: Option<TradePrint>,
+        print: Option<&TradePrint>,
     ) -> Result<(), String> {
         let Some(instrument) = self
             .demand
@@ -1878,7 +1881,7 @@ impl Worker {
                         self.epoch(),
                         self.ordinal,
                         index.clone(),
-                        &print,
+                        print,
                     )
                 })
                 .transpose()?
@@ -1886,6 +1889,11 @@ impl Worker {
         };
         if mutation_kind != IndexedTradeKind::Cancel && trade.is_none() {
             return Ok(());
+        }
+        if let Some(print) = print.as_ref()
+            && trade.is_some()
+        {
+            self.update_quote_from_trade(&symbol, print)?;
         }
         let batch = self.trade_batches.entry(symbol).or_default();
         if flags & SNAPSHOT_BEGIN != 0 {
@@ -1908,6 +1916,32 @@ impl Worker {
             let changes = std::mem::take(&mut batch.1);
             self.publish(RealtimeEvent::Trades(self.epoch(), instrument, changes))?;
         }
+        Ok(())
+    }
+
+    /// Trades carry the freshest top prices, while quote events remain the
+    /// authority for displayed sizes. Keep the quote timestamp unchanged so
+    /// retained sizes cannot be presented as freshly observed at trade time.
+    fn update_quote_from_trade(&mut self, symbol: &str, print: &TradePrint) -> Result<(), String> {
+        let Some(previous) = self.quotes.get(symbol).cloned() else {
+            return Ok(());
+        };
+        let mut quote = previous.clone();
+        if let Some(price) = print.bid_price {
+            quote.bid = quote.bid.map(|level| DepthLevel { price, ..level });
+        }
+        if let Some(price) = print.ask_price {
+            quote.ask = quote.ask.map(|level| DepthLevel { price, ..level });
+        }
+        if quote == previous {
+            return Ok(());
+        }
+        quote.metadata.source_sequence = self.ordinal;
+        if quote.validate().is_err() {
+            return Ok(());
+        }
+        self.quotes.insert(symbol.to_string(), quote.clone());
+        self.publish(RealtimeEvent::Quote(self.epoch(), quote))?;
         Ok(())
     }
     fn accept_candle(
@@ -2004,6 +2038,7 @@ impl Worker {
         self.pending_token = None;
         self.trade_batches.clear();
         self.candle_batches.clear();
+        self.quotes.clear();
         self.cancel_histories(&error);
         self.failures = self.failures.saturating_add(1);
         self.paused = self.failures >= 5;
@@ -2366,6 +2401,8 @@ mod tests {
             time_nanos,
             price,
             quantity: 100_000_000,
+            bid_price: None,
+            ask_price: None,
             aggressor: aeris_market_data::AggressorSide::Unknown,
             spread_leg: false,
         };
@@ -2617,5 +2654,77 @@ mod tests {
             .unwrap();
         assert!(output.try_recv().is_err());
         assert!(worker.socket.is_none());
+    }
+
+    #[test]
+    fn trade_updates_quote_prices_without_refreshing_quote_sizes() {
+        let (_, controls) = mpsc::sync_channel(1);
+        let (events, output) = mpsc::sync_channel(8);
+        let (_, history) = mpsc::sync_channel(1);
+        let (completions, _) = mpsc::sync_channel(1);
+        let (token_requests, _) = mpsc::sync_channel(1);
+        let (_, token_replies) = mpsc::sync_channel(1);
+        let wake = ProviderCoordinatorWake::new(completions.clone(), ["tastytrade"]);
+        let mut worker = Worker::new(WorkerPorts {
+            api: Arc::new(BrokerApi::default()),
+            controls,
+            events,
+            history,
+            completions,
+            generation: Arc::new(AtomicU64::new(1)),
+            stop: Arc::new(AtomicBool::new(false)),
+            wake,
+            token_requests,
+            token_replies,
+        });
+        let instrument = instrument();
+        let symbol = instrument.provider_symbol.clone();
+        worker.demand.instruments.push(instrument.clone());
+        let mut quote_metadata = metadata(&instrument, 1, 1, None).unwrap();
+        quote_metadata.timestamps.provider_unix_nanos = Some(1_790_800_000_000_000_000);
+        worker
+            .accept(FeedEvent::Quote {
+                channel: 1,
+                symbol: symbol.clone(),
+                bid: Some((500_000_000_000, 2_000_000_000)),
+                ask: Some((500_100_000_000, 3_000_000_000)),
+                time_nanos: quote_metadata.timestamps.provider_unix_nanos,
+            })
+            .unwrap();
+        let initial = output.try_recv().unwrap();
+        assert!(matches!(initial, RealtimeEvent::Quote(1, _)));
+
+        worker
+            .accept(FeedEvent::Trade {
+                channel: 5,
+                symbol,
+                flags: 0,
+                index: "trade-1".into(),
+                kind: "NEW".into(),
+                trade: Some(TradePrint {
+                    time_nanos: 1_790_800_001_000_000_000,
+                    price: 500_050_000_000,
+                    quantity: 1_000_000_000,
+                    bid_price: Some(500_025_000_000),
+                    ask_price: Some(500_125_000_000),
+                    aggressor: aeris_market_data::AggressorSide::Buy,
+                    spread_leg: false,
+                }),
+            })
+            .unwrap();
+        let updated = output.try_recv().unwrap();
+        let RealtimeEvent::Quote(_, updated) = updated else {
+            panic!("trade should publish a quote price update");
+        };
+        let bid = updated.bid.unwrap();
+        let ask = updated.ask.unwrap();
+        assert_eq!(bid.price, 500_025_000_000);
+        assert_eq!(ask.price, 500_125_000_000);
+        assert_eq!(bid.quantity, 2_000_000_000);
+        assert_eq!(ask.quantity, 3_000_000_000);
+        assert_eq!(
+            updated.metadata.timestamps.provider_unix_nanos,
+            quote_metadata.timestamps.provider_unix_nanos
+        );
     }
 }

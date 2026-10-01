@@ -56,6 +56,8 @@ const TAPE: &[&str] = &[
     "sequence",
     "price",
     "size",
+    "bidPrice",
+    "askPrice",
     "aggressorSide",
     "spreadLeg",
     "validTick",
@@ -104,6 +106,8 @@ pub struct TradePrint {
     pub time_nanos: i64,
     pub price: i64,
     pub quantity: i64,
+    pub bid_price: Option<i64>,
+    pub ask_price: Option<i64>,
     pub aggressor: AggressorSide,
     pub spread_leg: bool,
 }
@@ -165,7 +169,7 @@ pub struct DxlinkSession {
     last_received: Instant,
     stop: Arc<AtomicBool>,
     authorization_deadline: Option<Instant>,
-    decode_failures: u8,
+    decode_failures_in_window: u8,
     decode_window: Instant,
     subscription_budget: Arc<Mutex<SubscriptionChangeBudget>>,
 }
@@ -190,7 +194,7 @@ impl DxlinkSession {
             last_received: Instant::now(),
             stop: Arc::clone(stop),
             authorization_deadline: None,
-            decode_failures: 0,
+            decode_failures_in_window: 0,
             decode_window: Instant::now(),
             subscription_budget,
         };
@@ -417,14 +421,15 @@ impl DxlinkSession {
                 let Ok(events) = decode_data(&text, header.channel, &channel.fields) else {
                     if self.decode_window.elapsed() >= Duration::from_secs(60) {
                         self.decode_window = Instant::now();
-                        self.decode_failures = 0;
+                        self.decode_failures_in_window = 0;
                     }
-                    self.decode_failures = self.decode_failures.saturating_add(1);
+                    self.decode_failures_in_window =
+                        self.decode_failures_in_window.saturating_add(1);
                     eprintln!(
                         "Aeris DXLink rejected malformed feed data ({}/8)",
-                        self.decode_failures
+                        self.decode_failures_in_window
                     );
-                    if self.decode_failures > 8 {
+                    if self.decode_failures_in_window > 8 {
                         return Err(
                             "DXLink malformed feed data exceeded its per-connection budget".into(),
                         );
@@ -783,6 +788,8 @@ fn decode_trade(channel: u64, symbol: String, row: &Row<'_>) -> Result<FeedEvent
             time_nanos,
             price,
             quantity,
+            bid_price: row.decimal("bidPrice")?.filter(|price| *price > 0),
+            ask_price: row.decimal("askPrice")?.filter(|price| *price > 0),
             aggressor,
             spread_leg: row.boolean("spreadLeg")?,
         })
@@ -985,7 +992,7 @@ mod tests {
             "TimeAndSale".into(),
             TAPE.iter().map(|s| (*s).into()).collect(),
         )]);
-        let raw = r#"{"type":"FEED_DATA","channel":3,"data":["TimeAndSale",["TimeAndSale","/ESZ26:XCME",0,9007199254740993,1790800000000,123456,17,5000.25000000,2,"SELL",false,true,"NEW"]]}"#;
+        let raw = r#"{"type":"FEED_DATA","channel":3,"data":["TimeAndSale",["TimeAndSale","/ESZ26:XCME",0,9007199254740993,1790800000000,123456,17,5000.25000000,2,5000.00000000,5000.50000000,"SELL",false,true,"NEW"]]}"#;
         let events = decode_data(raw, 3, &fields).expect("wire");
         let FeedEvent::Trade {
             index,
@@ -999,6 +1006,8 @@ mod tests {
         assert_eq!(trade.price, 500_025_000_000);
         assert_eq!(trade.time_nanos, 1_790_800_000_000_123_456);
         assert_eq!(trade.aggressor, AggressorSide::Sell);
+        assert_eq!(trade.bid_price, Some(500_000_000_000));
+        assert_eq!(trade.ask_price, Some(500_050_000_000));
         assert!(decode_data(&raw.replace("5000.25000000", "5000.250000001"), 3, &fields).is_err());
     }
 

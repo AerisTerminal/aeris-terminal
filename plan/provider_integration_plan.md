@@ -98,16 +98,16 @@ Commits: native `d5e20e7`, `7071595`; website `de3dfb1` (deployed and pushed).
   - [x] Session gaps stay allowed; no double counting across the history/live handoff boundary.
   - [x] Reuse the trade-built handoff (the Rithmic model) through the Phase 2 neutral live-bar
     model; do not add another copy.
-- [ ] Top of book from trades: update best bid/ask prices from each `TimeAndSale`'s
+- [x] Top of book from trades: update best bid/ask prices from each `TimeAndSale`'s
   `bidPrice`/`askPrice`; take sizes from the latest `Quote`; never present a stale size as fresh.
-- [ ] Equity search: runtime debounce, newest-wins cancellation of superseded searches, and a
+- [x] Equity search: runtime debounce, newest-wins cancellation of superseded searches, and a
   bounded cache of recent results.
-- [ ] Decode-failure budget: either make it truly per connection or rename it; it currently resets
+- [x] Decode-failure budget: either make it truly per connection or rename it; it currently resets
   on a 60 s rolling window but is labelled per connection.
 - [ ] Release-build timings for: menu open → futures results, equity search, cold and warm
   selection → first candles, timeframe switch, reconnect after idle stop, chart close lag behind
   the tape, quote price update rate (p50/p90/p99 and measurement method), against the references above.
-- [ ] Tests: deterministic coverage for the trade-driven candle, reconciliation, top-of-book from
+- [x] Tests: deterministic coverage for the trade-driven candle, reconciliation, top-of-book from
   trades, search cancellation and caching (tastytrade currently has 25 tests).
 
 ### Maintainer-only
