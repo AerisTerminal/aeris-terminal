@@ -3394,12 +3394,8 @@ impl WorkspaceSurface {
     /// in `apply_publication` when the replacement's covering snapshot arrives.
     /// Dropping it here is what produced the blank surface on every switch.
     fn apply_rithmic_switch_marker(&mut self, sequence: u64, cx: &mut Context<Self>) {
-        if !matches!(
-            self.provider,
-            TerminalProvider::Rithmic
-                | TerminalProvider::Hyperliquid
-                | TerminalProvider::Tastytrade
-        ) || !self.rithmic_switch.is_pending()
+        if super::provider_presentation(self.provider).is_none()
+            || !self.rithmic_switch.is_pending()
             || self.rithmic_pending_sequence != Some(sequence)
         {
             return;
@@ -3424,7 +3420,9 @@ impl WorkspaceSurface {
             // the old book back to loading instead of showing BTC levels
             // under an ETH selection. Interval-only switches keep the book.
             self.order_book.update(cx, |order_book, order_book_cx| {
-                if provider == TerminalProvider::Tastytrade {
+                if super::provider_presentation(provider)
+                    .is_some_and(|descriptor| !descriptor.depth_available)
+                {
                     order_book.mark_unavailable(order_book_cx);
                 } else {
                     order_book.clear(order_book_cx);
@@ -3499,12 +3497,8 @@ impl WorkspaceSurface {
         for message in messages {
             self.apply_market_worker_message(message, cx);
         }
-        if matches!(
-            self.provider,
-            TerminalProvider::Rithmic
-                | TerminalProvider::Hyperliquid
-                | TerminalProvider::Tastytrade
-        ) && disconnected
+        if super::provider_presentation(self.provider).is_some()
+            && disconnected
             && !matches!(self.connection_state, Some(FeedConnectionState::Stopped))
         {
             let display = terminal_provider_display(self.provider);
