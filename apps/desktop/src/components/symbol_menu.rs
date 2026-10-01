@@ -97,6 +97,8 @@ pub(super) struct InstrumentSelectorState {
     pub(super) menu: InstrumentSelectorMenu,
     pub(super) scroll: ScrollHandle,
     pub(super) target: SymbolSelectionTarget,
+    /// The runtime reported no stored tastytrade connection; the menu points to Accounts.
+    pub(super) tastytrade_disconnected: bool,
 }
 
 pub(super) struct InstrumentSelectorAvailability {
@@ -174,15 +176,22 @@ pub(super) fn instrument_dialog_content(
             |input| instrument_search_header(input, theme, app, state, extent).into_any_element(),
         ))
         .when(
-            state.menu_provider == TerminalProvider::Tastytrade,
+            state.menu_provider == TerminalProvider::Tastytrade && state.tastytrade_disconnected,
             |menu| {
+                let accounts = app.clone();
                 menu.child(
                     div().px_3().py_1().child(
                         Button::new("symbol_menu_connect_tastytrade")
-                            .label("Connect tastytrade")
+                            .label("Connect tastytrade in Accounts")
                             .theme(theme)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ConnectTastytrade), cx);
+                            .on_click(move |_, window, cx| {
+                                accounts.update(cx, |surface, surface_cx| {
+                                    surface.open_chrome_overlay(
+                                        ChromeOverlay::Accounts,
+                                        window,
+                                        surface_cx,
+                                    );
+                                });
                             }),
                     ),
                 )

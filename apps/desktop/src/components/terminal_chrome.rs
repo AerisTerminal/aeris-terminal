@@ -477,6 +477,8 @@ pub(super) fn header_controls(
                 },
                 scroll: state.instrument_scroll,
                 target: SymbolSelectionTarget::Chart,
+                // The header trigger never renders the menu body that uses this.
+                tastytrade_disconnected: false,
             },
             &state.theme,
         ))
@@ -517,6 +519,7 @@ pub(super) fn header_controls(
         .children(side_panel_toggles)
         .child(context_toggle)
         .child(link_toggle);
+    let accounts = accounts_selector(app.clone(), state.account_label, &state.theme);
     let time_zone = time_zone_selector(
         app.clone(),
         state.time_zone_clock,
@@ -532,6 +535,7 @@ pub(super) fn header_controls(
         .flex()
         .items_center()
         .child(market_controls)
+        .child(accounts)
         .child(time_zone)
 }
 
@@ -1200,6 +1204,60 @@ pub(super) fn time_zone_selector(
     chrome_tooltip(
         "time_zone_selector",
         format!("Chart time zone · {time_zone_id}"),
+        trigger,
+        theme,
+    )
+}
+
+/// Opens the Accounts panel. The label names the practice account this workspace trades on,
+/// so the active account is always visible in the header.
+fn accounts_selector(
+    app: Entity<WorkspaceSurface>,
+    account_label: Option<String>,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    let button = Button::new("accounts_selector")
+        .leading(header_icon(HugeIcon::User).with_size(px(16.0)))
+        .label(account_label.unwrap_or_else(|| "Accounts".to_string()))
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .cursor_pointer();
+    let open_app = app.clone();
+    let bounds_app = app;
+    let button = button_activation_at(
+        chrome_button_style(button, theme, false, true),
+        true,
+        move |trigger_position, window, cx| {
+            open_app.update(cx, |app, app_cx| {
+                app.open_chrome_overlay_at(
+                    ChromeOverlay::Accounts,
+                    trigger_position,
+                    window,
+                    app_cx,
+                );
+            });
+        },
+    );
+    let trigger = div().relative().flex_none().child(button).child(
+        canvas(
+            move |bounds, _, cx| {
+                bounds_app.update(cx, |app, app_cx| {
+                    if app.menu_state.accounts_trigger_bounds == Some(bounds) {
+                        return;
+                    }
+                    app.menu_state.accounts_trigger_bounds = Some(bounds);
+                    if app.chrome_overlay == Some(ChromeOverlay::Accounts) {
+                        app_cx.notify();
+                    }
+                });
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .inset_0(),
+    );
+    chrome_tooltip(
+        "accounts_selector",
+        "Accounts and connections",
         trigger,
         theme,
     )

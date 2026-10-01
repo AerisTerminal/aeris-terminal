@@ -368,11 +368,6 @@ pub(super) fn workspace_market_area(
                     feedback: surface.trading_pnl.feedback.as_ref(),
                     market_error: surface.trading_pnl.market_error.as_deref(),
                     order_entry: &surface.trading_pnl.order_entry,
-                    account_creator: surface.trading_pnl.account_creator.as_ref(),
-                    account_delete_confirmation: surface
-                        .trading_pnl
-                        .account_delete_confirmation
-                        .as_ref(),
                     theme,
                 },
             },

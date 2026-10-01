@@ -1,6 +1,11 @@
 //! Compact practice-trading controls owned by the order-book panel.
 
-use super::*;
+use super::{
+    AerisTheme, App, ChromeOverlay, Div, Entity, FluentBuilder, HugeIcon, InteractiveElement,
+    IntoElement, ParentElement, RadiusToken, Role, SharedString, StatefulInteractiveElement,
+    Styled, TypographyRole, WorkspaceSurface, div, gpui_color, header_icon, platform_font_weight,
+    px,
+};
 use gpui::Stateful;
 
 #[derive(Clone, Copy)]
@@ -14,8 +19,6 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) feedback: Option<&'a aeris_desktop::trading::TradingCommandFeedback>,
     pub(super) market_error: Option<&'a str>,
     pub(super) order_entry: &'a super::TradingOrderEntryState,
-    pub(super) account_creator: Option<&'a super::PracticeAccountDialogState>,
-    pub(super) account_delete_confirmation: Option<&'a aeris_trading::TradingAccountId>,
     pub(super) theme: &'a AerisTheme,
 }
 
@@ -94,14 +97,6 @@ pub(super) fn trading_order_controls(
         .child(position_actions(state, ready && state.has_open_position))
         .child(global_actions(state))
         .children(status_rows(state.feedback, state.market_error, state.theme))
-        .children(
-            state
-                .account_creator
-                .map(|creator| practice_account_dialog(state.app, creator, state.theme)),
-        )
-        .children(state.account_delete_confirmation.map(|account_id| {
-            practice_account_delete_dialog(state.app, account_id, state.accounts, state.theme)
-        }))
 }
 
 fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use<> {
@@ -111,232 +106,36 @@ fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement +
         .selected_account_id
         .as_ref()
         .and_then(|id| state.accounts.iter().find(|account| &account.id == id));
-    let label = selected.map_or("Add practice account", |account| {
+    let label = selected.map_or("Choose a practice account", |account| {
         account.display_name.as_str()
     });
-    let toggle = state.app.clone();
-    let mut selector = div().relative().child(
-        div()
-            .id("trading_account_selector")
-            .h(px(CONTROL_HEIGHT))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_between()
-            .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-            .border(px(state.theme.dimensions.border_width))
-            .border_color(gpui_color(colors.border))
-            .bg(gpui_color(colors.surface))
-            .text_color(gpui_color(colors.text_primary))
-            .cursor_pointer()
-            .role(Role::Button)
-            .aria_label("Select or add a practice account")
-            .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-            .active(move |button| button.bg(gpui_color(colors.active_bg)))
-            .on_click(move |_, window, cx| {
-                toggle.update(cx, |surface, surface_cx| {
-                    if surface.trading_pnl.accounts.is_empty() {
-                        open_practice_account_dialog(surface, window, surface_cx);
-                    } else {
-                        surface.trading_pnl.order_entry.account_menu_open =
-                            !surface.trading_pnl.order_entry.account_menu_open;
-                        surface_cx.notify();
-                    }
-                });
-            })
-            .child(div().min_w_0().truncate().child(label.to_string()))
-            .child(header_icon(HugeIcon::ChevronDown)),
-    );
-    if state.order_entry.account_menu_open {
-        selector = selector.child(gpui::deferred(account_selector_menu(state)));
-    }
-    selector
-}
-
-fn account_selector_menu(state: &TradingOrderControlsState<'_>) -> Stateful<Div> {
-    let colors = state.theme.colors;
-    let mut menu = div()
-        .id("trading_account_menu")
-        .absolute()
-        .top(px(CONTROL_HEIGHT + 2.0))
-        .left_0()
-        .right_0()
-        .max_h(px(240.0))
-        .overflow_y_scroll()
-        .occlude()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(px(state.theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface))
-        .shadow_md()
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
-    for (index, account) in state.accounts.iter().enumerate() {
-        let select = state.app.clone();
-        let delete = state.app.clone();
-        let account_id = account.id.clone();
-        let delete_account_id = account.id.clone();
-        let delete_button = div()
-            .id(("trading_account_delete", index))
-            .size(px(24.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-            .border(px(state.theme.dimensions.border_width))
-            .border_color(gpui_color(colors.danger_ring))
-            .bg(gpui_color(colors.surface))
-            .text_color(gpui_color(colors.danger))
-            .cursor_pointer()
-            .role(Role::Button)
-            .aria_label(format!("Delete {}", account.display_name))
-            .hover(move |button| {
-                button
-                    .border_color(gpui_color(colors.danger))
-                    .bg(gpui_color(colors.danger))
-                    .text_color(gpui_color(colors.danger_foreground))
-            })
-            .active(move |button| {
-                button
-                    .border_color(gpui_color(colors.danger_active))
-                    .bg(gpui_color(colors.danger_active))
-                    .text_color(gpui_color(colors.danger_foreground))
-            })
-            .child(header_icon(HugeIcon::Trash).with_size(px(14.0)))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                delete.update(cx, |surface, surface_cx| {
-                    surface.trading_pnl.order_entry.account_menu_open = false;
-                    surface.trading_pnl.account_delete_confirmation =
-                        Some(delete_account_id.clone());
-                    surface_cx.notify();
-                });
-                cx.stop_propagation();
-            });
-        menu = menu.child(
-            MenuRow::compact(
-                ("trading_account_option", index),
-                account.display_name.clone(),
-                state.theme,
-            )
-            .highlighted(state.order_entry.selected_account_id.as_ref() == Some(&account.id))
-            .trailing(delete_button)
-            .on_click(move |_, _, cx| {
-                select.update(cx, |surface, surface_cx| {
-                    surface.trading_pnl.order_entry.selected_account_id = Some(account_id.clone());
-                    surface.trading_pnl.order_entry.account_menu_open = false;
-                    surface.trading_pnl.current = None;
-                    surface_cx.notify();
-                });
-            }),
-        );
-    }
-    let create = state.app.clone();
-    menu.child(
-        MenuRow::compact("trading_add_account", "Add practice account…", state.theme)
-            .leading(header_icon(HugeIcon::Add).with_size(px(16.0)))
-            .on_click(move |_, window, cx| {
-                create.update(cx, |surface, surface_cx| {
-                    surface.trading_pnl.order_entry.account_menu_open = false;
-                    open_practice_account_dialog(surface, window, surface_cx);
-                });
-            }),
-    )
-}
-
-fn practice_account_delete_dialog(
-    app: &Entity<WorkspaceSurface>,
-    account_id: &aeris_trading::TradingAccountId,
-    accounts: &[aeris_trading::TradingAccount],
-    theme: &AerisTheme,
-) -> AnyElement {
-    let display_name = accounts
-        .iter()
-        .find(|account| &account.id == account_id)
-        .map_or(account_id.as_str(), |account| account.display_name.as_str())
-        .to_string();
-    let account_key = account_id.as_str().to_string();
-    let dismiss_scrim = app.clone();
-    let cancel = app.clone();
-    let confirm = app.clone();
+    let open = state.app.clone();
+    // Accounts are created, chosen and deleted in the header Accounts panel; the ticket
+    // only shows which one it trades on.
     div()
-        .id("practice_account_delete_scrim")
-        .absolute()
-        .inset_0()
-        .occlude()
+        .id("trading_account_selector")
+        .h(px(CONTROL_HEIGHT))
+        .px_3()
         .flex()
         .items_center()
-        .justify_center()
-        .p_2()
-        .bg(gpui_color(theme.colors.surface_overlay))
-        .on_any_mouse_down(move |_, _, cx| {
-            dismiss_scrim.update(cx, |surface, surface_cx| {
-                surface.trading_pnl.account_delete_confirmation = None;
-                surface_cx.notify();
+        .justify_between()
+        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
+        .border(px(state.theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(colors.surface))
+        .text_color(gpui_color(colors.text_primary))
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label("Open accounts")
+        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
+        .active(move |button| button.bg(gpui_color(colors.active_bg)))
+        .on_click(move |_, window, cx| {
+            open.update(cx, |surface, surface_cx| {
+                surface.open_chrome_overlay(ChromeOverlay::Accounts, window, surface_cx);
             });
-            cx.stop_propagation();
         })
-        .child(
-            div()
-                .id("practice_account_delete_dialog")
-                .w_full()
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border(px(theme.dimensions.border_width))
-                .border_color(gpui_color(theme.colors.border_secondary))
-                .bg(gpui_color(theme.colors.surface))
-                .shadow_lg()
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .child("Delete practice account?"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(theme.colors.text_secondary))
-                        .child(format!(
-                            "Delete {display_name} permanently, including its open positions, working orders, fills, P/L history, risk state, and local copier references. This cannot be undone."
-                        )),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(dialog_button(
-                            "practice_account_delete_cancel",
-                            "Cancel",
-                            theme,
-                            move |cx| {
-                                cancel.update(cx, |surface, surface_cx| {
-                                    surface.trading_pnl.account_delete_confirmation = None;
-                                    surface_cx.notify();
-                                });
-                            },
-                        ))
-                        .child(
-                            Button::new("practice_account_delete_confirm")
-                                .variant(theme, ButtonVariant::Destructive)
-                                .with_size(px(CONTROL_HEIGHT))
-                                .label("Delete")
-                                .on_click(move |_, _, cx| {
-                                confirm.update(cx, |surface, surface_cx| {
-                                    surface.trading_pnl.account_delete_confirmation = None;
-                                    surface_cx.notify();
-                                });
-                                aeris_desktop::trading::delete_practice_account(
-                                    account_key.clone(),
-                                    cx,
-                                );
-                                }),
-                        ),
-                ),
-        )
-        .into_any_element()
+        .child(div().min_w_0().truncate().child(label.to_string()))
+        .child(header_icon(HugeIcon::ChevronDown))
 }
 
 fn account_summary(
@@ -346,11 +145,11 @@ fn account_summary(
     let pnl = pnl?;
     let realized_and_open = pnl.realized.checked_add(pnl.unrealized).ok().map_or_else(
         || "P/L unavailable".to_string(),
-        |value| format_money(pnl, value),
+        |value| format_money(&pnl.currency, value),
     );
     let equity = pnl.equity.map_or_else(
         || "Equity unavailable".to_string(),
-        |value| format!("Equity {}", format_money(pnl, value)),
+        |value| format!("Equity {}", format_money(&pnl.currency, value)),
     );
     let pnl_color = if pnl.realized.units().saturating_add(pnl.unrealized.units()) >= 0 {
         theme.colors.text_positive
@@ -378,15 +177,14 @@ fn account_summary(
     )
 }
 
-fn format_money(pnl: &aeris_trading::AccountPnl, value: aeris_trading::FixedPoint) -> String {
+pub(super) fn format_money(currency: &str, value: aeris_trading::FixedPoint) -> String {
     let scale = usize::from(value.scale());
     let units = value.units();
     let sign = if units < 0 { "-" } else { "" };
     let magnitude = units.unsigned_abs();
     let base = 10_u64.saturating_pow(u32::try_from(scale).unwrap_or(18));
     format!(
-        "{sign}{} {}.{:0scale$}",
-        pnl.currency,
+        "{sign}{currency} {}.{:0scale$}",
         magnitude / base,
         magnitude % base,
         scale = scale
@@ -859,134 +657,6 @@ fn status_rows(
         .collect()
 }
 
-fn open_practice_account_dialog(
-    surface: &mut WorkspaceSurface,
-    window: &mut Window,
-    cx: &mut Context<WorkspaceSurface>,
-) {
-    if surface.trading_pnl.account_creator.is_some() {
-        return;
-    }
-    let name = cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Account name"));
-    let equity =
-        cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Starting equity"));
-    name.update(cx, |input, input_cx| {
-        input.focus(window, input_cx);
-    });
-    equity.update(cx, |input, input_cx| {
-        input.set_value("50000", window, input_cx);
-    });
-    surface.trading_pnl.account_creator = Some(super::PracticeAccountDialogState { name, equity });
-    cx.notify();
-}
-
-fn practice_account_dialog(
-    app: &Entity<WorkspaceSurface>,
-    creator: &super::PracticeAccountDialogState,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let cancel = app.clone();
-    let create = app.clone();
-    let name = creator.name.clone();
-    let equity = creator.equity.clone();
-    div()
-        .id("practice_account_dialog_scrim")
-        .absolute()
-        .inset_0()
-        .occlude()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui_color(theme.colors.surface_overlay))
-        .child(
-            div()
-                .w_full()
-                .mx_2()
-                .p_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border(px(theme.dimensions.border_width))
-                .border_color(gpui_color(theme.colors.border_secondary))
-                .bg(gpui_color(theme.colors.surface))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .child("Create practice account"),
-                )
-                .child(Input::new(&creator.name).platform(theme))
-                .child(Input::new(&creator.equity).platform(theme))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(theme.colors.text_muted))
-                        .child("Starting equity in USD"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(dialog_button(
-                            "practice_account_cancel",
-                            "Cancel",
-                            theme,
-                            move |cx| {
-                                cancel.update(cx, |surface, surface_cx| {
-                                    surface.trading_pnl.account_creator = None;
-                                    surface_cx.notify();
-                                });
-                            },
-                        ))
-                        .child(dialog_button(
-                            "practice_account_create",
-                            "Create",
-                            theme,
-                            move |cx| {
-                                let name = name.read(cx).value().to_string();
-                                let equity = equity.read(cx).value().to_string();
-                                create.update(cx, |surface, surface_cx| {
-                                    surface.trading_pnl.account_creator = None;
-                                    surface_cx.notify();
-                                });
-                                aeris_desktop::trading::create_practice_account(name, &equity, cx);
-                            },
-                        )),
-                ),
-        )
-        .into_any_element()
-}
-
-fn dialog_button(
-    id: &'static str,
-    label: &'static str,
-    theme: &AerisTheme,
-    action: impl Fn(&mut App) + 'static,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .h(px(CONTROL_HEIGHT))
-        .px_3()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .text_color(gpui_color(colors.text_primary))
-        .font_weight(platform_font_weight(TypographyRole::Strong))
-        .cursor_pointer()
-        .role(Role::Button)
-        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-        .active(move |button| button.bg(gpui_color(colors.active_bg)))
-        .on_click(move |_, _, cx| action(cx))
-        .child(label)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,16 +690,9 @@ mod tests {
 
     #[test]
     fn money_format_keeps_exact_currency_scale() {
-        let pnl = aeris_trading::AccountPnl {
-            account_id: aeris_trading::TradingAccountId::try_new("test").expect("account"),
-            currency: "USD".to_string(),
-            realized: aeris_trading::FixedPoint::try_new(0, 2).expect("realized"),
-            unrealized: aeris_trading::FixedPoint::try_new(0, 2).expect("unrealized"),
-            equity: None,
-        };
         assert_eq!(
             format_money(
-                &pnl,
+                "USD",
                 aeris_trading::FixedPoint::try_new(-12_345_678, 2).expect("value")
             ),
             "-USD 123456.78"

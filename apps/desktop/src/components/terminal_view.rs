@@ -21,6 +21,19 @@ fn active_header_state(
         indicator_input: workspace.indicator_input.clone(),
         time_zone_id: workspace.chart_time_zone_id(cx).to_string(),
         time_zone_clock: workspace.chart_time_zone_clock(cx),
+        account_label: workspace
+            .trading_pnl
+            .order_entry
+            .selected_account_id
+            .as_ref()
+            .and_then(|id| {
+                workspace
+                    .trading_pnl
+                    .accounts
+                    .iter()
+                    .find(|account| &account.id == id)
+            })
+            .map(|account| account.display_name.clone()),
         indicator_message: workspace.indicator_message.clone(),
         series_message: workspace.series_message.clone(),
         pending: HeaderPendingState {
@@ -110,8 +123,25 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_command_palette(&OpenCommandPalette, window, cx);
-        self.run_broker_connection_command(CommandId::ConnectBroker, window, cx);
+        self.run_tastytrade_operation(TastytradeConnectionOperation::Connecting, window, cx);
+    }
+
+    fn disconnect_tastytrade(
+        &mut self,
+        _: &DisconnectTastytrade,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_tastytrade_operation(TastytradeConnectionOperation::Disconnecting, window, cx);
+    }
+
+    fn refresh_tastytrade_connection(
+        &mut self,
+        _: &RefreshTastytradeConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_tastytrade_operation(TastytradeConnectionOperation::Checking, window, cx);
     }
     fn open_command_palette(
         &mut self,
@@ -144,9 +174,6 @@ impl TerminalApp {
     ) {
         let surface = self.active_surface();
         match command {
-            CommandId::ConnectBroker | CommandId::DisconnectBroker => {
-                self.run_broker_connection_command(command, window, cx);
-            }
             CommandId::OpenPalette => self.open_command_palette(&OpenCommandPalette, window, cx),
             CommandId::ToggleContext => surface.update(cx, WorkspaceSurface::toggle_context_panel),
             CommandId::ToggleOrderBook => surface.update(cx, WorkspaceSurface::toggle_order_book),
@@ -253,41 +280,83 @@ impl TerminalApp {
             return;
         };
         self.execute_registered_command(command, window, cx);
-        if !matches!(
-            command,
-            CommandId::ConnectBroker | CommandId::DisconnectBroker
-        ) {
-            self.close_command_palette(window, cx);
-        }
+        self.close_command_palette(window, cx);
     }
 
-    fn run_broker_connection_command(
+    /// Runs one runtime-owned tastytrade connection operation off the UI thread and mirrors
+    /// its outcome into the Accounts panel. One operation runs at a time; a background
+    /// status check never interrupts a login or disconnect already in flight.
+    fn run_tastytrade_operation(
         &mut self,
-        command: CommandId,
+        operation: TastytradeConnectionOperation,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
         if self.broker_connection_task.is_some() {
-            self.command_palette_message = Some("A broker connection operation is already running. Complete or close the browser login and wait for its result.".to_string());
-            cx.notify();
+            if operation != TastytradeConnectionOperation::Checking {
+                self.tastytrade_connection.message = Some(
+                    "A tastytrade connection change is already running. Finish or close the \
+                     browser login and wait for its result."
+                        .to_string(),
+                );
+                self.tastytrade_connection.failed = true;
+                cx.notify();
+            }
             return;
         }
-        self.command_palette_message = Some(match command {
-            CommandId::DisconnectBroker => "Removing tastytrade connection…",
-            _ => "Opening tastytrade authorization. Complete login in your browser; Aeris will check your market-data access.",
-        }.to_string());
+        self.tastytrade_connection.operation = Some(operation);
+        if operation != TastytradeConnectionOperation::Checking {
+            self.tastytrade_connection.message = None;
+            self.tastytrade_connection.failed = false;
+        }
         let work = cx.background_executor().spawn(async move {
             let market = engine_market_worker::shared_market_runtime()?;
-            match command {
-                CommandId::DisconnectBroker => market.disconnect_provider("tastytrade"),
-                _ => market.connect_provider("tastytrade"),
+            match operation {
+                TastytradeConnectionOperation::Checking => market
+                    .provider_connected("tastytrade")
+                    .map(|connected| (connected, None)),
+                TastytradeConnectionOperation::Connecting => market
+                    .connect_provider("tastytrade")
+                    .map(|message| (true, Some(message))),
+                TastytradeConnectionOperation::Disconnecting => market
+                    .disconnect_provider("tastytrade")
+                    .map(|message| (false, Some(message))),
             }
         });
         self.broker_connection_task = Some(cx.spawn_in(window, async move |terminal, cx| {
             let result = work.await;
             let _ = cx.update(|window, cx| {
                 terminal.update(cx, |terminal, cx| {
-                    if result.is_ok() && command == CommandId::ConnectBroker {
+                    let connected_now =
+                        operation == TastytradeConnectionOperation::Connecting && result.is_ok();
+                    let view = &mut terminal.tastytrade_connection;
+                    view.operation = None;
+                    match result {
+                        Ok((connected, message)) => {
+                            view.connected = Some(connected);
+                            if message.is_some() {
+                                view.message = message;
+                                view.failed = false;
+                            }
+                        }
+                        Err(error) => {
+                            match operation {
+                                // A failed login leaves nothing usable; offer Connect again.
+                                TastytradeConnectionOperation::Connecting => {
+                                    view.connected = Some(false);
+                                }
+                                // The stored connection could not be confirmed either way.
+                                TastytradeConnectionOperation::Checking => view.connected = None,
+                                // The connection is still stored; keep offering Disconnect.
+                                TastytradeConnectionOperation::Disconnecting => {}
+                            }
+                            view.message = Some(error);
+                            view.failed = true;
+                        }
+                    }
+                    terminal.broker_connection_task = None;
+                    if connected_now {
+                        // A new connection goes straight to choosing a tastytrade market.
                         terminal.active_surface().update(cx, |surface, surface_cx| {
                             surface.choose_symbol_provider(
                                 TerminalProvider::Tastytrade,
@@ -300,13 +369,7 @@ impl TerminalApp {
                                 surface_cx,
                             );
                         });
-                        terminal.close_command_palette(window, cx);
                     }
-                    terminal.command_palette_message = Some(match result {
-                        Ok(message) => message,
-                        Err(error) => error,
-                    });
-                    terminal.broker_connection_task = None;
                     cx.notify();
                 })
             });
@@ -471,6 +534,29 @@ impl TerminalApp {
         )
     }
 
+    fn rendered_chrome_overlay(
+        &self,
+        active: &Entity<WorkspaceSurface>,
+        fullscreen: bool,
+        window: &Window,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        chrome_overlay_layer(
+            active.read(cx),
+            active,
+            &self.tastytrade_connection,
+            &self.theme,
+            chart_chrome::CHART_CHROME_HEIGHT
+                + if fullscreen {
+                    0.0
+                } else {
+                    WORKSPACE_TITLE_BAR_HEIGHT
+                },
+            window.viewport_size(),
+            cx,
+        )
+    }
+
     fn rendered_header(
         &self,
         _terminal: &Entity<Self>,
@@ -501,19 +587,7 @@ impl Render for TerminalApp {
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
         let fullscreen = window.is_fullscreen();
-        let overlay = chrome_overlay_layer(
-            workspace,
-            &active,
-            &self.theme,
-            chart_chrome::CHART_CHROME_HEIGHT
-                + if fullscreen {
-                    0.0
-                } else {
-                    WORKSPACE_TITLE_BAR_HEIGHT
-                },
-            window.viewport_size(),
-            cx,
-        );
+        let overlay = self.rendered_chrome_overlay(&active, fullscreen, window, cx);
         let (context_menu, settings_menu) = self.chart_surface_menus(
             &terminal,
             pane_count,
@@ -570,6 +644,8 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::trading_kill_switch))
             .on_action(cx.listener(Self::open_command_palette))
             .on_action(cx.listener(Self::connect_tastytrade))
+            .on_action(cx.listener(Self::disconnect_tastytrade))
+            .on_action(cx.listener(Self::refresh_tastytrade_connection))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
             .font_family(aeris_design_system::platform_font_family())

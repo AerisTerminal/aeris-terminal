@@ -2,6 +2,8 @@
 
 #[path = "components/about_dialog.rs"]
 mod about_dialog;
+#[path = "components/accounts_panel.rs"]
+mod accounts_panel;
 #[path = "assets.rs"]
 mod assets;
 #[path = "components/bottom_panel.rs"]
@@ -432,6 +434,8 @@ const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const TIME_ZONE_MENU_WIDTH: f32 = 320.0;
 const TIME_ZONE_MENU_MAX_HEIGHT: f32 = 520.0;
+const ACCOUNTS_PANEL_WIDTH: f32 = 380.0;
+const ACCOUNTS_PANEL_MAX_HEIGHT: f32 = 560.0;
 const TIMEFRAME_FLYOUT_WIDTH: f32 = 136.0;
 const TIMEFRAME_FLYOUT_GAP: f32 = 5.0;
 const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
@@ -500,6 +504,8 @@ actions!(
         TradingKillSwitch,
         OpenCommandPalette,
         ConnectTastytrade,
+        DisconnectTastytrade,
+        RefreshTastytradeConnection,
     ]
 );
 
@@ -966,7 +972,6 @@ fn selected_account_lock_reason(state: &TradingPnlState) -> Option<&str> {
 struct TradingOrderEntryState {
     quantity: u64,
     selected_account_id: Option<aeris_trading::TradingAccountId>,
-    account_menu_open: bool,
 }
 
 impl Default for TradingOrderEntryState {
@@ -974,7 +979,6 @@ impl Default for TradingOrderEntryState {
         Self {
             quantity: 1,
             selected_account_id: None,
-            account_menu_open: false,
         }
     }
 }
@@ -982,6 +986,25 @@ impl Default for TradingOrderEntryState {
 struct PracticeAccountDialogState {
     name: Entity<InputState>,
     equity: Entity<InputState>,
+}
+
+/// Presentation mirror of the runtime-owned tastytrade connection for the Accounts panel.
+/// The market runtime owns the connection and its credentials; this holds only the last
+/// result the desktop observed.
+#[derive(Clone, Default)]
+struct TastytradeConnectionView {
+    /// `None` until the runtime has been asked; refreshed whenever the Accounts panel opens.
+    connected: Option<bool>,
+    operation: Option<TastytradeConnectionOperation>,
+    message: Option<String>,
+    failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TastytradeConnectionOperation {
+    Checking,
+    Connecting,
+    Disconnecting,
 }
 
 #[derive(Clone)]
@@ -1169,6 +1192,8 @@ struct WorkspaceMenuState {
     order_book_column_open: bool,
     timeframe_flyout_keyboard: bool,
     chrome_list_keyboard: bool,
+    /// Header Accounts trigger, measured each frame so its panel opens beneath it.
+    accounts_trigger_bounds: Option<Bounds<Pixels>>,
 }
 
 #[derive(Default)]
@@ -1293,6 +1318,7 @@ enum ChromeOverlay {
     QuickTimeframe,
     ChartType,
     TimeZone,
+    Accounts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2545,6 +2571,7 @@ struct HeaderState {
     indicator_input: Entity<InputState>,
     time_zone_id: String,
     time_zone_clock: String,
+    account_label: Option<String>,
     indicator_message: Option<String>,
     series_message: String,
     pending: HeaderPendingState,
@@ -4227,6 +4254,7 @@ struct TerminalApp {
     command_palette_selection: usize,
     command_palette_message: Option<String>,
     broker_connection_task: Option<gpui::Task<()>>,
+    tastytrade_connection: TastytradeConnectionView,
     linked_sync_revisions: BTreeMap<String, u64>,
     event_risk_dispatches: BTreeMap<String, i64>,
     next_event_risk_check: Instant,

@@ -3,6 +3,7 @@ use super::*;
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
+    connection: &TastytradeConnectionView,
     theme: &AerisTheme,
     chrome_height: f32,
     viewport: gpui::Size<Pixels>,
@@ -15,10 +16,14 @@ pub(super) fn chrome_overlay_layer(
             | ChromeOverlay::QuickTimeframe
             | ChromeOverlay::ChartType
             | ChromeOverlay::TimeZone
+            | ChromeOverlay::Accounts
     );
     let anchored_menu = matches!(
         overlay,
-        ChromeOverlay::Timeframe | ChromeOverlay::ChartType | ChromeOverlay::TimeZone
+        ChromeOverlay::Timeframe
+            | ChromeOverlay::ChartType
+            | ChromeOverlay::TimeZone
+            | ChromeOverlay::Accounts
     );
     let quick_timeframe = overlay == ChromeOverlay::QuickTimeframe;
     let dual_container = overlay == ChromeOverlay::Timeframe;
@@ -27,7 +32,15 @@ pub(super) fn chrome_overlay_layer(
     let phase = app_state.chrome_overlay_phase;
     let generation = app_state.chrome_overlay_generation;
     let closing = phase == ChromeOverlayPhase::Closing;
-    let panel = chrome_overlay_content(app_state, app, overlay, chrome_height, viewport, theme, cx);
+    let panel = chrome_overlay_content(
+        app_state,
+        app,
+        overlay,
+        connection,
+        chrome_menu_extent(viewport, chrome_height),
+        theme,
+        cx,
+    );
     let close_app = app.clone();
     Some(
         div()
@@ -101,6 +114,10 @@ fn chrome_overlay_animation_origin(
             ChromeOverlay::TimeZone => app_state
                 .time_zone_trigger_bounds
                 .map(|bounds| bounds.center()),
+            ChromeOverlay::Accounts => app_state
+                .menu_state
+                .accounts_trigger_bounds
+                .map(|bounds| bounds.center()),
             ChromeOverlay::Instrument | ChromeOverlay::Indicator => None,
         });
     let Some(trigger) = trigger else {
@@ -121,6 +138,7 @@ fn chrome_overlay_animation_origin(
         }
         ChromeOverlay::ChartType => (menu_left, TIMEFRAME_MENU_WIDTH),
         ChromeOverlay::TimeZone => (menu_left, TIME_ZONE_MENU_WIDTH),
+        ChromeOverlay::Accounts => (menu_left, ACCOUNTS_PANEL_WIDTH),
         ChromeOverlay::QuickTimeframe => (
             ((viewport.width - px(QUICK_TIMEFRAME_POPUP_WIDTH)) / 2.0).max(px(0.0)),
             QUICK_TIMEFRAME_POPUP_WIDTH,
@@ -151,6 +169,10 @@ pub(super) fn compact_menu_left(
     let (trigger, width) = match overlay {
         ChromeOverlay::ChartType => (app_state.chart_type_trigger_bounds, TIMEFRAME_MENU_WIDTH),
         ChromeOverlay::TimeZone => (app_state.time_zone_trigger_bounds, TIME_ZONE_MENU_WIDTH),
+        ChromeOverlay::Accounts => (
+            app_state.menu_state.accounts_trigger_bounds,
+            ACCOUNTS_PANEL_WIDTH,
+        ),
         ChromeOverlay::Timeframe => {
             let intervals = app_state.available_intervals();
             let groups = timeframe_menu_groups(intervals);
@@ -188,8 +210,8 @@ pub(super) fn chrome_overlay_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     overlay: ChromeOverlay,
-    chrome_height: f32,
-    viewport: gpui::Size<Pixels>,
+    connection: &TastytradeConnectionView,
+    extent: super::chrome_menu::ChromeMenuExtent,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
@@ -197,7 +219,7 @@ pub(super) fn chrome_overlay_content(
     match overlay {
         ChromeOverlay::Instrument => instrument_dialog_content(
             app,
-            chrome_menu_extent(viewport, chrome_height),
+            extent,
             &InstrumentSelectorState {
                 label: terminal_instrument_label(app_state),
                 message: app_state.symbol_message.clone(),
@@ -215,6 +237,7 @@ pub(super) fn chrome_overlay_content(
                 },
                 scroll: app_state.scrolls.instrument.clone(),
                 target: app_state.symbol_selection_target,
+                tastytrade_disconnected: connection.connected == Some(false),
             },
             theme,
         )
@@ -222,7 +245,7 @@ pub(super) fn chrome_overlay_content(
         ChromeOverlay::Indicator => indicator_dialog_content(
             app,
             IndicatorDialogState {
-                extent: chrome_menu_extent(viewport, chrome_height),
+                extent,
                 input: &app_state.indicator_input,
                 message: app_state.indicator_message.as_deref(),
                 keyboard_selection: app_state.chrome_selection,
@@ -258,6 +281,10 @@ pub(super) fn chrome_overlay_content(
         ChromeOverlay::TimeZone => {
             time_zone_overlay_content(app_state, app, theme, cx).into_any_element()
         }
+        ChromeOverlay::Accounts => {
+            accounts_panel::accounts_panel_content(app_state, app, connection, theme)
+                .into_any_element()
+        }
     }
 }
 
@@ -274,7 +301,8 @@ const fn chrome_overlay_elevation(overlay: ChromeOverlay) -> ChromeOverlayElevat
         | ChromeOverlay::Indicator
         | ChromeOverlay::Timeframe
         | ChromeOverlay::ChartType
-        | ChromeOverlay::TimeZone => ChromeOverlayElevation::Flat,
+        | ChromeOverlay::TimeZone
+        | ChromeOverlay::Accounts => ChromeOverlayElevation::Flat,
     }
 }
 

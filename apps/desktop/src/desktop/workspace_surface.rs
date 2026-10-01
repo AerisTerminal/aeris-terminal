@@ -2055,6 +2055,11 @@ impl WorkspaceSurface {
         if overlay == ChromeOverlay::Instrument {
             self.symbol_selection_target = SymbolSelectionTarget::Chart;
         }
+        if matches!(overlay, ChromeOverlay::Instrument | ChromeOverlay::Accounts) {
+            // Both surfaces present the broker connection; the runtime check reads the
+            // local credential vault in the background and never blocks this frame.
+            window.dispatch_action(Box::new(RefreshTastytradeConnection), cx);
+        }
         self.chrome_overlay_trigger_position = trigger_position;
         self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
         self.chrome_overlay_phase = ChromeOverlayPhase::Opening;
@@ -2091,7 +2096,7 @@ impl WorkspaceSurface {
             ChromeOverlay::Instrument => {
                 current_instrument_menu_index(&self.instrument_entries(cx)).unwrap_or(0)
             }
-            ChromeOverlay::Indicator => 0,
+            ChromeOverlay::Indicator | ChromeOverlay::Accounts => 0,
             ChromeOverlay::TimeZone => {
                 self.sync_time_zone_menu_selection(cx);
                 self.chrome_selection
@@ -2120,7 +2125,7 @@ impl WorkspaceSurface {
                 self.time_zone_input
                     .update(cx, |input, input_cx| input.focus(window, input_cx));
             }
-            ChromeOverlay::Timeframe | ChromeOverlay::ChartType => {
+            ChromeOverlay::Timeframe | ChromeOverlay::ChartType | ChromeOverlay::Accounts => {
                 self.chrome_focus.focus(window, cx);
             }
         }
@@ -2153,6 +2158,11 @@ impl WorkspaceSurface {
                 self.time_zone_input.update(cx, |input, input_cx| {
                     input.set_value("", window, input_cx);
                 });
+            }
+            Some(ChromeOverlay::Accounts) => {
+                // An unfinished form or confirmation never outlives the panel that owns it.
+                self.trading_pnl.account_creator = None;
+                self.trading_pnl.account_delete_confirmation = None;
             }
             Some(
                 ChromeOverlay::Instrument | ChromeOverlay::Timeframe | ChromeOverlay::ChartType,
@@ -2278,7 +2288,8 @@ impl WorkspaceSurface {
                     Some(ChromeOverlay::ChartType) => ChartType::ALL.len(),
                     Some(ChromeOverlay::QuickTimeframe) => self.quick_timeframe_matches(cx).len(),
                     Some(ChromeOverlay::TimeZone) => self.time_zone_matches(cx).len(),
-                    None => 0,
+                    // The Accounts panel is a form, not a keyboard-navigated list.
+                    Some(ChromeOverlay::Accounts) | None => 0,
                 };
                 self.activate_chrome_list_keyboard();
                 self.chrome_selection = (self.chrome_selection + 1).min(count.saturating_sub(1));
@@ -2329,7 +2340,11 @@ impl WorkspaceSurface {
                 // again after closing clears the query, selecting another interval.
                 return false;
             }
-            Some(ChromeOverlay::Instrument | ChromeOverlay::Indicator) | None => return false,
+            // Accounts form inputs own their own Enter handling.
+            Some(
+                ChromeOverlay::Instrument | ChromeOverlay::Indicator | ChromeOverlay::Accounts,
+            )
+            | None => return false,
         }
         true
     }
@@ -2374,7 +2389,8 @@ impl WorkspaceSurface {
                 | ChromeOverlay::Timeframe
                 | ChromeOverlay::QuickTimeframe
                 | ChromeOverlay::ChartType
-                | ChromeOverlay::TimeZone,
+                | ChromeOverlay::TimeZone
+                | ChromeOverlay::Accounts,
             )
             | None => false,
         }

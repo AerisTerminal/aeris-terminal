@@ -93,6 +93,22 @@ impl MarketService {
         Ok("Tastytrade connected. Select an asset from the symbol menu.".into())
     }
 
+    /// Reports whether a protected broker connection is stored for `provider`.
+    /// Call from a background worker; this reads the native credential vault.
+    /// A stored connection is reported even if the broker later rejects it; the
+    /// market session surfaces that failure when it next connects.
+    ///
+    /// # Errors
+    /// Rejects unsupported providers or an unreadable credential vault.
+    pub fn provider_connected(&self, provider: &str) -> Result<bool, String> {
+        if provider != "tastytrade" {
+            return Err("Provider does not support browser authorization".to_string());
+        }
+        let vault = NativeCredentialVault::new(VAULT_SERVICE)
+            .map_err(|_| "Protected broker credential storage is unavailable".to_string())?;
+        Ok(load(&vault)?.is_some())
+    }
+
     /// Deletes the hosted broker connection and its protected desktop capability.
     /// Call from a background worker. Provider grant revocation remains with the broker.
     ///

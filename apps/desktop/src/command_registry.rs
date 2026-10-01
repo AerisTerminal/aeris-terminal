@@ -27,12 +27,10 @@ pub enum CommandId {
     CancelAll,
     FlattenAccount,
     KillSwitch,
-    ConnectBroker,
-    DisconnectBroker,
 }
 
 impl CommandId {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 24] = [
         Self::OpenPalette,
         Self::ToggleContext,
         Self::ToggleOrderBook,
@@ -57,8 +55,6 @@ impl CommandId {
         Self::CancelAll,
         Self::FlattenAccount,
         Self::KillSwitch,
-        Self::ConnectBroker,
-        Self::DisconnectBroker,
     ];
 }
 
@@ -71,18 +67,6 @@ pub struct CommandSpec {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        id: CommandId::ConnectBroker,
-        title: "Connect tastytrade",
-        keywords: "broker login authorize market data",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::DisconnectBroker,
-        title: "Disconnect tastytrade",
-        keywords: "broker logout remove connection",
-        chord: None,
-    },
     CommandSpec {
         id: CommandId::OpenPalette,
         title: "Open command palette",

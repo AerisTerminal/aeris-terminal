@@ -162,6 +162,12 @@ Maintainer-only: Rithmic test smoke (needs credentials).
 
 ## Phase 3 — Provider-neutral desktop
 
+- [x] Header **Accounts** panel (left of the time zone, secondary surface) replaces the
+  command-palette broker commands and the order-ticket practice-account dialogs: tastytrade
+  connect/disconnect with runtime status (`MarketService::provider_connected`), Hyperliquid
+  public feed, practice account create/select/delete. The order ticket only shows the active
+  account and opens the panel. When descriptors land, list providers from them instead of
+  hardcoding tastytrade and Hyperliquid in `components/accounts_panel.rs`.
 - [ ] `market_runtime` publishes provider presentation descriptors through a provider-neutral
   contract: id, display name, chart intervals, default/empty-query listing, search hint, logo key,
   depth capability, connection kind (credentials, hosted broker, public).
