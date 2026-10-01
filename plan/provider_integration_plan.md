@@ -184,7 +184,6 @@ Maintainer-only: Rithmic test smoke (needs credentials).
 - [x] Providers without depth show an explicit "depth not available from this provider" state
   using the existing tokenized order-book unavailable presentation; tastytrade selections and
   streaming state mark the book unavailable while Rithmic and Hyperliquid retain live depth.
-  instead of an empty ladder (`CSS.md` tokens; text over depth uses `--book-*-text`).
 - [x] Durable local state keeps loading existing Rithmic, Hyperliquid and tastytrade selections;
   sanitizer regression coverage exercises all three provider identities and entitlement routes.
 - [ ] tastytrade logo and attribution ("Market data provided by tastytrade") per tastytrade's
