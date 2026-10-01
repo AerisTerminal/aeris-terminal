@@ -85,11 +85,7 @@ pub(super) fn initialize_endpoint(
                 consumer_id: record.endpoint.consumer_id,
                 search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
                 provider: requested.provider.clone(),
-                query: if requested.provider == "tastytrade" {
-                    requested.display_symbol
-                } else {
-                    requested.provider_symbol
-                },
+                query: catalog_symbol(&requested),
                 maximum_results: 32,
             },
         );
@@ -239,11 +235,7 @@ fn startup_catalog_candidate(
     candidates: &[ProviderInstrumentSummary],
     requested: &InstallProviderInstrument,
 ) -> Result<ProviderInstrumentSummary, String> {
-    let symbol = if requested.provider == "tastytrade" {
-        &requested.display_symbol
-    } else {
-        &requested.provider_symbol
-    };
+    let symbol = catalog_symbol(requested);
     candidates
         .iter()
         .find(|candidate| candidate.symbol == *symbol && candidate.exchange == requested.venue_id)
@@ -261,6 +253,21 @@ fn startup_catalog_candidate(
         })
 }
 
+fn catalog_symbol(product: &InstallProviderInstrument) -> String {
+    let source = aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .find(|descriptor| descriptor.id == product.provider)
+        .map(|descriptor| descriptor.catalog_symbol);
+    match source {
+        Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
+            product.display_symbol.clone()
+        }
+        Some(aeris_contracts::ProviderCatalogSymbol::ProviderSymbol) | None => {
+            product.provider_symbol.clone()
+        }
+    }
+}
+
 fn is_retired_startup_catalog_event(event: &MarketRuntimeEvent) -> bool {
     match event {
         MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
@@ -275,6 +282,7 @@ fn is_retired_startup_catalog_event(event: &MarketRuntimeEvent) -> bool {
         _ => false,
     }
 }
+
 /// Records the desired order-book depth visibility and applies it to installed demand.
 ///
 /// Visibility is endpoint intent, so it is retained even when no series demand
@@ -546,4 +554,25 @@ pub(super) fn set_resource_class(
     market.set_resource_class(client_id, endpoint.consumer_id, resource_class)?;
     endpoint.resource_class = resource_class;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_symbol_uses_descriptor_identity_source() {
+        let mut product = InstallProviderInstrument {
+            provider: "tastytrade".to_string(),
+            provider_symbol: "/ES".to_string(),
+            display_symbol: "/ESZ6".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(catalog_symbol(&product), "/ESZ6");
+
+        product.provider = "hyperliquid".to_string();
+        product.provider_symbol = "BTC".to_string();
+        product.display_symbol = "BTC-PERP".to_string();
+        assert_eq!(catalog_symbol(&product), "BTC");
+    }
 }

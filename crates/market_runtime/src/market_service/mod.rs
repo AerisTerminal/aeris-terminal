@@ -22,9 +22,9 @@ use crate::{
 };
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
-    ProviderPresentationDescriptor, ProviderState, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesLoadState,
+    ProviderCatalogRejectionReason, ProviderCatalogSymbol, ProviderConnectionState,
+    ProviderInstrumentSearchResult, ProviderPresentationDescriptor, ProviderState,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
 };
 use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
 use aeris_market_data::{
@@ -996,6 +996,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     default_listing: "MNQ",
     search_hint: "Search Rithmic symbols",
     logo_key: "rithmic",
+    catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
     depth_available: true,
     connection_kind: aeris_contracts::ProviderConnectionKind::Credentials,
 };
@@ -1045,6 +1046,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     default_listing: "",
     search_hint: "Search Hyperliquid markets",
     logo_key: "hyperliquid",
+    catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
     depth_available: true,
     connection_kind: aeris_contracts::ProviderConnectionKind::Public,
 };

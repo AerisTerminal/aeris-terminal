@@ -26,4 +26,4 @@ pub use messages::{
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
-pub use provider::{ProviderConnectionKind, ProviderPresentationDescriptor};
+pub use provider::{ProviderCatalogSymbol, ProviderConnectionKind, ProviderPresentationDescriptor};

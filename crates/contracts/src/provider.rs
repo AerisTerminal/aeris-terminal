@@ -11,6 +11,13 @@ pub enum ProviderConnectionKind {
     HostedBroker,
 }
 
+/// Which persisted instrument identity is accepted by a provider catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderCatalogSymbol {
+    ProviderSymbol,
+    DisplaySymbol,
+}
+
 /// Stable provider metadata for catalog and chart presentation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderPresentationDescriptor {
@@ -20,6 +27,7 @@ pub struct ProviderPresentationDescriptor {
     pub default_listing: &'static str,
     pub search_hint: &'static str,
     pub logo_key: &'static str,
+    pub catalog_symbol: ProviderCatalogSymbol,
     pub depth_available: bool,
     pub connection_kind: ProviderConnectionKind,
 }

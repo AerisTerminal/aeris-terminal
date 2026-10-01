@@ -35,6 +35,7 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         default_listing: "/ES",
         search_hint: "Search futures or equities",
         logo_key: "tastytrade",
+        catalog_symbol: aeris_contracts::ProviderCatalogSymbol::DisplaySymbol,
         depth_available: false,
         connection_kind: aeris_contracts::ProviderConnectionKind::HostedBroker,
     };

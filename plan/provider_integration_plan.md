@@ -182,7 +182,8 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     by descriptor ID instead of positional provider matches. Provider-specific selection payloads and
     product-policy branches remain provider-owned; generic engine lifecycle and depth checks now use
     descriptor presence/capabilities instead of enumerating provider variants; viewport persistence
-    and hosted-broker prompt labels follow the same metadata.
+    and hosted-broker prompt labels follow the same metadata. Startup catalog matching now reads
+    the descriptor's catalog-symbol source instead of naming tastytrade.
 - [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the
