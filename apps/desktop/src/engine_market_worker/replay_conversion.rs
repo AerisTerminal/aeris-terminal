@@ -330,7 +330,10 @@ pub(crate) fn series_key(
         // series. Tick candles exist on neither public path: Hyperliquid
         // exposes no tick history and the Rithmic test feed prints none.
         ChartInterval::Day3
-            if matches!(product.provider.as_str(), "hyperliquid" | "tastytrade") =>
+            if super::provider_supports_interval(
+                product.provider.as_str(),
+                ChartInterval::Day3,
+            ) =>
         {
             BarPeriod::session(3)
         }

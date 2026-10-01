@@ -187,7 +187,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     the descriptor's catalog-symbol source and selection entitlement instead of naming tastytrade;
     generic menu selection carries only its result index instead of provider-tagged variants;
     startup metadata refresh is descriptor-declared and the time-and-sales history header is
-    provider-neutral; ready-market labels and Day 3 cadence support now use descriptor metadata.
+    provider-neutral; ready-market labels and Day 3 cadence/replay support now use descriptor metadata.
     Remaining provider names are limited to provider-owned selection payloads, wire identity and
     entitlement validation, worker identities, and the Rithmic default-selection product policy.
 - [x] Per-provider error strings become templates using the display name; interval tables come
