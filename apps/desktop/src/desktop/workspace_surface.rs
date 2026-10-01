@@ -2599,17 +2599,16 @@ impl WorkspaceSurface {
         } else if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
             self.chart_state_message = "market snapshot is current".to_string();
-            if self.provider == TerminalProvider::Rithmic {
+            if super::provider_presentation(self.provider).is_some() {
                 self.market_state.symbol_selection_pending = false;
                 self.symbol_message = self.product.as_ref().map_or_else(
-                    || "Rithmic market ready".to_string(),
-                    |product| format!("{} · Rithmic spot", product.provider_symbol),
-                );
-            } else if self.provider == TerminalProvider::Hyperliquid {
-                self.market_state.symbol_selection_pending = false;
-                self.symbol_message = self.product.as_ref().map_or_else(
-                    || "Hyperliquid market ready".to_string(),
-                    |product| format!("{} · Hyperliquid", product.display_symbol),
+                    || {
+                        format!(
+                            "{} market ready",
+                            super::terminal_provider_display(self.provider)
+                        )
+                    },
+                    |product| super::provider_ready_message(self.provider, product),
                 );
             }
         } else {
@@ -3301,17 +3300,7 @@ impl WorkspaceSurface {
             self.market_state.symbol_selection_pending = false;
             self.symbol_message = self.product.as_ref().map_or_else(
                 || format!("{} market ready", terminal_provider_display(self.provider)),
-                |product| {
-                    if self.provider == TerminalProvider::Rithmic {
-                        format!("{} · Rithmic spot", product.provider_symbol)
-                    } else {
-                        format!(
-                            "{} · {}",
-                            product.display_symbol,
-                            terminal_provider_display(self.provider)
-                        )
-                    }
-                },
+                |product| super::provider_ready_message(self.provider, product),
             );
         }
         self.set_chart_state(state, message, cx);

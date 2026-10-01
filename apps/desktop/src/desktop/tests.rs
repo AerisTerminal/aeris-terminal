@@ -2636,4 +2636,21 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         super::provider_intervals(super::TerminalProvider::Tastytrade)
             .contains(&ChartInterval::Month1)
     );
+    let product = InstallProviderInstrument {
+        provider_symbol: "MNQ".to_string(),
+        display_symbol: "MNQZ6".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::provider_ready_message(super::TerminalProvider::Rithmic, &product),
+        "MNQ · Rithmic spot"
+    );
+    assert_eq!(
+        super::provider_ready_message(super::TerminalProvider::Hyperliquid, &product),
+        "MNQ · Hyperliquid"
+    );
+    assert_eq!(
+        super::provider_ready_message(super::TerminalProvider::Tastytrade, &product),
+        "MNQZ6 · tastytrade"
+    );
 }

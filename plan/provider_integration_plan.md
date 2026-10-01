@@ -186,7 +186,8 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     the descriptor's catalog-symbol source and selection entitlement instead of naming tastytrade;
     generic menu selection carries only its result index instead of provider-tagged variants;
     startup metadata refresh is descriptor-declared and the time-and-sales history header is
-    provider-neutral. Remaining branches are provider-owned selection, wire identity, and product policy.
+    provider-neutral; ready-market labels now use descriptor identity and suffix metadata.
+    Remaining branches are provider-owned selection, wire identity, and product policy.
 - [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the

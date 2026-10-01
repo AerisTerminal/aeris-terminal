@@ -1255,6 +1255,27 @@ fn terminal_provider_display(provider: TerminalProvider) -> &'static str {
     })
 }
 
+fn provider_ready_message(
+    provider: TerminalProvider,
+    product: &InstallProviderInstrument,
+) -> String {
+    let descriptor = provider_presentation(provider);
+    let symbol = match descriptor.map(|descriptor| descriptor.catalog_symbol) {
+        Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
+            product.display_symbol.as_str()
+        }
+        Some(aeris_contracts::ProviderCatalogSymbol::ProviderSymbol) | None => {
+            product.provider_symbol.as_str()
+        }
+    };
+    let display_name = descriptor.map_or_else(
+        || terminal_provider_id(provider),
+        |descriptor| descriptor.display_name,
+    );
+    let suffix = descriptor.map_or("", |descriptor| descriptor.ready_label_suffix);
+    format!("{symbol} · {display_name}{suffix}")
+}
+
 fn terminal_provider_from_id(provider: &str) -> TerminalProvider {
     if provider == "tastytrade" {
         TerminalProvider::Tastytrade
