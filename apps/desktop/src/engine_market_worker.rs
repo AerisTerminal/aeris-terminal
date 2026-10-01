@@ -394,7 +394,8 @@ fn pane_interval(series: Option<&SeriesKey>, provider: &str) -> Result<ChartInte
             _ => Err(unsupported()),
         },
         Ok(SeriesCadence::SessionDays)
-            if series.cadence_value == 3 && provider == "hyperliquid" =>
+            if series.cadence_value == 3
+                && provider_supports_interval(provider, ChartInterval::Day3) =>
         {
             Ok(ChartInterval::Day3)
         }
@@ -580,6 +581,18 @@ fn provider_display_name(provider: &str) -> &str {
         .iter()
         .find(|descriptor| descriptor.id == provider)
         .map_or(provider, |descriptor| descriptor.display_name)
+}
+
+fn provider_supports_interval(provider: &str, interval: ChartInterval) -> bool {
+    aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .find(|descriptor| descriptor.id == provider)
+        .is_some_and(|descriptor| {
+            descriptor
+                .chart_interval_labels
+                .iter()
+                .any(|label| *label == interval.label())
+        })
 }
 
 /// Identity every pushed engine event is checked against.

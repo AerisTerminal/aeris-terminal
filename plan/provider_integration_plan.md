@@ -172,7 +172,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
 - [x] `market_runtime` publishes provider presentation descriptors through a provider-neutral
   contract: id, display name, chart intervals, default/empty-query listing, search hint, logo key,
   catalog-symbol source, depth capability, connection kind (credentials, hosted broker, public).
-- [~] Replace `TerminalProvider` branches in `apps/desktop/src/desktop.rs`,
+- [x] Replace `TerminalProvider` branches in `apps/desktop/src/desktop.rs`,
   `desktop/workspace_surface.rs`, `components/{symbol_menu,terminal_view,watchlist_panel,time_sales_panel}.rs`,
   `engine_market_worker*.rs`, `market_worker.rs` and `desktop/local_state.rs` with descriptors.
   - [~] Desktop display names and default listing queries now read from the runtime descriptor registry;
@@ -186,8 +186,9 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     the descriptor's catalog-symbol source and selection entitlement instead of naming tastytrade;
     generic menu selection carries only its result index instead of provider-tagged variants;
     startup metadata refresh is descriptor-declared and the time-and-sales history header is
-    provider-neutral; ready-market labels now use descriptor identity and suffix metadata.
-    Remaining branches are provider-owned selection, wire identity, and product policy.
+    provider-neutral; ready-market labels and Day 3 cadence support now use descriptor metadata.
+    Remaining provider names are limited to provider-owned selection payloads, wire identity and
+    entitlement validation, worker identities, and the Rithmic default-selection product policy.
 - [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the
