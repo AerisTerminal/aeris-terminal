@@ -54,6 +54,10 @@ violations and missing verification explicitly, and never describe them as satis
 5. Run focused checks while iterating, then broader gates before delivery or release.
 6. For behavior that depends on persistence, provider lifecycle, rendering, updates, or the installed
    app, exercise the real path; compilation alone is not proof.
+7. Edit files with the agent's native file tools (read, edit, write) so every change is a visible,
+   reviewable diff. Do not write Python, `sed`, heredoc, or other scripts to modify source files.
+   A script is allowed only for a genuinely bulk mechanical change that native tools cannot do
+   practically; say so before running it, and make it fail when any intended replacement does not apply.
 
 ## Architecture invariants
 
