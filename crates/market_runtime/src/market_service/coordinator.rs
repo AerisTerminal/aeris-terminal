@@ -1,7 +1,7 @@
 use super::{
-    Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
-    ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
-    DemandWaiter, Duration, EngineError, GenerationId, HistoryRange, HyperliquidLiveHandoff,
+    Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, CandleLiveHandoff,
+    ClientId, Command, ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass,
+    DeferredHistoryRequest, DemandWaiter, Duration, EngineError, GenerationId, HistoryRange,
     InstallProviderInstrument, Instant, LiveHistoryState, MAXIMUM_STUDIES,
     MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT,
     MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE, MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS,
@@ -85,7 +85,7 @@ fn run_coordinator(
         history_retries: BTreeMap::new(),
         events: BTreeMap::new(),
         rithmic_live: BTreeMap::new(),
-        hyperliquid_live: BTreeMap::new(),
+        candle_live: BTreeMap::new(),
         order_books: BTreeMap::new(),
         hyperliquid_display_depth: BTreeMap::new(),
         hyperliquid_display_generation: 0,
@@ -98,6 +98,11 @@ fn run_coordinator(
         rithmic_demand: None,
         rithmic_pending_demand: None,
         rithmic_stop_pending: None,
+        tastytrade_demand: None,
+        tastytrade_authorization: None,
+        tastytrade_suspended: false,
+        tastytrade_generation_floor: 0,
+        tastytrade_recovery: None,
         hyperliquid_engaged: false,
         hyperliquid_demand_dirty: false,
         hyperliquid_stop_pending: None,
@@ -113,10 +118,11 @@ fn run_coordinator(
         let drained = drain_coordinator_events(&mut coordinator);
         coordinator.broadcast_dirty_trade_tapes();
         coordinator.publish_rithmic_live();
-        coordinator.publish_hyperliquid_live();
+        coordinator.publish_candle_live();
         coordinator.recover_overflowed_series_queues();
         coordinator.flush_rithmic_demand();
         coordinator.flush_hyperliquid_demand();
+        coordinator.flush_tastytrade_demand();
         coordinator.stop_realtime_if_idle();
         coordinator.retry_history();
         match commands.recv_timeout(if drained >= REALTIME_DRAIN_BUDGET {
@@ -140,7 +146,7 @@ fn run_coordinator(
 
 fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
     if let Some(wake) = coordinator.providers.wake {
-        for (index, provider) in [(0, "rithmic"), (1, "hyperliquid")] {
+        for (index, provider) in [(0, "rithmic"), (1, "hyperliquid"), (2, "tastytrade")] {
             if wake.catalog_overflow[index].swap(false, Ordering::AcqRel) {
                 coordinator.reject_overflowed_catalog(provider);
             }
@@ -153,10 +159,10 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
         .wake
         .map_or(0, |wake| wake.drain_cursor.load(Ordering::Relaxed));
     'drain: for _ in 0..REALTIME_DRAIN_BUDGET {
-        for offset in 0..5 {
-            let lane = (first_lane + offset) % 5;
+        for offset in 0..7 {
+            let lane = (first_lane + offset) % 7;
             if let Some(wake) = coordinator.providers.wake {
-                wake.drain_cursor.store((lane + 1) % 5, Ordering::Relaxed);
+                wake.drain_cursor.store((lane + 1) % 7, Ordering::Relaxed);
                 if started.elapsed() >= Duration::from_millis(4) {
                     wake.notify();
                     break 'drain;
@@ -167,6 +173,12 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
             };
             drained += 1;
             match event {
+                ProviderRuntimeEvent::TastytradeRealtime(event) => {
+                    coordinator.handle_tastytrade_realtime(event);
+                }
+                ProviderRuntimeEvent::TastytradeCatalog(event) => {
+                    coordinator.handle_tastytrade_catalog(event);
+                }
                 ProviderRuntimeEvent::RithmicRealtime(event) => {
                     if coordinator
                         .providers
@@ -202,6 +214,14 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
     if let Some(wake) = coordinator.providers.wake {
         let rithmic = wake.pending_overflow[0].swap(0, Ordering::AcqRel);
         let hyperliquid = wake.pending_overflow[1].swap(0, Ordering::AcqRel);
+        let tastytrade = wake.pending_overflow[2].swap(0, Ordering::AcqRel);
+        if tastytrade != 0 {
+            coordinator.candle_provider_recovering(
+                "tastytrade",
+                tastytrade,
+                "Tastytrade queue overflow requires recovery",
+            );
+        }
         if rithmic != 0 {
             coordinator.rithmic_recovering(
                 rithmic,
@@ -209,7 +229,8 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
             );
         }
         if hyperliquid != 0 {
-            coordinator.hyperliquid_recovering(
+            coordinator.candle_provider_recovering(
+                "hyperliquid",
                 hyperliquid,
                 "Local market event queue overflow; repairing continuity",
             );
@@ -233,7 +254,7 @@ pub(super) fn drain_shutdown_provider_events(coordinator: &mut Coordinator<'_>) 
 fn study_market_series_live_ready(
     engine: &MarketEngine,
     rithmic_live: &BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
-    hyperliquid_live: &BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
+    candle_live: &BTreeMap<BarSeriesKey, CandleLiveHandoff>,
     input: &StudyMarketInput,
 ) -> bool {
     let Some(provider) = engine.provider_status(&input.series.provider_id) else {
@@ -252,8 +273,11 @@ fn study_market_series_live_ready(
                 && live.history_state == LiveHistoryState::Ready
         });
     }
-    if input.series.provider_id == "hyperliquid" {
-        return hyperliquid_live.get(&input.series).is_some_and(|live| {
+    if matches!(
+        input.series.provider_id.as_str(),
+        "hyperliquid" | "tastytrade"
+    ) {
+        return candle_live.get(&input.series).is_some_and(|live| {
             live.generation == provider_generation
                 && live.connected
                 && live.history_state == LiveHistoryState::Ready
@@ -266,10 +290,10 @@ fn study_live_market_data<'a>(
     engine: &MarketEngine,
     order_books: &'a BTreeMap<(String, String), ProviderOrderBook>,
     rithmic_live: &BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
-    hyperliquid_live: &BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
+    candle_live: &BTreeMap<BarSeriesKey, CandleLiveHandoff>,
     input: &StudyMarketInput,
 ) -> Option<StudyLiveMarketData<'a>> {
-    if !study_market_series_live_ready(engine, rithmic_live, hyperliquid_live, input) {
+    if !study_market_series_live_ready(engine, rithmic_live, candle_live, input) {
         return None;
     }
     let provider = engine.provider_status(&input.series.provider_id)?;
@@ -303,7 +327,7 @@ pub(super) struct Coordinator<'a> {
         BTreeMap<(BarSeriesKey, ProviderGeneration), (Instant, u8, Option<HistoryRange>)>,
     pub(super) events: BTreeMap<ConsumerId, ConsumerEvents>,
     pub(super) rithmic_live: BTreeMap<BarSeriesKey, RithmicLiveHandoff>,
-    pub(super) hyperliquid_live: BTreeMap<BarSeriesKey, HyperliquidLiveHandoff>,
+    pub(super) candle_live: BTreeMap<BarSeriesKey, CandleLiveHandoff>,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
     /// Provider-aggregated Hyperliquid depth used only for DOM presentation.
     /// Canonical `order_books` remain sourced from the standard full-precision
@@ -334,6 +358,11 @@ pub(super) struct Coordinator<'a> {
     ///
     /// The coordinator rebuilds the whole desired set and the worker diffs it;
     /// this flag only decides idle shutdown.
+    pub(super) tastytrade_authorization: Option<bool>,
+    pub(super) tastytrade_suspended: bool,
+    pub(super) tastytrade_generation_floor: u64,
+    pub(super) tastytrade_recovery: Option<u64>,
+    pub(super) tastytrade_demand: Option<super::tastytrade::Demand>,
     pub(super) hyperliquid_engaged: bool,
     /// Set whenever live handoffs or depth demand change the desired
     /// Hyperliquid subscriptions; cleared once the worker accepts the set.
@@ -373,12 +402,13 @@ impl Coordinator<'_> {
 
     pub(super) fn begin_shutdown(&mut self) {
         self.publish_rithmic_live();
-        self.publish_hyperliquid_live();
+        self.publish_candle_live();
         for stop in self.history_cancellations.values() {
             stop.store(true, Ordering::Release);
         }
         let _ = self.providers.stop("rithmic");
         let _ = self.providers.stop("hyperliquid");
+        let _ = self.providers.stop("tastytrade");
     }
 
     pub(super) fn handle_command(&mut self, command: Command) {
@@ -396,7 +426,9 @@ impl Coordinator<'_> {
             Command::HistoryCompleted(series, generation, range, result) => {
                 self.history_completed(&series, generation, range, result);
             }
-            command @ (Command::Status(..)
+            command @ (Command::BrokerAuthorizationChanged(..)
+            | Command::AvailableStreams(..)
+            | Command::Status(..)
             | Command::Attach(..)
             | Command::Detach(..)
             | Command::PollClient(..)) => self.handle_service_command(command),
@@ -406,6 +438,56 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_service_command(&mut self, command: Command) {
         match command {
+            Command::BrokerAuthorizationChanged(ready, reply) => {
+                self.tastytrade_suspended = !ready;
+                self.tastytrade_authorization = Some(ready);
+                if !ready
+                    && let Some(generation) = self
+                        .engine
+                        .provider_status("tastytrade")
+                        .and_then(|s| s.generation)
+                {
+                    self.tastytrade_generation_floor = generation.0.get().saturating_add(1);
+                    self.candle_provider_recovering(
+                        "tastytrade",
+                        generation.0.get(),
+                        "Tastytrade disconnected",
+                    );
+                    let _ = self.engine.end_provider_session("tastytrade", generation);
+                }
+                self.flush_tastytrade_demand();
+                self.broadcast_provider_for(
+                    "tastytrade",
+                    if ready {
+                        None
+                    } else {
+                        Some("Tastytrade disconnected")
+                    },
+                );
+                let _ = reply.send(Ok(()));
+            }
+            Command::AvailableStreams(provider, requested, reply) => {
+                let mut supported = StreamRequirements::NONE;
+                for stream in [
+                    MarketStream::Bars,
+                    MarketStream::Trades,
+                    MarketStream::Quotes,
+                    MarketStream::Depth,
+                ] {
+                    if requested.contains(stream)
+                        && self
+                            .engine
+                            .verify_provider_stream_requirements(
+                                &provider,
+                                StreamRequirements::NONE.with(stream),
+                            )
+                            .is_ok()
+                    {
+                        supported = supported.with(stream);
+                    }
+                }
+                let _ = reply.send(Ok(supported));
+            }
             Command::Status(reply) => {
                 let _ = reply.send(Ok(self.status()));
             }
@@ -508,7 +590,11 @@ impl Coordinator<'_> {
             | Command::Status(..)
             | Command::Attach(..)
             | Command::Detach(..)
-            | Command::PollClient(..) => unreachable!("command was routed to the wrong dispatcher"),
+            | Command::PollClient(..)
+            | Command::AvailableStreams(..)
+            | Command::BrokerAuthorizationChanged(..) => {
+                unreachable!("command was routed to the wrong dispatcher")
+            }
         }
     }
 
@@ -833,10 +919,10 @@ impl Coordinator<'_> {
         let engine = &self.engine;
         let order_books = &self.order_books;
         let rithmic_live = &self.rithmic_live;
-        let hyperliquid_live = &self.hyperliquid_live;
+        let candle_live = &self.candle_live;
         let studies = &mut self.studies;
         let mut live_market = |input: &StudyMarketInput| {
-            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+            study_live_market_data(engine, order_books, rithmic_live, candle_live, input)
         };
         studies.execute_ready_with_live(engine, study_id, &mut live_market)
     }
@@ -848,10 +934,10 @@ impl Coordinator<'_> {
         let engine = &self.engine;
         let order_books = &self.order_books;
         let rithmic_live = &self.rithmic_live;
-        let hyperliquid_live = &self.hyperliquid_live;
+        let candle_live = &self.candle_live;
         let studies = &mut self.studies;
         let mut live_market = |input: &StudyMarketInput| {
-            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+            study_live_market_data(engine, order_books, rithmic_live, candle_live, input)
         };
         studies.execute_ready_subtree_with_live(engine, study_id, &mut live_market)
     }
@@ -863,10 +949,10 @@ impl Coordinator<'_> {
         let engine = &self.engine;
         let order_books = &self.order_books;
         let rithmic_live = &self.rithmic_live;
-        let hyperliquid_live = &self.hyperliquid_live;
+        let candle_live = &self.candle_live;
         let studies = &mut self.studies;
         let mut live_market = |input: &StudyMarketInput| {
-            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+            study_live_market_data(engine, order_books, rithmic_live, candle_live, input)
         };
         studies.execute_ready_for_market_with_live(engine, series, &mut live_market)
     }
@@ -879,10 +965,10 @@ impl Coordinator<'_> {
         let engine = &self.engine;
         let order_books = &self.order_books;
         let rithmic_live = &self.rithmic_live;
-        let hyperliquid_live = &self.hyperliquid_live;
+        let candle_live = &self.candle_live;
         let studies = &mut self.studies;
         let mut live_market = |input: &StudyMarketInput| {
-            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+            study_live_market_data(engine, order_books, rithmic_live, candle_live, input)
         };
         studies.execute_live_market_change_with_live(
             engine,
@@ -901,10 +987,10 @@ impl Coordinator<'_> {
         let engine = &self.engine;
         let order_books = &self.order_books;
         let rithmic_live = &self.rithmic_live;
-        let hyperliquid_live = &self.hyperliquid_live;
+        let candle_live = &self.candle_live;
         let studies = &mut self.studies;
         let mut live_market = |input: &StudyMarketInput| {
-            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+            study_live_market_data(engine, order_books, rithmic_live, candle_live, input)
         };
         studies.execute_history_range_change_with_live(
             engine,
@@ -926,13 +1012,13 @@ impl Coordinator<'_> {
         let engine = &self.engine;
         let order_books = &self.order_books;
         let rithmic_live = &self.rithmic_live;
-        let hyperliquid_live = &self.hyperliquid_live;
+        let candle_live = &self.candle_live;
         let studies = &mut self.studies;
         let mut live_market = |input: &StudyMarketInput| {
-            study_live_market_data(engine, order_books, rithmic_live, hyperliquid_live, input)
+            study_live_market_data(engine, order_books, rithmic_live, candle_live, input)
         };
         let mut market_ready = |input: &StudyMarketInput| {
-            study_market_series_live_ready(engine, rithmic_live, hyperliquid_live, input)
+            study_market_series_live_ready(engine, rithmic_live, candle_live, input)
         };
         studies.execute_live_non_bar_change_with_live(
             engine,
@@ -1410,7 +1496,7 @@ mod tests {
             history_retries: BTreeMap::new(),
             events: BTreeMap::new(),
             rithmic_live: BTreeMap::new(),
-            hyperliquid_live: BTreeMap::new(),
+            candle_live: BTreeMap::new(),
             order_books: BTreeMap::new(),
             hyperliquid_display_depth: BTreeMap::new(),
             hyperliquid_display_generation: 0,
@@ -1423,6 +1509,11 @@ mod tests {
             rithmic_demand: None,
             rithmic_pending_demand: None,
             rithmic_stop_pending: None,
+            tastytrade_demand: None,
+            tastytrade_authorization: None,
+            tastytrade_suspended: false,
+            tastytrade_generation_floor: 0,
+            tastytrade_recovery: None,
             hyperliquid_engaged: false,
             hyperliquid_demand_dirty: false,
             hyperliquid_stop_pending: None,
@@ -1461,6 +1552,44 @@ mod tests {
         assert!(ticket.2.is_none());
         assert!(ticket.0 > Instant::now());
         assert_eq!(coordinator.history_retries.len(), 1);
+    }
+
+    #[test]
+    fn tastytrade_logout_rejects_late_events_after_reauthorization() {
+        let mut coordinator = coordinator();
+        coordinator
+            .handle_tastytrade_realtime(super::super::tastytrade::RealtimeEvent::Connecting(1));
+        coordinator
+            .handle_tastytrade_realtime(super::super::tastytrade::RealtimeEvent::Connected(1));
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_command(Command::BrokerAuthorizationChanged(false, reply));
+        result.recv().unwrap().unwrap();
+        assert!(coordinator.tastytrade_suspended);
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_command(Command::BrokerAuthorizationChanged(true, reply));
+        result.recv().unwrap().unwrap();
+        coordinator
+            .handle_tastytrade_realtime(super::super::tastytrade::RealtimeEvent::Connected(1));
+        assert_ne!(
+            coordinator
+                .engine
+                .provider_status("tastytrade")
+                .unwrap()
+                .health,
+            ProviderHealth::Online
+        );
+        coordinator
+            .handle_tastytrade_realtime(super::super::tastytrade::RealtimeEvent::Connecting(2));
+        coordinator
+            .handle_tastytrade_realtime(super::super::tastytrade::RealtimeEvent::Connected(2));
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("tastytrade")
+                .unwrap()
+                .generation,
+            Some(ProviderGeneration(std::num::NonZeroU64::new(2).unwrap()))
+        );
     }
 
     #[test]
@@ -2618,7 +2747,7 @@ mod tests {
             &coordinator.engine,
             &coordinator.order_books,
             &coordinator.rithmic_live,
-            &coordinator.hyperliquid_live,
+            &coordinator.candle_live,
             &input,
         )
         .expect("online ready series exposes current live market state");
@@ -2648,7 +2777,7 @@ mod tests {
                     &coordinator.engine,
                     &coordinator.order_books,
                     &coordinator.rithmic_live,
-                    &coordinator.hyperliquid_live,
+                    &coordinator.candle_live,
                     &input,
                 )
                 .is_none(),
@@ -2665,7 +2794,7 @@ mod tests {
                 &coordinator.engine,
                 &coordinator.order_books,
                 &coordinator.rithmic_live,
-                &coordinator.hyperliquid_live,
+                &coordinator.candle_live,
                 &input,
             )
             .is_some(),
@@ -2678,7 +2807,7 @@ mod tests {
                 &coordinator.engine,
                 &coordinator.order_books,
                 &coordinator.rithmic_live,
-                &coordinator.hyperliquid_live,
+                &coordinator.candle_live,
                 &input,
             )
             .is_none(),
@@ -3065,16 +3194,16 @@ mod tests {
             )
             .expect("demand installs");
         let provider_generation = ProviderGeneration(nonzero(1));
-        let mut live = HyperliquidLiveHandoff::new(
+        let mut live = CandleLiveHandoff::new(
             selected_series.clone(),
             provider_generation,
             "BTC".to_string(),
             "1m".to_string(),
         );
         live.history_state = LiveHistoryState::Ready;
-        coordinator.hyperliquid_live.insert(selected_series, live);
+        coordinator.candle_live.insert(selected_series, live);
 
-        coordinator.hyperliquid_online(1);
+        coordinator.candle_provider_online("hyperliquid", 1);
 
         assert!(matches!(
             coordinator
@@ -3675,7 +3804,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_restore_recreates_hyperliquid_live_demand_across_idle_stop_overlap() {
+    fn foreground_restore_recreates_candle_live_demand_across_idle_stop_overlap() {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
         let selected = hyperliquid_series();
@@ -3709,7 +3838,7 @@ mod tests {
         coordinator
             .ensure_realtime(&selected)
             .expect("initial Hyperliquid live handoff exists");
-        assert!(coordinator.hyperliquid_live.contains_key(&selected));
+        assert!(coordinator.candle_live.contains_key(&selected));
 
         let (reply, result) = std::sync::mpsc::sync_channel(1);
         coordinator.handle_resource_class(
@@ -3723,7 +3852,7 @@ mod tests {
             .expect("background reply arrives")
             .expect("consumer backgrounds");
         assert!(!coordinator.engine.has_subscription(&selected));
-        assert!(coordinator.hyperliquid_live.is_empty());
+        assert!(coordinator.candle_live.is_empty());
 
         let provider_generation = ProviderGeneration(nonzero(1));
         coordinator.hyperliquid_stop_pending = Some(provider_generation);
@@ -3740,7 +3869,7 @@ mod tests {
             .expect("consumer returns to foreground");
         assert!(coordinator.engine.has_subscription(&selected));
         let live = coordinator
-            .hyperliquid_live
+            .candle_live
             .get(&selected)
             .expect("Hyperliquid live handoff is recreated");
         assert_eq!(live.history_state, LiveHistoryState::Ready);
@@ -3766,13 +3895,13 @@ mod tests {
         );
         assert!(
             coordinator
-                .hyperliquid_live
+                .candle_live
                 .get(&selected)
                 .is_some_and(|live| live.connected),
             "the accepted heartbeat marks the restored handoff connected"
         );
         assert!(
-            coordinator.hyperliquid_live.contains_key(&selected),
+            coordinator.candle_live.contains_key(&selected),
             "restored Hyperliquid demand remains live without requiring Disconnected"
         );
     }

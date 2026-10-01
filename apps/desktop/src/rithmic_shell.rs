@@ -91,6 +91,17 @@ impl Default for RithmicSymbolBrowser {
 }
 
 impl RithmicSymbolBrowser {
+    pub(crate) fn change_catalog(&mut self) {
+        self.pending_search_id = None;
+        self.pending_search_query = None;
+        self.retained_search_query = None;
+        self.completed_search_id = None;
+        self.results.clear();
+        self.pending_selection = None;
+        self.selected = None;
+        self.allow_empty_query = true;
+    }
+
     pub(crate) fn rithmic_catalog_awaiting_search(request_id: NonZeroUsize, query: &str) -> Self {
         Self {
             maximum_results: MAXIMUM_RITHMIC_SYMBOL_RESULTS,

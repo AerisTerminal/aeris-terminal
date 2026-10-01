@@ -71,7 +71,9 @@ pub(crate) fn shared_market_runtime() -> Result<MarketService, String> {
 }
 
 pub(super) fn chart_streams(depth_visible: bool) -> StreamRequirements {
-    let streams = StreamRequirements::BARS.with(MarketStream::Trades);
+    let streams = StreamRequirements::BARS
+        .with(MarketStream::Trades)
+        .with(MarketStream::Quotes);
     if depth_visible {
         streams.with(MarketStream::Depth)
     } else {
@@ -577,6 +579,7 @@ fn provider_display_name(provider: &str) -> &str {
     match provider {
         "rithmic" => "Rithmic",
         "hyperliquid" => "Hyperliquid",
+        "tastytrade" => "tastytrade",
         _ => provider,
     }
 }
@@ -2292,6 +2295,7 @@ mod tests {
             provider_generation: 3,
             revision,
             source_watermark: revision,
+            rewrite_generation: 0,
             price_scale: 2,
             quantity_scale: 0,
             trades: Arc::from([]),

@@ -311,6 +311,7 @@ fn process_pending_depth_visibility(
         market,
         client_id,
         &mut record.endpoint,
+        &record.product.provider,
         record.startup_resolution.is_some(),
         visible,
     ) {

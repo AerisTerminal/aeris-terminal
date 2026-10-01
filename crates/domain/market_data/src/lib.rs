@@ -3,8 +3,12 @@
 use core::fmt;
 use std::error::Error;
 
+mod candle;
 mod chart_interval;
 mod contracts;
+pub use candle::merge_live_candle;
+mod decimal;
+pub use decimal::{expand_decimal_exponent, parse_decimal_to_fixed};
 mod order_book;
 
 pub use chart_interval::{

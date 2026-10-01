@@ -9,10 +9,10 @@ fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).take(2).collect();
     let action = match arguments.as_slice() {
         [] => "connect",
-        [action] if matches!(action.as_str(), "disconnect" | "verify") => action.as_str(),
+        [action] if matches!(action.as_str(), "disconnect") => action.as_str(),
         _ => {
             eprintln!(
-                "Usage: cargo run -p aeris_market_runtime --example broker_authorization --locked -- [disconnect|verify]"
+                "Usage: cargo run -p aeris_market_runtime --example broker_authorization --locked -- [disconnect]"
             );
             return ExitCode::FAILURE;
         }
@@ -24,13 +24,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = match action {
-        "disconnect" => market.disconnect_provider("tastytrade"),
-        "verify" => market.verify_provider_feed("tastytrade"),
-        _ => {
-            println!("Complete tastytrade authorization in your system browser when it opens.");
-            market.connect_provider("tastytrade")
-        }
+    let result = if action == "disconnect" {
+        market.disconnect_provider("tastytrade")
+    } else {
+        println!("Complete tastytrade authorization in your system browser when it opens.");
+        market.connect_provider("tastytrade")
     };
     let shutdown = market.shutdown(Duration::from_secs(5));
     let mut succeeded = true;

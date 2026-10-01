@@ -25,13 +25,11 @@ use aeris_contracts::{
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState,
     SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
 };
-use aeris_hyperliquid_market_adapter::{
-    HyperliquidLiveCandle, hyperliquid_interval_for_period, merge_live_candle,
-};
+use aeris_hyperliquid_market_adapter::{HyperliquidLiveCandle, hyperliquid_interval_for_period};
 use aeris_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
     MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
-    TopOfBookQuote,
+    TopOfBookQuote, merge_live_candle,
 };
 use aeris_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
@@ -167,6 +165,8 @@ enum Command {
     /// the top of the next coordinator iteration.
     ProviderWake,
     Status(Reply<MarketServiceStatus>),
+    BrokerAuthorizationChanged(bool, Reply<()>),
+    AvailableStreams(String, StreamRequirements, Reply<StreamRequirements>),
     Attach(ClientId, Reply<()>),
     Detach(ClientId, Reply<()>),
     Register(ConsumerIdentity, Reply<()>),
@@ -231,12 +231,12 @@ enum Command {
 #[derive(Clone)]
 pub(crate) struct ProviderCoordinatorWake {
     commands: SyncSender<Command>,
-    // Two fixed provider slots: overflow is observable even when every queue is full.
-    overflow: Arc<[AtomicU64; 2]>,
+    // Three fixed provider slots: overflow is observable even when every queue is full.
+    overflow: Arc<[AtomicU64; 3]>,
     pending: Arc<AtomicBool>,
-    catalog_overflow: Arc<[AtomicBool; 2]>,
+    catalog_overflow: Arc<[AtomicBool; 3]>,
     drain_cursor: Arc<std::sync::atomic::AtomicUsize>,
-    pending_overflow: Arc<[AtomicU64; 2]>,
+    pending_overflow: Arc<[AtomicU64; 3]>,
 }
 
 impl ProviderCoordinatorWake {
@@ -312,6 +312,7 @@ impl<T> CatalogPublisher<T> {
     }
 }
 
+#[derive(Clone)]
 struct HistoryRequest {
     series: BarSeriesKey,
     provider_generation: ProviderGeneration,
@@ -360,7 +361,7 @@ struct HistorySnapshot {
 }
 
 /// Everything one Hyperliquid series needs to close its history/live seam.
-struct HyperliquidHandoffSeed<'a> {
+struct CandleHandoffSeed<'a> {
     price_scale: u8,
     quantity_scale: u8,
     /// Periods the provider closed, already installed as canonical history.
@@ -440,6 +441,8 @@ struct ProviderOrderBook {
     last_trade_source_sequence: u64,
     next_trade_ingestion_ordinal: u64,
     trade_tape_revision: u64,
+    trade_tape_rewrite_generation: u64,
+    indexed_trade_ordinals: BTreeMap<String, u64>,
     trade_tape_dirty: bool,
     retention_clock_unix_nanos: i64,
 }
@@ -453,13 +456,13 @@ enum LiveHistoryState {
     Reseeding,
 }
 
-/// Live candle handoff for one Hyperliquid series.
+/// Shared canonical handoff for a series delivered as whole provider candles.
 ///
 /// Unlike the trade-built Rithmic handoff, provider candles arrive whole:
 /// history seeds closed bars plus the open period, and live replacements
 /// merge by candle-open timestamp with exactly one forming candle. Sequence
 /// ingestion sequence numbers stay runtime-owned so a redelivered update can never look new.
-struct HyperliquidLiveHandoff {
+struct CandleLiveHandoff {
     series: BarSeriesKey,
     generation: ProviderGeneration,
     wire_coin: String,
@@ -469,7 +472,7 @@ struct HyperliquidLiveHandoff {
     bars: Vec<MarketBar>,
     forming: Option<MarketBar>,
     /// Live updates that arrived before history seeded the seam, bounded.
-    buffered: VecDeque<HyperliquidLiveCandle>,
+    buffered: VecDeque<MarketBar>,
     pending_publications: VecDeque<MarketBar>,
     connected: bool,
     history_state: LiveHistoryState,
@@ -534,7 +537,7 @@ struct LiveHyperliquidHistory(aeris_hyperliquid_market_adapter::HyperliquidHttpC
 
 struct ProviderRuntimeSpec {
     provider_id: &'static str,
-    history: Box<dyn HistorySource>,
+    history: Option<Box<dyn HistorySource>>,
     realtime: ProviderRealtimeSpec,
 }
 
@@ -543,10 +546,17 @@ struct ProviderRealtimeSpec {
 }
 
 impl ProviderRuntimeSpec {
+    fn tastytrade() -> Self {
+        Self {
+            provider_id: "tastytrade",
+            history: None,
+            realtime: ProviderRealtimeSpec { enabled: true },
+        }
+    }
     fn rithmic(history: Box<dyn HistorySource>, enabled: bool) -> Self {
         Self {
             provider_id: "rithmic",
-            history,
+            history: Some(history),
             realtime: ProviderRealtimeSpec { enabled },
         }
     }
@@ -554,7 +564,7 @@ impl ProviderRuntimeSpec {
     fn hyperliquid(history: Box<dyn HistorySource>, enabled: bool) -> Self {
         Self {
             provider_id: "hyperliquid",
-            history,
+            history: Some(history),
             realtime: ProviderRealtimeSpec { enabled },
         }
     }
@@ -617,6 +627,10 @@ struct ProviderRealtimeChannels {
 }
 
 enum ProviderRealtimeChannelSet {
+    Tastytrade {
+        controls: SyncSender<tastytrade::RealtimeControl>,
+        events: Receiver<tastytrade::RealtimeEvent>,
+    },
     Rithmic {
         controls: SyncSender<RithmicRealtimeControl>,
         events: Receiver<RithmicRealtimeEvent>,
@@ -635,6 +649,10 @@ struct ProviderCatalogChannels {
 }
 
 enum ProviderCatalogChannelSet {
+    Tastytrade {
+        controls: SyncSender<tastytrade::CatalogControl>,
+        events: Receiver<tastytrade::CatalogEvent>,
+    },
     Rithmic {
         controls: SyncSender<RithmicCatalogControl>,
         events: Receiver<RithmicCatalogEvent>,
@@ -715,6 +733,10 @@ struct ProviderDispatchRecord<'a> {
 }
 
 enum ProviderRealtimeDispatch<'a> {
+    Tastytrade {
+        controls: &'a SyncSender<tastytrade::RealtimeControl>,
+        events: &'a Receiver<tastytrade::RealtimeEvent>,
+    },
     Rithmic {
         controls: &'a SyncSender<RithmicRealtimeControl>,
         events: &'a Receiver<RithmicRealtimeEvent>,
@@ -732,14 +754,14 @@ impl<'a> ProviderRealtimeDispatch<'a> {
     fn rithmic_controls(&self) -> Option<&'a SyncSender<RithmicRealtimeControl>> {
         match self {
             Self::Rithmic { controls, .. } => Some(controls),
-            Self::Hyperliquid { .. } | Self::Disabled => None,
+            Self::Tastytrade { .. } | Self::Hyperliquid { .. } | Self::Disabled => None,
         }
     }
 
     fn hyperliquid_controls(&self) -> Option<&'a SyncSender<HyperliquidRealtimeControl>> {
         match self {
             Self::Hyperliquid { controls, .. } => Some(controls),
-            Self::Rithmic { .. } | Self::Disabled => None,
+            Self::Tastytrade { .. } | Self::Rithmic { .. } | Self::Disabled => None,
         }
     }
 
@@ -750,12 +772,16 @@ impl<'a> ProviderRealtimeDispatch<'a> {
             Self::Hyperliquid {
                 display_controls, ..
             } => Some(display_controls),
-            Self::Rithmic { .. } | Self::Disabled => None,
+            Self::Tastytrade { .. } | Self::Rithmic { .. } | Self::Disabled => None,
         }
     }
 }
 
 enum ProviderCatalogDispatch<'a> {
+    Tastytrade {
+        controls: &'a SyncSender<tastytrade::CatalogControl>,
+        events: &'a Receiver<tastytrade::CatalogEvent>,
+    },
     Rithmic {
         controls: &'a SyncSender<RithmicCatalogControl>,
         events: &'a Receiver<RithmicCatalogEvent>,
@@ -773,6 +799,8 @@ enum ProviderCatalogCommand {
 }
 
 enum ProviderRuntimeEvent {
+    TastytradeRealtime(tastytrade::RealtimeEvent),
+    TastytradeCatalog(tastytrade::CatalogEvent),
     RithmicRealtime(RithmicRealtimeEvent),
     RithmicCatalog(RithmicCatalogEvent),
     HyperliquidRealtime(HyperliquidRealtimeEvent),
@@ -782,6 +810,7 @@ enum ProviderRuntimeEvent {
 
 mod broker_authorization;
 mod runtime;
+mod tastytrade;
 use runtime::join_runtime_workers;
 
 mod coordinator;
@@ -855,6 +884,22 @@ fn configured_engine() -> Result<MarketEngine, String> {
                         .with(MarketStream::Depth),
                 },
                 reconnect_delay: PROVIDER_RECONNECT_DELAY,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    engine
+        .register_provider(
+            "tastytrade".into(),
+            ProviderConfig {
+                account_id: tastytrade::ENTITLEMENT.into(),
+                capabilities: ProviderCapabilities {
+                    historical_bars: true,
+                    realtime_bars: true,
+                    streams: StreamRequirements::BARS
+                        .with(MarketStream::Trades)
+                        .with(MarketStream::Quotes),
+                },
+                reconnect_delay: Duration::from_secs(3),
             },
         )
         .map_err(|error| error.to_string())?;

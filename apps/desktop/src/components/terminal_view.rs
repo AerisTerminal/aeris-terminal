@@ -11,6 +11,7 @@ fn active_header_state(
     HeaderState {
         theme: *theme,
         provider: workspace.provider,
+        symbol_provider: workspace.symbol_provider,
         instrument_label: terminal_instrument_label(workspace),
         series_label: series_selector_label(workspace.selected_interval()),
         chart_type: workspace.chart_type(cx),
@@ -103,6 +104,15 @@ fn due_economic_event_triggers(
 }
 
 impl TerminalApp {
+    fn connect_tastytrade(
+        &mut self,
+        _: &ConnectTastytrade,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_command_palette(&OpenCommandPalette, window, cx);
+        self.run_broker_connection_command(CommandId::ConnectBroker, window, cx);
+    }
     fn open_command_palette(
         &mut self,
         _: &OpenCommandPalette,
@@ -134,10 +144,8 @@ impl TerminalApp {
     ) {
         let surface = self.active_surface();
         match command {
-            CommandId::ConnectBroker
-            | CommandId::DisconnectBroker
-            | CommandId::VerifyBrokerFeed => {
-                self.run_broker_connection_command(command, cx);
+            CommandId::ConnectBroker | CommandId::DisconnectBroker => {
+                self.run_broker_connection_command(command, window, cx);
             }
             CommandId::OpenPalette => self.open_command_palette(&OpenCommandPalette, window, cx),
             CommandId::ToggleContext => surface.update(cx, WorkspaceSurface::toggle_context_panel),
@@ -247,13 +255,18 @@ impl TerminalApp {
         self.execute_registered_command(command, window, cx);
         if !matches!(
             command,
-            CommandId::ConnectBroker | CommandId::DisconnectBroker | CommandId::VerifyBrokerFeed
+            CommandId::ConnectBroker | CommandId::DisconnectBroker
         ) {
             self.close_command_palette(window, cx);
         }
     }
 
-    fn run_broker_connection_command(&mut self, command: CommandId, cx: &mut Context<Self>) {
+    fn run_broker_connection_command(
+        &mut self,
+        command: CommandId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.broker_connection_task.is_some() {
             self.command_palette_message = Some("A broker connection operation is already running. Complete or close the browser login and wait for its result.".to_string());
             cx.notify();
@@ -261,26 +274,41 @@ impl TerminalApp {
         }
         self.command_palette_message = Some(match command {
             CommandId::DisconnectBroker => "Removing tastytrade connection…",
-            CommandId::VerifyBrokerFeed => "Checking the current ES contract and DXLink feed. This takes about 30 seconds…",
             _ => "Opening tastytrade authorization. Complete login in your browser; Aeris will check your market-data access.",
         }.to_string());
         let work = cx.background_executor().spawn(async move {
             let market = engine_market_worker::shared_market_runtime()?;
             match command {
                 CommandId::DisconnectBroker => market.disconnect_provider("tastytrade"),
-                CommandId::VerifyBrokerFeed => market.verify_provider_feed("tastytrade"),
                 _ => market.connect_provider("tastytrade"),
             }
         });
-        self.broker_connection_task = Some(cx.spawn(async move |terminal, cx| {
+        self.broker_connection_task = Some(cx.spawn_in(window, async move |terminal, cx| {
             let result = work.await;
-            let _ = terminal.update(cx, |terminal, cx| {
-                terminal.command_palette_message = Some(match result {
-                    Ok(message) => message,
-                    Err(error) => error,
-                });
-                terminal.broker_connection_task = None;
-                cx.notify();
+            let _ = cx.update(|window, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    if result.is_ok() && command == CommandId::ConnectBroker {
+                        terminal.active_surface().update(cx, |surface, surface_cx| {
+                            surface.choose_symbol_provider(
+                                TerminalProvider::Tastytrade,
+                                window,
+                                surface_cx,
+                            );
+                            surface.open_chrome_overlay(
+                                ChromeOverlay::Instrument,
+                                window,
+                                surface_cx,
+                            );
+                        });
+                        terminal.close_command_palette(window, cx);
+                    }
+                    terminal.command_palette_message = Some(match result {
+                        Ok(message) => message,
+                        Err(error) => error,
+                    });
+                    terminal.broker_connection_task = None;
+                    cx.notify();
+                })
             });
         }));
         cx.notify();
@@ -541,6 +569,7 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::trading_flatten_account))
             .on_action(cx.listener(Self::trading_kill_switch))
             .on_action(cx.listener(Self::open_command_palette))
+            .on_action(cx.listener(Self::connect_tastytrade))
             .bg(gpui_color(self.theme.colors.surface))
             .text_color(gpui_color(self.theme.colors.text_primary))
             .font_family(aeris_design_system::platform_font_family())
@@ -874,18 +903,14 @@ fn workspace_tab_content(
             std::cmp::Ordering::Greater => theme.colors.text_positive,
             std::cmp::Ordering::Equal => theme.colors.text_secondary,
         });
-    let exchange = match surface.provider {
-        TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
-        TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
-    };
     let content = div()
         .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .gap_1()
-        .child(exchange_mark(
-            exchange,
+        .child(symbol_menu::provider_exchange_mark(
+            surface.provider,
             px(WORKSPACE_TAB_EXCHANGE_GLYPH),
             false,
             &theme.colors,

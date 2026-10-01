@@ -170,6 +170,7 @@ fn trade_tape_snapshot(
         provider_generation: order_book.trade_session_generation,
         revision: order_book.trade_tape_revision,
         source_watermark: order_book.last_trade_source_sequence,
+        rewrite_generation: order_book.trade_tape_rewrite_generation,
         price_scale: u8::try_from(order_book.instrument.price_scale).ok()?,
         quantity_scale: u8::try_from(order_book.instrument.quantity_scale).ok()?,
         trades,
@@ -380,7 +381,7 @@ impl Coordinator<'_> {
     ) -> SeriesLoadState {
         if self.rithmic_live.get(series).is_some_and(|live| {
             live.connected && live.history_state == super::LiveHistoryState::Ready
-        }) || self.hyperliquid_live.get(series).is_some_and(|live| {
+        }) || self.candle_live.get(series).is_some_and(|live| {
             live.connected && live.history_state == super::LiveHistoryState::Ready
         }) {
             SeriesLoadState::Live

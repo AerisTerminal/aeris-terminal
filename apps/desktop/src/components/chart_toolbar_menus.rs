@@ -200,6 +200,7 @@ pub(super) fn chrome_overlay_content(
             chrome_menu_extent(viewport, chrome_height),
             &InstrumentSelectorState {
                 label: terminal_instrument_label(app_state),
+                message: app_state.symbol_message.clone(),
                 instruments: app_state.instrument_entries(cx),
                 input: app_state.symbol_input.clone(),
                 availability: InstrumentSelectorAvailability {
@@ -207,6 +208,7 @@ pub(super) fn chrome_overlay_content(
                     enabled: true,
                 },
                 provider: app_state.provider,
+                menu_provider: app_state.symbol_provider,
                 menu: InstrumentSelectorMenu {
                     keyboard_selection: app_state.chrome_selection,
                     keyboard_active: app_state.menu_state.chrome_list_keyboard,

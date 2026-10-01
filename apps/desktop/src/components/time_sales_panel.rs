@@ -67,6 +67,10 @@ pub(super) fn time_sales_panel(
             [symbol],
             theme,
         ))
+        .children(
+            tape.filter(|snapshot| snapshot.provider_id == "tastytrade")
+                .map(|snapshot| tick_history_header(snapshot, theme)),
+        )
         .child(
             div()
                 .p_1()
@@ -119,6 +123,35 @@ pub(super) fn time_sales_panel(
         )
 }
 
+fn tick_history_header(
+    snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
+    theme: &AerisTheme,
+) -> Div {
+    div()
+        .px_2()
+        .py_1()
+        .text_color(gpui_color(theme.colors.text_secondary))
+        .child(tick_history_label(snapshot))
+}
+
+fn tick_history_label(snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot) -> String {
+    let oldest = snapshot
+        .trades
+        .iter()
+        .filter_map(|trade| trade.trade.metadata.timestamps.exchange_unix_nanos)
+        .min();
+    oldest.map_or_else(
+        || "Waiting for available tick history".to_string(),
+        |time| {
+            let time = chrono::DateTime::from_timestamp(time.div_euclid(1_000_000_000), 0)
+                .map_or_else(String::new, |time| {
+                    time.format("%m-%d %H:%M:%S UTC").to_string()
+                });
+            format!("{} ticks · from {time}", snapshot.trades.len())
+        },
+    )
+}
+
 fn filtered_time_sales_rows<'a>(
     tape: Option<&'a aeris_market_runtime::MarketTradeTapeSnapshot>,
     product: Option<&InstallProviderInstrument>,
@@ -130,7 +163,8 @@ fn filtered_time_sales_rows<'a>(
         .and_then(|frame| frame.best_bid.as_ref().zip(frame.best_ask.as_ref()))
         .map(|(bid, ask)| i128::from(bid.price) + i128::from(ask.price));
     let increment = product.and_then(|product| product.price_increment);
-    tape.into_iter()
+    let mut rows: Vec<_> = tape
+        .into_iter()
         .flat_map(|snapshot| snapshot.trades.iter().rev())
         .filter(|retained| match filter.side {
             super::TimeSalesSideFilter::All => true,
@@ -161,8 +195,27 @@ fn filtered_time_sales_rows<'a>(
             let doubled_distance = (i128::from(retained.trade.price) * 2 - center).abs();
             doubled_distance <= i128::from(range) * i128::from(increment) * 2
         })
-        .take(MAXIMUM_VISIBLE_TRADES)
-        .collect()
+        .collect();
+    // A covering history reply can arrive after live trades. Display exchange
+    // time, preserving ingestion ordinals as local delivery evidence only.
+    let key = |retained: &&aeris_market_runtime::RetainedMarketTrade| {
+        std::cmp::Reverse((
+            retained
+                .trade
+                .metadata
+                .timestamps
+                .exchange_unix_nanos
+                .or(retained.trade.metadata.timestamps.provider_unix_nanos)
+                .unwrap_or(retained.trade.metadata.timestamps.received_unix_nanos),
+            retained.ingestion_ordinal,
+        ))
+    };
+    if rows.len() > MAXIMUM_VISIBLE_TRADES {
+        rows.select_nth_unstable_by_key(MAXIMUM_VISIBLE_TRADES, key);
+    }
+    rows.truncate(MAXIMUM_VISIBLE_TRADES);
+    rows.sort_unstable_by_key(key);
+    rows
 }
 
 /// Fits an eight-decimal size such as `12.34567891` beside the price column.

@@ -98,6 +98,7 @@ fn trade_tape_slot_keeps_only_the_latest_complete_publication() {
         provider_generation: 7,
         revision,
         source_watermark: revision,
+        rewrite_generation: 0,
         price_scale: 2,
         quantity_scale: 0,
         trades: Arc::from([]),

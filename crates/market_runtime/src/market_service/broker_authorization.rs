@@ -1,10 +1,8 @@
 //! Runtime-owned broker authorization, separate from Aeris account sign-in.
 
-use super::{MarketService, Reply};
+use super::{Command, MarketService, Reply, tastytrade::BrokerApi};
 use aeris_platform_runtime::{CredentialVault, NativeCredentialVault, open_system_browser};
-use aeris_tastytrade_market_adapter::{
-    AuthorizationPhase, ConnectionCapability, TastytradeBrokerClient,
-};
+use aeris_tastytrade_market_adapter::{AuthorizationPhase, ConnectionCapability};
 use std::{
     sync::{
         Arc,
@@ -26,7 +24,6 @@ const WORKER_POLL: Duration = Duration::from_millis(100);
 enum Operation {
     Connect,
     Disconnect,
-    VerifyFeed,
 }
 struct BrokerCommand {
     operation: Operation,
@@ -39,14 +36,17 @@ pub(super) struct BrokerAuthorization {
 }
 
 impl BrokerAuthorization {
-    pub(super) fn start(stop: &Arc<AtomicBool>) -> Result<(Self, thread::JoinHandle<()>), String> {
+    pub(super) fn start(
+        stop: &Arc<AtomicBool>,
+        api: Arc<BrokerApi>,
+    ) -> Result<(Self, thread::JoinHandle<()>), String> {
         let (commands, requests) = mpsc::sync_channel(1);
         let busy = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(stop);
         let worker_busy = Arc::clone(&busy);
         let worker = thread::Builder::new()
             .name("broker_authorization".to_string())
-            .spawn(move || run(&requests, &worker_stop, &worker_busy))
+            .spawn(move || run(&requests, &worker_stop, &worker_busy, &api))
             .map_err(|_| "Broker authorization worker could not start".to_string())?;
         Ok((Self { commands, busy }, worker))
     }
@@ -88,7 +88,9 @@ impl MarketService {
         }
         self.runtime
             .broker_authorization
-            .request(Operation::Connect, &self.runtime.shutdown)
+            .request(Operation::Connect, &self.runtime.shutdown)?;
+        self.request(|reply| Ok(Command::BrokerAuthorizationChanged(true, reply)))?;
+        Ok("Tastytrade connected. Select an asset from the symbol menu.".into())
     }
 
     /// Deletes the hosted broker connection and its protected desktop capability.
@@ -100,28 +102,19 @@ impl MarketService {
         if provider != "tastytrade" {
             return Err("Provider does not support browser authorization".to_string());
         }
+        self.request(|reply| Ok(Command::BrokerAuthorizationChanged(false, reply)))?;
         self.runtime
             .broker_authorization
             .request(Operation::Disconnect, &self.runtime.shutdown)
     }
-
-    /// Checks an existing authorization against one bounded public feed session.
-    /// Call from a background worker. Results contain no credentials or raw events.
-    ///
-    /// # Errors
-    /// Rejects unsupported providers, missing login, overload, or feed failures.
-    pub fn verify_provider_feed(&self, provider: &str) -> Result<String, String> {
-        if provider != "tastytrade" {
-            return Err("Provider does not support this feed verification".to_string());
-        }
-        self.runtime
-            .broker_authorization
-            .request(Operation::VerifyFeed, &self.runtime.shutdown)
-    }
 }
 
-fn run(requests: &Receiver<BrokerCommand>, stop: &Arc<AtomicBool>, busy: &AtomicBool) {
-    let mut client = TastytradeBrokerClient::default();
+fn run(
+    requests: &Receiver<BrokerCommand>,
+    stop: &Arc<AtomicBool>,
+    busy: &AtomicBool,
+    api: &BrokerApi,
+) {
     while !stop.load(Ordering::Acquire) {
         let command = match requests.recv_timeout(WORKER_POLL) {
             Ok(command) => command,
@@ -132,9 +125,8 @@ fn run(requests: &Receiver<BrokerCommand>, stop: &Arc<AtomicBool>, busy: &Atomic
         let result = NativeCredentialVault::new(VAULT_SERVICE)
             .map_err(|_| "Protected broker credential storage is unavailable".to_string())
             .and_then(|vault| match operation {
-                Operation::Disconnect => disconnect(&mut client, &vault, stop),
-                Operation::Connect => connect(&mut client, &vault, stop),
-                Operation::VerifyFeed => verify_feed(&mut client, &vault, stop),
+                Operation::Disconnect => disconnect(api, &vault, stop),
+                Operation::Connect => connect(api, &vault, stop),
             });
         busy.store(false, Ordering::Release);
         // A dropped request cannot change ownership or start another transaction.
@@ -142,6 +134,12 @@ fn run(requests: &Receiver<BrokerCommand>, stop: &Arc<AtomicBool>, busy: &Atomic
             break;
         }
     }
+}
+
+pub(super) fn load_connection() -> Result<ConnectionCapability, String> {
+    let vault = NativeCredentialVault::new(VAULT_SERVICE)
+        .map_err(|_| "Protected broker credential storage is unavailable".to_string())?;
+    load(&vault)?.ok_or_else(|| "Connect tastytrade to access market data".to_string())
 }
 
 fn load(vault: &NativeCredentialVault) -> Result<Option<ConnectionCapability>, String> {
@@ -153,26 +151,26 @@ fn load(vault: &NativeCredentialVault) -> Result<Option<ConnectionCapability>, S
 }
 
 fn connect(
-    client: &mut TastytradeBrokerClient,
+    api: &BrokerApi,
     vault: &NativeCredentialVault,
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     if let Some(capability) = load(vault)? {
-        let status = client.status(&capability, stop)?;
+        let status = api.with_client(stop, |client| client.status(&capability, stop))?;
         if status.phase == AuthorizationPhase::Ready {
-            return verify_entitlement(client, &capability, stop);
+            return verify_entitlement(api, &capability, stop);
         }
         // A prior pending transaction cannot be resumed safely without its browser
         // URL. Delete it before creating another transaction.
-        client.disconnect(&capability, stop)?;
+        api.with_client(stop, |client| client.disconnect(&capability, stop))?;
         delete_local(vault)?;
     }
-    let pending = client.begin(stop)?;
+    let pending = api.with_client(stop, |client| client.begin(stop))?;
     if vault
         .store(VAULT_KEY, &pending.capability.vault_bytes()?)
         .is_err()
     {
-        client.disconnect(&pending.capability, stop)?;
+        api.with_client(stop, |client| client.disconnect(&pending.capability, stop))?;
         return Err("Broker connection could not be saved in protected storage".to_string());
     }
     if open_system_browser(&pending.authorization_url).is_err() {
@@ -187,10 +185,13 @@ fn connect(
         if Instant::now() >= deadline || unix_seconds()? >= pending.expires_at {
             return Err("Tastytrade login expired; disconnect and connect again".to_string());
         }
-        match client.status(&pending.capability, stop)?.phase {
+        match api
+            .with_client(stop, |client| client.status(&pending.capability, stop))?
+            .phase
+        {
             AuthorizationPhase::Pending | AuthorizationPhase::Exchanging => {}
             AuthorizationPhase::Ready => {
-                return verify_entitlement(client, &pending.capability, stop);
+                return verify_entitlement(api, &pending.capability, stop);
             }
             AuthorizationPhase::Failed => {
                 return Err("Tastytrade authorization failed; disconnect and retry".to_string());
@@ -200,85 +201,28 @@ fn connect(
 }
 
 fn verify_entitlement(
-    client: &mut TastytradeBrokerClient,
+    api: &BrokerApi,
     capability: &ConnectionCapability,
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
-    let _token = client.quote_token(capability, stop)?;
+    let _token = api.with_client(stop, |client| client.quote_token(capability, stop))?;
     // This checks the actual API entitlement, not the brokerage website display.
     // No feed/order-book claim is made before the DXLink live path is verified.
-    Ok("Tastytrade authorization complete. Streaming token issued. Live charts are not connected yet.".to_string())
+    Ok("Tastytrade connected. Open the symbol menu and select a tastytrade asset.".to_string())
 }
 
 fn disconnect(
-    client: &mut TastytradeBrokerClient,
+    api: &BrokerApi,
     vault: &NativeCredentialVault,
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     if let Some(capability) = load(vault)? {
         // Keep the local proof until server deletion succeeds, including after an
         // uncertain response, so deletion can be retried without orphaning tokens.
-        client.disconnect(&capability, stop)?;
+        api.with_client(stop, |client| client.disconnect(&capability, stop))?;
         delete_local(vault)?;
     }
     Ok("Tastytrade connection removed. You can revoke Aeris access in tastytrade's authorized applications.".to_string())
-}
-
-fn verify_feed(
-    client: &mut TastytradeBrokerClient,
-    vault: &NativeCredentialVault,
-    stop: &Arc<AtomicBool>,
-) -> Result<String, String> {
-    let capability = load(vault)?.ok_or("Connect tastytrade before checking the feed")?;
-    let instruments = client.futures_for_product(&capability, "ES", stop)?;
-    let instrument = instruments
-        .iter()
-        .filter(|item| item.active && item.exchange == "CME")
-        .min_by_key(|item| (!item.active_month, &item.expiration_date))
-        .ok_or("Tastytrade did not return an active CME ES contract")?;
-    // Respect the hosted connection's two-second request cooldown; no retry storm.
-    wait_until(Instant::now() + POLL_INTERVAL, stop)?;
-    let token = client.quote_token(&capability, stop)?;
-    let report = aeris_tastytrade_market_adapter::verify_live_feed(
-        &token,
-        &instrument.streamer_symbol,
-        stop,
-    )?;
-    let observed_now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "System clock is invalid")?;
-    let observed_ms =
-        u64::try_from(observed_now.as_millis()).map_err(|_| "System clock overflowed")?;
-    let quote_age = timestamp_age(report.newest_quote_time_ms, observed_ms);
-    let trade_age = timestamp_age(report.newest_trade_time_ms, observed_ms);
-    Ok(format!(
-        "{} feed check: {} usable quote updates, {} candle rows, {} new trades ({} buy, {} sell, {} unknown side). TimeAndSale fields: {}. Latest quote age: {quote_age}. Latest trade age: {trade_age}. Live charts remain disconnected.",
-        instrument.symbol,
-        report.usable_quotes,
-        report.usable_candles,
-        report.new_trades,
-        report.buy_trades,
-        report.sell_trades,
-        report.unknown_side_trades,
-        if report.time_and_sale_fields {
-            "confirmed"
-        } else {
-            "unavailable"
-        }
-    ))
-}
-
-fn timestamp_age(provider_ms: Option<u64>, observed_ms: u64) -> String {
-    match provider_ms {
-        Some(time) if time <= observed_ms => {
-            format!("{} ms against this machine's clock", observed_ms - time)
-        }
-        Some(time) => format!(
-            "provider timestamp is {} ms ahead of this machine's clock",
-            time - observed_ms
-        ),
-        None => "provider timestamp unavailable".to_string(),
-    }
 }
 
 fn delete_local(vault: &NativeCredentialVault) -> Result<(), String> {
@@ -335,18 +279,5 @@ mod tests {
     #[test]
     fn pending_browser_wait_observes_shutdown() {
         assert!(wait_until(Instant::now() + POLL_INTERVAL, &AtomicBool::new(true)).is_err());
-    }
-
-    #[test]
-    fn feed_age_keeps_missing_and_future_timestamps_explicit() {
-        assert_eq!(
-            timestamp_age(Some(1000), 1200),
-            "200 ms against this machine's clock"
-        );
-        assert_eq!(
-            timestamp_age(Some(1200), 1000),
-            "provider timestamp is 200 ms ahead of this machine's clock"
-        );
-        assert_eq!(timestamp_age(None, 1000), "provider timestamp unavailable");
     }
 }

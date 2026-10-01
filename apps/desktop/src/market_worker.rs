@@ -3001,6 +3001,7 @@ mod tests {
             provider_generation: 4,
             revision,
             source_watermark: revision,
+            rewrite_generation: 0,
             price_scale: 2,
             quantity_scale: 0,
             trades: Arc::from([]),

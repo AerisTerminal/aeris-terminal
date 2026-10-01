@@ -83,8 +83,15 @@ impl AerisChartView {
             .map(|state| state.presentation.ticks_per_row())
     }
 
-    /// Returns the footprint to its candle history when the instrument has no known
-    /// price increment. Footprint rows are keyed by the increment, so none are guessed.
+    /// Invalidates an incremental prefix after a canonical history/correction rewrite.
+    pub fn invalidate_order_flow_prefix(&mut self) {
+        if let Some(state) = &mut self.order_flow_state {
+            state.first_ingestion_ordinal = None;
+            state.last_ingestion_ordinal = None;
+        }
+    }
+
+    /// Returns the footprint to candle history when its trade tape is unavailable.
     pub fn clear_order_flow_trades(&mut self) {
         self.teardown_order_flow();
     }
@@ -119,6 +126,11 @@ impl AerisChartView {
         {
             self.teardown_order_flow();
         }
+        if self.order_flow_state.as_ref().is_some_and(|state| {
+            state.identity == identity && state.provider_generation < provider_generation
+        }) {
+            self.teardown_order_flow();
+        }
         if self.order_flow_state.is_none() {
             self.configure_order_flow(
                 identity,
@@ -146,7 +158,7 @@ impl AerisChartView {
             && state.last_ingestion_ordinal < last;
         let presentation = state.presentation;
         let prior_last = state.last_ingestion_ordinal;
-        let converted = if can_append {
+        let mut converted = if can_append {
             let suffix_start = trades.partition_point(|trade| {
                 prior_last.is_some_and(|last| trade.ingestion_ordinal <= last)
             });
@@ -160,6 +172,9 @@ impl AerisChartView {
                 .map(order_flow_trade)
                 .collect::<Result<Vec<_>, _>>()?
         };
+        if !can_append {
+            converted.sort_by_key(|trade| trade.timestamp_micros);
+        }
         self.engine
             .update_order_flow_presentation(presentation, converted, can_append)
             .map_err(|error| error.to_string())?;

@@ -462,6 +462,7 @@ pub(super) fn header_controls(
             app.clone(),
             &InstrumentSelectorState {
                 label: state.instrument_label,
+                message: String::new(),
                 instruments: state.instruments,
                 input: state.symbol_input,
                 availability: InstrumentSelectorAvailability {
@@ -469,6 +470,7 @@ pub(super) fn header_controls(
                     enabled: state.controls.enabled(HeaderControls::INSTRUMENT),
                 },
                 provider: state.provider,
+                menu_provider: state.symbol_provider,
                 menu: InstrumentSelectorMenu {
                     keyboard_selection: 0,
                     keyboard_active: false,

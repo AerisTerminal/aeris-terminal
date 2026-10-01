@@ -6,10 +6,22 @@ use super::chrome_menu::{
     compact_menu_add_button, scrollable_menu_body,
 };
 
-fn provider_exchange_logo(provider: TerminalProvider) -> assets::ExchangeLogo {
+pub(super) fn provider_exchange_mark(
+    provider: TerminalProvider,
+    size: Pixels,
+    well: bool,
+    colors: &aeris_design_system::ThemeColors,
+) -> AnyElement {
     match provider {
-        TerminalProvider::Rithmic => assets::ExchangeLogo::Rithmic,
-        TerminalProvider::Hyperliquid => assets::ExchangeLogo::Hyperliquid,
+        TerminalProvider::Tastytrade => header_icon(HugeIcon::Chart)
+            .with_size(size)
+            .into_any_element(),
+        TerminalProvider::Rithmic => {
+            exchange_mark(assets::ExchangeLogo::Rithmic, size, well, colors).into_any_element()
+        }
+        TerminalProvider::Hyperliquid => {
+            exchange_mark(assets::ExchangeLogo::Hyperliquid, size, well, colors).into_any_element()
+        }
     }
 }
 
@@ -19,8 +31,8 @@ pub(super) fn instrument_selector(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let trigger = Button::new("instrument_selector")
-        .leading(exchange_mark(
-            provider_exchange_logo(state.provider),
+        .leading(provider_exchange_mark(
+            state.provider,
             px(16.0),
             false,
             &theme.colors,
@@ -53,6 +65,7 @@ pub(super) fn instrument_selector(
             match state.provider {
                 TerminalProvider::Rithmic => "Rithmic",
                 TerminalProvider::Hyperliquid => "Hyperliquid",
+                TerminalProvider::Tastytrade => "tastytrade",
             }
         ),
         button_activation_at(
@@ -75,10 +88,12 @@ pub(super) fn instrument_selector(
 
 pub(super) struct InstrumentSelectorState {
     pub(super) label: String,
+    pub(super) message: String,
     pub(super) instruments: Vec<InstrumentMenuEntry>,
     pub(super) input: Option<Entity<InputState>>,
     pub(super) availability: InstrumentSelectorAvailability,
     pub(super) provider: TerminalProvider,
+    pub(super) menu_provider: TerminalProvider,
     pub(super) menu: InstrumentSelectorMenu,
     pub(super) scroll: ScrollHandle,
     pub(super) target: SymbolSelectionTarget,
@@ -104,8 +119,8 @@ pub(super) fn instrument_dialog_content(
     let mut list = chrome_menu_scroll_body(extent.scale);
     if state.instruments.is_empty() {
         list = list.child(chrome_menu_empty(
-            "No matching markets",
-            "Try a symbol or instrument code.",
+            "No markets to display",
+            state.message.clone(),
             extent.scale,
             &colors,
         ));
@@ -120,17 +135,75 @@ pub(super) fn instrument_dialog_content(
                 }),
         );
     }
+    let provider_buttons = [
+        TerminalProvider::Tastytrade,
+        TerminalProvider::Hyperliquid,
+        TerminalProvider::Rithmic,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, provider)| {
+        let app = app.clone();
+        Button::new(("symbol_provider", index))
+            .label(terminal_provider_display(provider))
+            .theme(theme)
+            .text_color(gpui_color(if provider == state.menu_provider {
+                colors.text_primary
+            } else {
+                colors.text_muted
+            }))
+            .disabled(state.availability.selection_pending)
+            .on_click(move |_, window, cx| {
+                app.update(cx, |surface, surface_cx| {
+                    surface.choose_symbol_provider(provider, window, surface_cx);
+                });
+            })
+    });
     chrome_menu_surface(&colors, extent)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .children(provider_buttons),
+        )
         .child(state.input.as_ref().map_or_else(
             || div().into_any_element(),
             |input| instrument_search_header(input, theme, app, state, extent).into_any_element(),
         ))
+        .when(
+            state.menu_provider == TerminalProvider::Tastytrade,
+            |menu| {
+                menu.child(
+                    div().px_3().py_1().child(
+                        Button::new("symbol_menu_connect_tastytrade")
+                            .label("Connect tastytrade")
+                            .theme(theme)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ConnectTastytrade), cx);
+                            }),
+                    ),
+                )
+            },
+        )
         .child(scrollable_menu_body(
             list,
             &state.scroll,
             colors.text_secondary,
             extent,
         ))
+        .when(!state.instruments.is_empty(), |menu| {
+            menu.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(state.message.clone()),
+            )
+        })
 }
 
 pub(super) fn instrument_dialog_row(
@@ -168,8 +241,8 @@ pub(super) fn instrument_dialog_row(
             });
         }
     });
-    row = row.leading(exchange_mark(
-        provider_exchange_logo(state.provider),
+    row = row.leading(provider_exchange_mark(
+        state.menu_provider,
         scale.px(CHROME_MENU_ROW_ICON_WELL),
         true,
         &theme.colors,
@@ -212,8 +285,8 @@ pub(super) fn instrument_search_header(
         .border_color(gpui_color(colors.border))
         .text_size(scale.rems(0.875))
         .text_color(gpui_color(colors.text_primary))
-        .child(exchange_mark(
-            provider_exchange_logo(state.provider),
+        .child(provider_exchange_mark(
+            state.menu_provider,
             scale.px(CHROME_MENU_SEARCH_ICON_SIZE),
             false,
             &colors,

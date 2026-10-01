@@ -91,7 +91,7 @@ pub(super) fn chrome_menu_group_heading(
 
 pub(super) fn chrome_menu_empty(
     title: &'static str,
-    detail: &'static str,
+    detail: impl Into<gpui::SharedString>,
     scale: MenuScale,
     colors: &aeris_design_system::ThemeColors,
 ) -> Div {
@@ -114,7 +114,7 @@ pub(super) fn chrome_menu_empty(
             div()
                 .text_size(scale.px(11.0))
                 .text_color(gpui_color(colors.text_muted))
-                .child(detail),
+                .child(detail.into()),
         )
 }
 

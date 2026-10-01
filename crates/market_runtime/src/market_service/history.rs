@@ -1,14 +1,14 @@
 use super::{
-    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, Command, ConsumerId, Coordinator,
-    DeferredHistoryRequest, DemandWaiter, FailureStage, FormingBar, GenerationId,
-    HISTORY_CAPACITY_EXHAUSTED, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
+    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, CandleHandoffSeed, Command,
+    ConsumerId, Coordinator, DeferredHistoryRequest, DemandWaiter, FailureStage, FormingBar,
+    GenerationId, HISTORY_CAPACITY_EXHAUSTED, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
     HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest,
-    HistorySnapshot, HistorySource, HyperliquidHandoffSeed, INITIAL_HISTORY_BARS,
-    InstallProviderInstrument, Instant, MAXIMUM_HISTORY_BARS_PER_REQUEST, MAXIMUM_HISTORY_RETRIES,
-    MarketBar, Mutex, Ordering, ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed,
-    SeriesLoadState, SeriesSnapshot, SyncSender, VIEWPORT_LIVE_TAIL_RESERVE, Viewport,
-    engine_install_failure_stage, fail_waiters, hyperliquid_interval_for_period, publish_state,
-    series_state, thread, try_enqueue_history,
+    HistorySnapshot, HistorySource, INITIAL_HISTORY_BARS, InstallProviderInstrument, Instant,
+    MAXIMUM_HISTORY_BARS_PER_REQUEST, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
+    ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed, SeriesLoadState,
+    SeriesSnapshot, SyncSender, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
+    fail_waiters, hyperliquid_interval_for_period, publish_state, series_state, thread,
+    try_enqueue_history,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -479,8 +479,8 @@ impl Coordinator<'_> {
                     Some(detail),
                 );
             }
-        } else if series.provider_id == "hyperliquid" {
-            self.start_hyperliquid_realtime_from_snapshot(series, snapshot)?;
+        } else if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+            self.start_candle_realtime_from_snapshot(series, snapshot)?;
         } else {
             self.start_rithmic_realtime_from_snapshot(series, snapshot)?;
         }
@@ -559,8 +559,8 @@ impl Coordinator<'_> {
             .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts, range));
         self.broadcast_series_recovery_for(
             series,
-            if series.provider_id == "hyperliquid" {
-                "Hyperliquid current history is retrying"
+            if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+                "Provider current history is retrying"
             } else {
                 "Rithmic current history is retrying"
             },
@@ -602,21 +602,25 @@ impl Coordinator<'_> {
         &self,
         series: &BarSeriesKey,
     ) -> Result<ProviderGeneration, String> {
-        if series.provider_id == "hyperliquid" {
-            hyperliquid_interval_for_period(series.period)
-                .map_err(|_| "Hyperliquid history is unavailable for this interval".to_string())?;
-            if series.definition_version != 1 {
-                return Err("unsupported Hyperliquid engine series definition".to_string());
+        if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+            if series.provider_id == "tastytrade" {
+                super::tastytrade::candle_period(series.period)?;
+            } else {
+                hyperliquid_interval_for_period(series.period)
+                    .map_err(|_| "Provider history is unavailable for this interval".to_string())?;
             }
-            let installed = self.hyperliquid_instrument(series)?;
+            if series.definition_version != 1 {
+                return Err("unsupported Provider engine series definition".to_string());
+            }
+            let installed = self.candle_instrument(series)?;
             if installed.entitlement_id != series.entitlement_id {
-                return Err("Hyperliquid series entitlement is inconsistent".to_string());
+                return Err("Provider series entitlement is inconsistent".to_string());
             }
             return self
                 .engine
-                .provider_status("hyperliquid")
+                .provider_status(&series.provider_id)
                 .and_then(|status| status.generation)
-                .ok_or_else(|| "Hyperliquid engine session is unavailable".to_string());
+                .ok_or_else(|| "Provider engine session is unavailable".to_string());
         }
         if series.provider_id != "rithmic" {
             return Err("market provider is unsupported".to_string());
@@ -643,13 +647,13 @@ impl Coordinator<'_> {
             .ok_or_else(|| "Rithmic instrument is not installed".to_string())
     }
 
-    pub(super) fn hyperliquid_instrument(
+    pub(super) fn candle_instrument(
         &self,
         series: &BarSeriesKey,
     ) -> Result<&InstallProviderInstrument, String> {
         self.catalog
             .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-            .ok_or_else(|| "Hyperliquid instrument is not installed".to_string())
+            .ok_or_else(|| "Provider instrument is not installed".to_string())
     }
     pub(super) fn enqueue_history(
         &mut self,
@@ -731,16 +735,16 @@ impl Coordinator<'_> {
     }
 
     fn live_history_coverage(&self, series: &BarSeriesKey) -> Option<(i64, i64)> {
-        if series.provider_id == "hyperliquid" {
-            self.hyperliquid_live.get(series)?.coverage()
+        if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+            self.candle_live.get(series)?.coverage()
         } else {
             self.rithmic_live.get(series)?.coverage()
         }
     }
 
     fn begin_live_history_reseed(&mut self, series: &BarSeriesKey) {
-        if series.provider_id == "hyperliquid" {
-            if let Some(live) = self.hyperliquid_live.get_mut(series) {
+        if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+            if let Some(live) = self.candle_live.get_mut(series) {
                 live.begin_history_reseed();
             }
         } else if let Some(live) = self.rithmic_live.get_mut(series) {
@@ -749,8 +753,8 @@ impl Coordinator<'_> {
     }
 
     fn cancel_live_history_reseed(&mut self, series: &BarSeriesKey) -> Result<(), String> {
-        if series.provider_id == "hyperliquid" {
-            if let Some(live) = self.hyperliquid_live.get_mut(series) {
+        if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+            if let Some(live) = self.candle_live.get_mut(series) {
                 live.cancel_history_reseed()?;
             }
         } else if let Some(live) = self.rithmic_live.get_mut(series) {
@@ -833,7 +837,9 @@ impl Coordinator<'_> {
                 .or_insert_with(|| deferred_history_request(range));
             return Ok(());
         }
-        let instrument = if series.provider_id == "rithmic" || series.provider_id == "hyperliquid" {
+        let instrument = if series.provider_id == "rithmic"
+            || matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade")
+        {
             self.catalog
                 .get(&(series.provider_id.clone(), series.instrument_id.clone()))
                 .cloned()
@@ -878,8 +884,8 @@ impl Coordinator<'_> {
                 waiters,
                 series,
                 FailureStage::ProviderHistory,
-                if series.provider_id == "hyperliquid" {
-                    "Hyperliquid historical bars are unavailable"
+                if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+                    "Provider historical bars are unavailable"
                 } else {
                     "Rithmic historical bars are unavailable"
                 },
@@ -946,6 +952,9 @@ impl Coordinator<'_> {
         range: Option<HistoryRange>,
         result: Result<HistorySnapshot, String>,
     ) {
+        if series.provider_id == "tastytrade" && self.tastytrade_suspended {
+            return;
+        }
         let Some(snapshot) = self.accept_history_completion(series, generation, range, result)
         else {
             return;
@@ -1015,8 +1024,8 @@ impl Coordinator<'_> {
                 self.history_failed(series, generation);
                 return;
             };
-            let realigned = if series.provider_id == "hyperliquid" {
-                self.start_hyperliquid_realtime_from_snapshot(series, &canonical)
+            let realigned = if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+                self.start_candle_realtime_from_snapshot(series, &canonical)
             } else {
                 self.start_rithmic_realtime_from_snapshot(series, &canonical)
             };
@@ -1090,7 +1099,9 @@ impl Coordinator<'_> {
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
         let mut forming = snapshot.forming;
         let provider_forming =
-            if series.provider_id == "hyperliquid" || series.provider_id == "rithmic" {
+            if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade")
+                || series.provider_id == "rithmic"
+            {
                 forming.take()
             } else {
                 None
@@ -1140,11 +1151,11 @@ impl Coordinator<'_> {
         if !install.reseeds_live() {
             return Some((bars, forming));
         }
-        if series.provider_id == "hyperliquid" {
-            if let Err(error) = self.finish_hyperliquid_history_handoff(
+        if matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade") {
+            if let Err(error) = self.finish_candle_history_handoff(
                 series,
                 generation,
-                HyperliquidHandoffSeed {
+                CandleHandoffSeed {
                     price_scale,
                     quantity_scale,
                     bars: &bars,
@@ -1356,16 +1367,16 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn finish_hyperliquid_history_handoff(
+    pub(super) fn finish_candle_history_handoff(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        seed: HyperliquidHandoffSeed<'_>,
+        seed: CandleHandoffSeed<'_>,
     ) -> Result<(), String> {
         self.ensure_realtime(series)?;
-        self.seed_hyperliquid_history(series, generation, seed)
+        self.seed_candle_history(series, generation, seed)
             .then_some(())
-            .ok_or_else(|| "Hyperliquid history/live handoff failed".to_string())
+            .ok_or_else(|| "Provider history/live handoff failed".to_string())
     }
 
     pub(super) fn finish_rithmic_history_handoff(
@@ -1383,7 +1394,7 @@ impl Coordinator<'_> {
             .ok_or_else(|| "Rithmic history/live handoff failed".to_string())
     }
 
-    pub(super) fn start_hyperliquid_realtime_from_snapshot(
+    pub(super) fn start_candle_realtime_from_snapshot(
         &mut self,
         series: &BarSeriesKey,
         snapshot: &aeris_market_engine::SeriesSnapshot,
@@ -1402,10 +1413,10 @@ impl Coordinator<'_> {
             ),
             _ => (snapshot.bars.as_ref(), None),
         };
-        if self.seed_hyperliquid_history(
+        if self.seed_candle_history(
             series,
             snapshot.provider_generation,
-            HyperliquidHandoffSeed {
+            CandleHandoffSeed {
                 price_scale: snapshot.price_scale,
                 quantity_scale: snapshot.quantity_scale,
                 bars,
@@ -1414,20 +1425,20 @@ impl Coordinator<'_> {
         ) {
             Ok(())
         } else {
-            Err("Hyperliquid cached history/live handoff failed".to_string())
+            Err("Provider cached history/live handoff failed".to_string())
         }
     }
 
-    pub(super) fn seed_hyperliquid_history(
+    pub(super) fn seed_candle_history(
         &mut self,
         series: &BarSeriesKey,
         _generation: ProviderGeneration,
-        seed: HyperliquidHandoffSeed<'_>,
+        seed: CandleHandoffSeed<'_>,
     ) -> bool {
-        let Some(live) = self.hyperliquid_live.get_mut(series) else {
+        let Some(live) = self.candle_live.get_mut(series) else {
             return true;
         };
-        let HyperliquidHandoffSeed {
+        let CandleHandoffSeed {
             price_scale,
             quantity_scale,
             bars,
@@ -1441,7 +1452,7 @@ impl Coordinator<'_> {
         }
         live.history_state = super::LiveHistoryState::AwaitingHistory;
         live.dirty = false;
-        self.broadcast_series_recovery_for(series, "Hyperliquid history/live handoff failed");
+        self.broadcast_series_recovery_for(series, "Provider history/live handoff failed");
         false
     }
 

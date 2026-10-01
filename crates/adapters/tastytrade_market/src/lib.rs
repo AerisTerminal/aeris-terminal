@@ -18,9 +18,9 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
 mod catalog;
-mod dxlink;
-pub use catalog::FutureInstrument;
-pub use dxlink::{FeedVerification, verify_live_feed};
+mod session;
+pub use catalog::{FutureInstrument, ResolvedInstrument, SearchInstrument};
+pub use session::{DATA_SCALE, DxlinkSession, FeedEvent, Subscription, TradePrint};
 
 /// Broker authorization service; separate from Aeris account authentication.
 pub const TASTYTRADE_BROKER_ORIGIN: &str = "https://app.aeristerminal.com";
@@ -268,6 +268,98 @@ impl TastytradeBrokerClient {
             stop,
         )?;
         page.validated(product)
+    }
+
+    /// Searches the provider's complete instrument universe without retaining it locally.
+    /// # Errors
+    /// Rejects malformed identities, overload, expired authorization and provider errors.
+    pub fn search(
+        &mut self,
+        capability: &ConnectionCapability,
+        query: &str,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<Vec<SearchInstrument>, String> {
+        #[derive(Serialize)]
+        struct Request<'a> {
+            #[serde(flatten)]
+            capability: &'a ConnectionCapability,
+            kind: &'static str,
+            query: &'a str,
+        }
+        if query.len() > 128 || query.chars().any(char::is_control) {
+            return Err("Tastytrade search query invalid".into());
+        }
+        let mut page: catalog::SearchPage = self.post(
+            "instruments",
+            &Request {
+                capability,
+                kind: "search",
+                query,
+            },
+            stop,
+        )?;
+        if page.data.items.len() > 100 {
+            return Err("Tastytrade search exceeded its page bound".into());
+        }
+        // Future Product results describe a contract family, not a streamable instrument.
+        page.data
+            .items
+            .retain(|item| item.instrument_type != "Future Product");
+        if page.data.items.len() > 100
+            || page.data.items.iter().any(|item| {
+                !catalog::valid_identity(&item.symbol)
+                    || !matches!(
+                        item.instrument_type.as_str(),
+                        "Future"
+                            | "Equity"
+                            | "Index"
+                            | "Equity Option"
+                            | "Future Option"
+                            | "Cryptocurrency"
+                            | "Warrant"
+                    )
+            })
+        {
+            return Err(format!(
+                "Tastytrade search returned unsupported instrument types: {:?}",
+                page.data
+                    .items
+                    .iter()
+                    .map(|item| &item.instrument_type)
+                    .collect::<std::collections::BTreeSet<_>>()
+            ));
+        }
+        Ok(page.data.items)
+    }
+
+    /// Resolves an exact tradable identity to its own streamer symbol and tick schedule.
+    /// # Errors
+    /// Rejects missing required metadata or a response for another instrument.
+    pub fn instrument(
+        &mut self,
+        capability: &ConnectionCapability,
+        instrument: &SearchInstrument,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<ResolvedInstrument, String> {
+        #[derive(Serialize)]
+        struct Request<'a> {
+            #[serde(flatten)]
+            capability: &'a ConnectionCapability,
+            kind: &'static str,
+            symbol: &'a str,
+            instrument_type: &'a str,
+        }
+        let response: serde_json::Value = self.post(
+            "instruments",
+            &Request {
+                capability,
+                kind: "instrument",
+                symbol: &instrument.symbol,
+                instrument_type: &instrument.instrument_type,
+            },
+            stop,
+        )?;
+        ResolvedInstrument::from_response(&response, instrument)
     }
 
     fn post<T: DeserializeOwned>(

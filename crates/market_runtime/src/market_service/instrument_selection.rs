@@ -13,7 +13,7 @@ pub(super) fn id(value: u64) -> Result<NonZeroU64, String> {
 }
 
 fn supported_catalog_provider(provider: &str) -> bool {
-    provider == "rithmic" || provider == "hyperliquid"
+    matches!(provider, "rithmic" | "hyperliquid" | "tastytrade")
 }
 
 pub(super) fn validate_provider_search(search: &SearchProviderInstruments) -> Result<(), String> {

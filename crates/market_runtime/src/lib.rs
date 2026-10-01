@@ -118,6 +118,8 @@ pub struct MarketTradeTapeSnapshot {
     pub provider_generation: u64,
     pub revision: u64,
     pub source_watermark: u64,
+    /// Changes when history or a correction rewrites the retained prefix.
+    pub rewrite_generation: u64,
     pub price_scale: u8,
     pub quantity_scale: u8,
     pub trades: std::sync::Arc<[RetainedMarketTrade]>,

@@ -139,6 +139,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         chrome_selection: 0,
         chrome_focus: init.chrome_focus,
         provider: startup.provider,
+        symbol_provider: startup.provider,
         product: startup.product,
         rithmic_switch: RithmicSwitchState::Idle,
         interval: init.interval,
@@ -1532,7 +1533,7 @@ impl WorkspaceSurface {
 
     pub(super) fn available_intervals(&self) -> &'static [ChartInterval] {
         match self.provider {
-            TerminalProvider::Rithmic => RITHMIC_INTERVALS,
+            TerminalProvider::Rithmic | TerminalProvider::Tastytrade => RITHMIC_INTERVALS,
             TerminalProvider::Hyperliquid => HYPERLIQUID_INTERVALS,
         }
     }
@@ -1884,6 +1885,30 @@ impl WorkspaceSurface {
         cx.notify();
         true
     }
+    pub(super) fn choose_symbol_provider(
+        &mut self,
+        provider: TerminalProvider,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.market_state.symbol_selection_pending {
+            return;
+        }
+        if self.symbol_provider != provider {
+            self.symbol_provider = provider;
+            self.symbol_browser.change_catalog();
+            self.pending_mnemonic_symbol = None;
+            self.chrome_selection = 0;
+        }
+        let query = default_listing_query(provider);
+        if let Some(input) = &self.symbol_input {
+            input.update(cx, |input, input_cx| {
+                input.set_value(query, window, input_cx);
+            });
+        }
+        self.search_symbol_query(query, cx);
+        cx.notify();
+    }
 
     pub(super) fn instrument_entries(&self, _cx: &App) -> Vec<InstrumentMenuEntry> {
         self.symbol_browser
@@ -1896,9 +1921,10 @@ impl WorkspaceSurface {
                     selected.instrument.symbol == instrument.symbol
                         && selected.instrument.exchange == instrument.exchange
                 }),
-                selection: match self.provider {
+                selection: match self.symbol_provider {
                     TerminalProvider::Rithmic => InstrumentMenuSelection::Rithmic(index),
                     TerminalProvider::Hyperliquid => InstrumentMenuSelection::Hyperliquid(index),
+                    TerminalProvider::Tastytrade => InstrumentMenuSelection::Tastytrade(index),
                 },
             })
             .collect()
@@ -1960,13 +1986,15 @@ impl WorkspaceSurface {
         let started = Instant::now();
         let selected = (|| match selection {
             InstrumentMenuSelection::Rithmic(index)
-            | InstrumentMenuSelection::Hyperliquid(index) => {
-                let provider = terminal_provider_id(self.provider);
-                let entitlement_id = match self.provider {
+            | InstrumentMenuSelection::Hyperliquid(index)
+            | InstrumentMenuSelection::Tastytrade(index) => {
+                let provider = terminal_provider_id(self.symbol_provider);
+                let entitlement_id = match self.symbol_provider {
                     TerminalProvider::Rithmic => RITHMIC_ENTITLEMENT_ID,
                     TerminalProvider::Hyperliquid => HYPERLIQUID_ENTITLEMENT_ID,
+                    TerminalProvider::Tastytrade => "tastytrade-authorized",
                 };
-                let display = terminal_provider_display(self.provider);
+                let display = terminal_provider_display(self.symbol_provider);
                 let Some(selection) = self.symbol_browser.select(index) else {
                     return false;
                 };
@@ -2659,7 +2687,9 @@ impl WorkspaceSurface {
     /// and jump when current coverage lands.
     pub(super) fn showing_superseded_series(&self) -> bool {
         match self.provider {
-            TerminalProvider::Rithmic | TerminalProvider::Hyperliquid => {
+            TerminalProvider::Rithmic
+            | TerminalProvider::Hyperliquid
+            | TerminalProvider::Tastytrade => {
                 switch_requires_chart_cover(self.chart.is_some(), self.rithmic_switch)
             }
         }
@@ -2815,9 +2845,11 @@ impl WorkspaceSurface {
         });
         if is_current
             && self.trade_tape.as_ref().is_none_or(|current| {
-                current.generation != snapshot.generation
-                    || current.provider_generation != snapshot.provider_generation
-                    || snapshot.revision >= current.revision
+                snapshot.generation.0.get() >= current.generation.0.get()
+                    && snapshot.provider_generation >= current.provider_generation
+                    && (current.generation != snapshot.generation
+                        || current.provider_generation != snapshot.provider_generation
+                        || snapshot.revision >= current.revision)
             })
         {
             self.apply_trade_tape_to_chart(&snapshot, cx);
@@ -3208,7 +3240,9 @@ impl WorkspaceSurface {
         // providers resolve selections through the same marker flow.
         let engine_provider = matches!(
             self.provider,
-            TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
+            TerminalProvider::Rithmic
+                | TerminalProvider::Hyperliquid
+                | TerminalProvider::Tastytrade
         );
         if self.stale_ready_during_engine_switch(state, engine_provider) {
             return;
@@ -3225,21 +3259,23 @@ impl WorkspaceSurface {
             } else {
                 self.rithmic_previous_selection = None;
             }
-        } else if self.provider == TerminalProvider::Rithmic && state == ChartState::Ready {
+        } else if engine_provider && state == ChartState::Ready {
             self.rithmic_switch = RithmicSwitchState::Idle;
             self.rithmic_previous_selection = None;
             self.market_state.symbol_selection_pending = false;
             self.symbol_message = self.product.as_ref().map_or_else(
-                || "Rithmic market ready".to_string(),
-                |product| format!("{} · Rithmic spot", product.provider_symbol),
-            );
-        } else if self.provider == TerminalProvider::Hyperliquid && state == ChartState::Ready {
-            self.rithmic_switch = RithmicSwitchState::Idle;
-            self.rithmic_previous_selection = None;
-            self.market_state.symbol_selection_pending = false;
-            self.symbol_message = self.product.as_ref().map_or_else(
-                || "Hyperliquid market ready".to_string(),
-                |product| format!("{} · Hyperliquid", product.display_symbol),
+                || format!("{} market ready", terminal_provider_display(self.provider)),
+                |product| {
+                    if self.provider == TerminalProvider::Rithmic {
+                        format!("{} · Rithmic spot", product.provider_symbol)
+                    } else {
+                        format!(
+                            "{} · {}",
+                            product.display_symbol,
+                            terminal_provider_display(self.provider)
+                        )
+                    }
+                },
             );
         }
         self.set_chart_state(state, message, cx);
@@ -3315,7 +3351,9 @@ impl WorkspaceSurface {
     fn apply_rithmic_switch_marker(&mut self, sequence: u64, cx: &mut Context<Self>) {
         if !matches!(
             self.provider,
-            TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
+            TerminalProvider::Rithmic
+                | TerminalProvider::Hyperliquid
+                | TerminalProvider::Tastytrade
         ) || !self.rithmic_switch.is_pending()
             || self.rithmic_pending_sequence != Some(sequence)
         {
@@ -3334,7 +3372,6 @@ impl WorkspaceSurface {
             let provider = terminal_provider_from_id(&product.provider);
             if provider != self.provider {
                 self.provider = provider;
-                self.symbol_browser = demand_startup_symbol_browser();
                 self.symbol_message = initial_symbol_message(provider);
             }
             self.product = Some(product);
@@ -3415,7 +3452,9 @@ impl WorkspaceSurface {
         }
         if matches!(
             self.provider,
-            TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
+            TerminalProvider::Rithmic
+                | TerminalProvider::Hyperliquid
+                | TerminalProvider::Tastytrade
         ) && disconnected
             && !matches!(self.connection_state, Some(FeedConnectionState::Stopped))
         {
@@ -3432,6 +3471,7 @@ impl WorkspaceSurface {
             let message = match self.provider {
                 TerminalProvider::Rithmic => "Rithmic market worker stopped",
                 TerminalProvider::Hyperliquid => "Hyperliquid market worker stopped",
+                TerminalProvider::Tastytrade => "Tastytrade market worker stopped",
             }
             .to_string();
             self.connection_state = Some(FeedConnectionState::Stopped);
@@ -3920,6 +3960,13 @@ impl WorkspaceSurface {
         let identity = product.instrument_id.clone();
         let aggregation = order_flow_aggregation(self.interval);
         let result = chart.update(cx, |chart, chart_cx| {
+            if self
+                .trade_tape
+                .as_ref()
+                .is_some_and(|prior| prior.rewrite_generation != snapshot.rewrite_generation)
+            {
+                chart.invalidate_order_flow_prefix();
+            }
             let result = chart.apply_order_flow_trades(
                 &identity,
                 snapshot.provider_generation,
@@ -3975,7 +4022,7 @@ impl WorkspaceSurface {
         ) {
             return;
         }
-        let _ = self.search_symbol_query(default_listing_query(self.provider), cx);
+        let _ = self.search_symbol_query(default_listing_query(self.symbol_provider), cx);
     }
 
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
@@ -3983,7 +4030,7 @@ impl WorkspaceSurface {
             match self.symbol_browser.retain_latest_search(query) {
                 Ok(already_dispatched) => {
                     if !already_dispatched {
-                        let display = terminal_provider_display(self.provider);
+                        let display = terminal_provider_display(self.symbol_provider);
                         self.symbol_message =
                             format!("Waiting to search the latest {display} query");
                     }
@@ -4013,7 +4060,7 @@ impl WorkspaceSurface {
         request: rithmic_shell::RithmicSymbolSearchRequest,
         cx: &mut Context<Self>,
     ) -> bool {
-        let provider = terminal_provider_id(self.provider);
+        let provider = terminal_provider_id(self.symbol_provider);
         let retained_query = request.query.clone();
         let request_id = request.request_id;
         let search = SearchProviderInstruments {
@@ -4025,9 +4072,10 @@ impl WorkspaceSurface {
                 .unwrap_or(u32::MAX),
         };
         let dispatched = if self.market_worker.try_search_provider(search).is_ok() {
-            self.symbol_message = match self.provider {
+            self.symbol_message = match self.symbol_provider {
                 TerminalProvider::Rithmic => "Searching Rithmic spot markets".to_string(),
                 TerminalProvider::Hyperliquid => "Searching Hyperliquid markets".to_string(),
+                TerminalProvider::Tastytrade => "Searching tastytrade assets".into(),
             };
             true
         } else {
@@ -4080,7 +4128,7 @@ impl WorkspaceSurface {
 
     pub(super) fn submit_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
         let entries = self.instrument_entries(cx);
-        match symbol_submit_decision(self.provider, entries.len(), self.chrome_selection) {
+        match symbol_submit_decision(self.symbol_provider, entries.len(), self.chrome_selection) {
             SymbolSubmitDecision::Select(index) => entries.get(index).is_some_and(|entry| {
                 self.select_instrument(entry.selection, self.symbol_selection_target, cx)
             }),
@@ -4127,7 +4175,7 @@ impl WorkspaceSurface {
     }
 
     fn apply_catalog_event(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
-        if provider_catalog_event_provider(&event) != terminal_provider_id(self.provider) {
+        if provider_catalog_event_provider(&event) != terminal_provider_id(self.symbol_provider) {
             return;
         }
         match event {
@@ -4138,7 +4186,7 @@ impl WorkspaceSurface {
                 command_generation,
                 instrument,
             } => {
-                // Both engine providers resolve selections through the same
+                // Engine providers resolve selections through the same
                 // switch flow: the pending product replaces the chart only
                 // when its covering snapshot arrives.
                 if self.pending_symbol_selection_target == Some(SymbolSelectionTarget::Watchlist) {
@@ -4164,7 +4212,7 @@ impl WorkspaceSurface {
                 }
                 self.pending_symbol_selection_target = None;
                 self.consume_catalog_search_authorization();
-                let display = terminal_provider_display(self.provider);
+                let display = terminal_provider_display(self.symbol_provider);
                 let interval = self.rithmic_pending_interval.unwrap_or(self.interval);
                 let Ok(sequence) = self
                     .market_worker
@@ -4209,12 +4257,15 @@ impl WorkspaceSurface {
         else {
             return;
         };
-        self.symbol_message = match self.provider {
+        self.symbol_message = match self.symbol_provider {
             TerminalProvider::Rithmic => {
                 format!("{count} active Rithmic spot markets")
             }
             TerminalProvider::Hyperliquid => {
                 format!("{count} Hyperliquid markets")
+            }
+            TerminalProvider::Tastytrade => {
+                format!("{count} tastytrade assets · search to find more")
             }
         };
         if self.symbol_browser.has_retained_search() {
@@ -4230,11 +4281,12 @@ impl WorkspaceSurface {
             if let Some(index) = index {
                 self.chrome_selection = index;
                 self.select_instrument(
-                    match self.provider {
+                    match self.symbol_provider {
                         TerminalProvider::Rithmic => InstrumentMenuSelection::Rithmic(index),
                         TerminalProvider::Hyperliquid => {
                             InstrumentMenuSelection::Hyperliquid(index)
                         }
+                        TerminalProvider::Tastytrade => InstrumentMenuSelection::Tastytrade(index),
                     },
                     SymbolSelectionTarget::Chart,
                     cx,
@@ -4243,7 +4295,7 @@ impl WorkspaceSurface {
             }
             self.symbol_message = format!("No exact market matched {symbol}");
         }
-        if self.provider == TerminalProvider::Rithmic
+        if self.symbol_provider == TerminalProvider::Rithmic
             && self.market_state.rithmic_autoload_started
             && self.symbol_browser.selected().is_none()
             && let Some(index) = default_rithmic_contract_index(self.symbol_browser.results())

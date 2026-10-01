@@ -213,6 +213,22 @@ pub(super) fn snapshot_instrument(
             "USD".to_string(),
         ));
     }
+    if series.provider_id == "tastytrade" {
+        let (kind, symbol) = series
+            .instrument_id
+            .strip_prefix("tastytrade:")
+            .and_then(|path| path.split_once(':'))
+            .ok_or_else(|| "Tastytrade chart identity is invalid".to_string())?;
+        let class = match kind {
+            "Future" => AssetClass::Future,
+            "Equity Option" | "Future Option" => AssetClass::Option,
+            "Cryptocurrency" => AssetClass::CryptoAsset,
+            "Index" => AssetClass::Index,
+            "Equity" | "Warrant" => AssetClass::Equity,
+            _ => return Err("Tastytrade asset class is unsupported".into()),
+        };
+        return Ok(("tastytrade".into(), symbol.into(), class, "USD".into()));
+    }
     let path = series
         .instrument_id
         .strip_prefix("hyperliquid:")
@@ -266,8 +282,10 @@ pub(crate) fn series_key(
     // The provider field must agree with the installed instrument identity:
     // a Hyperliquid product can never demand a Rithmic series and vice
     // versa, so a mismatch fails here instead of misrouting demand.
-    if product.provider != "rithmic" && product.provider != "hyperliquid"
-        || product.venue_id.trim().is_empty()
+    if !matches!(
+        product.provider.as_str(),
+        "rithmic" | "hyperliquid" | "tastytrade"
+    ) || product.venue_id.trim().is_empty()
         || product.price_scale > 18
         || product.quantity_scale > 18
     {
@@ -280,7 +298,10 @@ pub(crate) fn series_key(
         if !product.entitlement_id.starts_with("rithmic-test:") {
             return Err("Rithmic installed instrument identity is invalid".to_string());
         }
-    } else if product.entitlement_id != "hyperliquid-public" {
+    } else if product.provider == "tastytrade" && product.entitlement_id != "tastytrade-authorized"
+    {
+        return Err("Tastytrade installed instrument identity is invalid".into());
+    } else if product.provider == "hyperliquid" && product.entitlement_id != "hyperliquid-public" {
         return Err("Hyperliquid installed instrument identity is invalid".to_string());
     }
     if product.provider == "rithmic" && !product.instrument_id.starts_with("instrument:rithmic:")
@@ -308,7 +329,11 @@ pub(crate) fn series_key(
         // Hyperliquid serves a native 3-day candle; Rithmic has no Day3
         // series. Tick candles exist on neither public path: Hyperliquid
         // exposes no tick history and the Rithmic test feed prints none.
-        ChartInterval::Day3 if product.provider == "hyperliquid" => BarPeriod::session(3),
+        ChartInterval::Day3
+            if matches!(product.provider.as_str(), "hyperliquid" | "tastytrade") =>
+        {
+            BarPeriod::session(3)
+        }
         ChartInterval::Tick100 | ChartInterval::Day3 => {
             return Err(format!(
                 "{} chart interval is unsupported",

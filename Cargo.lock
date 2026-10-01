@@ -292,6 +292,7 @@ dependencies = [
  "aeris_provider_history",
  "aeris_rithmic_protocol_adapter",
  "aeris_tastytrade_market_adapter",
+ "chrono",
  "serde_json",
  "zeroize",
 ]
@@ -373,6 +374,7 @@ dependencies = [
 name = "aeris_tastytrade_market_adapter"
 version = "0.2.3"
 dependencies = [
+ "aeris_market_data",
  "aeris_platform_runtime",
  "base64 0.23.1",
  "chrono",
@@ -380,6 +382,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tungstenite",
  "ureq",
  "zeroize",
 ]

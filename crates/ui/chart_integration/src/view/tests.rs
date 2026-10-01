@@ -56,6 +56,49 @@ fn order_flow_trade(ordinal: u64, timestamp_micros: i64, volume: f64) -> OrderFl
     }
 }
 
+#[test]
+fn footprint_rebuilds_after_runtime_rewrite_and_reconnect_without_accepting_retired_sessions() {
+    let mut chart = AerisChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    let mut trades = vec![
+        order_flow_trade(1, 1_000_000, 2.0),
+        order_flow_trade(2, 2_000_000, 3.0),
+    ];
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .unwrap();
+    trades[0].volume = 5.0;
+    chart.invalidate_order_flow_prefix();
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .unwrap();
+    let series = chart.footprint_series_id().unwrap();
+    let total = chart
+        .engine
+        .footprint_bars(series)
+        .unwrap()
+        .iter()
+        .map(|bar| bar.total_volume)
+        .sum::<f64>();
+    assert!((total - 8.0).abs() < f64::EPSILON);
+    for trade in &mut trades {
+        trade.session_id = 8;
+    }
+    chart
+        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &trades)
+        .unwrap();
+    assert!(chart.footprint_series_id().is_some());
+    assert!(
+        chart
+            .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+            .is_err()
+    );
+    chart
+        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &trades)
+        .unwrap();
+}
+
 fn enable_cvd_and_delta(
     chart: &mut AerisChartView,
     aggregation: OrderFlowAggregation,

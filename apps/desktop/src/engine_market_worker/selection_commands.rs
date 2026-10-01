@@ -67,22 +67,29 @@ pub(super) fn initialize_endpoint(
         )?;
     }
 
-    // Restored Hyperliquid metadata (price increment, session) is never trusted:
+    // Restored provider metadata (price increment, session) is never trusted:
     // the live catalog re-resolves it before any market data reaches the chart.
-    if record.product.provider == "hyperliquid" {
+    if matches!(
+        record.product.provider.as_str(),
+        "hyperliquid" | "tastytrade"
+    ) {
         let requested = record.product.clone();
         record.startup_resolution = Some(StartupResolution::Searching(requested.clone()));
         let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
             state: ChartState::Loading,
-            message: "Refreshing Hyperliquid instrument metadata".to_string(),
+            message: "Refreshing provider instrument metadata".to_string(),
         });
         return market.search_provider_instruments(
             client_id,
             SearchProviderInstruments {
                 consumer_id: record.endpoint.consumer_id,
                 search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
-                provider: requested.provider,
-                query: requested.provider_symbol,
+                provider: requested.provider.clone(),
+                query: if requested.provider == "tastytrade" {
+                    requested.display_symbol
+                } else {
+                    requested.provider_symbol
+                },
                 maximum_results: 32,
             },
         );
@@ -107,7 +114,10 @@ fn begin_endpoint_demand(
         record.endpoint.consumer_id,
         record.endpoint.active_generation,
         &series,
-        chart_streams(record.endpoint.depth_visible),
+        market.available_streams(
+            &record.product.provider,
+            chart_streams(record.endpoint.depth_visible),
+        )?,
     ) {
         let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
             state: ChartState::Error,
@@ -180,7 +190,7 @@ pub(super) fn handle_startup_catalog_event(
                     && rejection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
             {
                 record.startup_resolution = None;
-                return Err("Hyperliquid startup catalog refresh was rejected".to_string());
+                return Err("Provider startup catalog refresh was rejected".to_string());
             }
             _ => return Ok(false),
         }
@@ -197,7 +207,7 @@ pub(super) fn handle_startup_catalog_event(
                 || instrument.entitlement_id != requested.entitlement_id
             {
                 record.startup_resolution = None;
-                return Err("Hyperliquid startup selection identity mismatched".to_string());
+                return Err("Provider startup selection identity mismatched".to_string());
             }
             aeris_desktop::trading::register_provider_instrument_if_running(instrument)?;
             record.product.clone_from(instrument);
@@ -219,7 +229,7 @@ pub(super) fn handle_startup_catalog_event(
                 && rejection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
         {
             record.startup_resolution = None;
-            Err("Hyperliquid startup selection was rejected".to_string())
+            Err("Provider startup selection was rejected".to_string())
         }
         _ => Ok(false),
     }
@@ -229,21 +239,23 @@ fn startup_catalog_candidate(
     candidates: &[ProviderInstrumentSummary],
     requested: &InstallProviderInstrument,
 ) -> Result<ProviderInstrumentSummary, String> {
+    let symbol = if requested.provider == "tastytrade" {
+        &requested.display_symbol
+    } else {
+        &requested.provider_symbol
+    };
     candidates
         .iter()
-        .find(|candidate| {
-            candidate.symbol == requested.provider_symbol
-                && candidate.exchange == requested.venue_id
-        })
+        .find(|candidate| candidate.symbol == *symbol && candidate.exchange == requested.venue_id)
         .or_else(|| {
             candidates
                 .iter()
-                .find(|candidate| candidate.symbol == requested.provider_symbol)
+                .find(|candidate| candidate.symbol == *symbol)
         })
         .cloned()
         .ok_or_else(|| {
             format!(
-                "Hyperliquid catalog no longer contains {}",
+                "Provider catalog no longer contains {}",
                 requested.display_symbol
             )
         })
@@ -272,6 +284,7 @@ pub(super) fn set_depth_visible(
     market: &MarketService,
     client_id: u64,
     endpoint: &mut WorkerEndpoint,
+    provider: &str,
     startup_resolving: bool,
     visible: bool,
 ) -> Result<(), String> {
@@ -282,7 +295,7 @@ pub(super) fn set_depth_visible(
         client_id,
         endpoint.consumer_id,
         endpoint.active_generation,
-        streams,
+        market.available_streams(provider, streams)?,
     )
 }
 
@@ -311,16 +324,10 @@ pub(super) fn process_command(
     } = record;
     match command {
         MarketWorkerCommand::ProviderSearch(mut request) => {
-            if request.provider != product.provider {
-                return Err("unsupported provider catalog command".to_string());
-            }
             request.consumer_id = endpoint.consumer_id;
             market.search_provider_instruments(client_id, request)
         }
         MarketWorkerCommand::ProviderSelect(mut request) => {
-            if request.provider != product.provider {
-                return Err("unsupported provider catalog command".to_string());
-            }
             request.consumer_id = endpoint.consumer_id;
             market.select_provider_instrument(client_id, request)
         }
@@ -359,6 +366,7 @@ pub(super) fn process_command(
             market,
             client_id,
             endpoint,
+            &product.provider,
             startup_resolution.is_some(),
             visible,
         ),
@@ -425,7 +433,10 @@ fn process_engine_select(
         endpoint.consumer_id,
         request.sequence,
         &series,
-        chart_streams(endpoint.depth_visible),
+        market.available_streams(
+            &request.product.provider,
+            chart_streams(endpoint.depth_visible),
+        )?,
     )
 }
 

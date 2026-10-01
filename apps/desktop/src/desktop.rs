@@ -499,6 +499,7 @@ actions!(
         TradingFlattenAccount,
         TradingKillSwitch,
         OpenCommandPalette,
+        ConnectTastytrade,
     ]
 );
 
@@ -630,6 +631,7 @@ const fn default_listing_query(provider: TerminalProvider) -> &'static str {
     match provider {
         TerminalProvider::Rithmic => DEFAULT_RITHMIC_LISTING_QUERY,
         TerminalProvider::Hyperliquid => "",
+        TerminalProvider::Tastytrade => "/ES",
     }
 }
 
@@ -770,6 +772,7 @@ struct WorkspaceSurface {
     chrome_selection: usize,
     chrome_focus: FocusHandle,
     provider: TerminalProvider,
+    symbol_provider: TerminalProvider,
     product: Option<InstallProviderInstrument>,
     rithmic_switch: RithmicSwitchState,
     interval: ChartInterval,
@@ -1201,6 +1204,7 @@ struct WorkspaceScrollHandles {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalProvider {
+    Tastytrade,
     Rithmic,
     Hyperliquid,
 }
@@ -1209,6 +1213,7 @@ const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
     match provider {
         TerminalProvider::Rithmic => "rithmic",
         TerminalProvider::Hyperliquid => "hyperliquid",
+        TerminalProvider::Tastytrade => "tastytrade",
     }
 }
 
@@ -1216,11 +1221,14 @@ const fn terminal_provider_display(provider: TerminalProvider) -> &'static str {
     match provider {
         TerminalProvider::Rithmic => "Rithmic",
         TerminalProvider::Hyperliquid => "Hyperliquid",
+        TerminalProvider::Tastytrade => "tastytrade",
     }
 }
 
 fn terminal_provider_from_id(provider: &str) -> TerminalProvider {
-    if provider == terminal_provider_id(TerminalProvider::Hyperliquid) {
+    if provider == "tastytrade" {
+        TerminalProvider::Tastytrade
+    } else if provider == terminal_provider_id(TerminalProvider::Hyperliquid) {
         TerminalProvider::Hyperliquid
     } else {
         TerminalProvider::Rithmic
@@ -2442,7 +2450,9 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
             }
             if matches!(
                 app.provider,
-                TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
+                TerminalProvider::Rithmic
+                    | TerminalProvider::Hyperliquid
+                    | TerminalProvider::Tastytrade
             ) && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
                 && app.last_persisted_viewport != Some(viewport)
                 && app
@@ -2459,6 +2469,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
 
 #[derive(Clone, Copy)]
 enum InstrumentMenuSelection {
+    Tastytrade(usize),
     Rithmic(usize),
     Hyperliquid(usize),
 }
@@ -2478,7 +2489,9 @@ const fn symbol_submit_decision(
         return SymbolSubmitDecision::Select(highlighted);
     }
     match provider {
-        TerminalProvider::Rithmic | TerminalProvider::Hyperliquid => SymbolSubmitDecision::Search,
+        TerminalProvider::Rithmic
+        | TerminalProvider::Hyperliquid
+        | TerminalProvider::Tastytrade => SymbolSubmitDecision::Search,
     }
 }
 
@@ -2522,6 +2535,7 @@ fn should_autoload_rithmic_catalog(
 struct HeaderState {
     theme: AerisTheme,
     provider: TerminalProvider,
+    symbol_provider: TerminalProvider,
     instrument_label: String,
     series_label: String,
     chart_type: ChartType,
@@ -2947,7 +2961,7 @@ fn instrument_selector_label(selected: Option<(&str, &str)>, selection_pending: 
 fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
     if matches!(
         app.provider,
-        TerminalProvider::Rithmic | TerminalProvider::Hyperliquid
+        TerminalProvider::Rithmic | TerminalProvider::Hyperliquid | TerminalProvider::Tastytrade
     ) {
         return app.product.as_ref().map_or_else(
             || "Select market".to_string(),
@@ -3051,6 +3065,9 @@ fn terminal_startup_state(
                 subscription_id: startup.subscription_id,
                 connection_state: Some(FeedConnectionState::Discovering),
                 connection_message: Some(match provider {
+                    TerminalProvider::Tastytrade => {
+                        "Connecting to authorized tastytrade markets".into()
+                    }
                     TerminalProvider::Rithmic => "Connecting to Rithmic public markets".to_string(),
                     TerminalProvider::Hyperliquid => {
                         "Connecting to Hyperliquid public markets".to_string()
@@ -3067,6 +3084,9 @@ fn initial_symbol_message(provider: TerminalProvider) -> String {
     match provider {
         TerminalProvider::Rithmic => "Search for an entitled Rithmic Test symbol",
         TerminalProvider::Hyperliquid => "Search Hyperliquid perps and spot markets",
+        TerminalProvider::Tastytrade => {
+            "Search tastytrade futures, stocks, options, indices and crypto"
+        }
     }
     .to_string()
 }
@@ -3097,6 +3117,23 @@ fn catalog_rejection_message(
 ) -> &'static str {
     let rithmic = provider == TerminalProvider::Rithmic;
     let hyperliquid = provider == TerminalProvider::Hyperliquid;
+    if provider == TerminalProvider::Tastytrade {
+        return match reason {
+            ProviderCatalogRejectionReason::SupersededSearch => {
+                "A newer symbol search replaced this one"
+            }
+            ProviderCatalogRejectionReason::InstrumentUnavailable => {
+                "This tastytrade asset is no longer available"
+            }
+            ProviderCatalogRejectionReason::SearchTimedOut
+            | ProviderCatalogRejectionReason::SelectionTimedOut => {
+                "Tastytrade did not respond in time; try again"
+            }
+            _ => {
+                "Tastytrade could not load this market. Check your connection and market-data permissions."
+            }
+        };
+    }
     match reason {
         ProviderCatalogRejectionReason::SearchRejected if rithmic => {
             "Rithmic rejected the market search"
@@ -3104,7 +3141,7 @@ fn catalog_rejection_message(
         ProviderCatalogRejectionReason::SearchRejected if hyperliquid => {
             "Hyperliquid rejected the market search"
         }
-        ProviderCatalogRejectionReason::SearchRejected => "Rithmic Test rejected the symbol search",
+        ProviderCatalogRejectionReason::SearchRejected => "The provider rejected the symbol search",
         ProviderCatalogRejectionReason::SupersededSearch => {
             "A newer symbol search replaced this one"
         }
@@ -3118,7 +3155,7 @@ fn catalog_rejection_message(
             "Hyperliquid rejected the market subscription"
         }
         ProviderCatalogRejectionReason::SubscriptionRejected => {
-            "Rithmic Test rejected the market subscription"
+            "The provider rejected the market subscription"
         }
         ProviderCatalogRejectionReason::DispatchUnavailable
             if rithmic && command == ProviderCatalogCommand::Search =>
