@@ -17,6 +17,13 @@ pub(super) enum ProviderTradeBatch {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct ProviderCandle {
+    pub(super) bar: MarketBar,
+    pub(super) trade_count: Option<u64>,
+    pub(super) trade_watermark: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum ProviderDisconnect {
     Recover {
         detail: &'static str,
@@ -53,7 +60,7 @@ pub(super) enum ProviderEventKind {
     Depth(DepthSnapshot),
     Candle {
         symbol: String,
-        bar: MarketBar,
+        candle: ProviderCandle,
     },
     CandleRecovery(String),
 }
@@ -127,15 +134,19 @@ impl ProviderEvent {
             }),
             Wire::Candle(_, coin, interval, candle) => ProviderEventKind::Candle {
                 symbol: format!("{coin}{{={interval}}}"),
-                bar: MarketBar {
-                    source_sequence: 1,
-                    exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
-                    exchange_timestamp_unix_nanos: candle.open_nanos,
-                    open: candle.open,
-                    high: candle.high,
-                    low: candle.low,
-                    close: candle.close,
-                    volume: candle.volume,
+                candle: ProviderCandle {
+                    bar: MarketBar {
+                        source_sequence: 1,
+                        exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
+                        exchange_timestamp_unix_nanos: candle.open_nanos,
+                        open: candle.open,
+                        high: candle.high,
+                        low: candle.low,
+                        close: candle.close,
+                        volume: candle.volume,
+                    },
+                    trade_count: None,
+                    trade_watermark: None,
                 },
             },
             Wire::Trades(_, trades) => ProviderEventKind::Trades(ProviderTradeBatch::Many(trades)),
@@ -160,7 +171,14 @@ impl ProviderEvent {
                 provider_detail: Some(detail),
             },
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
-            Wire::Candle(_, symbol, bar) => ProviderEventKind::Candle { symbol, bar },
+            Wire::Candle(_, symbol, bar, count, trade_watermark) => ProviderEventKind::Candle {
+                symbol,
+                candle: ProviderCandle {
+                    bar,
+                    trade_count: Some(count),
+                    trade_watermark: Some(trade_watermark),
+                },
+            },
             Wire::CandleRecovery(_, symbol) => ProviderEventKind::CandleRecovery(symbol),
             Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
             Wire::Trades(_, instrument, changes) => ProviderEventKind::IndexedTrades {

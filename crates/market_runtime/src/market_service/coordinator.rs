@@ -13,7 +13,7 @@ use super::{
     StudyRuntime, StudyRuntimeConfig, authorize_consumer, publish_state, thread,
 };
 #[cfg(test)]
-use super::{CandleLiveHandoff, RithmicLiveHandoff};
+use super::{CandleLiveHandoff, TradeLiveHandoff};
 use crate::{
     MarketRuntimeEvent, MarketStudyOutputSnapshot,
     study::{
@@ -1755,10 +1755,11 @@ mod tests {
             (selected.provider.clone(), selected.instrument_id.clone()),
             order_book,
         );
-        let mut live_handoff = RithmicLiveHandoff::new(
+        let mut live_handoff = TradeLiveHandoff::new(
             &selected_series,
             ProviderGeneration(nonzero(1)),
             &selected.venue_id,
+            None,
         )
         .expect("live handoff");
         live_handoff.connected = true;
@@ -1976,7 +1977,7 @@ mod tests {
             .last()
             .map(|bar| bar.exchange_timestamp_unix_nanos)
             .expect("history boundary");
-        let mut live = RithmicLiveHandoff::new(&series, provider_generation, "CME")
+        let mut live = TradeLiveHandoff::new(&series, provider_generation, "CME", None)
             .expect("Rithmic live handoff");
         live.seed(2, 0, &bars, None, Some(boundary))
             .expect("live handoff seeds from current history");
@@ -2225,7 +2226,7 @@ mod tests {
             coordinator
                 .series_live
                 .trade(&series)
-                .and_then(RithmicLiveHandoff::coverage)
+                .and_then(TradeLiveHandoff::coverage)
                 .map(|(_, end)| end),
             Some(live_timestamp)
         );
@@ -3130,7 +3131,7 @@ mod tests {
             )
             .expect("demand installs");
         let provider_generation = ProviderGeneration(nonzero(1));
-        let mut live = RithmicLiveHandoff::new(&selected_series, provider_generation, "CME")
+        let mut live = TradeLiveHandoff::new(&selected_series, provider_generation, "CME", None)
             .expect("live handoff");
         live.history_state = LiveHistoryState::Ready;
         coordinator.series_live.insert_trade(selected_series, live);

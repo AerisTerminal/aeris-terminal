@@ -2,7 +2,7 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey,
     COMMAND_CAPACITY, CatalogPublisher, Command, Coordinator, Duration, FormingBar,
-    HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, IndexedTradeMutation,
+    HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, IndexedTradeKind, IndexedTradeMutation,
     InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, MAXIMUM_CONSUMERS, MarketBar,
     MarketTrade, Mutex, Ordering, ProviderCatalogChannelSet, ProviderCatalogChannels,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderCoordinatorWake,
@@ -45,7 +45,7 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
     start: super::ProviderRuntimeRegistry::start_tastytrade_runtime,
     flush_demand,
     prepare_search: Some(prepare_search),
-    live_model: super::LiveModel::ProviderCandles,
+    live_model: super::LiveModel::TradeBuilt,
     supported_period: super::tastytrade_supported_period,
     alert_overrides_instrument: true,
     overflow_recovery_detail: "Tastytrade queue overflow requires recovery",
@@ -55,6 +55,7 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
     candle_correction_detail: "Tastytrade candle correction requires covering history",
     candle_wire_interval: Some(candle_period),
     candle_demand_policy: super::CandleDemandPolicy::SessionManaged,
+    trade_demand_policy: super::TradeDemandPolicy::SessionManaged,
     instrument_missing_detail: "Tastytrade instrument is not installed",
 };
 
@@ -116,7 +117,7 @@ pub(super) enum RealtimeEvent {
     Connected(u64),
     Recovering(u64, String),
     Disconnected(u64),
-    Candle(u64, String, MarketBar),
+    Candle(u64, String, MarketBar, u64, u64),
     CandleRecovery(u64, String),
     Quote(u64, TopOfBookQuote),
     Trades(u64, InstallProviderInstrument, Vec<IndexedTradeMutation>),
@@ -976,7 +977,7 @@ struct HistoryTask {
     request: HistoryRequest,
     symbol: String,
     deadline: Instant,
-    candles: BTreeMap<String, MarketBar>,
+    candles: BTreeMap<String, (MarketBar, u64)>,
     saw_newer_candle: bool,
     candle_state: CandleHistoryState,
 }
@@ -1038,6 +1039,7 @@ impl HistoryTask {
                 flags,
                 index,
                 bar,
+                count,
                 ..
             } if symbol == self.symbol => {
                 if self.candle_state == CandleHistoryState::Published {
@@ -1065,7 +1067,7 @@ impl HistoryTask {
                         if !self.candles.contains_key(&index) && self.candles.len() >= 16_384 {
                             return Err("Tastytrade candle snapshot exceeded its bound".into());
                         }
-                        self.candles.insert(index, bar);
+                        self.candles.insert(index, (bar, count));
                     }
                 }
                 if flags & (SNAPSHOT_END | SNAPSHOT_SNIP) != 0 {
@@ -1087,20 +1089,20 @@ impl HistoryTask {
         now: i64,
         session: Option<MarketSession>,
     ) -> Result<HistorySnapshot, String> {
-        let mut bars: Vec<_> = self
+        let mut candles: Vec<_> = self
             .candles
             .values()
             .copied()
-            .filter(|bar| {
+            .filter(|(bar, _)| {
                 self.request.range.is_none_or(|range| {
                     bar.exchange_timestamp_unix_nanos >= range.start_unix_nanos
                         && bar.exchange_timestamp_unix_nanos < range.end_unix_nanos
                 })
             })
             .collect();
-        bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
-        bars.dedup_by_key(|bar| bar.exchange_timestamp_unix_nanos);
-        let backwards_exhausted = bars.is_empty() && self.saw_newer_candle;
+        candles.sort_unstable_by_key(|(bar, _)| bar.exchange_timestamp_unix_nanos);
+        candles.dedup_by_key(|(bar, _)| bar.exchange_timestamp_unix_nanos);
+        let backwards_exhausted = candles.is_empty() && self.saw_newer_candle;
         let mut forming = None;
         if self.request.range.is_none()
             && self
@@ -1109,7 +1111,7 @@ impl HistoryTask {
                 .period
                 .duration_nanos()
                 .is_some_and(|duration| {
-                    bars.last().is_some_and(|bar| {
+                    candles.last().is_some_and(|(bar, _)| {
                         bar.exchange_timestamp_unix_nanos.saturating_add(duration) > now
                     })
                 })
@@ -1120,10 +1122,19 @@ impl HistoryTask {
             {
                 return Err("Tastytrade market session calendar is unavailable".into());
             }
-            if session.is_none_or(|session| session.contains(now)) {
-                forming = bars.pop().map(|bar| FormingBar { bar, trades: None });
+            if session.is_none_or(|session| session.contains(now))
+                && let Some((bar, count)) = candles.pop()
+            {
+                forming = Some(FormingBar {
+                    bar,
+                    trades: Some(
+                        u32::try_from(count)
+                            .map_err(|_| "Tastytrade candle trade count exceeds storage")?,
+                    ),
+                });
             }
         }
+        let mut bars = candles.into_iter().map(|(bar, _)| bar).collect::<Vec<_>>();
         if bars.len() > self.request.maximum_bars {
             bars.drain(..bars.len() - self.request.maximum_bars);
         }
@@ -1140,7 +1151,11 @@ impl HistoryTask {
                 .map_err(|_| "Tastytrade quantity scale exceeds storage")?,
             bars,
             forming,
-            handoff_boundary_unix_nanos: None,
+            // Live events accepted before this snapshot was taken fall on or
+            // before this time fence. The shared trade handoff drops that
+            // buffered prefix so the forming provider candle and TimeAndSale
+            // stream cannot count the same print twice.
+            handoff_boundary_unix_nanos: Some(now),
             backwards_exhausted,
         })
     }
@@ -1320,7 +1335,7 @@ struct Worker {
     failures: u8,
     paused: bool,
     trade_batches: BTreeMap<String, (bool, Vec<IndexedTradeMutation>)>,
-    candle_batches: BTreeMap<String, (bool, Vec<MarketBar>)>,
+    candle_batches: BTreeMap<String, (bool, Vec<(MarketBar, u64)>)>,
 }
 impl Worker {
     fn new(ports: WorkerPorts) -> Self {
@@ -1823,8 +1838,9 @@ impl Worker {
                 symbol,
                 flags,
                 bar,
+                count,
                 ..
-            } => self.accept_candle(&symbol, flags, bar)?,
+            } => self.accept_candle(&symbol, flags, bar, count)?,
             _ => {}
         }
         Ok(())
@@ -1846,10 +1862,16 @@ impl Worker {
         else {
             return Ok(());
         };
-        let trade = if kind == "CANCEL" || flags & REMOVE_EVENT != 0 {
-            None
+        let mutation_kind = if kind == "CANCEL" || flags & REMOVE_EVENT != 0 {
+            IndexedTradeKind::Cancel
+        } else if kind == "CORRECTION" {
+            IndexedTradeKind::Correction
         } else {
-            print
+            IndexedTradeKind::New
+        };
+        let trade = match mutation_kind {
+            IndexedTradeKind::Cancel => None,
+            IndexedTradeKind::New | IndexedTradeKind::Correction => print
                 .map(|print| {
                     market_trade(
                         &instrument,
@@ -1860,8 +1882,11 @@ impl Worker {
                     )
                 })
                 .transpose()?
-                .flatten()
+                .flatten(),
         };
+        if mutation_kind != IndexedTradeKind::Cancel && trade.is_none() {
+            return Ok(());
+        }
         let batch = self.trade_batches.entry(symbol).or_default();
         if flags & SNAPSHOT_BEGIN != 0 {
             batch.0 = true;
@@ -1870,7 +1895,12 @@ impl Worker {
         if batch.1.len() >= MAXIMUM_TICK_HISTORY {
             return Err("Tastytrade live transaction exceeded its bound".into());
         }
-        batch.1.push(IndexedTradeMutation { index, trade });
+        batch.1.push(IndexedTradeMutation {
+            index,
+            kind: mutation_kind,
+            source_sequence: self.ordinal,
+            trade,
+        });
         if flags & (SNAPSHOT_END | SNAPSHOT_SNIP) != 0 {
             batch.0 = false;
         }
@@ -1885,6 +1915,7 @@ impl Worker {
         symbol: &str,
         flags: u32,
         bar: Option<MarketBar>,
+        count: u64,
     ) -> Result<(), String> {
         if !self.demand.series.iter().any(|(series, instrument)| {
             candle_symbol(series, instrument).is_ok_and(|expected| expected == symbol)
@@ -1908,16 +1939,22 @@ impl Worker {
             if batch.1.len() >= LIVE_BUFFER_CAPACITY {
                 return Err("Tastytrade candle transaction exceeded its bound".into());
             }
-            batch.1.push(bar);
+            batch.1.push((bar, count));
         }
         if flags & (SNAPSHOT_END | SNAPSHOT_SNIP) != 0 {
             batch.0 = false;
         }
         if !batch.0 && flags & TX_PENDING == 0 {
             let mut bars = std::mem::take(&mut batch.1);
-            bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
-            for bar in bars {
-                self.publish(RealtimeEvent::Candle(self.epoch(), symbol.to_string(), bar))?;
+            bars.sort_unstable_by_key(|(bar, _)| bar.exchange_timestamp_unix_nanos);
+            for (bar, count) in bars {
+                self.publish(RealtimeEvent::Candle(
+                    self.epoch(),
+                    symbol.to_string(),
+                    bar,
+                    count,
+                    self.ordinal,
+                ))?;
             }
         }
         Ok(())
@@ -2229,6 +2266,7 @@ mod tests {
             flags,
             index: "9007199254740993".into(),
             bar,
+            count: 1,
         };
         task.accept(event(SNAPSHOT_BEGIN, Some(bar())), 1, &mut 1)
             .unwrap();
@@ -2238,17 +2276,16 @@ mod tests {
         task.accept(event(0, Some(bar())), 1, &mut 1).unwrap();
         assert!(task.candle_state == CandleHistoryState::Ready);
         let open = bar().exchange_timestamp_unix_nanos;
-        assert_eq!(
-            task.snapshot_at(
+        let forming = task
+            .snapshot_at(
                 open + 30_000_000_000,
-                Some(session_at(open, open + 60_000_000_000))
+                Some(session_at(open, open + 60_000_000_000)),
             )
             .unwrap()
             .forming
-            .unwrap()
-            .bar,
-            bar()
-        );
+            .unwrap();
+        assert_eq!(forming.bar, bar());
+        assert_eq!(forming.trades, Some(1));
         assert!(
             task.snapshot_at(
                 open + 60_000_000_000,
@@ -2297,6 +2334,7 @@ mod tests {
                 flags: SNAPSHOT_END,
                 index: "1".into(),
                 bar: Some(newest),
+                count: 1,
             },
             1,
             &mut 1,
@@ -2564,17 +2602,19 @@ mod tests {
         let symbol = candle_symbol(&request.series, &instrument).unwrap();
         worker.demand.series.push((request.series, instrument));
         worker
-            .accept_candle(&symbol, SNAPSHOT_BEGIN, Some(bar()))
+            .accept_candle(&symbol, SNAPSHOT_BEGIN, Some(bar()), 1)
             .unwrap();
         assert!(output.try_recv().is_err());
         worker
-            .accept_candle(&symbol, SNAPSHOT_END | REMOVE_EVENT, None)
+            .accept_candle(&symbol, SNAPSHOT_END | REMOVE_EVENT, None, 0)
             .unwrap();
         assert!(matches!(
             output.try_recv().unwrap(),
-            RealtimeEvent::Candle(1, _, _)
+            RealtimeEvent::Candle(1, ..)
         ));
-        worker.accept_candle("retired{=m}", 0, Some(bar())).unwrap();
+        worker
+            .accept_candle("retired{=m}", 0, Some(bar()), 1)
+            .unwrap();
         assert!(output.try_recv().is_err());
         assert!(worker.socket.is_none());
     }

@@ -5,8 +5,8 @@ use super::{
     HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest,
     HistorySnapshot, HistorySource, INITIAL_HISTORY_BARS, InstallProviderInstrument, Instant,
     MAXIMUM_HISTORY_BARS_PER_REQUEST, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
-    ProviderGeneration, ProviderRequest, Receiver, RithmicHandoffSeed, SeriesLoadState,
-    SeriesSnapshot, SyncSender, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
+    ProviderGeneration, ProviderRequest, Receiver, SeriesLoadState, SeriesSnapshot, SyncSender,
+    TradeHandoffSeed, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
     fail_waiters, publish_state, series_state, thread, try_enqueue_history,
 };
 
@@ -1277,7 +1277,7 @@ impl Coordinator<'_> {
         } else if let Err(error) = self.finish_rithmic_history_handoff(
             series,
             generation,
-            RithmicHandoffSeed {
+            TradeHandoffSeed {
                 price_scale,
                 quantity_scale,
                 bars: &bars,
@@ -1462,7 +1462,7 @@ impl Coordinator<'_> {
         if self.seed_rithmic_history(
             series,
             snapshot.provider_generation,
-            RithmicHandoffSeed {
+            TradeHandoffSeed {
                 price_scale: snapshot.price_scale,
                 quantity_scale: snapshot.quantity_scale,
                 bars,
@@ -1492,7 +1492,7 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
-        seed: RithmicHandoffSeed<'_>,
+        seed: TradeHandoffSeed<'_>,
     ) -> Result<(), String> {
         if self.providers.live_model(&series.provider_id) != Some(super::LiveModel::TradeBuilt) {
             return Ok(());
@@ -1569,12 +1569,12 @@ impl Coordinator<'_> {
         &mut self,
         series: &BarSeriesKey,
         _generation: ProviderGeneration,
-        seed: RithmicHandoffSeed<'_>,
+        seed: TradeHandoffSeed<'_>,
     ) -> bool {
         let Some(live) = self.series_live.trade_mut(series) else {
             return true;
         };
-        let RithmicHandoffSeed {
+        let TradeHandoffSeed {
             price_scale,
             quantity_scale,
             bars,

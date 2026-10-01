@@ -86,17 +86,17 @@ Commits: native `d5e20e7`, `7071595`; website `de3dfb1` (deployed and pushed).
 
 ### Remaining
 
-- [ ] **Urgent: drive the tastytrade live candle from trades.** The chart's forming candle currently
+- [x] **Urgent: drive the tastytrade live candle from trades.** The chart's forming candle currently
   advances only on provider `Candle` events (~2/s), so it trails the tape by 0.5–1.7 s.
-  - [ ] Each accepted trade (NEW, valid tick, not a spread leg) updates close/high/low/volume of
+  - [x] Each accepted trade (NEW, valid tick, not a spread leg) updates close/high/low/volume of
     the forming bar immediately and rolls to a new bar at the period boundary by exchange time.
-  - [ ] Provider `Candle` events become authoritative reconciliation: completed bars are replaced
+  - [x] Provider `Candle` events become authoritative reconciliation: completed bars are replaced
     by the provider candle; a lagging `Candle` event never moves the forming bar backwards
     relative to trades already applied. Reconcile deterministically (candle `count`, trade
     identity/timestamps); corrections and cancels still reach the bar. Document the rule in code
     and cover it with tests.
-  - [ ] Session gaps stay allowed; no double counting across the history/live handoff boundary.
-  - [ ] Reuse the trade-built handoff (the Rithmic model) through the Phase 2 neutral live-bar
+  - [x] Session gaps stay allowed; no double counting across the history/live handoff boundary.
+  - [x] Reuse the trade-built handoff (the Rithmic model) through the Phase 2 neutral live-bar
     model; do not add another copy.
 - [ ] Top of book from trades: update best bid/ask prices from each `TimeAndSale`'s
   `bidPrice`/`askPrice`; take sizes from the latest `Quote`; never present a stale size as fresh.

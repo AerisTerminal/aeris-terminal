@@ -378,6 +378,86 @@ impl SeriesStore {
         Ok(tail)
     }
 
+    pub(crate) fn replace_realtime_completed_bar(
+        &mut self,
+        series: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        price_scale: u8,
+        quantity_scale: u8,
+        bar: MarketBar,
+    ) -> Result<Arc<SeriesSnapshot>, EngineError> {
+        bar.validate()?;
+        let current = self
+            .series
+            .get_mut(series)
+            .ok_or(EngineError::EmptySeries)?;
+        if provider_generation != current.covering.provider_generation {
+            return Err(EngineError::StaleSeriesGeneration {
+                current: current.covering.provider_generation,
+                received: provider_generation,
+            });
+        }
+        if current.covering.price_scale != price_scale
+            || current.covering.quantity_scale != quantity_scale
+        {
+            return Err(EngineError::ConflictingSeriesGeneration(
+                provider_generation,
+            ));
+        }
+        if current.tail.is_some_and(|tail| {
+            tail.bar.source_sequence == bar.source_sequence
+                || tail.bar.exchange_timestamp_unix_nanos == bar.exchange_timestamp_unix_nanos
+        }) {
+            return Err(EngineError::ConflictingSeriesGeneration(
+                provider_generation,
+            ));
+        }
+        let publication_generation = current
+            .latest_publication_generation()
+            .checked_add(1)
+            .ok_or(EngineError::CapacityOverflow)?;
+        if let Some(completed) = current.completed_tail.iter_mut().find(|candidate| {
+            candidate.source_sequence == bar.source_sequence
+                && candidate.exchange_timestamp_unix_nanos == bar.exchange_timestamp_unix_nanos
+        }) {
+            *completed = bar;
+        } else {
+            let Some(position) = current.covering.bars.iter().position(|candidate| {
+                candidate.source_sequence == bar.source_sequence
+                    && candidate.exchange_timestamp_unix_nanos == bar.exchange_timestamp_unix_nanos
+            }) else {
+                return Err(EngineError::ConflictingSeriesGeneration(
+                    provider_generation,
+                ));
+            };
+            let mut bars = current.covering.bars.to_vec();
+            bars[position] = bar;
+            current.covering = Arc::new(SeriesSnapshot {
+                series: current.covering.series.clone(),
+                provider_generation,
+                publication_generation,
+                price_scale,
+                quantity_scale,
+                forming: false,
+                bars: bars.into(),
+            });
+        }
+        if let Some(tail) = current.tail.as_mut() {
+            tail.publication_generation = publication_generation;
+        } else if current.covering.publication_generation != publication_generation {
+            current.covering = Arc::new(SeriesSnapshot {
+                series: current.covering.series.clone(),
+                provider_generation,
+                publication_generation,
+                price_scale,
+                quantity_scale,
+                forming: false,
+                bars: Arc::clone(&current.covering.bars),
+            });
+        }
+        Ok(current.snapshot())
+    }
+
     pub(crate) fn get(&self, series: &BarSeriesKey) -> Option<Arc<SeriesSnapshot>> {
         self.series.get(series).map(StoredSeries::snapshot)
     }

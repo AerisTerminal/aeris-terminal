@@ -105,6 +105,7 @@ const VIEWPORT_LIVE_TAIL_RESERVE: usize = 512;
 const MAXIMUM_CATALOG_INSTRUMENTS: usize = 4_096;
 const MAXIMUM_CATALOG_FIELD_BYTES: usize = 256;
 const LIVE_BUFFER_CAPACITY: usize = 2_048;
+const MAXIMUM_TRADE_BAR_OVERLAY: usize = 16_384;
 const LIVE_HANDOFF_HISTORY_BARS: usize = VIEWPORT_LIVE_TAIL_RESERVE + 1;
 const MAXIMUM_RECENT_LADDER_TRADES: usize = 65_536;
 
@@ -543,8 +544,8 @@ struct CandleHandoffSeed<'a> {
     forming: Option<FormingBar>,
 }
 
-/// Everything one Rithmic series needs to close its history/live seam.
-struct RithmicHandoffSeed<'a> {
+/// Everything one trade-built series needs to close its history/live seam.
+struct TradeHandoffSeed<'a> {
     price_scale: u8,
     quantity_scale: u8,
     /// Periods the provider closed, already installed as canonical history.
@@ -560,8 +561,9 @@ struct RithmicHandoffSeed<'a> {
 /// already is.
 pub(crate) struct FormingBar {
     pub(crate) bar: MarketBar,
-    /// Trades already inside the open bundle. `None` for a clock-driven period,
-    /// where elapsed time rather than a count decides when the bar closes.
+    /// Provider-observed trades already inside the open candle, when known.
+    /// Tick cadence requires this to resume a partial bundle; clock-driven
+    /// cadence uses it to reconcile an independent provider candle stream.
     pub(crate) trades: Option<u32>,
 }
 
@@ -621,14 +623,32 @@ struct ProviderOrderBook {
     retention_clock_unix_nanos: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexedTradeKind {
+    New,
+    Correction,
+    Cancel,
+}
+
+#[derive(Clone)]
 struct IndexedTradeMutation {
     index: String,
+    kind: IndexedTradeKind,
+    source_sequence: u64,
     trade: Option<MarketTrade>,
+}
+
+#[derive(Clone)]
+enum TradeLiveUpdate {
+    Append(MarketTrade),
+    Indexed(IndexedTradeMutation),
 }
 
 mod provider_event;
 mod realtime;
-use provider_event::{ProviderDisconnect, ProviderEvent, ProviderEventKind, ProviderTradeBatch};
+use provider_event::{
+    ProviderCandle, ProviderDisconnect, ProviderEvent, ProviderEventKind, ProviderTradeBatch,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LiveHistoryState {
@@ -661,15 +681,18 @@ struct CandleLiveHandoff {
     dirty: bool,
 }
 
-struct RithmicLiveHandoff {
+struct TradeLiveHandoff {
     series: BarSeriesKey,
     generation: ProviderGeneration,
-    cadence: RithmicLiveCadence,
+    cadence: TradeLiveCadence,
+    gap_policy: CandleGapPolicy,
+    candle_symbol: Option<String>,
     price_scale: u8,
     quantity_scale: u8,
     bars: Vec<MarketBar>,
-    buffered: VecDeque<MarketTrade>,
+    buffered: VecDeque<TradeLiveUpdate>,
     pending_publications: VecDeque<MarketBar>,
+    pending_corrections: VecDeque<MarketBar>,
     connected: bool,
     history_state: LiveHistoryState,
     dirty: bool,
@@ -683,9 +706,13 @@ struct RithmicLiveHandoff {
     live_session_generation: Option<u64>,
     last_trade_sequence: Option<u64>,
     history_boundary_unix_nanos: i64,
+    overlay_base: Option<MarketBar>,
+    indexed_overlay: BTreeMap<String, MarketTrade>,
+    provider_candle_count: Option<u64>,
+    provider_candle_timestamp: Option<i64>,
 }
 
-enum RithmicLiveCadence {
+enum TradeLiveCadence {
     Fixed {
         seconds: i64,
     },
@@ -704,6 +731,7 @@ enum RithmicLiveCadence {
 /// out of a handoff on the hot path.
 enum LiveSeriesPublication {
     Tails(Vec<MarketBar>),
+    CompletedCorrection(MarketBar),
 }
 
 /// A live bar that neither continues the published tail nor revises it in place
@@ -742,11 +770,12 @@ struct ProviderDescriptor {
     candle_correction_detail: &'static str,
     candle_wire_interval: Option<fn(BarPeriod) -> Result<String, String>>,
     candle_demand_policy: CandleDemandPolicy,
+    trade_demand_policy: TradeDemandPolicy,
     instrument_missing_detail: &'static str,
 }
 
 enum SeriesLive {
-    TradeBuilt(RithmicLiveHandoff),
+    TradeBuilt(TradeLiveHandoff),
     ProviderCandles(CandleLiveHandoff),
 }
 
@@ -762,6 +791,7 @@ impl SeriesLiveMap {
         self.candle(series).is_some()
     }
 
+    #[cfg(test)]
     fn trades_are_empty(&self) -> bool {
         self.trade_keys().next().is_none()
     }
@@ -771,14 +801,14 @@ impl SeriesLiveMap {
         self.candle_keys().next().is_none()
     }
 
-    fn trade(&self, series: &BarSeriesKey) -> Option<&RithmicLiveHandoff> {
+    fn trade(&self, series: &BarSeriesKey) -> Option<&TradeLiveHandoff> {
         match self.0.get(series)? {
             SeriesLive::TradeBuilt(live) => Some(live),
             SeriesLive::ProviderCandles(_) => None,
         }
     }
 
-    fn trade_mut(&mut self, series: &BarSeriesKey) -> Option<&mut RithmicLiveHandoff> {
+    fn trade_mut(&mut self, series: &BarSeriesKey) -> Option<&mut TradeLiveHandoff> {
         match self.0.get_mut(series)? {
             SeriesLive::TradeBuilt(live) => Some(live),
             SeriesLive::ProviderCandles(_) => None,
@@ -799,7 +829,7 @@ impl SeriesLiveMap {
         }
     }
 
-    fn insert_trade(&mut self, series: BarSeriesKey, live: RithmicLiveHandoff) {
+    fn insert_trade(&mut self, series: BarSeriesKey, live: TradeLiveHandoff) {
         self.0.insert(series, SeriesLive::TradeBuilt(live));
     }
 
@@ -833,7 +863,7 @@ impl SeriesLiveMap {
         })
     }
 
-    fn trade_values_mut(&mut self) -> impl Iterator<Item = &mut RithmicLiveHandoff> {
+    fn trade_values_mut(&mut self) -> impl Iterator<Item = &mut TradeLiveHandoff> {
         self.0.values_mut().filter_map(|live| match live {
             SeriesLive::TradeBuilt(live) => Some(live),
             SeriesLive::ProviderCandles(_) => None,
@@ -847,24 +877,16 @@ impl SeriesLiveMap {
         })
     }
 
-    fn trade_iter_mut(&mut self) -> impl Iterator<Item = (&BarSeriesKey, &mut RithmicLiveHandoff)> {
+    fn trade_iter_mut(&mut self) -> impl Iterator<Item = (&BarSeriesKey, &mut TradeLiveHandoff)> {
         self.0.iter_mut().filter_map(|(series, live)| match live {
             SeriesLive::TradeBuilt(live) => Some((series, live)),
             SeriesLive::ProviderCandles(_) => None,
         })
     }
 
-    fn trade_count(&self) -> usize {
-        self.trade_keys().count()
-    }
-
-    fn candle_count(&self) -> usize {
-        self.candle_keys().count()
-    }
-
     fn retain_trades(
         &mut self,
-        mut keep: impl FnMut(&BarSeriesKey, &mut RithmicLiveHandoff) -> bool,
+        mut keep: impl FnMut(&BarSeriesKey, &mut TradeLiveHandoff) -> bool,
     ) {
         self.0.retain(|series, live| match live {
             SeriesLive::TradeBuilt(live) => keep(series, live),
@@ -956,6 +978,12 @@ enum CandleDemandPolicy {
     ReconcileAfterSelection,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TradeDemandPolicy {
+    Immediate,
+    SessionManaged,
+}
+
 const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "rithmic",
     account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
@@ -987,6 +1015,7 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     candle_correction_detail: "Provider candle correction requires covering history",
     candle_wire_interval: None,
     candle_demand_policy: CandleDemandPolicy::SessionManaged,
+    trade_demand_policy: TradeDemandPolicy::Immediate,
     instrument_missing_detail: "Rithmic instrument is not installed",
 };
 
@@ -1014,6 +1043,7 @@ const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     candle_correction_detail: "Hyperliquid candle replacement requires covering history",
     candle_wire_interval: Some(hyperliquid_candle_interval),
     candle_demand_policy: CandleDemandPolicy::ReconcileAfterSelection,
+    trade_demand_policy: TradeDemandPolicy::SessionManaged,
     instrument_missing_detail: "Hyperliquid instrument is not installed",
 };
 

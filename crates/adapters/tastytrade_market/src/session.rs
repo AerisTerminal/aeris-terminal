@@ -87,6 +87,7 @@ pub enum FeedEvent {
         flags: u32,
         index: String,
         bar: Option<MarketBar>,
+        count: u64,
     },
     Trade {
         channel: u64,
@@ -712,6 +713,7 @@ fn decode_row(channel: u64, kind: &str, row: &Row<'_>) -> Result<FeedEvent, Stri
             let flags = row.integer("eventFlags")?;
             let index = row.index()?;
             let time: i64 = row.integer("time")?;
+            let count = row.integer("count")?;
             let values = [
                 row.decimal("open")?,
                 row.decimal("high")?,
@@ -743,6 +745,7 @@ fn decode_row(channel: u64, kind: &str, row: &Row<'_>) -> Result<FeedEvent, Stri
                 flags,
                 index,
                 bar,
+                count,
             })
         }
         "TimeAndSale" => decode_trade(channel, symbol, row),
@@ -997,5 +1000,28 @@ mod tests {
         assert_eq!(trade.time_nanos, 1_790_800_000_000_123_456);
         assert_eq!(trade.aggressor, AggressorSide::Sell);
         assert!(decode_data(&raw.replace("5000.25000000", "5000.250000001"), 3, &fields).is_err());
+    }
+
+    #[test]
+    fn candle_wire_count_is_required_and_preserved() {
+        let fields = BTreeMap::from([(
+            "Candle".into(),
+            CANDLE.iter().map(|field| (*field).into()).collect(),
+        )]);
+        let raw = r#"{"type":"FEED_DATA","channel":3,"data":["Candle",["Candle","/ESZ26:XCME{=m}",0,9007199254740993,1790800000000,1,5000.0,5001.0,4999.0,5000.5,27.0,83]]}"#;
+        let events = decode_data(raw, 3, &fields).expect("candle wire");
+        let FeedEvent::Candle {
+            index,
+            count,
+            bar: Some(bar),
+            ..
+        } = &events[0]
+        else {
+            panic!("candle")
+        };
+        assert_eq!(index, "9007199254740993");
+        assert_eq!(*count, 83);
+        assert_eq!(bar.close, 500_050_000_000);
+        assert!(decode_data(&raw.replace(",83]]}", "]]}"), 3, &fields).is_err());
     }
 }

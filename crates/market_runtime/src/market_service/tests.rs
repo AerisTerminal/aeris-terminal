@@ -83,6 +83,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
         candle_correction_detail: "Provider candle correction requires covering history",
         candle_wire_interval: None,
         candle_demand_policy: CandleDemandPolicy::SessionManaged,
+        trade_demand_policy: TradeDemandPolicy::SessionManaged,
         instrument_missing_detail: "Provider instrument is not installed",
     };
     let mut engine = configured_engine_from_descriptors(&[

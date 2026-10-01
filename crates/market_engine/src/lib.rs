@@ -955,6 +955,37 @@ impl MarketEngine {
             .collect()
     }
 
+    /// Replaces one completed live bar with an authoritative provider value.
+    ///
+    /// The bar must identify an existing completed bucket exactly. The forming
+    /// tail remains intact and the replacement is published as a new canonical
+    /// snapshot to each matching consumer.
+    ///
+    /// # Errors
+    /// Returns an error for stale generation, precision mismatch, a missing or
+    /// forming bucket, invalid market data, or publication capacity failure.
+    pub fn replace_realtime_completed_bar(
+        &mut self,
+        provider_generation: ProviderGeneration,
+        series: &BarSeriesKey,
+        price_scale: u8,
+        quantity_scale: u8,
+        bar: MarketBar,
+    ) -> Result<Vec<ConsumerPublication>, EngineError> {
+        self.providers
+            .verify_generation(&series.provider_id, provider_generation)?;
+        self.providers
+            .verify_request(&series.provider_id, ProviderRequest::RealtimeBars)?;
+        let snapshot = self.series.replace_realtime_completed_bar(
+            series,
+            provider_generation,
+            price_scale,
+            quantity_scale,
+            bar,
+        )?;
+        self.publish_snapshot(series, &snapshot)
+    }
+
     #[must_use]
     pub fn current_demand(&self, consumer_id: ConsumerId) -> Option<&ConsumerDemand> {
         self.demands.current(consumer_id)
@@ -1577,6 +1608,62 @@ mod tests {
             .expect("revised series remains materializable");
         assert_eq!(snapshot.bars.len(), 3);
         assert_eq!(snapshot.bars[2].close, 106);
+    }
+
+    #[test]
+    fn authoritative_live_correction_replaces_only_an_exact_completed_bucket() {
+        let mut engine = engine(1, 1, 8);
+        let btc = series("rithmic:spot:BTC-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand(id(1), generation(1), &btc)
+            .expect("demand installs");
+        engine
+            .install_history(provider_generation(1), &btc, 2, 8, bars(2))
+            .expect("history installs");
+        engine
+            .install_realtime_tail(
+                provider_generation(1),
+                &btc,
+                2,
+                8,
+                bars(3).pop().expect("third bar"),
+                true,
+            )
+            .expect("first live tail");
+        engine
+            .install_realtime_tail(
+                provider_generation(1),
+                &btc,
+                2,
+                8,
+                bars(4).pop().expect("fourth bar"),
+                true,
+            )
+            .expect("rollover");
+        let before = engine.series_snapshot(&btc).expect("live snapshot");
+        let mut corrected = before.bars[2];
+        corrected.high = corrected.high.saturating_add(5);
+        corrected.close = corrected.close.saturating_add(4);
+        let publications = engine
+            .replace_realtime_completed_bar(provider_generation(1), &btc, 2, 8, corrected)
+            .expect("completed correction installs");
+        assert_eq!(publications.len(), 1);
+        let after = engine.series_snapshot(&btc).expect("corrected snapshot");
+        assert!(after.forming);
+        assert_eq!(after.bars[2], corrected);
+        assert_eq!(after.bars[3], before.bars[3]);
+        assert!(after.publication_generation > before.publication_generation);
+        assert!(matches!(
+            engine.replace_realtime_completed_bar(
+                provider_generation(1),
+                &btc,
+                2,
+                8,
+                after.bars[3],
+            ),
+            Err(EngineError::ConflictingSeriesGeneration(_))
+        ));
     }
 
     #[test]
