@@ -13,15 +13,15 @@ use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError,
 };
+pub use aeris_charts_engine::DrawingKind as ChartDrawingKind;
 #[cfg(test)]
 use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
-    AlertCreateRequest, AlertSnapshot, BrushRange, BrushStyle, ChartEngine, ChartFrame, ChartTheme,
-    DeltaTooltipOptions, DrawingId, DrawingKind, DrawingModifiers, DrawingTextEditKey,
-    EMA_RIBBON_DEFAULT_PERIODS, FinancialAppearance, FinancialDrag, FinancialLegendIdentity,
-    FinancialLegendRequest, FinancialLegendTone, FinancialNavigation, HostLegendSeries,
-    IndicatorChromeOptions, IndicatorKind, NativePrimitiveId, PriceScaleMode, PriceScaleTarget,
-    SeriesChromeFlag, TradingIntent, TradingSnapshot,
+    AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
+    DrawingId, EMA_RIBBON_DEFAULT_PERIODS, FinancialAppearance, FinancialLegendIdentity,
+    FinancialLegendRequest, FinancialLegendTone, HostLegendSeries, IndicatorChromeOptions,
+    IndicatorKind, InteractionOptions, PriceScaleMode, PriceScaleTarget, SeriesChromeFlag,
+    TradingIntent, TradingSnapshot,
 };
 pub use aeris_charts_engine::{
     ExternalStudyError as ChartStudyOutputError,
@@ -36,6 +36,7 @@ pub use aeris_charts_engine::{
 use aeris_charts_render::color::Color;
 use aeris_charts_render::draw_list::{LineStyle, Prim};
 use aeris_charts_render_gpui::backend::measure_text;
+use aeris_charts_render_gpui::input::{GpuiChartInput, install_text_metrics};
 use aeris_charts_render_gpui::{AerisViewport, GpuiChartRenderer, PreparedAerisFrame};
 use aeris_design_system::{
     AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_font_stack,
@@ -43,13 +44,12 @@ use aeris_design_system::{
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
-    KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task,
-    Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
+    KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task, Transformation,
+    Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
 use num_traits::ToPrimitive;
 use order_flow::{OrderFlowChartState, OrderFlowStudy};
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 #[cfg(feature = "diagnostics")]
@@ -58,11 +58,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How often the surface wakes itself so the candle countdown keeps moving.
 const CHART_CLOCK_INTERVAL: Duration = Duration::from_secs(1);
-const WHEEL_LINE_HEIGHT: f32 = 32.0;
-const PANE_SEPARATOR_HIT: f64 = 4.0;
-const BRUSHABLE_LINE: (u8, u8, u8) = (40, 98, 255);
-const BRUSHABLE_UP: (u8, u8, u8) = (4, 153, 129);
-const BRUSHABLE_DOWN: (u8, u8, u8) = (239, 83, 80);
 const MAXIMUM_SESSION_PLAN_LEVELS: usize = 32;
 const SESSION_PLAN_LEVEL_COLOR: Color = Color::rgb(245, 166, 35);
 
@@ -119,6 +114,15 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine, time_visible: bool) 
         .expect("the platform text options derived from platform.css are valid");
 }
 
+/// Terminal interaction policy: the reference defaults plus wheel zoom over a price axis, which
+/// traders expect from professional platforms.
+fn apply_platform_interaction(engine: &mut ChartEngine) {
+    engine.set_interaction_options(InteractionOptions {
+        price_axis_wheel_zoom: true,
+        ..InteractionOptions::default()
+    });
+}
+
 fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySnapshot) {
     let definition = replay.bar_definition();
     let right_offset = if definition.interval_seconds > 0
@@ -138,27 +142,6 @@ fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySna
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
-
-fn text_edit_text(event: &KeyDownEvent) -> Option<String> {
-    if let Some(text) = event.keystroke.key_char.as_deref() {
-        return (!text.is_empty() && !text.chars().any(char::is_control)).then(|| text.to_owned());
-    }
-    match event.keystroke.key.as_str() {
-        "space" => Some(" ".to_owned()),
-        key => {
-            let mut chars = key.chars();
-            let ch = chars.next()?;
-            if chars.next().is_some() || ch.is_control() {
-                return None;
-            }
-            if ch.is_ascii_alphabetic() && event.keystroke.modifiers.shift {
-                Some(ch.to_ascii_uppercase().to_string())
-            } else {
-                Some(ch.to_string())
-            }
-        }
-    }
-}
 
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -587,60 +570,12 @@ fn price_format_min_move(precision: u8) -> f64 {
     10_f64.powi(-i32::from(precision.min(18)))
 }
 
-fn json_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!("\"{key}\":");
-    Some(json.split_once(&needle)?.1.trim_start())
-}
-
-fn json_u8(json: &str, key: &str) -> Option<u8> {
-    json_value(json, key)?
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .ok()
-}
-
-fn json_bool(json: &str, key: &str) -> Option<bool> {
-    let rest = json_value(json, key)?;
-    if rest.starts_with("true") {
-        Some(true)
-    } else if rest.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// A drawing tool exposed by the native chart surface.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ChartDrawingTool {
-    /// Selects, moves, and pans without creating a drawing.
-    #[default]
-    Cursor,
-    TrendLine,
-    HorizontalLine,
-    VerticalLine,
-    Ray,
-    Rectangle,
-    Path,
-    Brush,
-    Text,
-}
-
-impl ChartDrawingTool {
-    const fn drawing_kind(self) -> Option<DrawingKind> {
-        match self {
-            Self::Cursor => None,
-            Self::TrendLine => Some(DrawingKind::TrendLine),
-            Self::HorizontalLine => Some(DrawingKind::HorizontalLine),
-            Self::VerticalLine => Some(DrawingKind::VerticalLine),
-            Self::Ray => Some(DrawingKind::HorizontalRay),
-            Self::Rectangle => Some(DrawingKind::Rectangle),
-            Self::Path => Some(DrawingKind::Path),
-            Self::Brush => Some(DrawingKind::Brush),
-            Self::Text => Some(DrawingKind::Text),
-        }
+const fn price_scale_mode_code(mode: PriceScaleMode) -> u8 {
+    match mode {
+        PriceScaleMode::Normal => 0,
+        PriceScaleMode::Logarithmic => 1,
+        PriceScaleMode::Percentage => 2,
+        PriceScaleMode::IndexedTo100 => 3,
     }
 }
 
@@ -650,11 +585,6 @@ pub struct DrawingsLockSummary {
     pub total: usize,
     pub locked_count: usize,
     pub all_locked: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum ChartDrag {
-    BrushableRange,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -786,19 +716,7 @@ impl SeriesMutation {
     }
 }
 
-const fn should_stop_mouse_up_propagation(outside_chart: bool) -> bool {
-    !outside_chart
-}
-
 /// A GPUI entity hosting one authoritative Aeris Charts chart engine and renderer.
-/// Close-control tooltip dwell. `Pending` records a hover change made without a GPUI context;
-/// the next pointer event starts the timer. Replacing `Waiting` drops and cancels its task.
-enum TradingTooltipDwell {
-    Idle,
-    Pending,
-    Waiting { _task: Task<()> },
-}
-
 pub struct AerisChartView {
     engine: ChartEngine,
     theme: ChartTheme,
@@ -821,12 +739,13 @@ pub struct AerisChartView {
     fitted: bool,
     /// Host-selected stroke width per external study, kept for outputs installed later.
     study_line_widths: std::collections::BTreeMap<u64, u8>,
-    viewport_origin: (f32, f32),
-    drag: Option<ChartDrag>,
-    drawing_tool: ChartDrawingTool,
-    locked_drawings: HashSet<DrawingId>,
+    /// Window bounds of the chart canvas from the latest prepaint.
+    viewport_bounds: Bounds<Pixels>,
+    /// GPUI event translation; every interaction decision lives in the Aeris Charts controller.
+    input: GpuiChartInput,
+    /// The single scheduled wake for deferred engine input work (trading-tooltip dwell).
+    input_wake: Option<Task<()>>,
     focus_handle: Option<FocusHandle>,
-    cursor_style: CursorStyle,
     pointer_interaction: PointerInteractionState,
     pending_context_menu: Option<ChartContextRequest>,
     pending_activate: ActivationRequest,
@@ -839,9 +758,6 @@ pub struct AerisChartView {
     order_flow_settings: OrderFlowSettings,
     order_flow_state: Option<OrderFlowChartState>,
     product_bars: ProductPriceBars,
-    brushable_tooltip: Option<NativePrimitiveId>,
-    brushable_line_width: Option<f64>,
-    pending_brush_point: Option<(f64, f64)>,
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
@@ -857,8 +773,6 @@ pub struct AerisChartView {
     /// Monotonic presentation-clock revision. It advances once per scheduled clock wake and is
     /// intentionally separate from durable user state so a ticking header never dirties storage.
     clock_revision: u64,
-    /// Hover dwell before a close control reveals its action tooltip; the engine owns no clock.
-    trading_tooltip: TradingTooltipDwell,
     #[cfg(feature = "diagnostics")]
     last_snapshot_installation_nanos: Option<u64>,
     #[cfg(feature = "diagnostics")]
@@ -904,6 +818,7 @@ impl AerisChartView {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
         apply_platform_chrome_contract(&mut engine, true);
+        apply_platform_interaction(&mut engine);
         let volume_series = install_volume_series(&mut engine);
         Self {
             engine,
@@ -924,12 +839,10 @@ impl AerisChartView {
             layout_dirty: true,
             fitted: false,
             study_line_widths: std::collections::BTreeMap::new(),
-            viewport_origin: (0.0, 0.0),
-            drag: None,
-            drawing_tool: ChartDrawingTool::Cursor,
-            locked_drawings: HashSet::new(),
+            viewport_bounds: Bounds::default(),
+            input: GpuiChartInput::default(),
+            input_wake: None,
             focus_handle: None,
-            cursor_style: CursorStyle::Crosshair,
             pointer_interaction: PointerInteractionState::Active,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
@@ -942,9 +855,6 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars: ProductPriceBars::default(),
-            brushable_tooltip: None,
-            brushable_line_width: None,
-            pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
@@ -953,7 +863,6 @@ impl AerisChartView {
             user_state_revision: 0,
             clock_tick: None,
             clock_revision: 0,
-            trading_tooltip: TradingTooltipDwell::Idle,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -999,6 +908,7 @@ impl AerisChartView {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
         apply_platform_chrome_contract(&mut engine, replay_time_visible(replay));
+        apply_platform_interaction(&mut engine);
         apply_replay_time_scale_defaults(&mut engine, replay);
         let volume_series = install_volume_series(&mut engine);
         let mut product_bars = ProductPriceBars::default();
@@ -1030,12 +940,10 @@ impl AerisChartView {
             layout_dirty: true,
             fitted: false,
             study_line_widths: std::collections::BTreeMap::new(),
-            viewport_origin: (0.0, 0.0),
-            drag: None,
-            drawing_tool: ChartDrawingTool::Cursor,
-            locked_drawings: HashSet::new(),
+            viewport_bounds: Bounds::default(),
+            input: GpuiChartInput::default(),
+            input_wake: None,
             focus_handle: None,
-            cursor_style: CursorStyle::Crosshair,
             pointer_interaction: PointerInteractionState::Active,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
@@ -1048,9 +956,6 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars,
-            brushable_tooltip: None,
-            brushable_line_width: None,
-            pending_brush_point: None,
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
@@ -1059,7 +964,6 @@ impl AerisChartView {
             user_state_revision: 0,
             clock_tick: None,
             clock_revision: 0,
-            trading_tooltip: TradingTooltipDwell::Idle,
             #[cfg(feature = "diagnostics")]
             last_snapshot_installation_nanos: None,
             #[cfg(feature = "diagnostics")]
@@ -1129,40 +1033,6 @@ impl AerisChartView {
         self.pending_context_menu.take()
     }
 
-    /// Aeris Charts-formatted price at pane coordinates, using the engine's secondary-click context.
-    fn formatted_copy_price(&self, pane_x: f64, y: f64) -> Option<SharedString> {
-        let context = self.engine.chart_context_at(pane_x, y)?;
-        let series = context.series.unwrap_or(0);
-        self.engine
-            .series_format_price(series, context.price)
-            .map(SharedString::from)
-    }
-
-    fn context_menu_request(
-        &self,
-        position: Point<Pixels>,
-        pane_x: f64,
-        y: f64,
-    ) -> ChartContextRequest {
-        let kind = match self.price_axis_at(pane_x, y) {
-            Some((pane, PriceScaleTarget::Left)) => {
-                ChartContextKind::PriceAxis { pane, left: true }
-            }
-            Some((pane, PriceScaleTarget::Right)) => {
-                ChartContextKind::PriceAxis { pane, left: false }
-            }
-            _ => ChartContextKind::Pane,
-        };
-        let copy_price = matches!(kind, ChartContextKind::Pane)
-            .then(|| self.formatted_copy_price(pane_x, y))
-            .flatten();
-        ChartContextRequest {
-            position,
-            kind,
-            copy_price,
-        }
-    }
-
     /// Takes a pending request to make this chart's workspace pane active.
     pub fn take_activate_request(&mut self) -> bool {
         let pending = self.pending_activate == ActivationRequest::Pending;
@@ -1185,7 +1055,6 @@ impl AerisChartView {
     pub fn price_axis_menu_state(&self, pane: usize, left: bool) -> Option<PriceAxisMenuState> {
         let target = price_axis_target(left);
         let primary = self.engine.primary_series_on_price_scale(pane, target)?;
-        let options = self.engine.price_scale_options_json(pane, target)?;
         let mut flags = 0;
         if self.product_price_line_visible() {
             flags |= PriceAxisMenuState::PRICE_LINE;
@@ -1217,12 +1086,12 @@ impl AerisChartView {
         if primary.bid_ask_visible {
             flags |= PriceAxisMenuState::BID_ASK;
         }
-        if json_bool(&options, "align_labels").unwrap_or(true) {
+        if self.engine.price_scale_align_labels_for(pane, target)? {
             flags |= PriceAxisMenuState::ALIGN_LABELS;
         }
         Some(PriceAxisMenuState {
             flags,
-            mode: json_u8(&options, "mode").unwrap_or(0),
+            mode: price_scale_mode_code(self.engine.price_scale_mode_for(pane, target)?),
             left,
             precision: self.price_precision_override,
         })
@@ -1404,12 +1273,7 @@ impl AerisChartView {
 
     /// Returns the time scale to the newest bar without changing its zoom.
     pub fn scroll_to_latest(&mut self) {
-        let offset = if self.engine.has_future_time_projection() {
-            REAL_TIME_RIGHT_OFFSET_BARS
-        } else {
-            0.0
-        };
-        self.engine.scroll_to_position(offset);
+        self.engine.scroll_to_latest();
         self.invalidate_series_layout();
     }
 
@@ -1488,32 +1352,37 @@ impl AerisChartView {
         let Some(series) = self.engine.selected_series() else {
             return false;
         };
-        if series == 0 {
+        let removed = self.remove_series_selection(series);
+        if removed {
+            self.engine.set_selected_series(None);
+        }
+        removed
+    }
+
+    /// Removes one selected product series. Studies are runtime-owned and become a host request;
+    /// the price series and the footprint presentation are protected; volume is hidden rather than
+    /// tombstoned so the catalog can show it again with its live data.
+    fn remove_series_selection(&mut self, series: u32) -> bool {
+        if series == 0 || self.footprint_series_id() == Some(series) {
             return false;
         }
         if let Some(study_id) = self.engine.external_study_for_series(series) {
             self.pending_study_remove = Some(study_id);
-            self.engine.set_selected_series(None);
             return true;
         }
-        if self.footprint_series_id() == Some(series) {
-            // The footprint is the chart type's price presentation, not a removable study.
-            return false;
-        }
         if let Some(study) = self.order_flow_study_for_series(series) {
-            self.engine.set_selected_series(None);
             return self.remove_order_flow_study(study);
         }
         if series == self.volume_series {
             self.engine.set_series_visible(series, false);
             self.volume_legend = LegendPresence::Absent;
-            self.engine.set_selected_series(None);
         } else if !self.engine.remove_indicator_for_series(series)
             && !self.engine.remove_series(series)
         {
             return false;
         }
         self.invalidate_series_layout();
+        self.mark_user_state_changed();
         true
     }
 
@@ -1521,12 +1390,7 @@ impl AerisChartView {
     /// its intentional right-side future-time margin.
     #[must_use]
     pub fn is_at_latest(&self) -> bool {
-        let expected = if self.engine.has_future_time_projection() {
-            REAL_TIME_RIGHT_OFFSET_BARS
-        } else {
-            0.0
-        };
-        (self.engine.scroll_position() - expected).abs() < f64::EPSILON
+        self.engine.is_at_latest()
     }
 
     /// Returns whether a provider snapshot has populated the chart surface.
@@ -2140,10 +2004,12 @@ impl AerisChartView {
         self.clock_revision
     }
 
-    /// Monotonic revision of durable user-authored presentation state.
+    /// Monotonic revision of durable user-authored presentation state, including every committed
+    /// Aeris Charts drawing edit.
     #[must_use]
-    pub const fn user_state_revision(&self) -> u64 {
+    pub fn user_state_revision(&self) -> u64 {
         self.user_state_revision
+            .wrapping_add(self.engine.drawing_revision())
     }
 
     fn mark_user_state_changed(&mut self) {
@@ -2209,7 +2075,6 @@ impl AerisChartView {
             return Err("persisted drawing count exceeds the chart bound".to_string());
         }
         self.engine.clear_drawings();
-        self.locked_drawings.clear();
         for item in items {
             let old_id = item
                 .get("id")
@@ -2250,26 +2115,30 @@ impl AerisChartView {
                 .engine
                 .add_drawing(kind, pane_index, drawing_points, Some(&options))
                 .ok_or_else(|| "persisted drawing could not be restored".to_string())?;
+            // Workspaces saved before locks were drawing state carry them as a separate id list.
             if locked_ids.contains(&old_id) {
-                self.locked_drawings.insert(new_id);
+                self.engine.set_drawing_locked(new_id, true);
             }
         }
         self.invalidate_series_layout();
         Ok(())
     }
 
-    /// Returns stable drawing locks in deterministic id order.
+    /// Returns locked drawings in deterministic id order.
     #[must_use]
     pub fn locked_drawing_ids(&self) -> Vec<u32> {
-        let mut ids = self.locked_drawings.iter().copied().collect::<Vec<_>>();
+        let mut ids = self
+            .engine
+            .drawings()
+            .iter()
+            .filter(|drawing| drawing.locked)
+            .map(|drawing| drawing.id)
+            .collect::<Vec<_>>();
         ids.sort_unstable();
         ids
     }
 
     fn apply_price_series_kind(&mut self) {
-        if self.chart_type != ChartType::BrushableArea {
-            self.teardown_brushable_interaction();
-        }
         self.remove_session_plan_price_lines();
         install_product_price_series(&mut self.engine, self.chart_type, &self.product_bars);
         self.install_session_plan_price_lines();
@@ -2301,98 +2170,22 @@ impl AerisChartView {
         }
     }
 
+    /// Brushable Area is the Aeris Charts brushable-area composition over the product Area series.
+    /// Shift+drag compares a range so a plain drag still pans the chart.
     fn sync_brushable_interaction(&mut self) {
-        if self.chart_type != ChartType::BrushableArea {
-            self.teardown_brushable_interaction();
+        let wanted = self.chart_type == ChartType::BrushableArea;
+        if wanted == self.engine.is_brushable_area(0) {
             return;
         }
-        if self.brushable_tooltip.is_none() {
-            self.brushable_tooltip = self
-                .engine
-                .add_delta_tooltip(0, DeltaTooltipOptions::default());
-        }
-        if self.brushable_line_width.is_none() {
-            self.brushable_line_width = self
-                .engine
-                .series_options_json(0)
-                .and_then(|options| serde_json::from_str::<serde_json::Value>(&options).ok())
-                .and_then(|options| options["line_width"].as_f64());
-        }
-        self.sync_brushable_range();
-    }
-
-    fn teardown_brushable_interaction(&mut self) {
-        if let Some(id) = self.brushable_tooltip.take() {
-            let _ = self.engine.clear_delta_tooltip(id);
-            let _ = self.engine.remove_native_primitive(id);
-        }
-        let _ = self.engine.clear_area_brush_state(0);
-        self.brushable_line_width = None;
-        if matches!(self.drag, Some(ChartDrag::BrushableRange)) {
-            self.drag = None;
-        }
-    }
-
-    fn sync_brushable_range(&mut self) {
-        let Some(id) = self.brushable_tooltip else {
-            return;
-        };
-        let Some(line_width) = self.brushable_line_width else {
-            return;
-        };
-        let (base_style, ranges) = match self.engine.delta_tooltip_active_range(id) {
-            Some(range) => (
-                Self::brush_style(BRUSHABLE_LINE, 51, 13, line_width),
-                vec![BrushRange {
-                    from: f64::from(i32::try_from(range.from).unwrap_or(0)),
-                    to: f64::from(i32::try_from(range.to).unwrap_or(0)),
-                    style: if range.positive {
-                        Self::brush_style(BRUSHABLE_UP, 255, 102, line_width)
-                    } else {
-                        Self::brush_style(BRUSHABLE_DOWN, 255, 102, line_width)
-                    },
-                }],
-            ),
-            None => (
-                Self::brush_style(BRUSHABLE_LINE, 255, 102, line_width),
-                Vec::new(),
-            ),
-        };
-        let _ = self.engine.set_area_brush_state(0, base_style, ranges);
-    }
-
-    const fn brush_style(
-        rgb: (u8, u8, u8),
-        line_alpha: u8,
-        top_alpha: u8,
-        width: f64,
-    ) -> BrushStyle {
-        BrushStyle {
-            line_color: Color::rgba(rgb.0, rgb.1, rgb.2, line_alpha),
-            top_color: Color::rgba(rgb.0, rgb.1, rgb.2, top_alpha),
-            bottom_color: Color::rgba(rgb.0, rgb.1, rgb.2, 0),
-            line_width: width,
-        }
-    }
-
-    fn begin_brushable_range(&mut self, pane_x: f64, y: f64) {
-        self.end_drag(pane_x, y);
-        if self
-            .engine
-            .delta_tooltip_mouse_down_with_shift(pane_x, true)
-        {
-            self.drag = Some(ChartDrag::BrushableRange);
-            self.sync_brushable_range();
-        }
-        self.update_cursor(pane_x, y);
-        self.update_crosshair(pane_x, y);
-    }
-
-    fn clear_brushable_range(&mut self) {
-        if let Some(id) = self.brushable_tooltip {
-            let _ = self.engine.clear_delta_tooltip(id);
-            self.sync_brushable_range();
-        }
+        let options = wanted.then_some(DeltaTooltipOptions {
+            requires_shift_drag: true,
+            ..DeltaTooltipOptions::default()
+        });
+        let applied = self.engine.set_brushable_area(0, options);
+        debug_assert!(
+            applied,
+            "the product Area series accepts the brushable area"
+        );
     }
 
     fn move_price_axis(&mut self, pane: usize, from_left: bool, to_left: bool) -> bool {
@@ -2468,7 +2261,8 @@ impl AerisChartView {
     ) -> bool {
         #[cfg(not(feature = "diagnostics"))]
         let _ = mutation;
-        self.flush_pending_brush();
+        install_text_metrics(&mut self.engine, window);
+        self.input.prepare_frame(&mut self.engine);
         #[cfg(feature = "diagnostics")]
         let rebuild_started = Instant::now();
         self.pin_host_clock();
@@ -2873,8 +2667,12 @@ fn legend_control_element_id(item: LegendItem, control: LegendControl) -> (&'sta
 }
 
 impl Render for AerisChartView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.schedule_clock_tick(cx);
+        // Kinetic coasts, held keyboard pans, and animated scrolls advance once per frame.
+        if self.engine.input_animating() {
+            window.request_animation_frame();
+        }
         let mutation = self.apply_pending_data();
         let entity: Entity<Self> = cx.entity();
         let prepaint_entity = entity.clone();
@@ -2904,12 +2702,12 @@ impl Render for AerisChartView {
             .font_weight(gpui::FontWeight(f32::from(
                 platform_typography().weight(TypographyRole::Normal),
             )))
-            .cursor(self.cursor_style)
+            .cursor(self.cursor_style())
             .track_focus(&focus_handle)
             .key_context("AerisChart")
             .on_hover(move |hovered, _, cx| {
                 if !*hovered {
-                    hover_entity.update(cx, AerisChartView::clear_pointer);
+                    hover_entity.update(cx, AerisChartView::on_pointer_left);
                 }
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -2920,6 +2718,7 @@ impl Render for AerisChartView {
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_key_up(cx.listener(Self::on_key_up))
             .child(
                 canvas(
                     move |bounds: Bounds<gpui::Pixels>, window, cx| {
@@ -2927,8 +2726,8 @@ impl Render for AerisChartView {
                         let height = bounds.size.height.into();
                         let scale_factor = window.scale_factor();
                         prepaint_entity.update(cx, |chart, chart_cx| {
-                            chart.viewport_origin =
-                                (bounds.origin.x.into(), bounds.origin.y.into());
+                            chart.viewport_bounds = bounds;
+                            chart.input.set_origin(bounds.origin);
                             if chart.rebuild(width, height, scale_factor, mutation, window) {
                                 chart_cx.notify();
                             }

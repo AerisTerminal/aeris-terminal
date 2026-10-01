@@ -106,6 +106,21 @@ Aeris Charts is a separate pinned Git dependency. Do not clone or vendor it into
 Host integration belongs in `crates/ui/chart_integration`. When intentionally updating Aeris Charts, change
 only the `aeris_charts_*` revisions required by that update; do not update GPUI incidentally.
 
+Chart behavior is owned by Aeris Charts, never re-implemented here:
+
+- `crates/ui/chart_integration` is product glue only: the market-data bridge, trading, alert, study, and
+  order-flow projections from the runtimes, design tokens, legend and menu UI, and workspace persistence.
+- Pointer, wheel, and keyboard input reach the chart through `aeris_charts_render_gpui::input` and the
+  engine's `input_*` controller, one adapter call per GPUI listener. Never add gesture routing, hover or
+  cursor arbitration, key bindings, drawing-tool mirrors, host-side drawing state (locks, selection,
+  creation), brush styling, or other engine-owned state to Terminal. `tools/naming_check` rejects the
+  engine's low-level interaction primitives in this crate.
+- When a chart feature needs more from Terminal than data, product policy, or a platform-only effect, the
+  missing operation belongs in Aeris Charts. Add it there first (a coordinated two-repository task), push
+  it, then bump the pinned revision here; never compensate with Terminal-side wiring.
+- After bumping Aeris Charts, check for engine capabilities Terminal is not yet using (for example a new
+  controller behavior or host request) instead of assuming the pin bump alone delivered them.
+
 ## Authentication and website coordination
 
 Authentication is disabled for the current development build because no Aeris account backend is deployed. Desktop startup must reach the workspace without opening a browser or creating an account session. Do not restore sign-in, sign-up, profile, billing, or lease traffic until an Aeris backend is provisioned and the full browser to callback to account runtime to vault to desktop path is verified.

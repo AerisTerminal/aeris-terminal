@@ -2346,7 +2346,7 @@ impl WorkspaceSurface {
         if self.chrome_overlay_phase == ChromeOverlayPhase::Closing {
             return false;
         }
-        if self.drawing_toolbar_state(cx).active_tool == ChartDrawingTool::Text {
+        if self.drawing_toolbar_state(cx).active_tool == Some(ChartDrawingKind::Text) {
             return false;
         }
         if self
@@ -4625,7 +4625,11 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn select_drawing_tool(&mut self, tool: ChartDrawingTool, cx: &mut Context<Self>) {
+    pub(super) fn select_drawing_tool(
+        &mut self,
+        tool: Option<ChartDrawingKind>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 chart.set_drawing_tool(tool);

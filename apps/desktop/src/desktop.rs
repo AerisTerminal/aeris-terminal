@@ -71,7 +71,7 @@ use aeris_chart_integration::{
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
-    ChartDrawingTool, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
+    ChartDrawingKind, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
     ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
     ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind, ChartOrderRole,
     ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSplitDirection,

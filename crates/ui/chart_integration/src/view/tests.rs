@@ -2,7 +2,117 @@
 
 use super::*;
 use aeris_application::{Provenanced, ReplayTailOperation, ReplayTailUpdate};
-use aeris_charts_engine::{AppearanceColor, AxisTextMidpoint};
+use aeris_charts_engine::{
+    AppearanceColor, AxisTextMidpoint, ChartCursor, ChartKey, DrawingKind, DrawingModifiers,
+    InputModifiers, PointerInput, WheelSample,
+};
+use std::collections::HashSet;
+
+// Input helpers drive the Aeris Charts input controller exactly as the GPUI listeners do: the
+// shared adapter forwards one normalized event, then the view turns engine requests into product
+// state.
+
+fn pointer(x: f64, y: f64) -> PointerInput {
+    PointerInput {
+        x,
+        y,
+        ..PointerInput::default()
+    }
+}
+
+fn with_modifiers(x: f64, y: f64, modifiers: InputModifiers) -> PointerInput {
+    PointerInput {
+        modifiers,
+        ..pointer(x, y)
+    }
+}
+
+const SHIFT: InputModifiers = InputModifiers {
+    shift: true,
+    control: false,
+    alt: false,
+    meta: false,
+};
+
+const CTRL: InputModifiers = InputModifiers {
+    shift: false,
+    control: true,
+    alt: false,
+    meta: false,
+};
+
+fn press_with(chart: &mut AerisChartView, input: PointerInput, click_count: u32) {
+    chart.engine.input_pointer_down(input, click_count);
+    chart.process_input_events();
+}
+
+fn press(chart: &mut AerisChartView, x: f64, y: f64) {
+    press_with(chart, pointer(x, y), 1);
+}
+
+fn move_to(chart: &mut AerisChartView, input: PointerInput, pressed: bool) {
+    chart.engine.input_pointer_move(input, pressed);
+    chart.process_input_events();
+}
+
+fn hover(chart: &mut AerisChartView, x: f64, y: f64) {
+    move_to(chart, pointer(x, y), false);
+}
+
+fn release_with(chart: &mut AerisChartView, input: PointerInput) {
+    chart.engine.input_pointer_up(input);
+    chart.process_input_events();
+}
+
+fn release(chart: &mut AerisChartView, x: f64, y: f64) {
+    release_with(chart, pointer(x, y));
+}
+
+fn click(chart: &mut AerisChartView, x: f64, y: f64) {
+    press(chart, x, y);
+    release(chart, x, y);
+}
+
+fn double_click(chart: &mut AerisChartView, x: f64, y: f64) {
+    click(chart, x, y);
+    press_with(chart, pointer(x, y), 2);
+    release(chart, x, y);
+}
+
+/// Press, move through intermediate samples past the drag threshold, and release.
+fn drag_with(
+    chart: &mut AerisChartView,
+    from: (f64, f64),
+    to: (f64, f64),
+    modifiers: InputModifiers,
+) {
+    press_with(chart, with_modifiers(from.0, from.1, modifiers), 1);
+    for step in 1..=4 {
+        let t = f64::from(step) / 4.0;
+        let x = from.0 + (to.0 - from.0) * t;
+        let y = from.1 + (to.1 - from.1) * t;
+        move_to(chart, with_modifiers(x, y, modifiers), true);
+    }
+    release_with(chart, with_modifiers(to.0, to.1, modifiers));
+}
+
+fn drag(chart: &mut AerisChartView, from: (f64, f64), to: (f64, f64)) {
+    drag_with(chart, from, to, InputModifiers::default());
+}
+
+fn key_with(chart: &mut AerisChartView, key: ChartKey, modifiers: InputModifiers) -> bool {
+    let handled = chart.engine.input_key_down(key, modifiers, false, 0.0);
+    chart.process_input_events();
+    handled
+}
+
+fn key(chart: &mut AerisChartView, key: ChartKey) -> bool {
+    key_with(chart, key, InputModifiers::default())
+}
+
+fn cursor(chart: &AerisChartView) -> ChartCursor {
+    chart.engine.input_cursor()
+}
 
 fn custom_color(color: &str) -> AppearanceColor {
     AppearanceColor::Custom(color.to_string())
@@ -439,14 +549,15 @@ fn crosshair_alert_action_reaches_the_host_with_aeris_charts_price_context() {
         .engine
         .series_price_to_coordinate(0, price)
         .expect("price coordinate");
-    chart.engine.crosshair = Some((chart.engine.pane_w / 2.0, y));
+    let center = chart.engine.pane_w / 2.0;
+    hover(&mut chart, center, y);
     let action_x = (-100..=4_096)
         .map(f64::from)
         .find(|x| chart.engine.alert_create_hit_at(*x, y))
         .expect("alert action is hit-testable");
-    chart.update_cursor(action_x, y);
-    assert_eq!(chart.cursor_style, CursorStyle::PointingHand);
-    assert!(chart.engine.activate_alert_create_at(action_x, y));
+    hover(&mut chart, action_x, y);
+    assert_eq!(cursor(&chart), ChartCursor::Pointer);
+    click(&mut chart, action_x, y);
     let requests = chart.take_alert_create_requests();
     assert_eq!(requests.len(), 1);
     assert!((requests[0].price - price).abs() < f64::EPSILON);
@@ -724,22 +835,22 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
     chart
         .engine
         .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    assert!(chart.engine.is_brushable_area(0));
     let start = chart.engine.time_scale.index_to_coordinate(2);
     let end = chart.engine.time_scale.index_to_coordinate(8);
-    chart.begin_drag(start, 200.0, 1, false);
-    assert!(matches!(
-        chart.engine.financial_drag(),
-        Some(FinancialDrag::Pane { .. })
-    ));
-    chart.end_drag(start, 200.0);
-    chart.begin_drag(start, 200.0, 1, true);
-    assert_eq!(chart.drag, Some(ChartDrag::BrushableRange));
-    chart.drag_to(end, 200.0);
-    chart.end_drag(end, 200.0);
-    assert!(chart.drag.is_none());
+    // A plain drag still pans; Shift+drag compares a range instead.
+    let scroll = chart.engine.scroll_position();
+    drag(&mut chart, (start, 200.0), (end, 200.0));
+    assert_ne!(chart.engine.scroll_position().to_bits(), scroll.to_bits());
+    assert_eq!(chart.engine.brushable_area_range(0), None);
+    let start = chart.engine.time_scale.index_to_coordinate(2);
+    let end = chart.engine.time_scale.index_to_coordinate(8);
+    let scroll = chart.engine.scroll_position();
+    drag_with(&mut chart, (start, 200.0), (end, 200.0), SHIFT);
+    assert_eq!(chart.engine.scroll_position().to_bits(), scroll.to_bits());
     let selected = chart
-        .brushable_tooltip
-        .and_then(|id| chart.engine.delta_tooltip_active_range(id))
+        .engine
+        .brushable_area_range(0)
         .expect("shift-drag installs a comparison range");
     assert!(selected.from < selected.to);
     assert_eq!(
@@ -825,22 +936,18 @@ fn series_updates_dirty_layout_without_discarding_viewport_dimensions() {
 }
 
 #[test]
-fn mouse_up_out_finishes_chart_gesture_without_stopping_window_propagation() {
-    assert!(should_stop_mouse_up_propagation(false));
-    assert!(!should_stop_mouse_up_propagation(true));
-}
-
-#[test]
 fn occluded_mouse_up_inside_chart_is_not_geometrically_outside() {
     let mut chart = interactive_chart();
-    chart.viewport_origin = (100.0, 80.0);
-    chart.built_for = (640.0, 360.0, 1.0);
+    chart.viewport_bounds = Bounds::new(
+        gpui::point(px(100.0), px(80.0)),
+        gpui::size(px(640.0), px(360.0)),
+    );
 
-    assert!(chart.position_is_inside_viewport(gpui::point(px(420.0), px(240.0))));
-    assert!(chart.position_is_inside_viewport(gpui::point(px(100.0), px(80.0))));
-    assert!(chart.position_is_inside_viewport(gpui::point(px(740.0), px(440.0))));
-    assert!(!chart.position_is_inside_viewport(gpui::point(px(99.0), px(240.0))));
-    assert!(!chart.position_is_inside_viewport(gpui::point(px(420.0), px(441.0))));
+    assert!(!chart.release_outside_chart(gpui::point(px(420.0), px(240.0))));
+    assert!(!chart.release_outside_chart(gpui::point(px(100.0), px(80.0))));
+    assert!(!chart.release_outside_chart(gpui::point(px(739.0), px(439.0))));
+    assert!(chart.release_outside_chart(gpui::point(px(99.0), px(240.0))));
+    assert!(chart.release_outside_chart(gpui::point(px(420.0), px(441.0))));
 }
 
 #[test]
@@ -1402,37 +1509,57 @@ fn aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators
 #[test]
 fn wheel_zoom_and_horizontal_scroll_mutate_aeris_charts_without_refitting() {
     let mut chart = interactive_chart();
+    let wheel = |delta_x, delta_y| WheelSample {
+        x: 400.0,
+        y: 200.0,
+        delta_x,
+        delta_y,
+        ..WheelSample::default()
+    };
     let spacing = chart.engine.bar_spacing();
-    chart.apply_wheel(400.0, 200.0, 0.0, 1.0);
+    assert!(chart.engine.input_wheel(wheel(0.0, 1.0)));
     assert!((chart.engine.bar_spacing() - spacing).abs() > f64::EPSILON);
     let offset = chart.engine.right_offset();
-    chart.apply_wheel(400.0, 200.0, 1.0, 0.0);
+    assert!(chart.engine.input_wheel(wheel(1.0, 0.0)));
     assert!((chart.engine.right_offset() - offset).abs() > f64::EPSILON);
     assert!(chart.fitted);
+
+    // The Terminal keeps professional price-axis wheel zoom.
+    let axis_x = chart.engine.pane_w + 10.0;
+    let range = chart
+        .engine
+        .price_scale_visible_range_for(0, PriceScaleTarget::Right);
+    assert!(chart.engine.input_wheel(WheelSample {
+        x: axis_x,
+        ..wheel(0.0, 1.0)
+    }));
+    assert_ne!(
+        chart
+            .engine
+            .price_scale_visible_range_for(0, PriceScaleTarget::Right),
+        range
+    );
 }
 
 #[test]
 fn mouse_pan_and_crosshair_have_bounded_lifecycle() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, 200.0, 1, false);
-    assert_eq!(
-        chart.engine.financial_drag(),
-        Some(FinancialDrag::Pane { price_pan: None })
-    );
+    press(&mut chart, 300.0, 200.0);
     assert_eq!(chart.engine.crosshair, Some((300.0, 200.0)));
     let offset = chart.engine.right_offset();
-    chart.drag_to(340.0, 200.0);
+    move_to(&mut chart, pointer(320.0, 200.0), true);
+    move_to(&mut chart, pointer(340.0, 200.0), true);
     assert!((chart.engine.right_offset() - offset).abs() > f64::EPSILON);
-    chart.end_drag(340.0, 200.0);
-    assert!(chart.drag.is_none());
-    assert!(chart.engine.financial_drag().is_none());
-    chart.update_crosshair(-1.0, 200.0);
+    assert_eq!(cursor(&chart), ChartCursor::Grabbing);
+    release(&mut chart, 340.0, 200.0);
+    assert_ne!(cursor(&chart), ChartCursor::Grabbing);
+    hover(&mut chart, -1.0, 200.0);
     assert!(chart.engine.crosshair.is_none());
 }
 
 #[test]
 fn pane_copy_price_uses_aeris_chart_context() {
-    let chart = interactive_chart();
+    let mut chart = interactive_chart();
     let (x, y) = visible_series_point(&chart, 0);
     let context = chart
         .engine
@@ -1442,21 +1569,24 @@ fn pane_copy_price_uses_aeris_chart_context() {
         .engine
         .series_format_price(0, context.price)
         .expect("asset price format");
-    let request = chart.context_menu_request(gpui::point(gpui::px(0.0), gpui::px(0.0)), x, y);
+    chart.engine.input_context_menu(x, y);
+    chart.process_input_events();
+    let request = chart
+        .take_context_menu_request()
+        .expect("a pane right-click requests the menu");
     assert_eq!(request.kind, ChartContextKind::Pane);
     assert_eq!(request.copy_price.as_deref(), Some(expected.as_str()));
-    assert_eq!(
-        chart.formatted_copy_price(x, y).as_deref(),
-        Some(expected.as_str())
-    );
 }
 
 #[test]
 fn price_axis_context_menu_does_not_copy_price() {
-    let chart = interactive_chart();
+    let mut chart = interactive_chart();
     let axis_x = chart.engine.pane_w + 1.0;
-    let request =
-        chart.context_menu_request(gpui::point(gpui::px(0.0), gpui::px(0.0)), axis_x, 200.0);
+    chart.engine.input_context_menu(axis_x, 200.0);
+    chart.process_input_events();
+    let request = chart
+        .take_context_menu_request()
+        .expect("an axis right-click requests the menu");
     assert!(matches!(
         request.kind,
         ChartContextKind::PriceAxis {
@@ -1469,19 +1599,25 @@ fn price_axis_context_menu_does_not_copy_price() {
 
 #[test]
 fn empty_chart_has_no_copy_price() {
-    let chart = AerisChartView::empty();
-    assert!(chart.formatted_copy_price(100.0, 200.0).is_none());
+    let mut chart = AerisChartView::empty();
+    chart.engine.input_context_menu(100.0, 200.0);
+    chart.process_input_events();
+    assert!(
+        chart
+            .take_context_menu_request()
+            .is_none_or(|request| request.copy_price.is_none())
+    );
 }
 
 #[test]
 fn axes_drag_and_double_click_reset_through_aeris_charts() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1, false);
-    assert_eq!(chart.engine.financial_drag(), Some(FinancialDrag::TimeAxis));
-    chart.drag_to(340.0, chart.engine.pane_h + 10.0);
-    chart.end_drag(340.0, chart.engine.pane_h + 10.0);
-    assert!(chart.drag.is_none());
-    assert!(chart.engine.financial_drag().is_none());
+    let time_y = chart.engine.pane_h + 10.0;
+    hover(&mut chart, 300.0, time_y);
+    assert_eq!(cursor(&chart), ChartCursor::ResizeHorizontal);
+    let spacing = chart.engine.bar_spacing();
+    drag(&mut chart, (300.0, time_y), (340.0, time_y));
+    assert_ne!(chart.engine.bar_spacing().to_bits(), spacing.to_bits());
 
     let right_axis_x = chart.engine.pane_w + 1.0;
     assert_eq!(
@@ -1490,30 +1626,7 @@ fn axes_drag_and_double_click_reset_through_aeris_charts() {
             .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
         Some(true)
     );
-    chart.begin_drag(right_axis_x, 200.0, 1, false);
-    assert!(matches!(
-        chart.engine.financial_drag(),
-        Some(FinancialDrag::PriceAxis {
-            target: PriceScaleTarget::Right,
-            ..
-        })
-    ));
-    assert_eq!(
-        chart
-            .engine
-            .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
-        Some(false)
-    );
-    chart.drag_to(right_axis_x, 240.0);
-    assert_eq!(
-        chart
-            .engine
-            .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
-        Some(false)
-    );
-    chart.end_drag(right_axis_x, 240.0);
-    assert!(chart.drag.is_none());
-    assert!(chart.engine.financial_drag().is_none());
+    drag(&mut chart, (right_axis_x, 200.0), (right_axis_x, 240.0));
     assert_eq!(
         chart
             .engine
@@ -1524,15 +1637,7 @@ fn axes_drag_and_double_click_reset_through_aeris_charts() {
     let locked_range = chart
         .engine
         .price_scale_visible_range_for(0, PriceScaleTarget::Right);
-    chart.begin_drag(300.0, 200.0, 1, false);
-    assert!(matches!(
-        chart.engine.financial_drag(),
-        Some(FinancialDrag::Pane {
-            price_pan: Some((_, PriceScaleTarget::Right))
-        })
-    ));
-    chart.drag_to(300.0, 260.0);
-    chart.end_drag(300.0, 260.0);
+    drag(&mut chart, (300.0, 200.0), (300.0, 260.0));
     assert_ne!(
         chart
             .engine
@@ -1551,9 +1656,17 @@ fn axes_drag_and_double_click_reset_through_aeris_charts() {
     chart.engine.time_scale.end_scroll();
     let offset = chart.engine.right_offset();
     assert!(offset.abs() > f64::EPSILON);
-    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 2, false);
+    double_click(&mut chart, 300.0, time_y);
     assert!(chart.engine.right_offset().abs() < offset.abs());
-    assert!(chart.drag.is_none());
+
+    // A price-axis double-click restores that scale's automatic range.
+    double_click(&mut chart, right_axis_x, 200.0);
+    assert_eq!(
+        chart
+            .engine
+            .price_scale_auto_scale_for(0, PriceScaleTarget::Right),
+        Some(true)
+    );
 }
 
 #[test]
@@ -2245,10 +2358,10 @@ fn native_indicator_hover_selection_and_delete_reach_aeris_charts() {
     let (x, y) = visible_series_point(&chart, indicator);
     assert_eq!(chart.engine.hit_test_series(x, y), Some(indicator));
 
-    chart.update_cursor(x, y);
+    hover(&mut chart, x, y);
     assert_eq!(chart.engine.hovered_series(), Some(indicator));
-    assert_eq!(chart.cursor_style, CursorStyle::PointingHand);
-    assert!(chart.select_series_at(x, y));
+    assert_eq!(cursor(&chart), ChartCursor::Pointer);
+    click(&mut chart, x, y);
     assert_eq!(chart.engine.selected_series(), Some(indicator));
     assert!(chart.has_deletable_selection());
 
@@ -2718,7 +2831,7 @@ fn selecting_one_runtime_study_output_selects_the_complete_indicator() {
     let selected = series_ids[1];
     let (x, y) = visible_series_point(&chart, selected);
 
-    assert!(chart.select_series_at(x, y));
+    click(&mut chart, x, y);
     assert_eq!(chart.engine.selected_series(), Some(selected));
     assert_eq!(
         chart.engine.selected_series_members().collect::<Vec<_>>(),
@@ -2977,30 +3090,33 @@ fn indicator_metadata_matches_the_legacy_picker_copy() {
 fn anchored_drawing_tools_commit_real_aeris_charts_drawings_and_return_to_cursor() {
     let mut chart = interactive_chart();
     let tools = [
-        (ChartDrawingTool::TrendLine, 2, 160.0),
-        (ChartDrawingTool::HorizontalLine, 1, 180.0),
-        (ChartDrawingTool::VerticalLine, 1, 200.0),
-        (ChartDrawingTool::Ray, 1, 220.0),
-        (ChartDrawingTool::Rectangle, 2, 240.0),
-        (ChartDrawingTool::Text, 1, 260.0),
+        (DrawingKind::TrendLine, 2, 160.0),
+        (DrawingKind::HorizontalLine, 1, 180.0),
+        (DrawingKind::VerticalLine, 1, 200.0),
+        (DrawingKind::HorizontalRay, 1, 220.0),
+        (DrawingKind::Rectangle, 2, 240.0),
+        (DrawingKind::Text, 1, 260.0),
     ];
     let anchor_x = [260.0, 340.0];
 
     for (index, (tool, anchors, y)) in tools.into_iter().enumerate() {
-        chart.set_drawing_tool(tool);
-        assert_eq!(chart.drawing_tool(), tool);
+        chart.set_drawing_tool(Some(tool));
+        assert_eq!(chart.drawing_tool(), Some(tool));
         assert!(
             !chart.engine.drawing_create_active(),
             "arming must not start a pre-click handle"
         );
         for &x in anchor_x.iter().take(anchors) {
-            let handled = chart.drawing_pointer_down(x, y, DrawingModifiers::default(), 1);
-            assert!(handled);
+            click(&mut chart, x, y);
         }
         assert_eq!(chart.drawing_count(), index + 1);
-        assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+        assert_eq!(chart.drawing_tool(), None);
         assert!(!chart.engine.drawing_create_active());
     }
+    assert!(
+        chart.is_editing_text(),
+        "a placed text drawing opens its editor"
+    );
 }
 
 #[test]
@@ -3009,8 +3125,8 @@ fn semantic_drawing_state_round_trips_after_indicator_panes_are_recreated() {
     source
         .add_indicator(ChartIndicator::Rsi)
         .expect("RSI creates its oscillator pane");
-    source.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-    assert!(source.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default(), 1,));
+    source.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    click(&mut source, 300.0, 180.0);
     let main_id = source
         .selected_drawing_id()
         .expect("main drawing is selected");
@@ -3101,13 +3217,13 @@ fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
 #[test]
 fn ctrl_leaves_the_cursor_crosshair_raw_without_drawing_work() {
     let mut chart = interactive_chart();
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+    assert_eq!(chart.drawing_tool(), None);
 
     let x = chart.engine.time_scale.logical_to_coordinate(32.0);
     let y = 200.0;
-    chart.update_crosshair(x, y);
+    hover(&mut chart, x, y);
     let free = chart.engine.build_frame();
-    chart.update_crosshair_magnet(true);
+    chart.engine.input_modifiers_changed(CTRL);
     let held = chart.engine.build_frame();
     let crosshair_color = Color::parse_css(&chart.engine.options.get().crosshair.horz_line.color)
         .expect("the package crosshair color is valid");
@@ -3119,20 +3235,20 @@ fn ctrl_leaves_the_cursor_crosshair_raw_without_drawing_work() {
     };
 
     assert_eq!(crosshair_y(&free), crosshair_y(&held));
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+    assert_eq!(chart.drawing_tool(), None);
 }
 
 #[test]
-fn armed_ctrl_leaves_the_crosshair_raw_without_a_preview_dot() {
+fn armed_ctrl_magnet_snaps_the_crosshair_without_a_preview_dot() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::TrendLine);
+    chart.set_drawing_tool(Some(DrawingKind::TrendLine));
     assert!(!chart.engine.drawing_create_active());
 
     let x = chart.engine.time_scale.logical_to_coordinate(32.0);
     let y = 200.0;
-    chart.update_crosshair(x, y);
+    hover(&mut chart, x, y);
     let free = chart.engine.build_frame();
-    chart.update_crosshair_magnet(true);
+    chart.engine.input_modifiers_changed(CTRL);
     let held = chart.engine.build_frame();
     let crosshair_color = Color::parse_css(&chart.engine.options.get().crosshair.horz_line.color)
         .expect("the package crosshair color is valid");
@@ -3143,7 +3259,8 @@ fn armed_ctrl_leaves_the_crosshair_raw_without_a_preview_dot() {
         })
     };
 
-    assert_eq!(crosshair_y(&free), crosshair_y(&held));
+    // Ctrl/Cmd is the drawing magnet: with a tool armed it snaps to the bar's rendered prices.
+    assert_ne!(crosshair_y(&free), crosshair_y(&held));
     assert_eq!(
         held.panes[0]
             .main
@@ -3165,28 +3282,28 @@ fn aeris_charts_upgrade_hides_crosshair_during_creation_and_restores_it_on_cance
             |primitive| matches!(primitive, Prim::HLine { color: actual, .. } if *actual == color),
         )
     };
-    chart.update_crosshair(300.0, 200.0);
+    hover(&mut chart, 300.0, 200.0);
     assert!(visible(&chart.engine.build_frame()));
-    chart.set_drawing_tool(ChartDrawingTool::TrendLine);
-    assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
-    chart.move_pointer(320.0, 220.0, false, DrawingModifiers::default());
+    chart.set_drawing_tool(Some(DrawingKind::TrendLine));
+    click(&mut chart, 300.0, 200.0);
+    hover(&mut chart, 320.0, 220.0);
     assert!(
         chart.engine.crosshair.is_some(),
         "host pointer coordinates remain available"
     );
     assert!(!visible(&chart.engine.build_frame()));
     chart.cancel_drawing();
-    chart.update_crosshair(300.0, 200.0);
+    hover(&mut chart, 300.0, 200.0);
     assert!(visible(&chart.engine.build_frame()));
 }
 
 #[test]
 fn text_tool_place_enters_edit_mode_and_keeps_typed_label() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::Text);
-    assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+    chart.set_drawing_tool(Some(DrawingKind::Text));
+    click(&mut chart, 300.0, 200.0);
     assert!(chart.is_editing_text());
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+    assert_eq!(chart.drawing_tool(), None);
 
     assert!(chart.engine.drawing_text_edit_insert("NQ"));
     assert_eq!(
@@ -3202,21 +3319,21 @@ fn text_tool_place_enters_edit_mode_and_keeps_typed_label() {
 #[test]
 fn trend_line_hover_and_first_label_click_edit_without_replacing_the_line() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::TrendLine);
-    assert!(chart.drawing_pointer_down(260.0, 160.0, DrawingModifiers::default(), 1));
-    assert!(chart.drawing_pointer_down(340.0, 160.0, DrawingModifiers::default(), 1));
+    chart.set_drawing_tool(Some(DrawingKind::TrendLine));
+    click(&mut chart, 260.0, 160.0);
+    click(&mut chart, 340.0, 160.0);
     let id = chart.engine.drawings()[0].id;
     let (label_x, label_y, _) = chart.engine.drawing_text_transform(id).unwrap();
     let label_x = label_x - 20.0;
     assert!(chart.engine.hit_test_drawing(label_x, label_y).is_none());
 
-    chart.update_cursor(label_x, label_y);
+    hover(&mut chart, label_x, label_y);
     assert_eq!(chart.engine.hovered_text(), Some(id));
-    assert_eq!(chart.cursor_style, CursorStyle::IBeam);
+    assert_eq!(cursor(&chart), ChartCursor::Text);
     assert!(chart.engine.build_frame().panes[0].main.iter().any(
         |primitive| matches!(primitive, Prim::RotatedText { text, .. } if text == "+ Add text")
     ));
-    assert!(chart.drawing_pointer_down(label_x, label_y, DrawingModifiers::default(), 1));
+    click(&mut chart, label_x, label_y);
     assert_eq!(
         chart
             .engine
@@ -3234,9 +3351,9 @@ fn trend_line_hover_and_first_label_click_edit_without_replacing_the_line() {
         Some("Breakout")
     );
 
-    chart.begin_text_edit(id);
+    assert!(chart.engine.begin_drawing_text_edit(id, true));
     assert!(chart.engine.set_drawing_text_edit("Breakout!", 9));
-    assert!(chart.drawing_pointer_down(260.0, 160.0, DrawingModifiers::default(), 1));
+    click(&mut chart, 260.0, 160.0);
     assert!(!chart.is_editing_text());
     assert_eq!(
         chart
@@ -3246,10 +3363,10 @@ fn trend_line_hover_and_first_label_click_edit_without_replacing_the_line() {
         Some("Breakout!")
     );
 
-    chart.update_cursor(-1.0, -1.0);
+    chart.engine.input_pointer_leave();
     assert_eq!(chart.engine.hovered_text(), None);
 
-    chart.begin_text_edit(id);
+    assert!(chart.engine.begin_drawing_text_edit(id, true));
     assert!(chart.engine.set_drawing_text_edit("", 0));
     assert!(chart.finish_text_edit());
     assert_eq!(chart.drawing_count(), 1);
@@ -3265,10 +3382,11 @@ fn trend_line_hover_and_first_label_click_edit_without_replacing_the_line() {
 #[test]
 fn pointer_exit_keeps_the_active_text_edit_session() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::Text);
-    assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+    chart.set_drawing_tool(Some(DrawingKind::Text));
+    click(&mut chart, 300.0, 200.0);
 
-    chart.cancel_pointer_gesture();
+    chart.engine.input_pointer_leave();
+    chart.engine.input_cancel();
 
     assert!(chart.is_editing_text());
     assert!(chart.engine.drawing_text_edit_insert("ES"));
@@ -3280,9 +3398,12 @@ fn pointer_exit_keeps_the_active_text_edit_session() {
 
 #[test]
 fn text_edit_accepts_committed_altgr_and_multicharacter_input() {
+    use aeris_charts_render_gpui::input::text_edit_key;
+    use gpui::Modifiers;
+
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::Text);
-    assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+    chart.set_drawing_tool(Some(DrawingKind::Text));
+    click(&mut chart, 300.0, 200.0);
     let event =
         |key: &str, text: &str, modifiers: Modifiers, prefer_character_input| KeyDownEvent {
             keystroke: gpui::Keystroke {
@@ -3293,17 +3414,23 @@ fn text_edit_accepts_committed_altgr_and_multicharacter_input() {
             is_held: false,
             prefer_character_input,
         };
-    assert!(chart.apply_text_edit_key(&event(
-        "q",
-        "@",
-        Modifiers {
-            control: true,
-            alt: true,
-            ..Modifiers::default()
-        },
-        true,
-    )));
-    assert!(chart.apply_text_edit_key(&event("emoji", "👩‍💻", Modifiers::default(), false,)));
+    text_edit_key(
+        &mut chart.engine,
+        &event(
+            "q",
+            "@",
+            Modifiers {
+                control: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            true,
+        ),
+    );
+    text_edit_key(
+        &mut chart.engine,
+        &event("emoji", "👩‍💻", Modifiers::default(), false),
+    );
     assert_eq!(
         chart.engine.drawing_text_edit().map(|(_, text, _)| text),
         Some("@👩‍💻")
@@ -3322,8 +3449,8 @@ fn activate_request_is_latched_until_taken() {
 #[test]
 fn unfinished_empty_text_edit_is_removed_on_finish() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::Text);
-    assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+    chart.set_drawing_tool(Some(DrawingKind::Text));
+    click(&mut chart, 300.0, 200.0);
     assert!(chart.is_editing_text());
     assert!(chart.finish_text_edit());
     assert!(!chart.is_editing_text());
@@ -3333,37 +3460,34 @@ fn unfinished_empty_text_edit_is_removed_on_finish() {
 #[test]
 fn brush_capture_commits_on_release_and_returns_to_cursor() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::Brush);
+    chart.set_drawing_tool(Some(DrawingKind::Brush));
 
-    assert!(chart.drawing_pointer_down(240.0, 180.0, DrawingModifiers::default(), 1));
-    assert!(chart.drawing_pointer_move(280.0, 210.0, true, DrawingModifiers::default()));
-    assert!(chart.drawing_pointer_up(320.0, 240.0, DrawingModifiers::default()));
+    drag(&mut chart, (240.0, 180.0), (320.0, 240.0));
 
     assert_eq!(chart.drawing_count(), 1);
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+    assert_eq!(chart.drawing_tool(), None);
     assert!(!chart.engine.brush_create_active());
 }
 
 #[test]
 fn brush_capture_coalesces_pointer_samples_to_one_knot_per_flush() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::Brush);
-    let modifiers = DrawingModifiers::default();
+    chart.set_drawing_tool(Some(DrawingKind::Brush));
 
-    assert!(chart.drawing_pointer_down(100.0, 100.0, modifiers, 1));
+    press(&mut chart, 100.0, 100.0);
     for offset in 1..=8 {
         let x = 100.0 + f64::from(offset);
-        assert!(chart.drawing_pointer_move(x, 100.0 + x, true, modifiers));
+        move_to(&mut chart, pointer(x, 100.0 + x), true);
     }
     assert!(
-        chart.flush_pending_brush(),
+        chart.engine.flush_coalesced_input(),
         "the newest pending sample is captured once"
     );
     assert!(
-        !chart.flush_pending_brush(),
+        !chart.engine.flush_coalesced_input(),
         "an idle flush without a pending sample captures nothing"
     );
-    assert!(chart.drawing_pointer_up(180.0, 180.0, modifiers));
+    release(&mut chart, 180.0, 180.0);
 
     let drawing = &chart.engine.drawings()[0];
     assert_eq!(drawing.kind, DrawingKind::Brush);
@@ -3377,64 +3501,67 @@ fn brush_capture_coalesces_pointer_samples_to_one_knot_per_flush() {
 #[test]
 fn path_stays_armed_until_enter_or_double_click_finishes() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::Path);
+    chart.set_drawing_tool(Some(DrawingKind::Path));
     assert!(
         !chart.engine.drawing_create_active(),
         "arming must not start a pre-click handle"
     );
 
-    assert!(chart.drawing_pointer_down(260.0, 180.0, DrawingModifiers::default(), 1));
-    assert!(chart.drawing_pointer_down(340.0, 220.0, DrawingModifiers::default(), 1));
-    assert!(chart.drawing_pointer_down(400.0, 200.0, DrawingModifiers::default(), 1));
+    click(&mut chart, 260.0, 180.0);
+    click(&mut chart, 340.0, 220.0);
+    click(&mut chart, 400.0, 200.0);
     assert_eq!(chart.drawing_count(), 0);
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Path);
-    assert!(chart.apply_key("backspace", false));
-    assert!(chart.apply_key("enter", false));
+    assert_eq!(chart.drawing_tool(), Some(DrawingKind::Path));
+    assert!(key(&mut chart, ChartKey::Backspace));
+    assert!(key(&mut chart, ChartKey::Enter));
     assert_eq!(chart.drawing_count(), 1);
     assert_eq!(chart.engine.drawings()[0].kind, DrawingKind::Path);
     assert_eq!(chart.engine.drawings()[0].points.len(), 2);
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+    assert_eq!(chart.drawing_tool(), None);
 
-    chart.set_drawing_tool(ChartDrawingTool::Path);
-    assert!(chart.drawing_pointer_down(260.0, 200.0, DrawingModifiers::default(), 1));
-    assert!(chart.drawing_pointer_down(340.0, 240.0, DrawingModifiers::default(), 1));
-    assert!(chart.drawing_pointer_down(340.0, 240.0, DrawingModifiers::default(), 2));
+    chart.set_drawing_tool(Some(DrawingKind::Path));
+    click(&mut chart, 260.0, 200.0);
+    double_click(&mut chart, 340.0, 240.0);
     assert_eq!(chart.drawing_count(), 2);
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+    assert_eq!(chart.drawing_tool(), None);
     assert!(!chart.engine.drawing_create_active());
 }
 
 #[test]
 fn cursor_selects_and_moves_unlocked_drawings_but_locked_drawings_do_not_drag() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-    assert!(chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    click(&mut chart, 300.0, 200.0);
     let id = chart.selected_drawing_id().expect("drawing selected");
     let (_, drawing_y) = chart
         .engine
         .drawing_point_to_coordinate(id, 0)
         .expect("drawing coordinate");
-    chart.set_drawing_tool(ChartDrawingTool::Cursor);
+    let before = chart.engine.drawing(id).expect("drawing").points.clone();
+    chart.set_drawing_tool(None);
 
     assert!(chart.set_selected_drawing_locked(true));
-    assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default(), 1));
-    assert!(!chart.engine.drawing_drag_active());
+    drag(&mut chart, (500.0, drawing_y), (500.0, drawing_y + 30.0));
+    assert_eq!(chart.engine.drawing(id).expect("drawing").points, before);
     assert_eq!(chart.selected_drawing_id(), Some(id));
 
     assert!(chart.set_selected_drawing_locked(false));
-    assert!(chart.drawing_pointer_down(500.0, drawing_y, DrawingModifiers::default(), 1));
+    press(&mut chart, 500.0, drawing_y);
     assert!(chart.engine.drawing_drag_active());
-    assert!(chart.drawing_pointer_up(500.0, drawing_y + 30.0, DrawingModifiers::default()));
+    assert_eq!(cursor(&chart), ChartCursor::Grabbing);
+    move_to(&mut chart, pointer(500.0, drawing_y + 30.0), true);
+    release(&mut chart, 500.0, drawing_y + 30.0);
     assert!(!chart.engine.drawing_drag_active());
+    assert_ne!(chart.engine.drawing(id).expect("drawing").points, before);
 }
 
 #[test]
 fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
     let mut chart = interactive_chart();
-    chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-    assert!(chart.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default(), 1));
-    chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-    assert!(chart.drawing_pointer_down(300.0, 240.0, DrawingModifiers::default(), 1));
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    click(&mut chart, 300.0, 180.0);
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    click(&mut chart, 300.0, 240.0);
     assert_eq!(chart.drawing_count(), 2);
 
     assert!(chart.set_all_drawings_locked(true));
@@ -3446,19 +3573,19 @@ fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
             all_locked: true,
         }
     );
-    assert!(chart.apply_key("delete", false));
+    assert!(key(&mut chart, ChartKey::Delete));
     assert_eq!(chart.drawing_count(), 1);
     assert_eq!(chart.drawings_lock_summary().locked_count, 1);
 
-    assert!(chart.apply_key("escape", false));
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::Cursor);
+    assert!(key(&mut chart, ChartKey::Escape));
+    assert_eq!(chart.drawing_tool(), None);
     assert!(!chart.engine.drawing_create_active());
     chart.clear_drawings();
     assert_eq!(
         chart.drawings_lock_summary(),
         DrawingsLockSummary::default()
     );
-    assert!(!chart.apply_key("backspace", false));
+    assert!(!key(&mut chart, ChartKey::Backspace));
 }
 
 #[test]
@@ -3468,18 +3595,25 @@ fn drawing_history_steps_back_and_forward_and_keeps_the_armed_tool() {
     assert!(!chart.can_redo_drawing());
     assert!(!chart.undo_drawing());
 
-    chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-    assert!(chart.drawing_pointer_down(300.0, 180.0, DrawingModifiers::default(), 1));
-    chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
-    assert!(chart.drawing_pointer_down(300.0, 240.0, DrawingModifiers::default(), 1));
+    let revision = chart.user_state_revision();
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    click(&mut chart, 300.0, 180.0);
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    click(&mut chart, 300.0, 240.0);
     assert_eq!(chart.drawing_count(), 2);
     assert!(chart.can_undo_drawing());
+    assert!(
+        chart.user_state_revision() > revision,
+        "committed drawings dirty durable state"
+    );
 
-    chart.set_drawing_tool(ChartDrawingTool::HorizontalLine);
+    chart.set_drawing_tool(Some(DrawingKind::HorizontalLine));
+    let revision = chart.user_state_revision();
     assert!(chart.undo_drawing());
+    assert!(chart.user_state_revision() > revision);
     assert_eq!(chart.drawing_count(), 1);
     assert!(chart.can_redo_drawing());
-    assert_eq!(chart.drawing_tool(), ChartDrawingTool::HorizontalLine);
+    assert_eq!(chart.drawing_tool(), Some(DrawingKind::HorizontalLine));
     assert!(
         !chart.engine.drawing_create_active(),
         "stepping history must keep the tool selected without a pre-click handle"
@@ -3494,87 +3628,90 @@ fn drawing_history_steps_back_and_forward_and_keeps_the_armed_tool() {
 #[test]
 fn cursor_mode_still_falls_through_to_chart_pan_on_a_drawing_miss() {
     let mut chart = interactive_chart();
-    assert!(!chart.drawing_pointer_down(300.0, 200.0, DrawingModifiers::default(), 1));
-
-    chart.begin_drag(300.0, 200.0, 1, false);
-
-    assert_eq!(
-        chart.engine.financial_drag(),
-        Some(FinancialDrag::Pane { price_pan: None })
-    );
+    let offset = chart.engine.right_offset();
+    drag(&mut chart, (300.0, 200.0), (360.0, 200.0));
+    assert!((chart.engine.right_offset() - offset).abs() > f64::EPSILON);
+    assert_eq!(chart.drawing_count(), 0);
 }
 
 #[test]
 fn keyboard_navigation_scrolls_zooms_resets_and_ignores_unknown_keys() {
     let mut chart = interactive_chart();
     let offset = chart.engine.scroll_position();
-    assert!(chart.apply_key("right", false));
-    assert!((chart.engine.scroll_position() - offset - 1.0).abs() < f64::EPSILON);
-    assert!(chart.apply_key("left", true));
-    assert!((chart.engine.scroll_position() - offset + 9.0).abs() < f64::EPSILON);
+    // Arrow pans are velocity-owned: the key starts an engine animation that key-up ends.
+    assert!(key(&mut chart, ChartKey::ArrowRight));
+    assert!(chart.engine.input_animating());
+    chart.engine.input_tick(200.0);
+    assert!(chart.engine.scroll_position() > offset);
+    assert!(chart.engine.input_key_up(ChartKey::ArrowRight));
+    assert!(!chart.engine.input_animating());
 
     let before_page = chart.engine.scroll_position();
-    assert!(chart.apply_key("pageup", false));
-    assert!(chart.engine.scroll_position() < before_page);
-    assert!(chart.apply_key("pagedown", false));
-    assert!((chart.engine.scroll_position() - before_page).abs() < f64::EPSILON);
+    assert!(key(&mut chart, ChartKey::PageUp));
+    let after_page_up = chart.engine.scroll_position();
+    assert!(after_page_up < before_page);
+    assert!(key(&mut chart, ChartKey::PageDown));
+    assert!(chart.engine.scroll_position() > after_page_up);
 
     let spacing = chart.engine.bar_spacing();
-    assert!(chart.apply_key("+", false));
+    assert!(key(&mut chart, ChartKey::ZoomIn));
     assert!((chart.engine.bar_spacing() - spacing).abs() > f64::EPSILON);
 
-    chart.engine.crosshair = Some((100.0, 100.0));
-    assert!(chart.apply_key("escape", false));
+    hover(&mut chart, 100.0, 100.0);
+    assert!(chart.engine.crosshair.is_some());
+    assert!(key(&mut chart, ChartKey::Escape));
     assert!(chart.engine.crosshair.is_none());
-    assert!(chart.apply_key("home", false));
+    assert!(key(&mut chart, ChartKey::Home));
     let reset_margin = chart.engine.pane_w * 0.10 / chart.engine.bar_spacing();
     assert!((chart.engine.scroll_position() - reset_margin).abs() < f64::EPSILON);
     chart.engine.scroll_to_position(-4.0);
     assert!(!chart.is_at_latest());
-    assert!(chart.apply_key("end", false));
+    assert!(key(&mut chart, ChartKey::End));
     assert!(chart.is_at_latest());
-    assert!(!chart.apply_key("a", false));
+    assert!(aeris_charts_render_gpui::input::chart_key("a").is_none());
 }
 
 #[test]
 fn native_pointer_state_ends_a_drag_when_mouse_up_was_lost() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, 200.0, 1, false);
-    assert_eq!(
-        chart.engine.financial_drag(),
-        Some(FinancialDrag::Pane { price_pan: None })
-    );
+    press(&mut chart, 300.0, 200.0);
+    move_to(&mut chart, pointer(330.0, 200.0), true);
+    assert_eq!(cursor(&chart), ChartCursor::Grabbing);
 
-    chart.move_pointer(340.0, 200.0, false, DrawingModifiers::default());
+    move_to(&mut chart, pointer(340.0, 200.0), false);
 
-    assert!(chart.drag.is_none());
-    assert!(chart.engine.financial_drag().is_none());
-    assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
+    assert_eq!(cursor(&chart), ChartCursor::Crosshair);
     assert_eq!(chart.engine.crosshair, Some((340.0, 200.0)));
 }
 
 #[test]
 fn host_modal_suspension_clears_crosshair_and_active_pointer_gestures() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, 200.0, 1, false);
+    press(&mut chart, 300.0, 200.0);
+    move_to(&mut chart, pointer(330.0, 200.0), true);
     assert!(chart.engine.crosshair.is_some());
-    assert!(chart.engine.financial_drag().is_some());
+    assert_eq!(cursor(&chart), ChartCursor::Grabbing);
 
     chart.suspend_pointer_interaction();
 
     assert!(chart.engine.crosshair.is_none());
-    assert!(chart.drag.is_none());
-    assert!(chart.engine.financial_drag().is_none());
     assert!(chart.engine.separator_hover.is_none());
     assert_eq!(
         chart.pointer_interaction,
         PointerInteractionState::Suspended
     );
-    assert_eq!(chart.cursor_style, CursorStyle::Arrow);
+    assert_eq!(chart.cursor_style(), CursorStyle::Arrow);
+    let offset = chart.engine.right_offset();
+    move_to(&mut chart, pointer(380.0, 200.0), true);
+    assert_eq!(
+        chart.engine.right_offset().to_bits(),
+        offset.to_bits(),
+        "a suspended gesture never resumes"
+    );
 
     chart.resume_pointer_interaction();
     assert_eq!(chart.pointer_interaction, PointerInteractionState::Active);
-    assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
+    assert_eq!(chart.cursor_style(), CursorStyle::Crosshair);
 }
 
 #[test]
@@ -3694,83 +3831,100 @@ fn indicator_separator_resize_has_bounded_native_pointer_state() {
     let first_stretch = chart.engine.panes[0].stretch_factor;
     let first_height = chart.engine.panes[0].height;
 
-    chart.update_cursor(300.0, separator_y);
-    assert_eq!(chart.cursor_style, CursorStyle::ResizeRow);
+    hover(&mut chart, 300.0, separator_y);
+    assert_eq!(cursor(&chart), ChartCursor::ResizeRow);
     assert_eq!(chart.engine.separator_hover, Some(0));
 
-    chart.begin_drag(300.0, separator_y, 1, false);
-    assert!(matches!(
-        chart.engine.financial_drag(),
-        Some(FinancialDrag::PaneSeparator { index: 0, .. })
-    ));
+    press(&mut chart, 300.0, separator_y);
     assert!(chart.engine.crosshair.is_none());
-    chart.layout_dirty = false;
-    chart.drag_to(300.0, separator_y + 20.0);
-    assert!(chart.layout_dirty, "dragging must rebuild pane geometry");
+    move_to(&mut chart, pointer(300.0, separator_y + 20.0), true);
     assert!(chart.engine.panes[0].stretch_factor > first_stretch);
     // Mouse events may arrive faster than chart frames. The latest pointer
     // position must win even before a layout pass updates pane heights.
-    chart.drag_to(300.0, separator_y + 40.0);
+    move_to(&mut chart, pointer(300.0, separator_y + 40.0), true);
     assert!((chart.engine.panes[0].stretch_factor - (first_height + 40.0)).abs() < 1e-6);
     chart
         .engine
         .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
     assert!((chart.engine.panes[1].top - (separator_y + 40.0)).abs() < 1.0);
 
-    chart.move_pointer(
-        300.0,
-        separator_y + 40.0,
-        false,
-        DrawingModifiers::default(),
-    );
-    assert!(chart.drag.is_none());
-    assert!(chart.engine.financial_drag().is_none());
-    assert_eq!(chart.cursor_style, CursorStyle::ResizeRow);
+    move_to(&mut chart, pointer(300.0, separator_y + 40.0), false);
+    assert_eq!(cursor(&chart), ChartCursor::ResizeRow);
 }
 
 #[test]
 fn escape_cancels_every_active_gesture_and_clears_pointer_state() {
     let mut chart = interactive_chart();
-    chart.begin_drag(300.0, chart.engine.pane_h + 10.0, 1, false);
-    assert_eq!(chart.engine.financial_drag(), Some(FinancialDrag::TimeAxis));
+    let time_y = chart.engine.pane_h + 10.0;
+    press(&mut chart, 300.0, time_y);
+    move_to(&mut chart, pointer(320.0, time_y), true);
+    assert_eq!(cursor(&chart), ChartCursor::ResizeHorizontal);
 
-    assert!(chart.apply_key("escape", false));
+    assert!(key(&mut chart, ChartKey::Escape));
 
-    assert!(chart.drag.is_none());
-    assert!(chart.engine.financial_drag().is_none());
+    let spacing = chart.engine.bar_spacing();
+    move_to(&mut chart, pointer(360.0, time_y), true);
+    assert_eq!(
+        chart.engine.bar_spacing().to_bits(),
+        spacing.to_bits(),
+        "the scale session ended"
+    );
     assert!(chart.engine.crosshair.is_none());
-    assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
 }
 
 #[test]
 fn pointer_cursor_truthfully_tracks_chart_and_axis_gestures() {
     let mut chart = interactive_chart();
-    chart.update_cursor(300.0, 200.0);
-    assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
-    chart.update_cursor(300.0, chart.engine.pane_h + 1.0);
-    assert_eq!(chart.cursor_style, CursorStyle::ResizeLeftRight);
-    chart.update_cursor(chart.engine.pane_w + 1.0, 200.0);
-    assert_eq!(chart.cursor_style, CursorStyle::ResizeUpDown);
+    hover(&mut chart, 300.0, 200.0);
+    assert_eq!(cursor(&chart), ChartCursor::Crosshair);
+    let time_y = chart.engine.pane_h + 1.0;
+    hover(&mut chart, 300.0, time_y);
+    assert_eq!(cursor(&chart), ChartCursor::ResizeHorizontal);
+    let axis_x = chart.engine.pane_w + 1.0;
+    hover(&mut chart, axis_x, 200.0);
+    assert_eq!(cursor(&chart), ChartCursor::ResizeVertical);
 
-    chart.begin_drag(300.0, 200.0, 1, false);
-    assert_eq!(chart.cursor_style, CursorStyle::ClosedHand);
-    chart.end_drag(300.0, 200.0);
-    assert_eq!(chart.cursor_style, CursorStyle::Crosshair);
+    press(&mut chart, 300.0, 200.0);
+    move_to(&mut chart, pointer(330.0, 200.0), true);
+    assert_eq!(cursor(&chart), ChartCursor::Grabbing);
+    release(&mut chart, 330.0, 200.0);
+    assert_eq!(cursor(&chart), ChartCursor::Crosshair);
 }
 
 #[test]
-fn trading_line_cursor_uses_a_visible_native_drag_affordance() {
+fn chart_cursors_map_to_visible_native_gpui_cursors() {
+    use aeris_charts_render_gpui::input::cursor_style;
     #[cfg(target_os = "windows")]
     {
-        assert_eq!(input::trading_line_cursor(), CursorStyle::ResizeUpDown);
-        assert_eq!(input::trading_line_drag_cursor(), CursorStyle::ResizeUpDown);
+        assert_eq!(
+            cursor_style(ChartCursor::VerticalGrab),
+            CursorStyle::ResizeUpDown
+        );
+        assert_eq!(
+            cursor_style(ChartCursor::VerticalGrabbing),
+            CursorStyle::ResizeUpDown
+        );
     }
-
     #[cfg(not(target_os = "windows"))]
     {
-        assert_eq!(input::trading_line_cursor(), CursorStyle::OpenHand);
-        assert_eq!(input::trading_line_drag_cursor(), CursorStyle::ClosedHand);
+        assert_eq!(
+            cursor_style(ChartCursor::VerticalGrab),
+            CursorStyle::OpenHand
+        );
+        assert_eq!(
+            cursor_style(ChartCursor::VerticalGrabbing),
+            CursorStyle::ClosedHand
+        );
     }
+    // GPUI names diagonal cursors geometrically; `nwse` runs up-left to down-right.
+    assert_eq!(
+        cursor_style(ChartCursor::ResizeNwse),
+        CursorStyle::ResizeUpLeftDownRight
+    );
+    assert_eq!(
+        cursor_style(ChartCursor::ResizeNesw),
+        CursorStyle::ResizeUpRightDownLeft
+    );
 }
 
 #[test]

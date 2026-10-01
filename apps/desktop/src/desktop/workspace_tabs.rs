@@ -669,7 +669,7 @@ impl TerminalApp {
 
     pub(super) fn select_drawing_tool_on_active_workspace(
         &mut self,
-        tool: ChartDrawingTool,
+        tool: Option<ChartDrawingKind>,
         cx: &mut Context<Self>,
     ) {
         let panes: Vec<_> = self.workspaces[self.active]

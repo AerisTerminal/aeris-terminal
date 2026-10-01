@@ -389,7 +389,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "5ed2fea";
+        let expected_revision = "17a591f";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",
@@ -418,6 +418,62 @@ mod tests {
                 || contents.contains("aeris_charts_render_gpui.workspace")
             {
                 assert_eq!(relative, "crates/ui/chart_integration/Cargo.toml");
+            }
+        }
+    }
+
+    /// Chart interaction is Aeris Charts behavior. Terminal binds GPUI listeners through the
+    /// `aeris_charts_render_gpui::input` adapter and the engine's `input_*` controller; it never
+    /// routes gestures, arbitrates hover, picks cursors, or composes chart features from engine
+    /// primitives. A feature that seems to need these calls is missing an engine operation.
+    #[test]
+    fn chart_integration_routes_interaction_through_aeris_charts() {
+        const ENGINE_INTERACTION_PRIMITIVES: &[&str] = &[
+            "drawing_create_begin",
+            "drawing_create_click",
+            "drawing_create_move",
+            "drawing_create_finish",
+            "drawing_tool_pointer_down",
+            "drawing_tool_pointer_move",
+            "drawing_tool_pointer_up",
+            "drawing_tool_activate",
+            "drawing_drag_start_at",
+            "drawing_drag_to",
+            "brush_create_start",
+            "brush_create_add",
+            "update_drawing_hover",
+            "drawing_hover_at",
+            "hit_test_series",
+            "set_hovered_series",
+            "set_separator_hover",
+            "set_crosshair_ohlc_magnet",
+            "delta_tooltip_mouse_down_with_shift",
+            "set_area_brush_state",
+            "time_scale_start_scroll",
+            "time_axis_start_scale",
+            "price_axis_start_scale",
+            "price_axis_start_scroll",
+            "kinetic_begin_sampling",
+            "start_keyboard_scroll",
+            "set_trading_hover",
+            "set_trading_pressed",
+            "trading_drag_start_at",
+            "trading_activate_at",
+            "activate_alert_create_at",
+            "measure_pointer_down",
+            "GestureResolver",
+            "ChartDrawingTool",
+        ];
+        for path in production_sources_under("crates/ui/chart_integration/src") {
+            let relative = relative_string(&path);
+            let contents = fs::read_to_string(&path).expect("chart integration source");
+            let production = production_prefix(&contents);
+            for primitive in ENGINE_INTERACTION_PRIMITIVES {
+                assert!(
+                    !contains_identifier(production, primitive),
+                    "{relative} uses `{primitive}`; chart interaction belongs in the Aeris Charts \
+                     input controller and the shared GPUI adapter"
+                );
             }
         }
     }
