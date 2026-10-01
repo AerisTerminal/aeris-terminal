@@ -28,6 +28,7 @@ pub struct ProviderPresentationDescriptor {
     pub search_hint: &'static str,
     pub logo_key: &'static str,
     pub catalog_symbol: ProviderCatalogSymbol,
+    pub selection_entitlement_id: &'static str,
     pub depth_available: bool,
     pub connection_kind: ProviderConnectionKind,
 }

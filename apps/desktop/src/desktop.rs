@@ -509,9 +509,6 @@ actions!(
     ]
 );
 
-const HYPERLIQUID_ENTITLEMENT_ID: &str = "hyperliquid-public";
-const RITHMIC_TEST_ENTITLEMENT_ID: &str = "crypto_public_realtime";
-
 fn generation_status(
     worker_label: &str,
     subscription_id: &str,

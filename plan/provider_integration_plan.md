@@ -183,8 +183,8 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     product-policy branches remain provider-owned; generic engine lifecycle and depth checks now use
     descriptor presence/capabilities instead of enumerating provider variants; viewport persistence
     and hosted-broker prompt labels follow the same metadata. Startup catalog matching now reads
-    the descriptor's catalog-symbol source instead of naming tastytrade; generic menu selection
-    carries only its result index instead of provider-tagged variants.
+    the descriptor's catalog-symbol source and selection entitlement instead of naming tastytrade;
+    generic menu selection carries only its result index instead of provider-tagged variants.
 - [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the

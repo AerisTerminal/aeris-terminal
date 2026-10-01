@@ -2020,10 +2020,8 @@ impl WorkspaceSurface {
         let selected = (|| {
             let index = selection.0;
             let provider = terminal_provider_id(self.symbol_provider);
-            let entitlement_id = match self.symbol_provider {
-                TerminalProvider::Rithmic => RITHMIC_TEST_ENTITLEMENT_ID,
-                TerminalProvider::Hyperliquid => HYPERLIQUID_ENTITLEMENT_ID,
-                TerminalProvider::Tastytrade => "tastytrade-authorized",
+            let Some(descriptor) = super::provider_presentation(self.symbol_provider) else {
+                return false;
             };
             let display = terminal_provider_display(self.symbol_provider);
             let Some(selection) = self.symbol_browser.select(index) else {
@@ -2036,7 +2034,7 @@ impl WorkspaceSurface {
                 provider: provider.to_string(),
                 symbol: selection.instrument.symbol.clone(),
                 exchange: selection.instrument.exchange.clone(),
-                entitlement_id: entitlement_id.to_string(),
+                entitlement_id: descriptor.selection_entitlement_id.to_string(),
             };
             if self.market_worker.try_select_provider(request).is_err() {
                 self.symbol_browser.reject_selection(selection.generation);

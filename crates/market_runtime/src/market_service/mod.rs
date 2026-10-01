@@ -997,6 +997,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     search_hint: "Search Rithmic symbols",
     logo_key: "rithmic",
     catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
+    selection_entitlement_id: "crypto_public_realtime",
     depth_available: true,
     connection_kind: aeris_contracts::ProviderConnectionKind::Credentials,
 };
@@ -1047,6 +1048,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     search_hint: "Search Hyperliquid markets",
     logo_key: "hyperliquid",
     catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
+    selection_entitlement_id: "hyperliquid-public",
     depth_available: true,
     connection_kind: aeris_contracts::ProviderConnectionKind::Public,
 };
