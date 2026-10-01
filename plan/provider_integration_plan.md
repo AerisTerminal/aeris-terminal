@@ -204,8 +204,10 @@ Maintainer-only: visual check of the symbol menu, depth-unavailable state and at
   `apps/desktop/src/desktop/workspace_surface_tests.rs`.
 - [x] `crates/account_runtime/src/account_service/mod.rs` (5.7k) — moved its test module to
   `crates/account_runtime/src/account_service/tests.rs`.
-- [ ] `apps/desktop/src/desktop.rs` (5k)
-- [ ] `crates/trading_runtime/src/lib.rs` (4.6k)
+- [x] `apps/desktop/src/desktop.rs` (5k) — moved the remaining inline HTTP wiring tests to
+  `apps/desktop/src/http_wiring_tests.rs`; the main test module was already external.
+- [x] `crates/trading_runtime/src/lib.rs` (4.6k) — its test module was already external in
+  `crates/trading_runtime/src/tests.rs`.
 - [ ] `crates/market_runtime/src/market_service/tastytrade.rs` and anything still oversized in
   `market_service/{coordinator,realtime}.rs` after Phase 2
 - [ ] Update path-based `naming_check` assertions to the new locations with equal strictness.
