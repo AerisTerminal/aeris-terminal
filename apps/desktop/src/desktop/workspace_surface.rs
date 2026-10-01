@@ -3620,7 +3620,7 @@ impl WorkspaceSurface {
             }
             FeedConnectionState::Streaming => {
                 let depth_available = super::provider_presentation(self.provider)
-                    .map_or(true, |descriptor| descriptor.depth_available);
+                    .is_none_or(|descriptor| descriptor.depth_available);
                 self.order_book.update(cx, |order_book, order_book_cx| {
                     if depth_available {
                         order_book.set_connection_state(
