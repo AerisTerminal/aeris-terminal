@@ -4137,8 +4137,10 @@ impl WorkspaceSurface {
                 .unwrap_or(u32::MAX),
         };
         let dispatched = if self.market_worker.try_search_provider(search).is_ok() {
-            let display = terminal_provider_display(self.symbol_provider);
-            self.symbol_message = format!("Searching {display} markets");
+            self.symbol_message = super::provider_presentation(self.symbol_provider).map_or_else(
+                || "Searching provider markets".to_string(),
+                |descriptor| descriptor.search_hint.to_string(),
+            );
             true
         } else {
             self.symbol_browser.reject_search(request_id);

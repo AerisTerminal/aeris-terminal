@@ -3121,14 +3121,11 @@ fn terminal_startup_state(
 }
 
 fn initial_symbol_message(provider: TerminalProvider) -> String {
-    match provider {
-        TerminalProvider::Rithmic => "Search for an entitled Rithmic Test symbol",
-        TerminalProvider::Hyperliquid => "Search Hyperliquid perps and spot markets",
-        TerminalProvider::Tastytrade => {
-            "Search tastytrade futures, stocks, options, indices and crypto"
-        }
-    }
-    .to_string()
+    provider_presentation(provider)
+        .map_or("Search provider markets", |descriptor| {
+            descriptor.search_hint
+        })
+        .to_string()
 }
 
 fn initialize_chart_chrome(

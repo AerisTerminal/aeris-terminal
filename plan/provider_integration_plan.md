@@ -176,7 +176,8 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   `desktop/workspace_surface.rs`, `components/{symbol_menu,terminal_view,watchlist_panel,time_sales_panel}.rs`,
   `engine_market_worker*.rs`, `market_worker.rs` and `desktop/local_state.rs` with descriptors.
   - [~] Desktop display names and default listing queries now read from the runtime descriptor registry;
-    selection, interval, connection, and component branches remain to be migrated.
+    search hints now do as well; selection, interval, connection, and component branches remain to
+    be migrated.
 - [ ] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the
