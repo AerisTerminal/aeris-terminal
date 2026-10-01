@@ -2482,12 +2482,8 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 app.retained_chart_presentation.price_precision =
                     chart.read(cx).selected_price_precision();
             }
-            if matches!(
-                app.provider,
-                TerminalProvider::Rithmic
-                    | TerminalProvider::Hyperliquid
-                    | TerminalProvider::Tastytrade
-            ) && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
+            if provider_presentation(app.provider).is_some()
+                && let Some(viewport) = chart.read(cx).visible_time_range_unix_nanos()
                 && app.last_persisted_viewport != Some(viewport)
                 && app
                     .market_worker

@@ -182,7 +182,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     by descriptor ID instead of positional provider matches. Selection and remaining provider-specific
     provider-specific selection payloads and product-policy branches remain provider-owned; generic
     engine lifecycle and depth checks now use descriptor presence/capabilities instead of enumerating
-    provider variants.
+    provider variants; viewport persistence follows the same descriptor gate.
 - [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the
