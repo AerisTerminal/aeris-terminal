@@ -8,6 +8,7 @@ use aeris_market_data::{BarPeriod, BarSeriesKey};
 use aeris_market_engine::{MarketStream, StreamRequirements};
 use aeris_market_runtime::{MarketRuntimeEvent, MarketService, MarketTradeTapeSnapshot};
 use std::{
+    collections::VecDeque,
     thread,
     time::{Duration, Instant},
 };
@@ -34,6 +35,7 @@ fn run(market: &MarketService) -> Result<(), String> {
     let mut tails = 0;
     let mut trades = 0;
     let mut history_check = HistoryCheck::default();
+    let mut live_timing = LiveTiming::default();
     while Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
             match event {
@@ -62,9 +64,14 @@ fn run(market: &MarketService) -> Result<(), String> {
                 }
                 MarketRuntimeEvent::SeriesUpdate(_) => {
                     tails += 1;
+                    live_timing.record_update();
+                }
+                MarketRuntimeEvent::OrderBookSnapshot(_) => {
+                    live_timing.record_order_book();
                 }
                 MarketRuntimeEvent::TradeTapeSnapshot(tape) => {
                     report_tape(&tape, &mut trades);
+                    live_timing.record_tape();
                 }
                 MarketRuntimeEvent::ProviderState(state) => {
                     println!("Provider: {:?} {:?}", state.state, state.detail);
@@ -86,6 +93,7 @@ fn run(market: &MarketService) -> Result<(), String> {
         }
     }
     println!("Selected={selected}; snapshots={snapshots}; updates={tails}; ticks={trades}");
+    live_timing.report();
     if !selected || snapshots == 0 || tails == 0 || !history_check.switched {
         return Err("Catalog/chart/live integration did not complete".into());
     }
@@ -99,6 +107,75 @@ fn run(market: &MarketService) -> Result<(), String> {
     )?;
     market.detach(1)?;
     Ok(())
+}
+
+const LIVE_TIMING_SAMPLE_CAPACITY: usize = 4096;
+
+#[derive(Default)]
+struct LiveTiming {
+    updates: IntervalSamples,
+    order_books: IntervalSamples,
+    tapes: IntervalSamples,
+}
+
+impl LiveTiming {
+    fn record_update(&mut self) {
+        self.updates.record();
+    }
+
+    fn record_order_book(&mut self) {
+        self.order_books.record();
+    }
+
+    fn record_tape(&mut self) {
+        self.tapes.record();
+    }
+
+    fn report(&self) {
+        self.updates.report("chart update");
+        self.order_books.report("order-book/quote publication");
+        self.tapes.report("tape snapshot");
+    }
+}
+
+#[derive(Default)]
+struct IntervalSamples {
+    previous: Option<Instant>,
+    intervals_ms: VecDeque<u128>,
+}
+
+impl IntervalSamples {
+    fn record(&mut self) {
+        let now = Instant::now();
+        if let Some(previous) = self.previous.replace(now) {
+            if self.intervals_ms.len() == LIVE_TIMING_SAMPLE_CAPACITY {
+                self.intervals_ms.pop_front();
+            }
+            self.intervals_ms
+                .push_back(now.duration_since(previous).as_millis());
+        }
+    }
+
+    fn report(&self, label: &str) {
+        if self.intervals_ms.is_empty() {
+            println!("Timing: {label} intervals unavailable (fewer than two events)");
+            return;
+        }
+        let mut values: Vec<_> = self.intervals_ms.iter().copied().collect();
+        values.sort_unstable();
+        println!(
+            "Timing: {label} interval p50={} ms p90={} ms p99={} ms samples={}",
+            percentile(&values, 50),
+            percentile(&values, 90),
+            percentile(&values, 99),
+            values.len()
+        );
+    }
+}
+
+fn percentile(values: &[u128], percentile: usize) -> u128 {
+    let index = (values.len() - 1) * percentile / 100;
+    values[index]
 }
 fn report_tape(tape: &MarketTradeTapeSnapshot, trades: &mut usize) {
     if *trades == 0 || tape.trades.len() >= *trades + 1024 {
