@@ -145,7 +145,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_core"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=17a591f#17a591ff4d2327676190f4a6d5a481d2ace7591a"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=5e7e2bb#5e7e2bbab00e207e5a05646c8b279fa1b2be9ce1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -156,7 +156,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_engine"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=17a591f#17a591ff4d2327676190f4a6d5a481d2ace7591a"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=5e7e2bb#5e7e2bbab00e207e5a05646c8b279fa1b2be9ce1"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_indicators",
@@ -168,7 +168,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_indicators"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=17a591f#17a591ff4d2327676190f4a6d5a481d2ace7591a"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=5e7e2bb#5e7e2bbab00e207e5a05646c8b279fa1b2be9ce1"
 dependencies = [
  "serde",
 ]
@@ -176,7 +176,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=17a591f#17a591ff4d2327676190f4a6d5a481d2ace7591a"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=5e7e2bb#5e7e2bbab00e207e5a05646c8b279fa1b2be9ce1"
 dependencies = [
  "aeris_charts_core",
 ]
@@ -184,7 +184,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render_gpui"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=17a591f#17a591ff4d2327676190f4a6d5a481d2ace7591a"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=5e7e2bb#5e7e2bbab00e207e5a05646c8b279fa1b2be9ce1"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_engine",
@@ -2230,7 +2230,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5702,7 +5702,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6214,7 +6214,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6282,7 +6282,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7251,7 +7251,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8520,7 +8520,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

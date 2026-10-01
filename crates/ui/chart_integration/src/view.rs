@@ -2717,6 +2717,7 @@ impl Render for AerisChartView {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_pinch(cx.listener(Self::on_pinch))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .child(
@@ -2727,7 +2728,7 @@ impl Render for AerisChartView {
                         let scale_factor = window.scale_factor();
                         prepaint_entity.update(cx, |chart, chart_cx| {
                             chart.viewport_bounds = bounds;
-                            chart.input.set_origin(bounds.origin);
+                            chart.input.set_canvas_bounds(bounds);
                             if chart.rebuild(width, height, scale_factor, mutation, window) {
                                 chart_cx.notify();
                             }

@@ -8,7 +8,7 @@ use super::{
 };
 use aeris_charts_engine::{ChartContextMenu, ChartInputEvent, ChartRegion, PriceScaleTarget};
 use aeris_charts_render_gpui::input::cursor_style;
-use gpui::{CursorStyle, KeyUpEvent, Point};
+use gpui::{CursorStyle, KeyUpEvent, PinchEvent, Point};
 use num_traits::ToPrimitive;
 
 impl AerisChartView {
@@ -206,6 +206,22 @@ impl AerisChartView {
             return;
         }
         if self.input.scroll_wheel(&mut self.engine, event) {
+            cx.stop_propagation();
+            self.after_input(cx);
+        }
+    }
+
+    /// Trackpad pinch zooms around the pinch point; the engine owns the anchor rule.
+    pub(super) fn on_pinch(
+        &mut self,
+        event: &PinchEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pointer_suspended() {
+            return;
+        }
+        if self.input.pinch(&mut self.engine, event) {
             cx.stop_propagation();
             self.after_input(cx);
         }
