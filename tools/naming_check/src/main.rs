@@ -594,6 +594,11 @@ mod tests {
             "crates/provider_history/tests/handoff_conformance.rs",
             "crates/contracts/tests/contracts.rs",
             "crates/market_runtime/src/market_service/tests.rs",
+            "crates/market_runtime/src/market_service/tastytrade_tests.rs",
+            "crates/market_runtime/src/study/tests.rs",
+            "crates/account_runtime/src/account_service/tests.rs",
+            "apps/desktop/src/desktop/workspace_surface_tests.rs",
+            "apps/desktop/src/http_wiring_tests.rs",
             "apps/desktop/src/readiness_conformance.rs",
         ] {
             assert!(
