@@ -250,9 +250,9 @@ Maintainer-only: visual check that inputs, buttons and switches behave identical
 
 ## Final gates (after Phase 6)
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
-- [ ] `cargo test --workspace --all-features --locked`
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+- [x] `cargo test --workspace --all-features --locked`
 - [ ] Website `infra` tests (if the website changed)
 
 Report pre-existing failures precisely; fix every failure the work caused.
