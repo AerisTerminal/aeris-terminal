@@ -52,6 +52,7 @@ fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, St
         bars: snapshot.bars,
         forming: snapshot.forming,
         handoff_boundary_unix_nanos: Some(snapshot.handoff_boundary_unix_nanos),
+        backwards_exhausted: false,
     })
 }
 
@@ -78,6 +79,7 @@ impl HistorySource for LiveHyperliquidHistory {
             bars: snapshot.bars,
             forming: snapshot.forming,
             handoff_boundary_unix_nanos: snapshot.handoff_boundary_unix_nanos,
+            backwards_exhausted: false,
         })
     }
 }
@@ -1540,6 +1542,7 @@ mod tests {
                 ],
                 forming: None,
                 handoff_boundary_unix_nanos: Some(1_700_000_060_000_000_000),
+                backwards_exhausted: false,
             })
         }
     }

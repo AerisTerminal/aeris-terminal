@@ -1062,9 +1062,7 @@ impl HistoryTask {
             .collect();
         bars.sort_unstable_by_key(|bar| bar.exchange_timestamp_unix_nanos);
         bars.dedup_by_key(|bar| bar.exchange_timestamp_unix_nanos);
-        if bars.is_empty() && self.saw_newer_candle {
-            return Err("Tastytrade did not cover the requested older candle range".into());
-        }
+        let backwards_exhausted = bars.is_empty() && self.saw_newer_candle;
         let mut forming = None;
         if self.request.range.is_none()
             && self
@@ -1105,6 +1103,7 @@ impl HistoryTask {
             bars,
             forming,
             handoff_boundary_unix_nanos: None,
+            backwards_exhausted,
         })
     }
 }
@@ -2555,7 +2554,7 @@ mod tests {
         assert_eq!(task.candles.len(), 1);
     }
     #[test]
-    fn older_candles_are_not_marked_empty_when_dxlink_only_returns_newer_data() {
+    fn newer_only_dxlink_snapshot_marks_backwards_history_exhausted() {
         let mut request = request();
         let newest = bar();
         request.range = Some(super::super::HistoryRange {
@@ -2584,10 +2583,11 @@ mod tests {
         )
         .unwrap();
         assert!(task.candle_state == CandleHistoryState::Ready);
-        assert!(
-            task.snapshot_at(newest.exchange_timestamp_unix_nanos, None)
-                .is_err()
-        );
+        let snapshot = task
+            .snapshot_at(newest.exchange_timestamp_unix_nanos, None)
+            .unwrap();
+        assert!(snapshot.bars.is_empty());
+        assert!(snapshot.backwards_exhausted);
     }
     #[test]
     fn tape_backfill_keeps_only_its_requested_window_and_applies_corrections() {

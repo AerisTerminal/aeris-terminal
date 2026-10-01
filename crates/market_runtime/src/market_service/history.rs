@@ -848,15 +848,10 @@ impl Coordinator<'_> {
         }
         let key = (series.clone(), generation);
         let range = if let Some(requested) = range {
-            if let Some(confirmed_empty) = self.history_confirmed_empty.get(&key).copied() {
-                let Some(missing) = history_range_after_confirmed_empty(requested, confirmed_empty)
-                else {
-                    return Ok(());
-                };
-                Some(missing)
-            } else {
-                Some(requested)
-            }
+            let Some(missing) = self.uncovered_history_range(series, &key, requested) else {
+                return Ok(());
+            };
+            Some(missing)
         } else {
             None
         };
@@ -944,6 +939,35 @@ impl Coordinator<'_> {
             }
             Err(error) => Err(error),
         }
+    }
+    fn backwards_history_exhausted(
+        &self,
+        series: &BarSeriesKey,
+        key: &(BarSeriesKey, ProviderGeneration),
+        requested: HistoryRange,
+    ) -> bool {
+        self.history_backwards_exhausted.contains(key)
+            && self.engine.series_snapshot(series).is_some_and(|snapshot| {
+                snapshot.bars.first().is_some_and(|first| {
+                    requested.end_unix_nanos <= first.exchange_timestamp_unix_nanos
+                })
+            })
+    }
+    fn uncovered_history_range(
+        &self,
+        series: &BarSeriesKey,
+        key: &(BarSeriesKey, ProviderGeneration),
+        requested: HistoryRange,
+    ) -> Option<HistoryRange> {
+        if self.backwards_history_exhausted(series, key, requested) {
+            return None;
+        }
+        self.history_confirmed_empty
+            .get(key)
+            .copied()
+            .map_or(Some(requested), |confirmed| {
+                history_range_after_confirmed_empty(requested, confirmed)
+            })
     }
     pub(super) fn history_failed(
         &mut self,
@@ -1041,6 +1065,10 @@ impl Coordinator<'_> {
         if snapshot.bars.is_empty() {
             if let Some(range) = range {
                 let key = (series.clone(), generation);
+                if snapshot.backwards_exhausted {
+                    self.history_backwards_exhausted.insert(key.clone());
+                    self.history_deferred.remove(&key);
+                }
                 self.history_confirmed_empty
                     .entry(key)
                     .and_modify(|existing| merge_confirmed_empty_range(existing, range))
@@ -1604,6 +1632,15 @@ impl Coordinator<'_> {
                         .and_then(|status| status.generation)
                         == Some(*generation)
             });
+        self.history_backwards_exhausted
+            .retain(|(series, generation)| {
+                demanded_series.contains(series)
+                    && self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .and_then(|status| status.generation)
+                        == Some(*generation)
+            });
         self.detached_history.retain(|(series, generation)| {
             demanded_series.contains(series)
                 && self
@@ -1837,6 +1874,7 @@ mod tests {
                 bars: Vec::new(),
                 forming: None,
                 handoff_boundary_unix_nanos: None,
+                backwards_exhausted: false,
             })
         }
     }

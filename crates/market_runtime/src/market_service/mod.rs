@@ -360,6 +360,8 @@ struct HistorySnapshot {
     /// trader selected it.
     forming: Option<FormingBar>,
     handoff_boundary_unix_nanos: Option<i64>,
+    /// The provider cannot serve any earlier candles for this series.
+    backwards_exhausted: bool,
 }
 
 /// Everything one Hyperliquid series needs to close its history/live seam.

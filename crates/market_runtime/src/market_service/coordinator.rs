@@ -80,6 +80,7 @@ fn run_coordinator(
         history_inflight: BTreeMap::new(),
         history_deferred: BTreeMap::new(),
         history_confirmed_empty: BTreeMap::new(),
+        history_backwards_exhausted: BTreeSet::new(),
         detached_history: BTreeSet::new(),
         history_cancellations: BTreeMap::new(),
         history_retries: BTreeMap::new(),
@@ -318,6 +319,8 @@ pub(super) struct Coordinator<'a> {
     /// This is request coverage metadata only; canonical bars remain owned by
     /// `MarketEngine::SeriesStore`.
     pub(super) history_confirmed_empty: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
+    /// Series for which a provider snapshot proved no older candles are available.
+    pub(super) history_backwards_exhausted: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
     /// Series whose bounded canonical working window is intentionally away from
     /// the live tail. The provider handoff remains active; live publication is
     /// gated until current history reseeds this canonical window.
@@ -1491,6 +1494,7 @@ mod tests {
             history_inflight: BTreeMap::new(),
             history_deferred: BTreeMap::new(),
             history_confirmed_empty: BTreeMap::new(),
+            history_backwards_exhausted: BTreeSet::new(),
             detached_history: BTreeSet::new(),
             history_cancellations: BTreeMap::new(),
             history_retries: BTreeMap::new(),
@@ -2053,6 +2057,7 @@ mod tests {
                 trades: None,
             }),
             handoff_boundary_unix_nanos: Some(live_timestamp),
+            backwards_exhausted: false,
         }
     }
 
@@ -2097,6 +2102,7 @@ mod tests {
                 bars: minute_bars(10, 2),
                 forming: None,
                 handoff_boundary_unix_nanos: Some(11 * 60 * 1_000_000_000),
+                backwards_exhausted: false,
             }),
         );
 
@@ -2158,6 +2164,7 @@ mod tests {
                         bars: minute_bars(0, 2),
                         forming: None,
                         handoff_boundary_unix_nanos: None,
+                        backwards_exhausted: false,
                     }),
                 )
                 .is_none()
@@ -3448,12 +3455,70 @@ mod tests {
                 bars: Vec::new(),
                 forming: None,
                 handoff_boundary_unix_nanos: Some(range.end_unix_nanos),
+                backwards_exhausted: false,
             }),
         );
 
         assert_eq!(coordinator.history_confirmed_empty.get(&key), Some(&range));
         assert!(!coordinator.history_inflight.contains_key(&key));
         assert!(!coordinator.history_retries.contains_key(&key));
+    }
+
+    #[test]
+    fn exhausted_backwards_history_suppresses_further_older_requests_without_error() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", generation)
+            .expect("provider session begins");
+        let current = minute_bars(10, 2);
+        let first_timestamp = current[0].exchange_timestamp_unix_nanos;
+        coordinator
+            .engine
+            .install_history(generation, &selected, 2, 0, current)
+            .expect("current history installs");
+        let range = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: first_timestamp,
+        };
+        let key = (selected.clone(), generation);
+        coordinator
+            .history_inflight
+            .insert(key.clone(), Some(range));
+        coordinator
+            .history_retries
+            .insert(key.clone(), (Instant::now(), 1, Some(range)));
+        coordinator.history_completed(
+            &selected,
+            generation,
+            Some(range),
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: Vec::new(),
+                forming: None,
+                handoff_boundary_unix_nanos: None,
+                backwards_exhausted: true,
+            }),
+        );
+
+        assert!(coordinator.history_backwards_exhausted.contains(&key));
+        assert!(!coordinator.history_retries.contains_key(&key));
+        assert!(!coordinator.history_inflight.contains_key(&key));
+        let farther_left = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: first_timestamp - 60_000_000_000,
+        };
+        assert!(
+            coordinator
+                .enqueue_history_request(&selected, generation, Some(farther_left))
+                .is_ok()
+        );
+        assert!(!coordinator.history_inflight.contains_key(&key));
+        assert!(!coordinator.history_retries.contains_key(&key));
+        assert!(coordinator.events.is_empty());
     }
 
     #[test]
