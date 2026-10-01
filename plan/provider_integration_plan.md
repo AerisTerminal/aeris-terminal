@@ -257,7 +257,8 @@ Maintainer-only: visual check that inputs, buttons and switches behave identical
 - [x] `cargo fmt --all -- --check`
 - [x] `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
 - [x] `cargo test --workspace --all-features --locked`
-- [ ] Website `infra` tests (if the website changed)
+- [x] Website `infra` tests (if the website changed): tastytrade backend `npm test` (16 passed)
+  and CDK infra `npm run typecheck` both pass in `aeris-website`.
 
 Report pre-existing failures precisely; fix every failure the work caused.
 
