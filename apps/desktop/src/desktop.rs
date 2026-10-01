@@ -607,32 +607,31 @@ fn provider_presentation(
 }
 
 fn provider_intervals(provider: TerminalProvider) -> &'static [ChartInterval] {
-    static INTERVALS: OnceLock<Vec<Vec<ChartInterval>>> = OnceLock::new();
-    let index = match provider {
-        TerminalProvider::Rithmic => 0,
-        TerminalProvider::Hyperliquid => 1,
-        TerminalProvider::Tastytrade => 2,
-    };
+    static INTERVALS: OnceLock<Vec<(&'static str, Vec<ChartInterval>)>> = OnceLock::new();
     INTERVALS
         .get_or_init(|| {
             aeris_market_runtime::built_in_provider_presentations()
                 .iter()
                 .map(|descriptor| {
-                    descriptor
-                        .chart_interval_labels
-                        .iter()
-                        .filter_map(|label| {
-                            ChartInterval::ALL
-                                .iter()
-                                .copied()
-                                .find(|interval| interval.label() == *label)
-                        })
-                        .collect()
+                    (
+                        descriptor.id,
+                        descriptor
+                            .chart_interval_labels
+                            .iter()
+                            .filter_map(|label| {
+                                ChartInterval::ALL
+                                    .iter()
+                                    .copied()
+                                    .find(|interval| interval.label() == *label)
+                            })
+                            .collect(),
+                    )
                 })
                 .collect()
         })
-        .get(index)
-        .map_or(&[], Vec::as_slice)
+        .iter()
+        .find(|(id, _)| *id == terminal_provider_id(provider))
+        .map_or(&[], |(_, intervals)| intervals.as_slice())
 }
 
 /// Rithmic searches require text, so its default listing is a symbol query;
