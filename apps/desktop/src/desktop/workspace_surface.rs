@@ -4182,6 +4182,17 @@ impl WorkspaceSurface {
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.apply_search_completed(result, cx);
             }
+            ProviderCatalogEvent::SearchPreview(result) => {
+                if let Some(generation) = usize_generation(result.search_generation) {
+                    let count = result.instruments.len();
+                    if self
+                        .symbol_browser
+                        .apply_preview_results(generation, result.instruments)
+                    {
+                        self.symbol_message = format!("{count} matching markets");
+                    }
+                }
+            }
             ProviderCatalogEvent::SelectionInstalled {
                 command_generation,
                 instrument,

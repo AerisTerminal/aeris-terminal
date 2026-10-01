@@ -980,7 +980,10 @@ impl MarketService {
         broker_api: Arc<super::tastytrade::BrokerApi>,
     ) -> Result<Self, String> {
         let (broker_authorization, worker) =
-            match super::broker_authorization::BrokerAuthorization::start(&shutdown, broker_api) {
+            match super::broker_authorization::BrokerAuthorization::start(
+                &shutdown,
+                Arc::clone(&broker_api),
+            ) {
                 Ok(started) => started,
                 Err(error) => {
                     shutdown.store(true, Ordering::Release);
@@ -993,6 +996,7 @@ impl MarketService {
             commands,
             runtime: Arc::new(MarketRuntime {
                 shutdown,
+                broker_api,
                 broker_authorization,
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
@@ -1006,6 +1010,7 @@ impl MarketService {
     /// Returns an error when a worker panics or the complete shutdown exceeds `timeout`.
     pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
         self.runtime.shutdown.store(true, Ordering::Release);
+        self.runtime.broker_api.cancel_searches();
         let mut workers = self
             .runtime
             .workers
@@ -1316,13 +1321,21 @@ impl MarketService {
         search: SearchProviderInstruments,
     ) -> Result<(), String> {
         validate_provider_search(&search)?;
+        let tastytrade_search = (search.provider == "tastytrade")
+            .then_some((search.consumer_id, search.search_generation));
         self.request(|reply| {
             Ok(Command::SearchProviderInstruments(
                 ClientId(id(client_id)?),
                 search,
                 reply,
             ))
-        })
+        })?;
+        if let Some((consumer, generation)) = tastytrade_search {
+            self.runtime
+                .broker_api
+                .register_search(consumer, generation)?;
+        }
+        Ok(())
     }
 
     /// Schedules one exact provider-instrument selection for an owned consumer.

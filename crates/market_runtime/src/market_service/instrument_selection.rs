@@ -309,6 +309,26 @@ impl Coordinator<'_> {
         self.hyperliquid_catalog_degraded = None;
     }
 
+    pub(super) fn handle_catalog_search_preview(
+        &mut self,
+        result: aeris_contracts::ProviderInstrumentSearchResult,
+    ) {
+        if result.consumer_id == 0 {
+            return;
+        }
+        let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
+            return;
+        };
+        let key = (consumer_id, result.provider.clone());
+        if self.catalog_searches.get(&key).copied() != Some(result.search_generation) {
+            return;
+        }
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.catalog_search =
+                Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(result));
+        }
+    }
+
     pub(super) fn handle_catalog_search(
         &mut self,
         result: aeris_contracts::ProviderInstrumentSearchResult,

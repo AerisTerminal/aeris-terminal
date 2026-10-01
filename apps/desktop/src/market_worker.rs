@@ -137,6 +137,7 @@ pub enum ProviderCatalogCommand {
 
 pub enum ProviderCatalogEvent {
     SearchCompleted(ProviderInstrumentSearchResult),
+    SearchPreview(ProviderInstrumentSearchResult),
     SelectionInstalled {
         command_generation: u64,
         instrument: InstallProviderInstrument,
@@ -162,6 +163,9 @@ pub fn classify_provider_catalog_event(
         // presentation command shape.
         MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
             (Some(ProviderCatalogEvent::SearchCompleted(result)), None)
+        }
+        MarketRuntimeEvent::ProviderInstrumentSearchPreview(result) => {
+            (Some(ProviderCatalogEvent::SearchPreview(result)), None)
         }
         MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
             let instrument = selection.instrument;

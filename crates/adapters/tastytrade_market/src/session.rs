@@ -9,7 +9,7 @@ use serde_json::{Value, json, value::RawValue};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -20,6 +20,8 @@ use zeroize::Zeroizing;
 /// no provider price or volume is rounded to fit the canonical representation.
 pub const DATA_SCALE: u32 = 8;
 const MAXIMUM_CHANNELS: usize = 100;
+// Leave headroom below DXLink's 10,000 subscription changes per minute.
+const MAXIMUM_SUBSCRIPTION_CHANGES_PER_MINUTE: usize = 9_000;
 const QUOTE: &[&str] = &[
     "eventType",
     "eventSymbol",
@@ -69,6 +71,9 @@ pub struct Subscription {
 
 #[derive(Debug)]
 pub enum FeedEvent {
+    ChannelFailure {
+        channel: u64,
+    },
     Quote {
         channel: u64,
         symbol: String,
@@ -118,6 +123,38 @@ struct Channel {
     fields: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Default)]
+pub struct SubscriptionChangeBudget {
+    changes: VecDeque<(Instant, usize)>,
+    used: usize,
+}
+
+impl SubscriptionChangeBudget {
+    fn has_capacity(&mut self, now: Instant, changes: usize) -> bool {
+        while self
+            .changes
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= Duration::from_secs(60))
+        {
+            if let Some((_, expired)) = self.changes.pop_front() {
+                self.used -= expired;
+            }
+        }
+        changes <= MAXIMUM_SUBSCRIPTION_CHANGES_PER_MINUTE.saturating_sub(self.used)
+    }
+
+    fn reserve(&mut self, now: Instant, changes: usize) -> bool {
+        if !self.has_capacity(now, changes) {
+            return false;
+        }
+        if changes > 0 {
+            self.changes.push_back((now, changes));
+            self.used += changes;
+        }
+        true
+    }
+}
+
 pub struct DxlinkSession {
     socket: MarketSocket,
     channels: BTreeMap<u64, Channel>,
@@ -127,13 +164,20 @@ pub struct DxlinkSession {
     last_received: Instant,
     stop: Arc<AtomicBool>,
     authorization_deadline: Option<Instant>,
+    decode_failures: u8,
+    decode_window: Instant,
+    subscription_budget: Arc<Mutex<SubscriptionChangeBudget>>,
 }
 
 impl DxlinkSession {
     /// Authenticates once. Channel changes never recreate the transport.
     /// # Errors
     /// Rejects failed authorization, unsupported setup, cancellation or timeout.
-    pub fn connect(token: &QuoteToken, stop: &Arc<AtomicBool>) -> Result<Self, String> {
+    pub fn connect(
+        token: &QuoteToken,
+        stop: &Arc<AtomicBool>,
+        subscription_budget: Arc<Mutex<SubscriptionChangeBudget>>,
+    ) -> Result<Self, String> {
         let (socket, _) = MarketSocket::connect(&token.dxlink_url, Duration::from_secs(10), stop)
             .map_err(|e| e.to_string())?;
         let mut session = Self {
@@ -145,6 +189,9 @@ impl DxlinkSession {
             last_received: Instant::now(),
             stop: Arc::clone(stop),
             authorization_deadline: None,
+            decode_failures: 0,
+            decode_window: Instant::now(),
+            subscription_budget,
         };
         session.send(&json!({"type":"SETUP","channel":0,"version":"0.1-DXF-JS/0.3.0","keepaliveTimeout":60,"acceptKeepaliveTimeout":60}))?;
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -225,6 +272,16 @@ impl DxlinkSession {
         for sub in &subscriptions {
             validate_subscription(sub)?;
         }
+        // Reserve the eventual CHANNEL_CANCEL as well as each added subscription.
+        // This keeps cancellation possible when a busy history channel retires.
+        if !self
+            .subscription_budget
+            .lock()
+            .map_err(|_| "DXLink subscription budget lock poisoned")?
+            .reserve(Instant::now(), subscriptions.len().saturating_mul(2))
+        {
+            return Err("DXLink subscription change budget exhausted".into());
+        }
         self.send(&json!({"type":"CHANNEL_REQUEST","channel":channel,"service":"FEED","parameters":{"contract":contract}}))?;
         self.channels.insert(
             channel,
@@ -250,6 +307,15 @@ impl DxlinkSession {
         }
         for sub in &subscriptions {
             validate_subscription(sub)?;
+        }
+        let changes = self.subscription_changes_for_replace(channel, &subscriptions)?;
+        if !self
+            .subscription_budget
+            .lock()
+            .map_err(|_| "DXLink subscription budget lock poisoned")?
+            .reserve(Instant::now(), changes)
+        {
+            return Err("DXLink subscription change budget exhausted".into());
         }
         let state = self
             .channels
@@ -277,6 +343,40 @@ impl DxlinkSession {
             )?;
         }
         Ok(())
+    }
+
+    /// Counts a pending live-channel change without modifying its subscriptions.
+    /// # Errors
+    /// Rejects an unavailable channel.
+    pub fn subscription_changes_for_replace(
+        &self,
+        channel: u64,
+        subscriptions: &[Subscription],
+    ) -> Result<usize, String> {
+        let current = &self
+            .channels
+            .get(&channel)
+            .ok_or("DXLink channel is unavailable")?
+            .subscriptions;
+        Ok(current
+            .iter()
+            .filter(|sub| !subscriptions.contains(sub))
+            .count()
+            + subscriptions
+                .iter()
+                .filter(|sub| !current.contains(sub))
+                .count())
+    }
+
+    /// Checks the rolling session budget before a worker starts a change batch.
+    /// # Errors
+    /// Returns an error if the shared budget lock is poisoned.
+    pub fn can_change_subscriptions(&mut self, changes: usize) -> Result<bool, String> {
+        Ok(self
+            .subscription_budget
+            .lock()
+            .map_err(|_| "DXLink subscription budget lock poisoned")?
+            .has_capacity(Instant::now(), changes))
     }
 
     /// Retires a channel without closing the provider session.
@@ -313,7 +413,23 @@ impl DxlinkSession {
                 let Some(channel) = self.channels.get(&header.channel) else {
                     continue;
                 }; // Retired channel cannot publish.
-                let events = decode_data(&text, header.channel, &channel.fields)?;
+                let Ok(events) = decode_data(&text, header.channel, &channel.fields) else {
+                    if self.decode_window.elapsed() >= Duration::from_secs(60) {
+                        self.decode_window = Instant::now();
+                        self.decode_failures = 0;
+                    }
+                    self.decode_failures = self.decode_failures.saturating_add(1);
+                    eprintln!(
+                        "Aeris DXLink rejected malformed feed data ({}/8)",
+                        self.decode_failures
+                    );
+                    if self.decode_failures > 8 {
+                        return Err(
+                            "DXLink malformed feed data exceeded its per-connection budget".into(),
+                        );
+                    }
+                    continue;
+                };
                 self.pending.extend(events);
                 if let Some(event) = self.pending.pop_front() {
                     return Ok(Some(event));
@@ -330,6 +446,7 @@ impl DxlinkSession {
         match header.r#type.as_str() {
             "KEEPALIVE"=>Ok(()),
             "CHANNEL_OPENED" if self.channels.contains_key(&header.channel)=>self.send(&json!({"type":"FEED_SETUP","channel":header.channel,"acceptAggregationPeriod":0,"acceptDataFormat":"COMPACT","acceptEventFields":{"Quote":QUOTE,"Candle":CANDLE,"TimeAndSale":TAPE}})),
+            "CHANNEL_OPENED" if header.channel >= 7 => Ok(()),
             "FEED_CONFIG"=>{
                 let Some(channel)=self.channels.get_mut(&header.channel) else {return Ok(())};
                 let was_compact=channel.compact;
@@ -355,9 +472,20 @@ impl DxlinkSession {
                 Ok(())
             }
             "CHANNEL_CLOSED" if !self.channels.contains_key(&header.channel)=>Ok(()),
+            "ERROR" if header.channel >= 7 && !self.channels.contains_key(&header.channel) => Ok(()),
+            "ERROR" | "CHANNEL_CLOSED" if header.channel >= 7 && self.channels.remove(&header.channel).is_some() => {
+                self.pending.retain(|event| event.channel() != header.channel);
+                self.pending.push_back(FeedEvent::ChannelFailure { channel: header.channel });
+                Ok(())
+            },
             "AUTH_STATE" if self.authorization_deadline.is_some() && frame.get("state").and_then(Value::as_str)==Some("AUTHORIZED")=>{self.authorization_deadline=None;Ok(())},
             "ERROR"|"CHANNEL_CLOSED"|"AUTH_STATE"=>Err("DXLink feed authorization or channel failed".into()),
-            _=>Err("DXLink sent unexpected control data".into()),
+            _ => Err(if header.r#type.len() <= 32
+                && header.r#type.bytes().all(|byte| byte.is_ascii_uppercase() || byte == b'_') {
+                format!("DXLink sent unexpected {} control on channel {}", header.r#type, header.channel)
+            } else {
+                "DXLink sent unexpected control data".into()
+            }),
         }
     }
 
@@ -442,7 +570,8 @@ impl FeedEvent {
         match self {
             Self::Quote { channel, .. }
             | Self::Candle { channel, .. }
-            | Self::Trade { channel, .. } => *channel,
+            | Self::Trade { channel, .. }
+            | Self::ChannelFailure { channel } => *channel,
         }
     }
 }
@@ -670,6 +799,38 @@ fn decode_trade(channel: u64, symbol: String, row: &Row<'_>) -> Result<FeedEvent
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn subscription_changes_are_bounded_over_a_rolling_minute() {
+        let mut budget = SubscriptionChangeBudget::default();
+        let started = Instant::now();
+        assert!(budget.reserve(started, 4_000));
+        assert!(budget.reserve(started + Duration::from_secs(30), 5_000));
+        assert!(!budget.reserve(started + Duration::from_secs(59), 1));
+        assert_eq!(budget.used, MAXIMUM_SUBSCRIPTION_CHANGES_PER_MINUTE);
+        assert!(budget.reserve(started + Duration::from_secs(60), 4_000));
+        assert_eq!(budget.used, MAXIMUM_SUBSCRIPTION_CHANGES_PER_MINUTE);
+        assert!(!budget.reserve(started + Duration::from_secs(60), 1));
+        assert!(budget.reserve(started + Duration::from_secs(90), 5_000));
+        assert_eq!(budget.used, MAXIMUM_SUBSCRIPTION_CHANGES_PER_MINUTE);
+    }
+    fn assert_budgeted_replace(
+        session: &mut DxlinkSession,
+        budget: &Arc<Mutex<SubscriptionChangeBudget>>,
+        subscription: impl Fn(&str) -> Subscription,
+    ) {
+        assert!(budget.lock().unwrap().reserve(Instant::now(), 8_998));
+        assert!(!session.can_change_subscriptions(2).unwrap());
+        assert!(session.replace(1, vec![subscription("MSFT")]).is_err());
+        assert_eq!(
+            session.channels[&1].subscriptions,
+            vec![subscription("AAPL")]
+        );
+        for (at, _) in &mut budget.lock().unwrap().changes {
+            *at = Instant::now().checked_sub(Duration::from_secs(61)).unwrap();
+        }
+        assert!(session.can_change_subscriptions(2).unwrap());
+        session.replace(1, vec![subscription("MSFT")]).unwrap();
+    }
     type TestSocket = tungstenite::WebSocket<std::net::TcpStream>;
     fn receive(socket: &mut TestSocket) -> Value {
         serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap()
@@ -681,6 +842,37 @@ mod tests {
     }
     fn quote(symbol: &str) -> Value {
         json!({"type":"FEED_DATA","channel":1,"data":["Quote",["Quote",symbol,100,101,2,3,0,0]]})
+    }
+    fn malformed_quotes(socket: &mut TestSocket) {
+        let malformed = json!({"type":"FEED_DATA","channel":1,"data":["Quote",["Quote","MSFT"]]});
+        for _ in 0..8 {
+            send(socket, &malformed);
+        }
+        send(socket, &quote("MSFT"));
+        send(socket, &malformed);
+    }
+    fn reject_history_channel(socket: &mut TestSocket) {
+        assert_eq!(receive(socket)["type"], "CHANNEL_REQUEST");
+        send(socket, &json!({"type":"CHANNEL_OPENED","channel":7}));
+        assert_eq!(receive(socket)["type"], "FEED_SETUP");
+        send(
+            socket,
+            &json!({"type":"FEED_CONFIG","channel":7,"dataFormat":"COMPACT","aggregationPeriod":0}),
+        );
+        assert_eq!(receive(socket)["type"], "FEED_SUBSCRIPTION");
+        send(socket, &json!({"type":"ERROR","channel":7}));
+    }
+    fn assert_history_channel_failure(session: &mut DxlinkSession) {
+        session.open(7, "AUTO", Vec::new()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let failure = loop {
+            if let Some(event) = session.poll(deadline).unwrap() {
+                break event;
+            }
+            assert!(Instant::now() < deadline, "history channel failure missing");
+        };
+        assert!(matches!(failure, FeedEvent::ChannelFailure { channel: 7 }));
+        assert!(!session.channels.contains_key(&7));
     }
     #[test]
     fn lazy_schema_subscription_changes_and_reauthorization_share_one_socket() {
@@ -730,11 +922,13 @@ mod tests {
                 &json!({"type":"AUTH_STATE","channel":0,"state":"AUTHORIZED"}),
             );
             send(&mut socket, &quote("MSFT"));
+            malformed_quotes(&mut socket);
             assert_eq!(receive(&mut socket)["type"], "CHANNEL_CANCEL");
             send(
                 &mut socket,
                 &json!({"type":"FEED_DATA","channel":1,"data":["retired malformed payload"]}),
             );
+            reject_history_channel(&mut socket);
             assert_eq!(receive(&mut socket)["type"], "KEEPALIVE");
         });
         let token = QuoteToken {
@@ -744,7 +938,8 @@ mod tests {
             level: "level-1".into(),
         };
         let stop = Arc::new(AtomicBool::new(false));
-        let mut session = DxlinkSession::connect(&token, &stop).unwrap();
+        let budget = Arc::new(Mutex::new(SubscriptionChangeBudget::default()));
+        let mut session = DxlinkSession::connect(&token, &stop, Arc::clone(&budget)).unwrap();
         let subscription = |symbol: &str| Subscription {
             kind: "Quote",
             symbol: symbol.into(),
@@ -754,12 +949,20 @@ mod tests {
         assert!(
             matches!(session.poll(Instant::now()+Duration::from_secs(3)).unwrap(),Some(FeedEvent::Quote {symbol,time_nanos:None,..}) if symbol=="AAPL")
         );
-        session.replace(1, vec![subscription("MSFT")]).unwrap();
+        assert_budgeted_replace(&mut session, &budget, subscription);
         session.reauthorize(&token).unwrap();
         assert!(
             matches!(session.poll(Instant::now()+Duration::from_secs(3)).unwrap(),Some(FeedEvent::Quote {symbol,..}) if symbol=="MSFT")
         );
         assert!(session.authorization_deadline.is_none());
+        assert!(
+            matches!(session.poll(Instant::now()+Duration::from_secs(3)).unwrap(),Some(FeedEvent::Quote {symbol,..}) if symbol=="MSFT")
+        );
+        assert!(
+            session
+                .poll(Instant::now() + Duration::from_secs(3))
+                .is_err()
+        );
         session.close_channel(1).unwrap();
         assert!(
             session
@@ -767,6 +970,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert_history_channel_failure(&mut session);
         session
             .send(&json!({"type":"KEEPALIVE","channel":0}))
             .unwrap();

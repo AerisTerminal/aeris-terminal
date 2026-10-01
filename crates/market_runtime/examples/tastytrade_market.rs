@@ -1,9 +1,12 @@
 //! Exercises ordinary `MarketService` catalog, selection, history and live demand.
 //! Close the desktop first. Credentials remain in the native vault and hosted broker service.
-use aeris_contracts::{SearchProviderInstruments, SelectProviderInstrument};
+use aeris_contracts::{
+    InstallProviderInstrument, ProviderConnectionState, SearchProviderInstruments,
+    SelectProviderInstrument,
+};
 use aeris_market_data::{BarPeriod, BarSeriesKey};
 use aeris_market_engine::{MarketStream, StreamRequirements};
-use aeris_market_runtime::{MarketRuntimeEvent, MarketService};
+use aeris_market_runtime::{MarketRuntimeEvent, MarketService, MarketTradeTapeSnapshot};
 use std::{
     thread,
     time::{Duration, Instant},
@@ -12,6 +15,7 @@ fn run(market: &MarketService) -> Result<(), String> {
     let query = std::env::args().nth(1).unwrap_or_else(|| "/ES".into());
     market.attach(1)?;
     market.register_consumer(1, 1, 1)?;
+    let mut search_timings = SearchTimings::new();
     market.search_provider_instruments(
         1,
         SearchProviderInstruments {
@@ -24,6 +28,8 @@ fn run(market: &MarketService) -> Result<(), String> {
     )?;
     let deadline = Instant::now() + Duration::from_secs(150);
     let mut selected = false;
+    let mut installed_instrument = None;
+    let mut selection_started: Option<Instant> = None;
     let mut snapshots = 0;
     let mut tails = 0;
     let mut trades = 0;
@@ -31,14 +37,26 @@ fn run(market: &MarketService) -> Result<(), String> {
     while Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
             match event {
-                MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
-                    select(market, result)?;
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
+                | MarketRuntimeEvent::ProviderInstrumentSearchPreview(result) => {
+                    if let Some(started) = search_timings.accept(market, result)? {
+                        selection_started = Some(started);
+                    }
                 }
                 MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
-                    demand(market, selection.instrument)?;
+                    installed_instrument = Some(selection.instrument.clone());
+                    demand(market, 1, selection.instrument)?;
                     selected = true;
                 }
                 MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
+                    if snapshots == 0
+                        && let Some(started) = selection_started
+                    {
+                        println!(
+                            "Timing: selection to first candles {} ms",
+                            started.elapsed().as_millis()
+                        );
+                    }
                     snapshots += 1;
                     history_check.accept(market, &snapshot)?;
                 }
@@ -46,22 +64,7 @@ fn run(market: &MarketService) -> Result<(), String> {
                     tails += 1;
                 }
                 MarketRuntimeEvent::TradeTapeSnapshot(tape) => {
-                    if trades == 0 || tape.trades.len() >= trades + 1024 {
-                        trades = tape.trades.len();
-                        let first = tape
-                            .trades
-                            .iter()
-                            .filter_map(|t| t.trade.metadata.timestamps.exchange_unix_nanos)
-                            .min();
-                        let last = tape
-                            .trades
-                            .iter()
-                            .filter_map(|t| t.trade.metadata.timestamps.exchange_unix_nanos)
-                            .max();
-                        println!(
-                            "Retained ticks={trades}; first exchange nanoseconds={first:?}; last={last:?}"
-                        );
-                    }
+                    report_tape(&tape, &mut trades);
                 }
                 MarketRuntimeEvent::ProviderState(state) => {
                     println!("Provider: {:?} {:?}", state.state, state.detail);
@@ -78,18 +81,171 @@ fn run(market: &MarketService) -> Result<(), String> {
         } else {
             thread::sleep(Duration::from_millis(5));
         }
-        if history_check.switched && tails >= 10 && trades > 0 {
+        if history_check.switched && tails >= 2 && trades > 0 {
             break;
         }
     }
-    println!(
-        "Selected={selected}; history snapshots={snapshots}; live updates={tails}; retained ticks={trades}"
-    );
+    println!("Selected={selected}; snapshots={snapshots}; updates={tails}; ticks={trades}");
     if !selected || snapshots == 0 || tails == 0 || !history_check.switched {
         return Err("Catalog/chart/live integration did not complete".into());
     }
+    let old_generation = history_check
+        .provider_generation
+        .ok_or("Initial tastytrade generation missing")?;
+    measure_idle_reconnect(
+        market,
+        installed_instrument.ok_or("Selected instrument missing")?,
+        old_generation,
+    )?;
     market.detach(1)?;
     Ok(())
+}
+fn report_tape(tape: &MarketTradeTapeSnapshot, trades: &mut usize) {
+    if *trades == 0 || tape.trades.len() >= *trades + 1024 {
+        *trades = tape.trades.len();
+        let first = tape
+            .trades
+            .iter()
+            .filter_map(|trade| trade.trade.metadata.timestamps.exchange_unix_nanos)
+            .min();
+        let last = tape
+            .trades
+            .iter()
+            .filter_map(|trade| trade.trade.metadata.timestamps.exchange_unix_nanos)
+            .max();
+        println!("Retained ticks={trades}; first exchange nanoseconds={first:?}; last={last:?}");
+    }
+}
+fn measure_idle_reconnect(
+    market: &MarketService,
+    instrument: InstallProviderInstrument,
+    old_generation: u64,
+) -> Result<(), String> {
+    market.register_consumer(1, 1, 2)?;
+    market.remove_consumer(1, 1)?;
+    let stop_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if Instant::now() >= stop_deadline {
+            let states: Vec<_> = market
+                .status()?
+                .providers
+                .iter()
+                .filter(|state| state.provider == "tastytrade")
+                .map(|state| (state.state, state.generation))
+                .collect();
+            return Err(format!(
+                "Tastytrade idle stop did not close the session: {states:?}"
+            ));
+        }
+        if market.status()?.providers.iter().any(|state| {
+            state.provider == "tastytrade" && state.state == ProviderConnectionState::Disconnected
+        }) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let reconnect_started = Instant::now();
+    demand(market, 2, instrument)?;
+    let reconnect_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Instant::now() >= reconnect_deadline {
+            return Err("Tastytrade did not return to live after idle stop".into());
+        }
+        if let Some(MarketRuntimeEvent::ProviderState(state)) = market.poll_event(1, 2)?
+            && state.provider == "tastytrade"
+            && state.state == ProviderConnectionState::Online
+            && state.generation > old_generation
+        {
+            println!(
+                "Timing: idle stop to live again {} ms",
+                reconnect_started.elapsed().as_millis()
+            );
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+struct SearchTimings {
+    cold: Instant,
+    cold_done: bool,
+    warm: Option<Instant>,
+    equity: Option<Instant>,
+}
+impl SearchTimings {
+    fn new() -> Self {
+        Self {
+            cold: Instant::now(),
+            cold_done: false,
+            warm: None,
+            equity: None,
+        }
+    }
+    fn accept(
+        &mut self,
+        market: &MarketService,
+        result: aeris_contracts::ProviderInstrumentSearchResult,
+    ) -> Result<Option<Instant>, String> {
+        match result.search_generation {
+            1 => {
+                if self.cold_done {
+                    return Ok(None);
+                }
+                self.cold_done = true;
+                println!(
+                    "Timing: search to first results {} ms",
+                    self.cold.elapsed().as_millis()
+                );
+                let selection_started = Instant::now();
+                select(market, result)?;
+                self.warm = Some(Instant::now());
+                market.search_provider_instruments(
+                    1,
+                    SearchProviderInstruments {
+                        consumer_id: 1,
+                        search_generation: 2,
+                        provider: "tastytrade".into(),
+                        query: "/ES".into(),
+                        maximum_results: 100,
+                    },
+                )?;
+                Ok(Some(selection_started))
+            }
+            2 => {
+                let Some(started) = self.warm.take() else {
+                    return Ok(None);
+                };
+                println!(
+                    "Timing: cached futures search to results {} ms",
+                    started.elapsed().as_millis()
+                );
+                self.equity = Some(Instant::now());
+                market.search_provider_instruments(
+                    1,
+                    SearchProviderInstruments {
+                        consumer_id: 1,
+                        search_generation: 3,
+                        provider: "tastytrade".into(),
+                        query: "SPY".into(),
+                        maximum_results: 100,
+                    },
+                )?;
+                Ok(None)
+            }
+            3 => {
+                if !result.instruments.is_empty()
+                    && let Some(started) = self.equity.take()
+                {
+                    println!(
+                        "Timing: remote equity search to results {} ms",
+                        started.elapsed().as_millis()
+                    );
+                }
+                Ok(None)
+            }
+            _ => Err("Unexpected catalog measurement generation".into()),
+        }
+    }
 }
 #[derive(Default)]
 struct HistoryCheck {
@@ -97,6 +253,7 @@ struct HistoryCheck {
     provider_generation: Option<u64>,
     backfilled: bool,
     switched: bool,
+    switch_started: Option<Instant>,
 }
 impl HistoryCheck {
     fn accept(
@@ -142,6 +299,7 @@ impl HistoryCheck {
                 println!("Older viewport history loaded on the same session");
                 let mut series = snapshot.series.clone();
                 series.period = BarPeriod::time(300).map_err(|e| e.to_string())?;
+                self.switch_started = Some(Instant::now());
                 market.set_demand(
                     1,
                     1,
@@ -156,6 +314,12 @@ impl HistoryCheck {
                 && snapshot.series.period == BarPeriod::time(300).map_err(|e| e.to_string())? =>
             {
                 self.switched = true;
+                if let Some(started) = self.switch_started {
+                    println!(
+                        "Timing: timeframe switch to candles {} ms",
+                        started.elapsed().as_millis()
+                    );
+                }
                 println!("Five-minute candles loaded on the same session");
             }
             _ => {}
@@ -165,9 +329,127 @@ impl HistoryCheck {
 }
 fn main() -> Result<(), String> {
     let market = MarketService::start()?;
-    let result = run(&market);
+    let result = if std::env::args().nth(1).as_deref() == Some("--history-load") {
+        run_history_load(&market)
+    } else {
+        run(&market)
+    };
     let shutdown = market.shutdown(Duration::from_secs(10));
     result.and(shutdown)
+}
+
+fn run_history_load(market: &MarketService) -> Result<(), String> {
+    let periods = [60, 300, 900, 3_600];
+    market.attach(1)?;
+    for consumer in 1..=periods.len() {
+        let consumer = u64::try_from(consumer).map_err(|_| "Consumer identity overflow")?;
+        market.register_consumer(1, 1, consumer)?;
+    }
+    market.search_provider_instruments(
+        1,
+        SearchProviderInstruments {
+            consumer_id: 1,
+            search_generation: 1,
+            provider: "tastytrade".into(),
+            query: "/ES".into(),
+            maximum_results: 100,
+        },
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut selecting = false;
+    let mut started = None;
+    let mut snapshots = [false; 4];
+    while Instant::now() < deadline {
+        for consumer in 1..=periods.len() {
+            let consumer = u64::try_from(consumer).map_err(|_| "Consumer identity overflow")?;
+            let Some(event) = market.poll_event(1, consumer)? else {
+                continue;
+            };
+            match event {
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
+                | MarketRuntimeEvent::ProviderInstrumentSearchPreview(result)
+                    if !selecting =>
+                {
+                    selecting = true;
+                    select_load_instrument(market, result)?;
+                }
+                MarketRuntimeEvent::ProviderInstrumentSelection(selection) if started.is_none() => {
+                    started = Some(Instant::now());
+                    for (index, seconds) in periods.iter().copied().enumerate() {
+                        let series = BarSeriesKey {
+                            provider_id: selection.instrument.provider.clone(),
+                            instrument_id: selection.instrument.instrument_id.clone(),
+                            entitlement_id: selection.instrument.entitlement_id.clone(),
+                            period: BarPeriod::time(seconds).map_err(|error| error.to_string())?,
+                            definition_version: 1,
+                        };
+                        market.set_demand(
+                            1,
+                            u64::try_from(index + 1).map_err(|_| "Consumer identity overflow")?,
+                            1,
+                            &series,
+                            StreamRequirements::BARS,
+                        )?;
+                    }
+                }
+                MarketRuntimeEvent::SeriesSnapshot(publication) => {
+                    let Some(index) = periods.iter().position(|seconds| {
+                        BarPeriod::time(*seconds)
+                            .is_ok_and(|period| publication.snapshot.series.period == period)
+                    }) else {
+                        return Err("Unexpected history load period".into());
+                    };
+                    if !snapshots[index] {
+                        snapshots[index] = true;
+                        println!(
+                            "History load: {}-second candles visible at {} ms ({} bars)",
+                            periods[index],
+                            started
+                                .ok_or("History load start missing")?
+                                .elapsed()
+                                .as_millis(),
+                            publication.snapshot.bars.len()
+                        );
+                    }
+                }
+                MarketRuntimeEvent::DemandError(error) => {
+                    return Err(format!("History load demand failed: {error:?}"));
+                }
+                _ => {}
+            }
+        }
+        if snapshots.iter().all(|ready| *ready) {
+            market.detach(1)?;
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Err(format!("History load timed out: {snapshots:?}"))
+}
+
+fn select_load_instrument(
+    market: &MarketService,
+    result: aeris_contracts::ProviderInstrumentSearchResult,
+) -> Result<(), String> {
+    let candidate = result
+        .instruments
+        .into_iter()
+        .find(|item| {
+            item.symbol.starts_with("/ES") && item.instrument_type.as_deref() == Some("Future")
+        })
+        .ok_or("History load future was not found")?;
+    market.select_provider_instrument(
+        1,
+        SelectProviderInstrument {
+            consumer_id: 1,
+            selection_generation: 1,
+            search_generation: 1,
+            provider: "tastytrade".into(),
+            symbol: candidate.symbol,
+            exchange: candidate.exchange,
+            entitlement_id: "tastytrade-authorized".into(),
+        },
+    )
 }
 
 fn select(
@@ -181,7 +463,7 @@ fn select(
         .into_iter()
         .find(|item| {
             item.symbol == query
-                || (query == "/ES"
+                || (matches!(query.as_str(), "ES" | "/ES")
                     && item.symbol.starts_with("/ES")
                     && item.instrument_type.as_deref() == Some("Future"))
         })
@@ -203,7 +485,8 @@ fn select(
 
 fn demand(
     market: &MarketService,
-    instrument: aeris_contracts::InstallProviderInstrument,
+    consumer_id: u64,
+    instrument: InstallProviderInstrument,
 ) -> Result<(), String> {
     println!(
         "Resolved {} -> {} ({})",
@@ -218,7 +501,7 @@ fn demand(
     };
     market.set_demand(
         1,
-        1,
+        consumer_id,
         1,
         &series,
         StreamRequirements::BARS

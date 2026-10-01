@@ -30,9 +30,36 @@ pub struct ResolvedInstrument {
     pub venue: String,
     pub instrument_type: String,
     pub tick_size: Option<i64>,
+    pub point_value: Option<i64>,
+    pub currency: Option<String>,
+    pub expiration_date: Option<String>,
+    pub first_notice_date: Option<String>,
+    pub last_trade_date: Option<String>,
 }
 
 impl ResolvedInstrument {
+    /// Uses authoritative fields already present in the active-futures list.
+    /// # Errors
+    /// Rejects decimal values that cannot be represented exactly.
+    pub fn from_future(future: &FutureInstrument) -> Result<Self, String> {
+        let point_value = parse_decimal_to_fixed(&future.notional_multiplier, DATA_SCALE)?;
+        let tick_size = parse_decimal_to_fixed(&future.tick_size, DATA_SCALE)?;
+        if point_value <= 0 || tick_size <= 0 {
+            return Err("Tastytrade futures contract terms invalid".into());
+        }
+        Ok(Self {
+            symbol: future.symbol.clone(),
+            streamer_symbol: future.streamer_symbol.clone(),
+            venue: future.exchange.clone(),
+            instrument_type: "Future".into(),
+            tick_size: Some(tick_size),
+            point_value: Some(point_value),
+            currency: future.currency.clone(),
+            expiration_date: Some(future.expiration_date.clone()),
+            first_notice_date: future.first_notice_date.clone(),
+            last_trade_date: future.last_trade_date.clone(),
+        })
+    }
     pub(super) fn from_response(
         response: &Value,
         requested: &SearchInstrument,
@@ -80,12 +107,45 @@ impl ResolvedInstrument {
         if ticks.iter().any(|tick| *tick <= 0) {
             return Err("Tastytrade tick increment invalid".into());
         }
+        let point_value = if requested.instrument_type == "Future" {
+            Some(parse_decimal_to_fixed(
+                text("notional-multiplier").ok_or("Tastytrade futures multiplier missing")?,
+                DATA_SCALE,
+            )?)
+        } else {
+            None
+        };
+        if point_value.is_some_and(|value| value <= 0) {
+            return Err("Tastytrade futures multiplier invalid".into());
+        }
+        let parse_date = |name| -> Result<Option<String>, String> {
+            data.get(name)
+                .map(|value| {
+                    let value = value.as_str().ok_or("Tastytrade futures date invalid")?;
+                    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                        .map_err(|_| "Tastytrade futures date invalid")?;
+                    Ok(value.to_string())
+                })
+                .transpose()
+        };
+        let expiration_date = parse_date("expiration-date")?;
+        if requested.instrument_type == "Future" && expiration_date.is_none() {
+            return Err("Tastytrade futures expiry missing".into());
+        }
         Ok(Self {
             symbol: symbol.into(),
             streamer_symbol: streamer_symbol.into(),
             venue: venue.into(),
             instrument_type: requested.instrument_type.clone(),
             tick_size: ticks.into_iter().min(),
+            point_value,
+            currency: data
+                .get("currency")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            expiration_date,
+            first_notice_date: parse_date("first-notice-date")?,
+            last_trade_date: parse_date("last-trade-date")?,
         })
     }
 }
@@ -105,6 +165,11 @@ pub struct FutureInstrument {
     pub expiration_date: String,
     pub active: bool,
     pub active_month: bool,
+    pub notional_multiplier: String,
+    pub tick_size: String,
+    pub first_notice_date: Option<String>,
+    pub last_trade_date: Option<String>,
+    pub currency: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -118,13 +183,12 @@ struct CatalogData {
 }
 
 impl CatalogPage {
-    pub(super) fn validated(self, product: &str) -> Result<Vec<FutureInstrument>, String> {
+    pub(super) fn validated(self) -> Result<Vec<FutureInstrument>, String> {
         if self.data.items.len() > 100 {
             return Err("Futures catalog exceeded its page bound".to_string());
         }
         for item in &self.data.items {
-            if item.product_code != product
-                || !item.symbol.starts_with('/')
+            if !item.symbol.starts_with('/')
                 || !item.streamer_symbol.starts_with('/')
                 || !item.streamer_symbol.contains(':')
                 || [
@@ -142,6 +206,14 @@ impl CatalogPage {
                             .any(|byte| byte.is_ascii_control() || byte == b' ')
                 })
                 || chrono::NaiveDate::parse_from_str(&item.expiration_date, "%Y-%m-%d").is_err()
+                || item.first_notice_date.as_ref().is_some_and(|date| {
+                    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err()
+                })
+                || item.last_trade_date.as_ref().is_some_and(|date| {
+                    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err()
+                })
+                || parse_decimal_to_fixed(&item.notional_multiplier, DATA_SCALE).is_err()
+                || parse_decimal_to_fixed(&item.tick_size, DATA_SCALE).is_err()
             {
                 return Err("Futures catalog contains invalid required metadata".to_string());
             }
@@ -156,17 +228,36 @@ mod tests {
 
     #[test]
     fn catalog_preserves_provider_symbols_and_requires_identity_fields() {
-        let fixture = r#"{"data":{"items":[{"symbol":"/ESU3","streamer-symbol":"/ESU23:XCME","exchange":"CME","product-code":"ES","expiration-date":"2023-09-15","active":true,"active-month":true}]}}"#;
+        let fixture = r#"{"data":{"items":[{"symbol":"/ESU3","streamer-symbol":"/ESU23:XCME","exchange":"CME","product-code":"ES","expiration-date":"2023-09-15","notional-multiplier":"50.0","tick-size":"0.25","active":true,"active-month":true}]}}"#;
         let page: CatalogPage = serde_json::from_str(fixture).expect("documented catalog shape");
         assert_eq!(
-            page.validated("ES").expect("valid catalog")[0].streamer_symbol,
+            page.validated().expect("valid catalog")[0].streamer_symbol,
             "/ESU23:XCME"
         );
-        let page: CatalogPage = serde_json::from_str(fixture).expect("documented shape");
-        assert!(page.validated("NQ").is_err());
         assert!(
             serde_json::from_str::<CatalogPage>(r#"{"data":{"items":[{"symbol":"/ESU3"}]}}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn futures_terms_keep_exact_point_value_and_reject_excess_precision() {
+        let future: FutureInstrument = serde_json::from_str(
+            r#"{
+            "symbol":"/ESZ6","streamer-symbol":"/ESZ26:XCME","exchange":"CME",
+            "product-code":"ES","expiration-date":"2026-12-18","active":true,
+            "active-month":true,"notional-multiplier":"50.25","tick-size":"0.25",
+            "first-notice-date":"2026-12-17","last-trade-date":"2026-12-18"
+        }"#,
+        )
+        .expect("documented futures fields");
+        let resolved = ResolvedInstrument::from_future(&future).expect("exact terms");
+        assert_eq!(resolved.point_value, Some(5_025_000_000));
+        assert_eq!(resolved.tick_size, Some(25_000_000));
+        assert_eq!(resolved.expiration_date.as_deref(), Some("2026-12-18"));
+        assert_eq!(resolved.currency, None);
+        let mut invalid = future;
+        invalid.notional_multiplier = "50.000000001".into();
+        assert!(ResolvedInstrument::from_future(&invalid).is_err());
     }
 }

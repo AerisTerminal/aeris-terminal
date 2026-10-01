@@ -122,12 +122,27 @@ fn run(
             Err(RecvTimeoutError::Disconnected) => break,
         };
         let BrokerCommand { operation, reply } = command;
-        let result = NativeCredentialVault::new(VAULT_SERVICE)
-            .map_err(|_| "Protected broker credential storage is unavailable".to_string())
-            .and_then(|vault| match operation {
-                Operation::Disconnect => disconnect(api, &vault, stop),
-                Operation::Connect => connect(api, &vault, stop),
-            });
+        let result = (if matches!(operation, Operation::Connect) {
+            api.clear()
+        } else {
+            Ok(())
+        })
+        .and_then(|()| {
+            NativeCredentialVault::new(VAULT_SERVICE)
+                .map_err(|_| "Protected broker credential storage is unavailable".to_string())
+                .and_then(|vault| match operation {
+                    Operation::Disconnect => disconnect(api, &vault, stop),
+                    Operation::Connect => connect(api, &vault, stop),
+                })
+        });
+        if result.is_ok()
+            && matches!(operation, Operation::Disconnect)
+            && let Err(error) = api.clear()
+        {
+            let _ = reply.send(Err(error));
+            busy.store(false, Ordering::Release);
+            continue;
+        }
         busy.store(false, Ordering::Release);
         // A dropped request cannot change ownership or start another transaction.
         if reply.send(result).is_err() && stop.load(Ordering::Acquire) {
@@ -206,6 +221,7 @@ fn verify_entitlement(
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     let _token = api.with_client(stop, |client| client.quote_token(capability, stop))?;
+    let _futures = api.futures(stop)?;
     // This checks the actual API entitlement, not the brokerage website display.
     // No feed/order-book claim is made before the DXLink live path is verified.
     Ok("Tastytrade connected. Open the symbol menu and select a tastytrade asset.".to_string())

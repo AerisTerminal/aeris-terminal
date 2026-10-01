@@ -131,6 +131,7 @@ pub struct MarketServiceStatus {
 
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
+    broker_api: Arc<tastytrade::BrokerApi>,
     broker_authorization: broker_authorization::BrokerAuthorization,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
@@ -139,6 +140,7 @@ struct MarketRuntime {
 impl Drop for MarketRuntime {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.broker_api.cancel_searches();
     }
 }
 

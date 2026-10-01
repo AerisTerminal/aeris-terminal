@@ -66,6 +66,7 @@ pub(crate) struct RithmicSymbolBrowser {
     pending_search_query: Option<String>,
     retained_search_query: Option<String>,
     completed_search_id: Option<NonZeroUsize>,
+    preview_search_id: Option<NonZeroUsize>,
     results: Vec<ProviderInstrumentSummary>,
     selection_generation: usize,
     pending_selection: Option<RithmicSymbolSelection>,
@@ -82,6 +83,7 @@ impl Default for RithmicSymbolBrowser {
             pending_search_query: None,
             retained_search_query: None,
             completed_search_id: None,
+            preview_search_id: None,
             results: Vec::new(),
             selection_generation: 0,
             pending_selection: None,
@@ -96,6 +98,7 @@ impl RithmicSymbolBrowser {
         self.pending_search_query = None;
         self.retained_search_query = None;
         self.completed_search_id = None;
+        self.preview_search_id = None;
         self.results.clear();
         self.pending_selection = None;
         self.selected = None;
@@ -123,6 +126,7 @@ impl RithmicSymbolBrowser {
         let request_id = NonZeroUsize::new(self.next_search_id).unwrap_or(NonZeroUsize::MIN);
         self.pending_search_id = Some(request_id);
         self.pending_search_query = Some(query.to_string());
+        self.preview_search_id = None;
         self.results.clear();
         Ok(RithmicSymbolSearchRequest {
             request_id,
@@ -135,19 +139,36 @@ impl RithmicSymbolBrowser {
         request_id: NonZeroUsize,
         results: Vec<ProviderInstrumentSummary>,
     ) -> bool {
+        self.apply_results_with_enrichment(request_id, results, false)
+    }
+
+    pub(crate) fn apply_preview_results(
+        &mut self,
+        request_id: NonZeroUsize,
+        results: Vec<ProviderInstrumentSummary>,
+    ) -> bool {
+        self.apply_results_with_enrichment(request_id, results, true)
+    }
+
+    fn apply_results_with_enrichment(
+        &mut self,
+        request_id: NonZeroUsize,
+        results: Vec<ProviderInstrumentSummary>,
+        preview: bool,
+    ) -> bool {
         let initial = self.next_search_id == 0 && self.pending_search_id.is_none();
-        if self
-            .pending_search_id
-            .is_none_or(|pending| pending != request_id)
-            && !initial
-            || results.len() > self.maximum_results
-        {
+        let pending = self.pending_search_id == Some(request_id);
+        let enriching = self.preview_search_id == Some(request_id)
+            && self.pending_search_id.is_none()
+            && self.completed_search_id == Some(request_id);
+        if (!pending && !enriching && !initial) || results.len() > self.maximum_results {
             return false;
         }
         self.next_search_id = self.next_search_id.max(request_id.get());
         self.pending_search_id = None;
         self.pending_search_query = None;
         self.completed_search_id = Some(request_id);
+        self.preview_search_id = preview.then_some(request_id);
         self.results = results;
         true
     }
@@ -189,6 +210,7 @@ impl RithmicSymbolBrowser {
             return false;
         }
         self.completed_search_id = None;
+        self.preview_search_id = None;
         self.results.clear();
         true
     }
@@ -557,5 +579,20 @@ mod tests {
         assert!(browser.select(0).is_none());
         assert!(!browser.consume_completed_search(selection.search_generation));
         assert_eq!(browser.selected(), Some(&selection));
+    }
+    #[test]
+    fn a_current_search_can_add_remote_results_after_local_futures() {
+        let mut browser = RithmicSymbolBrowser::default();
+        let search = browser.begin_search("ES").unwrap();
+        assert!(browser.apply_preview_results(search.request_id, vec![result("/ESZ6")]));
+        assert!(browser.apply_results(
+            search.request_id,
+            vec![result("/ESZ6"), result("ES-EQUITY")]
+        ));
+        assert_eq!(browser.results().len(), 2);
+        assert!(!browser.apply_results(search.request_id, vec![result("DUPLICATE")]));
+        let next = browser.begin_search("NQ").unwrap();
+        assert!(!browser.apply_results(search.request_id, vec![result("STALE")]));
+        assert!(browser.apply_results(next.request_id, vec![result("/NQZ6")]));
     }
 }

@@ -1146,7 +1146,7 @@ impl Coordinator<'_> {
         MarketServiceStatus {
             connected_desktop_clients: self.attached.len(),
             study_execution_failed: self.studies.execution_failed(),
-            providers: ["rithmic", "hyperliquid"]
+            providers: ["rithmic", "hyperliquid", "tastytrade"]
                 .into_iter()
                 .filter_map(|provider| self.provider_state(provider))
                 .collect(),
@@ -4201,6 +4201,33 @@ mod tests {
             Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(ref result))
                 if result.search_generation == 8
         ));
+        assert!(!coordinator.catalog_searches.contains_key(&key));
+    }
+
+    #[test]
+    fn preliminary_catalog_result_keeps_the_remote_completion_fenced() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        let key = (consumer, "tastytrade".to_string());
+        coordinator.catalog_searches.insert(key.clone(), 8);
+        let result = ProviderInstrumentSearchResult {
+            consumer_id: consumer.0.get(),
+            provider: "tastytrade".into(),
+            provider_generation: 1,
+            search_generation: 8,
+            instruments: Vec::new(),
+        };
+        coordinator.handle_catalog_search_preview(result.clone());
+        assert_eq!(coordinator.catalog_searches.get(&key), Some(&8));
+        assert!(matches!(
+            coordinator.events.get(&consumer).unwrap().catalog_search,
+            Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(_))
+        ));
+        coordinator.handle_catalog_search(result);
         assert!(!coordinator.catalog_searches.contains_key(&key));
     }
 

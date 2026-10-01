@@ -230,6 +230,7 @@ pub enum MarketRuntimeEvent {
     StudyRemoved(MarketStudyRemoved),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     ProviderInstrumentSearchResult(aeris_contracts::ProviderInstrumentSearchResult),
+    ProviderInstrumentSearchPreview(aeris_contracts::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
     ProviderCatalogRejected(aeris_contracts::ProviderCatalogRejected),
     Fault(aeris_contracts::Fault),

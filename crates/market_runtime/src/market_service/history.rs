@@ -130,6 +130,55 @@ pub(super) fn history_request_bar_limit(
     })
 }
 
+fn bounded_tastytrade_range(
+    range: HistoryRange,
+    period_nanos: Option<i64>,
+    extends_newer: bool,
+) -> HistoryRange {
+    let Some(span) = period_nanos.and_then(|duration| {
+        duration.checked_mul(i64::try_from(MAXIMUM_HISTORY_BARS_PER_REQUEST).ok()?)
+    }) else {
+        return range;
+    };
+    if extends_newer {
+        HistoryRange {
+            start_unix_nanos: range.start_unix_nanos,
+            end_unix_nanos: range
+                .end_unix_nanos
+                .min(range.start_unix_nanos.saturating_add(span)),
+        }
+    } else {
+        HistoryRange {
+            start_unix_nanos: range
+                .start_unix_nanos
+                .max(range.end_unix_nanos.saturating_sub(span)),
+            end_unix_nanos: range.end_unix_nanos,
+        }
+    }
+}
+
+fn split_tastytrade_range(
+    requested: HistoryRange,
+    period_nanos: Option<i64>,
+    extends_newer: bool,
+) -> (HistoryRange, Option<HistoryRange>) {
+    let page = bounded_tastytrade_range(requested, period_nanos, extends_newer);
+    let remainder = if extends_newer && page.end_unix_nanos < requested.end_unix_nanos {
+        Some(HistoryRange {
+            start_unix_nanos: page.end_unix_nanos,
+            end_unix_nanos: requested.end_unix_nanos,
+        })
+    } else if !extends_newer && page.start_unix_nanos > requested.start_unix_nanos {
+        Some(HistoryRange {
+            start_unix_nanos: requested.start_unix_nanos,
+            end_unix_nanos: page.start_unix_nanos,
+        })
+    } else {
+        None
+    };
+    (page, remainder)
+}
+
 fn viewport_history_range(
     series: &BarSeriesKey,
     snapshot: &aeris_market_engine::SeriesSnapshot,
@@ -798,16 +847,6 @@ impl Coordinator<'_> {
             return Err("provider does not support historical bars");
         }
         let key = (series.clone(), generation);
-        if let Some((retry_at, attempts, failed_range)) = self.history_retries.get(&key).copied() {
-            if failed_range == range && Instant::now() < retry_at {
-                return Ok(());
-            }
-            if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {
-                // The failed cooldown expired, or the user moved to a genuinely
-                // different range. Start that request with a fresh retry budget.
-                self.history_retries.remove(&key);
-            }
-        }
         let range = if let Some(requested) = range {
             if let Some(confirmed_empty) = self.history_confirmed_empty.get(&key).copied() {
                 let Some(missing) = history_range_after_confirmed_empty(requested, confirmed_empty)
@@ -837,6 +876,38 @@ impl Coordinator<'_> {
                 .or_insert_with(|| deferred_history_request(range));
             return Ok(());
         }
+        // DXLink time-series subscriptions have a fromTime but no end bound.
+        // Preserve the edge adjacent to retained history and queue the rest
+        // explicitly, so merged viewports cannot create an oversized snapshot.
+        let (range, remainder) = if series.provider_id == "tastytrade" {
+            if let Some(requested) = range {
+                let extends_newer = self.engine.series_snapshot(series).is_some_and(|snapshot| {
+                    snapshot.bars.last().is_some_and(|last| {
+                        requested.start_unix_nanos >= last.exchange_timestamp_unix_nanos
+                    })
+                });
+                let (page, remainder) = split_tastytrade_range(
+                    requested,
+                    series.period.duration_nanos(),
+                    extends_newer,
+                );
+                (Some(page), remainder)
+            } else {
+                (None, None)
+            }
+        } else {
+            (range, None)
+        };
+        if let Some((retry_at, attempts, failed_range)) = self.history_retries.get(&key).copied() {
+            if failed_range == range && Instant::now() < retry_at {
+                return Ok(());
+            }
+            if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {
+                // The failed cooldown expired, or the user moved to a genuinely
+                // different range. Start that request with a fresh retry budget.
+                self.history_retries.remove(&key);
+            }
+        }
         let instrument = if series.provider_id == "rithmic"
             || matches!(series.provider_id.as_str(), "hyperliquid" | "tastytrade")
         {
@@ -860,7 +931,15 @@ impl Coordinator<'_> {
         match try_enqueue_history(history, request) {
             Ok(()) => {
                 self.history_inflight.insert(key.clone(), range);
-                self.history_cancellations.insert(key, stop);
+                self.history_cancellations.insert(key.clone(), stop);
+                if let Some(remainder) = remainder {
+                    self.history_deferred
+                        .entry(key)
+                        .and_modify(|deferred| {
+                            merge_deferred_history_request(deferred, Some(remainder));
+                        })
+                        .or_insert(DeferredHistoryRequest::Range(remainder));
+                }
                 Ok(())
             }
             Err(error) => Err(error),
@@ -1584,6 +1663,34 @@ mod tests {
             close: 100,
             volume: 1,
         }
+    }
+
+    #[test]
+    fn tastytrade_deep_range_pages_from_the_retained_edge() {
+        let period = 60_i64 * 1_000_000_000;
+        let page = i64::try_from(MAXIMUM_HISTORY_BARS_PER_REQUEST).expect("bounded page") * period;
+        let requested = HistoryRange {
+            start_unix_nanos: period,
+            end_unix_nanos: page * 3,
+        };
+        let (older, older_remainder) = split_tastytrade_range(requested, Some(period), false);
+        assert_eq!(older.end_unix_nanos, requested.end_unix_nanos);
+        assert_eq!(older.end_unix_nanos - older.start_unix_nanos, page);
+        let older_remainder = older_remainder.expect("older page remains");
+        assert_eq!(older_remainder.end_unix_nanos, older.start_unix_nanos);
+        let (next, _) = split_tastytrade_range(older_remainder, Some(period), false);
+        assert_eq!(next.end_unix_nanos, older.start_unix_nanos);
+        assert_eq!(next.end_unix_nanos - next.start_unix_nanos, page);
+
+        let (newer, newer_remainder) = split_tastytrade_range(requested, Some(period), true);
+        assert_eq!(newer.start_unix_nanos, requested.start_unix_nanos);
+        assert_eq!(newer.end_unix_nanos - newer.start_unix_nanos, page);
+        assert_eq!(
+            newer_remainder
+                .expect("newer page remains")
+                .start_unix_nanos,
+            newer.end_unix_nanos
+        );
     }
 
     #[test]
