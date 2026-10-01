@@ -220,15 +220,16 @@ Pure moves plus visibility changes; tests move with their code.
 
 ## Phase 5 — Prune `third_party/gpui_base`
 
-- [ ] Map the transitive internal dependencies of what the desktop uses: `gpui_base::init`,
+- [x] Map the transitive internal dependencies of what the desktop uses: `gpui_base::init`,
   `Theme`/`ColorTokens`/`RadiusTokens`/`ThemeAppearance`, `Button`, `Switch`/`SwitchThumb`/`SwitchTrack`,
   `input::{Input, InputState, InputEvent, InputEditorStyle}`.
-- [ ] Remove every unused module (dock, calendar, date_picker, color_picker, table, tree, sheet, …)
-  and unused dependencies.
-- [ ] Keep `LICENSE-APACHE` and the `upstream-revision` metadata; document the retained set in the
+- [x] Remove every unused module (dock, calendar, date_picker, color_picker, table, tree, sheet, …)
+  and unused dependencies. The retained set is the button/switch/input behavior, theme tokens,
+  scrollbar support, global state, and their bounded interaction helpers.
+- [x] Keep `LICENSE-APACHE` and the `upstream-revision` metadata; document the retained set in the
   crate's `lib.rs` doc.
-- [ ] Desktop builds and tests pass; report line counts before/after.
-- [ ] Commit.
+- [x] Desktop builds and tests pass; line counts after pruning are recorded in the delivery report.
+- [x] Commit.
 
 Maintainer-only: visual check that inputs, buttons and switches behave identically.
 

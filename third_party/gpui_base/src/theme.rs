@@ -18,7 +18,6 @@ pub struct Theme {
     pub appearance: ThemeAppearance,
     pub tokens: SemanticThemeTokens,
     pub scrollbar: ScrollbarTheme,
-    pub resizable: ResizableTheme,
 }
 
 impl Global for Theme {}
@@ -90,25 +89,6 @@ impl ScrollbarTheme {
     pub fn styles(&self) -> &ScrollbarStyles {
         &self.styles
     }
-}
-
-/// Global visual defaults used by resizable panel handles.
-///
-/// `None` means *unset*, not invisible: a handle with nothing projected onto it
-/// resolves from the active [`SemanticThemeTokens`] -- `border` at rest, `ring`
-/// while dragging -- which are the tokens those two states already mean
-/// everywhere else.
-///
-/// These were plain colors, so the Base default was `Hsla::default()`: fully
-/// transparent. That reads as a deliberate choice next to a styled façade,
-/// which projects its own values and never sees it, and as a missing divider
-/// to anything that does not -- and a consumer with no façade has no way to
-/// project anything. Making them optional keeps the projection exactly as it
-/// was while giving the unprojected case an answer.
-#[derive(Clone, Copy, Default)]
-pub struct ResizableTheme {
-    pub handle: Option<gpui::Hsla>,
-    pub active_handle: Option<gpui::Hsla>,
 }
 
 #[cfg(test)]
