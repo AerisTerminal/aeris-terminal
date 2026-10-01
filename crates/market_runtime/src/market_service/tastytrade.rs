@@ -134,6 +134,7 @@ pub(super) enum RealtimeEvent {
     Connecting(u64),
     Connected(u64),
     Recovering(u64, String),
+    Failed(u64, String),
     Disconnected(u64),
     Candle(u64, String, MarketBar, u64, u64),
     CandleRecovery(u64, String),
@@ -147,6 +148,7 @@ impl RealtimeEvent {
             Self::Connecting(g)
             | Self::Connected(g)
             | Self::Recovering(g, _)
+            | Self::Failed(g, _)
             | Self::Disconnected(g)
             | Self::Candle(g, ..)
             | Self::CandleRecovery(g, ..)
@@ -1600,7 +1602,10 @@ impl Worker {
                 Ok(Subscription {
                     kind: "Candle",
                     symbol: candle_symbol(series, instrument)?,
-                    from_time_ms: Some(self.live_from_ms),
+                    // Candle subscriptions are bounded to the current wall clock. History
+                    // remains the owner of the covering range; a late series must not replay
+                    // the entire socket lifetime into the live batch.
+                    from_time_ms: Some(now_nanos().unwrap_or_default() / 1_000_000),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1659,7 +1664,6 @@ impl Worker {
             }
             Err(error) => {
                 self.queue_completion(request, Err(error.clone()));
-                return Err(error);
             }
         }
         Ok(())
@@ -1779,6 +1783,41 @@ impl Worker {
         }
         Ok(())
     }
+    fn accept_history_event(&mut self, channel: u64, event: FeedEvent, epoch: u64) {
+        let Some(task) = self.histories.get_mut(&channel) else {
+            return;
+        };
+        let result = task.accept(event, epoch, &mut self.ordinal);
+        if let Err(error) = result
+            && let Some(task) = self.histories.remove(&channel)
+        {
+            self.queue_completion(task.request, Err(error));
+        }
+    }
+    fn accept_tape_event(
+        &mut self,
+        channel: u64,
+        event: FeedEvent,
+        epoch: u64,
+    ) -> Result<(), String> {
+        let Some(mut task) = self.tape.take() else {
+            return Ok(());
+        };
+        if task.channel != channel {
+            self.tape = Some(task);
+            return Ok(());
+        }
+        if let Err(error) = task.accept(event, epoch, &mut self.ordinal) {
+            self.loaded_tapes.remove(&task.instrument.instrument_id);
+            self.publish(RealtimeEvent::Recovering(
+                epoch,
+                format!("Tastytrade tape series recovery: {error}"),
+            ))?;
+        } else {
+            self.tape = Some(task);
+        }
+        Ok(())
+    }
     fn accept(&mut self, event: FeedEvent) -> Result<(), String> {
         if let FeedEvent::ChannelFailure { channel } = event {
             if let Some(task) = self.histories.remove(&channel) {
@@ -1804,13 +1843,17 @@ impl Worker {
             .checked_add(1)
             .ok_or("Tastytrade delivery ordinal overflowed")?;
         let epoch = self.epoch();
-        if let Some(task) = self.histories.get_mut(&event.channel()) {
-            return task.accept(event, epoch, &mut self.ordinal);
+        let event_channel = event.channel();
+        if self.histories.contains_key(&event_channel) {
+            self.accept_history_event(event_channel, event, epoch);
+            return Ok(());
         }
-        if let Some(task) = &mut self.tape
-            && task.channel == event.channel()
+        if self
+            .tape
+            .as_ref()
+            .is_some_and(|task| task.channel == event_channel)
         {
-            return task.accept(event, epoch, &mut self.ordinal);
+            return self.accept_tape_event(event_channel, event, epoch);
         }
         match event {
             FeedEvent::Quote {
@@ -1989,7 +2032,12 @@ impl Worker {
         }
         if let Some(bar) = bar {
             if batch.1.len() >= LIVE_BUFFER_CAPACITY {
-                return Err("Tastytrade candle transaction exceeded its bound".into());
+                batch.1.clear();
+                batch.0 = false;
+                return self.publish(RealtimeEvent::CandleRecovery(
+                    self.epoch(),
+                    symbol.to_string(),
+                ));
             }
             batch.1.push((bar, count));
         }
@@ -2067,7 +2115,12 @@ impl Worker {
         } else {
             error
         };
-        let _ = self.publish(RealtimeEvent::Recovering(self.epoch(), detail));
+        let event = if self.paused {
+            RealtimeEvent::Failed(self.epoch(), detail)
+        } else {
+            RealtimeEvent::Recovering(self.epoch(), detail)
+        };
+        let _ = self.publish(event);
     }
 }
 

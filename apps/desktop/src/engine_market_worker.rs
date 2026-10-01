@@ -2242,6 +2242,7 @@ mod tests {
                     bbo_source_watermark: 2,
                     traded_volumes: BTreeMap::new(),
                     trade_source_watermark: 0,
+                    top_of_book_only: false,
                 },
                 display_depth: None,
             }),

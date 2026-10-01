@@ -73,6 +73,7 @@ pub fn project_order_book(
         revision: publication.revision,
         source_watermark: publication.source_watermark,
         bbo_source_watermark: publication.bbo_source_watermark,
+        top_of_book_only: publication.top_of_book_only,
         state: publication.state,
         price_scale: selection.precision.price_scale(),
         quantity_scale: selection.precision.quantity_scale(),
@@ -259,6 +260,7 @@ mod tests {
                 aeris_market_data::AggressorTradeVolumes { buy: 4, sell: 2 },
             )]),
             trade_source_watermark: 11,
+            top_of_book_only: false,
             state: OrderBookState::Ready,
         }
     }
@@ -350,6 +352,8 @@ mod tests {
         let mut publication = publication("mnq");
         publication.bids.clear();
         publication.asks.clear();
+        publication.top_of_book_only = true;
+        publication.state = OrderBookState::Ready;
 
         let frame = project_order_book(&selection("mnq", 1), &publication)
             .expect("matching publication projects");
@@ -363,6 +367,7 @@ mod tests {
             Some(20_050)
         );
         assert!(frame.rows.is_empty());
+        assert!(frame.top_of_book_only);
     }
 
     #[test]

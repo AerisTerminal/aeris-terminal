@@ -13,7 +13,11 @@ use std::{
     time::{Duration, Instant},
 };
 fn run(market: &MarketService) -> Result<(), String> {
-    let query = std::env::args().nth(1).unwrap_or_else(|| "/ES".into());
+    let query = std::env::args()
+        .nth(1)
+        .filter(|arg| arg != "--cycle")
+        .or_else(|| std::env::args().nth(2))
+        .unwrap_or_else(|| "/ES".into());
     market.attach(1)?;
     market.register_consumer(1, 1, 1)?;
     let mut search_timings = SearchTimings::new();
@@ -429,11 +433,94 @@ fn main() -> Result<(), String> {
     let market = MarketService::start()?;
     let result = if std::env::args().nth(1).as_deref() == Some("--history-load") {
         run_history_load(&market)
+    } else if std::env::args().nth(1).as_deref() == Some("--cycle") {
+        run_timeframe_cycle(&market)
     } else {
         run(&market)
     };
     let shutdown = market.shutdown(Duration::from_secs(10));
     result.and(shutdown)
+}
+
+fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
+    let query = std::env::args().nth(2).unwrap_or_else(|| "/ES".into());
+    let fast = std::env::args().any(|arg| arg == "--fast");
+    market.attach(1)?;
+    market.register_consumer(1, 1, 1)?;
+    market.search_provider_instruments(
+        1,
+        SearchProviderInstruments {
+            consumer_id: 1,
+            search_generation: 1,
+            provider: "tastytrade".into(),
+            query,
+            maximum_results: 100,
+        },
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(150);
+    let mut instrument = None;
+    while instrument.is_none() && Instant::now() < deadline {
+        if let Some(event) = market.poll_event(1, 1)? {
+            match event {
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
+                    select(market, result)?;
+                }
+                MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
+                    instrument = Some(selection.instrument);
+                }
+                MarketRuntimeEvent::ProviderState(state) => println!(
+                    "Provider transition: {:?} detail={:?} generation={:?}",
+                    state.state, state.detail, state.generation
+                ),
+                _ => {}
+            }
+        } else {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let instrument = instrument.ok_or("cycle selection timed out")?;
+    let periods = [60_u32, 300, 900, 3_600];
+    let delay = if fast { 200 } else { 1_500 };
+    for cycle in 0..12 {
+        let seconds = periods[cycle % periods.len()];
+        let series = BarSeriesKey {
+            provider_id: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            entitlement_id: instrument.entitlement_id.clone(),
+            period: BarPeriod::time(seconds).map_err(|e| e.to_string())?,
+            definition_version: 1,
+        };
+        println!("Cycle {} timeframe={}ms", cycle + 1, seconds * 1_000);
+        market.set_demand(
+            1,
+            1,
+            u64::try_from(cycle + 2).map_err(|_| "cycle generation overflow")?,
+            &series,
+            StreamRequirements::BARS
+                .with(MarketStream::Trades)
+                .with(MarketStream::Quotes),
+        )?;
+        let until = Instant::now() + Duration::from_millis(delay);
+        while Instant::now() < until {
+            if let Some(event) = market.poll_event(1, 1)? {
+                match event {
+                    MarketRuntimeEvent::ProviderState(state) => println!(
+                        "Provider transition: {:?} detail={:?} generation={:?}",
+                        state.state, state.detail, state.generation
+                    ),
+                    MarketRuntimeEvent::SeriesSnapshot(snapshot) => println!(
+                        "First candles timeframe={} generation={} bars={}",
+                        seconds,
+                        snapshot.snapshot.provider_generation.0.get(),
+                        snapshot.snapshot.bars.len()
+                    ),
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    market.detach(1)
 }
 
 fn run_history_load(market: &MarketService) -> Result<(), String> {

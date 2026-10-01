@@ -95,11 +95,13 @@ impl ProviderOrderBook {
     pub(super) fn new(
         instrument: InstallProviderInstrument,
         trade_continuity: super::TradeContinuity,
+        top_of_book_only: bool,
     ) -> Self {
         let trade_session_generation = instrument.session_generation;
         Self {
             instrument,
             trade_continuity,
+            top_of_book_only,
             book: OrderBook::new(
                 NonZeroUsize::new(MAXIMUM_CANONICAL_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
@@ -1956,7 +1958,7 @@ impl Coordinator<'_> {
                     self.broadcast_provider_for(provider, Some(&provider_detail));
                 }
             }
-            ProviderEventKind::Failed(detail) => self.rithmic_failed(provider, generation, detail),
+            ProviderEventKind::Failed(detail) => self.rithmic_failed(provider, generation, &detail),
             ProviderEventKind::Disconnected(reason) => {
                 self.handle_provider_disconnected(provider, generation, descriptor, reason);
             }
@@ -2063,7 +2065,11 @@ impl Coordinator<'_> {
                     .replace_indexed_trade(&trade.trade_id, Some(trade), true)
                     .is_err()
                 {
-                    self.request_indexed_trade_recovery(provider, generation);
+                    self.request_indexed_trade_recovery(
+                        provider,
+                        generation,
+                        &instrument.instrument_id,
+                    );
                     return;
                 }
             }
@@ -2163,7 +2169,7 @@ impl Coordinator<'_> {
             }
         }
         if failed {
-            self.request_indexed_trade_recovery(provider, generation);
+            self.request_indexed_trade_recovery(provider, generation, &instrument.instrument_id);
             return;
         }
         let Ok(provider_generation) = id(generation).map(ProviderGeneration) else {
@@ -2196,7 +2202,7 @@ impl Coordinator<'_> {
                     "Indexed trade aggregation requires covering history",
                 );
             }
-            self.request_indexed_trade_recovery(provider, generation);
+            self.request_indexed_trade_recovery(provider, generation, &instrument.instrument_id);
             return;
         }
         for change in changes {
@@ -2221,13 +2227,19 @@ impl Coordinator<'_> {
         self.broadcast_order_book(provider, &instrument.instrument_id);
     }
 
-    fn request_indexed_trade_recovery(&mut self, provider: &str, generation: u64) {
-        self.session_mut(provider).recovery = Some(generation);
-        self.rithmic_recovering(
-            provider,
-            generation,
-            "Tick state is reloading available history",
-        );
+    fn request_indexed_trade_recovery(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        instrument_id: &str,
+    ) {
+        if let Some(book) = self
+            .order_books
+            .get_mut(&(provider.to_string(), instrument_id.to_string()))
+        {
+            book.invalidate_live_market(generation);
+            self.broadcast_order_book(provider, instrument_id);
+        }
     }
 
     fn accept_provider_trades(
@@ -3097,7 +3109,7 @@ impl Coordinator<'_> {
         self.invalidate_provider_live_market(provider, generation);
     }
 
-    fn rithmic_failed(&mut self, provider: &str, generation: u64, detail: &'static str) {
+    fn rithmic_failed(&mut self, provider: &str, generation: u64, detail: &str) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
@@ -3800,6 +3812,7 @@ mod tests {
         let mut book = ProviderOrderBook::new(
             ladder_instrument(1),
             super::super::TradeContinuity::Sequence,
+            false,
         );
         assert!(book.install_top_of_book(&ladder_quote(1, 1)));
         assert!(book.accept_recent_trade(&ladder_trade(1, 2, 2, 20_000, 3, AggressorSide::Buy,)));
@@ -3860,7 +3873,8 @@ mod tests {
     fn indexed_trade_correction_cancellation_and_delayed_history_are_fenced() {
         let mut instrument = ladder_instrument(1);
         instrument.provider = "tastytrade".into();
-        let mut book = ProviderOrderBook::new(instrument, super::super::TradeContinuity::Indexed);
+        let mut book =
+            ProviderOrderBook::new(instrument, super::super::TradeContinuity::Indexed, true);
         let mut trade = ladder_trade(1, 20, 1_000_000_000, 20_000, 4, AggressorSide::Buy);
         trade.metadata.provider_id = "tastytrade".into();
         trade.trade_id = "9007199254740993".into();
@@ -3911,6 +3925,7 @@ mod tests {
         let mut book = ProviderOrderBook::new(
             ladder_instrument(1),
             super::super::TradeContinuity::Sequence,
+            false,
         );
         let start = 1_000_000_000_i64;
         assert!(book.accept_recent_trade(&ladder_trade(
@@ -4017,6 +4032,7 @@ mod tests {
         let mut book = ProviderOrderBook::new(
             ladder_instrument(1),
             super::super::TradeContinuity::Sequence,
+            false,
         );
         for sequence in
             1..=u64::try_from(MAXIMUM_RECENT_LADDER_TRADES + 2).expect("tape capacity fits u64")

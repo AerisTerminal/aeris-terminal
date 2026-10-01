@@ -470,7 +470,11 @@ impl Render for ReadOnlyOrderBookView {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .child(render_header(columns, &self.theme))
+                    .child(render_header(
+                        columns,
+                        frame.as_deref().is_some_and(|frame| frame.top_of_book_only),
+                        &self.theme,
+                    ))
                     .children(connection_status_banner(
                         self.connection_state,
                         self.frame.is_some(),
@@ -480,7 +484,16 @@ impl Render for ReadOnlyOrderBookView {
                     .children(
                         (self.connection_state == OrderBookConnectionState::Online)
                             .then(|| {
-                                state.and_then(|state| status_banner(state, watermark, &self.theme))
+                                state.and_then(|state| {
+                                    if frame.as_deref().is_some_and(|frame| {
+                                        frame.top_of_book_only
+                                            && frame.state == OrderBookState::Ready
+                                    }) {
+                                        None
+                                    } else {
+                                        status_banner(state, watermark, &self.theme)
+                                    }
+                                })
                             })
                             .flatten(),
                     )
@@ -524,6 +537,7 @@ fn connection_status_banner(
 
 fn render_header(
     columns: OrderBookColumnVisibility,
+    top_of_book_only: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     div()
@@ -536,6 +550,14 @@ fn render_header(
         .text_size(px(TEXT_SIZE))
         .text_color(gpui_color(theme.colors.text_secondary))
         .bg(gpui_color(theme.colors.surface_secondary))
+        .children(
+            top_of_book_only.then_some(
+                div()
+                    .px_2()
+                    .text_color(gpui_color(theme.colors.text_secondary))
+                    .child("Level 1 · best bid/ask"),
+            ),
+        )
         .children(
             OrderBookColumn::ALL
                 .into_iter()
@@ -2225,6 +2247,7 @@ mod tests {
             best_ask: None,
             traded_volumes: std::collections::BTreeMap::default(),
             trade_source_watermark: revision,
+            top_of_book_only: false,
             rows: has_rows
                 .then_some(OrderBookRow {
                     bid: None,
@@ -2872,6 +2895,7 @@ mod tests {
                 AggressorTradeVolumes { buy: 8, sell: 3 },
             )]),
             trade_source_watermark: 2,
+            top_of_book_only: false,
             rows: vec![
                 OrderBookRow {
                     bid: Some(grid_level(20_000, 5)),

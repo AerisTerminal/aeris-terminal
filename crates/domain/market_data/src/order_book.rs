@@ -55,6 +55,8 @@ pub struct OrderBookPublication {
     pub asks: Vec<DepthLevel>,
     pub traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
     pub trade_source_watermark: u64,
+    /// True when the provider publishes Level 1 only and has no depth image.
+    pub top_of_book_only: bool,
     pub state: OrderBookState,
 }
 
@@ -103,6 +105,8 @@ pub struct OrderBookFrame {
     /// Runtime-owned recent aggressor volume, independent of resting depth.
     pub traded_volumes: BTreeMap<i64, AggressorTradeVolumes>,
     pub trade_source_watermark: u64,
+    /// True when this frame is an explicit Level 1 BBO publication.
+    pub top_of_book_only: bool,
     pub rows: Vec<OrderBookRow>,
 }
 
@@ -399,6 +403,7 @@ impl OrderBook {
             asks: self.asks.values().copied().collect(),
             traded_volumes: BTreeMap::new(),
             trade_source_watermark: 0,
+            top_of_book_only: false,
             state: self.state,
         }
     }

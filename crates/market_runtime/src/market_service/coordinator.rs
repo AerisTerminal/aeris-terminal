@@ -1103,7 +1103,11 @@ impl Coordinator<'_> {
                 };
                 self.order_books.insert(
                     identity,
-                    ProviderOrderBook::new(instrument, descriptor.trade_continuity),
+                    ProviderOrderBook::new(
+                        instrument,
+                        descriptor.trade_continuity,
+                        !descriptor.presentation.depth_available,
+                    ),
                 );
             }
         }
@@ -1676,8 +1680,11 @@ mod tests {
         selected: &InstallProviderInstrument,
         selected_series: &BarSeriesKey,
     ) -> ProviderOrderBook {
-        let mut order_book =
-            ProviderOrderBook::new(selected.clone(), super::super::TradeContinuity::Sequence);
+        let mut order_book = ProviderOrderBook::new(
+            selected.clone(),
+            super::super::TradeContinuity::Sequence,
+            false,
+        );
         let quote = TopOfBookQuote {
             metadata: EventMetadata {
                 provider_id: selected.provider.clone(),

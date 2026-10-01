@@ -969,6 +969,7 @@ mod tests {
             best_ask: Some(level(10_001)),
             traded_volumes: std::collections::BTreeMap::new(),
             trade_source_watermark: 7,
+            top_of_book_only: false,
             rows: Vec::new(),
         }
     }

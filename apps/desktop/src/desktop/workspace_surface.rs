@@ -3400,13 +3400,7 @@ impl WorkspaceSurface {
             // the old book back to loading instead of showing BTC levels
             // under an ETH selection. Interval-only switches keep the book.
             self.order_book.update(cx, |order_book, order_book_cx| {
-                if super::provider_presentation(provider)
-                    .is_some_and(|descriptor| !descriptor.depth_available)
-                {
-                    order_book.mark_unavailable(order_book_cx);
-                } else {
-                    order_book.clear(order_book_cx);
-                }
+                order_book.clear(order_book_cx);
             });
             self.trade_tape = None;
             self.trade_sweeps = Arc::from([]);
@@ -3583,17 +3577,11 @@ impl WorkspaceSurface {
                 });
             }
             FeedConnectionState::Streaming => {
-                let depth_available = super::provider_presentation(self.provider)
-                    .is_none_or(|descriptor| descriptor.depth_available);
                 self.order_book.update(cx, |order_book, order_book_cx| {
-                    if depth_available {
-                        order_book.set_connection_state(
-                            aeris_terminal_ui::OrderBookConnectionState::Online,
-                            order_book_cx,
-                        );
-                    } else {
-                        order_book.mark_unavailable(order_book_cx);
-                    }
+                    order_book.set_connection_state(
+                        aeris_terminal_ui::OrderBookConnectionState::Online,
+                        order_book_cx,
+                    );
                 });
             }
             FeedConnectionState::Stopped => {

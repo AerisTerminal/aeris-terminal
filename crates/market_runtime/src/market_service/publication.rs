@@ -128,6 +128,16 @@ pub(super) fn order_book_snapshot(
             .clone_from(&order_book.traded_volumes);
         publication.trade_source_watermark = order_book.last_trade_source_sequence;
     }
+    publication.top_of_book_only = order_book.top_of_book_only;
+    if order_book.top_of_book_only {
+        publication.state = if order_book.top_of_book.is_some() {
+            aeris_market_data::OrderBookState::Ready
+        } else {
+            aeris_market_data::OrderBookState::Recovering(
+                aeris_market_data::OrderBookRecoveryReason::AwaitingSnapshot,
+            )
+        };
+    }
     if let Some(quote) = order_book
         .top_of_book
         .as_ref()
@@ -863,8 +873,11 @@ mod tests {
             price_increment: Some(25),
             ..Default::default()
         };
-        let mut order_book =
-            ProviderOrderBook::new(instrument.clone(), super::super::TradeContinuity::Sequence);
+        let mut order_book = ProviderOrderBook::new(
+            instrument.clone(),
+            super::super::TradeContinuity::Sequence,
+            false,
+        );
         let snapshot = aeris_market_data::DepthSnapshot {
             metadata: aeris_market_data::EventMetadata {
                 provider_id: instrument.provider.clone(),
@@ -933,5 +946,60 @@ mod tests {
             Some(20_064)
         );
         assert_eq!(snapshot.display_depth, Some(display_depth));
+    }
+
+    #[test]
+    fn level_one_publication_is_ready_on_the_first_current_bbo() {
+        let instrument = aeris_contracts::InstallProviderInstrument {
+            provider: "tastytrade".into(),
+            session_generation: 4,
+            instrument_id: "tastytrade:Equity:SPY".into(),
+            entitlement_id: "tastytrade-authorized".into(),
+            ..Default::default()
+        };
+        let mut order_book = ProviderOrderBook::new(
+            instrument.clone(),
+            super::super::TradeContinuity::Indexed,
+            true,
+        );
+        order_book.install_top_of_book(&aeris_market_data::TopOfBookQuote {
+            metadata: aeris_market_data::EventMetadata {
+                provider_id: instrument.provider.clone(),
+                instrument_id: instrument.instrument_id.clone(),
+                entitlement_id: instrument.entitlement_id.clone(),
+                source_sequence: 1,
+                session_generation: 4,
+                timestamps: aeris_market_data::QualifiedTimestamp {
+                    exchange_unix_nanos: Some(1),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: 1,
+                },
+            },
+            bid: Some(aeris_market_data::DepthLevel {
+                price: 10_000,
+                quantity: 2,
+                order_count: None,
+            }),
+            ask: Some(aeris_market_data::DepthLevel {
+                price: 10_001,
+                quantity: 3,
+                order_count: None,
+            }),
+        });
+        let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = order_book_snapshot(
+            ConsumerId(std::num::NonZeroU64::MIN),
+            GenerationId(std::num::NonZeroU64::MIN),
+            &order_book,
+            None,
+        ) else {
+            panic!("order-book publication expected");
+        };
+        assert!(snapshot.publication.top_of_book_only);
+        assert_eq!(
+            snapshot.publication.state,
+            aeris_market_data::OrderBookState::Ready
+        );
+        assert!(snapshot.publication.bids.is_empty());
+        assert!(snapshot.publication.best_bid.is_some());
     }
 }

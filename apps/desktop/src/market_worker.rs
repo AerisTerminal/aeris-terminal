@@ -2924,6 +2924,7 @@ mod tests {
             best_ask: None,
             traded_volumes: std::collections::BTreeMap::default(),
             trade_source_watermark: revision,
+            top_of_book_only: false,
             rows: Vec::new(),
         };
         assert!(
@@ -2976,6 +2977,7 @@ mod tests {
             best_ask: None,
             traded_volumes: std::collections::BTreeMap::default(),
             trade_source_watermark: revision,
+            top_of_book_only: false,
             rows: Vec::new(),
         };
         sender
@@ -3045,6 +3047,7 @@ mod tests {
             best_ask: None,
             traded_volumes: std::collections::BTreeMap::default(),
             trade_source_watermark: revision,
+            top_of_book_only: false,
             rows: Vec::new(),
         };
         sender

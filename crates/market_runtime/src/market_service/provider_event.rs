@@ -44,7 +44,7 @@ pub(super) enum ProviderEventKind {
         detail: &'static str,
         provider_detail: Option<String>,
     },
-    Failed(&'static str),
+    Failed(String),
     Disconnected(ProviderDisconnect),
     Trades(ProviderTradeBatch),
     IndexedTrades {
@@ -74,7 +74,7 @@ impl ProviderEvent {
             Wire::Connected(_) => ProviderEventKind::Connected,
             Wire::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(rtt),
             Wire::Failed(_, _error) => ProviderEventKind::Failed(
-                "Rithmic reconnect could not start; check provider configuration",
+                "Rithmic reconnect could not start; check provider configuration".into(),
             ),
             Wire::Recovering(_, reason) => ProviderEventKind::Recovering {
                 detail: super::realtime::rithmic_invalidation_detail(reason),
@@ -170,6 +170,7 @@ impl ProviderEvent {
                 detail: "Tastytrade feed requires recovery",
                 provider_detail: Some(detail),
             },
+            Wire::Failed(_, detail) => ProviderEventKind::Failed(detail),
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
             Wire::Candle(_, symbol, bar, count, trade_watermark) => ProviderEventKind::Candle {
                 symbol,

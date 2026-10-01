@@ -197,9 +197,12 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   Rithmic Test entitlement expected by the current adapter path, so rename it to
   `RITHMIC_TEST_ENTITLEMENT_ID`; adapter selection entitlement preservation remains covered by
   `delayed_catalog_selection_preserves_entitlement_while_using_the_base_market_venue`.
-- [x] Providers without depth show an explicit "depth not available from this provider" state
-  using the existing tokenized order-book unavailable presentation; tastytrade selections and
-  streaming state mark the book unavailable while Rithmic and Hyperliquid retain live depth.
+- [x] Providers without depth publish an explicit Level 1 top-of-book frame; tastytrade becomes
+  Ready on the first current BBO, shows best bid/ask and traded volumes, and retains genuine
+  connection failure banners while Rithmic and Hyperliquid retain full depth.
+- [x] Tastytrade timeframe and series recovery stays scoped to the affected series, bounds late
+  candle subscriptions from the current wall clock, and publishes a terminal Failed state after
+  automatic retries are exhausted instead of leaving the desktop in a reconnecting state.
 - [x] Durable local state keeps loading existing Rithmic, Hyperliquid and tastytrade selections;
   sanitizer regression coverage exercises all three provider identities and entitlement routes.
 - [x] tastytrade logo and attribution ("Market data provided by tastytrade") per tastytrade's

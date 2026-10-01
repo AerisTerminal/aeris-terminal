@@ -611,6 +611,7 @@ struct ConsumerEvents {
 struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     trade_continuity: TradeContinuity,
+    top_of_book_only: bool,
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
     recent_trades: VecDeque<crate::RetainedMarketTrade>,
