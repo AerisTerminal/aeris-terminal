@@ -25,8 +25,20 @@ use aeris_tastytrade_market_adapter::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const ENTITLEMENT: &str = "tastytrade-authorized";
+pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
+    aeris_contracts::ProviderPresentationDescriptor {
+        id: "tastytrade",
+        display_name: "tastytrade",
+        chart_intervals_seconds: &[60, 300, 900, 1_800, 3_600, 14_400, 86_400],
+        default_listing: "/ES",
+        search_hint: "Search futures or equities",
+        logo_key: "tastytrade",
+        depth_available: false,
+        connection_kind: aeris_contracts::ProviderConnectionKind::HostedBroker,
+    };
 pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescriptor {
     id: "tastytrade",
+    presentation: &PRESENTATION,
     account_id: ENTITLEMENT,
     capabilities: super::ProviderCapabilities {
         historical_bars: true,

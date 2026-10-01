@@ -23,7 +23,8 @@ use crate::{
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
-    ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
+    ProviderPresentationDescriptor, ProviderState, SearchProviderInstruments,
+    SelectProviderInstrument, SeriesLoadState,
 };
 use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
 use aeris_market_data::{
@@ -133,6 +134,7 @@ pub struct MarketServiceStatus {
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
     broker_api: Arc<tastytrade::BrokerApi>,
+    provider_presentations: Vec<ProviderPresentationDescriptor>,
     provider_search_preparers: BTreeMap<&'static str, ProviderSearchPreparer>,
     broker_authorization: broker_authorization::BrokerAuthorization,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
@@ -748,6 +750,7 @@ struct LiveHyperliquidHistory(aeris_hyperliquid_market_adapter::HyperliquidHttpC
 #[derive(Clone, Copy)]
 struct ProviderDescriptor {
     id: &'static str,
+    presentation: &'static ProviderPresentationDescriptor,
     account_id: &'static str,
     capabilities: ProviderCapabilities,
     reconnect_delay: Duration,
@@ -984,8 +987,20 @@ enum TradeDemandPolicy {
     SessionManaged,
 }
 
+const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentationDescriptor {
+    id: "rithmic",
+    display_name: "Rithmic",
+    chart_intervals_seconds: &[1, 5, 10, 15, 30, 60, 300, 900, 1_800, 3_600, 14_400, 86_400],
+    default_listing: "",
+    search_hint: "Search Rithmic symbols",
+    logo_key: "rithmic",
+    depth_available: true,
+    connection_kind: aeris_contracts::ProviderConnectionKind::Credentials,
+};
+
 const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "rithmic",
+    presentation: &RITHMIC_PRESENTATION,
     account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
     capabilities: ProviderCapabilities {
         historical_bars: true,
@@ -1019,8 +1034,20 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     instrument_missing_detail: "Rithmic instrument is not installed",
 };
 
+const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentationDescriptor {
+    id: "hyperliquid",
+    display_name: "Hyperliquid",
+    chart_intervals_seconds: &[60, 300, 900, 1_800, 3_600, 14_400, 86_400],
+    default_listing: "",
+    search_hint: "Search Hyperliquid markets",
+    logo_key: "hyperliquid",
+    depth_available: true,
+    connection_kind: aeris_contracts::ProviderConnectionKind::Public,
+};
+
 const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "hyperliquid",
+    presentation: &HYPERLIQUID_PRESENTATION,
     account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID,
     capabilities: RITHMIC_DESCRIPTOR.capabilities,
     reconnect_delay: PROVIDER_RECONNECT_DELAY,

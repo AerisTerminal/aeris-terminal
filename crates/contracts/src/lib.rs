@@ -6,6 +6,7 @@
 
 pub mod account;
 mod messages;
+pub mod provider;
 
 pub use account::{
     AccountSessionState, AccountView, BeginLogin, CancelLogin, GetAccountStatus,
@@ -25,3 +26,4 @@ pub use messages::{
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
+pub use provider::{ProviderConnectionKind, ProviderPresentationDescriptor};

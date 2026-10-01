@@ -21,6 +21,7 @@ use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
 };
 use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidRealtimeControl};
+use aeris_contracts::ProviderPresentationDescriptor;
 
 impl HistorySource for LiveRithmicHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
@@ -1026,6 +1027,12 @@ impl MarketService {
         self.request(|reply| Ok(Command::AvailableStreams(provider.into(), requested, reply)))
     }
 
+    /// Returns provider-neutral metadata for catalog and chart presentation.
+    #[must_use]
+    pub fn provider_presentations(&self) -> Vec<ProviderPresentationDescriptor> {
+        self.runtime.provider_presentations.clone()
+    }
+
     /// Starts the desktop-owned in-process market runtime.
     ///
     /// Market state is intentionally ephemeral. History is requested from the
@@ -1045,6 +1052,10 @@ impl MarketService {
     }
 
     pub(super) fn start_composed(providers: Vec<ProviderRuntimeSpec>) -> Result<Self, String> {
+        let provider_presentations = providers
+            .iter()
+            .map(|provider| *provider.descriptor.presentation)
+            .collect();
         let descriptors = providers
             .iter()
             .map(|provider| provider.descriptor)
@@ -1084,6 +1095,7 @@ impl MarketService {
             workers,
             broker_api,
             provider_search_preparers,
+            provider_presentations,
         )
     }
 
@@ -1094,6 +1106,7 @@ impl MarketService {
         mut workers: Vec<thread::JoinHandle<()>>,
         broker_api: Arc<super::tastytrade::BrokerApi>,
         provider_search_preparers: BTreeMap<&'static str, super::ProviderSearchPreparer>,
+        provider_presentations: Vec<ProviderPresentationDescriptor>,
     ) -> Result<Self, String> {
         let (broker_authorization, worker) =
             match super::broker_authorization::BrokerAuthorization::start(
@@ -1113,6 +1126,7 @@ impl MarketService {
             runtime: Arc::new(MarketRuntime {
                 shutdown,
                 broker_api,
+                provider_presentations,
                 provider_search_preparers,
                 broker_authorization,
                 active_provider_workers,
@@ -1745,8 +1759,10 @@ mod tests {
             Vec::new(),
             Arc::new(super::super::tastytrade::BrokerApi::default()),
             BTreeMap::new(),
+            vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
         )
         .expect("test runtime starts");
+        assert_eq!(service.provider_presentations()[0].id, "rithmic");
         let result =
             service.request_with_timeout(|reply| Ok(Command::Status(reply)), Duration::ZERO);
         assert!(result.unwrap_err().contains("cancelled before execution"));

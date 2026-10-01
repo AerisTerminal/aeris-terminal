@@ -55,8 +55,20 @@ fn shipping_provider_capabilities_accept_the_declared_non_bar_study_streams() {
 
 #[test]
 fn fourth_descriptor_registers_without_coordinator_changes() {
+    const FOURTH_PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
+        aeris_contracts::ProviderPresentationDescriptor {
+            id: "fourth-test-provider",
+            display_name: "Fourth provider",
+            chart_intervals_seconds: &[60],
+            default_listing: "",
+            search_hint: "Search fourth provider",
+            logo_key: "fourth-provider",
+            depth_available: false,
+            connection_kind: aeris_contracts::ProviderConnectionKind::Public,
+        };
     let fourth = ProviderDescriptor {
         id: "fourth-test-provider",
+        presentation: &FOURTH_PRESENTATION,
         account_id: "fourth-test-account",
         capabilities: ProviderCapabilities {
             historical_bars: true,

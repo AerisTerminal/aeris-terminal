@@ -104,9 +104,10 @@ Commits: native `d5e20e7`, `7071595`; website `de3dfb1` (deployed and pushed).
   bounded cache of recent results.
 - [x] Decode-failure budget: either make it truly per connection or rename it; it currently resets
   on a 60 s rolling window but is labelled per connection.
-- [ ] Release-build timings for: menu open → futures results, equity search, cold and warm
+- [~] Release-build timings for: menu open → futures results, equity search, cold and warm
   selection → first candles, timeframe switch, reconnect after idle stop, chart close lag behind
   the tape, quote price update rate (p50/p90/p99 and measurement method), against the references above.
+  - [~] Release probe (2026-10-02, `cargo run -p aeris_market_runtime --release --locked --example tastytrade_market -- /ES`): cold search 7545 ms, cached futures search 0 ms, equity search 1513 ms, selection to first candles 4579 ms, timeframe switch 839 ms. The session reached live state but the market was closed (`updates=0`, `ticks=0`), so reconnect, tape-lag and quote-rate percentiles remain unmeasured.
 - [x] Tests: deterministic coverage for the trade-driven candle, reconciliation, top-of-book from
   trades, search cancellation and caching (tastytrade currently has 25 tests).
 
@@ -168,7 +169,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   public feed, practice account create/select/delete. The order ticket only shows the active
   account and opens the panel. When descriptors land, list providers from them instead of
   hardcoding tastytrade and Hyperliquid in `components/accounts_panel.rs`.
-- [ ] `market_runtime` publishes provider presentation descriptors through a provider-neutral
+- [x] `market_runtime` publishes provider presentation descriptors through a provider-neutral
   contract: id, display name, chart intervals, default/empty-query listing, search hint, logo key,
   depth capability, connection kind (credentials, hosted broker, public).
 - [ ] Replace `TerminalProvider` branches in `apps/desktop/src/desktop.rs`,
