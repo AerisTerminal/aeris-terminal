@@ -192,7 +192,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   sanitizer regression coverage exercises all three provider identities and entitlement routes.
 - [ ] tastytrade logo and attribution ("Market data provided by tastytrade") per tastytrade's
   brand guidelines, once the assets are received.
-- [ ] Gates and commit.
+- [x] Gates and commit.
 
 Maintainer-only: visual check of the symbol menu, depth-unavailable state and attribution.
 
