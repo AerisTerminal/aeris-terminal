@@ -1,25 +1,21 @@
 use super::{
     ClientId, ConsumerId, Coordinator, InstallProviderInstrument, MAXIMUM_CATALOG_FIELD_BYTES,
-    MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64, ProviderCatalogCommand, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderGeneration, ProviderHealth, Reply,
-    RithmicCatalogControl, RithmicCatalogEvent, SearchProviderInstruments,
-    SelectProviderInstrument, SyncSender, TrySendError, authorize_consumer,
+    MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64, ProviderCatalogCommand, ProviderCatalogEvent,
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderGeneration, ProviderHealth,
+    Reply, RithmicCatalogControl, SearchProviderInstruments, SelectProviderInstrument, SyncSender,
+    TrySendError, authorize_consumer,
 };
-use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidCatalogEvent};
+use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent};
 
 pub(super) fn id(value: u64) -> Result<NonZeroU64, String> {
     NonZeroU64::new(value).ok_or_else(|| "market identity must be non-zero".to_string())
 }
 
-fn supported_catalog_provider(provider: &str) -> bool {
-    matches!(provider, "rithmic" | "hyperliquid" | "tastytrade")
-}
-
 pub(super) fn validate_provider_search(search: &SearchProviderInstruments) -> Result<(), String> {
     id(search.consumer_id)?;
     id(search.search_generation)?;
-    if !supported_catalog_provider(&search.provider)
+    if !valid_catalog_field(&search.provider)
         || search.maximum_results == 0
         || usize::try_from(search.maximum_results).unwrap_or(usize::MAX)
             > MAXIMUM_CATALOG_INSTRUMENTS
@@ -36,14 +32,14 @@ pub(super) fn validate_provider_selection(
     id(selection.consumer_id)?;
     id(selection.selection_generation)?;
     id(selection.search_generation)?;
-    if !supported_catalog_provider(&selection.provider)
-        || ![
-            &selection.symbol,
-            &selection.exchange,
-            &selection.entitlement_id,
-        ]
-        .into_iter()
-        .all(|value| valid_catalog_field(value))
+    if ![
+        &selection.provider,
+        &selection.symbol,
+        &selection.exchange,
+        &selection.entitlement_id,
+    ]
+    .into_iter()
+    .all(|value| valid_catalog_field(value))
     {
         return Err("provider instrument selection is invalid".to_string());
     }
@@ -89,10 +85,7 @@ pub(super) fn try_send_hyperliquid_catalog(
 pub(super) fn validate_provider_instrument(
     instrument: &InstallProviderInstrument,
 ) -> Result<(), String> {
-    if !supported_catalog_provider(&instrument.provider)
-        || instrument.session_generation == 0
-        || instrument.selection_generation == 0
-    {
+    if instrument.session_generation == 0 || instrument.selection_generation == 0 {
         return Err("provider instrument generation must be non-zero".to_string());
     }
     for value in [
@@ -227,41 +220,36 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    pub(super) fn handle_rithmic_catalog(&mut self, event: RithmicCatalogEvent) {
-        match event {
-            RithmicCatalogEvent::SearchCompleted(result) => self.handle_catalog_search(result),
-            RithmicCatalogEvent::SelectionResolved {
-                consumer_id,
-                command_generation,
-                instrument,
-            } => self.handle_catalog_selection(consumer_id, command_generation, instrument),
-            RithmicCatalogEvent::Rejected {
-                rejection,
-                selection,
-            } => self.handle_catalog_rejection(rejection, selection),
+    pub(super) fn handle_provider_catalog(&mut self, provider: &str, event: ProviderCatalogEvent) {
+        if self
+            .sessions
+            .get(provider)
+            .is_some_and(|session| session.suspended)
+        {
+            return;
         }
-    }
-
-    pub(super) fn handle_hyperliquid_catalog(&mut self, event: HyperliquidCatalogEvent) {
         match event {
-            HyperliquidCatalogEvent::SearchCompleted(result) => {
-                self.restore_hyperliquid_catalog_health(&result.provider);
+            ProviderCatalogEvent::SearchCompleted(result) => {
+                self.restore_provider_catalog_health(&result.provider);
                 self.handle_catalog_search(result);
             }
-            HyperliquidCatalogEvent::SelectionResolved {
+            ProviderCatalogEvent::SearchPreliminary(result) => {
+                self.handle_catalog_search_preview(result);
+            }
+            ProviderCatalogEvent::SelectionResolved {
                 consumer_id,
                 command_generation,
                 instrument,
             } => {
-                self.restore_hyperliquid_catalog_health(&instrument.provider);
+                self.restore_provider_catalog_health(&instrument.provider);
                 self.handle_catalog_selection(consumer_id, command_generation, instrument);
             }
-            HyperliquidCatalogEvent::Rejected {
+            ProviderCatalogEvent::Rejected {
                 rejection,
                 selection,
             } => self.handle_catalog_rejection(rejection, selection),
-            HyperliquidCatalogEvent::RefreshFailed { detail } => {
-                self.degrade_hyperliquid_catalog_health(&detail);
+            ProviderCatalogEvent::RefreshFailed(detail) => {
+                self.degrade_provider_catalog_health(provider, &detail);
             }
         }
     }
@@ -269,44 +257,50 @@ impl Coordinator<'_> {
     /// Records a background catalog refresh failure without changing realtime
     /// transport health. The retained catalog remains usable, so a catalog
     /// problem must never paint an online WebSocket as reconnecting.
-    pub(super) fn degrade_hyperliquid_catalog_health(&mut self, detail: &str) {
+    pub(super) fn degrade_provider_catalog_health(&mut self, provider: &str, detail: &str) {
         let current = self
             .engine
-            .provider_status("hyperliquid")
+            .provider_status(provider)
             .and_then(|status| status.generation);
         let Some(generation) = current else {
             return;
         };
         let healthy = self
             .engine
-            .provider_status("hyperliquid")
+            .provider_status(provider)
             .is_some_and(|status| status.health == ProviderHealth::Online);
-        if !healthy || self.hyperliquid_catalog_degraded.is_some() {
+        if !healthy
+            || self
+                .sessions
+                .get(provider)
+                .is_none_or(|session| session.catalog_degraded.is_some())
+        {
             return;
         }
-        self.hyperliquid_catalog_degraded = Some(generation);
-        eprintln!("Aeris engine Hyperliquid catalog refresh degraded: {detail}");
+        self.session_mut(provider).catalog_degraded = Some(generation);
+        eprintln!("Aeris engine {provider} catalog refresh degraded: {detail}");
     }
 
     /// Clears catalog degradation after a success from the same provider
     /// generation. This intentionally publishes no provider state: only the
     /// realtime worker owns transport Online/Recovering transitions.
-    pub(super) fn restore_hyperliquid_catalog_health(&mut self, provider: &str) {
-        if provider != "hyperliquid" {
-            return;
-        }
-        let Some(degraded) = self.hyperliquid_catalog_degraded else {
+    pub(super) fn restore_provider_catalog_health(&mut self, provider: &str) {
+        let Some(degraded) = self
+            .sessions
+            .get(provider)
+            .and_then(|session| session.catalog_degraded)
+        else {
             return;
         };
         let current = self
             .engine
-            .provider_status("hyperliquid")
+            .provider_status(provider)
             .and_then(|status| status.generation);
         if current != Some(degraded) {
-            self.hyperliquid_catalog_degraded = None;
+            self.session_mut(provider).catalog_degraded = None;
             return;
         }
-        self.hyperliquid_catalog_degraded = None;
+        self.session_mut(provider).catalog_degraded = None;
     }
 
     pub(super) fn handle_catalog_search_preview(

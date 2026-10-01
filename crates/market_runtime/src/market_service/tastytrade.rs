@@ -1,17 +1,18 @@
 //! Runtime-owned tastytrade catalog, multiplexed stream, and on-demand history.
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey,
-    COMMAND_CAPACITY, CatalogPublisher, Command, Coordinator, Duration, FailureStage, FormingBar,
-    HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, InstallProviderInstrument, Instant,
-    LIVE_BUFFER_CAPACITY, MAXIMUM_CONSUMERS, MarketBar, MarketTrade, Mutex, Ordering,
-    ProviderCatalogChannelSet, ProviderCatalogChannels, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderCoordinatorWake, ProviderGeneration,
-    ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRealtimeDispatch,
-    ProviderRuntimeLifecycle, ProviderRuntimeRecord, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver, RecvTimeoutError, SearchProviderInstruments,
-    SelectProviderInstrument, SyncSender, TopOfBookQuote, TrySendError, VecDeque,
-    broker_authorization, id, mpsc, thread,
+    COMMAND_CAPACITY, CatalogPublisher, Command, Coordinator, Duration, FormingBar,
+    HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, IndexedTradeMutation,
+    InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, MAXIMUM_CONSUMERS, MarketBar,
+    MarketTrade, Mutex, Ordering, ProviderCatalogChannelSet, ProviderCatalogChannels,
+    ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderCoordinatorWake,
+    ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRuntimeLifecycle,
+    ProviderRuntimeRecord, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver,
+    RecvTimeoutError, SearchProviderInstruments, SelectProviderInstrument, SyncSender,
+    TopOfBookQuote, TrySendError, VecDeque, broker_authorization, mpsc, thread,
 };
+#[cfg(test)]
+use super::{ProviderGeneration, id};
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
 };
@@ -24,6 +25,47 @@ use aeris_tastytrade_market_adapter::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const ENTITLEMENT: &str = "tastytrade-authorized";
+pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescriptor {
+    id: "tastytrade",
+    account_id: ENTITLEMENT,
+    capabilities: super::ProviderCapabilities {
+        historical_bars: true,
+        realtime_bars: true,
+        streams: super::StreamRequirements::BARS
+            .with(super::MarketStream::Trades)
+            .with(super::MarketStream::Quotes),
+    },
+    reconnect_delay: Duration::from_secs(3),
+    gap_policy: super::CandleGapPolicy::SessionGapsAllowed,
+    history_source: super::HistorySourceKind::ProviderSession,
+    connection_kind: super::ProviderConnectionKind::BrokerCapability,
+    recovery_policy: super::ProviderRecoveryPolicy::WorkerReconcilesDemand,
+    idle_stop_policy: super::IdleStopPolicy::WorkerManaged,
+    alert_demand_update: super::AlertDemandUpdate::WorkerManaged,
+    start: super::ProviderRuntimeRegistry::start_tastytrade_runtime,
+    flush_demand,
+    prepare_search: Some(prepare_search),
+    live_model: super::LiveModel::ProviderCandles,
+    supported_period: super::tastytrade_supported_period,
+    alert_overrides_instrument: true,
+    overflow_recovery_detail: "Tastytrade queue overflow requires recovery",
+    history_range_policy: super::HistoryRangePolicy::FromTimeOnly,
+    trade_continuity: super::TradeContinuity::Indexed,
+    candle_requires_connected: false,
+    candle_correction_detail: "Tastytrade candle correction requires covering history",
+    candle_wire_interval: Some(candle_period),
+    candle_demand_policy: super::CandleDemandPolicy::SessionManaged,
+    instrument_missing_detail: "Tastytrade instrument is not installed",
+};
+
+fn flush_demand(coordinator: &mut Coordinator<'_>) {
+    coordinator.flush_session_managed_demand(DESCRIPTOR.id);
+}
+
+fn prepare_search(api: &BrokerApi, consumer: u64, generation: u64) -> Result<(), String> {
+    api.register_search(consumer, generation)
+}
+
 const SNAPSHOT_BEGIN: u32 = 4;
 const SNAPSHOT_END: u32 = 8;
 const SNAPSHOT_SNIP: u32 = 16;
@@ -68,10 +110,6 @@ pub(super) enum RealtimeControl {
     Stop,
     AuthorizationChanged(bool),
     Recover(u64),
-}
-pub(super) struct IndexedTradeMutation {
-    index: String,
-    trade: Option<MarketTrade>,
 }
 pub(super) enum RealtimeEvent {
     Connecting(u64),
@@ -920,7 +958,7 @@ fn publish(
             Ok(())
         }
         Err(TrySendError::Full(_)) => {
-            wake.report_overflow(2, generation);
+            wake.report_overflow("tastytrade", generation);
             Err("Tastytrade event queue overflowed; continuity requires recovery".into())
         }
         Err(TrySendError::Disconnected(_)) => Err("Tastytrade coordinator stopped".into()),
@@ -1944,6 +1982,7 @@ impl Worker {
 }
 
 pub(super) fn start_record(
+    descriptor: super::ProviderDescriptor,
     completions: &SyncSender<Command>,
     wake: ProviderCoordinatorWake,
     activity: &Arc<Mutex<BTreeSet<String>>>,
@@ -1957,7 +1996,7 @@ pub(super) fn start_record(
     let (events_tx, events) = mpsc::sync_channel(REALTIME_CAPACITY);
     let (catalog_controls, catalog_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (catalog_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
-    let catalog = CatalogPublisher::new(catalog_tx, 2, wake.clone());
+    let catalog = CatalogPublisher::new(catalog_tx, descriptor.id, wake.clone());
     let worker_stop = Arc::clone(&cancellation);
     let worker_generation = Arc::clone(&generation);
     let worker_api = Arc::clone(api);
@@ -2024,6 +2063,7 @@ pub(super) fn start_record(
         }
     };
     Ok(ProviderRuntimeRecord {
+        descriptor,
         history: history_tx,
         cancellation,
         lifecycle,
@@ -2040,326 +2080,6 @@ pub(super) fn start_record(
         },
         workers: vec![catalog_worker, token_worker, provider_worker],
     })
-}
-
-impl Coordinator<'_> {
-    pub(super) fn handle_tastytrade_catalog(&mut self, event: CatalogEvent) {
-        if self.tastytrade_suspended {
-            return;
-        }
-        match event {
-            CatalogEvent::Search(search) => self.handle_catalog_search(search),
-            CatalogEvent::SearchPreliminary(search) => self.handle_catalog_search_preview(search),
-            CatalogEvent::Selection {
-                consumer_id,
-                command_generation,
-                instrument,
-            } => self.handle_catalog_selection(consumer_id, command_generation, instrument),
-            CatalogEvent::Rejected {
-                rejection,
-                selection,
-            } => self.handle_catalog_rejection(rejection, selection),
-        }
-    }
-    pub(super) fn flush_tastytrade_demand(&mut self) {
-        if let Some(generation) = self.tastytrade_recovery {
-            if let Some(record) = self.providers.records.get("tastytrade")
-                && let ProviderRealtimeDispatch::Tastytrade { controls, .. } = &record.realtime
-                && controls
-                    .try_send(RealtimeControl::Recover(generation))
-                    .is_ok()
-            {
-                self.tastytrade_recovery = None;
-            }
-            return;
-        }
-        if let Some(ready) = self.tastytrade_authorization {
-            if let Some(record) = self.providers.records.get("tastytrade")
-                && let ProviderRealtimeDispatch::Tastytrade { controls, .. } = &record.realtime
-                && controls
-                    .try_send(RealtimeControl::AuthorizationChanged(ready))
-                    .is_ok()
-            {
-                self.tastytrade_authorization = None;
-            }
-            return;
-        }
-        if self.tastytrade_suspended {
-            return;
-        }
-        let mut demand = Demand::default();
-        let mut instruments = BTreeMap::new();
-        for series in self
-            .candle_live
-            .keys()
-            .filter(|series| series.provider_id == "tastytrade")
-        {
-            if !self.engine.has_subscription(series) {
-                continue;
-            }
-            let Ok(instrument) = self.candle_instrument(series) else {
-                continue;
-            };
-            demand.series.push((series.clone(), instrument.clone()));
-            instruments.insert(instrument.instrument_id.clone(), instrument.clone());
-        }
-        for instrument in self.price_alerts.active_instruments("tastytrade") {
-            instruments.insert(instrument.instrument_id.clone(), instrument);
-        }
-        let trade_ids: BTreeSet<_> = self
-            .engine
-            .subscriptions()
-            .into_iter()
-            .filter(|(series, subscription)| {
-                series.provider_id == "tastytrade"
-                    && subscription.streams.contains(super::MarketStream::Trades)
-            })
-            .map(|(series, _)| series.instrument_id.clone())
-            .collect();
-        demand.tape_instruments = instruments
-            .values()
-            .filter(|instrument| trade_ids.contains(&instrument.instrument_id))
-            .cloned()
-            .collect();
-        demand.instruments = instruments.into_values().collect();
-        if self.tastytrade_demand.as_ref() == Some(&demand) {
-            return;
-        }
-        if demand.series.is_empty() && demand.instruments.is_empty() {
-            if self.tastytrade_demand.is_some()
-                && self.providers.stop("tastytrade").is_ok_and(|sent| sent)
-            {
-                self.tastytrade_demand = Some(demand);
-            }
-            return;
-        }
-        let Some(record) = self.providers.records.get("tastytrade") else {
-            return;
-        };
-        let ProviderRealtimeDispatch::Tastytrade { controls, .. } = &record.realtime else {
-            return;
-        };
-        if controls
-            .try_send(RealtimeControl::Subscribe(demand.clone()))
-            .is_ok()
-        {
-            self.tastytrade_demand = Some(demand);
-        }
-    }
-    pub(super) fn handle_tastytrade_realtime(&mut self, event: RealtimeEvent) {
-        if self.tastytrade_suspended || event.generation() < self.tastytrade_generation_floor {
-            return;
-        }
-        let generation = event.generation();
-        if self
-            .providers
-            .wake
-            .is_some_and(|wake| wake.overflowed(2, generation))
-        {
-            return;
-        }
-        match event {
-            RealtimeEvent::Connecting(generation) => {
-                self.candle_provider_connecting("tastytrade", generation);
-            }
-            RealtimeEvent::Connected(generation) => {
-                self.candle_provider_online("tastytrade", generation);
-            }
-            RealtimeEvent::Recovering(generation, detail) => {
-                self.candle_provider_recovering(
-                    "tastytrade",
-                    generation,
-                    "Tastytrade feed requires recovery",
-                );
-                self.broadcast_provider_for("tastytrade", Some(&detail));
-            }
-            RealtimeEvent::Disconnected(generation) => {
-                if let Ok(generation) = id(generation).map(ProviderGeneration) {
-                    let _ = self.engine.end_provider_session("tastytrade", generation);
-                }
-                self.broadcast_provider_for("tastytrade", None);
-            }
-            RealtimeEvent::Quote(generation, quote) => {
-                self.provider_quote("tastytrade", generation, &quote);
-            }
-            RealtimeEvent::CandleRecovery(generation, symbol) => {
-                self.recover_tastytrade_candle(generation, &symbol);
-            }
-            RealtimeEvent::Candle(generation, symbol, bar) => {
-                let Ok(generation) = id(generation).map(ProviderGeneration) else {
-                    return;
-                };
-                if self
-                    .engine
-                    .provider_status("tastytrade")
-                    .and_then(|status| status.generation)
-                    != Some(generation)
-                {
-                    return;
-                }
-                let failed = self
-                    .candle_live
-                    .iter_mut()
-                    .filter(|(series, live)| {
-                        series.provider_id == "tastytrade"
-                            && live.generation == generation
-                            && format!("{}{{={}}}", live.wire_coin, live.interval) == symbol
-                    })
-                    .filter_map(|(series, live)| {
-                        live.accept_bar(bar).is_err().then(|| series.clone())
-                    })
-                    .collect::<Vec<_>>();
-                for series in failed {
-                    self.candle_series_recovering(
-                        &series,
-                        generation,
-                        FailureStage::Aggregation,
-                        "Tastytrade candle correction requires covering history",
-                    );
-                }
-            }
-            RealtimeEvent::Trades(generation, instrument, changes) => {
-                self.accept_tastytrade_trades(generation, &instrument, &changes);
-            }
-            RealtimeEvent::Tape(generation, instrument, trades, truncated) => {
-                self.accept_tastytrade_history(generation, &instrument, &trades, truncated);
-            }
-        }
-    }
-    fn accept_tastytrade_history(
-        &mut self,
-        generation: u64,
-        instrument: &InstallProviderInstrument,
-        trades: &[MarketTrade],
-        truncated: bool,
-    ) {
-        if self
-            .engine
-            .provider_status("tastytrade")
-            .and_then(|status| status.generation)
-            .map(|g| g.0.get())
-            != Some(generation)
-        {
-            return;
-        }
-        if let Some(book) = self
-            .order_books
-            .get_mut(&("tastytrade".into(), instrument.instrument_id.clone()))
-        {
-            for trade in trades {
-                if book
-                    .replace_indexed_trade(&trade.trade_id, Some(trade), true)
-                    .is_err()
-                {
-                    self.request_tastytrade_recovery(generation);
-                    return;
-                }
-            }
-        }
-        if let Some(observed) = trades
-            .iter()
-            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
-            .max()
-        {
-            self.publish_non_bar_study_change(
-                "tastytrade",
-                &instrument.instrument_id,
-                &instrument.entitlement_id,
-                super::MarketStream::Trades,
-                observed,
-            );
-        }
-        self.broadcast_order_book("tastytrade", &instrument.instrument_id);
-        if truncated {
-            self.broadcast_provider_for("tastytrade", Some("Available tick history is partial"));
-        }
-    }
-    fn recover_tastytrade_candle(&mut self, generation: u64, symbol: &str) {
-        let Ok(generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        let series: Vec<_> = self
-            .candle_live
-            .iter()
-            .filter(|(series, live)| {
-                series.provider_id == "tastytrade"
-                    && live.generation == generation
-                    && format!("{}{{={}}}", live.wire_coin, live.interval) == symbol
-            })
-            .map(|(series, _)| series.clone())
-            .collect();
-        for series in series {
-            self.candle_series_recovering(
-                &series,
-                generation,
-                FailureStage::Aggregation,
-                "Candle correction is reloading the available history",
-            );
-        }
-    }
-    fn accept_tastytrade_trades(
-        &mut self,
-        generation: u64,
-        instrument: &InstallProviderInstrument,
-        changes: &[IndexedTradeMutation],
-    ) {
-        if self
-            .engine
-            .provider_status("tastytrade")
-            .and_then(|status| status.generation)
-            .map(|g| g.0.get())
-            != Some(generation)
-        {
-            return;
-        }
-        let mut failed = false;
-        if let Some(book) = self
-            .order_books
-            .get_mut(&("tastytrade".into(), instrument.instrument_id.clone()))
-        {
-            for change in changes {
-                if book
-                    .replace_indexed_trade(&change.index, change.trade.as_ref(), false)
-                    .is_err()
-                {
-                    failed = true;
-                    break;
-                }
-            }
-        }
-        if failed {
-            self.request_tastytrade_recovery(generation);
-            return;
-        }
-        for change in changes {
-            if let Some(trade) = &change.trade {
-                self.evaluate_price_alert_trade(trade);
-            }
-        }
-        if let Some(observed) = changes
-            .iter()
-            .filter_map(|change| change.trade.as_ref())
-            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
-            .max()
-        {
-            self.publish_non_bar_study_change(
-                "tastytrade",
-                &instrument.instrument_id,
-                &instrument.entitlement_id,
-                super::MarketStream::Trades,
-                observed,
-            );
-        }
-        self.broadcast_order_book("tastytrade", &instrument.instrument_id);
-    }
-    fn request_tastytrade_recovery(&mut self, generation: u64) {
-        self.tastytrade_recovery = Some(generation);
-        self.candle_provider_recovering(
-            "tastytrade",
-            generation,
-            "Tick state is reloading available history",
-        );
-    }
 }
 
 #[cfg(test)]
@@ -2769,7 +2489,11 @@ mod tests {
         let (control_tx, control_rx) = mpsc::sync_channel(4);
         let (event_tx, event_rx) = mpsc::sync_channel(4);
         let (wake_tx, _wake_rx) = mpsc::sync_channel(4);
-        let publisher = CatalogPublisher::new(event_tx, 2, ProviderCoordinatorWake::new(wake_tx));
+        let publisher = CatalogPublisher::new(
+            event_tx,
+            "tastytrade",
+            ProviderCoordinatorWake::new(wake_tx, ["tastytrade"]),
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker_api = Arc::clone(&api);
@@ -2822,7 +2546,7 @@ mod tests {
         let (completions, _) = mpsc::sync_channel(1);
         let (token_requests, _) = mpsc::sync_channel(1);
         let (_, token_replies) = mpsc::sync_channel(1);
-        let wake = ProviderCoordinatorWake::new(completions.clone());
+        let wake = ProviderCoordinatorWake::new(completions.clone(), ["tastytrade"]);
         let mut worker = Worker::new(WorkerPorts {
             api: Arc::new(BrokerApi::default()),
             controls,

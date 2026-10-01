@@ -137,12 +137,14 @@ struct ProviderChannels<'a> {
 impl ProviderChannels<'_> {
     fn publish_realtime(&self, event: RithmicRealtimeEvent) {
         let generation = event.generation();
-        if self.coordinator_wake.overflowed(0, generation) {
+        if self.coordinator_wake.overflowed("rithmic", generation) {
             return;
         }
         match self.realtime_publications.try_send(event) {
             Ok(()) => self.coordinator_wake.notify(),
-            Err(TrySendError::Full(_)) => self.coordinator_wake.report_overflow(0, generation),
+            Err(TrySendError::Full(_)) => {
+                self.coordinator_wake.report_overflow("rithmic", generation);
+            }
             Err(TrySendError::Disconnected(_)) => {}
         }
     }
@@ -1204,7 +1206,7 @@ fn run_demand(
         channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, None));
     }
     loop {
-        if channels.coordinator_wake.overflowed(0, generation) {
+        if channels.coordinator_wake.overflowed("rithmic", generation) {
             let _ = runtime.stop();
             return SelectionExit::Replace {
                 demand,
@@ -1340,9 +1342,9 @@ fn drain_live_events(
 ) -> Option<SelectionExit> {
     let (environment, environment_state) = environment;
     let mut pending_depth = None;
-    for _ in (0..CALLBACK_CAPACITY)
-        .take_while(|_| events.has_ready() && !channels.coordinator_wake.overflowed(0, generation))
-    {
+    for _ in (0..CALLBACK_CAPACITY).take_while(|_| {
+        events.has_ready() && !channels.coordinator_wake.overflowed("rithmic", generation)
+    }) {
         match try_recv_rithmic_event(runtime, events, retries, Instant::now()) {
             Ok(Some(AppliedRithmicEvent::Semantic(event))) => match event {
                 ProviderSessionEvent::InstrumentsDiscovered {
@@ -1847,7 +1849,7 @@ mod tests {
         let (publications, published) = mpsc::sync_channel(1);
         let publications = super::CatalogPublisher::new(
             publications,
-            0,
+            "rithmic",
             crate::market_service::ProviderCoordinatorWake::for_tests(),
         );
         let mut searches = BTreeMap::new();
@@ -1900,7 +1902,7 @@ mod tests {
         let (publications, published) = mpsc::sync_channel(1);
         let publications = super::CatalogPublisher::new(
             publications,
-            0,
+            "rithmic",
             crate::market_service::ProviderCoordinatorWake::for_tests(),
         );
 
@@ -1922,7 +1924,7 @@ mod tests {
         let (publications, published) = mpsc::sync_channel(4);
         let publications = super::CatalogPublisher::new(
             publications,
-            0,
+            "rithmic",
             crate::market_service::ProviderCoordinatorWake::for_tests(),
         );
         let mut searches = BTreeMap::from([(2, 41)]);
@@ -1966,7 +1968,7 @@ mod tests {
         let (publications, published) = mpsc::sync_channel(2);
         let publications = super::CatalogPublisher::new(
             publications,
-            0,
+            "rithmic",
             crate::market_service::ProviderCoordinatorWake::for_tests(),
         );
         let mut searches = BTreeMap::from([(2, 41)]);

@@ -28,8 +28,7 @@ pub use book::{
 };
 pub use candles::{
     HyperliquidCandlePage, HyperliquidLiveCandle, MAXIMUM_HYPERLIQUID_CANDLES, decode_candle_page,
-    decode_live_candle, hyperliquid_interval_for_period, merge_live_candle,
-    period_for_hyperliquid_interval,
+    decode_live_candle, hyperliquid_interval_for_period, period_for_hyperliquid_interval,
 };
 pub use context::{HyperliquidMarketContext, decode_asset_context};
 pub use decimal::{

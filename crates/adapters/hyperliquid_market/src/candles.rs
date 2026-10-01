@@ -305,8 +305,6 @@ pub fn decode_live_candle(
     Ok(candle)
 }
 
-pub use aeris_market_data::merge_live_candle;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,31 +519,5 @@ mod tests {
             period_for_hyperliquid_interval("1h").unwrap(),
             BarPeriod::time(3_600).unwrap()
         );
-    }
-
-    #[test]
-    fn live_replacements_roll_the_forming_candle_exactly_once() {
-        let decoded = decode_candle_page(
-            &raw(&page(150_000)),
-            BarPeriod::time(60).unwrap(),
-            6,
-            6,
-            150_000,
-        )
-        .expect("page");
-        let mut closed = decoded.bars;
-        let mut forming = decoded.forming;
-        let first = forming.unwrap();
-        // Duplicate replacement is idempotent.
-        assert!(!merge_live_candle(&mut closed, &mut forming, first).unwrap());
-        // A newer open timestamp completes the old forming candle.
-        let mut next = first;
-        next.exchange_timestamp_unix_nanos = 180_000_000_000;
-        next.exchange_timestamp_seconds = 180;
-        next.source_sequence = 3;
-        assert!(merge_live_candle(&mut closed, &mut forming, next).unwrap());
-        assert_eq!(closed.len(), 2);
-        // Stale updates fail instead of rewriting closed history.
-        assert!(merge_live_candle(&mut closed, &mut forming, first).is_err());
     }
 }

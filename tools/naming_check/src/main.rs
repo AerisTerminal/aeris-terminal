@@ -1251,14 +1251,58 @@ mod tests {
             ("history.rs", "fn history_completed("),
             ("instrument_selection.rs", "fn handle_catalog_selection("),
             ("publication.rs", "fn recover_overflowed_series_queues("),
-            ("realtime.rs", "fn rithmic_trade("),
-            ("realtime.rs", "fn hyperliquid_candle("),
+            ("realtime.rs", "fn handle_provider_event("),
+            ("realtime.rs", "fn accept_provider_trades("),
+            ("realtime.rs", "fn accept_provider_candle("),
+            ("provider_event.rs", "pub(super) enum ProviderEventKind"),
             ("runtime.rs", "impl ProviderRuntimeRegistry"),
         ] {
             assert!(
                 manifest(&format!("{root}/{path}")).contains(contract),
                 "market-service owner {path} lost {contract}"
             );
+        }
+        let realtime = manifest(&format!("{root}/realtime.rs"));
+        for superseded in [
+            "fn handle_rithmic_realtime(",
+            "fn handle_hyperliquid_realtime(",
+            "fn hyperliquid_candle(",
+        ] {
+            assert!(
+                !realtime.contains(superseded),
+                "parallel provider event handler remains: {superseded}"
+            );
+        }
+        let tastytrade = manifest(&format!("{root}/tastytrade.rs"));
+        assert!(
+            !production_prefix(&tastytrade).contains("impl Coordinator"),
+            "tastytrade provider module owns coordinator behavior"
+        );
+        let coordinator_source = manifest(&format!("{root}/coordinator.rs"));
+        let coordinator = production_prefix(&coordinator_source);
+        assert!(coordinator.contains("series_live: super::SeriesLiveMap::default()"));
+        for superseded in ["rithmic_live:", "candle_live:"] {
+            assert!(
+                !coordinator.contains(superseded),
+                "parallel live-series map remains: {superseded}"
+            );
+        }
+        for path in [
+            "coordinator.rs",
+            "history.rs",
+            "instrument_selection.rs",
+            "publication.rs",
+            "realtime.rs",
+            "runtime.rs",
+        ] {
+            let source = manifest(&format!("{root}/{path}"));
+            let production = production_prefix(&source);
+            for branch in ["provider_id == \"", "provider_id != \""] {
+                assert!(
+                    !production.contains(branch),
+                    "neutral market-service owner {path} branches on provider identity: {branch}"
+                );
+            }
         }
     }
     #[test]

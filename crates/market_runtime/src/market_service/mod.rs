@@ -22,10 +22,10 @@ use crate::{
 };
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
-    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderState,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
+    ProviderCatalogRejectionReason, ProviderConnectionState, ProviderInstrumentSearchResult,
+    ProviderState, SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
 };
-use aeris_hyperliquid_market_adapter::{HyperliquidLiveCandle, hyperliquid_interval_for_period};
+use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
 use aeris_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
     MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
@@ -132,6 +132,7 @@ pub struct MarketServiceStatus {
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
     broker_api: Arc<tastytrade::BrokerApi>,
+    provider_search_preparers: BTreeMap<&'static str, ProviderSearchPreparer>,
     broker_authorization: broker_authorization::BrokerAuthorization,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
@@ -233,40 +234,57 @@ enum Command {
 #[derive(Clone)]
 pub(crate) struct ProviderCoordinatorWake {
     commands: SyncSender<Command>,
-    // Three fixed provider slots: overflow is observable even when every queue is full.
-    overflow: Arc<[AtomicU64; 3]>,
+    slots: Arc<BTreeMap<&'static str, ProviderWakeSlot>>,
     pending: Arc<AtomicBool>,
-    catalog_overflow: Arc<[AtomicBool; 3]>,
     drain_cursor: Arc<std::sync::atomic::AtomicUsize>,
-    pending_overflow: Arc<[AtomicU64; 3]>,
+}
+
+#[derive(Default)]
+struct ProviderWakeSlot {
+    overflow: AtomicU64,
+    pending_overflow: AtomicU64,
+    catalog_overflow: AtomicBool,
 }
 
 impl ProviderCoordinatorWake {
-    fn new(commands: SyncSender<Command>) -> Self {
+    fn new(
+        commands: SyncSender<Command>,
+        provider_ids: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
         Self {
             commands,
             pending: Arc::new(AtomicBool::new(false)),
-            catalog_overflow: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
+            slots: Arc::new(
+                provider_ids
+                    .into_iter()
+                    .map(|id| (id, ProviderWakeSlot::default()))
+                    .collect(),
+            ),
             drain_cursor: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            overflow: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
-            pending_overflow: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn for_tests() -> Self {
         let (commands, _receiver) = mpsc::sync_channel(1);
-        Self::new(commands)
+        Self::new(commands, ["rithmic", "hyperliquid", "tastytrade"])
     }
 
-    pub(crate) fn report_overflow(&self, provider: usize, generation: u64) {
-        self.overflow[provider].fetch_max(generation, Ordering::AcqRel);
-        self.pending_overflow[provider].fetch_max(generation, Ordering::AcqRel);
+    pub(crate) fn report_overflow(&self, provider: &str, generation: u64) {
+        if let Some(slot) = self.slots.get(provider) {
+            slot.overflow.fetch_max(generation, Ordering::AcqRel);
+            slot.pending_overflow
+                .fetch_max(generation, Ordering::AcqRel);
+        }
         self.notify();
     }
 
-    pub(crate) fn overflowed(&self, provider: usize, generation: u64) -> bool {
-        generation != 0 && self.overflow[provider].load(Ordering::Acquire) >= generation
+    pub(crate) fn overflowed(&self, provider: &str, generation: u64) -> bool {
+        generation != 0
+            && self
+                .slots
+                .get(provider)
+                .is_some_and(|slot| slot.overflow.load(Ordering::Acquire) >= generation)
     }
 
     pub(crate) fn notify(&self) {
@@ -283,13 +301,13 @@ impl ProviderCoordinatorWake {
 /// outstanding catalog requests through a fixed out-of-band flag.
 pub(crate) struct CatalogPublisher<T> {
     events: SyncSender<T>,
-    provider: usize,
+    provider: &'static str,
     wake: ProviderCoordinatorWake,
 }
 impl<T> CatalogPublisher<T> {
     pub(crate) fn new(
         events: SyncSender<T>,
-        provider: usize,
+        provider: &'static str,
         wake: ProviderCoordinatorWake,
     ) -> Self {
         Self {
@@ -305,7 +323,9 @@ impl<T> CatalogPublisher<T> {
                 Ok(())
             }
             Err(TrySendError::Full(event)) => {
-                self.wake.catalog_overflow[self.provider].store(true, Ordering::Release);
+                if let Some(slot) = self.wake.slots.get(self.provider) {
+                    slot.catalog_overflow.store(true, Ordering::Release);
+                }
                 self.wake.notify();
                 Err(mpsc::SendError(event))
             }
@@ -362,6 +382,155 @@ struct HistorySnapshot {
     handoff_boundary_unix_nanos: Option<i64>,
     /// The provider cannot serve any earlier candles for this series.
     backwards_exhausted: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderInstrumentDemand {
+    instrument: InstallProviderInstrument,
+    streams: StreamRequirements,
+    alert_trades: bool,
+    alert_instrument: Option<InstallProviderInstrument>,
+    display_depth: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ProviderDemand {
+    instruments: Vec<ProviderInstrumentDemand>,
+    candle_series: Vec<(BarSeriesKey, StreamRequirements, InstallProviderInstrument)>,
+    explicit_trade_ids: BTreeSet<String>,
+    missing_catalog: bool,
+}
+
+enum ProviderControl {
+    Demand(ProviderDemand),
+    Stop,
+    AuthorizationChanged(bool),
+    Recover(u64),
+}
+
+impl ProviderDemand {
+    fn rithmic_wire(&self) -> Result<RithmicRealtimeDemand, String> {
+        if self.missing_catalog {
+            return Err("Rithmic instrument is not installed".to_string());
+        }
+        Ok(RithmicRealtimeDemand {
+            instruments: self
+                .instruments
+                .iter()
+                .filter_map(|requested| {
+                    let trades = requested.alert_trades
+                        || requested.streams.contains(MarketStream::Bars)
+                        || requested.streams.contains(MarketStream::Trades)
+                        || requested.streams.contains(MarketStream::Depth);
+                    let quotes = requested.streams.contains(MarketStream::Quotes);
+                    let order_book = requested.streams.contains(MarketStream::Depth);
+                    (trades || quotes || order_book).then_some(RithmicInstrumentDemand {
+                        instrument: requested.instrument.clone(),
+                        trades,
+                        quotes,
+                        order_book,
+                    })
+                })
+                .collect(),
+        })
+    }
+
+    fn tastytrade_wire(&self) -> tastytrade::Demand {
+        let mut wire = tastytrade::Demand {
+            series: self
+                .candle_series
+                .iter()
+                .map(|(series, _, instrument)| (series.clone(), instrument.clone()))
+                .collect(),
+            ..tastytrade::Demand::default()
+        };
+        for requested in &self.instruments {
+            if self
+                .explicit_trade_ids
+                .contains(&requested.instrument.instrument_id)
+            {
+                wire.tape_instruments.push(requested.instrument.clone());
+            }
+            wire.instruments.push(requested.instrument.clone());
+        }
+        wire
+    }
+
+    fn hyperliquid_wire(&self) -> HyperliquidDemand {
+        let mut candles = BTreeSet::new();
+        let mut trades = BTreeSet::new();
+        let mut quotes = BTreeSet::new();
+        let mut books = BTreeSet::new();
+        for (series, streams, instrument) in &self.candle_series {
+            let (Ok(price_scale), Ok(quantity_scale), Ok(interval)) = (
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+                hyperliquid_interval_for_period(series.period),
+            ) else {
+                continue;
+            };
+            let mapping = HyperliquidInstrumentDemand {
+                wire_coin: instrument.provider_symbol.clone(),
+                instrument_id: series.instrument_id.clone(),
+                entitlement_id: series.entitlement_id.clone(),
+                price_scale,
+                quantity_scale,
+            };
+            if streams.contains(MarketStream::Bars) {
+                candles.insert(HyperliquidCandleDemand {
+                    instrument: mapping.clone(),
+                    interval: interval.to_string(),
+                });
+            }
+            if streams.contains(MarketStream::Trades) {
+                trades.insert(mapping.clone());
+            }
+            if streams.contains(MarketStream::Quotes) || streams.contains(MarketStream::Depth) {
+                quotes.insert(mapping.clone());
+            }
+            if streams.contains(MarketStream::Depth) {
+                books.insert(mapping);
+            }
+        }
+        for requested in self.instruments.iter().filter(|item| item.alert_trades) {
+            let Some(instrument) = requested.alert_instrument.as_ref() else {
+                continue;
+            };
+            let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+            ) else {
+                continue;
+            };
+            trades.insert(HyperliquidInstrumentDemand {
+                wire_coin: instrument.provider_symbol.clone(),
+                instrument_id: instrument.instrument_id.clone(),
+                entitlement_id: instrument.entitlement_id.clone(),
+                price_scale,
+                quantity_scale,
+            });
+        }
+        HyperliquidDemand {
+            candles: candles.into_iter().collect(),
+            trades: trades.into_iter().collect(),
+            quotes: quotes.into_iter().collect(),
+            books: books.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ProviderSessionSlot {
+    accepted: Option<ProviderDemand>,
+    pending: Option<ProviderDemand>,
+    stop_pending: Option<ProviderGeneration>,
+    engaged: bool,
+    demand_dirty: bool,
+    authorization: Option<bool>,
+    suspended: bool,
+    generation_floor: u64,
+    recovery: Option<u64>,
+    catalog_degraded: Option<ProviderGeneration>,
 }
 
 /// Everything one Hyperliquid series needs to close its history/live seam.
@@ -437,6 +606,7 @@ struct ConsumerEvents {
 
 struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
+    trade_continuity: TradeContinuity,
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
     recent_trades: VecDeque<crate::RetainedMarketTrade>,
@@ -451,7 +621,14 @@ struct ProviderOrderBook {
     retention_clock_unix_nanos: i64,
 }
 
+struct IndexedTradeMutation {
+    index: String,
+    trade: Option<MarketTrade>,
+}
+
+mod provider_event;
 mod realtime;
+use provider_event::{ProviderDisconnect, ProviderEvent, ProviderEventKind, ProviderTradeBatch};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LiveHistoryState {
@@ -469,6 +646,7 @@ enum LiveHistoryState {
 struct CandleLiveHandoff {
     series: BarSeriesKey,
     generation: ProviderGeneration,
+    gap_policy: CandleGapPolicy,
     wire_coin: String,
     interval: String,
     price_scale: u8,
@@ -539,8 +717,343 @@ struct LiveRithmicHistory;
 #[derive(Default)]
 struct LiveHyperliquidHistory(aeris_hyperliquid_market_adapter::HyperliquidHttpClient);
 
+#[derive(Clone, Copy)]
+struct ProviderDescriptor {
+    id: &'static str,
+    account_id: &'static str,
+    capabilities: ProviderCapabilities,
+    reconnect_delay: Duration,
+    gap_policy: CandleGapPolicy,
+    history_source: HistorySourceKind,
+    connection_kind: ProviderConnectionKind,
+    recovery_policy: ProviderRecoveryPolicy,
+    idle_stop_policy: IdleStopPolicy,
+    alert_demand_update: AlertDemandUpdate,
+    start: ProviderRuntimeStarter,
+    flush_demand: for<'a> fn(&mut Coordinator<'a>),
+    prepare_search: Option<ProviderSearchPreparer>,
+    live_model: LiveModel,
+    supported_period: fn(BarPeriod) -> Result<(), String>,
+    alert_overrides_instrument: bool,
+    overflow_recovery_detail: &'static str,
+    history_range_policy: HistoryRangePolicy,
+    trade_continuity: TradeContinuity,
+    candle_requires_connected: bool,
+    candle_correction_detail: &'static str,
+    candle_wire_interval: Option<fn(BarPeriod) -> Result<String, String>>,
+    candle_demand_policy: CandleDemandPolicy,
+    instrument_missing_detail: &'static str,
+}
+
+enum SeriesLive {
+    TradeBuilt(RithmicLiveHandoff),
+    ProviderCandles(CandleLiveHandoff),
+}
+
+#[derive(Default)]
+struct SeriesLiveMap(BTreeMap<BarSeriesKey, SeriesLive>);
+
+impl SeriesLiveMap {
+    fn trade_contains_key(&self, series: &BarSeriesKey) -> bool {
+        self.trade(series).is_some()
+    }
+
+    fn candle_contains_key(&self, series: &BarSeriesKey) -> bool {
+        self.candle(series).is_some()
+    }
+
+    fn trades_are_empty(&self) -> bool {
+        self.trade_keys().next().is_none()
+    }
+
+    #[cfg(test)]
+    fn candles_are_empty(&self) -> bool {
+        self.candle_keys().next().is_none()
+    }
+
+    fn trade(&self, series: &BarSeriesKey) -> Option<&RithmicLiveHandoff> {
+        match self.0.get(series)? {
+            SeriesLive::TradeBuilt(live) => Some(live),
+            SeriesLive::ProviderCandles(_) => None,
+        }
+    }
+
+    fn trade_mut(&mut self, series: &BarSeriesKey) -> Option<&mut RithmicLiveHandoff> {
+        match self.0.get_mut(series)? {
+            SeriesLive::TradeBuilt(live) => Some(live),
+            SeriesLive::ProviderCandles(_) => None,
+        }
+    }
+
+    fn candle(&self, series: &BarSeriesKey) -> Option<&CandleLiveHandoff> {
+        match self.0.get(series)? {
+            SeriesLive::ProviderCandles(live) => Some(live),
+            SeriesLive::TradeBuilt(_) => None,
+        }
+    }
+
+    fn candle_mut(&mut self, series: &BarSeriesKey) -> Option<&mut CandleLiveHandoff> {
+        match self.0.get_mut(series)? {
+            SeriesLive::ProviderCandles(live) => Some(live),
+            SeriesLive::TradeBuilt(_) => None,
+        }
+    }
+
+    fn insert_trade(&mut self, series: BarSeriesKey, live: RithmicLiveHandoff) {
+        self.0.insert(series, SeriesLive::TradeBuilt(live));
+    }
+
+    fn insert_candle(&mut self, series: BarSeriesKey, live: CandleLiveHandoff) {
+        self.0.insert(series, SeriesLive::ProviderCandles(live));
+    }
+
+    fn trade_keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
+        self.0.iter().filter_map(|(series, live)| {
+            matches!(live, SeriesLive::TradeBuilt(_)).then_some(series)
+        })
+    }
+
+    fn candle_keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
+        self.0.iter().filter_map(|(series, live)| {
+            matches!(live, SeriesLive::ProviderCandles(_)).then_some(series)
+        })
+    }
+
+    fn candle_iter(&self) -> impl Iterator<Item = (&BarSeriesKey, &CandleLiveHandoff)> {
+        self.0.iter().filter_map(|(series, live)| match live {
+            SeriesLive::ProviderCandles(live) => Some((series, live)),
+            SeriesLive::TradeBuilt(_) => None,
+        })
+    }
+
+    fn candle_iter_mut(&mut self) -> impl Iterator<Item = (&BarSeriesKey, &mut CandleLiveHandoff)> {
+        self.0.iter_mut().filter_map(|(series, live)| match live {
+            SeriesLive::ProviderCandles(live) => Some((series, live)),
+            SeriesLive::TradeBuilt(_) => None,
+        })
+    }
+
+    fn trade_values_mut(&mut self) -> impl Iterator<Item = &mut RithmicLiveHandoff> {
+        self.0.values_mut().filter_map(|live| match live {
+            SeriesLive::TradeBuilt(live) => Some(live),
+            SeriesLive::ProviderCandles(_) => None,
+        })
+    }
+
+    fn candle_values_mut(&mut self) -> impl Iterator<Item = &mut CandleLiveHandoff> {
+        self.0.values_mut().filter_map(|live| match live {
+            SeriesLive::ProviderCandles(live) => Some(live),
+            SeriesLive::TradeBuilt(_) => None,
+        })
+    }
+
+    fn trade_iter_mut(&mut self) -> impl Iterator<Item = (&BarSeriesKey, &mut RithmicLiveHandoff)> {
+        self.0.iter_mut().filter_map(|(series, live)| match live {
+            SeriesLive::TradeBuilt(live) => Some((series, live)),
+            SeriesLive::ProviderCandles(_) => None,
+        })
+    }
+
+    fn trade_count(&self) -> usize {
+        self.trade_keys().count()
+    }
+
+    fn candle_count(&self) -> usize {
+        self.candle_keys().count()
+    }
+
+    fn retain_trades(
+        &mut self,
+        mut keep: impl FnMut(&BarSeriesKey, &mut RithmicLiveHandoff) -> bool,
+    ) {
+        self.0.retain(|series, live| match live {
+            SeriesLive::TradeBuilt(live) => keep(series, live),
+            SeriesLive::ProviderCandles(_) => true,
+        });
+    }
+
+    fn retain_candles(
+        &mut self,
+        mut keep: impl FnMut(&BarSeriesKey, &mut CandleLiveHandoff) -> bool,
+    ) {
+        self.0.retain(|series, live| match live {
+            SeriesLive::ProviderCandles(live) => keep(series, live),
+            SeriesLive::TradeBuilt(_) => true,
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveModel {
+    TradeBuilt,
+    ProviderCandles,
+}
+
+type ProviderRuntimeStarter = fn(
+    ProviderRuntimeSpec,
+    &SyncSender<Command>,
+    ProviderCoordinatorWake,
+    &MarketEngine,
+    &Arc<Mutex<BTreeSet<String>>>,
+    &Arc<tastytrade::BrokerApi>,
+) -> Result<ProviderRuntimeRecord, String>;
+
+type ProviderSearchPreparer = fn(&tastytrade::BrokerApi, u64, u64) -> Result<(), String>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandleGapPolicy {
+    Contiguous,
+    SessionGapsAllowed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryRangePolicy {
+    Bounded,
+    FromTimeOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistorySourceKind {
+    DedicatedWorker(&'static str),
+    ProviderSession,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderConnectionKind {
+    NativeCredentials,
+    Public,
+    BrokerCapability,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderRecoveryPolicy {
+    CoordinatorReissuesDemand,
+    WorkerReconcilesDemand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IdleStopPolicy {
+    Coordinator,
+    WorkerManaged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AlertDemandUpdate {
+    Immediate,
+    MarkDirty,
+    WorkerManaged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TradeContinuity {
+    Sequence,
+    Indexed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandleDemandPolicy {
+    SessionManaged,
+    ReconcileAfterSelection,
+}
+
+const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "rithmic",
+    account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
+    capabilities: ProviderCapabilities {
+        historical_bars: true,
+        realtime_bars: true,
+        streams: StreamRequirements::BARS
+            .with(MarketStream::Trades)
+            .with(MarketStream::Quotes)
+            .with(MarketStream::Depth),
+    },
+    reconnect_delay: PROVIDER_RECONNECT_DELAY,
+    gap_policy: CandleGapPolicy::Contiguous,
+    history_source: HistorySourceKind::DedicatedWorker("aeris-rithmic-history"),
+    connection_kind: ProviderConnectionKind::NativeCredentials,
+    recovery_policy: ProviderRecoveryPolicy::CoordinatorReissuesDemand,
+    idle_stop_policy: IdleStopPolicy::Coordinator,
+    alert_demand_update: AlertDemandUpdate::Immediate,
+    start: ProviderRuntimeRegistry::start_rithmic_runtime,
+    flush_demand: flush_rithmic_provider_demand,
+    prepare_search: None,
+    live_model: LiveModel::TradeBuilt,
+    supported_period: rithmic_supported_period,
+    alert_overrides_instrument: false,
+    overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+    history_range_policy: HistoryRangePolicy::Bounded,
+    trade_continuity: TradeContinuity::Sequence,
+    candle_requires_connected: false,
+    candle_correction_detail: "Provider candle correction requires covering history",
+    candle_wire_interval: None,
+    candle_demand_policy: CandleDemandPolicy::SessionManaged,
+    instrument_missing_detail: "Rithmic instrument is not installed",
+};
+
+const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
+    id: "hyperliquid",
+    account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID,
+    capabilities: RITHMIC_DESCRIPTOR.capabilities,
+    reconnect_delay: PROVIDER_RECONNECT_DELAY,
+    gap_policy: CandleGapPolicy::Contiguous,
+    history_source: HistorySourceKind::DedicatedWorker("aeris-hyperliquid-history"),
+    connection_kind: ProviderConnectionKind::Public,
+    recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
+    idle_stop_policy: IdleStopPolicy::Coordinator,
+    alert_demand_update: AlertDemandUpdate::MarkDirty,
+    start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
+    flush_demand: flush_hyperliquid_provider_demand,
+    prepare_search: None,
+    live_model: LiveModel::ProviderCandles,
+    supported_period: hyperliquid_supported_period,
+    alert_overrides_instrument: false,
+    overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+    history_range_policy: HistoryRangePolicy::Bounded,
+    trade_continuity: TradeContinuity::Sequence,
+    candle_requires_connected: true,
+    candle_correction_detail: "Hyperliquid candle replacement requires covering history",
+    candle_wire_interval: Some(hyperliquid_candle_interval),
+    candle_demand_policy: CandleDemandPolicy::ReconcileAfterSelection,
+    instrument_missing_detail: "Hyperliquid instrument is not installed",
+};
+
+fn hyperliquid_candle_interval(period: BarPeriod) -> Result<String, String> {
+    hyperliquid_interval_for_period(period)
+        .map(str::to_owned)
+        .map_err(|_| "Hyperliquid history is unavailable for this interval".to_string())
+}
+
+#[cfg(test)]
+const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
+    RITHMIC_DESCRIPTOR,
+    HYPERLIQUID_DESCRIPTOR,
+    tastytrade::DESCRIPTOR,
+];
+
+fn flush_rithmic_provider_demand(coordinator: &mut Coordinator<'_>) {
+    coordinator.flush_rithmic_demand();
+}
+
+fn flush_hyperliquid_provider_demand(coordinator: &mut Coordinator<'_>) {
+    coordinator.flush_hyperliquid_demand();
+}
+
+fn rithmic_supported_period(period: BarPeriod) -> Result<(), String> {
+    crate::rithmic_history::chart_interval(period).map(|_| ())
+}
+
+fn hyperliquid_supported_period(period: BarPeriod) -> Result<(), String> {
+    hyperliquid_interval_for_period(period)
+        .map(|_| ())
+        .map_err(|_| "Provider history is unavailable for this interval".to_string())
+}
+
+fn tastytrade_supported_period(period: BarPeriod) -> Result<(), String> {
+    tastytrade::candle_period(period).map(|_| ())
+}
+
 struct ProviderRuntimeSpec {
-    provider_id: &'static str,
+    descriptor: ProviderDescriptor,
     history: Option<Box<dyn HistorySource>>,
     realtime: ProviderRealtimeSpec,
 }
@@ -552,14 +1065,14 @@ struct ProviderRealtimeSpec {
 impl ProviderRuntimeSpec {
     fn tastytrade() -> Self {
         Self {
-            provider_id: "tastytrade",
+            descriptor: tastytrade::DESCRIPTOR,
             history: None,
             realtime: ProviderRealtimeSpec { enabled: true },
         }
     }
     fn rithmic(history: Box<dyn HistorySource>, enabled: bool) -> Self {
         Self {
-            provider_id: "rithmic",
+            descriptor: RITHMIC_DESCRIPTOR,
             history: Some(history),
             realtime: ProviderRealtimeSpec { enabled },
         }
@@ -567,7 +1080,7 @@ impl ProviderRuntimeSpec {
 
     fn hyperliquid(history: Box<dyn HistorySource>, enabled: bool) -> Self {
         Self {
-            provider_id: "hyperliquid",
+            descriptor: HYPERLIQUID_DESCRIPTOR,
             history: Some(history),
             realtime: ProviderRealtimeSpec { enabled },
         }
@@ -668,6 +1181,7 @@ enum ProviderCatalogChannelSet {
 }
 
 struct ProviderRuntimeRecord {
+    descriptor: ProviderDescriptor,
     history: SyncSender<HistoryRequest>,
     cancellation: Arc<AtomicBool>,
     lifecycle: Arc<ProviderRuntimeLifecycle>,
@@ -698,6 +1212,7 @@ impl StartedProviderRuntime {
 struct ProviderRuntimeRegistry {
     wake: ProviderCoordinatorWake,
     records: BTreeMap<&'static str, ProviderRuntimeRecord>,
+    order: Vec<&'static str>,
 }
 
 struct ActiveWorkerGuard {
@@ -727,9 +1242,18 @@ impl Drop for ActiveWorkerGuard {
 struct ProviderDispatch<'a> {
     wake: Option<&'a ProviderCoordinatorWake>,
     records: BTreeMap<&'static str, ProviderDispatchRecord<'a>>,
+    lanes: Vec<ProviderEventLane>,
+}
+
+#[derive(Clone, Copy)]
+enum ProviderEventLane {
+    Realtime(&'static str),
+    Catalog(&'static str),
+    DisplayDepth(&'static str),
 }
 
 struct ProviderDispatchRecord<'a> {
+    descriptor: ProviderDescriptor,
     history: &'a SyncSender<HistoryRequest>,
     lifecycle: Option<&'a ProviderRuntimeLifecycle>,
     realtime: ProviderRealtimeDispatch<'a>,
@@ -803,13 +1327,161 @@ enum ProviderCatalogCommand {
 }
 
 enum ProviderRuntimeEvent {
-    TastytradeRealtime(tastytrade::RealtimeEvent),
-    TastytradeCatalog(tastytrade::CatalogEvent),
-    RithmicRealtime(RithmicRealtimeEvent),
-    RithmicCatalog(RithmicCatalogEvent),
-    HyperliquidRealtime(HyperliquidRealtimeEvent),
-    HyperliquidDisplayDepth(HyperliquidDisplayDepthEvent),
-    HyperliquidCatalog(HyperliquidCatalogEvent),
+    Realtime(ProviderEvent),
+    DisplayDepth(&'static str, ProviderDisplayDepthEvent),
+    Catalog(&'static str, ProviderCatalogEvent),
+}
+
+enum ProviderDisplayDepthEvent {
+    Reset {
+        display_generation: u64,
+    },
+    Snapshot {
+        provider_generation: u64,
+        display_generation: u64,
+        snapshot: DepthSnapshot,
+    },
+}
+
+impl From<HyperliquidDisplayDepthEvent> for ProviderDisplayDepthEvent {
+    fn from(event: HyperliquidDisplayDepthEvent) -> Self {
+        match event {
+            HyperliquidDisplayDepthEvent::Reset { display_generation } => {
+                Self::Reset { display_generation }
+            }
+            HyperliquidDisplayDepthEvent::Snapshot(display) => Self::Snapshot {
+                provider_generation: display.provider_generation,
+                display_generation: display.display_generation,
+                snapshot: display.snapshot,
+            },
+        }
+    }
+}
+
+enum ProviderCatalogEvent {
+    SearchCompleted(ProviderInstrumentSearchResult),
+    SearchPreliminary(ProviderInstrumentSearchResult),
+    SelectionResolved {
+        consumer_id: u64,
+        command_generation: u64,
+        instrument: InstallProviderInstrument,
+    },
+    Rejected {
+        rejection: ProviderCatalogRejected,
+        selection: bool,
+    },
+    RefreshFailed(String),
+}
+
+impl From<RithmicCatalogEvent> for ProviderCatalogEvent {
+    fn from(event: RithmicCatalogEvent) -> Self {
+        match event {
+            RithmicCatalogEvent::SearchCompleted(result) => Self::SearchCompleted(result),
+            RithmicCatalogEvent::SelectionResolved {
+                consumer_id,
+                command_generation,
+                instrument,
+            } => Self::SelectionResolved {
+                consumer_id,
+                command_generation,
+                instrument,
+            },
+            RithmicCatalogEvent::Rejected {
+                rejection,
+                selection,
+            } => Self::Rejected {
+                rejection,
+                selection,
+            },
+        }
+    }
+}
+
+impl From<HyperliquidCatalogEvent> for ProviderCatalogEvent {
+    fn from(event: HyperliquidCatalogEvent) -> Self {
+        match event {
+            HyperliquidCatalogEvent::SearchCompleted(result) => Self::SearchCompleted(result),
+            HyperliquidCatalogEvent::SelectionResolved {
+                consumer_id,
+                command_generation,
+                instrument,
+            } => Self::SelectionResolved {
+                consumer_id,
+                command_generation,
+                instrument,
+            },
+            HyperliquidCatalogEvent::Rejected {
+                rejection,
+                selection,
+            } => Self::Rejected {
+                rejection,
+                selection,
+            },
+            HyperliquidCatalogEvent::RefreshFailed { detail } => Self::RefreshFailed(detail),
+        }
+    }
+}
+
+impl From<tastytrade::CatalogEvent> for ProviderCatalogEvent {
+    fn from(event: tastytrade::CatalogEvent) -> Self {
+        match event {
+            tastytrade::CatalogEvent::Search(result) => Self::SearchCompleted(result),
+            tastytrade::CatalogEvent::SearchPreliminary(result) => Self::SearchPreliminary(result),
+            tastytrade::CatalogEvent::Selection {
+                consumer_id,
+                command_generation,
+                instrument,
+            } => Self::SelectionResolved {
+                consumer_id,
+                command_generation,
+                instrument,
+            },
+            tastytrade::CatalogEvent::Rejected {
+                rejection,
+                selection,
+            } => Self::Rejected {
+                rejection,
+                selection,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProviderEventMetadata {
+    provider: &'static str,
+    generation: u64,
+    reconnecting: bool,
+    transport_rtt_nanos: Option<u64>,
+}
+
+impl ProviderRuntimeEvent {
+    fn metadata(&self) -> Option<ProviderEventMetadata> {
+        let (provider, generation, reconnecting, transport_rtt_nanos) = match self {
+            Self::Realtime(event) => (
+                event.provider,
+                event.generation,
+                matches!(
+                    event.kind,
+                    ProviderEventKind::Connecting
+                        | ProviderEventKind::Recovering { .. }
+                        | ProviderEventKind::Failed(..)
+                        | ProviderEventKind::Disconnected(..)
+                ),
+                match event.kind {
+                    ProviderEventKind::Heartbeat(rtt) => rtt,
+                    _ => None,
+                },
+            ),
+            Self::Catalog(..) | Self::DisplayDepth(..) => return None,
+        };
+        Some(ProviderEventMetadata {
+            provider,
+            generation,
+            reconnecting,
+            transport_rtt_nanos,
+        })
+    }
 }
 
 mod broker_authorization;
@@ -849,7 +1521,14 @@ fn configured_reconnect_delay(engine: &MarketEngine, provider: &str) -> Result<D
         .ok_or_else(|| format!("{provider} reconnect policy is unavailable"))
 }
 
+#[cfg(test)]
 fn configured_engine() -> Result<MarketEngine, String> {
+    configured_engine_from_descriptors(BUILT_IN_PROVIDER_DESCRIPTORS)
+}
+
+fn configured_engine_from_descriptors(
+    descriptors: &[ProviderDescriptor],
+) -> Result<MarketEngine, String> {
     let mut engine = MarketEngine::new(MarketEngineConfig {
         maximum_consumers: NonZeroUsize::new(MAXIMUM_CONSUMERS).unwrap_or(NonZeroUsize::MIN),
         maximum_series: NonZeroUsize::new(MAXIMUM_SERIES).unwrap_or(NonZeroUsize::MIN),
@@ -857,56 +1536,18 @@ fn configured_engine() -> Result<MarketEngine, String> {
         // runtime compaction keeps each series at/below its high watermark.
         maximum_bars: NonZeroUsize::new(MAXIMUM_STORED_BARS).unwrap_or(NonZeroUsize::MIN),
     });
-    engine
-        .register_provider(
-            "rithmic".to_string(),
-            ProviderConfig {
-                account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID.to_string(),
-                capabilities: ProviderCapabilities {
-                    historical_bars: true,
-                    realtime_bars: true,
-                    streams: StreamRequirements::BARS
-                        .with(MarketStream::Trades)
-                        .with(MarketStream::Quotes)
-                        .with(MarketStream::Depth),
+    for descriptor in descriptors {
+        engine
+            .register_provider(
+                descriptor.id.to_string(),
+                ProviderConfig {
+                    account_id: descriptor.account_id.to_string(),
+                    capabilities: descriptor.capabilities,
+                    reconnect_delay: descriptor.reconnect_delay,
                 },
-                reconnect_delay: PROVIDER_RECONNECT_DELAY,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-    engine
-        .register_provider(
-            "hyperliquid".to_string(),
-            ProviderConfig {
-                account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID.to_string(),
-                capabilities: ProviderCapabilities {
-                    historical_bars: true,
-                    realtime_bars: true,
-                    streams: StreamRequirements::BARS
-                        .with(MarketStream::Trades)
-                        .with(MarketStream::Quotes)
-                        .with(MarketStream::Depth),
-                },
-                reconnect_delay: PROVIDER_RECONNECT_DELAY,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-    engine
-        .register_provider(
-            "tastytrade".into(),
-            ProviderConfig {
-                account_id: tastytrade::ENTITLEMENT.into(),
-                capabilities: ProviderCapabilities {
-                    historical_bars: true,
-                    realtime_bars: true,
-                    streams: StreamRequirements::BARS
-                        .with(MarketStream::Trades)
-                        .with(MarketStream::Quotes),
-                },
-                reconnect_delay: Duration::from_secs(3),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
+    }
     Ok(engine)
 }
 

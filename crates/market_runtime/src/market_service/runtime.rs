@@ -6,30 +6,24 @@ use super::{
     MarketRuntime, MarketService, MarketServiceStatus, Mutex, NativeStudyRegistration, Ordering,
     OwnedCoordinatorChannels, ProviderCatalogChannelSet, ProviderCatalogChannels,
     ProviderCatalogCommand, ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch,
-    ProviderDispatchRecord, ProviderRealtimeChannelSet, ProviderRealtimeChannels,
-    ProviderRealtimeDispatch, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
-    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, RithmicRealtimeControl,
-    RithmicRealtimeEvent, SearchProviderInstruments, SelectProviderInstrument,
+    ProviderDispatchRecord, ProviderEventLane, ProviderRealtimeChannelSet,
+    ProviderRealtimeChannels, ProviderRealtimeDispatch, ProviderRuntimeEvent,
+    ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec,
+    REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl,
+    RithmicRealtimeControl, SearchProviderInstruments, SelectProviderInstrument,
     StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
-    Viewport, WorkspaceId, configured_engine, configured_reconnect_delay, id, mpsc,
-    spawn_coordinator, spawn_history_worker, thread, try_send_hyperliquid_catalog,
-    try_send_rithmic_catalog, validate_provider_instrument, validate_provider_search,
-    validate_provider_selection,
+    Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc, spawn_coordinator,
+    spawn_history_worker, thread, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
+    validate_provider_instrument, validate_provider_search, validate_provider_selection,
 };
 use crate::MarketRuntimeEvent;
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
 };
-use crate::hyperliquid_realtime::{
-    HyperliquidCatalogControl, HyperliquidRealtimeControl, HyperliquidRealtimeEvent,
-};
+use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidRealtimeControl};
 
 impl HistorySource for LiveRithmicHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
-        if request.series.provider_id != "rithmic" {
-            return Err("Rithmic history received another provider".to_string());
-        }
         fetch_rithmic_history(request)
     }
 }
@@ -58,9 +52,6 @@ fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, St
 
 impl HistorySource for LiveHyperliquidHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
-        if request.series.provider_id != "hyperliquid" {
-            return Err("Hyperliquid history received another provider".to_string());
-        }
         let installed = request
             .instrument
             .as_ref()
@@ -92,20 +83,24 @@ impl ProviderRuntimeRegistry {
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
         broker_api: &Arc<super::tastytrade::BrokerApi>,
     ) -> Result<Self, String> {
-        let wake = ProviderCoordinatorWake::new(completions.clone());
+        let wake = ProviderCoordinatorWake::new(
+            completions.clone(),
+            specs.iter().map(|spec| spec.descriptor.id),
+        );
         let mut registry = Self {
             wake: wake.clone(),
             records: BTreeMap::new(),
+            order: Vec::new(),
         };
         for spec in specs {
-            if registry.records.contains_key(spec.provider_id) {
+            if registry.records.contains_key(spec.descriptor.id) {
                 registry.cancel_and_join();
                 return Err(format!(
                     "provider runtime {} is configured more than once",
-                    spec.provider_id
+                    spec.descriptor.id
                 ));
             }
-            let provider_id = spec.provider_id;
+            let provider_id = spec.descriptor.id;
             let record = match Self::start_record(
                 spec,
                 completions,
@@ -121,6 +116,7 @@ impl ProviderRuntimeRegistry {
                 }
             };
             registry.records.insert(provider_id, record);
+            registry.order.push(provider_id);
         }
         Ok(registry)
     }
@@ -133,19 +129,23 @@ impl ProviderRuntimeRegistry {
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
         broker_api: &Arc<super::tastytrade::BrokerApi>,
     ) -> Result<ProviderRuntimeRecord, String> {
-        if spec.provider_id == "tastytrade" {
-            return super::tastytrade::start_record(completions, wake, active_workers, broker_api);
-        }
+        (spec.descriptor.start)(spec, completions, wake, engine, active_workers, broker_api)
+    }
+
+    fn start_history_runtime(
+        spec: ProviderRuntimeSpec,
+        completions: &SyncSender<Command>,
+        active_workers: &Arc<Mutex<BTreeSet<String>>>,
+    ) -> Result<StartedProviderRuntime, String> {
         let cancellation = Arc::new(AtomicBool::new(false));
         let lifecycle = Arc::new(ProviderRuntimeLifecycle::default());
         let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
-        let history_name: &'static str = if spec.provider_id == "hyperliquid" {
-            "aeris-hyperliquid-history"
-        } else {
-            "aeris-rithmic-history"
+        let super::HistorySourceKind::DedicatedWorker(worker_name) = spec.descriptor.history_source
+        else {
+            return Err("Provider history source is not a dedicated worker".to_string());
         };
         let history_worker = spawn_history_worker(
-            history_name,
+            worker_name,
             spec.history
                 .ok_or_else(|| "Provider history source is unavailable".to_string())?,
             history_rx,
@@ -153,43 +153,73 @@ impl ProviderRuntimeRegistry {
             Arc::clone(&cancellation),
             Arc::clone(active_workers),
         )?;
-        let started = StartedProviderRuntime {
+        Ok(StartedProviderRuntime {
             history: history_tx,
             cancellation,
             lifecycle,
             workers: vec![history_worker],
-        };
-        match spec.provider_id {
-            "hyperliquid" => Self::start_hyperliquid_record(
-                started,
-                spec.realtime.enabled,
-                wake,
-                engine,
-                active_workers,
-            ),
-            "rithmic" => Self::start_rithmic_record(
-                started,
-                spec.realtime.enabled,
-                wake,
-                engine,
-                active_workers,
-            ),
-            provider => {
-                started.cancel_and_join();
-                Err(format!("market provider is unsupported: {provider}"))
-            }
+        })
+    }
+
+    pub(super) fn start_rithmic_runtime(
+        spec: ProviderRuntimeSpec,
+        completions: &SyncSender<Command>,
+        wake: ProviderCoordinatorWake,
+        engine: &MarketEngine,
+        active_workers: &Arc<Mutex<BTreeSet<String>>>,
+        _broker_api: &Arc<super::tastytrade::BrokerApi>,
+    ) -> Result<ProviderRuntimeRecord, String> {
+        let enabled = spec.realtime.enabled;
+        let descriptor = spec.descriptor;
+        let started = Self::start_history_runtime(spec, completions, active_workers)?;
+        Self::start_rithmic_record(started, descriptor, enabled, wake, engine, active_workers)
+    }
+
+    pub(super) fn start_hyperliquid_runtime(
+        spec: ProviderRuntimeSpec,
+        completions: &SyncSender<Command>,
+        wake: ProviderCoordinatorWake,
+        engine: &MarketEngine,
+        active_workers: &Arc<Mutex<BTreeSet<String>>>,
+        _broker_api: &Arc<super::tastytrade::BrokerApi>,
+    ) -> Result<ProviderRuntimeRecord, String> {
+        let enabled = spec.realtime.enabled;
+        let descriptor = spec.descriptor;
+        let started = Self::start_history_runtime(spec, completions, active_workers)?;
+        Self::start_hyperliquid_record(started, descriptor, enabled, wake, engine, active_workers)
+    }
+
+    pub(super) fn start_tastytrade_runtime(
+        spec: ProviderRuntimeSpec,
+        completions: &SyncSender<Command>,
+        wake: ProviderCoordinatorWake,
+        _engine: &MarketEngine,
+        active_workers: &Arc<Mutex<BTreeSet<String>>>,
+        broker_api: &Arc<super::tastytrade::BrokerApi>,
+    ) -> Result<ProviderRuntimeRecord, String> {
+        let ProviderRuntimeSpec {
+            descriptor,
+            history,
+            ..
+        } = spec;
+        if descriptor.history_source != super::HistorySourceKind::ProviderSession
+            || history.is_some()
+        {
+            return Err("Tastytrade history source must be runtime-owned".to_string());
         }
+        super::tastytrade::start_record(descriptor, completions, wake, active_workers, broker_api)
     }
 
     fn start_rithmic_record(
         mut started: StartedProviderRuntime,
+        descriptor: super::ProviderDescriptor,
         enabled: bool,
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
     ) -> Result<ProviderRuntimeRecord, String> {
         let reconnect_delay = if enabled {
-            match configured_reconnect_delay(engine, "rithmic") {
+            match configured_reconnect_delay(engine, descriptor.id) {
                 Ok(delay) => Some(delay),
                 Err(error) => {
                     started.cancel_and_join();
@@ -200,7 +230,8 @@ impl ProviderRuntimeRegistry {
             None
         };
         let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let catalog_events_tx = super::CatalogPublisher::new(catalog_events_tx, 0, wake.clone());
+        let catalog_events_tx =
+            super::CatalogPublisher::new(catalog_events_tx, descriptor.id, wake.clone());
         let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_controls, realtime_controls_rx) =
@@ -241,6 +272,7 @@ impl ProviderRuntimeRegistry {
             }
         }
         Ok(ProviderRuntimeRecord {
+            descriptor,
             history: started.history,
             cancellation: started.cancellation,
             lifecycle: started.lifecycle,
@@ -264,13 +296,14 @@ impl ProviderRuntimeRegistry {
 
     fn start_hyperliquid_record(
         mut started: StartedProviderRuntime,
+        descriptor: super::ProviderDescriptor,
         enabled: bool,
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
     ) -> Result<ProviderRuntimeRecord, String> {
         let reconnect_delay = if enabled {
-            match configured_reconnect_delay(engine, "hyperliquid") {
+            match configured_reconnect_delay(engine, descriptor.id) {
                 Ok(delay) => Some(delay),
                 Err(error) => {
                     started.cancel_and_join();
@@ -281,7 +314,8 @@ impl ProviderRuntimeRegistry {
             None
         };
         let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let catalog_events_tx = super::CatalogPublisher::new(catalog_events_tx, 1, wake.clone());
+        let catalog_events_tx =
+            super::CatalogPublisher::new(catalog_events_tx, descriptor.id, wake.clone());
         let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
         let (realtime_controls, realtime_controls_rx) =
@@ -333,6 +367,7 @@ impl ProviderRuntimeRegistry {
             }
         }
         Ok(ProviderRuntimeRecord {
+            descriptor,
             history: started.history,
             cancellation: started.cancellation,
             lifecycle: started.lifecycle,
@@ -450,7 +485,7 @@ impl ProviderRuntimeRegistry {
     }
 
     pub(super) fn dispatch(&self) -> ProviderDispatch<'_> {
-        let records = self
+        let records: BTreeMap<_, _> = self
             .records
             .iter()
             .map(|(provider_id, record)| {
@@ -499,6 +534,7 @@ impl ProviderRuntimeRegistry {
                 (
                     *provider_id,
                     ProviderDispatchRecord {
+                        descriptor: record.descriptor,
                         history: &record.history,
                         lifecycle: Some(&record.lifecycle),
                         realtime,
@@ -507,9 +543,28 @@ impl ProviderRuntimeRegistry {
                 )
             })
             .collect();
+        let mut lanes = Vec::new();
+        for provider_id in &self.order {
+            let Some(record) = records.get(provider_id) else {
+                continue;
+            };
+            if !matches!(record.realtime, ProviderRealtimeDispatch::Disabled) {
+                lanes.push(ProviderEventLane::Realtime(provider_id));
+            }
+            if !matches!(record.catalog, ProviderCatalogDispatch::Disabled) {
+                lanes.push(ProviderEventLane::Catalog(provider_id));
+            }
+            if matches!(
+                record.realtime,
+                ProviderRealtimeDispatch::Hyperliquid { .. }
+            ) {
+                lanes.push(ProviderEventLane::DisplayDepth(provider_id));
+            }
+        }
         ProviderDispatch {
             records,
             wake: Some(&self.wake),
+            lanes,
         }
     }
 
@@ -554,6 +609,42 @@ pub(super) fn join_runtime_workers(workers: Vec<thread::JoinHandle<()>>) {
 }
 
 impl ProviderDispatch<'_> {
+    pub(super) fn descriptor(&self, provider_id: &str) -> Option<super::ProviderDescriptor> {
+        let registered = self
+            .records
+            .get(provider_id)
+            .map(|record| record.descriptor);
+        #[cfg(test)]
+        {
+            registered.or_else(|| {
+                super::BUILT_IN_PROVIDER_DESCRIPTORS
+                    .iter()
+                    .copied()
+                    .find(|descriptor| descriptor.id == provider_id)
+            })
+        }
+        #[cfg(not(test))]
+        {
+            registered
+        }
+    }
+
+    pub(super) fn live_model(&self, provider_id: &str) -> Option<super::LiveModel> {
+        self.descriptor(provider_id)
+            .map(|descriptor| descriptor.live_model)
+    }
+
+    pub(super) fn validate_period(
+        &self,
+        provider_id: &str,
+        period: super::BarPeriod,
+    ) -> Result<(), String> {
+        let descriptor = self
+            .descriptor(provider_id)
+            .ok_or_else(|| "market provider is unsupported".to_string())?;
+        (descriptor.supported_period)(period)
+    }
+
     pub(super) fn history(
         &self,
         provider_id: &str,
@@ -610,143 +701,76 @@ impl ProviderDispatch<'_> {
     }
 
     pub(super) fn take_event(&self, lane: usize) -> Option<ProviderRuntimeEvent> {
-        let event = match lane {
-            0 => match &self.records.get("rithmic")?.realtime {
-                ProviderRealtimeDispatch::Rithmic { events, .. } => events
-                    .try_recv()
-                    .ok()
-                    .map(ProviderRuntimeEvent::RithmicRealtime),
-                ProviderRealtimeDispatch::Tastytrade { .. }
-                | ProviderRealtimeDispatch::Hyperliquid { .. }
-                | ProviderRealtimeDispatch::Disabled => None,
-            },
-            1 => match &self.records.get("rithmic")?.catalog {
-                ProviderCatalogDispatch::Rithmic { events, .. } => events
-                    .try_recv()
-                    .ok()
-                    .map(ProviderRuntimeEvent::RithmicCatalog),
-                ProviderCatalogDispatch::Tastytrade { .. }
-                | ProviderCatalogDispatch::Hyperliquid { .. }
-                | ProviderCatalogDispatch::Disabled => None,
-            },
-            2 => match &self.records.get("hyperliquid")?.realtime {
-                ProviderRealtimeDispatch::Hyperliquid { events, .. } => events
-                    .try_recv()
-                    .ok()
-                    .map(ProviderRuntimeEvent::HyperliquidRealtime),
-                ProviderRealtimeDispatch::Tastytrade { .. }
-                | ProviderRealtimeDispatch::Rithmic { .. }
-                | ProviderRealtimeDispatch::Disabled => None,
-            },
-            3 => match &self.records.get("hyperliquid")?.catalog {
-                ProviderCatalogDispatch::Hyperliquid { events, .. } => events
-                    .try_recv()
-                    .ok()
-                    .map(ProviderRuntimeEvent::HyperliquidCatalog),
-                ProviderCatalogDispatch::Tastytrade { .. }
-                | ProviderCatalogDispatch::Rithmic { .. }
-                | ProviderCatalogDispatch::Disabled => None,
-            },
-            4 => match &self.records.get("hyperliquid")?.realtime {
-                ProviderRealtimeDispatch::Hyperliquid { display_events, .. } => display_events
-                    .try_recv()
-                    .ok()
-                    .map(ProviderRuntimeEvent::HyperliquidDisplayDepth),
-                ProviderRealtimeDispatch::Tastytrade { .. }
-                | ProviderRealtimeDispatch::Rithmic { .. }
-                | ProviderRealtimeDispatch::Disabled => None,
-            },
-            5 => match &self.records.get("tastytrade")?.realtime {
-                ProviderRealtimeDispatch::Tastytrade { events, .. } => events
-                    .try_recv()
-                    .ok()
-                    .map(ProviderRuntimeEvent::TastytradeRealtime),
-                _ => None,
-            },
-            6 => match &self.records.get("tastytrade")?.catalog {
-                ProviderCatalogDispatch::Tastytrade { events, .. } => events
-                    .try_recv()
-                    .ok()
-                    .map(ProviderRuntimeEvent::TastytradeCatalog),
-                _ => None,
-            },
-            _ => None,
+        let event = match *self.lanes.get(lane)? {
+            ProviderEventLane::Realtime(provider_id) => {
+                match &self.records.get(provider_id)?.realtime {
+                    ProviderRealtimeDispatch::Tastytrade { events, .. } => {
+                        events.try_recv().ok().map(|event| {
+                            ProviderRuntimeEvent::Realtime(super::ProviderEvent::tastytrade(event))
+                        })
+                    }
+                    ProviderRealtimeDispatch::Rithmic { events, .. } => {
+                        events.try_recv().ok().map(|event| {
+                            ProviderRuntimeEvent::Realtime(super::ProviderEvent::rithmic(event))
+                        })
+                    }
+                    ProviderRealtimeDispatch::Hyperliquid { events, .. } => {
+                        events.try_recv().ok().map(|event| {
+                            ProviderRuntimeEvent::Realtime(super::ProviderEvent::hyperliquid(event))
+                        })
+                    }
+                    ProviderRealtimeDispatch::Disabled => None,
+                }
+            }
+            ProviderEventLane::Catalog(provider_id) => {
+                match &self.records.get(provider_id)?.catalog {
+                    ProviderCatalogDispatch::Tastytrade { events, .. } => events
+                        .try_recv()
+                        .ok()
+                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
+                    ProviderCatalogDispatch::Rithmic { events, .. } => events
+                        .try_recv()
+                        .ok()
+                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
+                    ProviderCatalogDispatch::Hyperliquid { events, .. } => events
+                        .try_recv()
+                        .ok()
+                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
+                    ProviderCatalogDispatch::Disabled => None,
+                }
+            }
+            ProviderEventLane::DisplayDepth(provider_id) => {
+                match &self.records.get(provider_id)?.realtime {
+                    ProviderRealtimeDispatch::Hyperliquid { display_events, .. } => display_events
+                        .try_recv()
+                        .ok()
+                        .map(|event| ProviderRuntimeEvent::DisplayDepth(provider_id, event.into())),
+                    _ => None,
+                }
+            }
         }?;
         self.observe_event(&event);
         Some(event)
     }
 
     fn observe_event(&self, event: &ProviderRuntimeEvent) {
-        // Do not let retired queued events overwrite out-of-band health.
-        let retired = match event {
-            ProviderRuntimeEvent::RithmicRealtime(event) => self
-                .wake
-                .is_some_and(|wake| wake.overflowed(0, event.generation())),
-            ProviderRuntimeEvent::HyperliquidRealtime(event) => self
-                .wake
-                .is_some_and(|wake| wake.overflowed(1, event.generation())),
-            _ => false,
+        let Some(metadata) = event.metadata() else {
+            return;
         };
-        if retired {
+        // A retired queued event cannot overwrite out-of-band recovery health.
+        if self
+            .wake
+            .is_some_and(|wake| wake.overflowed(metadata.provider, metadata.generation))
+        {
             return;
         }
-        match event {
-            ProviderRuntimeEvent::TastytradeRealtime(event) => self.observe_generation(
-                "tastytrade",
-                event.generation(),
-                matches!(
-                    event,
-                    super::tastytrade::RealtimeEvent::Connecting(_)
-                        | super::tastytrade::RealtimeEvent::Recovering(..)
-                        | super::tastytrade::RealtimeEvent::Disconnected(_)
-                ),
-            ),
-            ProviderRuntimeEvent::RithmicRealtime(event) => {
-                let (generation, reconnecting, transport_rtt_nanos) = match event {
-                    RithmicRealtimeEvent::Failed(generation, _)
-                    | RithmicRealtimeEvent::Connecting(generation)
-                    | RithmicRealtimeEvent::Recovering(generation, _)
-                    | RithmicRealtimeEvent::Disconnected(generation, _) => {
-                        (*generation, true, None)
-                    }
-                    RithmicRealtimeEvent::Heartbeat(generation, transport_rtt_nanos) => {
-                        (*generation, false, *transport_rtt_nanos)
-                    }
-                    RithmicRealtimeEvent::Connected(generation)
-                    | RithmicRealtimeEvent::Trade(generation, _)
-                    | RithmicRealtimeEvent::Quote(generation, _)
-                    | RithmicRealtimeEvent::Depth(generation, _) => (*generation, false, None),
-                };
-                self.observe_generation("rithmic", generation, reconnecting);
-                if let Some(transport_rtt_nanos) = transport_rtt_nanos {
-                    self.observe_transport_rtt("rithmic", generation, transport_rtt_nanos);
-                }
-            }
-            ProviderRuntimeEvent::HyperliquidRealtime(event) => {
-                let (generation, reconnecting, transport_rtt_nanos) = match event {
-                    HyperliquidRealtimeEvent::Connecting(generation)
-                    | HyperliquidRealtimeEvent::Recovering(generation)
-                    | HyperliquidRealtimeEvent::Disconnected(generation) => {
-                        (*generation, true, None)
-                    }
-                    HyperliquidRealtimeEvent::Heartbeat(generation, transport_rtt_nanos) => {
-                        (*generation, false, *transport_rtt_nanos)
-                    }
-                    HyperliquidRealtimeEvent::Connected(generation)
-                    | HyperliquidRealtimeEvent::Candle(generation, ..)
-                    | HyperliquidRealtimeEvent::Trades(generation, _)
-                    | HyperliquidRealtimeEvent::Quote(generation, _)
-                    | HyperliquidRealtimeEvent::Depth(generation, _) => (*generation, false, None),
-                };
-                self.observe_generation("hyperliquid", generation, reconnecting);
-                if let Some(transport_rtt_nanos) = transport_rtt_nanos {
-                    self.observe_transport_rtt("hyperliquid", generation, transport_rtt_nanos);
-                }
-            }
-            ProviderRuntimeEvent::TastytradeCatalog(_)
-            | ProviderRuntimeEvent::RithmicCatalog(_)
-            | ProviderRuntimeEvent::HyperliquidCatalog(_)
-            | ProviderRuntimeEvent::HyperliquidDisplayDepth(_) => {}
+        self.observe_generation(
+            metadata.provider,
+            metadata.generation,
+            metadata.reconnecting,
+        );
+        if let Some(rtt) = metadata.transport_rtt_nanos {
+            self.observe_transport_rtt(metadata.provider, metadata.generation, rtt);
         }
     }
 
@@ -804,6 +828,82 @@ impl ProviderDispatch<'_> {
                     Err(format!("{provider_id} catalog worker is unavailable"))
                 }
             },
+        }
+    }
+
+    pub(super) fn send_control(
+        &self,
+        provider_id: &str,
+        control: super::ProviderControl,
+    ) -> Result<bool, String> {
+        match control {
+            super::ProviderControl::Stop => self.stop(provider_id),
+            super::ProviderControl::Demand(demand) => {
+                let Some(record) = self.records.get(provider_id) else {
+                    return Err(format!("{provider_id} live worker is unavailable"));
+                };
+                match &record.realtime {
+                    ProviderRealtimeDispatch::Rithmic { .. } => self.send_rithmic_realtime(
+                        RithmicRealtimeControl::Subscribe(demand.rithmic_wire()?),
+                    ),
+                    ProviderRealtimeDispatch::Hyperliquid { .. } => self.send_hyperliquid_realtime(
+                        HyperliquidRealtimeControl::Subscribe(demand.hyperliquid_wire()),
+                    ),
+                    ProviderRealtimeDispatch::Tastytrade { controls, .. } => {
+                        match controls.try_send(super::tastytrade::RealtimeControl::Subscribe(
+                            demand.tastytrade_wire(),
+                        )) {
+                            Ok(()) => Ok(true),
+                            Err(TrySendError::Full(_)) => Ok(false),
+                            Err(TrySendError::Disconnected(_)) => {
+                                Err("Tastytrade live worker is unavailable".to_string())
+                            }
+                        }
+                    }
+                    ProviderRealtimeDispatch::Disabled => Ok(false),
+                }
+            }
+            super::ProviderControl::AuthorizationChanged(ready) => {
+                let Some(record) = self.records.get(provider_id) else {
+                    return Err(format!("{provider_id} live worker is unavailable"));
+                };
+                if record.descriptor.connection_kind
+                    != super::ProviderConnectionKind::BrokerCapability
+                {
+                    return Err(format!(
+                        "{provider_id} does not accept authorization control"
+                    ));
+                }
+                let ProviderRealtimeDispatch::Tastytrade { controls, .. } = &record.realtime else {
+                    return Err(format!(
+                        "{provider_id} does not accept authorization control"
+                    ));
+                };
+                match controls.try_send(super::tastytrade::RealtimeControl::AuthorizationChanged(
+                    ready,
+                )) {
+                    Ok(()) => Ok(true),
+                    Err(TrySendError::Full(_)) => Ok(false),
+                    Err(TrySendError::Disconnected(_)) => {
+                        Err("Tastytrade live worker is unavailable".to_string())
+                    }
+                }
+            }
+            super::ProviderControl::Recover(generation) => {
+                let Some(record) = self.records.get(provider_id) else {
+                    return Err(format!("{provider_id} live worker is unavailable"));
+                };
+                let ProviderRealtimeDispatch::Tastytrade { controls, .. } = &record.realtime else {
+                    return Err(format!("{provider_id} does not accept recovery control"));
+                };
+                match controls.try_send(super::tastytrade::RealtimeControl::Recover(generation)) {
+                    Ok(()) => Ok(true),
+                    Err(TrySendError::Full(_)) => Ok(false),
+                    Err(TrySendError::Disconnected(_)) => {
+                        Err("Tastytrade live worker is unavailable".to_string())
+                    }
+                }
+            }
         }
     }
 
@@ -945,7 +1045,19 @@ impl MarketService {
     }
 
     pub(super) fn start_composed(providers: Vec<ProviderRuntimeSpec>) -> Result<Self, String> {
-        let engine = configured_engine()?;
+        let descriptors = providers
+            .iter()
+            .map(|provider| provider.descriptor)
+            .collect::<Vec<_>>();
+        let provider_search_preparers = descriptors
+            .iter()
+            .filter_map(|descriptor| {
+                descriptor
+                    .prepare_search
+                    .map(|prepare| (descriptor.id, prepare))
+            })
+            .collect();
+        let engine = super::configured_engine_from_descriptors(&descriptors)?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
@@ -971,6 +1083,7 @@ impl MarketService {
             active_provider_workers,
             workers,
             broker_api,
+            provider_search_preparers,
         )
     }
 
@@ -980,6 +1093,7 @@ impl MarketService {
         active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
         mut workers: Vec<thread::JoinHandle<()>>,
         broker_api: Arc<super::tastytrade::BrokerApi>,
+        provider_search_preparers: BTreeMap<&'static str, super::ProviderSearchPreparer>,
     ) -> Result<Self, String> {
         let (broker_authorization, worker) =
             match super::broker_authorization::BrokerAuthorization::start(
@@ -999,6 +1113,7 @@ impl MarketService {
             runtime: Arc::new(MarketRuntime {
                 shutdown,
                 broker_api,
+                provider_search_preparers,
                 broker_authorization,
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
@@ -1323,8 +1438,12 @@ impl MarketService {
         search: SearchProviderInstruments,
     ) -> Result<(), String> {
         validate_provider_search(&search)?;
-        let tastytrade_search = (search.provider == "tastytrade")
-            .then_some((search.consumer_id, search.search_generation));
+        let preparation = self
+            .runtime
+            .provider_search_preparers
+            .get(search.provider.as_str())
+            .copied()
+            .map(|prepare| (prepare, search.consumer_id, search.search_generation));
         self.request(|reply| {
             Ok(Command::SearchProviderInstruments(
                 ClientId(id(client_id)?),
@@ -1332,10 +1451,8 @@ impl MarketService {
                 reply,
             ))
         })?;
-        if let Some((consumer, generation)) = tastytrade_search {
-            self.runtime
-                .broker_api
-                .register_search(consumer, generation)?;
+        if let Some((prepare, consumer, generation)) = preparation {
+            prepare(&self.runtime.broker_api, consumer, generation)?;
         }
         Ok(())
     }
@@ -1627,6 +1744,7 @@ mod tests {
             Arc::new(Mutex::new(BTreeSet::new())),
             Vec::new(),
             Arc::new(super::super::tastytrade::BrokerApi::default()),
+            BTreeMap::new(),
         )
         .expect("test runtime starts");
         let result =
@@ -1639,6 +1757,28 @@ mod tests {
         service
             .shutdown(Duration::from_secs(1))
             .expect("test runtime stops");
+    }
+
+    #[test]
+    fn fourth_descriptor_starts_without_coordinator_registration_edits() {
+        let mut spec = ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), false);
+        spec.descriptor.id = "fourth-test-provider";
+        spec.descriptor.account_id = "fourth-test-account";
+        spec.descriptor.history_source =
+            super::super::HistorySourceKind::DedicatedWorker("aeris-fourth-history");
+        spec.descriptor.flush_demand = |_| {};
+        let service = MarketService::start_composed(vec![spec]).expect("fourth runtime starts");
+        assert!(
+            service
+                .status()
+                .expect("runtime status")
+                .providers
+                .iter()
+                .any(|provider| provider.provider == "fourth-test-provider")
+        );
+        service
+            .shutdown(Duration::from_secs(1))
+            .expect("fourth runtime stops");
     }
 
     #[test]

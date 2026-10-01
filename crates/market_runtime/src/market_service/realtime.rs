@@ -1,19 +1,19 @@
 use super::{
-    AggressorSide, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CandleLiveHandoff,
+    AggressorSide, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CandleGapPolicy, CandleLiveHandoff,
     CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, FailureStage, FormingBar,
-    HyperliquidCandleDemand, HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidLiveCandle,
-    HyperliquidRealtimeControl, HyperliquidRealtimeEvent, InstallProviderInstrument,
+    HyperliquidInstrumentDemand, IndexedTradeMutation, InstallProviderInstrument,
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
     MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
-    OrderBookApplyOutcome, Ordering, ProviderGeneration, ProviderHealth, ProviderOrderBook,
-    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicInstrumentDemand, RithmicLiveCadence,
-    RithmicLiveHandoff, RithmicRealtimeControl, RithmicRealtimeDemand, RithmicRealtimeEvent,
-    SeriesLoadState, TopOfBookQuote, VecDeque, hyperliquid_interval_for_period, id,
-    merge_live_candle, series_state_payload, series_update_message,
+    OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent,
+    ProviderEvent, ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
+    ProviderOrderBook, ProviderTradeBatch, RithmicCalendarPeriod, RithmicExchangeCalendar,
+    RithmicLiveCadence, RithmicLiveHandoff, SeriesLoadState, StreamRequirements, TopOfBookQuote,
+    VecDeque, id, merge_live_candle, series_state_payload, series_update_message,
 };
+#[cfg(test)]
+use super::{HyperliquidDemand, RithmicRealtimeDemand};
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl, HyperliquidDisplayDepthDemand,
-    HyperliquidDisplayDepthEvent,
 };
 use crate::study::{
     StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyQuoteView, StudyTradeWindow,
@@ -23,7 +23,9 @@ use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
 
-const fn rithmic_invalidation_detail(reason: Option<ProviderInvalidationReason>) -> &'static str {
+pub(super) const fn rithmic_invalidation_detail(
+    reason: Option<ProviderInvalidationReason>,
+) -> &'static str {
     match reason {
         Some(ProviderInvalidationReason::Transport) => "Rithmic transport connection failed",
         Some(ProviderInvalidationReason::Authentication) => "Rithmic authentication was rejected",
@@ -55,7 +57,7 @@ const fn rithmic_invalidation_detail(reason: Option<ProviderInvalidationReason>)
     }
 }
 
-const fn rithmic_auto_recovers(reason: Option<ProviderInvalidationReason>) -> bool {
+pub(super) const fn rithmic_auto_recovers(reason: Option<ProviderInvalidationReason>) -> bool {
     matches!(
         reason,
         None | Some(
@@ -90,10 +92,14 @@ fn enqueue_bar_transition(
 }
 
 impl ProviderOrderBook {
-    pub(super) fn new(instrument: InstallProviderInstrument) -> Self {
+    pub(super) fn new(
+        instrument: InstallProviderInstrument,
+        trade_continuity: super::TradeContinuity,
+    ) -> Self {
         let trade_session_generation = instrument.session_generation;
         Self {
             instrument,
+            trade_continuity,
             book: OrderBook::new(
                 NonZeroUsize::new(MAXIMUM_CANONICAL_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
@@ -167,7 +173,8 @@ impl ProviderOrderBook {
             .saturating_sub(RECENT_TRADE_RETENTION_NANOS);
         let mut changed = false;
         while self.recent_trades.front().is_some_and(|trade| {
-            trade.observed_unix_nanos < cutoff && self.instrument.provider != "tastytrade"
+            trade.observed_unix_nanos < cutoff
+                && self.trade_continuity == super::TradeContinuity::Sequence
         }) || self.recent_trades.len() > MAXIMUM_RECENT_LADDER_TRADES
         {
             let Some(expired) = self.recent_trades.pop_front() else {
@@ -197,7 +204,7 @@ impl ProviderOrderBook {
         if trade.metadata.session_generation > self.trade_session_generation {
             self.reset_recent_trades_for_session(trade.metadata.session_generation);
         }
-        if self.instrument.provider != "tastytrade"
+        if self.trade_continuity == super::TradeContinuity::Sequence
             && trade.metadata.source_sequence <= self.last_trade_source_sequence
         {
             return false;
@@ -227,7 +234,7 @@ impl ProviderOrderBook {
             observed_unix_nanos,
             trade: std::sync::Arc::new(trade.clone()),
         };
-        if self.instrument.provider == "tastytrade" {
+        if self.trade_continuity == super::TradeContinuity::Indexed {
             self.indexed_trade_ordinals
                 .insert(trade.trade_id.clone(), ingestion_ordinal);
         }
@@ -720,10 +727,12 @@ impl CandleLiveHandoff {
         generation: ProviderGeneration,
         wire_coin: String,
         interval: String,
+        gap_policy: CandleGapPolicy,
     ) -> Self {
         Self {
             series,
             generation,
+            gap_policy,
             wire_coin,
             interval,
             price_scale: 0,
@@ -862,18 +871,6 @@ impl CandleLiveHandoff {
         (!tails.is_empty()).then_some(LiveSeriesPublication::Tails(tails))
     }
 
-    pub(super) fn accept_candle(&mut self, candle: &HyperliquidLiveCandle) -> Result<(), String> {
-        self.accept_bar(MarketBar {
-            source_sequence: 1,
-            exchange_timestamp_seconds: candle.open_nanos.div_euclid(1_000_000_000),
-            exchange_timestamp_unix_nanos: candle.open_nanos,
-            open: candle.open,
-            high: candle.high,
-            low: candle.low,
-            close: candle.close,
-            volume: candle.volume,
-        })
-    }
     pub(super) fn accept_bar(&mut self, bar: MarketBar) -> Result<(), String> {
         if self.history_state == LiveHistoryState::Ready {
             if self.ingest(bar)? {
@@ -894,7 +891,7 @@ impl CandleLiveHandoff {
     /// bar instead of looking like a new one.
     fn ingest(&mut self, candle: MarketBar) -> Result<bool, String> {
         let active = self.forming.or_else(|| self.bars.last().copied());
-        if self.series.provider_id == "hyperliquid"
+        if self.gap_policy == CandleGapPolicy::Contiguous
             && let (Some(active), Some(duration)) = (active, self.series.period.duration_nanos())
             && candle.exchange_timestamp_unix_nanos > active.exchange_timestamp_unix_nanos
             && active.exchange_timestamp_unix_nanos.checked_add(duration)
@@ -995,15 +992,16 @@ impl Coordinator<'_> {
         }
     }
 
-    fn clear_hyperliquid_display_depth(&mut self) {
+    fn clear_provider_display_depth(&mut self, provider: &str) {
         let affected = self
-            .hyperliquid_display_depth
+            .display_depth
             .keys()
+            .filter(|(candidate, _)| candidate == provider)
             .cloned()
             .collect::<Vec<_>>();
-        self.hyperliquid_display_depth.clear();
-        for instrument_id in affected {
-            self.broadcast_order_book("hyperliquid", &instrument_id);
+        for identity in affected {
+            self.display_depth.remove(&identity);
+            self.broadcast_order_book(&identity.0, &identity.1);
         }
     }
 
@@ -1023,74 +1021,84 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn handle_hyperliquid_display_depth(&mut self, event: HyperliquidDisplayDepthEvent) {
+    pub(super) fn handle_provider_display_depth(
+        &mut self,
+        provider: &str,
+        event: ProviderDisplayDepthEvent,
+    ) {
         match event {
-            HyperliquidDisplayDepthEvent::Reset { display_generation } => {
-                if display_generation <= self.hyperliquid_display_generation {
+            ProviderDisplayDepthEvent::Reset { display_generation } => {
+                let current = self.display_generations.entry(provider.into()).or_default();
+                if display_generation <= *current {
                     return;
                 }
-                self.hyperliquid_display_generation = display_generation;
-                self.clear_hyperliquid_display_depth();
+                *current = display_generation;
+                self.clear_provider_display_depth(provider);
             }
-            HyperliquidDisplayDepthEvent::Snapshot(display) => {
-                if display.display_generation < self.hyperliquid_display_generation {
+            ProviderDisplayDepthEvent::Snapshot {
+                provider_generation,
+                display_generation,
+                snapshot,
+            } => {
+                let current = self.display_generations.get(provider).copied().unwrap_or(0);
+                if display_generation < current {
                     return;
                 }
-                let Some(provider_generation) = self
+                let Some(current_generation) = self
                     .engine
-                    .provider_status("hyperliquid")
+                    .provider_status(provider)
                     .and_then(|status| status.generation)
                 else {
                     return;
                 };
-                if provider_generation.0.get() != display.provider_generation
-                    || display.snapshot.metadata.provider_id != "hyperliquid"
-                    || display.snapshot.metadata.session_generation != display.provider_generation
+                if current_generation.0.get() != provider_generation
+                    || snapshot.metadata.provider_id != provider
+                    || snapshot.metadata.session_generation != provider_generation
                 {
                     return;
                 }
-                let instrument_id = display.snapshot.metadata.instrument_id.clone();
+                let instrument_id = snapshot.metadata.instrument_id.clone();
                 let Some(order_book) = self
                     .order_books
-                    .get(&("hyperliquid".to_string(), instrument_id.clone()))
+                    .get(&(provider.to_string(), instrument_id.clone()))
                 else {
                     return;
                 };
-                if order_book.instrument.entitlement_id != display.snapshot.metadata.entitlement_id
-                {
+                if order_book.instrument.entitlement_id != snapshot.metadata.entitlement_id {
                     return;
                 }
                 // A full display queue may coalesce its reset. A validated
                 // snapshot carries the same generation boundary itself.
-                if display.display_generation > self.hyperliquid_display_generation {
-                    self.hyperliquid_display_generation = display.display_generation;
-                    self.clear_hyperliquid_display_depth();
+                if display_generation > current {
+                    self.display_generations
+                        .insert(provider.into(), display_generation);
+                    self.clear_provider_display_depth(provider);
                 }
-                let source_sequence = display.snapshot.metadata.source_sequence;
+                let source_sequence = snapshot.metadata.source_sequence;
                 if self
-                    .hyperliquid_display_depth
-                    .get(&instrument_id)
+                    .display_depth
+                    .get(&(provider.into(), instrument_id.clone()))
                     .is_some_and(|current| {
-                        current.provider_generation > display.provider_generation
-                            || (current.provider_generation == display.provider_generation
-                                && (current.display_generation > display.display_generation
-                                    || (current.display_generation == display.display_generation
+                        current.provider_generation > provider_generation
+                            || (current.provider_generation == provider_generation
+                                && (current.display_generation > display_generation
+                                    || (current.display_generation == display_generation
                                         && current.source_sequence >= source_sequence)))
                     })
                 {
                     return;
                 }
-                self.hyperliquid_display_depth.insert(
-                    instrument_id.clone(),
+                self.display_depth.insert(
+                    (provider.into(), instrument_id.clone()),
                     crate::MarketDisplayDepth {
-                        provider_generation: display.provider_generation,
-                        display_generation: display.display_generation,
+                        provider_generation,
+                        display_generation,
                         source_sequence,
-                        bids: display.snapshot.bids,
-                        asks: display.snapshot.asks,
+                        bids: snapshot.bids,
+                        asks: snapshot.asks,
                     },
                 );
-                self.broadcast_order_book("hyperliquid", &instrument_id);
+                self.broadcast_order_book(provider, &instrument_id);
             }
         }
     }
@@ -1138,9 +1146,21 @@ impl Coordinator<'_> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn rithmic_realtime_demand(&self) -> Result<RithmicRealtimeDemand, String> {
-        let mut instruments = BTreeMap::<String, RithmicInstrumentDemand>::new();
-        for series in self.rithmic_live.keys() {
+        self.provider_demand("rithmic").rithmic_wire()
+    }
+
+    pub(super) fn provider_demand(&self, provider_id: &str) -> ProviderDemand {
+        let mut instruments = BTreeMap::<String, ProviderInstrumentDemand>::new();
+        let mut candle_series = Vec::new();
+        let mut missing_catalog = false;
+        for series in self
+            .series_live
+            .trade_keys()
+            .chain(self.series_live.candle_keys())
+            .filter(|series| series.provider_id == provider_id)
+        {
             let Some(streams) = self
                 .engine
                 .subscription_status(series)
@@ -1148,66 +1168,125 @@ impl Coordinator<'_> {
             else {
                 continue;
             };
-            let instrument = self
+            let Some(instrument) = self
                 .catalog
                 .get(&(series.provider_id.clone(), series.instrument_id.clone()))
                 .cloned()
-                .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
-            let demand = instruments
-                .entry(instrument.instrument_id.clone())
-                .or_insert_with(|| RithmicInstrumentDemand {
-                    instrument,
-                    trades: false,
-                    quotes: false,
-                    order_book: false,
-                });
-            // Rithmic bars are constructed from trades. Provider transport
-            // therefore needs the trade feed for bar continuity even when no
-            // consumer requested downstream order-flow publications.
-            demand.trades |= streams.contains(MarketStream::Bars)
-                || streams.contains(MarketStream::Trades)
-                || streams.contains(MarketStream::Depth);
-            demand.quotes |= streams.contains(MarketStream::Quotes);
-            demand.order_book |= streams.contains(MarketStream::Depth);
-        }
-        for instrument in self.price_alerts.active_instruments("rithmic") {
+            else {
+                missing_catalog = true;
+                continue;
+            };
+            if self.providers.live_model(provider_id) == Some(super::LiveModel::ProviderCandles) {
+                candle_series.push((series.clone(), streams, instrument.clone()));
+            }
             instruments
                 .entry(instrument.instrument_id.clone())
-                .and_modify(|demand| demand.trades = true)
-                .or_insert(RithmicInstrumentDemand {
+                .and_modify(|entry| entry.streams = entry.streams.union(streams))
+                .or_insert(ProviderInstrumentDemand {
                     instrument,
-                    trades: true,
-                    quotes: false,
-                    order_book: false,
+                    streams,
+                    alert_trades: false,
+                    alert_instrument: None,
+                    display_depth: false,
                 });
         }
-        Ok(RithmicRealtimeDemand {
-            instruments: instruments
-                .into_values()
-                .filter(|demand| demand.trades || demand.quotes || demand.order_book)
+        let alert_overrides_instrument = self
+            .providers
+            .descriptor(provider_id)
+            .is_some_and(|descriptor| descriptor.alert_overrides_instrument);
+        for instrument in self.price_alerts.active_instruments(provider_id) {
+            instruments
+                .entry(instrument.instrument_id.clone())
+                .and_modify(|entry| {
+                    entry.alert_trades = true;
+                    entry.alert_instrument = Some(instrument.clone());
+                    if alert_overrides_instrument {
+                        entry.instrument = instrument.clone();
+                    }
+                })
+                .or_insert(ProviderInstrumentDemand {
+                    alert_instrument: Some(instrument.clone()),
+                    instrument,
+                    streams: StreamRequirements::NONE,
+                    alert_trades: true,
+                    display_depth: false,
+                });
+        }
+        self.mark_display_depth_demand(provider_id, &mut instruments);
+        ProviderDemand {
+            instruments: instruments.into_values().collect(),
+            candle_series,
+            explicit_trade_ids: self
+                .engine
+                .subscriptions()
+                .into_iter()
+                .filter(|(series, subscription)| {
+                    series.provider_id == provider_id
+                        && subscription.streams.contains(MarketStream::Trades)
+                })
+                .map(|(series, _)| series.instrument_id)
                 .collect(),
-        })
+            missing_catalog,
+        }
+    }
+
+    fn mark_display_depth_demand(
+        &self,
+        provider_id: &str,
+        instruments: &mut BTreeMap<String, ProviderInstrumentDemand>,
+    ) {
+        for consumer_id in self.events.keys() {
+            let Some(demand) = self.engine.current_demand(*consumer_id) else {
+                continue;
+            };
+            if !demand.resource_class.publishes_ui()
+                || !demand
+                    .streams
+                    .is_some_and(|streams| streams.contains(MarketStream::Depth))
+            {
+                continue;
+            }
+            let Some(series) = demand
+                .series
+                .as_ref()
+                .filter(|series| series.provider_id == provider_id)
+            else {
+                continue;
+            };
+            if self
+                .order_books
+                .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+                .is_some_and(|book| book.instrument.entitlement_id == series.entitlement_id)
+                && let Some(entry) = instruments.get_mut(&series.instrument_id)
+            {
+                entry.display_depth = true;
+            }
+        }
     }
 
     pub(super) fn send_rithmic_demand(&mut self) -> Result<(), String> {
         if !self.providers.rithmic_realtime_enabled() {
             return Ok(());
         }
-        let demand = self.rithmic_realtime_demand()?;
+        let neutral = self.provider_demand("rithmic");
+        let demand = neutral.rithmic_wire()?;
         if demand.instruments.is_empty() {
             return Ok(());
         }
-        if self.rithmic_demand.as_ref() == Some(&demand) && self.rithmic_pending_demand.is_none() {
+        if self.session("rithmic").accepted.as_ref() == Some(&neutral)
+            && self.session("rithmic").pending.is_none()
+        {
             return Ok(());
         }
         if self
             .providers
-            .send_rithmic_realtime(RithmicRealtimeControl::Subscribe(demand.clone()))?
+            .send_control("rithmic", super::ProviderControl::Demand(neutral.clone()))?
         {
-            self.rithmic_pending_demand = None;
-            self.rithmic_demand = Some(demand);
+            let session = self.session_mut("rithmic");
+            session.pending = None;
+            session.accepted = Some(neutral);
         } else {
-            self.rithmic_pending_demand = Some(demand);
+            self.session_mut("rithmic").pending = Some(neutral);
         }
         Ok(())
     }
@@ -1226,260 +1305,517 @@ impl Coordinator<'_> {
         self.engine
             .verify_provider_stream_requirements(&series.provider_id, streams)
             .map_err(|error| error.to_string())?;
-        if series.provider_id == "rithmic" {
-            if !self.rithmic_live.contains_key(series) {
-                let venue_id = self
-                    .catalog
-                    .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                    .ok_or_else(|| "Rithmic instrument is not installed".to_string())?
-                    .venue_id
-                    .clone();
-                if let Some(mut handoff) = RithmicLiveHandoff::new(
-                    series,
-                    self.provider_generation_for_series(series)?,
-                    &venue_id,
-                ) {
-                    handoff.connected = self
-                        .engine
-                        .provider_status("rithmic")
-                        .is_some_and(|status| status.health == ProviderHealth::Online);
-                    self.rithmic_live.insert(series.clone(), handoff);
+        let descriptor = self
+            .providers
+            .descriptor(&series.provider_id)
+            .ok_or_else(|| "realtime provider is unsupported".to_string())?;
+        let connected = self
+            .engine
+            .provider_status(&series.provider_id)
+            .is_some_and(|status| status.health == ProviderHealth::Online);
+        match descriptor.live_model {
+            super::LiveModel::TradeBuilt => {
+                if !self.series_live.trade_contains_key(series) {
+                    let generation = self.provider_generation_for_series(series)?;
+                    let venue_id = self
+                        .catalog
+                        .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+                        .ok_or_else(|| descriptor.instrument_missing_detail.to_string())?
+                        .venue_id
+                        .clone();
+                    if let Some(mut handoff) =
+                        RithmicLiveHandoff::new(series, generation, &venue_id)
+                    {
+                        handoff.connected = connected;
+                        self.series_live.insert_trade(series.clone(), handoff);
+                    }
+                }
+                self.send_rithmic_demand()?;
+            }
+            super::LiveModel::ProviderCandles => {
+                if descriptor.candle_demand_policy
+                    == super::CandleDemandPolicy::ReconcileAfterSelection
+                {
+                    // Newest-wins controls may replace a queued idle Stop without a
+                    // Disconnected event. Retire that fence when demand resumes.
+                    self.session_mut(&series.provider_id).stop_pending = None;
+                }
+                if !self.series_live.candle_contains_key(series) {
+                    let generation = self.provider_generation_for_series(series)?;
+                    let instrument = self.candle_instrument(series)?.clone();
+                    let interval =
+                        descriptor.candle_wire_interval.ok_or_else(|| {
+                            "provider candle interval is unavailable".to_string()
+                        })?(series.period)?;
+                    let mut handoff = CandleLiveHandoff::new(
+                        series.clone(),
+                        generation,
+                        instrument.provider_symbol,
+                        interval,
+                        descriptor.gap_policy,
+                    );
+                    handoff.connected = connected;
+                    self.series_live.insert_candle(series.clone(), handoff);
+                }
+                if descriptor.candle_demand_policy
+                    == super::CandleDemandPolicy::ReconcileAfterSelection
+                {
+                    self.session_mut(&series.provider_id).demand_dirty = true;
                 }
             }
-            self.send_rithmic_demand()?;
-            return Ok(());
         }
-        if series.provider_id == "tastytrade" {
-            let instrument = self.candle_instrument(series)?.clone();
-            let generation = self.provider_generation_for_series(series)?;
-            let interval = super::tastytrade::candle_period(series.period)?;
-            if !self.candle_live.contains_key(series) {
-                let mut handoff = CandleLiveHandoff::new(
-                    series.clone(),
-                    generation,
-                    instrument.provider_symbol,
-                    interval,
-                );
-                handoff.connected = self
-                    .engine
-                    .provider_status("tastytrade")
-                    .is_some_and(|status| status.health == ProviderHealth::Online);
-                self.candle_live.insert(series.clone(), handoff);
-            }
-            return Ok(());
-        }
-        if series.provider_id == "hyperliquid" {
-            // Hyperliquid drains controls newest-wins, so a replacement
-            // Subscribe can cancel an already queued idle Stop without the
-            // worker ever emitting Disconnected. Resuming accepted demand must
-            // therefore retire the old stop fence here; otherwise valid events
-            // from the still-current generation remain suppressed forever.
-            self.hyperliquid_stop_pending = None;
-            // Hyperliquid multiplexes every demand over one connection, so a
-            // timeframe change only changes this series' candle feed and a
-            // symbol change only adds its feeds: neither reconnects. The full
-            // desired set is rebuilt below and flushed on the next tick.
-            let instrument = self.candle_instrument(series)?.clone();
-            let interval = hyperliquid_interval_for_period(series.period)
-                .map_err(|_| "Hyperliquid history is unavailable for this interval".to_string())?
-                .to_string();
-            let generation = self.provider_generation_for_series(series)?;
-            if !self.candle_live.contains_key(series) {
-                let mut handoff = CandleLiveHandoff::new(
-                    series.clone(),
-                    generation,
-                    instrument.provider_symbol.clone(),
-                    interval,
-                );
-                handoff.connected = self
-                    .engine
-                    .provider_status("hyperliquid")
-                    .is_some_and(|status| status.health == ProviderHealth::Online);
-                self.candle_live.insert(series.clone(), handoff);
-            }
-            self.hyperliquid_demand_dirty = true;
-            return Ok(());
-        }
-        Err("realtime provider is unsupported".to_string())
+        Ok(())
     }
 
-    pub(super) fn handle_rithmic_realtime(&mut self, event: RithmicRealtimeEvent) {
-        let event_generation = match &event {
-            RithmicRealtimeEvent::Failed(generation, _)
-            | RithmicRealtimeEvent::Connecting(generation)
-            | RithmicRealtimeEvent::Connected(generation)
-            | RithmicRealtimeEvent::Trade(generation, _)
-            | RithmicRealtimeEvent::Quote(generation, _)
-            | RithmicRealtimeEvent::Depth(generation, _)
-            | RithmicRealtimeEvent::Recovering(generation, _)
-            | RithmicRealtimeEvent::Disconnected(generation, _)
-            | RithmicRealtimeEvent::Heartbeat(generation, _) => *generation,
+    pub(super) fn handle_provider_event(&mut self, event: ProviderEvent) {
+        let ProviderEvent {
+            provider,
+            generation,
+            kind,
+        } = event;
+        let Some(session) = self.sessions.get(provider) else {
+            return;
         };
-        if self
-            .rithmic_stop_pending
-            .is_some_and(|pending| pending.0.get() == event_generation)
-            && !matches!(event, RithmicRealtimeEvent::Disconnected(..))
+        if session.suspended
+            || generation < session.generation_floor
+            || (session
+                .stop_pending
+                .is_some_and(|pending| pending.0.get() == generation)
+                && !matches!(kind, ProviderEventKind::Disconnected(_)))
         {
             return;
         }
-        match event {
-            RithmicRealtimeEvent::Failed(generation, error) => {
-                eprintln!("Aeris Rithmic reconnect requires intervention: {error}");
-                self.rithmic_failed(
-                    generation,
-                    "Rithmic reconnect could not start; check provider configuration",
-                );
+        let Some(descriptor) = self.providers.descriptor(provider) else {
+            return;
+        };
+        match kind {
+            ProviderEventKind::Connecting => match descriptor.live_model {
+                super::LiveModel::TradeBuilt => self.rithmic_connecting(provider, generation),
+                super::LiveModel::ProviderCandles => {
+                    self.candle_provider_connecting(provider, generation);
+                }
+            },
+            ProviderEventKind::Connected | ProviderEventKind::Heartbeat(_) => {
+                match descriptor.live_model {
+                    super::LiveModel::TradeBuilt => self.rithmic_online(provider, generation),
+                    super::LiveModel::ProviderCandles => {
+                        self.candle_provider_online(provider, generation);
+                    }
+                }
             }
-            RithmicRealtimeEvent::Connecting(generation) => self.rithmic_connecting(generation),
-            RithmicRealtimeEvent::Connected(generation)
-            | RithmicRealtimeEvent::Heartbeat(generation, _) => self.rithmic_online(generation),
-            RithmicRealtimeEvent::Trade(generation, trade) => {
-                self.rithmic_trade(generation, &trade);
+            ProviderEventKind::Recovering {
+                detail,
+                provider_detail,
+            } => {
+                match descriptor.live_model {
+                    super::LiveModel::TradeBuilt => {
+                        self.rithmic_recovering(provider, generation, detail);
+                    }
+                    super::LiveModel::ProviderCandles => {
+                        self.candle_provider_recovering(provider, generation, detail);
+                    }
+                }
+                if let Some(provider_detail) = provider_detail {
+                    self.broadcast_provider_for(provider, Some(&provider_detail));
+                }
             }
-            RithmicRealtimeEvent::Quote(generation, quote) => {
-                self.provider_quote("rithmic", generation, &quote);
+            ProviderEventKind::Failed(detail) => self.rithmic_failed(provider, generation, detail),
+            ProviderEventKind::Disconnected(reason) => {
+                self.handle_provider_disconnected(provider, generation, descriptor, reason);
             }
-            RithmicRealtimeEvent::Depth(generation, snapshot) => {
-                self.provider_depth("rithmic", generation, &snapshot);
+            ProviderEventKind::Trades(batch) => {
+                self.accept_provider_trades(provider, generation, descriptor.live_model, &batch);
             }
-            RithmicRealtimeEvent::Recovering(generation, reason) => {
-                self.rithmic_recovering(generation, rithmic_invalidation_detail(reason));
+            ProviderEventKind::IndexedTrades {
+                instrument,
+                changes,
+            } => self.accept_indexed_trades(provider, generation, &instrument, &changes),
+            ProviderEventKind::TapeBackfill {
+                instrument,
+                trades,
+                truncated,
+            } => self.accept_tape_backfill(provider, generation, &instrument, &trades, truncated),
+            ProviderEventKind::Quote(quote) => self.provider_quote(provider, generation, &quote),
+            ProviderEventKind::Depth(depth) => self.provider_depth(provider, generation, &depth),
+            ProviderEventKind::Candle { symbol, bar } => {
+                self.accept_provider_candle(provider, generation, &symbol, bar, descriptor);
             }
-            RithmicRealtimeEvent::Disconnected(generation, reason) => {
-                let auto_recover = rithmic_auto_recovers(reason);
-                if self
-                    .rithmic_stop_pending
-                    .is_some_and(|pending| pending.0.get() == generation)
+            ProviderEventKind::CandleRecovery(symbol) => {
+                self.recover_provider_candle(provider, generation, &symbol);
+            }
+        }
+    }
+
+    pub(super) fn flush_session_managed_demand(&mut self, provider: &'static str) {
+        if !self.sessions.contains_key(provider) {
+            return;
+        }
+        if let Some(generation) = self.session(provider).recovery {
+            if self
+                .providers
+                .send_control(provider, super::ProviderControl::Recover(generation))
+                .is_ok_and(|sent| sent)
+            {
+                self.session_mut(provider).recovery = None;
+            }
+            return;
+        }
+        if let Some(ready) = self.session(provider).authorization {
+            if self
+                .providers
+                .send_control(
+                    provider,
+                    super::ProviderControl::AuthorizationChanged(ready),
+                )
+                .is_ok_and(|sent| sent)
+            {
+                self.session_mut(provider).authorization = None;
+            }
+            return;
+        }
+        if self.session(provider).suspended {
+            return;
+        }
+        let demand = self.provider_demand(provider);
+        if self.session(provider).accepted.as_ref() == Some(&demand) {
+            return;
+        }
+        if demand.candle_series.is_empty() && demand.instruments.is_empty() {
+            if self.session(provider).accepted.is_some()
+                && self
+                    .providers
+                    .send_control(provider, super::ProviderControl::Stop)
+                    .is_ok_and(|sent| sent)
+            {
+                self.session_mut(provider).accepted = Some(demand);
+            }
+            return;
+        }
+        if self
+            .providers
+            .send_control(provider, super::ProviderControl::Demand(demand.clone()))
+            .is_ok_and(|sent| sent)
+        {
+            self.session_mut(provider).accepted = Some(demand);
+        }
+    }
+
+    fn accept_tape_backfill(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        instrument: &InstallProviderInstrument,
+        trades: &[MarketTrade],
+        truncated: bool,
+    ) {
+        if self
+            .engine
+            .provider_status(provider)
+            .and_then(|status| status.generation)
+            .map(|current| current.0.get())
+            != Some(generation)
+        {
+            return;
+        }
+        if let Some(book) = self
+            .order_books
+            .get_mut(&(provider.to_string(), instrument.instrument_id.clone()))
+        {
+            for trade in trades {
+                if book
+                    .replace_indexed_trade(&trade.trade_id, Some(trade), true)
+                    .is_err()
                 {
-                    self.rithmic_stop_pending = None;
-                    if !self.rithmic_live.is_empty()
-                        || self.price_alerts.has_active_provider("rithmic")
-                    {
-                        self.rithmic_demand = None;
-                        self.rithmic_pending_demand = None;
+                    self.request_indexed_trade_recovery(provider, generation);
+                    return;
+                }
+            }
+        }
+        if let Some(observed) = trades
+            .iter()
+            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
+            .max()
+        {
+            self.publish_non_bar_study_change(
+                provider,
+                &instrument.instrument_id,
+                &instrument.entitlement_id,
+                MarketStream::Trades,
+                observed,
+            );
+        }
+        self.broadcast_order_book(provider, &instrument.instrument_id);
+        if truncated {
+            self.broadcast_provider_for(provider, Some("Available tick history is partial"));
+        }
+    }
+
+    fn recover_provider_candle(&mut self, provider: &str, generation: u64, symbol: &str) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        let series = self
+            .series_live
+            .candle_iter()
+            .filter(|(series, live)| {
+                series.provider_id == provider
+                    && live.generation == generation
+                    && format!("{}{{={}}}", live.wire_coin, live.interval) == symbol
+            })
+            .map(|(series, _)| series.clone())
+            .collect::<Vec<_>>();
+        for series in series {
+            self.candle_series_recovering(
+                &series,
+                generation,
+                FailureStage::Aggregation,
+                "Candle correction is reloading the available history",
+            );
+        }
+    }
+
+    fn accept_indexed_trades(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        instrument: &InstallProviderInstrument,
+        changes: &[IndexedTradeMutation],
+    ) {
+        if self
+            .engine
+            .provider_status(provider)
+            .and_then(|status| status.generation)
+            .map(|current| current.0.get())
+            != Some(generation)
+        {
+            return;
+        }
+        let mut failed = false;
+        if let Some(book) = self
+            .order_books
+            .get_mut(&(provider.to_string(), instrument.instrument_id.clone()))
+        {
+            for change in changes {
+                if book
+                    .replace_indexed_trade(&change.index, change.trade.as_ref(), false)
+                    .is_err()
+                {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            self.request_indexed_trade_recovery(provider, generation);
+            return;
+        }
+        for change in changes {
+            if let Some(trade) = &change.trade {
+                self.evaluate_price_alert_trade(trade);
+            }
+        }
+        if let Some(observed) = changes
+            .iter()
+            .filter_map(|change| change.trade.as_ref())
+            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
+            .max()
+        {
+            self.publish_non_bar_study_change(
+                provider,
+                &instrument.instrument_id,
+                &instrument.entitlement_id,
+                MarketStream::Trades,
+                observed,
+            );
+        }
+        self.broadcast_order_book(provider, &instrument.instrument_id);
+    }
+
+    fn request_indexed_trade_recovery(&mut self, provider: &str, generation: u64) {
+        self.session_mut(provider).recovery = Some(generation);
+        self.candle_provider_recovering(
+            provider,
+            generation,
+            "Tick state is reloading available history",
+        );
+    }
+
+    fn accept_provider_trades(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        live_model: super::LiveModel,
+        batch: &ProviderTradeBatch,
+    ) {
+        let trades = match &batch {
+            ProviderTradeBatch::One(trade) => std::slice::from_ref(trade),
+            ProviderTradeBatch::Many(trades) => trades.as_slice(),
+        };
+        if live_model == super::LiveModel::TradeBuilt {
+            for trade in trades {
+                self.rithmic_trade(provider, generation, trade);
+            }
+            return;
+        }
+        let mut dirty_books = BTreeSet::new();
+        for trade in trades {
+            if let Some(instrument_id) = self.candle_provider_trade(provider, generation, trade) {
+                dirty_books.insert(instrument_id);
+            }
+        }
+        for instrument_id in dirty_books {
+            self.broadcast_order_book(provider, &instrument_id);
+        }
+    }
+
+    fn accept_provider_candle(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        symbol: &str,
+        bar: MarketBar,
+        descriptor: super::ProviderDescriptor,
+    ) {
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status(provider)
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        let failed = self
+            .series_live
+            .candle_iter_mut()
+            .filter(|(series, live)| {
+                series.provider_id == provider
+                    && live.generation == generation
+                    && (!descriptor.candle_requires_connected || live.connected)
+                    && format!("{}{{={}}}", live.wire_coin, live.interval) == symbol
+            })
+            .filter_map(|(series, live)| live.accept_bar(bar).is_err().then(|| series.clone()))
+            .collect::<Vec<_>>();
+        for series in failed {
+            self.candle_series_recovering(
+                &series,
+                generation,
+                FailureStage::Aggregation,
+                descriptor.candle_correction_detail,
+            );
+        }
+    }
+
+    fn handle_provider_disconnected(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        descriptor: super::ProviderDescriptor,
+        reason: ProviderDisconnect,
+    ) {
+        if matches!(reason, ProviderDisconnect::End) {
+            self.end_provider_live_session(provider, generation);
+            return;
+        }
+        let stop_pending = self
+            .session(provider)
+            .stop_pending
+            .is_some_and(|pending| pending.0.get() == generation);
+        if stop_pending {
+            self.session_mut(provider).stop_pending = None;
+            let demanded = match descriptor.live_model {
+                super::LiveModel::TradeBuilt => {
+                    !self.series_live.trades_are_empty()
+                        || self.price_alerts.has_active_provider(provider)
+                }
+                super::LiveModel::ProviderCandles => {
+                    self.series_live
+                        .candle_keys()
+                        .any(|series| series.provider_id == provider)
+                        || !self.order_books.is_empty()
+                        || self.price_alerts.has_active_provider(provider)
+                }
+            };
+            if demanded {
+                match descriptor.live_model {
+                    super::LiveModel::TradeBuilt => {
+                        self.session_mut(provider).accepted = None;
+                        self.session_mut(provider).pending = None;
                         let _ = self.send_rithmic_demand();
                         self.rithmic_recovering(
+                            provider,
                             generation,
                             "Rithmic realtime restarted after idle-stop overlap",
                         );
-                        return;
                     }
-                    self.rithmic_demand = None;
-                    self.rithmic_pending_demand = None;
-                    if let Ok(generation) = id(generation).map(ProviderGeneration) {
-                        let _ = self.engine.end_provider_session("rithmic", generation);
-                        self.broadcast_provider_for("rithmic", None);
+                    super::LiveModel::ProviderCandles => {
+                        self.session_mut(provider).engaged = false;
+                        self.session_mut(provider).demand_dirty = true;
+                        self.candle_provider_recovering(
+                            provider,
+                            generation,
+                            "Hyperliquid realtime restarted after idle-stop overlap",
+                        );
                     }
-                    return;
                 }
-                self.rithmic_demand = None;
-                self.rithmic_pending_demand = None;
-                if let Some(reason) = reason {
-                    self.rithmic_failed(generation, rithmic_invalidation_detail(Some(reason)));
+                return;
+            }
+            let session = self.session_mut(provider);
+            session.accepted = None;
+            session.pending = None;
+            session.engaged = false;
+            session.demand_dirty = false;
+            self.end_provider_live_session(provider, generation);
+            return;
+        }
+        match descriptor.live_model {
+            super::LiveModel::TradeBuilt => {
+                self.session_mut(provider).accepted = None;
+                self.session_mut(provider).pending = None;
+                let (detail, auto_recover, failed) = match reason {
+                    ProviderDisconnect::Recover {
+                        detail,
+                        auto_recover,
+                    } => (detail, auto_recover, false),
+                    ProviderDisconnect::Fail {
+                        detail,
+                        auto_recover,
+                    } => (detail, auto_recover, true),
+                    ProviderDisconnect::End => return,
+                };
+                if failed {
+                    self.rithmic_failed(provider, generation, detail);
                 } else {
-                    self.rithmic_recovering(generation, "Rithmic live session is recovering");
+                    self.rithmic_recovering(provider, generation, detail);
                 }
                 if auto_recover
-                    && (!self.rithmic_live.is_empty()
-                        || self.price_alerts.has_active_provider("rithmic"))
+                    && descriptor.recovery_policy
+                        == super::ProviderRecoveryPolicy::CoordinatorReissuesDemand
+                    && (!self.series_live.trades_are_empty()
+                        || self.price_alerts.has_active_provider(provider))
                 {
                     let _ = self.send_rithmic_demand();
                 }
             }
+            super::LiveModel::ProviderCandles => {
+                self.session_mut(provider).engaged = false;
+                let detail = match reason {
+                    ProviderDisconnect::Recover { detail, .. }
+                    | ProviderDisconnect::Fail { detail, .. } => detail,
+                    ProviderDisconnect::End => return,
+                };
+                self.candle_provider_recovering(provider, generation, detail);
+            }
         }
     }
 
-    pub(super) fn handle_hyperliquid_realtime(&mut self, event: HyperliquidRealtimeEvent) {
-        let event_generation = match &event {
-            HyperliquidRealtimeEvent::Connecting(generation)
-            | HyperliquidRealtimeEvent::Connected(generation)
-            | HyperliquidRealtimeEvent::Candle(generation, ..)
-            | HyperliquidRealtimeEvent::Trades(generation, _)
-            | HyperliquidRealtimeEvent::Quote(generation, _)
-            | HyperliquidRealtimeEvent::Depth(generation, _)
-            | HyperliquidRealtimeEvent::Recovering(generation)
-            | HyperliquidRealtimeEvent::Disconnected(generation)
-            | HyperliquidRealtimeEvent::Heartbeat(generation, _) => *generation,
-        };
-        if self
-            .hyperliquid_stop_pending
-            .is_some_and(|pending| pending.0.get() == event_generation)
-            && !matches!(event, HyperliquidRealtimeEvent::Disconnected(_))
-        {
-            return;
+    fn end_provider_live_session(&mut self, provider: &str, generation: u64) {
+        if let Ok(generation) = id(generation).map(ProviderGeneration) {
+            let _ = self.engine.end_provider_session(provider, generation);
         }
-        match event {
-            HyperliquidRealtimeEvent::Connecting(generation) => {
-                self.candle_provider_connecting("hyperliquid", generation);
-            }
-            HyperliquidRealtimeEvent::Connected(generation)
-            | HyperliquidRealtimeEvent::Heartbeat(generation, _) => {
-                self.candle_provider_online("hyperliquid", generation);
-            }
-            HyperliquidRealtimeEvent::Candle(generation, wire_coin, interval, candle) => {
-                self.hyperliquid_candle(generation, &wire_coin, &interval, &candle);
-            }
-            HyperliquidRealtimeEvent::Trades(generation, trades) => {
-                let mut dirty_books = BTreeSet::new();
-                for trade in &trades {
-                    if let Some(instrument_id) =
-                        self.candle_provider_trade("hyperliquid", generation, trade)
-                    {
-                        dirty_books.insert(instrument_id);
-                    }
-                }
-                for instrument_id in dirty_books {
-                    self.broadcast_order_book("hyperliquid", &instrument_id);
-                }
-            }
-            HyperliquidRealtimeEvent::Quote(generation, quote) => {
-                self.provider_quote("hyperliquid", generation, &quote);
-            }
-            HyperliquidRealtimeEvent::Depth(generation, snapshot) => {
-                self.provider_depth("hyperliquid", generation, &snapshot);
-            }
-            HyperliquidRealtimeEvent::Recovering(generation) => {
-                self.candle_provider_recovering(
-                    "hyperliquid",
-                    generation,
-                    "Hyperliquid live session is recovering",
-                );
-            }
-            HyperliquidRealtimeEvent::Disconnected(generation) => {
-                if self
-                    .hyperliquid_stop_pending
-                    .is_some_and(|pending| pending.0.get() == generation)
-                {
-                    self.hyperliquid_stop_pending = None;
-                    if !self.candle_live.is_empty()
-                        || !self.order_books.is_empty()
-                        || self.price_alerts.has_active_provider("hyperliquid")
-                    {
-                        self.hyperliquid_engaged = false;
-                        self.hyperliquid_demand_dirty = true;
-                        self.candle_provider_recovering(
-                            "hyperliquid",
-                            generation,
-                            "Hyperliquid realtime restarted after idle-stop overlap",
-                        );
-                        return;
-                    }
-                    self.hyperliquid_engaged = false;
-                    self.hyperliquid_demand_dirty = false;
-                    if let Ok(generation) = id(generation).map(ProviderGeneration) {
-                        let _ = self.engine.end_provider_session("hyperliquid", generation);
-                        self.broadcast_provider_for("hyperliquid", None);
-                    }
-                    return;
-                }
-                self.hyperliquid_engaged = false;
-                self.candle_provider_recovering(
-                    "hyperliquid",
-                    generation,
-                    "Hyperliquid live session is recovering",
-                );
-            }
-        }
+        self.broadcast_provider_for(provider, None);
     }
 
     pub(super) fn candle_provider_connecting(&mut self, provider: &str, generation: u64) {
@@ -1502,24 +1838,31 @@ impl Coordinator<'_> {
             return;
         }
         if current.is_some_and(|current| generation > current) {
-            if provider == "hyperliquid" {
-                self.clear_hyperliquid_display_depth();
-            }
+            self.clear_provider_display_depth(provider);
             self.invalidate_provider_live_market(provider, generation);
-            self.hyperliquid_demand_dirty = true;
+            if self
+                .providers
+                .descriptor(provider)
+                .is_some_and(|descriptor| {
+                    descriptor.candle_demand_policy
+                        == super::CandleDemandPolicy::ReconcileAfterSelection
+                })
+            {
+                self.session_mut(provider).demand_dirty = true;
+            }
             for ((series, _), stop) in &self.history_cancellations {
                 if series.provider_id == provider {
                     stop.store(true, Ordering::Release);
                 }
             }
             let series = self
-                .candle_live
-                .keys()
+                .series_live
+                .candle_keys()
                 .filter(|series| series.provider_id == provider)
                 .cloned()
                 .collect::<Vec<_>>();
             for selected in &series {
-                if let Some(live) = self.candle_live.get_mut(selected) {
+                if let Some(live) = self.series_live.candle_mut(selected) {
                     live.reset(generation);
                 }
                 self.broadcast_series_recovery_for(
@@ -1563,8 +1906,8 @@ impl Coordinator<'_> {
         self.broadcast_provider_for(provider, None);
         let mut ready = Vec::new();
         let missing = self
-            .candle_live
-            .iter_mut()
+            .series_live
+            .candle_iter_mut()
             .filter(|(series, _)| series.provider_id == provider)
             .filter_map(|(series, live)| {
                 if live.generation != generation {
@@ -1589,48 +1932,6 @@ impl Coordinator<'_> {
             {
                 let _ = self.enqueue_history_recovery(&series, generation);
             }
-        }
-    }
-
-    pub(super) fn hyperliquid_candle(
-        &mut self,
-        generation: u64,
-        wire_coin: &str,
-        interval: &str,
-        candle: &HyperliquidLiveCandle,
-    ) {
-        let Ok(generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        if self
-            .engine
-            .provider_status("hyperliquid")
-            .and_then(|status| status.generation)
-            != Some(generation)
-        {
-            return;
-        }
-        let failed = self
-            .candle_live
-            .iter_mut()
-            .filter(|(series, live)| {
-                series.provider_id == "hyperliquid"
-                    && live.generation == generation
-                    && live.connected
-                    && live.wire_coin == wire_coin
-                    && live.interval == interval
-            })
-            .filter_map(|(series, live)| {
-                live.accept_candle(candle).is_err().then(|| series.clone())
-            })
-            .collect::<Vec<_>>();
-        for series in failed {
-            self.candle_series_recovering(
-                &series,
-                generation,
-                FailureStage::Aggregation,
-                "Hyperliquid candle replacement requires covering history",
-            );
         }
     }
 
@@ -1659,7 +1960,7 @@ impl Coordinator<'_> {
                 generation.0.get(),
                 "Provider live session identity requires recovery",
             );
-            for (series, live) in &mut self.candle_live {
+            for (series, live) in self.series_live.candle_iter_mut() {
                 if series.provider_id != provider {
                     continue;
                 }
@@ -1703,7 +2004,7 @@ impl Coordinator<'_> {
         detail: &str,
     ) {
         self.cancel_inflight_history_for_live_recovery(series, generation);
-        if let Some(live) = self.candle_live.get_mut(series) {
+        if let Some(live) = self.series_live.candle_mut(series) {
             live.history_state = LiveHistoryState::AwaitingHistory;
             live.dirty = false;
             live.buffered.clear();
@@ -1736,12 +2037,10 @@ impl Coordinator<'_> {
             return;
         }
         self.price_alerts.reset_provider_baselines(provider);
-        if provider == "hyperliquid" {
-            self.clear_hyperliquid_display_depth();
-        }
-        self.hyperliquid_demand_dirty = true;
+        self.clear_provider_display_depth(provider);
+        self.session_mut(provider).demand_dirty = true;
         if self.price_alerts.has_active_provider(provider) {
-            self.hyperliquid_demand_dirty = true;
+            self.session_mut(provider).demand_dirty = true;
         }
         if self
             .engine
@@ -1751,7 +2050,7 @@ impl Coordinator<'_> {
             return;
         }
         self.broadcast_provider_for(provider, Some(detail));
-        for (series, live) in &mut self.candle_live {
+        for (series, live) in self.series_live.candle_iter_mut() {
             if series.provider_id != provider {
                 continue;
             }
@@ -1760,13 +2059,13 @@ impl Coordinator<'_> {
         self.invalidate_provider_live_market(provider, generation);
     }
 
-    pub(super) fn rithmic_connecting(&mut self, generation: u64) {
+    pub(super) fn rithmic_connecting(&mut self, provider: &str, generation: u64) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
         let current = self
             .engine
-            .provider_status("rithmic")
+            .provider_status(provider)
             .and_then(|status| status.generation);
         if current.is_some_and(|current| generation < current) {
             return;
@@ -1774,21 +2073,26 @@ impl Coordinator<'_> {
         if current.is_none_or(|current| generation > current)
             && self
                 .engine
-                .begin_provider_session("rithmic", generation)
+                .begin_provider_session(provider, generation)
                 .is_err()
         {
             return;
         }
         if current.is_some_and(|current| generation > current) {
-            self.invalidate_provider_live_market("rithmic", generation);
+            self.invalidate_provider_live_market(provider, generation);
             for ((series, _), stop) in &self.history_cancellations {
-                if series.provider_id == "rithmic" {
+                if series.provider_id == provider {
                     stop.store(true, Ordering::Release);
                 }
             }
-            let series = self.rithmic_live.keys().cloned().collect::<Vec<_>>();
+            let series = self
+                .series_live
+                .trade_keys()
+                .filter(|series| series.provider_id == provider)
+                .cloned()
+                .collect::<Vec<_>>();
             for selected in &series {
-                if let Some(live) = self.rithmic_live.get_mut(selected) {
+                if let Some(live) = self.series_live.trade_mut(selected) {
                     live.reset(generation);
                 }
                 self.broadcast_series_recovery_for(
@@ -1802,21 +2106,21 @@ impl Coordinator<'_> {
         }
         if self
             .engine
-            .set_provider_health("rithmic", generation, ProviderHealth::Connecting)
+            .set_provider_health(provider, generation, ProviderHealth::Connecting)
             .is_err()
         {
             return;
         }
-        self.broadcast_provider_for("rithmic", None);
+        self.broadcast_provider_for(provider, None);
     }
 
-    pub(super) fn rithmic_online(&mut self, generation: u64) {
+    pub(super) fn rithmic_online(&mut self, provider: &str, generation: u64) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
         if self
             .engine
-            .provider_status("rithmic")
+            .provider_status(provider)
             .and_then(|status| status.generation)
             != Some(generation)
         {
@@ -1824,16 +2128,17 @@ impl Coordinator<'_> {
         }
         if self
             .engine
-            .set_provider_health("rithmic", generation, ProviderHealth::Online)
+            .set_provider_health(provider, generation, ProviderHealth::Online)
             .is_err()
         {
             return;
         }
-        self.broadcast_provider_for("rithmic", None);
+        self.broadcast_provider_for(provider, None);
         let mut ready = Vec::new();
         let missing = self
-            .rithmic_live
-            .iter_mut()
+            .series_live
+            .trade_iter_mut()
+            .filter(|(series, _)| series.provider_id == provider)
             .filter_map(|(series, live)| {
                 if live.generation != generation {
                     return None;
@@ -1860,26 +2165,30 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn rithmic_trade(&mut self, generation: u64, trade: &MarketTrade) {
+    pub(super) fn rithmic_trade(&mut self, provider: &str, generation: u64, trade: &MarketTrade) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
         if self
             .engine
-            .provider_status("rithmic")
+            .provider_status(provider)
             .and_then(|status| status.generation)
             != Some(generation)
         {
             return;
         }
-        if trade.metadata.provider_id != "rithmic"
+        if trade.metadata.provider_id != provider
             || trade.metadata.session_generation != generation.0.get()
         {
             self.rithmic_recovering(
+                provider,
                 generation.0.get(),
                 "Rithmic live session identity requires recovery",
             );
-            for live in self.rithmic_live.values_mut() {
+            for (series, live) in self.series_live.trade_iter_mut() {
+                if series.provider_id != provider {
+                    continue;
+                }
                 live.history_state = LiveHistoryState::AwaitingHistory;
                 live.dirty = false;
                 live.buffered.clear();
@@ -1902,10 +2211,10 @@ impl Coordinator<'_> {
         // series must enter AwaitingHistory before the non-bar study wave runs,
         // while unaffected timeframes remain eligible.
         let failed = self
-            .rithmic_live
-            .iter_mut()
+            .series_live
+            .trade_iter_mut()
             .filter(|(series, live)| {
-                series.provider_id == "rithmic"
+                series.provider_id == provider
                     && live.generation == generation
                     && live.connected
                     && live.series.instrument_id == trade.metadata.instrument_id
@@ -1923,12 +2232,12 @@ impl Coordinator<'_> {
         }
         let trade_changed = self
             .order_books
-            .get_mut(&("rithmic".to_string(), instrument_id.clone()))
+            .get_mut(&(provider.to_string(), instrument_id.clone()))
             .is_some_and(|order_book| order_book.accept_recent_trade(trade));
         if trade_changed {
-            self.broadcast_order_book("rithmic", &instrument_id);
+            self.broadcast_order_book(provider, &instrument_id);
             self.publish_non_bar_study_change(
-                "rithmic",
+                provider,
                 &instrument_id,
                 &entitlement_id,
                 MarketStream::Trades,
@@ -1944,7 +2253,7 @@ impl Coordinator<'_> {
         _stage: FailureStage,
         detail: &str,
     ) {
-        if let Some(live) = self.rithmic_live.get_mut(series) {
+        if let Some(live) = self.series_live.trade_mut(series) {
             live.history_state = LiveHistoryState::AwaitingHistory;
             live.dirty = false;
             live.buffered.clear();
@@ -1990,11 +2299,7 @@ impl Coordinator<'_> {
             }
         }
         if demand_changed {
-            if trade.metadata.provider_id == "rithmic" {
-                let _ = self.send_rithmic_demand();
-            } else if trade.metadata.provider_id == "hyperliquid" {
-                self.hyperliquid_demand_dirty = true;
-            }
+            self.mark_provider_alert_demand_changed(&trade.metadata.provider_id);
             self.stop_realtime_if_idle();
         }
     }
@@ -2124,64 +2429,75 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn rithmic_recovering(&mut self, generation: u64, detail: &'static str) {
+    pub(super) fn rithmic_recovering(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        detail: &'static str,
+    ) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
         if self
             .engine
-            .provider_status("rithmic")
+            .provider_status(provider)
             .and_then(|status| status.generation)
             != Some(generation)
         {
             return;
         }
-        self.price_alerts.reset_provider_baselines("rithmic");
+        self.price_alerts.reset_provider_baselines(provider);
         if self
             .engine
-            .set_provider_health("rithmic", generation, ProviderHealth::Recovering)
+            .set_provider_health(provider, generation, ProviderHealth::Recovering)
             .is_err()
         {
             return;
         }
-        self.broadcast_provider_for("rithmic", Some(detail));
-        for live in self.rithmic_live.values_mut() {
+        self.broadcast_provider_for(provider, Some(detail));
+        for (series, live) in self.series_live.trade_iter_mut() {
+            if series.provider_id != provider {
+                continue;
+            }
             live.connected = false;
         }
-        self.invalidate_provider_live_market("rithmic", generation);
+        self.invalidate_provider_live_market(provider, generation);
     }
 
-    fn rithmic_failed(&mut self, generation: u64, detail: &'static str) {
+    fn rithmic_failed(&mut self, provider: &str, generation: u64, detail: &'static str) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
         if self
             .engine
-            .provider_status("rithmic")
+            .provider_status(provider)
             .and_then(|status| status.generation)
             != Some(generation)
         {
             return;
         }
-        self.price_alerts.reset_provider_baselines("rithmic");
+        self.price_alerts.reset_provider_baselines(provider);
         if self
             .engine
-            .set_provider_health("rithmic", generation, ProviderHealth::Failed)
+            .set_provider_health(provider, generation, ProviderHealth::Failed)
             .is_err()
         {
             return;
         }
-        self.broadcast_provider_for("rithmic", Some(detail));
-        for live in self.rithmic_live.values_mut() {
+        self.broadcast_provider_for(provider, Some(detail));
+        for (series, live) in self.series_live.trade_iter_mut() {
+            if series.provider_id != provider {
+                continue;
+            }
             live.connected = false;
         }
-        self.invalidate_provider_live_market("rithmic", generation);
+        self.invalidate_provider_live_market(provider, generation);
     }
 
     pub(super) fn publish_rithmic_live(&mut self) {
         let ready = self
-            .rithmic_live
-            .values_mut()
+            .series_live
+            .trade_values_mut()
             .filter_map(|live| {
                 let update = live.take_publication()?;
                 Some((
@@ -2224,9 +2540,9 @@ impl Coordinator<'_> {
             return false;
         }
         let ready =
-            self.rithmic_live.get(series).is_some_and(|live| {
+            self.series_live.trade(series).is_some_and(|live| {
                 live.connected && live.history_state == LiveHistoryState::Ready
-            }) || self.candle_live.get(series).is_some_and(|live| {
+            }) || self.series_live.candle(series).is_some_and(|live| {
                 live.connected && live.history_state == LiveHistoryState::Ready
             });
         if ready {
@@ -2258,78 +2574,15 @@ impl Coordinator<'_> {
     /// authoritative engine stream union. Each provider feed follows only the
     /// stream classes that require it; retaining canonical live state never
     /// implies an unrelated upstream subscription.
+    #[cfg(test)]
     pub(super) fn hyperliquid_demand(&self) -> HyperliquidDemand {
-        let mut candles = BTreeSet::new();
-        let mut trades = BTreeSet::new();
-        let mut quotes = BTreeSet::new();
-        let mut books = BTreeSet::new();
-        for (series, live) in &self.candle_live {
-            if series.provider_id != "hyperliquid" {
-                continue;
-            }
-            let Some(streams) = self
-                .engine
-                .subscription_status(series)
-                .map(|status| status.streams)
-            else {
-                continue;
-            };
-            let Ok(instrument) = self.candle_instrument(series) else {
-                continue;
-            };
-            let (Ok(price_scale), Ok(quantity_scale)) = (
-                u8::try_from(instrument.price_scale),
-                u8::try_from(instrument.quantity_scale),
-            ) else {
-                continue;
-            };
-            let mapping = crate::hyperliquid_realtime::HyperliquidInstrumentDemand {
-                wire_coin: live.wire_coin.clone(),
-                instrument_id: series.instrument_id.clone(),
-                entitlement_id: series.entitlement_id.clone(),
-                price_scale,
-                quantity_scale,
-            };
-            if streams.contains(MarketStream::Bars) {
-                candles.insert(HyperliquidCandleDemand {
-                    instrument: mapping.clone(),
-                    interval: live.interval.clone(),
-                });
-            }
-            if streams.contains(MarketStream::Trades) {
-                trades.insert(mapping.clone());
-            }
-            if streams.contains(MarketStream::Quotes) || streams.contains(MarketStream::Depth) {
-                quotes.insert(mapping.clone());
-            }
-            if streams.contains(MarketStream::Depth) {
-                books.insert(mapping);
-            }
-        }
-        for instrument in self.price_alerts.active_instruments("hyperliquid") {
-            let (Ok(price_scale), Ok(quantity_scale)) = (
-                u8::try_from(instrument.price_scale),
-                u8::try_from(instrument.quantity_scale),
-            ) else {
-                continue;
-            };
-            trades.insert(HyperliquidInstrumentDemand {
-                wire_coin: instrument.provider_symbol,
-                instrument_id: instrument.instrument_id,
-                entitlement_id: instrument.entitlement_id,
-                price_scale,
-                quantity_scale,
-            });
-        }
-        HyperliquidDemand {
-            candles: candles.into_iter().collect(),
-            trades: trades.into_iter().collect(),
-            quotes: quotes.into_iter().collect(),
-            books: books.into_iter().collect(),
-        }
+        self.provider_demand("hyperliquid").hyperliquid_wire()
     }
 
-    fn hyperliquid_display_depth_demand(&self) -> HyperliquidDisplayDepthDemand {
+    fn hyperliquid_display_depth_demand(
+        &self,
+        demand: &ProviderDemand,
+    ) -> HyperliquidDisplayDepthDemand {
         let Some(provider_generation) = self
             .engine
             .provider_status("hyperliquid")
@@ -2338,29 +2591,15 @@ impl Coordinator<'_> {
             return HyperliquidDisplayDepthDemand::default();
         };
         let mut books = BTreeSet::new();
-        for consumer_id in self.events.keys() {
-            let Some(demand) = self.engine.current_demand(*consumer_id) else {
-                continue;
-            };
-            if !demand.resource_class.publishes_ui()
-                || !demand
-                    .streams
-                    .is_some_and(|streams| streams.contains(MarketStream::Depth))
-            {
-                continue;
-            }
-            let Some(series) = demand
-                .series
-                .as_ref()
-                .filter(|series| series.provider_id == "hyperliquid")
-            else {
-                continue;
-            };
-            let Some(book) = self
-                .order_books
-                .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                .filter(|book| book.instrument.entitlement_id == series.entitlement_id)
-            else {
+        for requested in demand
+            .instruments
+            .iter()
+            .filter(|requested| requested.display_depth)
+        {
+            let Some(book) = self.order_books.get(&(
+                "hyperliquid".to_string(),
+                requested.instrument.instrument_id.clone(),
+            )) else {
                 continue;
             };
             let (Ok(price_scale), Ok(quantity_scale)) = (
@@ -2388,43 +2627,47 @@ impl Coordinator<'_> {
     /// Hands the worker the rebuilt subscription set. The worker diffs it
     /// against live subscriptions, so presentation changes never reconnect.
     pub(super) fn flush_hyperliquid_demand(&mut self) {
-        if !self.hyperliquid_demand_dirty {
+        if !self.sessions.contains_key("hyperliquid") {
             return;
         }
-        let demand = self.hyperliquid_demand();
-        let display_demand = self.hyperliquid_display_depth_demand();
+        if !self.session("hyperliquid").demand_dirty {
+            return;
+        }
+        let neutral = self.provider_demand("hyperliquid");
+        let demand = neutral.hyperliquid_wire();
+        let display_demand = self.hyperliquid_display_depth_demand(&neutral);
         let empty = demand.candles.is_empty()
             && demand.trades.is_empty()
             && demand.quotes.is_empty()
             && demand.books.is_empty();
-        if empty && !self.hyperliquid_engaged {
-            self.hyperliquid_demand_dirty = false;
+        if empty && !self.session("hyperliquid").engaged {
+            self.session_mut("hyperliquid").demand_dirty = false;
             return;
         }
         let raw = self
             .providers
-            .send_hyperliquid_realtime(HyperliquidRealtimeControl::Subscribe(demand));
+            .send_control("hyperliquid", super::ProviderControl::Demand(neutral));
         let display = self.providers.send_hyperliquid_display_depth(
             HyperliquidDisplayDepthControl::Subscribe(display_demand),
         );
         match (raw, display) {
             (Ok(true), Ok(true)) => {
-                self.hyperliquid_demand_dirty = false;
-                self.hyperliquid_engaged = !empty;
+                self.session_mut("hyperliquid").demand_dirty = false;
+                self.session_mut("hyperliquid").engaged = !empty;
             }
             // A full channel retries on the next coordinator tick; the
             // worker coalesces to the newest set.
             (Ok(false), _) | (_, Ok(false)) => {}
             (Err(_), _) | (_, Err(_)) => {
-                self.hyperliquid_demand_dirty = false;
+                self.session_mut("hyperliquid").demand_dirty = false;
             }
         }
     }
 
     pub(super) fn publish_candle_live(&mut self) {
         let ready = self
-            .candle_live
-            .values_mut()
+            .series_live
+            .candle_values_mut()
             .filter_map(|live| {
                 let update = live.take_publication()?;
                 Some((
@@ -2476,8 +2719,8 @@ impl Coordinator<'_> {
 
     pub(super) fn prune_unused_live_series(&mut self) {
         for series in self
-            .rithmic_live
-            .keys()
+            .series_live
+            .trade_keys()
             .filter(|series| !self.engine.has_subscription(series))
         {
             for ((active, _), stop) in &self.history_cancellations {
@@ -2486,15 +2729,17 @@ impl Coordinator<'_> {
                 }
             }
         }
-        let retained_rithmic = self.rithmic_live.len();
-        self.rithmic_live
-            .retain(|series, _| self.engine.has_subscription(series));
-        if self.rithmic_live.len() != retained_rithmic && !self.rithmic_live.is_empty() {
+        let retained_rithmic = self.series_live.trade_count();
+        self.series_live
+            .retain_trades(|series, _| self.engine.has_subscription(series));
+        if self.series_live.trade_count() != retained_rithmic
+            && !self.series_live.trades_are_empty()
+        {
             let _ = self.send_rithmic_demand();
         }
         for series in self
-            .candle_live
-            .keys()
+            .series_live
+            .candle_keys()
             .filter(|series| !self.engine.has_subscription(series))
         {
             for ((active, _), stop) in &self.history_cancellations {
@@ -2503,11 +2748,11 @@ impl Coordinator<'_> {
                 }
             }
         }
-        let retained_hyperliquid = self.candle_live.len();
-        self.candle_live
-            .retain(|series, _| self.engine.has_subscription(series));
-        if self.candle_live.len() != retained_hyperliquid {
-            self.hyperliquid_demand_dirty = true;
+        let retained_hyperliquid = self.series_live.candle_count();
+        self.series_live
+            .retain_candles(|series, _| self.engine.has_subscription(series));
+        if self.series_live.candle_count() != retained_hyperliquid {
+            self.session_mut("hyperliquid").demand_dirty = true;
         }
     }
 
@@ -2519,56 +2764,106 @@ impl Coordinator<'_> {
     }
     /// Hands the worker a replacement subscription set the control channel refused.
     pub(super) fn flush_rithmic_demand(&mut self) {
-        let Some(demand) = self.rithmic_pending_demand.take() else {
+        if !self.sessions.contains_key("rithmic") {
+            return;
+        }
+        let Some(neutral) = self.session_mut("rithmic").pending.take() else {
             return;
         };
         match self
             .providers
-            .send_rithmic_realtime(RithmicRealtimeControl::Subscribe(demand.clone()))
+            .send_control("rithmic", super::ProviderControl::Demand(neutral.clone()))
         {
-            Ok(true) => self.rithmic_demand = Some(demand),
-            Ok(false) | Err(_) => self.rithmic_pending_demand = Some(demand),
-        }
-    }
-    pub(super) fn stop_realtime_if_idle(&mut self) {
-        if self.rithmic_live.is_empty()
-            && !self.price_alerts.has_active_provider("rithmic")
-            && self.rithmic_demand.is_some()
-            && self.rithmic_stop_pending.is_none()
-            && let Some(generation) = self
-                .engine
-                .provider_status("rithmic")
-                .and_then(|status| status.generation)
-        {
-            match self.providers.stop("rithmic") {
-                Ok(true) => self.rithmic_stop_pending = Some(generation),
-                Ok(false) => {}
-                Err(_) => {
-                    self.rithmic_demand = None;
-                    self.rithmic_pending_demand = None;
-                    let _ = self.engine.end_provider_session("rithmic", generation);
-                }
+            Ok(true) => {
+                self.session_mut("rithmic").accepted = Some(neutral);
+            }
+            Ok(false) | Err(_) => {
+                self.session_mut("rithmic").pending = Some(neutral);
             }
         }
-        if !self
-            .candle_live
-            .keys()
-            .any(|series| series.provider_id == "hyperliquid")
-            && !self.price_alerts.has_active_provider("hyperliquid")
-            && self.hyperliquid_engaged
-            && self.hyperliquid_stop_pending.is_none()
-            && let Some(generation) = self
+    }
+    pub(super) fn mark_alert_demand_changed(&mut self) {
+        let providers = self
+            .providers
+            .records
+            .values()
+            .map(|record| record.descriptor.id)
+            .collect::<Vec<_>>();
+        for provider in providers {
+            self.mark_provider_alert_demand_changed(provider);
+        }
+    }
+
+    fn mark_provider_alert_demand_changed(&mut self, provider: &str) {
+        if let Some(descriptor) = self.providers.descriptor(provider) {
+            match descriptor.alert_demand_update {
+                super::AlertDemandUpdate::Immediate => {
+                    let _ = self.send_rithmic_demand();
+                }
+                super::AlertDemandUpdate::MarkDirty => {
+                    self.session_mut(provider).demand_dirty = true;
+                }
+                super::AlertDemandUpdate::WorkerManaged => {}
+            }
+        }
+    }
+
+    pub(super) fn stop_realtime_if_idle(&mut self) {
+        let descriptors = self
+            .providers
+            .records
+            .values()
+            .map(|record| record.descriptor)
+            .collect::<Vec<_>>();
+        for descriptor in descriptors {
+            if descriptor.idle_stop_policy != super::IdleStopPolicy::Coordinator {
+                continue;
+            }
+            let provider = descriptor.id;
+            let demanded = match descriptor.live_model {
+                super::LiveModel::TradeBuilt => self
+                    .series_live
+                    .trade_keys()
+                    .any(|series| series.provider_id == provider),
+                super::LiveModel::ProviderCandles => self
+                    .series_live
+                    .candle_keys()
+                    .any(|series| series.provider_id == provider),
+            } || self.price_alerts.has_active_provider(provider);
+            let session = self.session(provider);
+            let engaged = match descriptor.live_model {
+                super::LiveModel::TradeBuilt => session.accepted.is_some(),
+                super::LiveModel::ProviderCandles => session.engaged,
+            };
+            if demanded || !engaged || session.stop_pending.is_some() {
+                continue;
+            }
+            let Some(generation) = self
                 .engine
-                .provider_status("hyperliquid")
+                .provider_status(provider)
                 .and_then(|status| status.generation)
-        {
-            match self.providers.stop("hyperliquid") {
-                Ok(true) => self.hyperliquid_stop_pending = Some(generation),
+            else {
+                continue;
+            };
+            match self
+                .providers
+                .send_control(provider, super::ProviderControl::Stop)
+            {
+                Ok(true) => self.session_mut(provider).stop_pending = Some(generation),
                 Ok(false) => {}
                 Err(_) => {
-                    self.hyperliquid_engaged = false;
-                    self.hyperliquid_demand_dirty = false;
-                    let _ = self.engine.end_provider_session("hyperliquid", generation);
+                    let session = self.session_mut(provider);
+                    match descriptor.live_model {
+                        super::LiveModel::TradeBuilt => {
+                            session.accepted = None;
+                            session.pending = None;
+                        }
+                        super::LiveModel::ProviderCandles => {
+                            session.engaged = false;
+                            session.demand_dirty = false;
+                        }
+                    }
+                    let _ = self.engine.end_provider_session(provider, generation);
                 }
             }
         }
@@ -2597,6 +2892,40 @@ mod tests {
             close,
             volume: 1,
         }
+    }
+
+    fn candle(
+        open_nanos: i64,
+        open: i64,
+        high: i64,
+        low: i64,
+        close: i64,
+        volume: i64,
+    ) -> MarketBar {
+        MarketBar {
+            source_sequence: 1,
+            exchange_timestamp_seconds: open_nanos.div_euclid(1_000_000_000),
+            exchange_timestamp_unix_nanos: open_nanos,
+            open,
+            high,
+            low,
+            close,
+            volume,
+        }
+    }
+
+    #[test]
+    fn provider_live_candle_replacement_rolls_forming_once() {
+        let minute = 60_000_000_000;
+        let mut closed = vec![bar(1, minute, 10_100)];
+        let first = bar(2, 2 * minute, 10_200);
+        let mut forming = Some(first);
+        assert!(!merge_live_candle(&mut closed, &mut forming, first).expect("duplicate"));
+        let next = bar(3, 3 * minute, 10_300);
+        assert!(merge_live_candle(&mut closed, &mut forming, next).expect("rollover"));
+        assert_eq!(closed, vec![bar(1, minute, 10_100), first]);
+        assert_eq!(forming, Some(next));
+        assert!(merge_live_candle(&mut closed, &mut forming, first).is_err());
     }
 
     fn rithmic_tick_series() -> BarSeriesKey {
@@ -2749,7 +3078,10 @@ mod tests {
 
     #[test]
     fn study_live_market_views_are_generation_fenced_and_invalidated_for_recovery() {
-        let mut book = ProviderOrderBook::new(ladder_instrument(1));
+        let mut book = ProviderOrderBook::new(
+            ladder_instrument(1),
+            super::super::TradeContinuity::Sequence,
+        );
         assert!(book.install_top_of_book(&ladder_quote(1, 1)));
         assert!(book.accept_recent_trade(&ladder_trade(1, 2, 2, 20_000, 3, AggressorSide::Buy,)));
         assert!(matches!(
@@ -2809,7 +3141,7 @@ mod tests {
     fn indexed_trade_correction_cancellation_and_delayed_history_are_fenced() {
         let mut instrument = ladder_instrument(1);
         instrument.provider = "tastytrade".into();
-        let mut book = ProviderOrderBook::new(instrument);
+        let mut book = ProviderOrderBook::new(instrument, super::super::TradeContinuity::Indexed);
         let mut trade = ladder_trade(1, 20, 1_000_000_000, 20_000, 4, AggressorSide::Buy);
         trade.metadata.provider_id = "tastytrade".into();
         trade.trade_id = "9007199254740993".into();
@@ -2857,7 +3189,10 @@ mod tests {
 
     #[test]
     fn recent_ladder_trades_are_side_aware_deduped_retained_and_session_fenced() {
-        let mut book = ProviderOrderBook::new(ladder_instrument(1));
+        let mut book = ProviderOrderBook::new(
+            ladder_instrument(1),
+            super::super::TradeContinuity::Sequence,
+        );
         let start = 1_000_000_000_i64;
         assert!(book.accept_recent_trade(&ladder_trade(
             1,
@@ -2960,7 +3295,10 @@ mod tests {
 
     #[test]
     fn retained_trade_tape_enforces_its_hard_item_bound() {
-        let mut book = ProviderOrderBook::new(ladder_instrument(1));
+        let mut book = ProviderOrderBook::new(
+            ladder_instrument(1),
+            super::super::TradeContinuity::Sequence,
+        );
         for sequence in
             1..=u64::try_from(MAXIMUM_RECENT_LADDER_TRADES + 2).expect("tape capacity fits u64")
         {
@@ -3064,8 +3402,13 @@ mod tests {
             period: BarPeriod::time(60).expect("time period"),
             definition_version: 1,
         };
-        let mut live =
-            CandleLiveHandoff::new(series, generation(), "BTC".to_string(), "1m".to_string());
+        let mut live = CandleLiveHandoff::new(
+            series,
+            generation(),
+            "BTC".to_string(),
+            "1m".to_string(),
+            CandleGapPolicy::Contiguous,
+        );
         live.seed(
             2,
             2,
@@ -3079,24 +3422,10 @@ mod tests {
         live.connected = true;
         let _ = live.take_publication().expect("seed tail");
 
-        live.accept_candle(&HyperliquidLiveCandle {
-            open_nanos: 120_000_000_000,
-            open: 10_000,
-            high: 10_400,
-            low: 9_900,
-            close: 10_250,
-            volume: 4,
-        })
-        .expect("final revision");
-        live.accept_candle(&HyperliquidLiveCandle {
-            open_nanos: 180_000_000_000,
-            open: 10_250,
-            high: 10_500,
-            low: 10_200,
-            close: 10_300,
-            volume: 1,
-        })
-        .expect("rollover");
+        live.accept_bar(candle(120_000_000_000, 10_000, 10_400, 9_900, 10_250, 4))
+            .expect("final revision");
+        live.accept_bar(candle(180_000_000_000, 10_250, 10_500, 10_200, 10_300, 1))
+            .expect("rollover");
 
         let LiveSeriesPublication::Tails(bars) = live.take_publication().expect("rollover tails");
         assert_eq!(
@@ -3109,6 +3438,33 @@ mod tests {
     }
 
     #[test]
+    fn candle_gap_policy_allows_session_gaps_but_rejects_missing_contiguous_bars() {
+        let series = BarSeriesKey {
+            provider_id: "provider".to_string(),
+            instrument_id: "instrument:provider:TEST".to_string(),
+            entitlement_id: "provider-test".to_string(),
+            period: BarPeriod::time(60).expect("time period"),
+            definition_version: 1,
+        };
+        let previous = bar(10, 60_000_000_000, 10_000);
+        let next = bar(11, 180_000_000_000, 10_100);
+        for (policy, accepted) in [
+            (CandleGapPolicy::Contiguous, false),
+            (CandleGapPolicy::SessionGapsAllowed, true),
+        ] {
+            let mut live = CandleLiveHandoff::new(
+                series.clone(),
+                generation(),
+                "TEST".to_string(),
+                "1m".to_string(),
+                policy,
+            );
+            live.seed(2, 2, &[previous], None).expect("history seeds");
+            assert_eq!(live.ingest(next).is_ok(), accepted);
+        }
+    }
+
+    #[test]
     fn hyperliquid_reseed_buffers_and_replays_candles_without_losing_the_seam() {
         let series = BarSeriesKey {
             provider_id: "hyperliquid".to_string(),
@@ -3117,8 +3473,13 @@ mod tests {
             period: BarPeriod::time(60).expect("time period"),
             definition_version: 1,
         };
-        let mut live =
-            CandleLiveHandoff::new(series, generation(), "BTC".to_string(), "1m".to_string());
+        let mut live = CandleLiveHandoff::new(
+            series,
+            generation(),
+            "BTC".to_string(),
+            "1m".to_string(),
+            CandleGapPolicy::Contiguous,
+        );
         let closed = bar(10, 60_000_000_000, 10_000);
         let forming_bar = bar(11, 120_000_000_000, 10_100);
         live.seed(
@@ -3134,24 +3495,10 @@ mod tests {
         live.connected = true;
         live.begin_history_reseed();
 
-        live.accept_candle(&HyperliquidLiveCandle {
-            open_nanos: 120_000_000_000,
-            open: 10_000,
-            high: 10_400,
-            low: 9_900,
-            close: 10_250,
-            volume: 4,
-        })
-        .expect("forming revision buffers");
-        live.accept_candle(&HyperliquidLiveCandle {
-            open_nanos: 180_000_000_000,
-            open: 10_250,
-            high: 10_500,
-            low: 10_200,
-            close: 10_300,
-            volume: 1,
-        })
-        .expect("new candle buffers");
+        live.accept_bar(candle(120_000_000_000, 10_000, 10_400, 9_900, 10_250, 4))
+            .expect("forming revision buffers");
+        live.accept_bar(candle(180_000_000_000, 10_250, 10_500, 10_200, 10_300, 1))
+            .expect("new candle buffers");
         assert_eq!(live.buffered.len(), 2);
         assert_eq!(live.forming.map(|bar| bar.close), Some(10_100));
 

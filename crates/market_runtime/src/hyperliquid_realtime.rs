@@ -523,7 +523,7 @@ pub(crate) fn run(
         ) {
             return;
         }
-        if wake.overflowed(1, generation) {
+        if wake.overflowed("hyperliquid", generation) {
             generation = generation.saturating_add(1);
             thread_sleep(reconnect_delay, stop);
             continue;
@@ -538,7 +538,7 @@ pub(crate) fn run(
                 stop,
                 wake,
             ) {
-                SessionExit::Closed if !wake.overflowed(1, generation) => return,
+                SessionExit::Closed if !wake.overflowed("hyperliquid", generation) => return,
                 SessionExit::Closed => {}
                 SessionExit::Parked => {
                     eprintln!("Aeris Hyperliquid realtime parked by demand owner");
@@ -628,7 +628,7 @@ fn emit(
             false
         }
         Err(TrySendError::Full(_)) => {
-            wake.report_overflow(1, generation);
+            wake.report_overflow("hyperliquid", generation);
             false
         }
         Err(TrySendError::Disconnected(_)) => true,
@@ -663,7 +663,7 @@ impl RealtimeEventSink<'_> {
             return true;
         }
         let generation = event.generation();
-        if self.wake.overflowed(1, generation) {
+        if self.wake.overflowed("hyperliquid", generation) {
             return true;
         }
         match self.events.try_send(event) {
@@ -672,7 +672,7 @@ impl RealtimeEventSink<'_> {
                 false
             }
             Err(TrySendError::Full(_)) => {
-                self.wake.report_overflow(1, generation);
+                self.wake.report_overflow("hyperliquid", generation);
                 true
             }
             Err(TrySendError::Disconnected(_)) => true,
@@ -771,7 +771,7 @@ fn run_session(
                         }
                     }
                     Err(FrameOutcome::Closed) => {
-                        return if wake.overflowed(1, generation) {
+                        return if wake.overflowed("hyperliquid", generation) {
                             SessionExit::Reconnect("local event queue overflow".into())
                         } else {
                             SessionExit::Closed
@@ -1400,8 +1400,11 @@ mod tests {
             wake: &wake,
         };
         assert!(sink.send(HyperliquidRealtimeEvent::Heartbeat(1, None)));
-        assert!(wake.overflowed(1, 1));
-        assert!(!wake.overflowed(1, 2), "new generation can recover");
+        assert!(wake.overflowed("hyperliquid", 1));
+        assert!(
+            !wake.overflowed("hyperliquid", 2),
+            "new generation can recover"
+        );
     }
 
     #[test]
@@ -1707,7 +1710,8 @@ mod tests {
     fn full_event_queue_observes_cancellation() {
         let (events, _received) = std::sync::mpsc::sync_channel(1);
         events.send(1).expect("fill queue");
-        let events = CatalogPublisher::new(events, 1, ProviderCoordinatorWake::for_tests());
+        let events =
+            CatalogPublisher::new(events, "hyperliquid", ProviderCoordinatorWake::for_tests());
         let stop = AtomicBool::new(true);
         assert!(publish_catalog(&events, 2, &stop));
     }

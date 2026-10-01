@@ -54,9 +54,63 @@ fn shipping_provider_capabilities_accept_the_declared_non_bar_study_streams() {
 }
 
 #[test]
+fn fourth_descriptor_registers_without_coordinator_changes() {
+    let fourth = ProviderDescriptor {
+        id: "fourth-test-provider",
+        account_id: "fourth-test-account",
+        capabilities: ProviderCapabilities {
+            historical_bars: true,
+            realtime_bars: false,
+            streams: StreamRequirements::BARS,
+        },
+        reconnect_delay: Duration::from_secs(2),
+        gap_policy: CandleGapPolicy::Contiguous,
+        history_source: HistorySourceKind::ProviderSession,
+        connection_kind: ProviderConnectionKind::Public,
+        recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
+        idle_stop_policy: IdleStopPolicy::WorkerManaged,
+        alert_demand_update: AlertDemandUpdate::WorkerManaged,
+        start: ProviderRuntimeRegistry::start_tastytrade_runtime,
+        flush_demand: |_| {},
+        prepare_search: None,
+        live_model: LiveModel::TradeBuilt,
+        supported_period: rithmic_supported_period,
+        alert_overrides_instrument: false,
+        overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+        history_range_policy: HistoryRangePolicy::Bounded,
+        trade_continuity: TradeContinuity::Sequence,
+        candle_requires_connected: false,
+        candle_correction_detail: "Provider candle correction requires covering history",
+        candle_wire_interval: None,
+        candle_demand_policy: CandleDemandPolicy::SessionManaged,
+        instrument_missing_detail: "Provider instrument is not installed",
+    };
+    let mut engine = configured_engine_from_descriptors(&[
+        RITHMIC_DESCRIPTOR,
+        HYPERLIQUID_DESCRIPTOR,
+        tastytrade::DESCRIPTOR,
+        fourth,
+    ])
+    .expect("four descriptors register");
+    engine
+        .begin_provider_session(fourth.id, ProviderGeneration(NonZeroU64::MIN))
+        .expect("fourth provider session begins");
+    assert!(
+        engine
+            .verify_provider_request(fourth.id, ProviderRequest::HistoricalBars)
+            .is_ok()
+    );
+    assert!(
+        engine
+            .verify_provider_request(fourth.id, ProviderRequest::RealtimeBars)
+            .is_err()
+    );
+}
+
+#[test]
 fn provider_wake_is_a_conflated_nonblocking_edge() {
     let (commands, receiver) = mpsc::sync_channel(1);
-    let wake = ProviderCoordinatorWake::new(commands);
+    let wake = ProviderCoordinatorWake::new(commands, ["rithmic", "hyperliquid", "tastytrade"]);
     wake.notify();
     wake.notify();
     assert!(matches!(receiver.try_recv(), Ok(Command::ProviderWake)));
@@ -255,13 +309,21 @@ fn catalog_overflow_remains_observable_when_command_queue_is_full() {
     commands
         .try_send(Command::ProviderWake)
         .expect("fill command queue");
-    let wake = ProviderCoordinatorWake::new(commands);
+    let wake = ProviderCoordinatorWake::new(commands, ["rithmic", "hyperliquid"]);
     let (events, receiver) = mpsc::sync_channel(1);
-    let publisher = CatalogPublisher::new(events, 1, wake.clone());
+    let publisher = CatalogPublisher::new(events, "hyperliquid", wake.clone());
     publisher.send(1).expect("first catalog event");
     assert!(publisher.send(2).is_err());
-    assert!(wake.catalog_overflow[1].swap(false, Ordering::AcqRel));
-    assert!(!wake.catalog_overflow[0].load(Ordering::Acquire));
+    assert!(
+        wake.slots["hyperliquid"]
+            .catalog_overflow
+            .swap(false, Ordering::AcqRel)
+    );
+    assert!(
+        !wake.slots["rithmic"]
+            .catalog_overflow
+            .load(Ordering::Acquire)
+    );
     assert_eq!(receiver.try_recv().expect("retained event"), 1);
 }
 
@@ -271,12 +333,17 @@ fn realtime_overflow_fences_retired_generations_even_when_wake_queue_is_full() {
     commands
         .try_send(Command::ProviderWake)
         .expect("fill command queue");
-    let wake = ProviderCoordinatorWake::new(commands);
-    wake.report_overflow(1, 4);
-    wake.report_overflow(1, 2);
-    assert_eq!(wake.pending_overflow[1].load(Ordering::Acquire), 4);
-    assert!(wake.overflowed(1, 3));
-    assert!(wake.overflowed(1, 4));
-    assert!(!wake.overflowed(1, 5));
-    assert!(!wake.overflowed(0, 4));
+    let wake = ProviderCoordinatorWake::new(commands, ["rithmic", "hyperliquid"]);
+    wake.report_overflow("hyperliquid", 4);
+    wake.report_overflow("hyperliquid", 2);
+    assert_eq!(
+        wake.slots["hyperliquid"]
+            .pending_overflow
+            .load(Ordering::Acquire),
+        4
+    );
+    assert!(wake.overflowed("hyperliquid", 3));
+    assert!(wake.overflowed("hyperliquid", 4));
+    assert!(!wake.overflowed("hyperliquid", 5));
+    assert!(!wake.overflowed("rithmic", 4));
 }

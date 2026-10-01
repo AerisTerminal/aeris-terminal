@@ -379,9 +379,9 @@ impl Coordinator<'_> {
         consumer_id: ConsumerId,
         series: &BarSeriesKey,
     ) -> SeriesLoadState {
-        if self.rithmic_live.get(series).is_some_and(|live| {
+        if self.series_live.trade(series).is_some_and(|live| {
             live.connected && live.history_state == super::LiveHistoryState::Ready
-        }) || self.candle_live.get(series).is_some_and(|live| {
+        }) || self.series_live.candle(series).is_some_and(|live| {
             live.connected && live.history_state == super::LiveHistoryState::Ready
         }) {
             SeriesLoadState::Live
@@ -597,9 +597,9 @@ impl Coordinator<'_> {
         if order_book.instrument.entitlement_id != series.entitlement_id {
             return;
         }
-        let display_depth = (series.provider_id == "hyperliquid")
-            .then(|| self.hyperliquid_display_depth.get(&series.instrument_id))
-            .flatten();
+        let display_depth = self
+            .display_depth
+            .get(&(series.provider_id.clone(), series.instrument_id.clone()));
         let event = order_book_snapshot(consumer_id, generation, order_book, display_depth);
         if let Some(events) = self.events.get_mut(&consumer_id) {
             events.order_book = Some(event);
@@ -627,9 +627,9 @@ impl Coordinator<'_> {
         else {
             return;
         };
-        let display_depth = (provider == "hyperliquid")
-            .then(|| self.hyperliquid_display_depth.get(instrument_id))
-            .flatten();
+        let display_depth = self
+            .display_depth
+            .get(&(provider.to_string(), instrument_id.to_string()));
         for (consumer_id, generation) in consumers {
             let event = order_book_snapshot(consumer_id, generation, order_book, display_depth);
             if let Some(events) = self.events.get_mut(&consumer_id) {
@@ -863,7 +863,8 @@ mod tests {
             price_increment: Some(25),
             ..Default::default()
         };
-        let mut order_book = ProviderOrderBook::new(instrument.clone());
+        let mut order_book =
+            ProviderOrderBook::new(instrument.clone(), super::super::TradeContinuity::Sequence);
         let snapshot = aeris_market_data::DepthSnapshot {
             metadata: aeris_market_data::EventMetadata {
                 provider_id: instrument.provider.clone(),
