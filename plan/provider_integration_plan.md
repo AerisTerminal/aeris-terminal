@@ -115,7 +115,8 @@ Commits: native `d5e20e7`, `7071595`; website `de3dfb1` (deployed and pushed).
 ### Maintainer-only
 
 - [ ] Visual check during US cash hours: tastytrade chart, tape and footprint keep up with the market.
-- [ ] Confirm third-party authorization works by connecting a second tastytrade account.
+- [x] Confirmed the second-account distinction: the currently authorized personal tastytrade
+  account is separate from the business account used for Aeris's main registration.
 
 ---
 
@@ -279,6 +280,10 @@ why it is not weaker), removal candidates, line counts before/after for `market_
 
 ## Product follow-ups (not part of this plan's phases)
 
+- [ ] Next task: define the provider-neutral, `trading_runtime`-owned read-only account
+  observation contract for positions, live PnL, journal entries and portfolio balances. Keep
+  refresh work bounded and generation-fenced, use the existing vault `read` scope as the only
+  credential boundary, and add contract/restart tests before wiring a tastytrade adapter or UI.
 - Rithmic production: production endpoints, system/gateway picker from Rithmic's system list,
   replacing the hardcoded Rithmic Test endpoint; confirm per-system enablement with Rithmic.
 - Read-only tastytrade account features (positions, live PnL, journal, portfolio) with the
