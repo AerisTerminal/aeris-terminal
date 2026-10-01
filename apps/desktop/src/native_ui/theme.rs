@@ -64,12 +64,34 @@ pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> B
     }
 }
 
-pub(crate) fn input_appearance(theme: &AerisTheme) -> (ThemeColor, ThemeColor, ThemeColor) {
-    (
-        theme.colors.surface_secondary,
-        theme.colors.border_secondary,
-        theme.colors.ring,
-    )
+/// Text-field tokens, exactly as the Theme System `Input` uses them: a 1px `border` field that
+/// takes `hover-bg` on hover and focus, `border-strong` plus a 3px translucent `ring` halo on
+/// focus, and a `danger` border with a 3px `danger-ring` halo while invalid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct InputAppearance {
+    pub(crate) fill: ThemeColor,
+    pub(crate) hover_fill: ThemeColor,
+    pub(crate) border: ThemeColor,
+    pub(crate) focus_border: ThemeColor,
+    pub(crate) focus_ring: ThemeColor,
+    pub(crate) invalid_border: ThemeColor,
+    pub(crate) invalid_ring: ThemeColor,
+}
+
+pub(crate) fn input_appearance(theme: &AerisTheme) -> InputAppearance {
+    let colors = &theme.colors;
+    InputAppearance {
+        fill: match theme.mode {
+            ThemeMode::Light => colors.surface,
+            ThemeMode::Dark => colors.surface_secondary,
+        },
+        hover_fill: colors.hover_bg,
+        border: colors.border,
+        focus_border: colors.border_strong,
+        focus_ring: colors.ring,
+        invalid_border: colors.danger,
+        invalid_ring: colors.danger_ring,
+    }
 }
 
 pub(crate) fn gpui_color(color: ThemeColor) -> Hsla {
@@ -141,7 +163,7 @@ pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
 
 #[cfg(test)]
 mod tests {
-    use aeris_design_system::AerisTheme;
+    use aeris_design_system::{AerisTheme, ThemeMode};
 
     use super::{ButtonVariant, base_theme, button_appearance, gpui_color, input_appearance};
 
@@ -171,10 +193,20 @@ mod tests {
             );
             assert_eq!(destructive.focus_ring, theme.colors.danger_ring);
 
-            let (field_fill, field_border, focus) = input_appearance(&theme);
-            assert_eq!(field_fill, secondary.fill);
-            assert_eq!(field_border, secondary.border.unwrap());
-            assert_eq!(focus, theme.colors.ring);
+            let field = input_appearance(&theme);
+            assert_eq!(
+                field.fill,
+                match theme.mode {
+                    ThemeMode::Light => theme.colors.surface,
+                    ThemeMode::Dark => theme.colors.surface_secondary,
+                }
+            );
+            assert_eq!(field.hover_fill, theme.colors.hover_bg);
+            assert_eq!(field.border, theme.colors.border);
+            assert_eq!(field.focus_border, theme.colors.border_strong);
+            assert_eq!(field.focus_ring, theme.colors.ring);
+            assert_eq!(field.invalid_border, theme.colors.danger);
+            assert_eq!(field.invalid_ring, theme.colors.danger_ring);
         }
     }
 

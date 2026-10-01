@@ -77,7 +77,6 @@ pub(super) fn chrome_overlay_layer(
                     interval_popup: compact_panel,
                     dual_container,
                     primary_surface: quick_timeframe,
-                    elevation: chrome_overlay_elevation(overlay),
                     radius: if matches!(
                         overlay,
                         ChromeOverlay::Instrument | ChromeOverlay::Indicator
@@ -268,9 +267,16 @@ pub(super) fn chrome_overlay_content(
             theme,
         )
         .into_any_element(),
-        ChromeOverlay::QuickTimeframe => {
-            quick_timeframe_overlay_content(&app_state.timeframe_input, theme).into_any_element()
-        }
+        ChromeOverlay::QuickTimeframe => quick_timeframe_overlay_content(
+            &app_state.timeframe_input,
+            app_state
+                .menu_state
+                .quick_timeframe_error
+                .as_ref()
+                .map(|error| error.message.as_str()),
+            theme,
+        )
+        .into_any_element(),
         ChromeOverlay::ChartType => chart_type_overlay_content(
             app,
             app_state.chart_type(cx),
@@ -288,30 +294,13 @@ pub(super) fn chrome_overlay_content(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ChromeOverlayElevation {
-    Flat,
-    Elevated,
-}
-
-const fn chrome_overlay_elevation(overlay: ChromeOverlay) -> ChromeOverlayElevation {
-    match overlay {
-        ChromeOverlay::QuickTimeframe => ChromeOverlayElevation::Elevated,
-        ChromeOverlay::Instrument
-        | ChromeOverlay::Indicator
-        | ChromeOverlay::Timeframe
-        | ChromeOverlay::ChartType
-        | ChromeOverlay::TimeZone
-        | ChromeOverlay::Accounts => ChromeOverlayElevation::Flat,
-    }
-}
-
+/// Chrome overlays are flat surfaces: none casts a shadow. The quick timeframe popup
+/// marks focus with its `ring-primary` input border instead.
 #[derive(Clone, Copy)]
 pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
     dual_container: bool,
     primary_surface: bool,
-    elevation: ChromeOverlayElevation,
     radius: RadiusToken,
 }
 
@@ -349,10 +338,6 @@ pub(super) fn chrome_overlay_panel(
                     colors.surface
                 }))
         })
-        .when(
-            !style.dual_container && style.elevation == ChromeOverlayElevation::Elevated,
-            gpui::Styled::shadow_md,
-        )
         .when(style.interval_popup && !style.dual_container, |panel| {
             panel.max_h_full().overflow_y_scroll()
         })
@@ -763,6 +748,7 @@ fn time_zone_badge(label: String, theme: &AerisTheme) -> impl IntoElement {
 
 pub(super) fn quick_timeframe_overlay_content(
     input: &Entity<InputState>,
+    error: Option<&str>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     div()
@@ -790,11 +776,21 @@ pub(super) fn quick_timeframe_overlay_content(
                         .appearance(true)
                         .bordered(true)
                         .focus_bordered(true)
-                        .thick_border(true)
                         .platform(theme)
+                        .focus_border(theme.colors.ring_primary)
+                        .invalid(error.is_some())
                         .flex_1(),
                 ),
         )
+        .children(error.map(|error| {
+            div()
+                .id("quick_timeframe_error")
+                .w_full()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_danger))
+                .role(Role::Alert)
+                .child(error.to_string())
+        }))
 }
 
 pub(super) const fn timeframe_interval_group(interval: ChartInterval) -> TimeframeMenuGroup {
@@ -1059,25 +1055,4 @@ pub(super) fn chart_type_overlay_row(
         );
     }
     row
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn large_chrome_menus_are_flat_surfaces() {
-        assert_eq!(
-            chrome_overlay_elevation(ChromeOverlay::Instrument),
-            ChromeOverlayElevation::Flat
-        );
-        assert_eq!(
-            chrome_overlay_elevation(ChromeOverlay::Indicator),
-            ChromeOverlayElevation::Flat
-        );
-        assert_eq!(
-            chrome_overlay_elevation(ChromeOverlay::QuickTimeframe),
-            ChromeOverlayElevation::Elevated
-        );
-    }
 }

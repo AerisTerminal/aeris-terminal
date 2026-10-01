@@ -1180,12 +1180,24 @@ fn legacy_bollinger_contract() -> (
     )
 }
 
-/// Stroke width a persisted study draws with; zero predates the setting.
+/// Stroke width a persisted study draws with. Zero means the user never chose one (or the
+/// state predates the setting), so the study's default applies.
 fn persisted_study_line_width(persisted: &WorkspaceChartStudyState) -> u8 {
     u8::try_from(persisted.line_width)
         .ok()
         .filter(|width| (1..=MAXIMUM_STUDY_LINE_WIDTH).contains(width))
-        .unwrap_or(DEFAULT_STUDY_LINE_WIDTH)
+        .unwrap_or_else(|| default_study_line_width(&persisted.identifier))
+}
+
+/// Stroke width a study draws with until the user picks one. Exponential moving averages are
+/// one-pixel lines, matching Aeris Charts' own EMA defaults; other studies keep the chart
+/// default. Studies reach the chart as external outputs, so this host default is what applies.
+fn default_study_line_width(identifier: &str) -> u8 {
+    match identifier {
+        aeris_study_sdk::BUILTIN_EMA_IDENTIFIER
+        | aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER => 1,
+        _ => DEFAULT_STUDY_LINE_WIDTH,
+    }
 }
 
 fn legacy_runtime_study(
@@ -1764,6 +1776,34 @@ impl WorkspaceSurface {
             .unwrap_or(0);
     }
 
+    /// Applies the typed quick timeframe. A query that matches no offered interval, or an
+    /// interval this surface refuses (plan limit, no market), keeps the popup open and shows
+    /// why instead of closing silently.
+    pub(super) fn submit_quick_timeframe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.timeframe_input.read(cx).value().to_string();
+        let intervals = self.quick_timeframe_matches(cx);
+        if intervals.is_empty() {
+            let message = format!(
+                "\u{201c}{query}\u{201d} is not an available timeframe. Try 1m, 5m, 1H or 1D."
+            );
+            self.menu_state.quick_timeframe_error = Some(QuickTimeframeError { query, message });
+            cx.notify();
+            return;
+        }
+        self.apply_highlighted_interval(&intervals, window, cx);
+        let still_open = self.chrome_overlay == Some(ChromeOverlay::QuickTimeframe)
+            && self.chrome_overlay_phase != ChromeOverlayPhase::Closing;
+        if still_open {
+            let message = if self.series_message.is_empty() {
+                "This timeframe could not be applied.".to_string()
+            } else {
+                self.series_message.clone()
+            };
+            self.menu_state.quick_timeframe_error = Some(QuickTimeframeError { query, message });
+            cx.notify();
+        }
+    }
+
     pub(super) fn apply_highlighted_interval(
         &mut self,
         intervals: &[ChartInterval],
@@ -2150,6 +2190,7 @@ impl WorkspaceSurface {
                 });
             }
             Some(ChromeOverlay::QuickTimeframe) => {
+                self.menu_state.quick_timeframe_error = None;
                 self.timeframe_input.update(cx, |input, input_cx| {
                     input.set_value("", window, input_cx);
                 });
@@ -3155,9 +3196,10 @@ impl WorkspaceSurface {
             .active
             .iter()
             .find(|state| state.study_id == snapshot.study_id)
-            .map_or(DEFAULT_STUDY_LINE_WIDTH, |state| {
-                persisted_study_line_width(&state.persisted)
-            });
+            .map_or_else(
+                || default_study_line_width(&snapshot.study_identifier),
+                |state| persisted_study_line_width(&state.persisted),
+            );
         chart.update(cx, |chart, chart_cx| {
             chart.set_study_line_width(snapshot.study_id.get(), line_width);
             match chart.install_study_output(
@@ -4922,6 +4964,14 @@ impl WorkspaceSurface {
         let Some(dialog) = &mut self.study_settings_dialog else {
             return;
         };
+        let default_line_width = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == dialog.study_id)
+            .map_or(DEFAULT_STUDY_LINE_WIDTH, |state| {
+                default_study_line_width(&state.persisted.identifier)
+            });
         for spec in &dialog.specs {
             let value = spec.default.clone();
             if let Some(text) = study_setting_input_text(&value)
@@ -4933,7 +4983,7 @@ impl WorkspaceSurface {
             }
             dialog.draft_values.insert(spec.identifier.clone(), value);
         }
-        dialog.line_width = DEFAULT_STUDY_LINE_WIDTH;
+        dialog.line_width = default_line_width;
         dialog.message = None;
         cx.notify();
     }
@@ -5174,6 +5224,32 @@ impl WorkspaceSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ema_studies_default_to_one_pixel_and_explicit_widths_are_kept() {
+        let study = |identifier: &str, line_width: u32| WorkspaceChartStudyState {
+            identifier: identifier.to_string(),
+            line_width,
+            ..WorkspaceChartStudyState::default()
+        };
+        assert_eq!(
+            persisted_study_line_width(&study(aeris_study_sdk::BUILTIN_EMA_IDENTIFIER, 0)),
+            1
+        );
+        assert_eq!(
+            persisted_study_line_width(&study(aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER, 0)),
+            1
+        );
+        assert_eq!(
+            persisted_study_line_width(&study(aeris_study_sdk::BUILTIN_SMA_IDENTIFIER, 0)),
+            DEFAULT_STUDY_LINE_WIDTH
+        );
+        assert_eq!(
+            persisted_study_line_width(&study(aeris_study_sdk::BUILTIN_EMA_IDENTIFIER, 3)),
+            3,
+            "a width the user chose is never replaced by the default"
+        );
+    }
 
     #[test]
     fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_restore() {

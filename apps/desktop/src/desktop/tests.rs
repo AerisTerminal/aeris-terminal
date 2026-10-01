@@ -525,6 +525,41 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn invalid_quick_timeframe_stays_open_with_error_until_edited(cx: &mut TestAppContext) {
+        let (surface, requests, _publications, cx) = harness(cx);
+        cx.simulate_keystrokes("9 x");
+        cx.simulate_keystrokes("enter");
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::QuickTimeframe));
+            assert_ne!(surface.chrome_overlay_phase, ChromeOverlayPhase::Closing);
+            assert!(
+                surface
+                    .menu_state
+                    .quick_timeframe_error
+                    .as_ref()
+                    .is_some_and(|error| error.message.contains("9x")),
+                "an unmatched timeframe is reported, not silently ignored"
+            );
+        });
+        assert!(
+            requests
+                .try_iter()
+                .all(|command| !matches!(command, MarketWorkerCommand::EngineSelect(_))),
+            "an invalid timeframe never reaches the market worker"
+        );
+        cx.simulate_keystrokes("backspace");
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::QuickTimeframe));
+            assert!(
+                surface.menu_state.quick_timeframe_error.is_none(),
+                "editing the text clears the error"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn closing_quick_menu_ignores_delayed_submit_and_change(cx: &mut TestAppContext) {
         let (surface, requests, _publications, cx) = harness(cx);
         cx.simulate_keystrokes("1 d escape");

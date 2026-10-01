@@ -1194,6 +1194,15 @@ struct WorkspaceMenuState {
     chrome_list_keyboard: bool,
     /// Header Accounts trigger, measured each frame so its panel opens beneath it.
     accounts_trigger_bounds: Option<Bounds<Pixels>>,
+    /// Why the last quick-timeframe submission was rejected; cleared by an edit or close.
+    quick_timeframe_error: Option<QuickTimeframeError>,
+}
+
+/// A rejected quick-timeframe submission. The rejected text is kept so only a real edit
+/// clears the error: the input also reports a change when Enter submits unchanged text.
+struct QuickTimeframeError {
+    query: String,
+    message: String,
 }
 
 #[derive(Default)]
@@ -3675,8 +3684,7 @@ fn subscribe_timeframe_input(
                         {
                             return;
                         }
-                        let intervals = app.quick_timeframe_matches(app_cx);
-                        app.apply_highlighted_interval(&intervals, window, app_cx);
+                        app.submit_quick_timeframe(window, app_cx);
                     });
                 }
                 InputEvent::Change => {
@@ -3687,6 +3695,16 @@ fn subscribe_timeframe_input(
                             return;
                         }
                         let query = input.read(app_cx).value();
+                        // Only a real edit retracts the rejection; Enter also reports a
+                        // change while the rejected text is still in place.
+                        if app
+                            .menu_state
+                            .quick_timeframe_error
+                            .as_ref()
+                            .is_some_and(|error| error.query != query.as_ref())
+                        {
+                            app.menu_state.quick_timeframe_error = None;
+                        }
                         if query.is_empty() {
                             app.close_chrome_overlay(window, app_cx);
                             return;
