@@ -178,10 +178,8 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   - [~] Desktop display names and default listing queries now read from the runtime descriptor registry;
     search hints now do as well; selection, interval, connection, and component branches remain to
     be migrated.
-- [~] Per-provider error strings become templates using the display name; interval tables come
+- [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
-  - [~] Chart interval tables now come from the runtime descriptor registry; remaining
-    provider-specific error branches still need migration.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the
   Rithmic Test entitlement expected by the current adapter path, so rename it to
   `RITHMIC_TEST_ENTITLEMENT_ID`; adapter selection entitlement preservation remains covered by

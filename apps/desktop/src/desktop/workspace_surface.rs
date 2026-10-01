@@ -4399,7 +4399,7 @@ impl WorkspaceSurface {
         }
         self.market_state.symbol_selection_pending = false;
         let reason = rejection.reason;
-        self.symbol_message = catalog_rejection_message(reason, command, self.provider).to_string();
+        self.symbol_message = catalog_rejection_message(reason, command, self.provider);
         self.dispatch_retained_symbol_search(cx);
     }
 

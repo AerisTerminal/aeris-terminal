@@ -3147,98 +3147,37 @@ fn catalog_rejection_message(
     reason: ProviderCatalogRejectionReason,
     command: ProviderCatalogCommand,
     provider: TerminalProvider,
-) -> &'static str {
-    let rithmic = provider == TerminalProvider::Rithmic;
-    let hyperliquid = provider == TerminalProvider::Hyperliquid;
-    if provider == TerminalProvider::Tastytrade {
-        return match reason {
-            ProviderCatalogRejectionReason::SupersededSearch => {
-                "A newer symbol search replaced this one"
-            }
-            ProviderCatalogRejectionReason::InstrumentUnavailable => {
-                "This tastytrade asset is no longer available"
-            }
-            ProviderCatalogRejectionReason::SearchTimedOut
-            | ProviderCatalogRejectionReason::SelectionTimedOut => {
-                "Tastytrade did not respond in time; try again"
-            }
-            _ => {
-                "Tastytrade could not load this market. Check your connection and market-data permissions."
-            }
-        };
-    }
+) -> String {
+    let provider_name = terminal_provider_display(provider);
     match reason {
-        ProviderCatalogRejectionReason::SearchRejected if rithmic => {
-            "Rithmic rejected the market search"
+        ProviderCatalogRejectionReason::SearchRejected => {
+            format!("{provider_name} rejected the market search")
         }
-        ProviderCatalogRejectionReason::SearchRejected if hyperliquid => {
-            "Hyperliquid rejected the market search"
-        }
-        ProviderCatalogRejectionReason::SearchRejected => "The provider rejected the symbol search",
         ProviderCatalogRejectionReason::SupersededSearch => {
-            "A newer symbol search replaced this one"
+            "A newer symbol search replaced this one".to_string()
         }
         ProviderCatalogRejectionReason::InstrumentUnavailable => {
-            "The selected symbol is no longer available"
-        }
-        ProviderCatalogRejectionReason::SubscriptionRejected if rithmic => {
-            "Rithmic rejected the market subscription"
-        }
-        ProviderCatalogRejectionReason::SubscriptionRejected if hyperliquid => {
-            "Hyperliquid rejected the market subscription"
+            format!("The selected {provider_name} asset is no longer available")
         }
         ProviderCatalogRejectionReason::SubscriptionRejected => {
-            "The provider rejected the market subscription"
-        }
-        ProviderCatalogRejectionReason::DispatchUnavailable
-            if rithmic && command == ProviderCatalogCommand::Search =>
-        {
-            "The Rithmic search could not be scheduled"
-        }
-        ProviderCatalogRejectionReason::DispatchUnavailable if rithmic => {
-            "The Rithmic selection could not be scheduled"
-        }
-        ProviderCatalogRejectionReason::DispatchUnavailable
-            if hyperliquid && command == ProviderCatalogCommand::Search =>
-        {
-            "The Hyperliquid search could not be scheduled"
-        }
-        ProviderCatalogRejectionReason::DispatchUnavailable if hyperliquid => {
-            "The Hyperliquid selection could not be scheduled"
-        }
-        ProviderCatalogRejectionReason::DispatchUnavailable
-            if command == ProviderCatalogCommand::Search =>
-        {
-            "The Rithmic search could not be scheduled"
+            format!("{provider_name} rejected the market subscription")
         }
         ProviderCatalogRejectionReason::DispatchUnavailable => {
-            "The Rithmic selection could not be scheduled"
-        }
-        ProviderCatalogRejectionReason::SearchTimedOut if rithmic => {
-            "The Rithmic market search timed out; try again"
-        }
-        ProviderCatalogRejectionReason::SearchTimedOut if hyperliquid => {
-            "The Hyperliquid market search timed out; try again"
+            let operation = match command {
+                ProviderCatalogCommand::Search => "search",
+                ProviderCatalogCommand::Selection => "selection",
+            };
+            format!("The {provider_name} {operation} could not be scheduled")
         }
         ProviderCatalogRejectionReason::SearchTimedOut => {
-            "The Rithmic symbol search timed out; try again"
-        }
-        ProviderCatalogRejectionReason::SelectionTimedOut if rithmic => {
-            "The Rithmic market selection timed out; try again"
-        }
-        ProviderCatalogRejectionReason::SelectionTimedOut if hyperliquid => {
-            "The Hyperliquid market selection timed out; try again"
+            format!("The {provider_name} market search timed out; try again")
         }
         ProviderCatalogRejectionReason::SelectionTimedOut => {
-            "The Rithmic symbol selection timed out; try again"
+            format!("The {provider_name} market selection timed out; try again")
         }
-        ProviderCatalogRejectionReason::Unspecified if hyperliquid => {
-            "The Hyperliquid catalog request failed"
+        ProviderCatalogRejectionReason::Unspecified => {
+            format!("The {provider_name} catalog request failed")
         }
-        ProviderCatalogRejectionReason::Unspecified if rithmic => {
-            "The Rithmic catalog request failed"
-        }
-        ProviderCatalogRejectionReason::Unspecified => "The Rithmic catalog request failed",
     }
 }
 
