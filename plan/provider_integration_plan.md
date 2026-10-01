@@ -171,7 +171,7 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   hardcoding tastytrade and Hyperliquid in `components/accounts_panel.rs`.
 - [x] `market_runtime` publishes provider presentation descriptors through a provider-neutral
   contract: id, display name, chart intervals, default/empty-query listing, search hint, logo key,
-  depth capability, connection kind (credentials, hosted broker, public).
+  catalog-symbol source, depth capability, connection kind (credentials, hosted broker, public).
 - [~] Replace `TerminalProvider` branches in `apps/desktop/src/desktop.rs`,
   `desktop/workspace_surface.rs`, `components/{symbol_menu,terminal_view,watchlist_panel,time_sales_panel}.rs`,
   `engine_market_worker*.rs`, `market_worker.rs` and `desktop/local_state.rs` with descriptors.
