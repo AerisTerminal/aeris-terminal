@@ -177,8 +177,10 @@ Maintainer-only: Rithmic test smoke (needs credentials).
   `engine_market_worker*.rs`, `market_worker.rs` and `desktop/local_state.rs` with descriptors.
 - [ ] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
-- [ ] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: trace it into
-  the Rithmic adapter; fix with a regression test if stale, rename if meaningful.
+- [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the
+  Rithmic Test entitlement expected by the current adapter path, so rename it to
+  `RITHMIC_TEST_ENTITLEMENT_ID`; adapter selection entitlement preservation remains covered by
+  `delayed_catalog_selection_preserves_entitlement_while_using_the_base_market_venue`.
 - [ ] Providers without depth show an explicit "depth not available from this provider" state
   instead of an empty ladder (`CSS.md` tokens; text over depth uses `--book-*-text`).
 - [ ] Durable local state keeps loading existing Rithmic, Hyperliquid and tastytrade selections.

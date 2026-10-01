@@ -2030,7 +2030,7 @@ impl WorkspaceSurface {
             | InstrumentMenuSelection::Tastytrade(index) => {
                 let provider = terminal_provider_id(self.symbol_provider);
                 let entitlement_id = match self.symbol_provider {
-                    TerminalProvider::Rithmic => RITHMIC_ENTITLEMENT_ID,
+                    TerminalProvider::Rithmic => RITHMIC_TEST_ENTITLEMENT_ID,
                     TerminalProvider::Hyperliquid => HYPERLIQUID_ENTITLEMENT_ID,
                     TerminalProvider::Tastytrade => "tastytrade-authorized",
                 };
