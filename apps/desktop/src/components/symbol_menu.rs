@@ -182,10 +182,11 @@ pub(super) fn instrument_dialog_content(
             show_hosted_broker_connect_prompt(state.menu_provider, state.tastytrade_disconnected),
             |menu| {
                 let accounts = app.clone();
+                let provider_name = terminal_provider_display(state.menu_provider).to_string();
                 menu.child(
                     div().px_3().py_1().child(
                         Button::new("symbol_menu_connect_tastytrade")
-                            .label("Connect tastytrade in Accounts")
+                            .label(format!("Connect {provider_name} in Accounts"))
                             .theme(theme)
                             .on_click(move |_, window, cx| {
                                 accounts.update(cx, |surface, surface_cx| {

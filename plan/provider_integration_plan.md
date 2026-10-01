@@ -179,10 +179,10 @@ Maintainer-only: Rithmic test smoke (needs credentials).
     search hints and chart interval tables do as well; symbol-menu and watchlist provider marks now
     consume descriptor metadata. Connection messages, connection-kind prompts and depth capability
     now also consume descriptor metadata; worker status labels do as well. Interval lookup is keyed
-    by descriptor ID instead of positional provider matches. Selection and remaining provider-specific
-    provider-specific selection payloads and product-policy branches remain provider-owned; generic
-    engine lifecycle and depth checks now use descriptor presence/capabilities instead of enumerating
-    provider variants; viewport persistence follows the same descriptor gate.
+    by descriptor ID instead of positional provider matches. Provider-specific selection payloads and
+    product-policy branches remain provider-owned; generic engine lifecycle and depth checks now use
+    descriptor presence/capabilities instead of enumerating provider variants; viewport persistence
+    and hosted-broker prompt labels follow the same metadata.
 - [x] Per-provider error strings become templates using the display name; interval tables come
   from descriptors.
 - [x] Investigate `RITHMIC_ENTITLEMENT_ID = "crypto_public_realtime"` in `desktop.rs`: it is the
