@@ -1958,11 +1958,7 @@ impl WorkspaceSurface {
                     selected.instrument.symbol == instrument.symbol
                         && selected.instrument.exchange == instrument.exchange
                 }),
-                selection: match self.symbol_provider {
-                    TerminalProvider::Rithmic => InstrumentMenuSelection::Rithmic(index),
-                    TerminalProvider::Hyperliquid => InstrumentMenuSelection::Hyperliquid(index),
-                    TerminalProvider::Tastytrade => InstrumentMenuSelection::Tastytrade(index),
-                },
+                selection: InstrumentMenuSelection(index),
             })
             .collect()
     }
@@ -2021,41 +2017,38 @@ impl WorkspaceSurface {
         }
         #[cfg(feature = "diagnostics")]
         let started = Instant::now();
-        let selected = (|| match selection {
-            InstrumentMenuSelection::Rithmic(index)
-            | InstrumentMenuSelection::Hyperliquid(index)
-            | InstrumentMenuSelection::Tastytrade(index) => {
-                let provider = terminal_provider_id(self.symbol_provider);
-                let entitlement_id = match self.symbol_provider {
-                    TerminalProvider::Rithmic => RITHMIC_TEST_ENTITLEMENT_ID,
-                    TerminalProvider::Hyperliquid => HYPERLIQUID_ENTITLEMENT_ID,
-                    TerminalProvider::Tastytrade => "tastytrade-authorized",
-                };
-                let display = terminal_provider_display(self.symbol_provider);
-                let Some(selection) = self.symbol_browser.select(index) else {
-                    return false;
-                };
-                let request = SelectProviderInstrument {
-                    consumer_id: 0,
-                    selection_generation: selection.generation.get() as u64,
-                    search_generation: selection.search_generation.get() as u64,
-                    provider: provider.to_string(),
-                    symbol: selection.instrument.symbol.clone(),
-                    exchange: selection.instrument.exchange.clone(),
-                    entitlement_id: entitlement_id.to_string(),
-                };
-                if self.market_worker.try_select_provider(request).is_err() {
-                    self.symbol_browser.reject_selection(selection.generation);
-                    self.symbol_message = format!("{display} market selection is busy; try again");
-                    cx.notify();
-                    return false;
-                }
-                self.pending_symbol_selection_target = Some(target);
-                self.market_state.symbol_selection_pending = true;
-                self.symbol_message = format!("Selecting {}", selection.instrument.display_symbol);
+        let selected = (|| {
+            let index = selection.0;
+            let provider = terminal_provider_id(self.symbol_provider);
+            let entitlement_id = match self.symbol_provider {
+                TerminalProvider::Rithmic => RITHMIC_TEST_ENTITLEMENT_ID,
+                TerminalProvider::Hyperliquid => HYPERLIQUID_ENTITLEMENT_ID,
+                TerminalProvider::Tastytrade => "tastytrade-authorized",
+            };
+            let display = terminal_provider_display(self.symbol_provider);
+            let Some(selection) = self.symbol_browser.select(index) else {
+                return false;
+            };
+            let request = SelectProviderInstrument {
+                consumer_id: 0,
+                selection_generation: selection.generation.get() as u64,
+                search_generation: selection.search_generation.get() as u64,
+                provider: provider.to_string(),
+                symbol: selection.instrument.symbol.clone(),
+                exchange: selection.instrument.exchange.clone(),
+                entitlement_id: entitlement_id.to_string(),
+            };
+            if self.market_worker.try_select_provider(request).is_err() {
+                self.symbol_browser.reject_selection(selection.generation);
+                self.symbol_message = format!("{display} market selection is busy; try again");
                 cx.notify();
-                true
+                return false;
             }
+            self.pending_symbol_selection_target = Some(target);
+            self.market_state.symbol_selection_pending = true;
+            self.symbol_message = format!("Selecting {}", selection.instrument.display_symbol);
+            cx.notify();
+            true
         })();
         #[cfg(feature = "diagnostics")]
         self.foreground_interactions
@@ -4329,13 +4322,7 @@ impl WorkspaceSurface {
             if let Some(index) = index {
                 self.chrome_selection = index;
                 self.select_instrument(
-                    match self.symbol_provider {
-                        TerminalProvider::Rithmic => InstrumentMenuSelection::Rithmic(index),
-                        TerminalProvider::Hyperliquid => {
-                            InstrumentMenuSelection::Hyperliquid(index)
-                        }
-                        TerminalProvider::Tastytrade => InstrumentMenuSelection::Tastytrade(index),
-                    },
+                    InstrumentMenuSelection(index),
                     SymbolSelectionTarget::Chart,
                     cx,
                 );

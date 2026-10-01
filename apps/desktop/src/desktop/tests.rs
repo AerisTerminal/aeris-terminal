@@ -1311,12 +1311,12 @@ fn instrument_menu_index_follows_the_checked_live_market() {
         InstrumentMenuEntry {
             label: "BTC/USD".into(),
             checked: false,
-            selection: InstrumentMenuSelection::Rithmic(0),
+            selection: InstrumentMenuSelection(0),
         },
         InstrumentMenuEntry {
             label: "ETH/USD".into(),
             checked: true,
-            selection: InstrumentMenuSelection::Rithmic(1),
+            selection: InstrumentMenuSelection(1),
         },
     ];
     assert_eq!(current_instrument_menu_index(&entries), Some(1));
@@ -1324,7 +1324,7 @@ fn instrument_menu_index_follows_the_checked_live_market() {
         current_instrument_menu_index(&[InstrumentMenuEntry {
             label: "AAVE/USD".into(),
             checked: false,
-            selection: InstrumentMenuSelection::Rithmic(0),
+            selection: InstrumentMenuSelection(0),
         }]),
         None
     );

@@ -2498,11 +2498,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
 }
 
 #[derive(Clone, Copy)]
-enum InstrumentMenuSelection {
-    Tastytrade(usize),
-    Rithmic(usize),
-    Hyperliquid(usize),
-}
+struct InstrumentMenuSelection(usize);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SymbolSubmitDecision {
