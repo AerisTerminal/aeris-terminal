@@ -631,14 +631,20 @@ fn stopped_worker_chart_detail(chart_state: ChartState, existing: &str, fallback
 
 const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
 
+fn provider_presentation(
+    provider: TerminalProvider,
+) -> Option<&'static aeris_contracts::ProviderPresentationDescriptor> {
+    aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .find(|descriptor| descriptor.id == terminal_provider_id(provider))
+}
+
 /// Rithmic searches require text, so its default listing is a symbol query;
 /// Hyperliquid lists its whole catalog for an empty query.
-const fn default_listing_query(provider: TerminalProvider) -> &'static str {
-    match provider {
-        TerminalProvider::Rithmic => DEFAULT_RITHMIC_LISTING_QUERY,
-        TerminalProvider::Hyperliquid => "",
-        TerminalProvider::Tastytrade => "/ES",
-    }
+fn default_listing_query(provider: TerminalProvider) -> &'static str {
+    provider_presentation(provider).map_or(DEFAULT_RITHMIC_LISTING_QUERY, |descriptor| {
+        descriptor.default_listing
+    })
 }
 
 /// The instrument menu should open with a default provider listing instead of
@@ -1251,12 +1257,10 @@ const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
     }
 }
 
-const fn terminal_provider_display(provider: TerminalProvider) -> &'static str {
-    match provider {
-        TerminalProvider::Rithmic => "Rithmic",
-        TerminalProvider::Hyperliquid => "Hyperliquid",
-        TerminalProvider::Tastytrade => "tastytrade",
-    }
+fn terminal_provider_display(provider: TerminalProvider) -> &'static str {
+    provider_presentation(provider).map_or(terminal_provider_id(provider), |descriptor| {
+        descriptor.display_name
+    })
 }
 
 fn terminal_provider_from_id(provider: &str) -> TerminalProvider {

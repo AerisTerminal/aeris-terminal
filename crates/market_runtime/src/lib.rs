@@ -243,4 +243,4 @@ pub use aeris_market_engine::{
     ProviderGeneration as MarketProviderGeneration,
     SeriesSnapshot as CanonicalMarketSeriesSnapshot, SeriesTailOperation, StreamRequirements,
 };
-pub use market_service::{MarketService, MarketServiceStatus};
+pub use market_service::{MarketService, MarketServiceStatus, built_in_provider_presentations};

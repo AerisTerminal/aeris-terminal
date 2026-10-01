@@ -991,7 +991,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     id: "rithmic",
     display_name: "Rithmic",
     chart_intervals_seconds: &[1, 5, 10, 15, 30, 60, 300, 900, 1_800, 3_600, 14_400, 86_400],
-    default_listing: "",
+    default_listing: "MNQ",
     search_hint: "Search Rithmic symbols",
     logo_key: "rithmic",
     depth_available: true,
@@ -1080,12 +1080,28 @@ fn hyperliquid_candle_interval(period: BarPeriod) -> Result<String, String> {
         .map_err(|_| "Hyperliquid history is unavailable for this interval".to_string())
 }
 
-#[cfg(test)]
 const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
     RITHMIC_DESCRIPTOR,
     HYPERLIQUID_DESCRIPTOR,
     tastytrade::DESCRIPTOR,
 ];
+
+/// Built-in provider presentation metadata for provider-neutral desktop UI.
+#[must_use]
+pub fn built_in_provider_presentations() -> &'static [ProviderPresentationDescriptor] {
+    // Keep this projection in the runtime registry so desktop presentation does
+    // not maintain a second provider metadata table.
+    static PRESENTATIONS: std::sync::OnceLock<Vec<ProviderPresentationDescriptor>> =
+        std::sync::OnceLock::new();
+    PRESENTATIONS
+        .get_or_init(|| {
+            BUILT_IN_PROVIDER_DESCRIPTORS
+                .iter()
+                .map(|descriptor| *descriptor.presentation)
+                .collect()
+        })
+        .as_slice()
+}
 
 fn flush_rithmic_provider_demand(coordinator: &mut Coordinator<'_>) {
     coordinator.flush_rithmic_demand();

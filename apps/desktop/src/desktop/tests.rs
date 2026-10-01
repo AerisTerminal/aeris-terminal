@@ -2580,3 +2580,31 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
         .expect("shutdown");
     let _ = std::fs::remove_dir_all(directory);
 }
+
+#[test]
+fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
+    assert_eq!(
+        super::terminal_provider_display(super::TerminalProvider::Rithmic),
+        "Rithmic"
+    );
+    assert_eq!(
+        super::terminal_provider_display(super::TerminalProvider::Hyperliquid),
+        "Hyperliquid"
+    );
+    assert_eq!(
+        super::terminal_provider_display(super::TerminalProvider::Tastytrade),
+        "tastytrade"
+    );
+    assert_eq!(
+        super::default_listing_query(super::TerminalProvider::Rithmic),
+        "MNQ"
+    );
+    assert_eq!(
+        super::default_listing_query(super::TerminalProvider::Hyperliquid),
+        ""
+    );
+    assert_eq!(
+        super::default_listing_query(super::TerminalProvider::Tastytrade),
+        "/ES"
+    );
+}
