@@ -22,7 +22,7 @@ Repositories:
 - Website + AWS broker: `C:\Users\devraj\Downloads\Softwares\aeris-website`
   (`infra/backend/tastytrade/`, `infra/lib/broker_stack.ts`)
 
-Last status review: 2026-10-02, native `main` at `79194a0` with a clean worktree; the remaining
+Last status review: 2026-10-02, native `main` at `b708902` with a clean worktree; the remaining
 unchecked items require live-market hours or maintainer credentials.
 
 ## Decisions
