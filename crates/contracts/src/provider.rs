@@ -16,7 +16,7 @@ pub enum ProviderConnectionKind {
 pub struct ProviderPresentationDescriptor {
     pub id: &'static str,
     pub display_name: &'static str,
-    pub chart_intervals_seconds: &'static [u32],
+    pub chart_interval_labels: &'static [&'static str],
     pub default_listing: &'static str,
     pub search_hint: &'static str,
     pub logo_key: &'static str,

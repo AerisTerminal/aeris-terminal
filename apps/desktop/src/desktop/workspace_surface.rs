@@ -1544,10 +1544,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn available_intervals(&self) -> &'static [ChartInterval] {
-        match self.provider {
-            TerminalProvider::Rithmic | TerminalProvider::Tastytrade => RITHMIC_INTERVALS,
-            TerminalProvider::Hyperliquid => HYPERLIQUID_INTERVALS,
-        }
+        super::provider_intervals(self.provider)
     }
 
     pub(super) fn quick_timeframe_matches(&self, cx: &App) -> Vec<ChartInterval> {
@@ -3648,7 +3645,7 @@ impl WorkspaceSurface {
         self.connection_message = Some(stable_connection_message(state, message));
         if autoload_catalog {
             self.market_state.rithmic_autoload_started = true;
-            let _ = self.search_symbol_query(DEFAULT_RITHMIC_LISTING_QUERY, cx);
+            let _ = self.search_symbol_query(default_listing_query(self.provider), cx);
         }
         cx.notify();
     }

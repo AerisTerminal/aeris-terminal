@@ -59,7 +59,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
         aeris_contracts::ProviderPresentationDescriptor {
             id: "fourth-test-provider",
             display_name: "Fourth provider",
-            chart_intervals_seconds: &[60],
+            chart_interval_labels: &["1m"],
             default_listing: "",
             search_hint: "Search fourth provider",
             logo_key: "fourth-provider",

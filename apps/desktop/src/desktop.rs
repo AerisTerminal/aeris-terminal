@@ -201,7 +201,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
@@ -509,39 +509,6 @@ actions!(
     ]
 );
 
-static RITHMIC_INTERVALS: &[ChartInterval] = &[
-    ChartInterval::Minute1,
-    ChartInterval::Minute3,
-    ChartInterval::Minute5,
-    ChartInterval::Minute15,
-    ChartInterval::Minute30,
-    ChartInterval::Hour1,
-    ChartInterval::Hour2,
-    ChartInterval::Hour4,
-    ChartInterval::Hour8,
-    ChartInterval::Hour12,
-    ChartInterval::Day1,
-    ChartInterval::Week1,
-    ChartInterval::Month1,
-];
-/// Hyperliquid serves every Rithmic interval plus a native 3-day candle.
-/// Tick candles exist on neither public path, so 100t stays unoffered.
-static HYPERLIQUID_INTERVALS: &[ChartInterval] = &[
-    ChartInterval::Minute1,
-    ChartInterval::Minute3,
-    ChartInterval::Minute5,
-    ChartInterval::Minute15,
-    ChartInterval::Minute30,
-    ChartInterval::Hour1,
-    ChartInterval::Hour2,
-    ChartInterval::Hour4,
-    ChartInterval::Hour8,
-    ChartInterval::Hour12,
-    ChartInterval::Day1,
-    ChartInterval::Day3,
-    ChartInterval::Week1,
-    ChartInterval::Month1,
-];
 const HYPERLIQUID_ENTITLEMENT_ID: &str = "hyperliquid-public";
 const RITHMIC_TEST_ENTITLEMENT_ID: &str = "crypto_public_realtime";
 
@@ -637,6 +604,35 @@ fn provider_presentation(
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == terminal_provider_id(provider))
+}
+
+fn provider_intervals(provider: TerminalProvider) -> &'static [ChartInterval] {
+    static INTERVALS: OnceLock<Vec<Vec<ChartInterval>>> = OnceLock::new();
+    let index = match provider {
+        TerminalProvider::Rithmic => 0,
+        TerminalProvider::Hyperliquid => 1,
+        TerminalProvider::Tastytrade => 2,
+    };
+    INTERVALS
+        .get_or_init(|| {
+            aeris_market_runtime::built_in_provider_presentations()
+                .iter()
+                .map(|descriptor| {
+                    descriptor
+                        .chart_interval_labels
+                        .iter()
+                        .filter_map(|label| {
+                            ChartInterval::ALL
+                                .iter()
+                                .copied()
+                                .find(|interval| interval.label() == *label)
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .get(index)
+        .map_or(&[], Vec::as_slice)
 }
 
 /// Rithmic searches require text, so its default listing is a symbol query;

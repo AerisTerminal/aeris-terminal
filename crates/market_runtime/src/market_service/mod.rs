@@ -990,7 +990,10 @@ enum TradeDemandPolicy {
 const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentationDescriptor {
     id: "rithmic",
     display_name: "Rithmic",
-    chart_intervals_seconds: &[1, 5, 10, 15, 30, 60, 300, 900, 1_800, 3_600, 14_400, 86_400],
+    chart_interval_labels: &[
+        "100t", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W",
+        "1M",
+    ],
     default_listing: "MNQ",
     search_hint: "Search Rithmic symbols",
     logo_key: "rithmic",
@@ -1037,7 +1040,9 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentationDescriptor {
     id: "hyperliquid",
     display_name: "Hyperliquid",
-    chart_intervals_seconds: &[60, 300, 900, 1_800, 3_600, 14_400, 86_400],
+    chart_interval_labels: &[
+        "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
+    ],
     default_listing: "",
     search_hint: "Search Hyperliquid markets",
     logo_key: "hyperliquid",

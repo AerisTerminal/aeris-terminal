@@ -7,10 +7,10 @@ use super::{
     ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
     InstrumentMenuSelection, MarketSummaryEntry, MenuScale, OVERLAY_EDGE_MARGIN,
     PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
-    ProviderConnectionPresentation, RITHMIC_INTERVALS, RITHMIC_TEST_ENTITLEMENT_ID,
-    RithmicSwitchState, SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget,
-    SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
-    TerminalProvider, TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
+    ProviderConnectionPresentation, RITHMIC_TEST_ENTITLEMENT_ID, RithmicSwitchState, SidePanel,
+    SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision,
+    TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider,
+    TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
     WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
     WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
     active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
@@ -252,11 +252,12 @@ fn timeframe_menu_groups_every_catalog_interval() {
             TimeframeMenuGroup::Months,
         ]
     );
-    let rithmic_groups: Vec<TimeframeMenuGroup> = RITHMIC_INTERVALS
-        .iter()
-        .copied()
-        .map(timeframe_interval_group)
-        .collect();
+    let rithmic_groups: Vec<TimeframeMenuGroup> =
+        super::provider_intervals(TerminalProvider::Rithmic)
+            .iter()
+            .copied()
+            .map(timeframe_interval_group)
+            .collect();
     assert_eq!(
         rithmic_groups,
         [
@@ -291,7 +292,7 @@ fn timeframe_menu_uses_dual_group_and_interval_containers() {
         ]
     );
     assert_eq!(
-        timeframe_menu_groups(RITHMIC_INTERVALS),
+        timeframe_menu_groups(super::provider_intervals(TerminalProvider::Rithmic)),
         [
             TimeframeMenuGroup::Minutes,
             TimeframeMenuGroup::Hours,
@@ -315,9 +316,15 @@ fn timeframe_menu_uses_dual_group_and_interval_containers() {
     assert_eq!(timeframe_menu_row_label(ChartInterval::Day1), "1 Day");
     assert_eq!(TimeframeMenuGroup::Minutes.label(), "Minutes");
     assert!(
-        timeframe_menu_groups(RITHMIC_INTERVALS)
+        timeframe_menu_groups(super::provider_intervals(TerminalProvider::Rithmic))
             .into_iter()
-            .all(|group| !timeframe_group_intervals(group, RITHMIC_INTERVALS).is_empty()),
+            .all(|group| {
+                !timeframe_group_intervals(
+                    group,
+                    super::provider_intervals(TerminalProvider::Rithmic),
+                )
+                .is_empty()
+            }),
         "a hovered group owns its submenu; the root list does not keep a flyout open"
     );
     assert!((timeframe_flyout_offset(1) - CHART_CONTEXT_MENU_ROW_HEIGHT).abs() < f32::EPSILON);
@@ -362,7 +369,7 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
     assert_eq!(chrome_typeahead_char_from("a", Some("a"), false), Some('a'));
     assert_eq!(chrome_typeahead_char_from("enter", None, false), None);
     assert_eq!(
-        RITHMIC_INTERVALS
+        super::provider_intervals(TerminalProvider::Rithmic)
             .iter()
             .copied()
             .filter(|interval| interval.matches_typeahead("1m"))
@@ -370,7 +377,7 @@ fn chrome_typeahead_opens_digits_as_intervals_and_letters_as_symbols() {
         [ChartInterval::Minute1]
     );
     assert_eq!(
-        RITHMIC_INTERVALS
+        super::provider_intervals(TerminalProvider::Rithmic)
             .iter()
             .copied()
             .filter(|interval| interval.matches_typeahead("1M"))
@@ -1375,7 +1382,7 @@ fn persisted_calendar_series_keep_week_and_month_identity() {
     assert_eq!(month.cadence, SeriesCadence::CalendarMonths as i32);
     assert_eq!(week.cadence_value, 1);
     assert_eq!(month.cadence_value, 1);
-    assert!(RITHMIC_INTERVALS.contains(&ChartInterval::Month1));
+    assert!(super::provider_intervals(TerminalProvider::Rithmic).contains(&ChartInterval::Month1));
 }
 
 #[test]
@@ -2606,5 +2613,17 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
     assert_eq!(
         super::default_listing_query(super::TerminalProvider::Tastytrade),
         "/ES"
+    );
+    assert!(
+        super::provider_intervals(super::TerminalProvider::Rithmic)
+            .contains(&ChartInterval::Tick100)
+    );
+    assert!(
+        !super::provider_intervals(super::TerminalProvider::Hyperliquid)
+            .contains(&ChartInterval::Tick100)
+    );
+    assert!(
+        super::provider_intervals(super::TerminalProvider::Tastytrade)
+            .contains(&ChartInterval::Month1)
     );
 }
