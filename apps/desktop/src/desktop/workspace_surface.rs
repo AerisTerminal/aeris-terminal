@@ -3530,12 +3530,10 @@ impl WorkspaceSurface {
                 cx.notify();
             }
         } else if disconnected && self.chart_state != ChartState::Error {
-            let message = match self.provider {
-                TerminalProvider::Rithmic => "Rithmic market worker stopped",
-                TerminalProvider::Hyperliquid => "Hyperliquid market worker stopped",
-                TerminalProvider::Tastytrade => "Tastytrade market worker stopped",
-            }
-            .to_string();
+            let message = format!(
+                "{} market worker stopped",
+                terminal_provider_display(self.provider)
+            );
             self.connection_state = Some(FeedConnectionState::Stopped);
             self.connection_message = Some(message.clone());
             self.set_chart_state(ChartState::Error, message, cx);
@@ -4139,11 +4137,8 @@ impl WorkspaceSurface {
                 .unwrap_or(u32::MAX),
         };
         let dispatched = if self.market_worker.try_search_provider(search).is_ok() {
-            self.symbol_message = match self.symbol_provider {
-                TerminalProvider::Rithmic => "Searching Rithmic spot markets".to_string(),
-                TerminalProvider::Hyperliquid => "Searching Hyperliquid markets".to_string(),
-                TerminalProvider::Tastytrade => "Searching tastytrade assets".into(),
-            };
+            let display = terminal_provider_display(self.symbol_provider);
+            self.symbol_message = format!("Searching {display} markets");
             true
         } else {
             self.symbol_browser.reject_search(request_id);
@@ -4335,17 +4330,8 @@ impl WorkspaceSurface {
         else {
             return;
         };
-        self.symbol_message = match self.symbol_provider {
-            TerminalProvider::Rithmic => {
-                format!("{count} active Rithmic spot markets")
-            }
-            TerminalProvider::Hyperliquid => {
-                format!("{count} Hyperliquid markets")
-            }
-            TerminalProvider::Tastytrade => {
-                format!("{count} tastytrade assets · search to find more")
-            }
-        };
+        let display = terminal_provider_display(self.symbol_provider);
+        self.symbol_message = format!("{count} {display} markets · search to find more");
         if self.symbol_browser.has_retained_search() {
             self.dispatch_retained_symbol_search(cx);
             cx.notify();
