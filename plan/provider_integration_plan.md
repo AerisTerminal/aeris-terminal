@@ -200,7 +200,8 @@ Maintainer-only: visual check of the symbol menu, depth-unavailable state and at
 
 - [x] `crates/market_runtime/src/study.rs` (7.7k lines) — moved its test module to
   `crates/market_runtime/src/study/tests.rs`; production code remains in the public module.
-- [ ] `apps/desktop/src/desktop/workspace_surface.rs` (6k)
+- [x] `apps/desktop/src/desktop/workspace_surface.rs` (6k) — moved its test module to
+  `apps/desktop/src/desktop/workspace_surface_tests.rs`.
 - [ ] `crates/account_runtime/src/account_service/mod.rs` (5.7k)
 - [ ] `apps/desktop/src/desktop.rs` (5k)
 - [ ] `crates/trading_runtime/src/lib.rs` (4.6k)
