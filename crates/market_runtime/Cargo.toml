@@ -21,3 +21,6 @@ zeroize.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+aeris_study_sdk = { path = "../study_sdk" }

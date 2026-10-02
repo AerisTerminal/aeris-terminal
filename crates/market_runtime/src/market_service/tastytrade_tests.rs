@@ -111,6 +111,24 @@ fn practice_calendar_uses_the_cached_dated_window_and_fails_closed() {
         )
         .is_ok()
     );
+    for (symbol, streamer) in [
+        ("/MESZ6", "/MESZ26:XCME"),
+        ("/RTYZ6", "/RTYZ26:XCME"),
+        ("/CLX6", "/CLX26:XNYM"),
+        ("/GCZ6", "/GCZ26:XCEC"),
+        ("/ZNZ6", "/ZNZ26:XCBT"),
+    ] {
+        assert_eq!(
+            api.require_practice_market_session(
+                "tastytrade",
+                &format!("tastytrade:Future:{symbol}"),
+                streamer,
+                150,
+            ),
+            Ok(true),
+            "{streamer} must use the provider CME collection",
+        );
+    }
     assert_eq!(
         api.require_practice_market_session(
             "tastytrade",
@@ -124,7 +142,7 @@ fn practice_calendar_uses_the_cached_dated_window_and_fails_closed() {
     assert_eq!(
         api.require_practice_market_session("tastytrade", "tastytrade:Future:/ESZ6", "ESZ26", 150)
             .unwrap_err(),
-        "Practice futures streamer identity is unavailable"
+        "Practice market calendar is unavailable"
     );
     *api.equity_session.lock().unwrap() = Some((
         Instant::now(),
@@ -348,10 +366,75 @@ fn session_at(open: i64, close: i64) -> MarketSession {
     MarketSession {
         collection: MarketCollection::Cme,
         start_unix_nanos: open,
+        regular_open_unix_nanos: open,
+        regular_close_unix_nanos: close,
         close_unix_nanos: close,
         next_start_unix_nanos: close + 86_400_000_000_000,
+        next_regular_open_unix_nanos: close + 86_400_000_000_000,
+        next_regular_close_unix_nanos: close + 172_800_000_000_000,
         next_close_unix_nanos: close + 172_800_000_000_000,
     }
+}
+
+#[test]
+fn dated_equity_session_phases_follow_regular_and_extended_boundaries() {
+    let mut session = session_at(100, 400);
+    session.collection = MarketCollection::Equity;
+    session.regular_open_unix_nanos = 200;
+    session.regular_close_unix_nanos = 300;
+    let instrument_id = "tastytrade:Equity:AAPL";
+    for (now, expected) in [
+        (99, MarketSessionPhase::Closed),
+        (100, MarketSessionPhase::PreMarket),
+        (199, MarketSessionPhase::PreMarket),
+        (200, MarketSessionPhase::Regular),
+        (299, MarketSessionPhase::Regular),
+        (300, MarketSessionPhase::PostMarket),
+        (399, MarketSessionPhase::PostMarket),
+        (400, MarketSessionPhase::Closed),
+    ] {
+        assert_eq!(
+            session_status_at(instrument_id, session, now).phase,
+            expected,
+            "{now}"
+        );
+    }
+    let regular = session_status_at(instrument_id, session, 250);
+    assert_eq!(regular.session_start_unix_nanos, Some(200));
+    assert_eq!(regular.session_end_unix_nanos, Some(300));
+    let extended = session_status_at(instrument_id, session, 350);
+    assert_eq!(extended.session_start_unix_nanos, Some(300));
+    assert_eq!(extended.session_end_unix_nanos, Some(400));
+    assert_eq!(
+        session_status_at(instrument_id, session, 400).next_open_unix_nanos,
+        Some(session.next_start_unix_nanos)
+    );
+    assert_eq!(
+        session_status_at(instrument_id, session, session.next_close_unix_nanos).phase,
+        MarketSessionPhase::Unknown,
+        "an expired calendar must not imply a holiday or continuous trading"
+    );
+    session.collection = MarketCollection::Cme;
+    session.next_start_unix_nanos = 1_000;
+    session.next_regular_open_unix_nanos = 1_100;
+    session.next_regular_close_unix_nanos = 1_200;
+    session.next_close_unix_nanos = 1_300;
+    assert_eq!(
+        session_status_at(instrument_id, session, 150).phase,
+        MarketSessionPhase::Overnight
+    );
+    assert_eq!(
+        session_status_at(instrument_id, session, 400).phase,
+        MarketSessionPhase::Closed
+    );
+    assert_eq!(
+        session_status_at(instrument_id, session, 999).next_open_unix_nanos,
+        Some(1_000)
+    );
+    assert_eq!(
+        session_status_at(instrument_id, session, 1_200).phase,
+        MarketSessionPhase::Overnight
+    );
 }
 #[test]
 fn candle_history_waits_for_atomic_transaction_and_cannot_complete_twice() {
@@ -361,10 +444,21 @@ fn candle_history_waits_for_atomic_transaction_and_cannot_complete_twice() {
         request,
         symbol: symbol.clone(),
         deadline: Instant::now() + Duration::from_secs(45),
+        last_progress_at: Instant::now(),
         candles: BTreeMap::new(),
         saw_newer_candle: false,
         candle_state: CandleHistoryState::Collecting,
     };
+    let now = Instant::now();
+    assert!(!task.expired(now));
+    task.last_progress_at = now
+        .checked_sub(Duration::from_secs(21))
+        .expect("test clock");
+    assert!(
+        task.expired(now),
+        "an unanswered channel must finish with a retryable failure"
+    );
+    task.last_progress_at = now;
     let event = |flags, bar| FeedEvent::Candle {
         channel: 7,
         symbol: symbol.clone(),
@@ -377,9 +471,9 @@ fn candle_history_waits_for_atomic_transaction_and_cannot_complete_twice() {
         .unwrap();
     task.accept(event(SNAPSHOT_END | TX_PENDING, None), 1, &mut 1)
         .unwrap();
-    assert!(task.candle_state == CandleHistoryState::Ending);
+    assert_eq!(task.candle_state, CandleHistoryState::Ending);
     task.accept(event(0, Some(bar())), 1, &mut 1).unwrap();
-    assert!(task.candle_state == CandleHistoryState::Ready);
+    assert_eq!(task.candle_state, CandleHistoryState::Ready);
     let open = bar().exchange_timestamp_unix_nanos;
     let forming = task
         .snapshot_at(
@@ -412,7 +506,7 @@ fn candle_history_waits_for_atomic_transaction_and_cannot_complete_twice() {
     assert!(task.snapshot_at(open + 30_000_000_000, None).is_err());
     task.candle_state = CandleHistoryState::Published;
     task.accept(event(SNAPSHOT_BEGIN, None), 1, &mut 1).unwrap();
-    assert!(task.candle_state == CandleHistoryState::Published);
+    assert_eq!(task.candle_state, CandleHistoryState::Published);
     assert_eq!(task.candles.len(), 1);
 }
 #[test]
@@ -428,6 +522,7 @@ fn newer_only_dxlink_snapshot_marks_backwards_history_exhausted() {
         request,
         symbol: symbol.clone(),
         deadline: Instant::now() + Duration::from_secs(45),
+        last_progress_at: Instant::now(),
         candles: BTreeMap::new(),
         saw_newer_candle: false,
         candle_state: CandleHistoryState::Collecting,
@@ -445,7 +540,7 @@ fn newer_only_dxlink_snapshot_marks_backwards_history_exhausted() {
         &mut 1,
     )
     .unwrap();
-    assert!(task.candle_state == CandleHistoryState::Ready);
+    assert_eq!(task.candle_state, CandleHistoryState::Ready);
     let snapshot = task
         .snapshot_at(newest.exchange_timestamp_unix_nanos, None)
         .unwrap();

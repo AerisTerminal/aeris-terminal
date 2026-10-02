@@ -9,6 +9,8 @@ use std::num::NonZeroUsize;
 mod order_book;
 #[cfg(feature = "gpui")]
 mod order_book_view;
+#[cfg(feature = "gpui")]
+pub mod tooltip;
 
 pub use aeris_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookRow};
 pub use order_book::{OrderBookSelection, project_order_book};

@@ -279,6 +279,7 @@ pub enum MarketWorkerMessage {
         transport_rtt_nanos: Option<u64>,
     },
     ProviderCatalog(ProviderCatalogEvent),
+    MarketSessionStatus(aeris_contracts::MarketSessionStatus),
     OrderBook(OrderBookFrame),
     TradeTape(MarketTradeTapeSnapshot),
     DeltaDivergenceTriggered(MarketDeltaDivergenceTrigger),

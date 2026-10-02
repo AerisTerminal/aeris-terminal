@@ -38,10 +38,12 @@ use aeris_charts_render::draw_list::{LineStyle, Prim};
 use aeris_charts_render_gpui::backend::measure_text;
 use aeris_charts_render_gpui::input::{GpuiChartInput, install_text_metrics};
 use aeris_charts_render_gpui::{AerisViewport, GpuiChartRenderer, PreparedAerisFrame};
+use aeris_contracts::{MarketSessionPhase, MarketSessionStatus};
 use aeris_design_system::{
     AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_font_stack,
     platform_typography,
 };
+use aeris_terminal_ui::tooltip::TooltipSpec;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
     KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -683,10 +685,113 @@ struct LegendPaneLayout {
 struct LegendPalette {
     text: Rgba,
     muted: Rgba,
+    status_muted: Rgba,
     bullish: Rgba,
     bearish: Rgba,
     hover: Rgba,
     danger: Rgba,
+    success: Rgba,
+    warning: Rgba,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegendMarketTone {
+    Success,
+    Warning,
+    Muted,
+    Danger,
+}
+
+fn legend_market_tone(status: Option<&MarketSessionStatus>, feed_live: bool) -> LegendMarketTone {
+    match status.map(|status| status.phase) {
+        Some(MarketSessionPhase::Regular | MarketSessionPhase::AlwaysOpen) if feed_live => {
+            LegendMarketTone::Success
+        }
+        Some(
+            MarketSessionPhase::PreMarket
+            | MarketSessionPhase::PostMarket
+            | MarketSessionPhase::Overnight,
+        ) if feed_live => LegendMarketTone::Warning,
+        Some(MarketSessionPhase::Closed | MarketSessionPhase::Unknown) | None => {
+            LegendMarketTone::Muted
+        }
+        _ => LegendMarketTone::Danger,
+    }
+}
+
+fn countdown_text(target_unix_nanos: i64, now_unix_nanos: i64) -> String {
+    let remaining = target_unix_nanos.saturating_sub(now_unix_nanos).max(0);
+    let minutes = remaining.saturating_add(60_000_000_000 - 1) / 60_000_000_000;
+    let hours = minutes / 60;
+    let minutes = minutes % 60;
+    if hours == 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{hours}h {minutes}m")
+    }
+}
+
+fn session_time_label(zone: &str, timestamp_unix_nanos: i64) -> String {
+    aeris_charts_engine::ChartTimeZone::parse(zone)
+        .and_then(|zone| zone.local_parts(timestamp_unix_nanos.div_euclid(1_000_000_000)))
+        .map_or_else(
+            || "--:--".to_string(),
+            |parts| format!("{:02}:{:02}", parts.hour, parts.minute),
+        )
+}
+
+fn market_session_tooltip_text(
+    status: Option<&MarketSessionStatus>,
+    feed_live: bool,
+    zone: &str,
+    now_unix_nanos: i64,
+) -> String {
+    let Some(status) = status else {
+        return "Market hours unavailable".to_string();
+    };
+    let phase = match status.phase {
+        MarketSessionPhase::Regular => "Open",
+        MarketSessionPhase::PreMarket => "Pre-market",
+        MarketSessionPhase::PostMarket => "Post-market",
+        MarketSessionPhase::Overnight => "Overnight session",
+        MarketSessionPhase::Closed => "Closed",
+        MarketSessionPhase::AlwaysOpen => "Open 24/7",
+        MarketSessionPhase::Unknown => "Market hours unavailable",
+    };
+    if status.phase == MarketSessionPhase::AlwaysOpen {
+        return if feed_live {
+            phase.into()
+        } else {
+            "Data delayed/unavailable · Open 24/7".into()
+        };
+    }
+    let phase = if legend_market_tone(Some(status), feed_live) == LegendMarketTone::Danger {
+        "Data delayed/unavailable"
+    } else {
+        phase
+    };
+    let hours = status
+        .session_start_unix_nanos
+        .zip(status.session_end_unix_nanos)
+        .map(|(start, end)| {
+            format!(
+                "\nSession: {}–{} ({zone})",
+                session_time_label(zone, start),
+                session_time_label(zone, end)
+            )
+        })
+        .unwrap_or_default();
+    let countdown = if status.phase == MarketSessionPhase::Closed {
+        status
+            .next_open_unix_nanos
+            .map(|open| format!("\nOpens in {}", countdown_text(open, now_unix_nanos)))
+    } else {
+        status
+            .session_end_unix_nanos
+            .map(|close| format!("\nCloses in {}", countdown_text(close, now_unix_nanos)))
+    }
+    .unwrap_or_default();
+    format!("{phase}{hours}{countdown}")
 }
 
 const LEGEND_VIEW_ICON: &str = "aeris/icons/ui/view.svg";
@@ -728,6 +833,8 @@ pub struct AerisChartView {
     volume_series: u32,
     volume_legend: LegendPresence,
     asset_legend_title: String,
+    market_session_status: Option<MarketSessionStatus>,
+    market_feed_live: LegendPresence,
     /// A load the trader is waiting on, shown by the symbol legend itself so the
     /// notice sits where they are already reading the symbol.
     asset_loading: LegendPresence,
@@ -832,6 +939,8 @@ impl AerisChartView {
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: String::new(),
+            market_session_status: None,
+            market_feed_live: LegendPresence::Absent,
             asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
@@ -934,6 +1043,8 @@ impl AerisChartView {
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: replay_legend_title(replay),
+            market_session_status: None,
+            market_feed_live: LegendPresence::Absent,
             asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
@@ -1930,6 +2041,20 @@ impl AerisChartView {
         self.engine.time_zone_id()
     }
 
+    /// Applies the runtime-owned session projection to the asset legend.
+    pub fn set_market_session_status(&mut self, status: MarketSessionStatus) {
+        self.market_session_status = Some(status);
+    }
+
+    /// Records whether the active market feed is currently publishable.
+    pub fn set_market_feed_live(&mut self, live: bool) {
+        self.market_feed_live = if live {
+            LegendPresence::Present
+        } else {
+            LegendPresence::Absent
+        };
+    }
+
     /// TradingView-parity time zones exposed by Aeris Charts.
     #[must_use]
     pub const fn supported_time_zones() -> &'static [&'static str] {
@@ -2423,11 +2548,22 @@ fn legend_palette(theme: ChartTheme, bullish: &str, bearish: &str) -> LegendPale
     LegendPalette {
         text: gpui_theme_color(colors.text_primary),
         muted: gpui_theme_color(colors.text_secondary),
+        status_muted: gpui_theme_color(colors.text_muted),
         bullish: chart_color(bullish),
         bearish: chart_color(bearish),
         hover: gpui_theme_color(colors.hover_bg),
         danger: gpui_theme_color(colors.danger),
+        success: gpui_theme_color(colors.positive),
+        warning: gpui_theme_color(colors.warning),
     }
+}
+
+#[derive(Clone, Copy)]
+struct LegendMarketContext<'a> {
+    loading: bool,
+    session_status: Option<&'a MarketSessionStatus>,
+    feed_live: bool,
+    theme: ChartTheme,
 }
 
 fn chart_legend_layers(
@@ -2437,7 +2573,7 @@ fn chart_legend_layers(
     theme: ChartTheme,
     bullish: &str,
     bearish: &str,
-    loading: bool,
+    context: LegendMarketContext<'_>,
 ) -> Vec<AnyElement> {
     let palette = legend_palette(theme, bullish, bearish);
     panes
@@ -2464,7 +2600,15 @@ fn chart_legend_layers(
             let mut row_count = 0;
             for row in pane_rows {
                 row_count += 1;
-                layer = layer.child(chart_legend_row(chart, row, palette, loading));
+                layer = layer.child(chart_legend_row(
+                    chart,
+                    row,
+                    palette,
+                    context.loading,
+                    context.session_status,
+                    context.feed_live,
+                    context.theme,
+                ));
             }
             (row_count > 0).then(|| layer.into_any_element())
         })
@@ -2476,8 +2620,105 @@ fn chart_legend_row(
     row: &LegendRow,
     palette: LegendPalette,
     loading: bool,
-) -> impl IntoElement {
+    session_status: Option<&MarketSessionStatus>,
+    feed_live: bool,
+    theme: ChartTheme,
+) -> AnyElement {
     let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
+    let controls = legend_row_controls(chart, row, palette, &group);
+    let values_color = match row.values_tone {
+        LegendValueTone::Neutral => palette.muted,
+        LegendValueTone::Bullish => palette.bullish,
+        LegendValueTone::Bearish => palette.bearish,
+    };
+    let values = if row.visible {
+        row.values.clone()
+    } else {
+        Vec::new()
+    };
+    let values = values.into_iter().map(|value| {
+        let color = value
+            .color
+            .as_deref()
+            .and_then(Color::parse_css)
+            .map_or(values_color, |color| rgba(color.0));
+        div()
+            .flex_none()
+            .h(px(LEGEND_ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .font_features(platform_tabular_numerals())
+            .text_color(color)
+            .child(value.text)
+            .into_any_element()
+    });
+    let tone = legend_market_tone(session_status, feed_live);
+    let status_color = match tone {
+        LegendMarketTone::Success => palette.success,
+        LegendMarketTone::Warning => palette.warning,
+        LegendMarketTone::Muted => palette.status_muted,
+        LegendMarketTone::Danger => palette.danger,
+    };
+    let row_element = div()
+        .id(("chart_legend_row", row.item.key()))
+        .group(group.clone())
+        .min_h(px(LEGEND_ROW_HEIGHT))
+        .max_w_full()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x_2()
+        .px_1()
+        .rounded(px(f32::from(
+            aeris_design_system::RadiusToken::Sm.logical_pixels(),
+        )))
+        .text_xs()
+        .text_color(if row.visible {
+            palette.text
+        } else {
+            palette.muted
+        })
+        .cursor(CursorStyle::Arrow)
+        .hover(|style| style.bg(palette.hover))
+        .children((row.item == LegendItem::Asset).then(|| {
+            div()
+                .flex_none()
+                .size(px(6.0))
+                .rounded(px(f32::from(
+                    aeris_design_system::RadiusToken::Full.logical_pixels(),
+                )))
+                .bg(status_color)
+        }))
+        .children((loading && row.item == LegendItem::Asset).then(|| legend_loading_glyph(palette)))
+        .child(
+            div()
+                .flex_none()
+                .h(px(LEGEND_ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .font_weight(gpui::FontWeight(f32::from(
+                    platform_typography().weight(TypographyRole::Normal),
+                )))
+                .child(row.title.clone()),
+        )
+        .children(values)
+        .child(controls);
+    if row.item != LegendItem::Asset {
+        return row_element.into_any_element();
+    }
+    let spec = asset_session_tooltip(chart, theme);
+    row_element
+        .tooltip(spec.builder())
+        .tooltip_show_delay(spec.delay())
+        .into_any_element()
+}
+
+fn legend_row_controls(
+    chart: &Entity<AerisChartView>,
+    row: &LegendRow,
+    palette: LegendPalette,
+    group: &SharedString,
+) -> impl IntoElement {
     let visibility = legend_control(
         chart,
         row.item,
@@ -2510,65 +2751,29 @@ fn chart_legend_row(
                 .group_hover(group.clone(), gpui::Styled::visible),
         );
     }
-    let values_color = match row.values_tone {
-        LegendValueTone::Neutral => palette.muted,
-        LegendValueTone::Bullish => palette.bullish,
-        LegendValueTone::Bearish => palette.bearish,
-    };
-    let values = if row.visible {
-        row.values.clone()
-    } else {
-        Vec::new()
-    };
-    let values = values.into_iter().map(|value| {
-        let color = value
-            .color
-            .as_deref()
-            .and_then(Color::parse_css)
-            .map_or(values_color, |color| rgba(color.0));
-        div()
-            .flex_none()
-            .h(px(LEGEND_ROW_HEIGHT))
-            .flex()
-            .items_center()
-            .font_features(platform_tabular_numerals())
-            .text_color(color)
-            .child(value.text)
-            .into_any_element()
-    });
-    div()
-        .id(("chart_legend_row", row.item.key()))
-        .group(group)
-        .min_h(px(LEGEND_ROW_HEIGHT))
-        .max_w_full()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x_2()
-        .px_1()
-        .rounded(px(3.0))
-        .text_xs()
-        .text_color(if row.visible {
-            palette.text
-        } else {
-            palette.muted
-        })
-        .cursor(CursorStyle::Arrow)
-        .hover(|style| style.bg(palette.hover))
-        .children((loading && row.item == LegendItem::Asset).then(|| legend_loading_glyph(palette)))
-        .child(
-            div()
-                .flex_none()
-                .h(px(LEGEND_ROW_HEIGHT))
-                .flex()
-                .items_center()
-                .font_weight(gpui::FontWeight(f32::from(
-                    platform_typography().weight(TypographyRole::Normal),
-                )))
-                .child(row.title.clone()),
-        )
-        .children(values)
-        .child(controls)
+    controls
+}
+
+fn asset_session_tooltip(chart: &Entity<AerisChartView>, theme: ChartTheme) -> TooltipSpec {
+    let tooltip_chart = chart.clone();
+    TooltipSpec::dynamic(
+        move |app| {
+            let chart = tooltip_chart.read(app);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+                .unwrap_or(0);
+            market_session_tooltip_text(
+                chart.market_session_status.as_ref(),
+                chart.market_feed_live.is_present(),
+                chart.time_zone_id(),
+                now,
+            )
+            .into()
+        },
+        &platform_theme(theme),
+    )
 }
 
 /// The symbol row's own load indicator, sized to the legend text and placed ahead
@@ -2700,7 +2905,12 @@ impl Render for AerisChartView {
             self.theme,
             &bullish,
             &bearish,
-            self.asset_loading.is_present(),
+            LegendMarketContext {
+                loading: self.asset_loading.is_present(),
+                session_status: self.market_session_status.as_ref(),
+                feed_live: self.market_feed_live.is_present(),
+                theme: self.theme,
+            },
         );
 
         div()

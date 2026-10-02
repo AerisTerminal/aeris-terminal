@@ -169,9 +169,9 @@ impl ResolvedInstrument {
 }
 
 /// The tastytrade instrument schemas do not promise a currency field. These
-/// narrow defaults follow the exchange's ES/NQ/CL contract specifications and
+/// narrow defaults follow the exchange's contract specifications and
 /// US NMS equity USD quotation rules; all other products require an explicit
-/// provider currency. CME ES/NQ/CL specs: cmegroup.com/markets. US equity
+/// provider currency. CME Group contract specs: cmegroup.com/markets. US equity
 /// quotation rule: sec.gov/rules-regulations/2024/09/regulation-nms-minimum-pricing-increments-access-fees-transparency-better-priced-orders.
 fn documented_quote_currency(
     instrument_type: &str,
@@ -179,8 +179,24 @@ fn documented_quote_currency(
     product_code: &str,
 ) -> Option<String> {
     let currency = match instrument_type {
-        "Future" if venue == "CME" && matches!(product_code, "ES" | "NQ") => Some("USD"),
-        "Future" if venue == "NYMEX" && product_code == "CL" => Some("USD"),
+        "Future"
+            if matches!(venue, "CME" | "CBOT" | "NYMEX" | "COMEX")
+                && matches!(
+                    product_code,
+                    "ES" | "MES"
+                        | "NQ"
+                        | "MNQ"
+                        | "RTY"
+                        | "M2K"
+                        | "CL"
+                        | "MCL"
+                        | "GC"
+                        | "MGC"
+                        | "ZN"
+                ) =>
+        {
+            Some("USD")
+        }
         "Equity"
             if matches!(
                 venue,
@@ -326,14 +342,22 @@ mod tests {
 
     #[test]
     fn documented_currency_defaults_are_limited_to_verified_products() {
-        assert_eq!(
-            documented_quote_currency("Future", "CME", "NQ").as_deref(),
-            Some("USD")
-        );
-        assert_eq!(
-            documented_quote_currency("Future", "NYMEX", "CL").as_deref(),
-            Some("USD")
-        );
+        for (venue, code) in [
+            ("CME", "MES"),
+            ("CME", "RTY"),
+            ("CME", "CL"),
+            ("CME", "GC"),
+            ("CME", "ZN"),
+            ("NYMEX", "CL"),
+            ("COMEX", "GC"),
+            ("CBOT", "ZN"),
+        ] {
+            assert_eq!(
+                documented_quote_currency("Future", venue, code).as_deref(),
+                Some("USD"),
+                "{venue} {code} quote currency",
+            );
+        }
         assert_eq!(documented_quote_currency("Future", "CME", "6E"), None);
         assert_eq!(
             documented_quote_currency("Equity", "ARCX", "").as_deref(),
@@ -392,6 +416,34 @@ mod tests {
                 .as_deref(),
             Some("EUR")
         );
+    }
+
+    #[test]
+    fn cme_group_practice_contracts_use_verified_usd_quotes() {
+        for (code, exchange, streamer, multiplier, tick) in [
+            ("MES", "CME", "XCME", "5", "0.25"),
+            ("RTY", "CME", "XCME", "50", "0.10"),
+            ("CL", "CME", "XNYM", "1000", "0.01"),
+            ("GC", "CME", "XCEC", "100", "0.10"),
+            ("ZN", "CME", "XCBT", "1000", "0.015625"),
+        ] {
+            let future: FutureInstrument = serde_json::from_value(serde_json::json!({
+                "symbol": format!("/{code}Z6"),
+                "streamer-symbol": format!("/{code}Z26:{streamer}"),
+                "exchange": exchange,
+                "product-code": code,
+                "expiration-date": "2026-12-18",
+                "active": true,
+                "active-month": true,
+                "notional-multiplier": multiplier,
+                "tick-size": tick,
+            }))
+            .expect("sanitized futures shape");
+            let resolved = ResolvedInstrument::from_future(&future).expect("contract terms");
+            assert_eq!(resolved.currency.as_deref(), Some("USD"), "{code}");
+            assert!(resolved.point_value.is_some_and(|value| value > 0));
+            assert!(resolved.tick_size.is_some_and(|value| value > 0));
+        }
     }
 
     #[test]

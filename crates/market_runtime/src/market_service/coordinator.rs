@@ -30,6 +30,7 @@ pub(super) struct OwnedCoordinatorChannels {
 pub(super) fn spawn_coordinator(
     engine: MarketEngine,
     mut channels: OwnedCoordinatorChannels,
+    broker_api: Arc<super::tastytrade::BrokerApi>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>, String> {
     thread::Builder::new()
@@ -37,7 +38,7 @@ pub(super) fn spawn_coordinator(
         .spawn(move || {
             {
                 let providers = channels.providers.dispatch();
-                run_coordinator(engine, &channels.commands, providers, &shutdown);
+                run_coordinator(engine, &channels.commands, providers, broker_api, &shutdown);
             }
             let panicked = channels.providers.cancel_and_join();
             assert!(
@@ -53,6 +54,7 @@ fn run_coordinator(
     engine: MarketEngine,
     commands: &Receiver<Command>,
     providers: ProviderDispatch<'_>,
+    broker_api: Arc<super::tastytrade::BrokerApi>,
     shutdown: &AtomicBool,
 ) {
     let sessions = providers
@@ -81,6 +83,7 @@ fn run_coordinator(
                 .unwrap_or(NonZeroUsize::MIN),
         }),
         providers,
+        broker_api,
         attached: BTreeSet::new(),
         consumer_clients: BTreeMap::new(),
         pending: BTreeMap::new(),
@@ -123,6 +126,7 @@ fn run_coordinator(
         coordinator.broadcast_dirty_trade_tapes();
         coordinator.publish_rithmic_live();
         coordinator.publish_candle_live();
+        coordinator.recover_stalled_live_series();
         coordinator.recover_overflowed_series_queues();
         for flush in &demand_flushers {
             flush(&mut coordinator);
@@ -220,6 +224,20 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                     descriptor.overflow_recovery_detail,
                 ),
             }
+            eprintln!("Aeris market {provider} event queue overflowed at generation {generation}");
+        }
+        for (provider, slot) in wake.slots.iter() {
+            let generation = slot.pending_failure.swap(0, Ordering::AcqRel);
+            if generation != 0 {
+                coordinator.rithmic_failed(
+                    provider,
+                    generation,
+                    "Market data retry limit reached; reconnect the provider in Accounts",
+                );
+                eprintln!(
+                    "Aeris market {provider} stopped after retry limit at generation {generation}"
+                );
+            }
         }
     }
     drained
@@ -287,6 +305,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) engine: MarketEngine,
     pub(super) studies: StudyRuntime,
     pub(super) providers: ProviderDispatch<'a>,
+    pub(super) broker_api: Arc<super::tastytrade::BrokerApi>,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
@@ -1480,6 +1499,7 @@ mod tests {
                 records: BTreeMap::new(),
                 lanes: Vec::new(),
             },
+            broker_api: Arc::new(super::super::tastytrade::BrokerApi::default()),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1541,6 +1561,42 @@ mod tests {
         assert!(ticket.2.is_none());
         assert!(ticket.0 > Instant::now());
         assert_eq!(coordinator.history_retries.len(), 1);
+    }
+
+    #[test]
+    fn terminal_failure_report_is_delivered_without_a_realtime_lane() {
+        let mut coordinator = coordinator();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("tastytrade", generation)
+            .expect("provider session begins");
+        let wake = Box::leak(Box::new(super::super::ProviderCoordinatorWake::for_tests()));
+        coordinator.providers.wake = Some(wake);
+        wake.report_failure("tastytrade", 1);
+        drain_coordinator_events(&mut coordinator);
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("tastytrade")
+                .map(|status| status.health),
+            Some(ProviderHealth::Failed)
+        );
+    }
+
+    #[test]
+    fn terminal_failure_before_connected_is_visible() {
+        let mut coordinator = coordinator();
+        let wake = Box::leak(Box::new(super::super::ProviderCoordinatorWake::for_tests()));
+        coordinator.providers.wake = Some(wake);
+        wake.report_failure("tastytrade", 1);
+        drain_coordinator_events(&mut coordinator);
+        let status = coordinator
+            .engine
+            .provider_status("tastytrade")
+            .expect("failed provider status");
+        assert_eq!(status.generation, Some(ProviderGeneration(nonzero(1))));
+        assert_eq!(status.health, ProviderHealth::Failed);
     }
 
     #[test]
@@ -2142,6 +2198,67 @@ mod tests {
             !coordinator
                 .detached_history
                 .contains(&(selected, first_generation))
+        );
+    }
+
+    #[test]
+    fn failed_covering_recovery_retries_and_rejoins_live_publication() {
+        let DetachedRithmicFixture {
+            mut coordinator,
+            series,
+            provider_generation,
+            live_timestamp,
+            ..
+        } = detached_rithmic_fixture();
+        let installed = instrument();
+        coordinator.catalog.insert(
+            (series.provider_id.clone(), series.instrument_id.clone()),
+            installed,
+        );
+        let (history_tx, history_rx) = std::sync::mpsc::sync_channel(1);
+        let history_tx = Box::leak(Box::new(history_tx));
+        coordinator.providers.records.insert(
+            "rithmic",
+            ProviderDispatchRecord {
+                descriptor: super::super::RITHMIC_DESCRIPTOR,
+                history: history_tx,
+                lifecycle: None,
+                realtime: ProviderRealtimeDispatch::Disabled,
+                catalog: ProviderCatalogDispatch::Disabled,
+            },
+        );
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            None,
+            Err("history channel did not finish".into()),
+        );
+        let key = (series.clone(), provider_generation);
+        assert!(coordinator.history_retries.contains_key(&key));
+        coordinator
+            .history_retries
+            .get_mut(&key)
+            .expect("retry ticket")
+            .0 = Instant::now();
+        coordinator.retry_history();
+        assert!(
+            history_rx.try_recv().is_ok(),
+            "retry reached the history worker"
+        );
+        coordinator.history_completed(
+            &series,
+            provider_generation,
+            None,
+            Ok(current_rejoin_snapshot(live_timestamp)),
+        );
+        coordinator.publish_rithmic_live();
+        assert!(!coordinator.history_retries.contains_key(&key));
+        assert!(
+            coordinator
+                .engine
+                .series_snapshot(&series)
+                .is_some_and(|snapshot| snapshot.forming),
+            "a completed retry returns the canonical series to live publication"
         );
     }
 
@@ -3441,6 +3558,23 @@ mod tests {
                 .map(|(_, attempts, queued_range)| (*attempts, *queued_range)),
             Some((0, Some(range)))
         );
+    }
+
+    #[test]
+    fn duplicate_covering_request_during_study_registration_does_not_queue_a_second_page() {
+        let mut coordinator = coordinator();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", generation)
+            .expect("provider session begins");
+        let key = (selected.clone(), generation);
+        coordinator.history_inflight.insert(key.clone(), None);
+        coordinator
+            .enqueue_history_request(&selected, generation, None)
+            .expect("the active page covers the duplicate demand");
+        assert!(!coordinator.history_deferred.contains_key(&key));
     }
 
     #[test]

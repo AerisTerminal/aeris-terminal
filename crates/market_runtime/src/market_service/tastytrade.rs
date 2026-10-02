@@ -14,8 +14,8 @@ use super::{
 #[cfg(test)]
 use super::{ProviderGeneration, id};
 use aeris_contracts::{
-    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
-    STARTUP_CATALOG_COMMAND_GENERATION,
+    MarketSessionPhase, MarketSessionSource, MarketSessionStatus, ProviderContractMetadata,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary, STARTUP_CATALOG_COMMAND_GENERATION,
 };
 use aeris_market_data::{DepthLevel, EventMetadata, QualifiedTimestamp};
 use aeris_tastytrade_market_adapter::{
@@ -535,37 +535,130 @@ impl BrokerApi {
         if provider_id != "tastytrade" {
             return Ok(false);
         }
-        let collection = if instrument_id.starts_with("tastytrade:Equity:") {
-            MarketCollection::Equity
-        } else if instrument_id.starts_with("tastytrade:Future:") {
-            let (_, streamer_exchange) = provider_symbol
-                .strip_prefix('/')
-                .and_then(|symbol| symbol.rsplit_once(':'))
-                .ok_or("Practice futures streamer identity is unavailable")?;
-            match streamer_exchange {
-                "XCME" => MarketCollection::Cme,
-                "XCFE" => MarketCollection::Cfe,
-                _ => return Err("Practice market calendar is unavailable".into()),
+        let status = self.market_session_status(instrument_id, provider_symbol, now_unix_nanos);
+        match status.phase {
+            MarketSessionPhase::Regular
+            | MarketSessionPhase::PreMarket
+            | MarketSessionPhase::PostMarket
+            | MarketSessionPhase::Overnight => Ok(true),
+            MarketSessionPhase::Closed => Err("Practice market is closed".into()),
+            MarketSessionPhase::Unknown | MarketSessionPhase::AlwaysOpen => {
+                Err("Practice market calendar is unavailable".into())
             }
-        } else {
-            return Err("Practice market instrument is unavailable".into());
-        };
-        // The provider calendar includes its current and next dated sessions,
-        // with close-at-ext for equities. Unknown or expired calendars reject
-        // practice execution until the broker refreshes them.
-        let session = self
-            .session_for_collection(collection)
-            .ok_or("Practice market calendar is unavailable")?;
-        if !session.contains(now_unix_nanos) {
-            return Err("Practice market is closed".into());
         }
-        Ok(true)
+    }
+
+    pub(super) fn market_session_status(
+        &self,
+        instrument_id: &str,
+        provider_symbol: &str,
+        now_unix_nanos: i64,
+    ) -> MarketSessionStatus {
+        let unknown = || MarketSessionStatus {
+            instrument_id: instrument_id.into(),
+            phase: MarketSessionPhase::Unknown,
+            source: MarketSessionSource::Unavailable,
+            session_start_unix_nanos: None,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        };
+        let Some(collection) = tastytrade_market_collection(instrument_id, provider_symbol) else {
+            return unknown();
+        };
+        self.session_for_collection(collection)
+            .map_or_else(unknown, |session| {
+                session_status_at(instrument_id, session, now_unix_nanos)
+            })
+    }
+}
+
+fn tastytrade_market_collection(
+    instrument_id: &str,
+    provider_symbol: &str,
+) -> Option<MarketCollection> {
+    if instrument_id.starts_with("tastytrade:Equity:") {
+        return Some(MarketCollection::Equity);
+    }
+    if !instrument_id.starts_with("tastytrade:Future:") {
+        return None;
+    }
+    let (_, exchange) = provider_symbol.strip_prefix('/')?.rsplit_once(':')?;
+    match exchange {
+        "XCME" | "XCBT" | "XNYM" | "XCEC" => Some(MarketCollection::Cme),
+        "XCFE" => Some(MarketCollection::Cfe),
+        _ => None,
+    }
+}
+
+fn session_status_at(instrument_id: &str, session: MarketSession, now: i64) -> MarketSessionStatus {
+    let windows = [
+        (
+            session.start_unix_nanos,
+            session.regular_open_unix_nanos,
+            session.regular_close_unix_nanos,
+            session.close_unix_nanos,
+        ),
+        (
+            session.next_start_unix_nanos,
+            session.next_regular_open_unix_nanos,
+            session.next_regular_close_unix_nanos,
+            session.next_close_unix_nanos,
+        ),
+    ];
+    let valid_count = if session.next_start_unix_nanos > session.start_unix_nanos {
+        2
+    } else {
+        1
+    };
+    let active = windows
+        .iter()
+        .take(valid_count)
+        .copied()
+        .find(|(start, _, _, end)| (*start..*end).contains(&now));
+    let next_open = windows
+        .iter()
+        .take(valid_count)
+        .map(|(start, _, _, _)| *start)
+        .filter(|start| *start > now)
+        .min();
+    let (phase, start, end) = if let Some((start, regular_open, regular_close, end)) = active {
+        let (phase, phase_start, phase_end) = if now < regular_open {
+            let phase = if session.collection == MarketCollection::Equity {
+                MarketSessionPhase::PreMarket
+            } else {
+                MarketSessionPhase::Overnight
+            };
+            (phase, start, regular_open)
+        } else if now >= regular_close {
+            let phase = if session.collection == MarketCollection::Equity {
+                MarketSessionPhase::PostMarket
+            } else {
+                MarketSessionPhase::Overnight
+            };
+            (phase, regular_close, end)
+        } else {
+            (MarketSessionPhase::Regular, regular_open, regular_close)
+        };
+        (phase, Some(phase_start), Some(phase_end))
+    } else if next_open.is_some() {
+        let (start, _, _, end) = windows[0];
+        (MarketSessionPhase::Closed, Some(start), Some(end))
+    } else {
+        (MarketSessionPhase::Unknown, None, None)
+    };
+    MarketSessionStatus {
+        instrument_id: instrument_id.into(),
+        phase,
+        source: MarketSessionSource::ProviderCalendar,
+        session_start_unix_nanos: start,
+        session_end_unix_nanos: end,
+        next_open_unix_nanos: next_open,
     }
 }
 
 fn market_collection(instrument: &InstallProviderInstrument) -> Option<MarketCollection> {
     match instrument.venue_id.as_str() {
-        "CME" => Some(MarketCollection::Cme),
+        "CME" | "CBOT" | "NYMEX" | "COMEX" => Some(MarketCollection::Cme),
         "CFE" => Some(MarketCollection::Cfe),
         _ if instrument.instrument_id.starts_with("tastytrade:Equity:")
             || instrument.instrument_id.starts_with("tastytrade:Index:") =>
@@ -1042,7 +1135,7 @@ fn candle_symbol(
 fn candle_start_ms(starts: &mut BTreeMap<String, i64>, symbol: String, now_ms: i64) -> i64 {
     *starts.entry(symbol).or_insert(now_ms)
 }
-fn now_nanos() -> Result<i64, String> {
+pub(super) fn now_nanos() -> Result<i64, String> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "Machine clock is invalid")?;
@@ -1106,7 +1199,7 @@ fn publish(
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandleHistoryState {
     Collecting,
     Ending,
@@ -1117,11 +1210,16 @@ struct HistoryTask {
     request: HistoryRequest,
     symbol: String,
     deadline: Instant,
+    last_progress_at: Instant,
     candles: BTreeMap<String, (MarketBar, u64)>,
     saw_newer_candle: bool,
     candle_state: CandleHistoryState,
 }
 impl HistoryTask {
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.deadline || now.duration_since(self.last_progress_at) >= Duration::from_secs(20)
+    }
+
     fn begin(
         request: &HistoryRequest,
         channel: u64,
@@ -1158,10 +1256,16 @@ impl HistoryTask {
                 from_time_ms: Some(from / 1_000_000),
             }],
         )?;
+        let started_at = Instant::now();
         Ok(Self {
             request: request.clone(),
             symbol,
-            deadline: Instant::now() + Duration::from_secs(45),
+            // Two simultaneously requested 1,600-bar channels can take longer
+            // than 45 seconds to deliver their bounded DXLink snapshots. The
+            // channel stays finite, and an unanswered request still fails and
+            // enters the coordinator's series retry path.
+            deadline: started_at + Duration::from_secs(120),
+            last_progress_at: started_at,
             candles: BTreeMap::new(),
             saw_newer_candle: false,
             candle_state: CandleHistoryState::Collecting,
@@ -1182,6 +1286,7 @@ impl HistoryTask {
                 count,
                 ..
             } if symbol == self.symbol => {
+                self.last_progress_at = Instant::now();
                 if self.candle_state == CandleHistoryState::Published {
                     return Ok(());
                 }
@@ -1791,6 +1896,10 @@ impl Worker {
             .ok_or("Tastytrade channel identity overflowed")?;
         match HistoryTask::begin(&request, self.channel, socket) {
             Ok(task) => {
+                eprintln!(
+                    "Aeris tastytrade history channel opened instrument={} channel={} symbol={}",
+                    request.series.instrument_id, self.channel, task.symbol
+                );
                 self.histories.insert(self.channel, task);
             }
             Err(error) => {
@@ -1826,7 +1935,7 @@ impl Worker {
                 continue;
             };
             if !cancelled
-                && Instant::now() < task.deadline
+                && !task.expired(Instant::now())
                 && task.candle_state != CandleHistoryState::Published
             {
                 continue;
@@ -1834,6 +1943,15 @@ impl Worker {
             let Some(task) = self.histories.remove(&channel) else {
                 continue;
             };
+            if task.candle_state != CandleHistoryState::Published {
+                eprintln!(
+                    "Aeris tastytrade history channel ended instrument={} channel={} candles={} state={:?} cancelled={cancelled}",
+                    task.request.series.instrument_id,
+                    channel,
+                    task.candles.len(),
+                    task.candle_state
+                );
+            }
             if let Some(socket) = &mut self.socket {
                 socket.close_channel(channel)?;
             }
@@ -2237,6 +2355,7 @@ impl Worker {
         }
     }
     fn recover(&mut self, error: String) {
+        eprintln!("Aeris tastytrade transport recovery: {error}");
         self.socket = None;
         self.tape = None;
         self.loaded_tapes.clear();
@@ -2259,7 +2378,12 @@ impl Worker {
         } else {
             RealtimeEvent::Recovering(self.epoch(), detail)
         };
-        let _ = self.publish(event);
+        if let Err(publish_error) = self.publish(event) {
+            eprintln!("Aeris tastytrade provider state publication failed: {publish_error}");
+            if self.paused {
+                self.ports.wake.report_failure("tastytrade", self.epoch());
+            }
+        }
     }
 }
 

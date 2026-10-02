@@ -744,6 +744,7 @@ struct WorkspaceSurface {
     lifecycle: DesktopLifecycle,
     pending_ui_diagnostics: Option<PendingUiDiagnostics>,
     connection_state: Option<FeedConnectionState>,
+    market_session_status: Option<aeris_contracts::MarketSessionStatus>,
     connection_message: Option<String>,
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPnlState,

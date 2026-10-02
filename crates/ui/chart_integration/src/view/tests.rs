@@ -8,6 +8,55 @@ use aeris_charts_engine::{
 };
 use std::collections::HashSet;
 
+#[test]
+fn market_legend_tone_distinguishes_session_phase_from_feed_health() {
+    let mut status = MarketSessionStatus {
+        instrument_id: "tastytrade:Future:/ESZ6".into(),
+        phase: MarketSessionPhase::Regular,
+        source: aeris_contracts::MarketSessionSource::ProviderCalendar,
+        session_start_unix_nanos: Some(0),
+        session_end_unix_nanos: Some(3_600_000_000_000),
+        next_open_unix_nanos: Some(86_400_000_000_000),
+    };
+    assert_eq!(
+        legend_market_tone(Some(&status), true),
+        LegendMarketTone::Success
+    );
+    assert_eq!(
+        legend_market_tone(Some(&status), false),
+        LegendMarketTone::Danger
+    );
+    status.phase = MarketSessionPhase::Overnight;
+    assert_eq!(
+        legend_market_tone(Some(&status), true),
+        LegendMarketTone::Warning
+    );
+    status.phase = MarketSessionPhase::Closed;
+    assert_eq!(
+        legend_market_tone(Some(&status), false),
+        LegendMarketTone::Muted
+    );
+    status.phase = MarketSessionPhase::AlwaysOpen;
+    assert_eq!(
+        legend_market_tone(Some(&status), true),
+        LegendMarketTone::Success
+    );
+    assert_eq!(
+        market_session_tooltip_text(Some(&status), true, "UTC", 0),
+        "Open 24/7"
+    );
+}
+
+#[test]
+fn market_session_countdown_rounds_up_to_the_next_minute() {
+    assert_eq!(
+        countdown_text(2 * 3_600_000_000_000 + 13 * 60_000_000_000 + 1, 0),
+        "2h 14m"
+    );
+    assert_eq!(countdown_text(30_000_000_000, 0), "1m");
+    assert_eq!(countdown_text(0, 1), "0m");
+}
+
 // Input helpers drive the Aeris Charts input controller exactly as the GPUI listeners do: the
 // shared adapter forwards one normalized event, then the view turns engine requests into product
 // state.

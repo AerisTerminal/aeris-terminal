@@ -8,6 +8,7 @@ use super::{
     process_command, set_resource_class, shared_market_runtime, thread,
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
+use std::time::{Duration, Instant};
 
 pub(super) fn run_workers(
     client_id: u64,
@@ -47,6 +48,7 @@ fn run_attached_workers(
     }
 
     let mut additions = additions;
+    let mut next_session_status_at = Instant::now();
     while additions.is_some() || endpoints.iter().any(|record| record.endpoint.active) {
         if let Some(receiver) = additions.as_ref() {
             loop {
@@ -90,6 +92,23 @@ fn run_attached_workers(
             }
         }
         endpoints.retain(|record| record.endpoint.active);
+        if Instant::now() >= next_session_status_at {
+            let now = super::now_unix_nanos();
+            for record in endpoints
+                .iter()
+                .filter(|record| record.endpoint.active && !record.catalog_only)
+            {
+                let status = market.market_session_status(&record.product, now);
+                if let Err(error) = record
+                    .endpoint
+                    .messages
+                    .send(MarketWorkerMessage::MarketSessionStatus(status))
+                {
+                    eprintln!("Aeris market session status was not delivered: {error}");
+                }
+            }
+            next_session_status_at = Instant::now() + Duration::from_secs(60);
+        }
         let consumer_budgets = endpoints
             .iter()
             .filter(|record| record.endpoint.active)
@@ -240,6 +259,13 @@ fn apply_received_event(
                 && let Err(error) = aeris_desktop::trading::register_provider_instrument(instrument)
             {
                 aeris_desktop::trading::report_practice_registration_error(error);
+            }
+            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event {
+                let status = market.market_session_status(instrument, super::now_unix_nanos());
+                endpoint
+                    .messages
+                    .send(MarketWorkerMessage::MarketSessionStatus(status))
+                    .map_err(|error| error.to_string())?;
             }
             let _ = endpoint
                 .messages

@@ -30,8 +30,12 @@ pub use session::{
 pub struct MarketSession {
     pub collection: MarketCollection,
     pub start_unix_nanos: i64,
+    pub regular_open_unix_nanos: i64,
+    pub regular_close_unix_nanos: i64,
     pub close_unix_nanos: i64,
     pub next_start_unix_nanos: i64,
+    pub next_regular_open_unix_nanos: i64,
+    pub next_regular_close_unix_nanos: i64,
     pub next_close_unix_nanos: i64,
 }
 
@@ -649,6 +653,7 @@ struct FuturesSessionsData {
 struct CurrentMarketSession {
     instrument_collection: String,
     start_at: String,
+    open_at: Option<String>,
     close_at: String,
     close_at_ext: Option<String>,
     #[serde(rename = "next-session")]
@@ -659,6 +664,7 @@ struct CurrentMarketSession {
 #[serde(rename_all = "kebab-case")]
 struct MarketSessionWindow {
     start_at: String,
+    open_at: Option<String>,
     close_at: String,
     close_at_ext: Option<String>,
 }
@@ -734,8 +740,17 @@ fn parse_market_session(
             .ok_or("Tastytrade market session time is invalid".to_string())
     };
     let start_unix_nanos = parse(&item.start_at)?;
+    let regular_open_unix_nanos = parse(item.open_at.as_deref().unwrap_or(&item.start_at))?;
+    let regular_close_unix_nanos = parse(&item.close_at)?;
     let close_unix_nanos = parse(item.close_at_ext.as_deref().unwrap_or(&item.close_at))?;
     let next_start_unix_nanos = parse(&item.next_window.start_at)?;
+    let next_regular_open_unix_nanos = parse(
+        item.next_window
+            .open_at
+            .as_deref()
+            .unwrap_or(&item.next_window.start_at),
+    )?;
+    let next_regular_close_unix_nanos = parse(&item.next_window.close_at)?;
     let next_close_unix_nanos = parse(
         item.next_window
             .close_at_ext
@@ -753,13 +768,27 @@ fn parse_market_session(
     if !valid_span(next_start_unix_nanos, next_close_unix_nanos) {
         return Err("Tastytrade next market session interval is invalid".into());
     }
+    if !(start_unix_nanos <= regular_open_unix_nanos
+        && regular_open_unix_nanos < regular_close_unix_nanos
+        && regular_close_unix_nanos <= close_unix_nanos
+        && (next_start_unix_nanos <= start_unix_nanos
+            || (next_start_unix_nanos <= next_regular_open_unix_nanos
+                && next_regular_open_unix_nanos < next_regular_close_unix_nanos
+                && next_regular_close_unix_nanos <= next_close_unix_nanos)))
+    {
+        return Err("Tastytrade regular market session interval is invalid".into());
+    }
     // The provider can return an auxiliary next-session window that predates
     // its current window. Keep only the current window eligible for replay then.
     Ok(MarketSession {
         collection,
         start_unix_nanos,
+        regular_open_unix_nanos,
+        regular_close_unix_nanos,
         close_unix_nanos,
         next_start_unix_nanos,
+        next_regular_open_unix_nanos,
+        next_regular_close_unix_nanos,
         next_close_unix_nanos,
     })
 }

@@ -496,6 +496,27 @@ impl Coordinator<'_> {
         self.enqueue_history_request_with_capacity_retry(series, generation, None)
     }
 
+    /// Retains one bounded retry ticket and publishes an observable series state
+    /// when an immediate recovery request cannot enter the history worker.
+    pub(super) fn request_series_history_recovery(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) {
+        if let Err(error) = self.enqueue_history_recovery(series, generation) {
+            eprintln!(
+                "Aeris market history enqueue failed for {}: {error}",
+                series.instrument_id
+            );
+            self.schedule_history_retry(series, generation, None, error);
+            self.broadcast_series_resolution_for(
+                series,
+                SeriesLoadState::Partial,
+                Some("Current market history is unavailable; recovery will retry"),
+            );
+        }
+    }
+
     pub(super) fn enqueue_history_request_with_capacity_retry(
         &mut self,
         series: &BarSeriesKey,
@@ -504,9 +525,20 @@ impl Coordinator<'_> {
     ) -> Result<(), &'static str> {
         match self.enqueue_history_request(series, generation, range) {
             Err(HISTORY_CAPACITY_EXHAUSTED) => {
-                self.history_retries
-                    .entry((series.clone(), generation))
-                    .or_insert((Instant::now() + HISTORY_RETRY_DELAY, 0, range));
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    self.history_retries.entry((series.clone(), generation))
+                {
+                    entry.insert((Instant::now() + HISTORY_RETRY_DELAY, 0, range));
+                    eprintln!(
+                        "Aeris market history queue full for {}; bounded retry scheduled",
+                        series.instrument_id
+                    );
+                    self.broadcast_series_resolution_for(
+                        series,
+                        SeriesLoadState::Partial,
+                        Some("Current market history is queued for retry"),
+                    );
+                }
                 Ok(())
             }
             result => result,
@@ -605,14 +637,7 @@ impl Coordinator<'_> {
         }
         self.history_retries
             .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts, range));
-        self.broadcast_series_recovery_for(
-            series,
-            if self.provider_uses_candles(&series.provider_id) {
-                "Provider current history is retrying"
-            } else {
-                "Rithmic current history is retrying"
-            },
-        );
+        self.broadcast_series_recovery_for(series, "Current market history is retrying");
         true
     }
 
@@ -640,8 +665,14 @@ impl Coordinator<'_> {
             self.history_retries.remove(&key);
             return;
         }
-        let _ = self.enqueue_history_request(series, *generation, range);
-        if let Some((retry_at, _, _)) = self.history_retries.get_mut(&key) {
+        if let Err(error) = self.enqueue_history_request(series, *generation, range) {
+            self.schedule_history_retry(series, *generation, range, error);
+            self.broadcast_series_resolution_for(
+                series,
+                SeriesLoadState::Partial,
+                Some("Current market history is unavailable; recovery will retry"),
+            );
+        } else if let Some((retry_at, _, _)) = self.history_retries.get_mut(&key) {
             *retry_at = now + HISTORY_RETRY_DELAY;
         }
     }
@@ -847,6 +878,11 @@ impl Coordinator<'_> {
             None
         };
         if let Some(inflight) = self.history_inflight.get(&key).copied() {
+            if inflight.is_none() && range.is_none() {
+                // A study lease and its chart may request the same covering
+                // snapshot in one turn. The active request already owns both.
+                return Ok(());
+            }
             let range = match (inflight, range) {
                 (Some(inflight), Some(requested)) => {
                     let Some(missing) = history_range_after_inflight(requested, inflight) else {
@@ -893,6 +929,13 @@ impl Coordinator<'_> {
         let history = self.providers.history(&series.provider_id)?;
         match try_enqueue_history(history, request) {
             Ok(()) => {
+                if range.is_none() {
+                    eprintln!(
+                        "Aeris market covering history requested for {} generation={}",
+                        series.instrument_id,
+                        generation.0.get()
+                    );
+                }
                 self.history_inflight.insert(key.clone(), range);
                 self.history_cancellations.insert(key.clone(), stop);
                 if let Some(remainder) = remainder {
@@ -983,17 +1026,12 @@ impl Coordinator<'_> {
                 Some("Current provider history is unavailable; recovery will retry"),
             );
         } else if let Some(waiters) = self.pending.remove(series) {
-            let unavailable = if self.provider_uses_candles(&series.provider_id) {
-                "Provider historical bars are unavailable"
-            } else {
-                "Rithmic historical bars are unavailable"
-            };
             fail_waiters(
                 &mut self.events,
                 waiters,
                 series,
                 FailureStage::ProviderHistory,
-                unavailable,
+                "Market historical bars are unavailable",
             );
         }
     }
@@ -1021,12 +1059,20 @@ impl Coordinator<'_> {
         }
         if cancelled {
             if self.engine.has_subscription(series) {
-                let _ = self.enqueue_history(series, generation);
+                self.request_series_history_recovery(series, generation);
             }
             return None;
         }
         match result {
             Ok(snapshot) => {
+                if range.is_none() {
+                    eprintln!(
+                        "Aeris market covering history completed for {} generation={} bars={}",
+                        series.instrument_id,
+                        generation.0.get(),
+                        snapshot.bars.len()
+                    );
+                }
                 self.history_retries.remove(&key);
                 Some(snapshot)
             }
@@ -1069,22 +1115,7 @@ impl Coordinator<'_> {
             return;
         };
         if snapshot.bars.is_empty() {
-            if let Some(range) = range {
-                let key = (series.clone(), generation);
-                if snapshot.backwards_exhausted {
-                    self.history_backwards_exhausted.insert(key.clone());
-                    self.history_deferred.remove(&key);
-                }
-                self.history_confirmed_empty
-                    .entry(key)
-                    .and_modify(|existing| merge_confirmed_empty_range(existing, range))
-                    .or_insert(range);
-                self.dispatch_deferred_history(series, generation);
-            } else {
-                let _ = self.cancel_live_history_reseed(series);
-                self.history_deferred.remove(&(series.clone(), generation));
-                self.history_failed(series, generation);
-            }
+            self.handle_empty_history(series, generation, range, snapshot.backwards_exhausted);
             return;
         }
         let repaired_timestamp_span = range.and_then(|_| {
@@ -1149,6 +1180,13 @@ impl Coordinator<'_> {
         }
         self.pending.remove(series);
         self.series_live_if_ready(series);
+        if range.is_none() && replacing_existing {
+            eprintln!(
+                "Aeris market series recovery finished for {} generation={}",
+                series.instrument_id,
+                generation.0.get()
+            );
+        }
         self.execute_studies_after_history_install(series, repaired_timestamp_span);
         self.history_confirmed_empty
             .remove(&(series.clone(), generation));
@@ -1160,6 +1198,31 @@ impl Coordinator<'_> {
             let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
         }
         self.dispatch_deferred_history(series, generation);
+    }
+
+    fn handle_empty_history(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        backwards_exhausted: bool,
+    ) {
+        if let Some(range) = range {
+            let key = (series.clone(), generation);
+            if backwards_exhausted {
+                self.history_backwards_exhausted.insert(key.clone());
+                self.history_deferred.remove(&key);
+            }
+            self.history_confirmed_empty
+                .entry(key)
+                .and_modify(|existing| merge_confirmed_empty_range(existing, range))
+                .or_insert(range);
+            self.dispatch_deferred_history(series, generation);
+        } else {
+            let _ = self.cancel_live_history_reseed(series);
+            self.history_deferred.remove(&(series.clone(), generation));
+            self.history_failed(series, generation);
+        }
     }
 
     fn execute_studies_after_history_install(
@@ -1198,7 +1261,22 @@ impl Coordinator<'_> {
             DeferredHistoryRequest::Full => None,
             DeferredHistoryRequest::Range(range) => Some(range),
         };
-        let _ = self.enqueue_history_request_with_capacity_retry(series, generation, range);
+        if let Err(error) =
+            self.enqueue_history_request_with_capacity_retry(series, generation, range)
+        {
+            eprintln!(
+                "Aeris market deferred history enqueue failed for {}: {error}",
+                series.instrument_id
+            );
+            self.schedule_history_retry(series, generation, range, error);
+            if range.is_none() {
+                self.broadcast_series_resolution_for(
+                    series,
+                    SeriesLoadState::Partial,
+                    Some("Current market history is unavailable; recovery will retry"),
+                );
+            }
+        }
     }
     fn install_completed_history(
         &mut self,

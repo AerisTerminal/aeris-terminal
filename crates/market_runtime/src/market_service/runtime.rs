@@ -1001,6 +1001,41 @@ impl ProviderDispatch<'_> {
 }
 
 impl MarketService {
+    /// Returns the runtime-owned dated session projection for one installed instrument.
+    #[must_use]
+    pub fn market_session_status(
+        &self,
+        instrument: &aeris_contracts::InstallProviderInstrument,
+        now_unix_nanos: i64,
+    ) -> aeris_contracts::MarketSessionStatus {
+        if instrument.provider == "tastytrade" {
+            return self.runtime.broker_api.market_session_status(
+                &instrument.instrument_id,
+                &instrument.provider_symbol,
+                now_unix_nanos,
+            );
+        }
+        let (phase, source) = if instrument.provider == "hyperliquid" {
+            (
+                aeris_contracts::MarketSessionPhase::AlwaysOpen,
+                aeris_contracts::MarketSessionSource::Continuous,
+            )
+        } else {
+            (
+                aeris_contracts::MarketSessionPhase::Unknown,
+                aeris_contracts::MarketSessionSource::Unavailable,
+            )
+        };
+        aeris_contracts::MarketSessionStatus {
+            instrument_id: instrument.instrument_id.clone(),
+            phase,
+            source,
+            session_start_unix_nanos: None,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        }
+    }
+
     /// Checks the broker's bounded cached calendar before simulated execution.
     /// A true result requires a quote newer than the submitted order revision.
     /// # Errors
@@ -1090,6 +1125,7 @@ impl MarketService {
                 commands: command_rx,
                 providers: provider_registry,
             },
+            Arc::clone(&broker_api),
             Arc::clone(&shutdown),
         )?];
         Self::build_market_service(

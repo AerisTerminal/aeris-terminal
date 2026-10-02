@@ -689,6 +689,38 @@ pub struct ProviderSessionHours {
     pub timezone: String,
 }
 
+/// Provider-neutral phase of the dated market session for one instrument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketSessionPhase {
+    Regular,
+    PreMarket,
+    PostMarket,
+    Overnight,
+    Closed,
+    AlwaysOpen,
+    Unknown,
+}
+
+/// Provenance of market hours; an unavailable calendar never implies 24/7 trading.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketSessionSource {
+    ProviderCalendar,
+    ProviderHours,
+    Continuous,
+    Unavailable,
+}
+
+/// One bounded dated status projection owned by the market runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarketSessionStatus {
+    pub instrument_id: String,
+    pub phase: MarketSessionPhase,
+    pub source: MarketSessionSource,
+    pub session_start_unix_nanos: Option<i64>,
+    pub session_end_unix_nanos: Option<i64>,
+    pub next_open_unix_nanos: Option<i64>,
+}
+
 /// Reserves the startup catalog command generation used by desktop pane restore
 /// for provider metadata refreshes and selections.
 pub const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;

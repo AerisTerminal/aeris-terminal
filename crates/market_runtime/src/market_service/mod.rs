@@ -246,6 +246,7 @@ pub(crate) struct ProviderCoordinatorWake {
 struct ProviderWakeSlot {
     overflow: AtomicU64,
     pending_overflow: AtomicU64,
+    pending_failure: AtomicU64,
     catalog_overflow: AtomicBool,
 }
 
@@ -288,6 +289,13 @@ impl ProviderCoordinatorWake {
                 .slots
                 .get(provider)
                 .is_some_and(|slot| slot.overflow.load(Ordering::Acquire) >= generation)
+    }
+
+    pub(crate) fn report_failure(&self, provider: &str, generation: u64) {
+        if let Some(slot) = self.slots.get(provider) {
+            slot.pending_failure.fetch_max(generation, Ordering::AcqRel);
+        }
+        self.notify();
     }
 
     pub(crate) fn notify(&self) {
@@ -711,6 +719,8 @@ struct TradeLiveHandoff {
     indexed_overlay: BTreeMap<String, MarketTrade>,
     provider_candle_count: Option<u64>,
     provider_candle_timestamp: Option<i64>,
+    last_publication_at: Instant,
+    last_trade_at: Option<Instant>,
 }
 
 enum TradeLiveCadence {

@@ -8,6 +8,7 @@ use aeris_contracts::{
 };
 use aeris_market_data::{BarPeriod, BarSeriesKey};
 use aeris_market_engine::{MarketStream, StreamRequirements};
+use aeris_market_runtime::study::{NativeStudyRegistration, StudyDependency, StudyMarketInput};
 use aeris_market_runtime::{MarketRuntimeEvent, MarketService, MarketTradeTapeSnapshot};
 use std::{
     collections::VecDeque,
@@ -493,6 +494,8 @@ fn main() -> Result<(), String> {
     let market = MarketService::start()?;
     let result = if std::env::args().nth(1).as_deref() == Some("--history-load") {
         run_history_load(&market)
+    } else if std::env::args().nth(1).as_deref() == Some("--soak") {
+        run_soak(&market)
     } else if std::env::args().nth(1).as_deref() == Some("--cycle") {
         run_timeframe_cycle(&market)
     } else {
@@ -500,6 +503,235 @@ fn main() -> Result<(), String> {
     };
     let shutdown = market.shutdown(Duration::from_secs(10));
     result.and(shutdown)
+}
+
+fn run_soak(market: &MarketService) -> Result<(), String> {
+    const QUERIES: [&str; 2] = ["/ESZ6", "/NQZ6"];
+    let duration_minutes = soak_duration_minutes()?;
+    market.attach(1)?;
+    for (index, query) in QUERIES.iter().enumerate() {
+        let consumer_id = index as u64 + 1;
+        market.register_consumer(1, 1, consumer_id)?;
+        market.search_provider_instruments(
+            1,
+            SearchProviderInstruments {
+                consumer_id,
+                search_generation: 1,
+                provider: "tastytrade".into(),
+                query: (*query).into(),
+                maximum_results: 20,
+            },
+        )?;
+    }
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(duration_minutes * 60);
+    let mut instruments: [Option<InstallProviderInstrument>; 2] = [None, None];
+    let mut ribbon_studies = [None, None];
+    let mut selected = [false; 2];
+    let mut demand_generation = [1_u64; 2];
+    let mut counts = [[0_u64; 4]; 2];
+    let mut totals = [[0_u64; 4]; 2];
+    let mut next_report = started + Duration::from_secs(15);
+    let mut next_switch = started + Duration::from_secs(180);
+    while Instant::now() < deadline {
+        for (index, query) in QUERIES.iter().enumerate() {
+            let consumer_id = index as u64 + 1;
+            let Some(event) = market.poll_event(1, consumer_id)? else {
+                continue;
+            };
+            process_soak_event(
+                market,
+                index,
+                query,
+                event,
+                &mut SoakEventState {
+                    selected: &mut selected,
+                    instruments: &mut instruments,
+                    ribbon_studies: &mut ribbon_studies,
+                    counts: &mut counts,
+                    totals: &mut totals,
+                },
+            )?;
+        }
+        if Instant::now() >= next_report {
+            println!(
+                "SOAK interval elapsed_s={} ES[snapshot,update,book,tape]={:?} NQ={:?}",
+                started.elapsed().as_secs(),
+                counts[0],
+                counts[1]
+            );
+            counts = [[0; 4]; 2];
+            next_report += Duration::from_secs(15);
+        }
+        if Instant::now() >= next_switch {
+            for (index, instrument) in instruments.iter().enumerate() {
+                let Some(instrument) = instrument else {
+                    continue;
+                };
+                demand_generation[index] += 1;
+                let period = if demand_generation[index] % 2 == 0 {
+                    300
+                } else {
+                    60
+                };
+                let series = soak_series(instrument, period)?;
+                market.set_demand(
+                    1,
+                    index as u64 + 1,
+                    demand_generation[index],
+                    &series,
+                    StreamRequirements::BARS
+                        .with(MarketStream::Trades)
+                        .with(MarketStream::Quotes),
+                )?;
+                if let Some(study_id) = ribbon_studies[index] {
+                    market.reinitialize_study(1, study_id, ribbon_registration(series)?)?;
+                }
+                println!(
+                    "SOAK switch consumer={} period={period} demand_generation={}",
+                    index + 1,
+                    demand_generation[index]
+                );
+            }
+            next_switch += Duration::from_secs(180);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    println!(
+        "SOAK totals elapsed_s={} ES={:?} NQ={:?}",
+        started.elapsed().as_secs(),
+        totals[0],
+        totals[1]
+    );
+    market.detach(1)
+}
+
+fn soak_duration_minutes() -> Result<u64, String> {
+    Ok(std::env::args()
+        .nth(2)
+        .map(|value| value.parse::<u64>().map_err(|_| "Invalid soak minutes"))
+        .transpose()?
+        .unwrap_or(30)
+        .clamp(1, 45))
+}
+
+struct SoakEventState<'a> {
+    selected: &'a mut [bool; 2],
+    instruments: &'a mut [Option<InstallProviderInstrument>; 2],
+    ribbon_studies: &'a mut [Option<aeris_study_sdk::StudyInstanceId>; 2],
+    counts: &'a mut [[u64; 4]; 2],
+    totals: &'a mut [[u64; 4]; 2],
+}
+
+fn process_soak_event(
+    market: &MarketService,
+    index: usize,
+    query: &str,
+    event: MarketRuntimeEvent,
+    state: &mut SoakEventState<'_>,
+) -> Result<(), String> {
+    let consumer_id = index as u64 + 1;
+    match event {
+        MarketRuntimeEvent::ProviderInstrumentSearchPreview(result)
+        | MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
+            if !state.selected[index] =>
+        {
+            if let Some(item) = result
+                .instruments
+                .into_iter()
+                .find(|item| item.symbol == query)
+            {
+                state.selected[index] = true;
+                market.select_provider_instrument(
+                    1,
+                    SelectProviderInstrument {
+                        consumer_id,
+                        selection_generation: 1,
+                        search_generation: 1,
+                        provider: "tastytrade".into(),
+                        symbol: item.symbol,
+                        exchange: item.exchange,
+                        entitlement_id: "tastytrade-authorized".into(),
+                    },
+                )?;
+            }
+        }
+        MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
+            println!(
+                "SOAK selection consumer={consumer_id} symbol={}",
+                selection.instrument.display_symbol
+            );
+            demand(market, consumer_id, selection.instrument.clone())?;
+            let series = soak_series(&selection.instrument, 60)?;
+            state.ribbon_studies[index] =
+                Some(market.register_study(1, consumer_id, ribbon_registration(series)?)?);
+            state.instruments[index] = Some(selection.instrument);
+        }
+        MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
+            state.counts[index][0] += 1;
+            state.totals[index][0] += 1;
+            println!(
+                "SOAK snapshot consumer={consumer_id} bars={} provider_generation={} period={:?}",
+                snapshot.snapshot.bars.len(),
+                snapshot.snapshot.provider_generation.0.get(),
+                snapshot.snapshot.series.period
+            );
+        }
+        MarketRuntimeEvent::SeriesUpdate(_) => {
+            state.counts[index][1] += 1;
+            state.totals[index][1] += 1;
+        }
+        MarketRuntimeEvent::OrderBookSnapshot(_) => {
+            state.counts[index][2] += 1;
+            state.totals[index][2] += 1;
+        }
+        MarketRuntimeEvent::TradeTapeSnapshot(_) => {
+            state.counts[index][3] += 1;
+            state.totals[index][3] += 1;
+        }
+        MarketRuntimeEvent::ProviderState(state) => println!(
+            "SOAK provider consumer={consumer_id} state={:?} generation={:?} detail={:?}",
+            state.state, state.generation, state.detail
+        ),
+        MarketRuntimeEvent::SeriesState(state) => println!(
+            "SOAK series consumer={consumer_id} state={:?} detail={:?}",
+            state.state, state.detail
+        ),
+        MarketRuntimeEvent::DemandError(error) => {
+            println!("SOAK demand error consumer={consumer_id} {error:?}");
+        }
+        MarketRuntimeEvent::ProviderCatalogRejected(error) => {
+            println!("SOAK catalog rejected consumer={consumer_id} {error:?}");
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn soak_series(
+    instrument: &InstallProviderInstrument,
+    period_seconds: u32,
+) -> Result<BarSeriesKey, String> {
+    Ok(BarSeriesKey {
+        provider_id: instrument.provider.clone(),
+        instrument_id: instrument.instrument_id.clone(),
+        entitlement_id: instrument.entitlement_id.clone(),
+        period: BarPeriod::time(period_seconds).map_err(|error| error.to_string())?,
+        definition_version: 1,
+    })
+}
+
+fn ribbon_registration(series: BarSeriesKey) -> Result<NativeStudyRegistration, String> {
+    aeris_study_sdk::restore_native_registration(
+        aeris_study_sdk::BUILTIN_EMA_RIBBON_IDENTIFIER,
+        aeris_study_sdk::BUILTIN_EMA_RIBBON_IMPLEMENTATION_REVISION,
+        vec![StudyDependency::Market(StudyMarketInput {
+            series,
+            streams: StreamRequirements::BARS,
+        })],
+        std::collections::BTreeMap::default(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
@@ -539,6 +771,10 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
         }
     }
     let instrument = instrument.ok_or("cycle selection timed out")?;
+    println!(
+        "Resolved instrument: display_symbol={} provider_symbol={} venue={}",
+        instrument.display_symbol, instrument.provider_symbol, instrument.venue_id
+    );
     let periods = [60_u32, 300, 900, 3_600];
     let delay = if fast { 200 } else { 1_500 };
     for cycle in 0..12 {
