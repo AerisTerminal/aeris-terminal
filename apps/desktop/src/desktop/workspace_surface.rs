@@ -2536,7 +2536,6 @@ impl WorkspaceSurface {
                 let chart_theme = aeris_chart_theme(self.theme.mode);
                 let chart =
                     cx.new(move |_| AerisChartView::with_replay_and_theme(&snapshot, chart_theme));
-                self.configure_new_chart_market_status(&chart, cx);
                 self.apply_chart_chrome_to_chart(&chart, cx);
                 if let Some(restored) = self.restored_chart_state.take() {
                     Self::apply_restored_chart_state(&chart, &restored, true, cx);
@@ -2619,31 +2618,6 @@ impl WorkspaceSurface {
                 cx,
             );
         }
-        self.update_market_feed_indicator(cx);
-    }
-
-    fn configure_new_chart_market_status(
-        &self,
-        chart: &Entity<AerisChartView>,
-        cx: &mut Context<Self>,
-    ) {
-        let status = self
-            .market_session_status
-            .as_ref()
-            .filter(|status| {
-                self.product
-                    .as_ref()
-                    .is_some_and(|product| product.instrument_id == status.instrument_id)
-            })
-            .cloned();
-        let feed_live = self.connection_state == Some(FeedConnectionState::Streaming)
-            && self.chart_state == ChartState::Ready;
-        chart.update(cx, |chart, _| {
-            if let Some(status) = status {
-                chart.set_market_session_status(status);
-            }
-            chart.set_market_feed_live(feed_live);
-        });
     }
 
     fn reject_incremental_publication(
@@ -2766,19 +2740,7 @@ impl WorkspaceSurface {
         }
         self.chart_state = state;
         self.chart_state_message = message;
-        self.update_market_feed_indicator(cx);
         cx.notify();
-    }
-
-    fn update_market_feed_indicator(&self, cx: &mut Context<Self>) {
-        if let Some(chart) = &self.chart {
-            let live = self.chart_state == ChartState::Ready
-                && self.connection_state == Some(FeedConnectionState::Streaming);
-            chart.update(cx, |chart, chart_cx| {
-                chart.set_market_feed_live(live);
-                chart_cx.notify();
-            });
-        }
     }
 
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
@@ -2918,17 +2880,9 @@ impl WorkspaceSurface {
         status: aeris_contracts::MarketSessionStatus,
         cx: &mut Context<Self>,
     ) {
-        let current = self
-            .product
-            .as_ref()
-            .is_some_and(|product| product.instrument_id == status.instrument_id);
-        self.market_session_status = Some(status.clone());
-        if current && let Some(chart) = &self.chart {
-            chart.update(cx, |chart, chart_cx| {
-                chart.set_market_session_status(status);
-                chart_cx.notify();
-            });
-        }
+        // The header market indicator reads this for the selected product only.
+        self.market_session_status = Some(status);
+        cx.notify();
     }
 
     fn apply_trade_tape(
@@ -3613,7 +3567,6 @@ impl WorkspaceSurface {
             self.chart_state_message.clone_from(&message);
         }
         self.connection_state = Some(state);
-        self.update_market_feed_indicator(cx);
         // Depth follows the same honesty rule as the empty panel: a fresh
         // demand restarts from loading, and only a concrete stop marks the
         // book unavailable. Provider recovery itself is owned by the market runtime.

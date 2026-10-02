@@ -2598,6 +2598,8 @@ struct HeaderState {
     chart_link_group: u8,
     connection_state: FeedConnectionState,
     transport_rtt_nanos: Option<u64>,
+    /// Runtime session projection for the selected product, shown by the header market dot.
+    market_session: Option<aeris_contracts::MarketSessionStatus>,
     instrument_scroll: ScrollHandle,
 }
 

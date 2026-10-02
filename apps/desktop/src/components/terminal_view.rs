@@ -53,6 +53,16 @@ fn active_header_state(
             .connection_state
             .unwrap_or(FeedConnectionState::Disconnected),
         transport_rtt_nanos: workspace.provider_transport_rtt_nanos,
+        market_session: workspace
+            .market_session_status
+            .as_ref()
+            .filter(|status| {
+                workspace
+                    .product
+                    .as_ref()
+                    .is_some_and(|product| product.instrument_id == status.instrument_id)
+            })
+            .cloned(),
         instrument_scroll: workspace.scrolls.instrument.clone(),
     }
 }

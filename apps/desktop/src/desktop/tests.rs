@@ -1667,6 +1667,65 @@ fn connection_indicator_is_transport_only() {
 }
 
 #[test]
+fn header_market_dot_shows_session_only_while_the_feed_is_live() {
+    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+    const MINUTE: i64 = 60_000_000_000;
+    let theme = super::AerisTheme::dark();
+    let colors = theme.colors;
+    let mut status = MarketSessionStatus {
+        instrument_id: "tastytrade:Future:/ESZ6".into(),
+        phase: MarketSessionPhase::Regular,
+        source: MarketSessionSource::ProviderCalendar,
+        session_start_unix_nanos: Some(0),
+        session_end_unix_nanos: Some(134 * MINUTE),
+        next_open_unix_nanos: Some(1_440 * MINUTE),
+    };
+    let present = |state, status: &MarketSessionStatus| {
+        connection_presentation(TerminalProvider::Tastytrade, state, None).with_market(
+            state == FeedConnectionState::Streaming,
+            Some(status),
+            aeris_chart_integration::DEFAULT_TIME_ZONE,
+            0,
+        )
+    };
+
+    let open = present(FeedConnectionState::Streaming, &status);
+    assert_eq!((open.color)(&theme), colors.positive);
+    assert_eq!(
+        open.market_rows,
+        vec![
+            ("Market", "Open".to_string()),
+            ("Session", "00:00–02:14 Etc/UTC".to_string()),
+            ("Closes in", "2h 14m".to_string()),
+        ]
+    );
+    // Feed health outranks the market phase.
+    let reconnecting = present(FeedConnectionState::Recovering, &status);
+    assert_eq!((reconnecting.color)(&theme), colors.warning);
+    assert_eq!(
+        (present(FeedConnectionState::Stopped, &status).color)(&theme),
+        colors.danger
+    );
+
+    status.phase = MarketSessionPhase::PreMarket;
+    assert_eq!(
+        (present(FeedConnectionState::Streaming, &status).color)(&theme),
+        colors.warning
+    );
+    status.phase = MarketSessionPhase::Closed;
+    let closed = present(FeedConnectionState::Streaming, &status);
+    assert_eq!((closed.color)(&theme), colors.text_muted);
+    assert_eq!(
+        closed.market_rows.last(),
+        Some(&("Opens in", "24h 0m".to_string()))
+    );
+    status.phase = MarketSessionPhase::AlwaysOpen;
+    let always = present(FeedConnectionState::Streaming, &status);
+    assert_eq!((always.color)(&theme), colors.positive);
+    assert_eq!(always.market_rows[0], ("Market", "Open 24/7".to_string()));
+}
+
+#[test]
 fn reconnect_retry_states_do_not_flicker_back_to_offline() {
     assert_eq!(
         stabilized_connection_state(

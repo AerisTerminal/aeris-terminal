@@ -11,9 +11,8 @@ diagnostics = []
 
 [dependencies]
 aeris_application = { path = "../../application" }
-aeris_contracts = { path = "../../contracts" }
 aeris_design_system = { path = "../design_system" }
-aeris_terminal_ui = { path = "../terminal_ui", default-features = false, features = ["gpui"] }
+aeris_terminal_ui = { path = "../terminal_ui", default-features = false }
 gpui.workspace = true
 num-traits = "=0.2.19"
 aeris_charts_engine.workspace = true

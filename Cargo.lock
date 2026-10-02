@@ -135,7 +135,6 @@ dependencies = [
  "aeris_charts_engine",
  "aeris_charts_render",
  "aeris_charts_render_gpui",
- "aeris_contracts",
  "aeris_design_system",
  "aeris_terminal_ui",
  "gpui",

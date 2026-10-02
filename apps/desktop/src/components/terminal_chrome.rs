@@ -1,5 +1,6 @@
 use super::chart_context_menus::account_avatar_button;
 use super::*;
+use aeris_contracts::{MarketSessionPhase, MarketSessionStatus};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WindowCommand {
@@ -448,6 +449,12 @@ pub(super) fn header_controls(
         state.provider,
         state.connection_state,
         state.transport_rtt_nanos,
+    )
+    .with_market(
+        state.connection_state == FeedConnectionState::Streaming,
+        state.market_session.as_ref(),
+        &state.time_zone_id,
+        current_unix_nanos(),
     );
     let market_controls = div()
         .h_full()
@@ -651,6 +658,11 @@ pub(super) fn connection_status_indicator(
     let provider = SharedString::from(presentation.provider);
     let status = SharedString::from(presentation.status);
     let latency = SharedString::from(presentation.latency);
+    let market_rows: Vec<(&'static str, SharedString)> = presentation
+        .market_rows
+        .into_iter()
+        .map(|(label, value)| (label, SharedString::from(value)))
+        .collect();
     let tooltip_theme = *theme;
     div()
         .id(("connection_status", usize::MAX))
@@ -668,6 +680,7 @@ pub(super) fn connection_status_indicator(
                 provider: provider.clone(),
                 status: status.clone(),
                 latency: latency.clone(),
+                market_rows: market_rows.clone(),
                 theme: tooltip_theme,
             })
             .into()
@@ -679,6 +692,7 @@ struct ConnectionStatusTooltip {
     provider: SharedString,
     status: SharedString,
     latency: SharedString,
+    market_rows: Vec<(&'static str, SharedString)>,
     theme: AerisTheme,
 }
 
@@ -716,7 +730,10 @@ impl Render for ConnectionStatusTooltip {
                     self.latency.clone(),
                     true,
                     &self.theme,
-                )),
+                ))
+                .children(self.market_rows.iter().map(|(label, value)| {
+                    connection_tooltip_row(label, value.clone(), false, &self.theme)
+                })),
         )
     }
 }
@@ -1331,6 +1348,110 @@ pub(super) struct ConnectionPresentation {
     pub(super) status: &'static str,
     pub(super) latency: String,
     pub(super) color: ConnectionColor,
+    /// Market phase, session hours and countdown rows appended to the status tooltip.
+    pub(super) market_rows: Vec<(&'static str, String)>,
+}
+
+impl ConnectionPresentation {
+    /// Folds the runtime market session into the header dot. Feed health keeps priority: only a
+    /// live feed lets the dot show the market phase (open, extended hours, or closed).
+    pub(super) fn with_market(
+        mut self,
+        feed_live: bool,
+        status: Option<&MarketSessionStatus>,
+        time_zone: &str,
+        now_unix_nanos: i64,
+    ) -> Self {
+        let Some(status) = status else {
+            return self;
+        };
+        if feed_live && let Some(color) = market_dot_color(status.phase) {
+            self.color = color;
+        }
+        self.market_rows = market_tooltip_rows(status, time_zone, now_unix_nanos);
+        self
+    }
+}
+
+fn market_dot_color(phase: MarketSessionPhase) -> Option<ConnectionColor> {
+    match phase {
+        MarketSessionPhase::Regular | MarketSessionPhase::AlwaysOpen => {
+            Some(|theme| theme.colors.positive)
+        }
+        MarketSessionPhase::PreMarket
+        | MarketSessionPhase::PostMarket
+        | MarketSessionPhase::Overnight => Some(|theme| theme.colors.warning),
+        MarketSessionPhase::Closed => Some(|theme| theme.colors.text_muted),
+        MarketSessionPhase::Unknown => None,
+    }
+}
+
+const fn market_phase_label(phase: MarketSessionPhase) -> &'static str {
+    match phase {
+        MarketSessionPhase::Regular => "Open",
+        MarketSessionPhase::PreMarket => "Pre-market",
+        MarketSessionPhase::PostMarket => "Post-market",
+        MarketSessionPhase::Overnight => "Overnight session",
+        MarketSessionPhase::Closed => "Closed",
+        MarketSessionPhase::AlwaysOpen => "Open 24/7",
+        MarketSessionPhase::Unknown => "Hours unavailable",
+    }
+}
+
+fn market_tooltip_rows(
+    status: &MarketSessionStatus,
+    time_zone: &str,
+    now_unix_nanos: i64,
+) -> Vec<(&'static str, String)> {
+    let mut rows = vec![("Market", market_phase_label(status.phase).to_string())];
+    let wall = |nanos: i64| {
+        AerisChartView::time_zone_wall_time_label(time_zone, nanos.div_euclid(1_000_000_000))
+            .unwrap_or_else(|| "--:--".to_string())
+    };
+    if let Some((start, end)) = status
+        .session_start_unix_nanos
+        .zip(status.session_end_unix_nanos)
+    {
+        rows.push((
+            "Session",
+            format!("{}–{} {time_zone}", wall(start), wall(end)),
+        ));
+    }
+    let countdown = match status.phase {
+        MarketSessionPhase::Closed => status
+            .next_open_unix_nanos
+            .map(|open| ("Opens in", countdown_text(open, now_unix_nanos))),
+        MarketSessionPhase::Regular
+        | MarketSessionPhase::PreMarket
+        | MarketSessionPhase::PostMarket
+        | MarketSessionPhase::Overnight => status
+            .session_end_unix_nanos
+            .map(|close| ("Closes in", countdown_text(close, now_unix_nanos))),
+        MarketSessionPhase::AlwaysOpen | MarketSessionPhase::Unknown => None,
+    };
+    rows.extend(countdown);
+    rows
+}
+
+fn current_unix_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+/// Whole minutes until `target`, rounded up so "0m" only appears once the boundary passes.
+pub(super) fn countdown_text(target_unix_nanos: i64, now_unix_nanos: i64) -> String {
+    const MINUTE: i64 = 60_000_000_000;
+    let remaining = target_unix_nanos.saturating_sub(now_unix_nanos).max(0);
+    let minutes = remaining.saturating_add(MINUTE - 1) / MINUTE;
+    let (hours, minutes) = (minutes / 60, minutes % 60);
+    if hours == 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{hours}h {minutes}m")
+    }
 }
 
 pub(super) fn connection_presentation(
@@ -1355,6 +1476,7 @@ pub(super) fn connection_presentation(
             "Measuring…".to_string()
         },
         color,
+        market_rows: Vec::new(),
     }
 }
 
