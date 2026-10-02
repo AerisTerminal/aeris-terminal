@@ -837,6 +837,10 @@ pub fn register_provider_instrument(instrument: &InstallProviderInstrument) -> R
         .get()
         .ok_or_else(|| "Practice trading owner is unavailable".to_string())?;
     service.register_instrument(trading_instrument_from_install(instrument)?)?;
+    record_feedback(Ok(format!(
+        "Practice trading ready for {}",
+        instrument.display_symbol
+    )));
     Ok(())
 }
 
