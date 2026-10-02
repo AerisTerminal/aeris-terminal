@@ -645,7 +645,7 @@ pub struct InstallProviderInstrument {
     pub contract_metadata: Option<Box<ProviderContractMetadata>>,
 }
 
-/// Provider-sourced futures contract terms. Absent fields remain unknown and are never inferred.
+/// Provider contract terms and practice order constraints. Absent source terms remain unknown.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct ProviderContractMetadata {
     /// Point value coefficient in explicit `point_value_scale` currency units.
@@ -669,6 +669,9 @@ pub struct ProviderContractMetadata {
     /// Provider-reported weekly exchange sessions. Empty means unavailable, never 24x7.
     #[prost(message, repeated, tag = "7")]
     pub session_hours: Vec<ProviderSessionHours>,
+    /// Minimum practice order quantity in fixed-point `InstallProviderInstrument.quantity_scale` units.
+    #[prost(int64, optional, tag = "8")]
+    pub order_quantity_increment: Option<i64>,
 }
 
 /// One provider-reported weekly exchange session segment.

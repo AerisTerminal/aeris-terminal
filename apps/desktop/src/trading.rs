@@ -1,6 +1,6 @@
 //! Desktop command access to the single in-process trading owner.
 
-use aeris_contracts::InstallProviderInstrument;
+use aeris_contracts::{InstallProviderInstrument, ProviderContractMetadata};
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
     SessionHours,
@@ -606,6 +606,9 @@ pub fn prepare_simulated_order(
     order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
 ) -> Option<(PlaceOrder, Option<SimulatedMarketObservation>)> {
+    if frame.state != aeris_market_data::OrderBookState::Ready {
+        return None;
+    }
     let submitted_unix_nanos = now();
     let account_id = selected_account_key
         .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
@@ -791,6 +794,9 @@ pub fn prepare_flatten_for(
 pub fn simulated_market_observation(
     frame: &aeris_market_data::OrderBookFrame,
 ) -> Option<SimulatedMarketObservation> {
+    if frame.state != aeris_market_data::OrderBookState::Ready {
+        return None;
+    }
     let (bid, ask) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref())?;
     let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
     let bid = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?;
@@ -824,24 +830,22 @@ pub fn now() -> i64 {
 
 /// Registers complete provider contract terms on a market background worker.
 ///
-/// Returns `Ok(false)` when the provider did not supply the minimum currency metadata required
-/// for trading. Missing values are never guessed from a symbol or venue.
-///
 /// # Errors
-/// Returns an error for malformed provider metadata, runtime overload, or durable-store failure.
-pub fn register_provider_instrument_if_running(
+/// Returns an error for incomplete or malformed provider metadata, runtime overload, or durable-store failure.
+pub fn register_provider_instrument(instrument: &InstallProviderInstrument) -> Result<(), String> {
+    let service = TRADING_SERVICE
+        .get()
+        .ok_or_else(|| "Practice trading owner is unavailable".to_string())?;
+    service.register_instrument(trading_instrument_from_install(instrument)?)?;
+    Ok(())
+}
+
+fn trading_instrument_from_install(
     instrument: &InstallProviderInstrument,
-) -> Result<bool, String> {
-    let Some(service) = TRADING_SERVICE.get() else {
-        return Ok(false);
-    };
-    let Some(metadata) = instrument.contract_metadata.as_deref() else {
-        return Ok(false);
-    };
-    let Some(currency) = metadata.currency.clone() else {
-        return Ok(false);
-    };
+) -> Result<TradingInstrument, String> {
+    let (metadata, currency) = complete_contract_terms(instrument)?;
     let price_scale = u8_scale(instrument.price_scale)?;
+    let quantity_scale = u8_scale(instrument.quantity_scale)?;
     let point_value_scale = metadata.point_value_scale.map(u8_scale).transpose()?;
     let tick_size = instrument
         .price_increment
@@ -870,6 +874,11 @@ pub fn register_provider_instrument_if_running(
     let contract = ContractMetadata {
         tick_size,
         point_value,
+        order_quantity_increment: metadata
+            .order_quantity_increment
+            .map(|units| InstrumentDecimal::try_new(units, quantity_scale))
+            .transpose()
+            .map_err(|error| error.to_string())?,
         currency,
         expiry: metadata
             .contract_expiry
@@ -894,14 +903,43 @@ pub fn register_provider_instrument_if_running(
             session_generation: instrument.session_generation,
         },
     };
-    service.register_instrument(TradingInstrument {
+    Ok(TradingInstrument {
         instrument_id: InstrumentId::try_new(instrument.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         price_scale,
-        quantity_scale: u8_scale(instrument.quantity_scale)?,
+        quantity_scale,
         contract,
-    })?;
-    Ok(true)
+    })
+}
+
+fn complete_contract_terms(
+    instrument: &InstallProviderInstrument,
+) -> Result<(&ProviderContractMetadata, String), String> {
+    let unavailable = |detail: &str| {
+        format!(
+            "Practice trading unavailable for {}: {detail}",
+            instrument.display_symbol
+        )
+    };
+    let metadata = instrument
+        .contract_metadata
+        .as_deref()
+        .ok_or_else(|| unavailable("contract metadata missing"))?;
+    let currency = metadata
+        .currency
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| unavailable("contract currency missing"))?;
+    if metadata.point_value.is_none() || metadata.point_value_scale.is_none() {
+        return Err(unavailable("contract point value missing"));
+    }
+    Ok((metadata, currency))
+}
+
+/// Shows incomplete provider contract terms in the order-entry status while
+/// allowing the chart to continue loading.
+pub fn report_practice_registration_error(error: String) {
+    record_feedback(Err(error));
 }
 
 fn u8_scale(scale: u32) -> Result<u8, String> {
@@ -938,9 +976,71 @@ fn parse_contract_date(value: &str) -> Result<ContractDate, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_contract_date, parse_usd_equity, prepare_simulated_order,
-        simulated_market_observation,
+        complete_contract_terms, parse_contract_date, parse_usd_equity, prepare_simulated_order,
+        simulated_market_observation, trading_instrument_from_install,
     };
+
+    #[test]
+    fn incomplete_contract_terms_name_the_missing_field_in_order_entry_copy() {
+        let mut instrument = aeris_contracts::InstallProviderInstrument {
+            provider: "tastytrade".into(),
+            session_generation: 1,
+            selection_generation: 1,
+            instrument_id: "tastytrade:Future:/ESZ6".into(),
+            provider_symbol: "/ESZ26:XCME".into(),
+            display_symbol: "ESZ6".into(),
+            venue_id: "CME".into(),
+            price_scale: 8,
+            quantity_scale: 8,
+            entitlement_id: "tastytrade-market".into(),
+            price_increment: Some(25_000_000),
+            contract_metadata: Some(Box::new(aeris_contracts::ProviderContractMetadata {
+                point_value: Some(5_000_000_000),
+                point_value_scale: Some(8),
+                currency: None,
+                contract_expiry: None,
+                first_notice_date: None,
+                last_trade_date: None,
+                session_hours: Vec::new(),
+                order_quantity_increment: Some(100_000_000),
+            })),
+        };
+        assert_eq!(
+            complete_contract_terms(&instrument).unwrap_err(),
+            "Practice trading unavailable for ESZ6: contract currency missing"
+        );
+        instrument.contract_metadata.as_mut().unwrap().currency = Some("USD".into());
+        assert_eq!(complete_contract_terms(&instrument).unwrap().1, "USD");
+        let registered =
+            trading_instrument_from_install(&instrument).expect("exact provider terms");
+        assert_eq!(
+            registered.contract.point_value.unwrap().units(),
+            5_000_000_000
+        );
+        assert_eq!(registered.contract.tick_size.unwrap().units(), 25_000_000);
+        assert_eq!(registered.contract.currency, "USD");
+        assert_eq!(
+            registered
+                .contract
+                .order_quantity_increment
+                .unwrap()
+                .units(),
+            100_000_000
+        );
+
+        instrument.instrument_id = "tastytrade:Equity:AAPL".into();
+        instrument.provider_symbol = "AAPL".into();
+        instrument.display_symbol = "AAPL".into();
+        instrument.price_increment = Some(1_000_000);
+        let terms = instrument.contract_metadata.as_mut().unwrap();
+        terms.point_value = Some(1);
+        terms.point_value_scale = Some(0);
+        let registered = trading_instrument_from_install(&instrument).expect("equity terms");
+        assert_eq!(registered.contract.point_value.unwrap().units(), 1);
+        assert_eq!(registered.contract.point_value.unwrap().scale(), 0);
+        assert_eq!(registered.contract.tick_size.unwrap().units(), 1_000_000);
+        assert_eq!(registered.contract.currency, "USD");
+    }
 
     fn order_book_frame() -> aeris_market_data::OrderBookFrame {
         let level = |price| aeris_market_data::OrderBookColumnLevel {
@@ -1039,6 +1139,24 @@ mod tests {
         assert_eq!(observation.instrument_id.as_str(), "test:instrument");
         assert_eq!(observation.bid.units(), 10_000);
         assert_eq!(observation.ask.units(), 10_001);
+    }
+
+    #[test]
+    fn recovering_book_cannot_fill_a_practice_order() {
+        let mut frame = order_book_frame();
+        frame.state = aeris_market_data::OrderBookState::Stale;
+        assert!(simulated_market_observation(&frame).is_none());
+        assert!(
+            prepare_simulated_order(
+                &frame,
+                aeris_trading::OrderSide::Buy,
+                Some("aeris-practice-1".into()),
+                1,
+                aeris_trading::OrderType::Market,
+                aeris_trading::TimeInForce::Day,
+            )
+            .is_none()
+        );
     }
 
     #[test]

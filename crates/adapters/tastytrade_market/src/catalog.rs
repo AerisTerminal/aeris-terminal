@@ -83,7 +83,9 @@ impl ResolvedInstrument {
                 threshold: None,
             }],
             point_value: Some(point_value),
-            currency: future.currency.clone(),
+            currency: future.currency.clone().or_else(|| {
+                documented_quote_currency("Future", &future.exchange, &future.product_code)
+            }),
             expiration_date: Some(future.expiration_date.clone()),
             first_notice_date: future.first_notice_date.clone(),
             last_trade_date: future.last_trade_date.clone(),
@@ -149,12 +151,47 @@ impl ResolvedInstrument {
             currency: data
                 .get("currency")
                 .and_then(Value::as_str)
-                .map(str::to_string),
+                .map(str::to_string)
+                .or_else(|| {
+                    documented_quote_currency(
+                        &requested.instrument_type,
+                        venue,
+                        data.get("product-code")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    )
+                }),
             expiration_date,
             first_notice_date: parse_date("first-notice-date")?,
             last_trade_date: parse_date("last-trade-date")?,
         })
     }
+}
+
+/// The tastytrade instrument schemas do not promise a currency field. These
+/// narrow defaults follow the exchange's ES/NQ/CL contract specifications and
+/// US NMS equity USD quotation rules; all other products require an explicit
+/// provider currency. CME ES/NQ/CL specs: cmegroup.com/markets. US equity
+/// quotation rule: sec.gov/rules-regulations/2024/09/regulation-nms-minimum-pricing-increments-access-fees-transparency-better-priced-orders.
+fn documented_quote_currency(
+    instrument_type: &str,
+    venue: &str,
+    product_code: &str,
+) -> Option<String> {
+    let currency = match instrument_type {
+        "Future" if venue == "CME" && matches!(product_code, "ES" | "NQ") => Some("USD"),
+        "Future" if venue == "NYMEX" && product_code == "CL" => Some("USD"),
+        "Equity"
+            if matches!(
+                venue,
+                "XNAS" | "XNYS" | "ARCX" | "XASE" | "NASDAQ" | "NYSE" | "NYSE ARCA" | "ARCA"
+            ) =>
+        {
+            Some("USD")
+        }
+        _ => None,
+    };
+    currency.map(str::to_string)
 }
 
 fn parse_tick_sizes(data: &Value) -> Result<Vec<PriceIncrementBand>, String> {
@@ -288,6 +325,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn documented_currency_defaults_are_limited_to_verified_products() {
+        assert_eq!(
+            documented_quote_currency("Future", "CME", "NQ").as_deref(),
+            Some("USD")
+        );
+        assert_eq!(
+            documented_quote_currency("Future", "NYMEX", "CL").as_deref(),
+            Some("USD")
+        );
+        assert_eq!(documented_quote_currency("Future", "CME", "6E"), None);
+        assert_eq!(
+            documented_quote_currency("Equity", "ARCX", "").as_deref(),
+            Some("USD")
+        );
+        assert_eq!(documented_quote_currency("Equity", "UNKNOWN", ""), None);
+    }
+
+    #[test]
     fn catalog_preserves_provider_symbols_and_requires_identity_fields() {
         let fixture = r#"{"data":{"items":[{"symbol":"/ESU3","streamer-symbol":"/ESU23:XCME","exchange":"CME","product-code":"ES","expiration-date":"2023-09-15","notional-multiplier":"50.0","tick-size":"0.25","active":true,"active-month":true}]}}"#;
         let page: CatalogPage = serde_json::from_str(fixture).expect("documented catalog shape");
@@ -316,10 +371,27 @@ mod tests {
         assert_eq!(resolved.point_value, Some(5_025_000_000));
         assert_eq!(resolved.tick_size, Some(25_000_000));
         assert_eq!(resolved.expiration_date.as_deref(), Some("2026-12-18"));
-        assert_eq!(resolved.currency, None);
+        assert_eq!(resolved.currency.as_deref(), Some("USD"));
         let mut invalid = future;
         invalid.notional_multiplier = "50.000000001".into();
         assert!(ResolvedInstrument::from_future(&invalid).is_err());
+
+        invalid.notional_multiplier = "50.0".into();
+        invalid.product_code = "UNVERIFIED".into();
+        assert_eq!(
+            ResolvedInstrument::from_future(&invalid)
+                .expect("unverified product remains chartable")
+                .currency,
+            None
+        );
+        invalid.currency = Some("EUR".into());
+        assert_eq!(
+            ResolvedInstrument::from_future(&invalid)
+                .expect("explicit provider currency wins")
+                .currency
+                .as_deref(),
+            Some("EUR")
+        );
     }
 
     #[test]
@@ -327,14 +399,14 @@ mod tests {
         let requested = SearchInstrument {
             symbol: "AAPL".into(),
             instrument_type: "Equity".into(),
-            exchange: Some("NASDAQ".into()),
+            exchange: Some("XNAS".into()),
             description: None,
         };
         let response = serde_json::json!({
             "data": {
                 "symbol": "AAPL",
                 "streamer-symbol": "AAPL",
-                "exchange": "NASDAQ",
+                "listed-market": "XNAS",
                 "tick-sizes": [
                     {"value": "0.0001", "threshold": "1.0"},
                     {"value": "0.01"}
@@ -343,6 +415,7 @@ mod tests {
         });
         let resolved = ResolvedInstrument::from_response(&response, &requested)
             .expect("banded equity metadata");
+        assert_eq!(resolved.currency.as_deref(), Some("USD"));
         assert_eq!(
             resolved.tick_size_for_price(Some(331 * 100_000_000)),
             Some(1_000_000)

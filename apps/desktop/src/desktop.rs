@@ -4680,6 +4680,33 @@ pub(super) fn run() {
             exit_after_account_refresh_quiesce(1);
         }
     };
+    let market = match engine_market_worker::shared_market_runtime() {
+        Ok(market) => market,
+        Err(error) => {
+            eprintln!("Aeris practice market calendar could not start: {error}");
+            let _ = context.shutdown(Duration::from_secs(2));
+            let _ = trading.shutdown(Duration::from_secs(2));
+            exit_after_account_refresh_quiesce(1);
+        }
+    };
+    if let Err(error) = trading.install_practice_market_session(Arc::new(
+        move |provider_id: &str,
+              instrument_id: &str,
+              provider_symbol: &str,
+              now_unix_nanos: i64| {
+            market.require_practice_market_session(
+                provider_id,
+                instrument_id,
+                provider_symbol,
+                now_unix_nanos,
+            )
+        },
+    )) {
+        eprintln!("Aeris practice market calendar could not be installed: {error}");
+        let _ = context.shutdown(Duration::from_secs(2));
+        let _ = trading.shutdown(Duration::from_secs(2));
+        exit_after_account_refresh_quiesce(1);
+    }
     let lifecycle = DesktopLifecycle::new(trading, context);
     run_desktop(configured, lifecycle);
 }

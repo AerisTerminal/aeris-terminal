@@ -459,6 +459,7 @@ fn handle_catalog_select(
                     first_notice_date: None,
                     last_trade_date: None,
                     session_hours: Vec::new(),
+                    order_quantity_increment: None,
                 })),
             },
         },

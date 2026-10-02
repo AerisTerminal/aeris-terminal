@@ -665,6 +665,7 @@ fn protocol_instrument(
                 first_notice_date: value.first_notice_date,
                 last_trade_date: value.last_trade_date,
                 session_hours: Vec::new(),
+                order_quantity_increment: None,
             })
         }),
     }

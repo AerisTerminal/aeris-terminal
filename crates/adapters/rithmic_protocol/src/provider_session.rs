@@ -3201,6 +3201,13 @@ mod tests {
 
         assert_eq!(selected.descriptor.venue_id, "CME");
         assert_eq!(selected.descriptor.price_increment, Some(25));
+        let terms = selected
+            .descriptor
+            .contract
+            .as_ref()
+            .expect("reference terms");
+        assert_eq!(terms.currency.as_deref(), Some("USD"));
+        assert_eq!(terms.point_value, Some((2, 0)));
         assert_eq!(selected.entitlement_id, entitlement_id);
         let callback = RithmicCatalogEvent::SelectionInstalled {
             session_generation: generation(1),

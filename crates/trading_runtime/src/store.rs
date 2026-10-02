@@ -2556,6 +2556,7 @@ fn encode_contract(contract: &ContractMetadata) -> Result<String, String> {
         })
     };
     Ok(json!({"tick_size": decimal(contract.tick_size), "point_value": decimal(contract.point_value),
+        "order_quantity_increment": decimal(contract.order_quantity_increment),
         "currency": contract.currency, "expiry": date(contract.expiry),
         "first_notice": date(contract.first_notice), "last_trade": date(contract.last_trade),
         "session_hours": contract.session_hours.iter().map(|value| json!({"weekday": value.weekday,
@@ -2596,6 +2597,7 @@ fn decode_contract(raw: &str, instrument_id: &InstrumentId) -> Result<ContractMe
     let contract = ContractMetadata {
         tick_size: decode_decimal(value.get("tick_size"))?,
         point_value: decode_decimal(value.get("point_value"))?,
+        order_quantity_increment: decode_decimal(value.get("order_quantity_increment"))?,
         currency: json_string(&value, "currency")?,
         expiry: decode_date(value.get("expiry"))?,
         first_notice: decode_date(value.get("first_notice"))?,
@@ -2801,6 +2803,7 @@ mod tests {
         let contract = decode_contract(legacy, &id).expect("legacy contract decodes");
         assert_eq!(contract.provenance.display_symbol, "ESZ6");
         assert_eq!(contract.provenance.provider_symbol, "/ESZ26:XCME");
+        assert_eq!(contract.order_quantity_increment, None);
 
         let equity = InstrumentId::try_new("tastytrade:Equity:AAPL").expect("equity id");
         assert_eq!(

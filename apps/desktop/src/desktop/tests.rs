@@ -2522,6 +2522,7 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
             contract: ContractMetadata {
                 tick_size: Some(InstrumentDecimal::try_new(1, 2).expect("tick")),
                 point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point value")),
+                order_quantity_increment: None,
                 currency: "USD".to_string(),
                 expiry: None,
                 first_notice: None,

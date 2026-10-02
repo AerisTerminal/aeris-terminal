@@ -40,7 +40,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use store::{FillPolicyPersistence, SCHEMA_VERSION, StoredState, TradingStore};
 pub use strategy::{
@@ -58,6 +58,19 @@ const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
 const MAXIMUM_COPY_DISPATCHES: usize = 128;
 const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
 type Reply<T> = SyncSender<Result<T, String>>;
+
+fn respond<T>(reply: &Reply<T>, result: Result<T, String>) {
+    // A retired caller cannot affect the authoritative owner.
+    let _ = reply.send(result);
+}
+
+fn current_unix_nanos() -> Result<i64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "Practice clock precedes the Unix epoch")?;
+    i64::try_from(elapsed.as_nanos())
+        .map_err(|_| "Practice clock exceeds the supported timestamp range".into())
+}
 
 /// One local-store retention policy. These values are user-visible runtime settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +179,11 @@ pub struct SimulatedMarketObservation {
     pub ask: FixedPoint,
     pub provenance: TradingProvenance,
 }
+
+/// Read-only provider calendar check supplied by the market owner. A `true`
+/// result also requires a quote newer than the order's source revision.
+pub type PracticeMarketSession =
+    dyn Fn(&str, &str, &str, i64) -> Result<bool, String> + Send + Sync;
 
 /// User-owned record classes stored by PF7.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -315,6 +333,7 @@ enum Command {
     CreatePracticeAccount(CreatePracticeAccount, Reply<TradingAccount>),
     DeletePracticeAccount(TradingAccountId, Reply<TradingAccount>),
     RegisterInstrument(TradingInstrument, Reply<()>),
+    InstallPracticeMarketSession(Arc<PracticeMarketSession>, Reply<()>),
     Place(PlaceOrder, Reply<Order>),
     PlaceBracket(PlaceBracket, Reply<ManagedBracket>),
     PlaceInlineBracket(PlaceInlineBracket, Reply<ManagedBracket>),
@@ -362,6 +381,7 @@ struct Coordinator {
     market_observation_error: Option<String>,
     observations: Arc<Mutex<PendingObservations>>,
     observation_cursors: BTreeMap<InstrumentId, ObservationCursor>,
+    practice_market_session: Option<Arc<PracticeMarketSession>>,
 }
 
 /// Latest canonical BBO applied per registered instrument. Market panes can
@@ -418,6 +438,7 @@ impl TradingService {
                             market_observation_error: None,
                             observations: coordinator_observations,
                             observation_cursors: BTreeMap::new(),
+                            practice_market_session: None,
                         };
                         coordinator.repair_loaded_position_projections()?;
                         Ok(coordinator)
@@ -497,6 +518,17 @@ impl TradingService {
     /// Returns an error for invalid metadata, overload, or a storage failure.
     pub fn register_instrument(&self, instrument: TradingInstrument) -> Result<(), String> {
         self.request(|reply| Command::RegisterInstrument(instrument, reply))
+    }
+
+    /// Installs the market owner's read-only calendar check before accepting
+    /// provider instruments. The owner rejects duplicate installation.
+    /// # Errors
+    /// Returns an error on duplicate installation or owner overload.
+    pub fn install_practice_market_session(
+        &self,
+        session: Arc<PracticeMarketSession>,
+    ) -> Result<(), String> {
+        self.request(|reply| Command::InstallPracticeMarketSession(session, reply))
     }
 
     /// Submits one order through the authoritative trading command path.
@@ -934,11 +966,9 @@ impl Coordinator {
     fn run(&mut self, commands: &Receiver<Command>) {
         while let Ok(command) = commands.recv() {
             match command {
-                Command::Status(reply) => {
-                    let _ = reply.send(Ok(self.status()));
-                }
+                Command::Status(reply) => respond(&reply, Ok(self.status())),
                 Command::RegisterAccount(account, reply) => {
-                    let _ = reply.send(self.register_account(account));
+                    respond(&reply, self.register_account(account));
                 }
                 Command::CreatePracticeAccount(account, reply) => {
                     let _ = reply.send(self.create_practice_account(&account));
@@ -948,6 +978,9 @@ impl Coordinator {
                 }
                 Command::RegisterInstrument(instrument, reply) => {
                     let _ = reply.send(self.register_instrument(instrument));
+                }
+                Command::InstallPracticeMarketSession(session, reply) => {
+                    respond(&reply, self.install_practice_market_session(session));
                 }
                 Command::Place(order, reply) => {
                     let _ = reply.send(self.place_order(&order));
@@ -1238,6 +1271,15 @@ impl Coordinator {
     fn register_instrument(&mut self, instrument: TradingInstrument) -> Result<(), String> {
         if instrument.price_scale > 18 || instrument.quantity_scale > 18 {
             return Err("instrument trading scale exceeds 18".to_string());
+        }
+        if instrument
+            .contract
+            .order_quantity_increment
+            .is_some_and(|increment| {
+                increment.units() <= 0 || increment.scale() != instrument.quantity_scale
+            })
+        {
+            return Err("instrument order quantity increment is invalid".to_string());
         }
         instrument
             .contract
@@ -1854,6 +1896,34 @@ impl Coordinator {
         Ok(order)
     }
 
+    fn require_practice_market_session(
+        &self,
+        instrument: &TradingInstrument,
+        now_unix_nanos: i64,
+    ) -> Result<bool, String> {
+        self.practice_market_session
+            .as_ref()
+            .map_or(Ok(false), |session| {
+                session(
+                    &instrument.contract.provenance.provider_id,
+                    instrument.instrument_id.as_str(),
+                    &instrument.contract.provenance.provider_symbol,
+                    now_unix_nanos,
+                )
+            })
+    }
+
+    fn install_practice_market_session(
+        &mut self,
+        session: Arc<PracticeMarketSession>,
+    ) -> Result<(), String> {
+        if self.practice_market_session.is_some() {
+            return Err("Practice market session checker is already installed".into());
+        }
+        self.practice_market_session = Some(session);
+        Ok(())
+    }
+
     fn prepare_single_order(
         &mut self,
         command: PlaceOrder,
@@ -1869,6 +1939,7 @@ impl Coordinator {
         if account.environment != AccountEnvironment::Simulated {
             return Err("T1 routes orders only to the simulated venue".to_string());
         }
+        let account_currency = account.currency.clone();
         let risk_warnings = if enforce_risk {
             self.evaluate_order_risk(&command)?.warnings
         } else {
@@ -1880,6 +1951,10 @@ impl Coordinator {
             .instruments
             .get(&command.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?;
+        self.require_practice_market_session(instrument, current_unix_nanos()?)?;
+        if instrument.contract.currency != account_currency {
+            return Err("Practice contract currency differs from the account currency".to_string());
+        }
         if command.quantity.scale() != instrument.quantity_scale
             || command
                 .limit_price
@@ -1888,6 +1963,13 @@ impl Coordinator {
                 .any(|price| price.scale() != instrument.price_scale)
         {
             return Err("order scales do not match the instrument".to_string());
+        }
+        if instrument
+            .contract
+            .order_quantity_increment
+            .is_some_and(|increment| command.quantity.units() % increment.units() != 0)
+        {
+            return Err("order quantity must use whole provider units".to_string());
         }
         if self
             .state
@@ -2412,6 +2494,8 @@ impl Coordinator {
             .get(&observation.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?
             .clone();
+        let require_new_quote =
+            self.require_practice_market_session(&instrument, current_unix_nanos()?)?;
         if observation.bid.scale() != instrument.price_scale {
             return Err("market observation scale does not match the instrument".to_string());
         }
@@ -2421,7 +2505,20 @@ impl Coordinator {
         self.validate_mark_to_market(observation, &instrument)?;
         self.recover_managed_brackets(observation, &instrument)?;
         self.update_managed_stops(observation, &instrument)?;
-        let candidates = market_fill_candidates(&self.state.orders, observation);
+        let mut candidates = market_fill_candidates(&self.state.orders, observation);
+        if require_new_quote {
+            candidates.retain(|(order_id, _)| {
+                self.state.orders.get(order_id).is_some_and(|order| {
+                    (
+                        observation.provenance.session_generation,
+                        observation.provenance.source_sequence,
+                    ) > (
+                        order.provenance.session_generation,
+                        order.provenance.source_sequence,
+                    )
+                })
+            });
+        }
         let candidate_ids = candidates
             .iter()
             .map(|(order_id, _)| order_id.clone())

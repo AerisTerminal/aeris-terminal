@@ -1001,6 +1001,25 @@ impl ProviderDispatch<'_> {
 }
 
 impl MarketService {
+    /// Checks the broker's bounded cached calendar before simulated execution.
+    /// A true result requires a quote newer than the submitted order revision.
+    /// # Errors
+    /// Rejects a closed or unavailable provider calendar.
+    pub fn require_practice_market_session(
+        &self,
+        provider_id: &str,
+        instrument_id: &str,
+        provider_symbol: &str,
+        now_unix_nanos: i64,
+    ) -> Result<bool, String> {
+        self.runtime.broker_api.require_practice_market_session(
+            provider_id,
+            instrument_id,
+            provider_symbol,
+            now_unix_nanos,
+        )
+    }
+
     /// Returns the requested streams supported by the authoritative provider configuration.
     /// # Errors
     /// Returns coordinator failure.

@@ -236,8 +236,10 @@ fn apply_received_event(
     let (catalog, event) = classify_provider_catalog_event(event);
     let event = match catalog {
         Some(event) => {
-            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event {
-                aeris_desktop::trading::register_provider_instrument_if_running(instrument)?;
+            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
+                && let Err(error) = aeris_desktop::trading::register_provider_instrument(instrument)
+            {
+                aeris_desktop::trading::report_practice_registration_error(error);
             }
             let _ = endpoint
                 .messages

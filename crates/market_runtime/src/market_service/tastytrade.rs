@@ -502,6 +502,9 @@ impl BrokerApi {
     }
     fn market_session(&self, instrument: &InstallProviderInstrument) -> Option<MarketSession> {
         let collection = market_collection(instrument)?;
+        self.session_for_collection(collection)
+    }
+    fn session_for_collection(&self, collection: MarketCollection) -> Option<MarketSession> {
         if collection == MarketCollection::Equity {
             return self.equity_session.lock().ok().and_then(|session| {
                 session
@@ -521,6 +524,42 @@ impl BrokerApi {
                         .copied()
                 })
         })
+    }
+    pub(super) fn require_practice_market_session(
+        &self,
+        provider_id: &str,
+        instrument_id: &str,
+        provider_symbol: &str,
+        now_unix_nanos: i64,
+    ) -> Result<bool, String> {
+        if provider_id != "tastytrade" {
+            return Ok(false);
+        }
+        let collection = if instrument_id.starts_with("tastytrade:Equity:") {
+            MarketCollection::Equity
+        } else if instrument_id.starts_with("tastytrade:Future:") {
+            let (_, streamer_exchange) = provider_symbol
+                .strip_prefix('/')
+                .and_then(|symbol| symbol.rsplit_once(':'))
+                .ok_or("Practice futures streamer identity is unavailable")?;
+            match streamer_exchange {
+                "XCME" => MarketCollection::Cme,
+                "XCFE" => MarketCollection::Cfe,
+                _ => return Err("Practice market calendar is unavailable".into()),
+            }
+        } else {
+            return Err("Practice market instrument is unavailable".into());
+        };
+        // The provider calendar includes its current and next dated sessions,
+        // with close-at-ext for equities. Unknown or expired calendars reject
+        // practice execution until the broker refreshes them.
+        let session = self
+            .session_for_collection(collection)
+            .ok_or("Practice market calendar is unavailable")?;
+        if !session.contains(now_unix_nanos) {
+            return Err("Practice market is closed".into());
+        }
+        Ok(true)
     }
 }
 
@@ -855,17 +894,31 @@ fn install_resolved(
         quantity_scale: DATA_SCALE,
         entitlement_id: ENTITLEMENT.into(),
         price_increment,
-        contract_metadata: (resolved.instrument_type == "Future").then(|| {
-            Box::new(ProviderContractMetadata {
-                point_value: resolved.point_value,
-                point_value_scale: resolved.point_value.map(|_| DATA_SCALE),
-                currency: resolved.currency,
-                contract_expiry: resolved.expiration_date,
-                first_notice_date: resolved.first_notice_date,
-                last_trade_date: resolved.last_trade_date,
-                session_hours: Vec::new(),
-            })
-        }),
+        contract_metadata: (resolved.instrument_type == "Future"
+            || resolved.instrument_type == "Equity")
+            .then(|| {
+                Box::new(ProviderContractMetadata {
+                    point_value: if resolved.instrument_type == "Equity" {
+                        Some(1)
+                    } else {
+                        resolved.point_value
+                    },
+                    point_value_scale: if resolved.instrument_type == "Equity" {
+                        Some(0)
+                    } else {
+                        resolved.point_value.map(|_| DATA_SCALE)
+                    },
+                    currency: resolved.currency,
+                    contract_expiry: resolved.expiration_date,
+                    first_notice_date: resolved.first_notice_date,
+                    last_trade_date: resolved.last_trade_date,
+                    // The broker exposes dated current/next windows, including
+                    // holiday changes, rather than a durable weekly schedule.
+                    // Those windows cannot be represented by ProviderSessionHours.
+                    session_hours: Vec::new(),
+                    order_quantity_increment: 10_i64.checked_pow(DATA_SCALE),
+                })
+            }),
     }
 }
 fn tastytrade_display_symbol(symbol: &str, instrument_type: &str) -> String {

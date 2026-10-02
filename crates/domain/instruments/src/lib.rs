@@ -170,6 +170,8 @@ pub struct InstrumentMetadataProvenance {
 pub struct ContractMetadata {
     pub tick_size: Option<InstrumentDecimal>,
     pub point_value: Option<InstrumentDecimal>,
+    /// Minimum accepted order quantity. Absent means no provider quantity rule is known.
+    pub order_quantity_increment: Option<InstrumentDecimal>,
     pub currency: String,
     pub expiry: Option<ContractDate>,
     pub first_notice: Option<ContractDate>,

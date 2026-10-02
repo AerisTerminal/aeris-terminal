@@ -581,6 +581,21 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
         }
     }
     settle_cycle(market)?;
+    let now_unix_nanos = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "probe clock precedes epoch")?
+            .as_nanos(),
+    )
+    .map_err(|_| "probe clock exceeds timestamp range")?;
+    let practice_session = market.require_practice_market_session(
+        &instrument.provider,
+        &instrument.instrument_id,
+        &instrument.provider_symbol,
+        now_unix_nanos,
+    );
+    println!("Practice session: {practice_session:?}");
+    println!("Practice contract: {:?}", instrument.contract_metadata);
     market.detach(1)
 }
 

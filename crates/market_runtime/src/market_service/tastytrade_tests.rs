@@ -76,6 +76,83 @@ fn resolved_instrument_cache_reuses_identity_and_clears_on_authorization_change(
 }
 
 #[test]
+fn practice_calendar_uses_the_cached_dated_window_and_fails_closed() {
+    let api = BrokerApi::default();
+    assert!(
+        !api.require_practice_market_session("hyperliquid", "hyperliquid:perp:BTC", "BTC", 150)
+            .expect("other providers keep their existing execution policy")
+    );
+    assert_eq!(
+        api.require_practice_market_session(
+            "tastytrade",
+            "tastytrade:Future:/ESZ6",
+            "/ESZ26:XCME",
+            150
+        )
+        .unwrap_err(),
+        "Practice market calendar is unavailable"
+    );
+    *api.futures_sessions.lock().unwrap() = Some((
+        Instant::now(),
+        [
+            session_at(100, 200),
+            MarketSession {
+                collection: MarketCollection::Cfe,
+                ..session_at(100, 200)
+            },
+        ],
+    ));
+    assert!(
+        api.require_practice_market_session(
+            "tastytrade",
+            "tastytrade:Future:/ESZ6",
+            "/ESZ26:XCME",
+            150
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        api.require_practice_market_session(
+            "tastytrade",
+            "tastytrade:Future:/ESZ6",
+            "/ESZ26:XCME",
+            200
+        )
+        .unwrap_err(),
+        "Practice market is closed"
+    );
+    assert_eq!(
+        api.require_practice_market_session("tastytrade", "tastytrade:Future:/ESZ6", "ESZ26", 150)
+            .unwrap_err(),
+        "Practice futures streamer identity is unavailable"
+    );
+    *api.equity_session.lock().unwrap() = Some((
+        Instant::now(),
+        MarketSession {
+            collection: MarketCollection::Equity,
+            ..session_at(100, 200)
+        },
+    ));
+    assert!(
+        api.require_practice_market_session("tastytrade", "tastytrade:Equity:AAPL", "AAPL", 150)
+            .is_ok()
+    );
+    assert_eq!(
+        api.require_practice_market_session("tastytrade", "tastytrade:Equity:AAPL", "AAPL", 200)
+            .unwrap_err(),
+        "Practice market is closed"
+    );
+    api.equity_session.lock().unwrap().as_mut().unwrap().0 = Instant::now()
+        .checked_sub(Duration::from_mins(7))
+        .expect("test instant has seven minutes of history");
+    assert_eq!(
+        api.require_practice_market_session("tastytrade", "tastytrade:Equity:AAPL", "AAPL", 150)
+            .unwrap_err(),
+        "Practice market calendar is unavailable"
+    );
+}
+
+#[test]
 fn equity_query_with_loaded_futures_catalog_returns_preliminary_empty_result() {
     let search = SearchProviderInstruments {
         consumer_id: 1,
@@ -188,10 +265,31 @@ fn equity_install_uses_the_upper_band_when_price_is_unknown() {
         first_notice_date: None,
         last_trade_date: None,
     };
-    assert_eq!(
-        install_resolved(resolved, 1, 1).price_increment,
-        Some(1_000_000)
+    let installed = install_resolved(resolved, 1, 1);
+    assert_eq!(installed.price_increment, Some(1_000_000));
+    let terms = installed.contract_metadata.expect("equity contract terms");
+    assert_eq!(terms.point_value, Some(1));
+    assert_eq!(terms.point_value_scale, Some(0));
+    assert_eq!(terms.currency.as_deref(), Some("USD"));
+    assert_eq!(terms.contract_expiry, None);
+}
+
+#[test]
+fn future_install_preserves_provider_multiplier_tick_and_available_currency() {
+    let future: FutureInstrument = serde_json::from_str(
+        r#"{"symbol":"/ESZ6","streamer-symbol":"/ESZ26:XCME","exchange":"CME","product-code":"ES","expiration-date":"2026-12-18","active":true,"active-month":true,"notional-multiplier":"50.0","tick-size":"0.25"}"#,
+    )
+    .expect("sanitized future");
+    let installed = install_resolved(
+        ResolvedInstrument::from_future(&future).expect("provider terms"),
+        1,
+        1,
     );
+    assert_eq!(installed.price_increment, Some(25_000_000));
+    let terms = installed.contract_metadata.expect("future contract terms");
+    assert_eq!(terms.point_value, Some(5_000_000_000));
+    assert_eq!(terms.point_value_scale, Some(DATA_SCALE));
+    assert_eq!(terms.currency.as_deref(), Some("USD"));
 }
 
 #[test]

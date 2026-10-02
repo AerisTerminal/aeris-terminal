@@ -69,6 +69,7 @@ fn instrument() -> TradingInstrument {
         contract: ContractMetadata {
             tick_size: Some(InstrumentDecimal::try_new(25, 2).expect("tick")),
             point_value: Some(InstrumentDecimal::try_new(5_000, 2).expect("point value")),
+            order_quantity_increment: Some(InstrumentDecimal::try_new(1, 0).expect("lot")),
             currency: "USD".to_string(),
             expiry: Some(ContractDate {
                 year: 2026,
@@ -105,6 +106,7 @@ fn high_precision_crypto_instrument() -> TradingInstrument {
         contract: ContractMetadata {
             tick_size: Some(InstrumentDecimal::try_new(1_000_000, 8).expect("tick")),
             point_value: Some(InstrumentDecimal::try_new(100_000_000, 8).expect("point value")),
+            order_quantity_increment: None,
             currency: "USD".to_string(),
             expiry: None,
             first_notice: None,
@@ -168,6 +170,195 @@ fn snapshot_projects_registered_instruments_with_provider_symbols() {
         snapshot.instruments[0].contract.provenance.provider_symbol,
         "ESZ6"
     );
+}
+
+#[test]
+fn whole_unit_contract_rejects_fractional_orders_at_market_data_scale() {
+    let directory = TestDirectory::new("whole-unit-order");
+    let service = start_service(&directory);
+    let mut contract = instrument();
+    contract.quantity_scale = 8;
+    contract.contract.order_quantity_increment =
+        Some(InstrumentDecimal::try_new(100_000_000, 8).expect("one contract"));
+    service
+        .register_instrument(contract)
+        .expect("whole-unit instrument registers");
+    let mut order = market_order("fractional-contract", OrderSide::Buy, 1, 1_000);
+    order.quantity = FixedPoint::try_new(50_000_000, 8).expect("half contract");
+    assert_eq!(
+        service.place_order(order.clone()).unwrap_err(),
+        "order quantity must use whole provider units"
+    );
+    order.client_order_id = ClientOrderId::try_new("whole-contract").expect("client id");
+    order.quantity = FixedPoint::try_new(100_000_000, 8).expect("one contract");
+    service.place_order(order).expect("whole contract accepted");
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let reopened = start_service(&directory);
+    let mut fractional = market_order("fractional-after-restart", OrderSide::Buy, 2, 2_000);
+    fractional.quantity = FixedPoint::try_new(50_000_000, 8).expect("half contract");
+    assert_eq!(
+        reopened.place_order(fractional).unwrap_err(),
+        "order quantity must use whole provider units"
+    );
+}
+
+#[test]
+fn practice_calendar_rejects_closed_market_and_requires_a_new_quote_to_fill() {
+    let directory = TestDirectory::new("practice-calendar");
+    let service = start_service(&directory);
+    let open = Arc::new(AtomicBool::new(true));
+    let calendar_open = Arc::clone(&open);
+    service
+        .install_practice_market_session(Arc::new(
+            move |_provider: &str, _instrument: &str, _symbol: &str, _now: i64| {
+                if calendar_open.load(Ordering::Acquire) {
+                    Ok(true)
+                } else {
+                    Err("Practice market is closed".into())
+                }
+            },
+        ))
+        .expect("calendar installs");
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    service
+        .place_order(market_order("open-session-buy", OrderSide::Buy, 5, 1_500))
+        .expect("open market accepts order");
+    assert!(
+        service
+            .observe_market(observation(9_975, 10_000, 5, 1_600))
+            .expect("submission quote is valid")
+            .is_empty()
+    );
+    assert_eq!(
+        service
+            .observe_market(observation(9_975, 10_000, 6, 2_000))
+            .expect("new live quote fills")
+            .len(),
+        1
+    );
+    open.store(false, Ordering::Release);
+    assert_eq!(
+        service
+            .place_order(market_order("closed-session-buy", OrderSide::Buy, 7, 3_000))
+            .unwrap_err(),
+        "Practice market is closed"
+    );
+    assert_eq!(
+        service
+            .observe_market(observation(9_975, 10_000, 7, 3_000))
+            .unwrap_err(),
+        "Practice market is closed"
+    );
+}
+
+#[test]
+fn refreshed_contract_terms_keep_one_instrument_and_an_open_position() {
+    let directory = TestDirectory::new("metadata-refresh-position");
+    let service = start_service(&directory);
+    let first = instrument();
+    service
+        .register_instrument(first.clone())
+        .expect("initial registration");
+    service
+        .place_order(market_order("before-refresh", OrderSide::Buy, 1, 1_000))
+        .expect("entry accepted");
+    service
+        .observe_market(observation(9_999, 10_000, 2, 2_000))
+        .expect("entry fills");
+
+    let mut refreshed = first.clone();
+    refreshed.contract.provenance.session_generation = 2;
+    service
+        .register_instrument(refreshed.clone())
+        .expect("metadata re-registers");
+    let snapshot = service.snapshot().expect("refreshed snapshot");
+    assert_eq!(snapshot.instruments, vec![refreshed]);
+    assert_eq!(snapshot.positions.len(), 1);
+    assert_eq!(snapshot.positions[0].net_quantity.units(), 1);
+}
+
+#[test]
+fn practice_order_rejects_contract_with_another_currency() {
+    let directory = TestDirectory::new("contract-currency");
+    let service = start_service(&directory);
+    let mut non_usd = instrument();
+    non_usd.contract.currency = "EUR".into();
+    service
+        .register_instrument(non_usd)
+        .expect("source currency remains registered");
+    assert_eq!(
+        service
+            .place_order(market_order("eur-against-usd", OrderSide::Buy, 1, 1_000))
+            .unwrap_err(),
+        "Practice contract currency differs from the account currency"
+    );
+}
+
+#[test]
+fn future_and_equity_practice_round_trips_use_their_point_values() {
+    let directory = TestDirectory::new("contract-pnl");
+    let service = start_service(&directory);
+    let future = instrument();
+    assert_eq!(
+        tick_value(&future, 2).expect("ES tick value"),
+        FixedPoint::try_new(1_250, 2).expect("$12.50")
+    );
+    service
+        .register_instrument(future.clone())
+        .expect("ES registers");
+    let mut equity = future.clone();
+    equity.instrument_id = InstrumentId::try_new("tastytrade:Equity:AAPL").expect("equity id");
+    equity.contract.point_value = Some(InstrumentDecimal::try_new(1, 0).expect("one per share"));
+    equity.contract.tick_size = Some(InstrumentDecimal::try_new(1, 2).expect("cent"));
+    equity.contract.provenance.display_symbol = "AAPL".into();
+    service
+        .register_instrument(equity.clone())
+        .expect("AAPL registers");
+
+    let es_buy = market_order("es-buy", OrderSide::Buy, 1, 1_000);
+    service.place_order(es_buy).expect("ES buy");
+    service
+        .observe_market(observation(9_999, 10_000, 2, 2_000))
+        .expect("ES entry fill");
+    service
+        .place_order(market_order("es-sell", OrderSide::Sell, 3, 3_000))
+        .expect("ES sell");
+    service
+        .observe_market(observation(10_400, 10_401, 4, 4_000))
+        .expect("ES exit fill");
+
+    let mut stock_buy = market_order("aapl-buy", OrderSide::Buy, 1, 1_000);
+    stock_buy.instrument_id = equity.instrument_id.clone();
+    stock_buy.quantity = FixedPoint::try_new(10, 0).expect("ten shares");
+    service.place_order(stock_buy).expect("AAPL buy");
+    let mut stock_entry = observation(33_099, 33_100, 2, 2_000);
+    stock_entry.instrument_id = equity.instrument_id.clone();
+    service
+        .observe_market(stock_entry)
+        .expect("AAPL entry fill");
+    let mut stock_sell = market_order("aapl-sell", OrderSide::Sell, 3, 3_000);
+    stock_sell.instrument_id = equity.instrument_id.clone();
+    stock_sell.quantity = FixedPoint::try_new(10, 0).expect("ten shares");
+    service.place_order(stock_sell).expect("AAPL sell");
+    let mut stock_exit = observation(33_200, 33_201, 4, 4_000);
+    stock_exit.instrument_id = equity.instrument_id.clone();
+    service.observe_market(stock_exit).expect("AAPL exit fill");
+
+    let snapshot = service.snapshot().expect("round-trip snapshot");
+    let realized = |id: &InstrumentId| {
+        snapshot
+            .positions
+            .iter()
+            .find(|position| &position.instrument_id == id)
+            .expect("closed position")
+            .realized_pnl
+    };
+    assert_eq!(realized(&future.instrument_id).units(), 20_000);
+    assert_eq!(realized(&equity.instrument_id).units(), 1_000);
 }
 
 #[test]

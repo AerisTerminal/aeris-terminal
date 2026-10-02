@@ -206,7 +206,9 @@ pub(super) fn handle_startup_catalog_event(
                 record.startup_resolution = None;
                 return Err("Provider startup selection identity mismatched".to_string());
             }
-            aeris_desktop::trading::register_provider_instrument_if_running(instrument)?;
+            if let Err(error) = aeris_desktop::trading::register_provider_instrument(instrument) {
+                aeris_desktop::trading::report_practice_registration_error(error);
+            }
             record.product.clone_from(instrument);
             record.startup_resolution = None;
             let _ = record
