@@ -63,6 +63,7 @@ pub(super) enum ProviderEventKind {
         candle: ProviderCandle,
     },
     CandleRecovery(String),
+    TradeRecovery(InstallProviderInstrument),
 }
 
 impl ProviderEvent {
@@ -181,6 +182,7 @@ impl ProviderEvent {
                 },
             },
             Wire::CandleRecovery(_, symbol) => ProviderEventKind::CandleRecovery(symbol),
+            Wire::TradeRecovery(_, instrument) => ProviderEventKind::TradeRecovery(instrument),
             Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
             Wire::Trades(_, instrument, changes) => ProviderEventKind::IndexedTrades {
                 instrument,

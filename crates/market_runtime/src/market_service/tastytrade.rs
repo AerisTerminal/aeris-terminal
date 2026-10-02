@@ -20,11 +20,13 @@ use aeris_market_data::{DepthLevel, EventMetadata, QualifiedTimestamp};
 use aeris_tastytrade_market_adapter::{
     ConnectionCapability, DATA_SCALE, DxlinkSession, FeedEvent, FutureInstrument, MarketCollection,
     MarketSession, QuoteToken, ResolvedInstrument, SearchInstrument, Subscription,
-    SubscriptionChangeBudget, TastytradeBrokerClient, TradePrint,
+    SubscriptionChangeBudget, SubscriptionChangeError, TastytradeBrokerClient, TradePrint,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const ENTITLEMENT: &str = "tastytrade-authorized";
+const CATALOG_UNAVAILABLE_DETAIL: &str =
+    "Tastytrade catalog unavailable; reconnect tastytrade in Accounts and retry";
 pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
     aeris_contracts::ProviderPresentationDescriptor {
         id: "tastytrade",
@@ -109,6 +111,7 @@ pub(super) enum CatalogEvent {
         rejection: ProviderCatalogRejected,
         selection: bool,
     },
+    RefreshFailed(String),
 }
 struct RemoteSearchRequest {
     search: SearchProviderInstruments,
@@ -128,7 +131,6 @@ pub(super) enum RealtimeControl {
     Subscribe(Demand),
     Stop,
     AuthorizationChanged(bool),
-    Recover(u64),
 }
 pub(super) enum RealtimeEvent {
     Connecting(u64),
@@ -141,6 +143,7 @@ pub(super) enum RealtimeEvent {
     Quote(u64, TopOfBookQuote),
     Trades(u64, InstallProviderInstrument, Vec<IndexedTradeMutation>),
     Tape(u64, InstallProviderInstrument, Vec<MarketTrade>, bool),
+    TradeRecovery(u64, InstallProviderInstrument),
 }
 impl RealtimeEvent {
     pub(super) fn generation(&self) -> u64 {
@@ -154,7 +157,8 @@ impl RealtimeEvent {
             | Self::CandleRecovery(g, ..)
             | Self::Quote(g, _)
             | Self::Trades(g, ..)
-            | Self::Tape(g, ..) => *g,
+            | Self::Tape(g, ..)
+            | Self::TradeRecovery(g, _) => *g,
         }
     }
 }
@@ -515,9 +519,9 @@ pub(super) fn run_catalog(
         return;
     };
     let mut searches = BTreeMap::<u64, (u64, Vec<SearchInstrument>)>::new();
-    let mut futures = api.futures(stop).unwrap_or_default();
+    let mut futures = Vec::new();
     let mut authorization_epoch = api.authorization_epoch.load(Ordering::Acquire);
-    let mut refresh_at = Instant::now() + Duration::from_mins(30);
+    let mut refresh_at = Instant::now();
     let mut selection_generation = 0u64;
     while !stop.load(Ordering::Acquire) {
         let current_epoch = api.authorization_epoch.load(Ordering::Acquire);
@@ -527,7 +531,9 @@ pub(super) fn run_catalog(
             searches.clear();
             refresh_at = Instant::now() + Duration::from_mins(30);
         }
-        refresh_catalog(&mut futures, &mut refresh_at, api, stop);
+        if let Some(detail) = refresh_catalog(&mut futures, &mut refresh_at, api, stop) {
+            let _ = events.send(CatalogEvent::RefreshFailed(detail));
+        }
         while let Ok(reply) = replies.try_recv() {
             if let Some(event) = remote_search_event(reply, &mut searches, generation, api)
                 && events.send(event).is_err()
@@ -577,19 +583,15 @@ pub(super) fn run_catalog(
         if api.authorization_epoch.load(Ordering::Acquire) != authorization_epoch {
             continue;
         }
-        if matches!(&result, Ok(CatalogEvent::SearchPreliminary(search)) if search.instruments.is_empty())
-        {
-            continue;
-        }
-        let event = result.unwrap_or_else(|error| {
-            eprintln!("Aeris tastytrade catalog request failed: {error}");
+        let event = result.unwrap_or_else(|_error| {
+            eprintln!("Aeris tastytrade catalog request failed");
             CatalogEvent::Rejected {
                 rejection: ProviderCatalogRejected {
                     consumer_id: consumer,
                     provider: "tastytrade".into(),
                     provider_generation: Some(generation.load(Ordering::Acquire)),
                     command_generation: command,
-                    reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+                    reason: ProviderCatalogRejectionReason::SearchRejected,
                 },
                 selection,
             }
@@ -606,16 +608,17 @@ fn refresh_catalog(
     refresh_at: &mut Instant,
     api: &BrokerApi,
     stop: &Arc<AtomicBool>,
-) {
+) -> Option<String> {
     if Instant::now() >= *refresh_at {
-        *refresh_at = match api.futures(stop) {
-            Ok(updated) => {
-                *futures = updated;
-                Instant::now() + Duration::from_mins(30)
-            }
-            Err(_) => Instant::now() + Duration::from_mins(1),
-        };
+        if let Ok(updated) = api.futures(stop) {
+            *futures = updated;
+            *refresh_at = Instant::now() + Duration::from_mins(30);
+        } else {
+            *refresh_at = Instant::now() + Duration::from_mins(1);
+            return Some(CATALOG_UNAVAILABLE_DETAIL.into());
+        }
     }
+    None
 }
 fn remote_search_event(
     reply: RemoteSearchReply,
@@ -830,7 +833,9 @@ fn search_catalog(
     generation: &Arc<AtomicU64>,
 ) -> Result<CatalogEvent, String> {
     if futures.is_empty() {
-        *futures = api.futures(stop)?;
+        *futures = api
+            .futures(stop)
+            .map_err(|_| CATALOG_UNAVAILABLE_DETAIL.to_string())?;
     }
     let query = search.query.to_ascii_uppercase();
     let mut matching: Vec<_> = futures
@@ -859,6 +864,9 @@ fn search_catalog(
             description: Some(future.product_code.clone()),
         })
         .collect();
+    if items.is_empty() {
+        return Err(CATALOG_UNAVAILABLE_DETAIL.into());
+    }
     let summaries = items
         .iter()
         .take(search.maximum_results.min(100) as usize)
@@ -921,6 +929,10 @@ fn candle_symbol(
         instrument.provider_symbol,
         candle_period(series.period)?
     ))
+}
+
+fn candle_start_ms(starts: &mut BTreeMap<String, i64>, symbol: String, now_ms: i64) -> i64 {
+    *starts.entry(symbol).or_insert(now_ms)
 }
 fn now_nanos() -> Result<i64, String> {
     let duration = SystemTime::now()
@@ -1351,7 +1363,7 @@ struct Worker {
     channel: u64,
     ordinal: u64,
     demand_dirty: bool,
-    live_from_ms: i64,
+    candle_from_ms: BTreeMap<String, i64>,
     failures: u8,
     paused: bool,
     trade_batches: BTreeMap<String, (bool, Vec<IndexedTradeMutation>)>,
@@ -1379,7 +1391,7 @@ impl Worker {
             channel: 5,
             ordinal: 0,
             demand_dirty: true,
-            live_from_ms: 0,
+            candle_from_ms: BTreeMap::new(),
             failures: 0,
             paused: false,
             trade_batches: BTreeMap::new(),
@@ -1426,20 +1438,7 @@ impl Worker {
                 Ok::<(), String>(())
             })();
             if let Err(error) = result {
-                if error.contains("DXLink subscription change budget exhausted")
-                    || error.contains("DXLink subscription capacity exhausted")
-                {
-                    // Subscription throttling is bounded demand pressure, not
-                    // a transport failure. Keep the socket and retry the
-                    // reconciliation after the rolling budget cools down.
-                    self.retry_at = Instant::now() + Duration::from_millis(250);
-                    let _ = self.publish(RealtimeEvent::Recovering(
-                        self.epoch(),
-                        format!("Tastytrade subscription reconciliation deferred: {error}"),
-                    ));
-                } else {
-                    self.recover(error);
-                }
+                self.recover(error);
             }
             if self.socket.is_none() {
                 thread::sleep(Duration::from_millis(25));
@@ -1482,10 +1481,6 @@ impl Worker {
                         self.cancel_histories("Tastytrade disconnected");
                     }
                 }
-                RealtimeControl::Recover(generation) if generation == self.epoch() => {
-                    self.recover("Tick state requires covering recovery".into());
-                }
-                RealtimeControl::Recover(_) => {}
             }
         }
     }
@@ -1575,7 +1570,7 @@ impl Worker {
         socket.open(5, "STREAM", Vec::new())?;
         self.socket_url.clone_from(&token.dxlink_url);
         self.connected_at = Instant::now();
-        self.live_from_ms = now_nanos()? / 1_000_000;
+        self.candle_from_ms.clear();
         self.demand_dirty = true;
         self.socket = Some(socket);
         self.publish(RealtimeEvent::Connected(self.epoch()))
@@ -1607,18 +1602,19 @@ impl Worker {
                 from_time_ms: None,
             })
             .collect();
+        let now_ms = now_nanos()? / 1_000_000;
         let candles = self
             .demand
             .series
             .iter()
             .map(|(series, instrument)| {
+                let symbol = candle_symbol(series, instrument)?;
+                let from_time_ms =
+                    candle_start_ms(&mut self.candle_from_ms, symbol.clone(), now_ms);
                 Ok(Subscription {
                     kind: "Candle",
-                    symbol: candle_symbol(series, instrument)?,
-                    // Candle subscriptions are bounded to the current wall clock. History
-                    // remains the owner of the covering range; a late series must not replay
-                    // the entire socket lifetime into the live batch.
-                    from_time_ms: Some(now_nanos().unwrap_or_default() / 1_000_000),
+                    symbol,
+                    from_time_ms: Some(from_time_ms),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1626,11 +1622,19 @@ impl Worker {
             + socket.subscription_changes_for_replace(5, &trades)?
             + socket.subscription_changes_for_replace(3, &candles)?;
         if !socket.can_change_subscriptions(changes.saturating_add(1_000))? {
+            self.retry_at = Instant::now() + Duration::from_millis(250);
             return Ok(());
         }
-        socket.replace(1, quotes)?;
-        socket.replace(5, trades)?;
-        socket.replace(3, candles)?;
+        for (channel, subscriptions) in [(1, quotes), (5, trades), (3, candles)] {
+            match socket.replace(channel, subscriptions) {
+                Ok(()) => {}
+                Err(SubscriptionChangeError::BudgetExhausted) => {
+                    self.retry_at = Instant::now() + Duration::from_millis(250);
+                    return Ok(());
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
         self.trade_batches.retain(|symbol, _| {
             self.demand
                 .instruments
@@ -1641,6 +1645,12 @@ impl Worker {
             self.demand.series.iter().any(|(series, instrument)| {
                 candle_symbol(series, instrument).is_ok_and(|expected| expected == *symbol)
             })
+        });
+        self.candle_from_ms.retain(|symbol, _| {
+            self.candle_batches.contains_key(symbol)
+                || self.demand.series.iter().any(|(series, instrument)| {
+                    candle_symbol(series, instrument).is_ok_and(|expected| expected == *symbol)
+                })
         });
         self.demand_dirty = false;
         Ok(())
@@ -1796,19 +1806,25 @@ impl Worker {
         }
         Ok(())
     }
-    fn accept_history_event(&mut self, channel: u64, event: FeedEvent, epoch: u64) {
+    fn accept_history_event(
+        &mut self,
+        channel: u64,
+        event: FeedEvent,
+        epoch: u64,
+    ) -> Result<(), String> {
         let Some(task) = self.histories.get_mut(&channel) else {
-            return;
+            return Ok(());
         };
         let result = task.accept(event, epoch, &mut self.ordinal);
         if let Err(error) = result
             && let Some(task) = self.histories.remove(&channel)
         {
             if let Some(socket) = &mut self.socket {
-                let _ = socket.close_channel(channel);
+                socket.close_channel(channel)?;
             }
             self.queue_completion(task.request, Err(error));
         }
+        Ok(())
     }
     fn accept_tape_event(
         &mut self,
@@ -1825,10 +1841,8 @@ impl Worker {
         }
         if let Err(error) = task.accept(event, epoch, &mut self.ordinal) {
             self.loaded_tapes.remove(&task.instrument.instrument_id);
-            self.publish(RealtimeEvent::Recovering(
-                epoch,
-                format!("Tastytrade tape series recovery: {error}"),
-            ))?;
+            eprintln!("Tastytrade tape series recovery: {error}");
+            self.publish(RealtimeEvent::TradeRecovery(epoch, task.instrument))?;
         } else {
             self.tape = Some(task);
         }
@@ -1861,8 +1875,7 @@ impl Worker {
         let epoch = self.epoch();
         let event_channel = event.channel();
         if self.histories.contains_key(&event_channel) {
-            self.accept_history_event(event_channel, event, epoch);
-            return Ok(());
+            return self.accept_history_event(event_channel, event, epoch);
         }
         if self
             .tape
@@ -1978,11 +1991,9 @@ impl Worker {
             batch.1.clear();
         }
         if batch.1.len() >= MAXIMUM_TICK_HISTORY {
-            // Drop only the incomplete transaction. The healthy socket and
-            // worker retry counter remain untouched.
             batch.1.clear();
             batch.0 = false;
-            return Ok(());
+            return self.publish(RealtimeEvent::TradeRecovery(self.epoch(), instrument));
         }
         batch.1.push(IndexedTradeMutation {
             index,

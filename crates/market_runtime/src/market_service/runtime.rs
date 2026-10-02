@@ -890,21 +890,6 @@ impl ProviderDispatch<'_> {
                     }
                 }
             }
-            super::ProviderControl::Recover(generation) => {
-                let Some(record) = self.records.get(provider_id) else {
-                    return Err(format!("{provider_id} live worker is unavailable"));
-                };
-                let ProviderRealtimeDispatch::Tastytrade { controls, .. } = &record.realtime else {
-                    return Err(format!("{provider_id} does not accept recovery control"));
-                };
-                match controls.try_send(super::tastytrade::RealtimeControl::Recover(generation)) {
-                    Ok(()) => Ok(true),
-                    Err(TrySendError::Full(_)) => Ok(false),
-                    Err(TrySendError::Disconnected(_)) => {
-                        Err("Tastytrade live worker is unavailable".to_string())
-                    }
-                }
-            }
         }
     }
 

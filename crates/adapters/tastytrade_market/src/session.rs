@@ -71,6 +71,28 @@ pub struct Subscription {
     pub from_time_ms: Option<i64>,
 }
 
+/// A subscription reconciliation failure, separate from socket failures.
+#[derive(Debug, Eq, PartialEq)]
+pub enum SubscriptionChangeError {
+    BudgetExhausted,
+    CapacityExhausted,
+    Other(String),
+}
+
+impl std::fmt::Display for SubscriptionChangeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BudgetExhausted => {
+                formatter.write_str("DXLink subscription change budget exhausted")
+            }
+            Self::CapacityExhausted => {
+                formatter.write_str("DXLink subscription capacity exhausted")
+            }
+            Self::Other(detail) => formatter.write_str(detail),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum FeedEvent {
     ChannelFailure {
@@ -306,26 +328,29 @@ impl DxlinkSession {
         &mut self,
         channel: u64,
         subscriptions: Vec<Subscription>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SubscriptionChangeError> {
         if subscriptions.len() > 128 {
-            return Err("DXLink subscription capacity exhausted".into());
+            return Err(SubscriptionChangeError::CapacityExhausted);
         }
         for sub in &subscriptions {
-            validate_subscription(sub)?;
+            validate_subscription(sub).map_err(SubscriptionChangeError::Other)?;
         }
-        let changes = self.subscription_changes_for_replace(channel, &subscriptions)?;
+        let changes = self
+            .subscription_changes_for_replace(channel, &subscriptions)
+            .map_err(SubscriptionChangeError::Other)?;
         if !self
             .subscription_budget
             .lock()
-            .map_err(|_| "DXLink subscription budget lock poisoned")?
+            .map_err(|_| {
+                SubscriptionChangeError::Other("DXLink subscription budget lock poisoned".into())
+            })?
             .reserve(Instant::now(), changes)
         {
-            return Err("DXLink subscription change budget exhausted".into());
+            return Err(SubscriptionChangeError::BudgetExhausted);
         }
-        let state = self
-            .channels
-            .get_mut(&channel)
-            .ok_or("DXLink channel is unavailable")?;
+        let state = self.channels.get_mut(&channel).ok_or_else(|| {
+            SubscriptionChangeError::Other("DXLink channel is unavailable".into())
+        })?;
         if state.subscriptions == subscriptions {
             return Ok(());
         }
@@ -345,7 +370,8 @@ impl DxlinkSession {
         if compact {
             self.send(
                 &json!({"type":"FEED_SUBSCRIPTION","channel":channel,"remove":remove,"add":add}),
-            )?;
+            )
+            .map_err(SubscriptionChangeError::Other)?;
         }
         Ok(())
     }
@@ -830,7 +856,10 @@ mod tests {
     ) {
         assert!(budget.lock().unwrap().reserve(Instant::now(), 8_998));
         assert!(!session.can_change_subscriptions(2).unwrap());
-        assert!(session.replace(1, vec![subscription("MSFT")]).is_err());
+        assert_eq!(
+            session.replace(1, vec![subscription("MSFT")]).unwrap_err(),
+            SubscriptionChangeError::BudgetExhausted
+        );
         assert_eq!(
             session.channels[&1].subscriptions,
             vec![subscription("AAPL")]

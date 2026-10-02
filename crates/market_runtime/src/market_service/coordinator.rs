@@ -1573,6 +1573,32 @@ mod tests {
     }
 
     #[test]
+    fn tastytrade_series_recovery_does_not_downgrade_provider_health() {
+        let mut coordinator = coordinator();
+        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
+            super::super::tastytrade::RealtimeEvent::Connecting(1),
+        ));
+        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
+            super::super::tastytrade::RealtimeEvent::Connected(1),
+        ));
+        let mut selected = instrument();
+        selected.provider = "tastytrade".into();
+        selected.instrument_id = "tastytrade:Future:/ESZ6".into();
+        selected.entitlement_id = super::super::tastytrade::ENTITLEMENT.into();
+        coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
+            super::super::tastytrade::RealtimeEvent::TradeRecovery(1, selected),
+        ));
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("tastytrade")
+                .expect("tastytrade status")
+                .health,
+            ProviderHealth::Online
+        );
+    }
+
+    #[test]
     fn cancelled_request_cannot_mutate_the_coordinator() {
         let mut coordinator = coordinator();
         let state = Arc::new(super::super::RequestState(

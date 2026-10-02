@@ -73,6 +73,40 @@ fn resolved_instrument_cache_reuses_identity_and_clears_on_authorization_change(
     assert!(api.market_session(&instrument()).is_none());
     assert!(api.market_session(&equity).is_none());
 }
+
+#[test]
+fn empty_futures_catalog_is_reported_as_a_search_failure() {
+    let search = SearchProviderInstruments {
+        consumer_id: 1,
+        search_generation: 1,
+        provider: "tastytrade".into(),
+        query: "__NO_SUCH_FUTURE__".into(),
+        maximum_results: 100,
+    };
+    let result = search_catalog(
+        &search,
+        &mut Vec::new(),
+        &mut BTreeMap::new(),
+        &BrokerApi::default(),
+        &Arc::new(AtomicBool::new(false)),
+        &Arc::new(AtomicU64::new(1)),
+    );
+    match result {
+        Err(error) => assert_eq!(
+            error,
+            "Tastytrade catalog unavailable; reconnect tastytrade in Accounts and retry"
+        ),
+        Ok(_) => panic!("an unavailable catalog must not become an empty success"),
+    }
+}
+
+#[test]
+fn late_candle_subscription_starts_at_demand_time() {
+    let mut starts = BTreeMap::new();
+    assert_eq!(candle_start_ms(&mut starts, "ES{=1m}".into(), 100), 100);
+    assert_eq!(candle_start_ms(&mut starts, "ES{=1m}".into(), 200), 100);
+    assert_eq!(candle_start_ms(&mut starts, "NQ{=1m}".into(), 200), 200);
+}
 fn instrument() -> InstallProviderInstrument {
     InstallProviderInstrument {
         provider: "tastytrade".into(),

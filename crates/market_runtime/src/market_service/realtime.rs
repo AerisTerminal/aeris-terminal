@@ -1982,21 +1982,18 @@ impl Coordinator<'_> {
             ProviderEventKind::CandleRecovery(symbol) => {
                 self.recover_provider_candle(provider, generation, &symbol);
             }
+            ProviderEventKind::TradeRecovery(instrument) => {
+                self.request_indexed_trade_recovery(
+                    provider,
+                    generation,
+                    &instrument.instrument_id,
+                );
+            }
         }
     }
 
     pub(super) fn flush_session_managed_demand(&mut self, provider: &'static str) {
         if !self.sessions.contains_key(provider) {
-            return;
-        }
-        if let Some(generation) = self.session(provider).recovery {
-            if self
-                .providers
-                .send_control(provider, super::ProviderControl::Recover(generation))
-                .is_ok_and(|sent| sent)
-            {
-                self.session_mut(provider).recovery = None;
-            }
             return;
         }
         if let Some(ready) = self.session(provider).authorization {
@@ -2239,6 +2236,29 @@ impl Coordinator<'_> {
         {
             book.invalidate_live_market(generation);
             self.broadcast_order_book(provider, instrument_id);
+        }
+        let Ok(provider_generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        let candidates = self.series_live.trade_keys().cloned().collect::<Vec<_>>();
+        let affected = candidates
+            .into_iter()
+            .filter(|series| {
+                series.provider_id == provider
+                    && series.instrument_id == instrument_id
+                    && self
+                        .series_live
+                        .trade(series)
+                        .is_some_and(|live| live.generation == provider_generation)
+            })
+            .collect::<Vec<_>>();
+        for series in affected {
+            self.rithmic_series_recovering(
+                &series,
+                provider_generation,
+                FailureStage::Aggregation,
+                "Indexed trade state requires covering history",
+            );
         }
     }
 

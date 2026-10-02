@@ -408,7 +408,6 @@ enum ProviderControl {
     Demand(ProviderDemand),
     Stop,
     AuthorizationChanged(bool),
-    Recover(u64),
 }
 
 impl ProviderDemand {
@@ -532,7 +531,6 @@ struct ProviderSessionSlot {
     authorization: Option<bool>,
     suspended: bool,
     generation_floor: u64,
-    recovery: Option<u64>,
     catalog_degraded: Option<ProviderGeneration>,
 }
 
@@ -1529,6 +1527,7 @@ impl From<tastytrade::CatalogEvent> for ProviderCatalogEvent {
                 rejection,
                 selection,
             },
+            tastytrade::CatalogEvent::RefreshFailed(detail) => Self::RefreshFailed(detail),
         }
     }
 }
