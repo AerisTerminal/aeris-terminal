@@ -1751,11 +1751,14 @@ impl WorkspaceSurface {
         &self.chart_time_zone
     }
 
-    pub(super) fn chart_time_zone_clock(&self, cx: &App) -> String {
-        self.chart.as_ref().map_or_else(
-            || "--:--:-- UTC".to_string(),
-            |chart| chart.read(cx).time_zone_clock_label(),
-        )
+    /// Header clock in the pane's selected zone. It needs no chart, so it shows at startup.
+    pub(super) fn chart_time_zone_clock(&self) -> String {
+        let utc_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|now| i64::try_from(now.as_secs()).ok())
+            .unwrap_or(0);
+        AerisChartView::time_zone_clock_label_for(&self.chart_time_zone, utc_seconds)
     }
 
     fn sync_time_zone_menu_selection(&mut self, cx: &App) {

@@ -539,7 +539,6 @@ pub(super) fn header_controls(
         app.clone(),
         state.time_zone_clock,
         &state.time_zone_id,
-        state.controls.enabled(HeaderControls::CHART_TYPE),
         &state.theme,
     );
     div()
@@ -1183,20 +1182,18 @@ pub(super) fn time_zone_selector(
     app: Entity<WorkspaceSurface>,
     clock: String,
     time_zone_id: &str,
-    enabled: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
+    // The zone belongs to the pane, not the chart, so it is selectable before data loads.
     let button = Button::new("time_zone_selector")
         .label(clock)
         .caret(header_icon(HugeIcon::ChevronDown))
-        .disabled(!enabled)
-        .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed);
+        .cursor_pointer();
     let open_app = app.clone();
     let bounds_app = app;
     let button = button_activation_at(
-        chrome_button_style(button, theme, false, enabled),
-        enabled,
+        chrome_button_style(button, theme, false, true),
+        true,
         move |trigger_position, window, cx| {
             open_app.update(cx, |app, app_cx| {
                 app.open_chrome_overlay_at(

@@ -1981,22 +1981,18 @@ impl AerisChartView {
         Ok(changed)
     }
 
-    /// Current clock text rendered in the selected chart time zone.
-    #[must_use]
-    pub fn time_zone_clock_label(&self) -> String {
-        let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-            return "--:--:--".to_string();
-        };
-        let seconds = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
-        self.time_zone_clock_label_at(seconds)
-    }
-
     /// Clock text for the selected zone using the same TradingView-style UTC-offset notation as
     /// the selector menu. Kept instant-addressable so the selected-state presentation is testable
     /// across DST boundaries.
     #[must_use]
     pub fn time_zone_clock_label_at(&self, utc_seconds: i64) -> String {
-        let time_zone = self.engine.time_zone_id();
+        Self::time_zone_clock_label_for(self.engine.time_zone_id(), utc_seconds)
+    }
+
+    /// Clock text for any supported zone, so host chrome can show the selected zone's time
+    /// before a chart exists.
+    #[must_use]
+    pub fn time_zone_clock_label_for(time_zone: &str, utc_seconds: i64) -> String {
         let Some(zone) = aeris_charts_engine::ChartTimeZone::parse(time_zone) else {
             return "--:--:--".to_string();
         };

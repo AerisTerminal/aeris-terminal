@@ -20,7 +20,7 @@ fn active_header_state(
         symbol_input: workspace.symbol_input.clone(),
         indicator_input: workspace.indicator_input.clone(),
         time_zone_id: workspace.chart_time_zone_id().to_string(),
-        time_zone_clock: workspace.chart_time_zone_clock(cx),
+        time_zone_clock: workspace.chart_time_zone_clock(),
         account_label: workspace
             .trading_pnl
             .order_entry
