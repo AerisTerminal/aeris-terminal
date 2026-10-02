@@ -29,6 +29,7 @@ pub enum IndicatorKind {
     Macd,
     Stochastic,
     Atr,
+    VolumeProfile,
 }
 
 impl IndicatorKind {
@@ -46,6 +47,7 @@ impl IndicatorKind {
             Self::Macd => "macd",
             Self::Stochastic => "stochastic",
             Self::Atr => "atr",
+            Self::VolumeProfile => "volume_profile",
         }
     }
 }
@@ -116,7 +118,7 @@ impl IndicatorSpec {
     }
 }
 
-pub const INDICATOR_SPECS: [IndicatorSpec; 11] = [
+pub const INDICATOR_SPECS: [IndicatorSpec; 12] = [
     IndicatorSpec {
         kind: IndicatorKind::Sma,
         label: "Moving Average",
@@ -160,6 +162,13 @@ pub const INDICATOR_SPECS: [IndicatorSpec; 11] = [
         label: "Volume Weighted Average Price",
         parameters: IndicatorParameters::None,
         parameter_description: "Session volume weighted price",
+        location: IndicatorLocation::MainChartOverlay,
+    },
+    IndicatorSpec {
+        kind: IndicatorKind::VolumeProfile,
+        label: "Volume Profile (Visible Range)",
+        parameters: IndicatorParameters::None,
+        parameter_description: "Rows 48 - Value area 70% - POC",
         location: IndicatorLocation::MainChartOverlay,
     },
     IndicatorSpec {
@@ -619,6 +628,7 @@ mod tests {
                 IndicatorKind::Wma,
                 IndicatorKind::BollingerBands,
                 IndicatorKind::Vwap,
+                IndicatorKind::VolumeProfile,
                 IndicatorKind::Volume,
                 IndicatorKind::Rsi,
                 IndicatorKind::Macd,
@@ -643,6 +653,7 @@ mod tests {
                 },
                 IndicatorParameters::None,
                 IndicatorParameters::None,
+                IndicatorParameters::None,
                 IndicatorParameters::Period { period: 14 },
                 IndicatorParameters::Macd {
                     fast_period: 12,
@@ -657,12 +668,12 @@ mod tests {
             ]
         );
         assert!(
-            INDICATOR_SPECS[..6]
+            INDICATOR_SPECS[..7]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::MainChartOverlay)
         );
         assert!(
-            INDICATOR_SPECS[7..]
+            INDICATOR_SPECS[8..]
                 .iter()
                 .all(|spec| spec.location == IndicatorLocation::OscillatorPane)
         );

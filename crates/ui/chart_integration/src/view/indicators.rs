@@ -24,6 +24,24 @@ impl AerisChartView {
             self.volume_legend = LegendPresence::Present;
             self.engine.set_series_visible(self.volume_series, true);
             vec![self.volume_series]
+        } else if indicator == ChartIndicator::VolumeProfile {
+            if self.volume_profile.is_some() {
+                return Err(ChartIndicatorError::CreationRejected(indicator));
+            }
+            // Aeris Charts owns the profile's binning, value area and rendering; the host only
+            // binds it to the product price series and the always-allocated volume weights.
+            let Some(id) = self.engine.add_volume_profile_indicator(
+                0,
+                self.volume_series,
+                aeris_charts_engine::VolumeProfileIndicatorOptions::default(),
+            ) else {
+                return Err(ChartIndicatorError::CreationRejected(indicator));
+            };
+            self.volume_profile = Some(id);
+            // A profile owns price bins, not a time series, so it has no series output.
+            self.invalidate_series_layout();
+            self.mark_user_state_changed();
+            return Ok(Vec::new());
         } else {
             let Some(kind) = indicator.engine_kind() else {
                 return Err(ChartIndicatorError::CreationRejected(indicator));
@@ -53,6 +71,12 @@ impl AerisChartView {
                 visible,
             });
         }
+        if let Some(visible) = self.volume_profile_visible() {
+            states.push(ChartIndicatorState {
+                indicator: ChartIndicator::VolumeProfile,
+                visible,
+            });
+        }
         for binding in self.engine.indicator_bindings() {
             let Some(indicator) = ChartIndicator::from_engine_kind(&binding.kind) else {
                 continue;
@@ -78,6 +102,8 @@ impl AerisChartView {
             }
             let item = if state.indicator == ChartIndicator::Volume {
                 LegendItem::Volume
+            } else if state.indicator == ChartIndicator::VolumeProfile {
+                LegendItem::VolumeProfile
             } else {
                 let Some(binding_id) = ids.first().copied() else {
                     return Err(ChartIndicatorError::CreationRejected(state.indicator));
@@ -92,6 +118,7 @@ impl AerisChartView {
     #[must_use]
     pub fn has_indicators(&self) -> bool {
         self.volume_legend.is_present()
+            || self.volume_profile.is_some()
             || self.engine.has_indicator_bindings()
             || self.engine.has_external_studies()
             || [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta]
@@ -109,6 +136,7 @@ impl AerisChartView {
             self.volume_legend = LegendPresence::Absent;
             cleared = true;
         }
+        cleared |= self.remove_volume_profile();
         for study in [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta] {
             if self.has_order_flow_study(study) {
                 cleared |= self.remove_order_flow_study(study);
@@ -158,7 +186,8 @@ impl AerisChartView {
                 })
             })
             .collect::<Vec<_>>();
-        self.engine
+        let mut rows = self
+            .engine
             .financial_legend(FinancialLegendRequest {
                 logical_index,
                 primary_title: &self.asset_legend_title,
@@ -205,7 +234,43 @@ impl AerisChartView {
                     settings_available: row.settings_available,
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        self.insert_volume_profile_legend_row(&mut rows);
+        rows
+    }
+    /// The profile is an engine-owned price-pane primitive, not a series, so the financial
+    /// legend has no row for it; the host adds one so it can be hidden or removed.
+    fn insert_volume_profile_legend_row(&self, rows: &mut Vec<LegendRow>) {
+        let Some(visible) = self.volume_profile_visible() else {
+            return;
+        };
+        let position = rows
+            .iter()
+            .position(|row| row.pane != 0)
+            .unwrap_or(rows.len());
+        rows.insert(
+            position,
+            LegendRow {
+                item: LegendItem::VolumeProfile,
+                pane: 0,
+                title: "Volume Profile".to_string(),
+                values: Vec::new(),
+                values_tone: LegendValueTone::Neutral,
+                visible,
+                settings_available: false,
+            },
+        );
+    }
+    fn volume_profile_visible(&self) -> Option<bool> {
+        self.volume_profile
+            .and_then(|id| self.engine.volume_profile_indicator_options(id))
+            .map(|options| options.visible)
+    }
+    fn remove_volume_profile(&mut self) -> bool {
+        let Some(id) = self.volume_profile.take() else {
+            return false;
+        };
+        self.engine.remove_native_primitive(id)
     }
     pub(super) fn set_legend_item_visible(&mut self, item: LegendItem, visible: bool) -> bool {
         if let LegendItem::Study { study_id, .. } = item {
@@ -225,6 +290,27 @@ impl AerisChartView {
                 .collect(),
             LegendItem::Volume if self.volume_legend.is_present() => vec![self.volume_series],
             LegendItem::Volume => return false,
+            LegendItem::VolumeProfile => {
+                let Some(id) = self.volume_profile else {
+                    return false;
+                };
+                let Some(mut options) = self.engine.volume_profile_indicator_options(id).cloned()
+                else {
+                    return false;
+                };
+                if options.visible == visible {
+                    return false;
+                }
+                options.visible = visible;
+                let changed = self
+                    .engine
+                    .set_volume_profile_indicator_options(id, options);
+                if changed {
+                    self.invalidate_series_frame();
+                    self.mark_user_state_changed();
+                }
+                return changed;
+            }
             LegendItem::Indicator(binding) => {
                 let changed = self.engine.set_indicator_binding_visible(binding, visible);
                 if changed {
@@ -262,6 +348,7 @@ impl AerisChartView {
                 true
             }
             LegendItem::OrderFlow(study) => return self.remove_order_flow_study(study),
+            LegendItem::VolumeProfile => self.remove_volume_profile(),
             LegendItem::Asset | LegendItem::Volume | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => self.engine.remove_indicator_binding(binding),
         };

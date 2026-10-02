@@ -159,6 +159,7 @@ pub enum ChartIndicator {
     Macd,
     Stochastic,
     Atr,
+    VolumeProfile,
 }
 
 /// Host-portable state for one indicator instance on a chart surface.
@@ -170,7 +171,7 @@ pub struct ChartIndicatorState {
 
 impl ChartIndicator {
     /// All indicators that can be calculated truthfully from the installed OHLC columns.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Volume,
         Self::Vwap,
         Self::Sma,
@@ -182,6 +183,7 @@ impl ChartIndicator {
         Self::Macd,
         Self::Stochastic,
         Self::Atr,
+        Self::VolumeProfile,
     ];
 
     /// Returns the durable workspace identifier for this indicator kind.
@@ -199,6 +201,7 @@ impl ChartIndicator {
             Self::Macd => "macd",
             Self::Stochastic => "stochastic",
             Self::Atr => "atr",
+            Self::VolumeProfile => "volume_profile",
         }
     }
 
@@ -217,6 +220,7 @@ impl ChartIndicator {
             "macd" => Self::Macd,
             "stochastic" => Self::Stochastic,
             "atr" => Self::Atr,
+            "volume_profile" => Self::VolumeProfile,
             _ => return None,
         })
     }
@@ -236,6 +240,7 @@ impl ChartIndicator {
             Self::Macd => "MACD",
             Self::Stochastic => "Stochastic",
             Self::Atr => "Average True Range",
+            Self::VolumeProfile => "Volume Profile (Visible Range)",
         }
     }
 
@@ -251,6 +256,7 @@ impl ChartIndicator {
             Self::Rsi | Self::Atr => "Period 14",
             Self::Macd => "Fast 12 · Slow 26 · Signal 9",
             Self::Stochastic => "%K 14 · %D 3",
+            Self::VolumeProfile => "Rows 48 · Value area 70%",
         }
     }
 
@@ -272,7 +278,7 @@ impl ChartIndicator {
 
     fn engine_kind(self) -> Option<IndicatorKind> {
         Some(match self {
-            Self::Volume => return None,
+            Self::Volume | Self::VolumeProfile => return None,
             Self::Vwap => IndicatorKind::Vwap,
             Self::Sma => IndicatorKind::Sma { period: 20 },
             Self::Ema => IndicatorKind::Ema { period: 20 },
@@ -602,6 +608,7 @@ enum SeriesMutation {
 enum LegendItem {
     Asset,
     Volume,
+    VolumeProfile,
     Indicator(u32),
     Study { study_id: u64, series_id: u32 },
     OrderFlow(OrderFlowStudy),
@@ -642,6 +649,7 @@ impl LegendItem {
             Self::Indicator(binding) => u64::from(binding) + 2,
             Self::Study { series_id, .. } => (1_u64 << 63) | u64::from(series_id),
             Self::OrderFlow(study) => (1_u64 << 62) | study as u64,
+            Self::VolumeProfile => 1_u64 << 61,
         }
     }
 }
@@ -832,6 +840,8 @@ pub struct AerisChartView {
     quantity_divisor: f64,
     volume_series: u32,
     volume_legend: LegendPresence,
+    /// Engine handle of the visible-range volume profile drawn on the price series.
+    volume_profile: Option<aeris_charts_engine::NativePrimitiveId>,
     asset_legend_title: String,
     market_session_status: Option<MarketSessionStatus>,
     market_feed_live: LegendPresence,
@@ -949,6 +959,7 @@ impl AerisChartView {
             layout_dirty: true,
             fitted: false,
             study_line_widths: std::collections::BTreeMap::new(),
+            volume_profile: None,
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
             input_wake: None,
@@ -1053,6 +1064,7 @@ impl AerisChartView {
             layout_dirty: true,
             fitted: false,
             study_line_widths: std::collections::BTreeMap::new(),
+            volume_profile: None,
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
             input_wake: None,

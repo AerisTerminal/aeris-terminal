@@ -1063,7 +1063,7 @@ fn legacy_runtime_study_contract(
             )],
             vec![aeris_study_sdk::BUILTIN_ATR_OUTPUT_IDENTIFIER.to_string()],
         ),
-        ChartIndicator::Volume => return None,
+        ChartIndicator::Volume | ChartIndicator::VolumeProfile => return None,
     };
     Some(contract)
 }

@@ -1392,6 +1392,53 @@ fn indicator_label_preference_applies_to_every_indicator_and_later_additions() {
 }
 
 #[test]
+fn volume_profile_indicator_round_trips_through_state_legend_and_removal() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::VolumeProfile)
+        .expect("volume profile binds to price and volume");
+    assert!(
+        chart.add_indicator(ChartIndicator::VolumeProfile).is_err(),
+        "one visible-range profile per chart"
+    );
+    assert!(chart.indicator_states().contains(&ChartIndicatorState {
+        indicator: ChartIndicator::VolumeProfile,
+        visible: true,
+    }));
+    assert!(
+        chart
+            .legend_rows()
+            .iter()
+            .any(|row| row.item == LegendItem::VolumeProfile && row.pane == 0)
+    );
+
+    assert!(chart.set_legend_item_visible(LegendItem::VolumeProfile, false));
+    assert!(!chart.set_legend_item_visible(LegendItem::VolumeProfile, false));
+    assert!(chart.indicator_states().contains(&ChartIndicatorState {
+        indicator: ChartIndicator::VolumeProfile,
+        visible: false,
+    }));
+
+    let mut restored = interactive_chart();
+    restored
+        .restore_indicator_states(&chart.indicator_states())
+        .expect("persisted profile restores");
+    assert_eq!(restored.indicator_states(), chart.indicator_states());
+
+    assert!(chart.remove_legend_indicator(LegendItem::VolumeProfile));
+    assert!(
+        !chart
+            .indicator_states()
+            .iter()
+            .any(|state| state.indicator == ChartIndicator::VolumeProfile)
+    );
+    assert_eq!(
+        ChartIndicator::from_identifier(ChartIndicator::VolumeProfile.identifier()),
+        Some(ChartIndicator::VolumeProfile)
+    );
+}
+
+#[test]
 fn indicator_price_line_preference_applies_to_every_plot() {
     let mut chart = interactive_chart();
     let ema_fast = chart
@@ -3114,8 +3161,12 @@ fn study_outputs_share_declared_dedicated_pane_with_independent_plot_and_scale_k
 
 #[test]
 fn indicator_metadata_matches_the_legacy_picker_copy() {
-    assert_eq!(ChartIndicator::ALL.len(), 11);
+    assert_eq!(ChartIndicator::ALL.len(), 12);
     assert_eq!(ChartIndicator::Volume.label(), "Volume");
+    assert_eq!(
+        ChartIndicator::VolumeProfile.label(),
+        "Volume Profile (Visible Range)"
+    );
     assert_eq!(ChartIndicator::Vwap.parameters(), "Session anchored");
     assert_eq!(ChartIndicator::Sma.label(), "Moving Average");
     assert_eq!(ChartIndicator::Sma.parameters(), "Period 20");
