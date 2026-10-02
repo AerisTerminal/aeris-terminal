@@ -23,6 +23,26 @@ use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
 
+enum LivePublicationError {
+    OrderingConflict,
+    Other(String),
+}
+
+impl From<String> for LivePublicationError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+fn live_publication_error(error: aeris_market_engine::EngineError) -> LivePublicationError {
+    match error {
+        aeris_market_engine::EngineError::ConflictingSeriesGeneration(_) => {
+            LivePublicationError::OrderingConflict
+        }
+        error => LivePublicationError::Other(error.to_string()),
+    }
+}
+
 pub(super) const fn rithmic_invalidation_detail(
     reason: Option<ProviderInvalidationReason>,
 ) -> &'static str {
@@ -663,7 +683,8 @@ impl TradeLiveHandoff {
                 .timestamps
                 .exchange_unix_nanos
                 .ok_or_else(|| "Trade-built live trade has no exchange timestamp".to_string())?;
-            if self.indexed_overlay.is_empty() && exchange_nanos <= self.history_boundary_unix_nanos
+            if mutation.kind == super::IndexedTradeKind::New
+                && exchange_nanos <= self.history_boundary_unix_nanos
             {
                 self.last_trade_sequence = Some(mutation.source_sequence);
                 return Ok(false);
@@ -1598,9 +1619,12 @@ impl Coordinator<'_> {
         price_scale: u8,
         quantity_scale: u8,
         bars: Vec<MarketBar>,
-    ) -> Result<(), String> {
+    ) -> Result<(), LivePublicationError> {
         for bar in bars {
-            if self.compact_live_series_if_needed(series, generation)? {
+            if self
+                .compact_live_series_if_needed(series, generation)
+                .map_err(LivePublicationError::Other)?
+            {
                 // `take_publication` already drained the provider-owned handoff;
                 // while detached, canonical history must not accept a tail that
                 // is not contiguous with its bounded historical window.
@@ -1610,7 +1634,7 @@ impl Coordinator<'_> {
             let publications = self
                 .engine
                 .install_realtime_tail(generation, series, price_scale, quantity_scale, bar, true)
-                .map_err(|error| error.to_string())?;
+                .map_err(live_publication_error)?;
             for publication in publications {
                 if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                     events.publish_series_update(series_update_message(&publication));
@@ -1641,7 +1665,7 @@ impl Coordinator<'_> {
         price_scale: u8,
         quantity_scale: u8,
         bar: MarketBar,
-    ) -> Result<(), String> {
+    ) -> Result<(), LivePublicationError> {
         if self
             .detached_history
             .contains(&(series.clone(), generation))
@@ -1652,7 +1676,7 @@ impl Coordinator<'_> {
         let publications = self
             .engine
             .replace_realtime_completed_bar(generation, series, price_scale, quantity_scale, bar)
-            .map_err(|error| error.to_string())?;
+            .map_err(live_publication_error)?;
         self.publish_installed_history(&publications);
         match self.execute_study_bar_change(series, exchange_timestamp_unix_nanos) {
             Ok(batch) => {
@@ -3189,13 +3213,21 @@ impl Coordinator<'_> {
                     ),
             };
             if let Err(error) = published {
-                eprintln!("Aeris engine Rithmic live publication failed: {error}");
-                self.rithmic_series_recovering(
-                    &series,
-                    generation,
-                    FailureStage::Publication,
-                    "Rithmic live publication requires covering history",
-                );
+                match error {
+                    LivePublicationError::OrderingConflict => eprintln!(
+                        "Aeris live publication discarded an out-of-sequence bar for {}",
+                        series.instrument_id
+                    ),
+                    LivePublicationError::Other(detail) => {
+                        eprintln!("Aeris engine live publication failed: {detail}");
+                        self.rithmic_series_recovering(
+                            &series,
+                            generation,
+                            FailureStage::Publication,
+                            "Live publication requires covering history",
+                        );
+                    }
+                }
             }
         }
     }
@@ -3367,13 +3399,21 @@ impl Coordinator<'_> {
                     ),
             };
             if let Err(error) = published {
-                eprintln!("Aeris engine Hyperliquid live publication failed: {error}");
-                self.candle_series_recovering(
-                    &series,
-                    generation,
-                    FailureStage::Publication,
-                    "Hyperliquid live publication requires covering history",
-                );
+                match error {
+                    LivePublicationError::OrderingConflict => eprintln!(
+                        "Aeris live publication discarded an out-of-sequence bar for {}",
+                        series.instrument_id
+                    ),
+                    LivePublicationError::Other(detail) => {
+                        eprintln!("Aeris engine live publication failed: {detail}");
+                        self.candle_series_recovering(
+                            &series,
+                            generation,
+                            FailureStage::Publication,
+                            "Live publication requires covering history",
+                        );
+                    }
+                }
             }
         }
     }
@@ -4309,7 +4349,7 @@ mod tests {
         live.accept_indexed_trade(&indexed_trade(
             "trade-3",
             super::super::IndexedTradeKind::New,
-            3,
+            4,
             2 * minute + 1,
             10_300,
             1,
@@ -4336,6 +4376,44 @@ mod tests {
             (10_250, 9_950, 20)
         );
         assert_eq!(live.bars.last().map(|bar| bar.close), Some(10_300));
+    }
+
+    #[test]
+    fn tastytrade_late_new_trade_after_history_boundary_is_ignored() {
+        let minute = 60_000_000_000;
+        let mut live = TradeLiveHandoff::new(
+            &tastytrade_minute_series(),
+            generation(),
+            "CME",
+            Some((
+                CandleGapPolicy::SessionGapsAllowed,
+                "/ESZ26:XCME{=m}".into(),
+            )),
+        )
+        .expect("handoff");
+        live.seed(
+            2,
+            0,
+            &[bar(1, 0, 10_000)],
+            Some(FormingBar {
+                bar: candle(minute, 10_000, 10_100, 10_000, 10_100, 10),
+                trades: Some(10),
+            }),
+            Some(minute),
+        )
+        .expect("seed");
+        live.connected = true;
+        let _ = live.take_publication();
+        live.accept_indexed_trade(&indexed_trade(
+            "late-trade",
+            super::super::IndexedTradeKind::New,
+            1,
+            minute - 1,
+            10_050,
+            1,
+        ))
+        .expect("late print is explicitly rejected by the history boundary");
+        assert!(live.take_publication().is_none());
     }
 
     #[test]

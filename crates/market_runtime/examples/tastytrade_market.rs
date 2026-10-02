@@ -15,11 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 fn run(market: &MarketService) -> Result<(), String> {
-    let query = std::env::args()
-        .nth(1)
-        .filter(|arg| arg != "--cycle")
-        .or_else(|| std::env::args().nth(2))
-        .unwrap_or_else(|| "/ES".into());
+    let query = probe_query();
     market.attach(1)?;
     market.register_consumer(1, 1, 1)?;
     let mut search_timings = SearchTimings::new();
@@ -45,11 +41,15 @@ fn run(market: &MarketService) -> Result<(), String> {
     while Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
             match event {
-                MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
-                | MarketRuntimeEvent::ProviderInstrumentSearchPreview(result) => {
-                    if let Some(started) = search_timings.accept(market, result, &query)? {
-                        selection_started = Some(started);
-                    }
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
+                    selection_started = search_timings
+                        .accept(market, result, &query, true)?
+                        .or(selection_started);
+                }
+                MarketRuntimeEvent::ProviderInstrumentSearchPreview(result) => {
+                    selection_started = search_timings
+                        .accept(market, result, &query, false)?
+                        .or(selection_started);
                 }
                 MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
                     installed_instrument = Some(selection.instrument.clone());
@@ -94,25 +94,72 @@ fn run(market: &MarketService) -> Result<(), String> {
         } else {
             thread::sleep(Duration::from_millis(5));
         }
-        if history_check.switched && tails >= 2 && trades > 0 {
+        if cycle_complete(&history_check, tails, trades) {
             break;
         }
     }
-    println!("Selected={selected}; snapshots={snapshots}; updates={tails}; ticks={trades}");
-    live_timing.report();
-    if !selected || snapshots == 0 || tails == 0 || !history_check.switched {
+    finish_run(
+        market,
+        RunOutcome {
+            selected,
+            snapshots,
+            tails,
+            trades,
+            history_check,
+            installed_instrument,
+            live_timing,
+        },
+    )?;
+    market.detach(1)?;
+    Ok(())
+}
+
+fn probe_query() -> String {
+    std::env::args()
+        .nth(1)
+        .filter(|arg| arg != "--cycle")
+        .or_else(|| std::env::args().nth(2))
+        .unwrap_or_else(|| "/ES".into())
+}
+
+fn cycle_complete(history: &HistoryCheck, tails: usize, trades: usize) -> bool {
+    history.switched && tails >= 2 && trades > 0
+}
+
+struct RunOutcome {
+    selected: bool,
+    snapshots: usize,
+    tails: usize,
+    trades: usize,
+    history_check: HistoryCheck,
+    installed_instrument: Option<InstallProviderInstrument>,
+    live_timing: LiveTiming,
+}
+
+fn finish_run(market: &MarketService, outcome: RunOutcome) -> Result<(), String> {
+    println!(
+        "Selected={}; snapshots={}; updates={}; ticks={}",
+        outcome.selected, outcome.snapshots, outcome.tails, outcome.trades
+    );
+    outcome.live_timing.report();
+    if !outcome.selected
+        || outcome.snapshots == 0
+        || outcome.tails == 0
+        || !outcome.history_check.switched
+    {
         return Err("Catalog/chart/live integration did not complete".into());
     }
-    let old_generation = history_check
+    let old_generation = outcome
+        .history_check
         .provider_generation
         .ok_or("Initial tastytrade generation missing")?;
     measure_idle_reconnect(
         market,
-        installed_instrument.ok_or("Selected instrument missing")?,
+        outcome
+            .installed_instrument
+            .ok_or("Selected instrument missing")?,
         old_generation,
-    )?;
-    market.detach(1)?;
-    Ok(())
+    )
 }
 
 const LIVE_TIMING_SAMPLE_CAPACITY: usize = 4096;
@@ -290,10 +337,20 @@ impl SearchTimings {
         market: &MarketService,
         result: aeris_contracts::ProviderInstrumentSearchResult,
         query: &str,
+        final_result: bool,
     ) -> Result<Option<Instant>, String> {
         match result.search_generation {
             1 => {
                 if self.cold_done {
+                    return Ok(None);
+                }
+                let contains_requested = result.instruments.iter().any(|item| {
+                    item.symbol == query
+                        || (matches!(query, "ES" | "/ES")
+                            && item.symbol.starts_with("/ES")
+                            && item.instrument_type.as_deref() == Some("Future"))
+                });
+                if !final_result && !contains_requested {
                     return Ok(None);
                 }
                 self.cold_done = true;

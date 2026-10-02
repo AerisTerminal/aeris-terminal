@@ -25,6 +25,7 @@ use aeris_tastytrade_market_adapter::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const ENTITLEMENT: &str = "tastytrade-authorized";
+const STARTUP_CATALOG_GENERATION: u64 = u32::MAX as u64;
 const CATALOG_UNAVAILABLE_DETAIL: &str =
     "Tastytrade catalog unavailable; reconnect tastytrade in Accounts and retry";
 pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
@@ -188,10 +189,9 @@ impl BrokerApi {
             .search_control
             .lock()
             .map_err(|_| "Tastytrade search control failed")?;
-        if searches
-            .get(&consumer)
-            .is_some_and(|(current, _)| *current >= generation)
-        {
+        if searches.get(&consumer).is_some_and(|(current, _)| {
+            *current >= generation && *current != STARTUP_CATALOG_GENERATION
+        }) {
             return Ok(());
         }
         if let Some((_, cancellation)) = searches.remove(&consumer) {
@@ -287,8 +287,14 @@ impl BrokerApi {
                 .lock()
                 .map_err(|_| "Tastytrade search control failed")?;
             match searches.get(&consumer) {
-                Some((current, cancellation)) if *current == generation => Arc::clone(cancellation),
-                Some((current, _)) if *current > generation => {
+                Some((current, cancellation))
+                    if *current == generation && *current != STARTUP_CATALOG_GENERATION =>
+                {
+                    Arc::clone(cancellation)
+                }
+                Some((current, _))
+                    if *current > generation && *current != STARTUP_CATALOG_GENERATION =>
+                {
                     return Err("Tastytrade search superseded".into());
                 }
                 _ => {

@@ -373,6 +373,14 @@ fn newer_catalog_search_cancels_the_prior_request_for_its_consumer() {
     api.cancel_searches();
     assert!(current.load(Ordering::Acquire));
 }
+
+#[test]
+fn startup_catalog_generation_is_retired_by_the_first_user_search() {
+    let api = BrokerApi::default();
+    api.register_search(66, u64::from(u32::MAX)).unwrap();
+    api.register_search(66, 1).unwrap();
+    assert_eq!(api.search_control.lock().unwrap()[&66].0, 1);
+}
 #[test]
 fn futures_search_uses_the_primed_catalog_before_remote_equity_search() {
     let api = BrokerApi::default();
