@@ -146,7 +146,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_core"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=6a2ea8084a1940661e7151d36a9716d901ac6de5#6a2ea8084a1940661e7151d36a9716d901ac6de5"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=b35026b#b35026bce06660329edbc001f97d486d30325947"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -157,7 +157,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_engine"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=6a2ea8084a1940661e7151d36a9716d901ac6de5#6a2ea8084a1940661e7151d36a9716d901ac6de5"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=b35026b#b35026bce06660329edbc001f97d486d30325947"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_indicators",
@@ -169,7 +169,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_indicators"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=6a2ea8084a1940661e7151d36a9716d901ac6de5#6a2ea8084a1940661e7151d36a9716d901ac6de5"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=b35026b#b35026bce06660329edbc001f97d486d30325947"
 dependencies = [
  "serde",
 ]
@@ -177,7 +177,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=6a2ea8084a1940661e7151d36a9716d901ac6de5#6a2ea8084a1940661e7151d36a9716d901ac6de5"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=b35026b#b35026bce06660329edbc001f97d486d30325947"
 dependencies = [
  "aeris_charts_core",
 ]
@@ -185,7 +185,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render_gpui"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=6a2ea8084a1940661e7151d36a9716d901ac6de5#6a2ea8084a1940661e7151d36a9716d901ac6de5"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=b35026b#b35026bce06660329edbc001f97d486d30325947"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_engine",
