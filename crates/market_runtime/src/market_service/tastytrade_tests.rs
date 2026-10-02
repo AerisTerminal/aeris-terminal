@@ -75,29 +75,57 @@ fn resolved_instrument_cache_reuses_identity_and_clears_on_authorization_change(
 }
 
 #[test]
-fn empty_futures_catalog_is_reported_as_a_search_failure() {
+fn equity_query_with_loaded_futures_catalog_returns_preliminary_empty_result() {
     let search = SearchProviderInstruments {
         consumer_id: 1,
         search_generation: 1,
         provider: "tastytrade".into(),
-        query: "__NO_SUCH_FUTURE__".into(),
+        query: "SPY".into(),
         maximum_results: 100,
     };
-    let result = search_catalog(
+    let event = search_catalog(
         &search,
-        &mut Vec::new(),
+        &mut vec![serde_json::from_str(
+            r#"{"symbol":"/ESZ6","streamer-symbol":"/ESZ26:XCME","exchange":"CME","product-code":"ES","expiration-date":"2026-12-18","active":true,"active-month":true,"notional-multiplier":"50.0","tick-size":"0.25"}"#,
+        )
+        .unwrap()],
         &mut BTreeMap::new(),
         &BrokerApi::default(),
         &Arc::new(AtomicBool::new(false)),
         &Arc::new(AtomicU64::new(1)),
-    );
-    match result {
-        Err(error) => assert_eq!(
-            error,
-            "Tastytrade catalog unavailable; reconnect tastytrade in Accounts and retry"
-        ),
-        Ok(_) => panic!("an unavailable catalog must not become an empty success"),
-    }
+    )
+    .unwrap();
+    let CatalogEvent::Search(result) = event else {
+        panic!("equity queries need a preliminary result before remote search");
+    };
+    assert!(result.instruments.is_empty());
+}
+
+#[test]
+fn no_match_query_returns_empty_search_result() {
+    let search = SearchProviderInstruments {
+        consumer_id: 1,
+        search_generation: 1,
+        provider: "tastytrade".into(),
+        query: "/NO_SUCH_FUTURE".into(),
+        maximum_results: 100,
+    };
+    let event = search_catalog(
+        &search,
+        &mut vec![serde_json::from_str(
+            r#"{"symbol":"/ESZ6","streamer-symbol":"/ESZ26:XCME","exchange":"CME","product-code":"ES","expiration-date":"2026-12-18","active":true,"active-month":true,"notional-multiplier":"50.0","tick-size":"0.25"}"#,
+        )
+        .unwrap()],
+        &mut BTreeMap::new(),
+        &BrokerApi::default(),
+        &Arc::new(AtomicBool::new(false)),
+        &Arc::new(AtomicU64::new(1)),
+    )
+    .unwrap();
+    let CatalogEvent::Search(result) = event else {
+        panic!("a no-match query must return an empty search result");
+    };
+    assert!(result.instruments.is_empty());
 }
 
 #[test]

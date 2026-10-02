@@ -1,5 +1,7 @@
 //! Exercises ordinary `MarketService` catalog, selection, history and live demand.
 //! Close the desktop first. Credentials remain in the native vault and hosted broker service.
+//! Git Bash rewrites `/ES` into a Windows path; run from PowerShell or set
+//! `MSYS_NO_PATHCONV=1` before invoking this example.
 use aeris_contracts::{
     InstallProviderInstrument, ProviderConnectionState, SearchProviderInstruments,
     SelectProviderInstrument,
@@ -27,7 +29,7 @@ fn run(market: &MarketService) -> Result<(), String> {
             consumer_id: 1,
             search_generation: 1,
             provider: "tastytrade".into(),
-            query,
+            query: query.clone(),
             maximum_results: 100,
         },
     )?;
@@ -45,7 +47,7 @@ fn run(market: &MarketService) -> Result<(), String> {
             match event {
                 MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
                 | MarketRuntimeEvent::ProviderInstrumentSearchPreview(result) => {
-                    if let Some(started) = search_timings.accept(market, result)? {
+                    if let Some(started) = search_timings.accept(market, result, &query)? {
                         selection_started = Some(started);
                     }
                 }
@@ -287,6 +289,7 @@ impl SearchTimings {
         &mut self,
         market: &MarketService,
         result: aeris_contracts::ProviderInstrumentSearchResult,
+        query: &str,
     ) -> Result<Option<Instant>, String> {
         match result.search_generation {
             1 => {
@@ -299,7 +302,7 @@ impl SearchTimings {
                     self.cold.elapsed().as_millis()
                 );
                 let selection_started = Instant::now();
-                select(market, result)?;
+                select(market, result, query)?;
                 self.warm = Some(Instant::now());
                 market.search_provider_instruments(
                     1,
@@ -453,7 +456,7 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
             consumer_id: 1,
             search_generation: 1,
             provider: "tastytrade".into(),
-            query,
+            query: query.clone(),
             maximum_results: 100,
         },
     )?;
@@ -463,7 +466,7 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
         if let Some(event) = market.poll_event(1, 1)? {
             match event {
                 MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
-                    select(market, result)?;
+                    select(market, result, &query)?;
                 }
                 MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
                     instrument = Some(selection.instrument);
@@ -520,7 +523,42 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
             thread::sleep(Duration::from_millis(5));
         }
     }
+    settle_cycle(market)?;
     market.detach(1)
+}
+
+fn settle_cycle(market: &MarketService) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut updates, mut order_books, mut tapes, mut snapshots) = (0, 0, 0, 0);
+    while Instant::now() < deadline {
+        if let Some(event) = market.poll_event(1, 1)? {
+            match event {
+                MarketRuntimeEvent::ProviderState(state) => println!(
+                    "Settle provider transition: {:?} detail={:?} generation={:?}",
+                    state.state, state.detail, state.generation
+                ),
+                MarketRuntimeEvent::SeriesSnapshot(snapshot) => {
+                    snapshots += 1;
+                    println!(
+                        "Settle snapshot: generation={} bars={}",
+                        snapshot.snapshot.provider_generation.0.get(),
+                        snapshot.snapshot.bars.len()
+                    );
+                }
+                MarketRuntimeEvent::SeriesUpdate(_) => updates += 1,
+                MarketRuntimeEvent::OrderBookSnapshot(_) => order_books += 1,
+                MarketRuntimeEvent::TradeTapeSnapshot(_) => tapes += 1,
+                _ => {}
+            }
+        } else {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    println!(
+        "Settle counts: SeriesSnapshot={snapshots}; SeriesUpdate={updates}; \
+         OrderBookSnapshot={order_books}; TradeTapeSnapshot={tapes}"
+    );
+    Ok(())
 }
 
 fn run_history_load(market: &MarketService) -> Result<(), String> {
@@ -640,15 +678,15 @@ fn select_load_instrument(
 fn select(
     market: &MarketService,
     result: aeris_contracts::ProviderInstrumentSearchResult,
+    query: &str,
 ) -> Result<(), String> {
     println!("Catalog returned {} assets", result.instruments.len());
-    let query = std::env::args().nth(1).unwrap_or_else(|| "/ES".into());
     let candidate = result
         .instruments
         .into_iter()
         .find(|item| {
             item.symbol == query
-                || (matches!(query.as_str(), "ES" | "/ES")
+                || (matches!(query, "ES" | "/ES")
                     && item.symbol.starts_with("/ES")
                     && item.instrument_type.as_deref() == Some("Future"))
         })

@@ -1215,7 +1215,9 @@ impl ProviderRuntimeLifecycle {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .or_else(|| {
-                self.reconnecting.load(Ordering::Acquire).then(|| {
+                (self.generation.load(Ordering::Acquire) > 1
+                    && self.reconnecting.load(Ordering::Acquire))
+                .then(|| {
                     "Market data connection interrupted; reconnecting automatically.".to_string()
                 })
             })

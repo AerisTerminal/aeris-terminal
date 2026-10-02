@@ -296,7 +296,7 @@ impl TastytradeBrokerClient {
                 Err(ureq::Error::Timeout(_)) => {
                     return Err("Tastytrade API request timed out".into());
                 }
-                Err(_) => return Err("Tastytrade API request failed".into()),
+                Err(error) => return Err(format!("Tastytrade API request failed: {error}")),
             };
             let mut bytes = Zeroizing::new(Vec::new());
             response

@@ -531,8 +531,10 @@ pub(super) fn run_catalog(
             searches.clear();
             refresh_at = Instant::now() + Duration::from_mins(30);
         }
-        if let Some(detail) = refresh_catalog(&mut futures, &mut refresh_at, api, stop) {
-            let _ = events.send(CatalogEvent::RefreshFailed(detail));
+        if let Some(detail) = refresh_catalog(&mut futures, &mut refresh_at, api, stop)
+            && events.send(CatalogEvent::RefreshFailed(detail)).is_err()
+        {
+            return;
         }
         while let Ok(reply) = replies.try_recv() {
             if let Some(event) = remote_search_event(reply, &mut searches, generation, api)
@@ -583,8 +585,8 @@ pub(super) fn run_catalog(
         if api.authorization_epoch.load(Ordering::Acquire) != authorization_epoch {
             continue;
         }
-        let event = result.unwrap_or_else(|_error| {
-            eprintln!("Aeris tastytrade catalog request failed");
+        let event = result.unwrap_or_else(|error| {
+            eprintln!("Aeris tastytrade catalog request failed: {error}");
             CatalogEvent::Rejected {
                 rejection: ProviderCatalogRejected {
                     consumer_id: consumer,
@@ -610,12 +612,16 @@ fn refresh_catalog(
     stop: &Arc<AtomicBool>,
 ) -> Option<String> {
     if Instant::now() >= *refresh_at {
-        if let Ok(updated) = api.futures(stop) {
-            *futures = updated;
-            *refresh_at = Instant::now() + Duration::from_mins(30);
-        } else {
-            *refresh_at = Instant::now() + Duration::from_mins(1);
-            return Some(CATALOG_UNAVAILABLE_DETAIL.into());
+        match api.futures(stop) {
+            Ok(updated) => {
+                *futures = updated;
+                *refresh_at = Instant::now() + Duration::from_mins(30);
+            }
+            Err(error) => {
+                eprintln!("Aeris tastytrade futures catalog refresh failed: {error}");
+                *refresh_at = Instant::now() + Duration::from_mins(1);
+                return Some(CATALOG_UNAVAILABLE_DETAIL.into());
+            }
         }
     }
     None
@@ -833,9 +839,10 @@ fn search_catalog(
     generation: &Arc<AtomicU64>,
 ) -> Result<CatalogEvent, String> {
     if futures.is_empty() {
-        *futures = api
-            .futures(stop)
-            .map_err(|_| CATALOG_UNAVAILABLE_DETAIL.to_string())?;
+        *futures = api.futures(stop).map_err(|error| {
+            eprintln!("Aeris tastytrade futures catalog request failed: {error}");
+            CATALOG_UNAVAILABLE_DETAIL.to_string()
+        })?;
     }
     let query = search.query.to_ascii_uppercase();
     let mut matching: Vec<_> = futures
@@ -864,9 +871,6 @@ fn search_catalog(
             description: Some(future.product_code.clone()),
         })
         .collect();
-    if items.is_empty() {
-        return Err(CATALOG_UNAVAILABLE_DETAIL.into());
-    }
     let summaries = items
         .iter()
         .take(search.maximum_results.min(100) as usize)
