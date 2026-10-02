@@ -1872,13 +1872,14 @@ impl TradingStore {
         for row in rows {
             let (id, price_scale, quantity_scale, contract) = row.map_err(database_error)?;
             let instrument_id = InstrumentId::try_new(id).map_err(|error| error.to_string())?;
+            let contract = decode_contract(&contract, &instrument_id)?;
             output.insert(
                 instrument_id.clone(),
                 TradingInstrument {
                     instrument_id,
                     price_scale,
                     quantity_scale,
-                    contract: decode_contract(&contract)?,
+                    contract,
                 },
             );
         }
@@ -2566,7 +2567,7 @@ fn encode_contract(contract: &ContractMetadata) -> Result<String, String> {
             "session_generation": contract.provenance.session_generation}}).to_string())
 }
 
-fn decode_contract(raw: &str) -> Result<ContractMetadata, String> {
+fn decode_contract(raw: &str, instrument_id: &InstrumentId) -> Result<ContractMetadata, String> {
     let value: Value =
         serde_json::from_str(raw).map_err(|_| "stored contract metadata is invalid".to_string())?;
     let provenance = value
@@ -2606,6 +2607,7 @@ fn decode_contract(raw: &str) -> Result<ContractMetadata, String> {
             display_symbol: provenance
                 .get("display_symbol")
                 .and_then(Value::as_str)
+                .or_else(|| instrument_id.as_str().strip_prefix("tastytrade:Future:/"))
                 .or_else(|| provenance.get("provider_symbol").and_then(Value::as_str))
                 .unwrap_or_default()
                 .to_string(),
@@ -2786,6 +2788,29 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_tastytrade_future_contract_uses_exact_instrument_display_symbol() {
+        let legacy = r#"{
+            "tick_size":null,"point_value":null,"currency":"USD", "expiry":null,
+            "first_notice":null,"last_trade":null,"session_hours":[],
+            "provenance":{"provider_id":"tastytrade",
+                "provider_symbol":"/ESZ26:XCME","session_generation":1}
+        }"#;
+        let id = InstrumentId::try_new("tastytrade:Future:/ESZ6").expect("instrument id");
+        let contract = decode_contract(legacy, &id).expect("legacy contract decodes");
+        assert_eq!(contract.provenance.display_symbol, "ESZ6");
+        assert_eq!(contract.provenance.provider_symbol, "/ESZ26:XCME");
+
+        let equity = InstrumentId::try_new("tastytrade:Equity:AAPL").expect("equity id");
+        assert_eq!(
+            decode_contract(legacy, &equity)
+                .expect("other identity retains legacy fallback")
+                .provenance
+                .display_symbol,
+            "/ESZ26:XCME"
+        );
+    }
 
     #[test]
     fn current_schema_migrates_historical_order_fill_progress() {
