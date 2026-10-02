@@ -492,6 +492,7 @@ pub(super) fn header_controls(
                 // The header trigger never renders the menu body that uses these.
                 tastytrade_disconnected: false,
                 provider_menu_open: false,
+                markets_flyout_open: false,
                 search_categories: aeris_contracts::InstrumentSearchCategories::ALL,
             },
             &state.theme,

@@ -1204,17 +1204,23 @@ enum SymbolProviderMenu {
     #[default]
     Closed,
     Open,
+    /// Open with the Markets flyout (category toggles) shown beside it.
+    MarketsFlyout,
 }
 
 impl SymbolProviderMenu {
     const fn is_open(self) -> bool {
-        matches!(self, Self::Open)
+        !matches!(self, Self::Closed)
+    }
+
+    const fn markets_flyout_open(self) -> bool {
+        matches!(self, Self::MarketsFlyout)
     }
 
     const fn toggled(self) -> Self {
         match self {
             Self::Closed => Self::Open,
-            Self::Open => Self::Closed,
+            Self::Open | Self::MarketsFlyout => Self::Closed,
         }
     }
 }

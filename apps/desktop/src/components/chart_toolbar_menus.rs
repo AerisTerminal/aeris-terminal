@@ -238,6 +238,10 @@ pub(super) fn chrome_overlay_content(
                 target: app_state.symbol_selection_target,
                 tastytrade_disconnected: connection.connected == Some(false),
                 provider_menu_open: app_state.menu_state.symbol_provider_menu.is_open(),
+                markets_flyout_open: app_state
+                    .menu_state
+                    .symbol_provider_menu
+                    .markets_flyout_open(),
                 search_categories: app_state.chart_chrome.symbol_search_categories,
             },
             theme,

@@ -2001,6 +2001,20 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    /// Shows or hides the Markets flyout beside the open provider menu, the way timeframe
+    /// groups open their flyouts: the Markets row opens it, other rows close it.
+    pub(super) fn set_symbol_markets_flyout(&mut self, open: bool, cx: &mut Context<Self>) {
+        let next = match (self.menu_state.symbol_provider_menu, open) {
+            (SymbolProviderMenu::Closed, _) => return,
+            (_, true) => SymbolProviderMenu::MarketsFlyout,
+            (_, false) => SymbolProviderMenu::Open,
+        };
+        if self.menu_state.symbol_provider_menu != next {
+            self.menu_state.symbol_provider_menu = next;
+            cx.notify();
+        }
+    }
+
     /// Includes or excludes one instrument category from symbol search and re-runs the current
     /// query. The last included category cannot be excluded, so search always returns something.
     pub(super) fn toggle_symbol_search_category(
