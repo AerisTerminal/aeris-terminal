@@ -237,14 +237,16 @@ fn startup_catalog_candidate(
     requested: &InstallProviderInstrument,
 ) -> Result<ProviderInstrumentSummary, String> {
     let symbol = catalog_symbol(requested);
+    let normalized = symbol.strip_prefix('/').unwrap_or(&symbol);
+    let matches = |candidate: &ProviderInstrumentSummary| {
+        [candidate.symbol.as_str(), candidate.display_symbol.as_str()]
+            .into_iter()
+            .any(|value| value == symbol || value.strip_prefix('/').unwrap_or(value) == normalized)
+    };
     candidates
         .iter()
-        .find(|candidate| candidate.symbol == *symbol && candidate.exchange == requested.venue_id)
-        .or_else(|| {
-            candidates
-                .iter()
-                .find(|candidate| candidate.symbol == *symbol)
-        })
+        .find(|candidate| matches(candidate) && candidate.exchange == requested.venue_id)
+        .or_else(|| candidates.iter().find(|candidate| matches(candidate)))
         .cloned()
         .ok_or_else(|| {
             format!(
@@ -575,5 +577,43 @@ mod tests {
         product.provider_symbol = "BTC".to_string();
         product.display_symbol = "BTC-PERP".to_string();
         assert_eq!(catalog_symbol(&product), "BTC");
+    }
+
+    #[test]
+    fn startup_candidate_accepts_old_and_normalized_futures_display_symbols() {
+        let product = InstallProviderInstrument {
+            provider: "tastytrade".into(),
+            provider_symbol: "/ESZ26:XCME".into(),
+            display_symbol: "ESZ6".into(),
+            venue_id: "CME".into(),
+            ..Default::default()
+        };
+        for display in ["ESZ6", "/ESZ6"] {
+            let mut candidate = ProviderInstrumentSummary {
+                symbol: "/ESZ6".into(),
+                display_symbol: display.into(),
+                exchange: "CME".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                startup_catalog_candidate(&[candidate.clone()], &product)
+                    .unwrap()
+                    .symbol,
+                "/ESZ6"
+            );
+            candidate.display_symbol = "ESZ6".into();
+            assert_eq!(
+                startup_catalog_candidate(
+                    &[candidate],
+                    &InstallProviderInstrument {
+                        display_symbol: "/ESZ6".into(),
+                        ..product.clone()
+                    }
+                )
+                .unwrap()
+                .symbol,
+                "/ESZ6"
+            );
+        }
     }
 }

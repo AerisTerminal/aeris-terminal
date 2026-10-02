@@ -132,7 +132,7 @@ impl BottomPanelState {
                 .map(|instrument| {
                     (
                         instrument.instrument_id.clone(),
-                        instrument.contract.provenance.provider_symbol.clone(),
+                        instrument.contract.provenance.display_symbol.clone(),
                     )
                 })
                 .collect(),

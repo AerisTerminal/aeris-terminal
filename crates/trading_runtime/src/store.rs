@@ -2562,6 +2562,7 @@ fn encode_contract(contract: &ContractMetadata) -> Result<String, String> {
             "timezone": value.timezone})).collect::<Vec<_>>(),
         "provenance": {"provider_id": contract.provenance.provider_id,
             "provider_symbol": contract.provenance.provider_symbol,
+            "display_symbol": contract.provenance.display_symbol,
             "session_generation": contract.provenance.session_generation}}).to_string())
 }
 
@@ -2602,6 +2603,12 @@ fn decode_contract(raw: &str) -> Result<ContractMetadata, String> {
         provenance: InstrumentMetadataProvenance {
             provider_id: json_string(provenance, "provider_id")?,
             provider_symbol: json_string(provenance, "provider_symbol")?,
+            display_symbol: provenance
+                .get("display_symbol")
+                .and_then(Value::as_str)
+                .or_else(|| provenance.get("provider_symbol").and_then(Value::as_str))
+                .unwrap_or_default()
+                .to_string(),
             session_generation: json_u64(provenance, "session_generation")?,
         },
     };

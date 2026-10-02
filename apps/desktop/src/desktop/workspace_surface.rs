@@ -4176,7 +4176,7 @@ impl WorkspaceSurface {
                 .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
             self.symbol_message = format!(
                 "Selecting {} · {}",
-                selection.instrument.symbol, selection.instrument.exchange
+                selection.instrument.display_symbol, selection.instrument.exchange
             );
             true
         } else {

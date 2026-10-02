@@ -849,7 +849,7 @@ fn install_resolved(
             resolved.instrument_type, resolved.symbol
         ),
         provider_symbol: resolved.streamer_symbol,
-        display_symbol: resolved.symbol,
+        display_symbol: tastytrade_display_symbol(&resolved.symbol, &resolved.instrument_type),
         venue_id: resolved.venue,
         price_scale: DATA_SCALE,
         quantity_scale: DATA_SCALE,
@@ -868,6 +868,13 @@ fn install_resolved(
         }),
     }
 }
+fn tastytrade_display_symbol(symbol: &str, instrument_type: &str) -> String {
+    if instrument_type == "Future" {
+        symbol.strip_prefix('/').unwrap_or(symbol).to_string()
+    } else {
+        symbol.to_string()
+    }
+}
 fn search_catalog(
     search: &SearchProviderInstruments,
     futures: &mut Vec<FutureInstrument>,
@@ -883,13 +890,19 @@ fn search_catalog(
         })?;
     }
     let query = search.query.to_ascii_uppercase();
+    let display_query = query.strip_prefix('/').unwrap_or(&query);
     let mut matching: Vec<_> = futures
         .iter()
         .filter(|future| {
             future.active
                 && (query.is_empty()
-                    || future.symbol.to_ascii_uppercase().contains(&query)
-                    || future.product_code.to_ascii_uppercase().contains(&query))
+                    || tastytrade_display_symbol(&future.symbol, "Future")
+                        .to_ascii_uppercase()
+                        .contains(display_query)
+                    || future
+                        .product_code
+                        .to_ascii_uppercase()
+                        .contains(display_query))
         })
         .collect();
     matching.sort_unstable_by(|left, right| {
@@ -929,7 +942,7 @@ fn search_catalog(
 fn instrument_summary(item: &SearchInstrument) -> ProviderInstrumentSummary {
     ProviderInstrumentSummary {
         symbol: item.symbol.clone(),
-        display_symbol: item.symbol.clone(),
+        display_symbol: tastytrade_display_symbol(&item.symbol, &item.instrument_type),
         exchange: catalog_venue(item),
         name: item.description.clone(),
         product_code: None,

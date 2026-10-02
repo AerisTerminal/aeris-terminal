@@ -103,6 +103,41 @@ fn equity_query_with_loaded_futures_catalog_returns_preliminary_empty_result() {
 }
 
 #[test]
+fn tastytrade_futures_display_symbols_drop_only_the_leading_slash() {
+    assert_eq!(tastytrade_display_symbol("/ESZ6", "Future"), "ESZ6");
+    assert_eq!(tastytrade_display_symbol("AAPL", "Equity"), "AAPL");
+}
+
+#[test]
+fn futures_search_accepts_slashless_and_slash_prefixed_queries() {
+    let future: FutureInstrument = serde_json::from_str(
+        r#"{"symbol":"/ESZ6","streamer-symbol":"/ESZ26:XCME","exchange":"CME","product-code":"ES","expiration-date":"2026-12-18","active":true,"active-month":true,"notional-multiplier":"50.0","tick-size":"0.25"}"#,
+    )
+    .unwrap();
+    for query in ["ES", "ESZ6", "/ES"] {
+        let event = search_catalog(
+            &SearchProviderInstruments {
+                consumer_id: 1,
+                search_generation: 1,
+                provider: "tastytrade".into(),
+                query: query.into(),
+                maximum_results: 10,
+            },
+            &mut vec![future.clone()],
+            &mut BTreeMap::new(),
+            &BrokerApi::default(),
+            &Arc::new(AtomicBool::new(false)),
+            &Arc::new(AtomicU64::new(1)),
+        )
+        .unwrap();
+        let CatalogEvent::Search(result) = event else {
+            panic!("futures search should complete locally");
+        };
+        assert_eq!(result.instruments[0].display_symbol, "ESZ6");
+    }
+}
+
+#[test]
 fn no_match_query_returns_empty_search_result() {
     let search = SearchProviderInstruments {
         consumer_id: 1,

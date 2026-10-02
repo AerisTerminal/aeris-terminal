@@ -2530,6 +2530,7 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
                 provenance: InstrumentMetadataProvenance {
                     provider_id: "fixture".to_string(),
                     provider_symbol: "BTC".to_string(),
+                    display_symbol: "BTC".to_string(),
                     session_generation: 1,
                 },
             },

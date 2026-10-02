@@ -161,6 +161,7 @@ impl SessionHours {
 pub struct InstrumentMetadataProvenance {
     pub provider_id: String,
     pub provider_symbol: String,
+    pub display_symbol: String,
     pub session_generation: u64,
 }
 
@@ -200,6 +201,7 @@ impl ContractMetadata {
         }
         if self.provenance.provider_id.trim().is_empty()
             || self.provenance.provider_symbol.trim().is_empty()
+            || self.provenance.display_symbol.trim().is_empty()
             || self.provenance.session_generation == 0
         {
             return Err(InstrumentValidationError::InvalidMetadataProvenance);

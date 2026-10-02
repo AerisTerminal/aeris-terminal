@@ -90,6 +90,7 @@ fn instrument() -> TradingInstrument {
             provenance: InstrumentMetadataProvenance {
                 provider_id: "fixture".to_string(),
                 provider_symbol: "ESZ6".to_string(),
+                display_symbol: "ESZ6".to_string(),
                 session_generation: 1,
             },
         },
@@ -112,6 +113,7 @@ fn high_precision_crypto_instrument() -> TradingInstrument {
             provenance: InstrumentMetadataProvenance {
                 provider_id: "hyperliquid".to_string(),
                 provider_symbol: "BTC".to_string(),
+                display_symbol: "BTC".to_string(),
                 session_generation: 1,
             },
         },

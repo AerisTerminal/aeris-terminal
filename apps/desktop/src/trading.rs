@@ -890,6 +890,7 @@ pub fn register_provider_instrument_if_running(
         provenance: InstrumentMetadataProvenance {
             provider_id: instrument.provider.clone(),
             provider_symbol: instrument.provider_symbol.clone(),
+            display_symbol: instrument.display_symbol.clone(),
             session_generation: instrument.session_generation,
         },
     };
