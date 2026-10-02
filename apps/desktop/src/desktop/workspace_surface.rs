@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// The persisted chart time zone, or the chart default for legacy workspaces without one.
+fn restored_chart_time_zone(restored: Option<&WorkspaceChartState>) -> String {
+    restored
+        .map(|state| state.time_zone.as_str())
+        .filter(|time_zone| !time_zone.is_empty())
+        .unwrap_or(aeris_chart_integration::DEFAULT_TIME_ZONE)
+        .to_string()
+}
+
 fn restored_context_and_link_state(
     restored: Option<&WorkspaceChartState>,
 ) -> (bool, ContextPanelTab, u8, u8) {
@@ -65,13 +74,13 @@ struct WorkspaceSurfaceInitialization {
     context_panel_height: f32,
     chart_link_group: u8,
     chart_link_flags: u8,
+    chart_time_zone: String,
+    chart_trading_visibility: ChartTradingVisibilitySettings,
     chrome_focus: FocusHandle,
     theme: AerisTheme,
 }
 
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
-    let chart_trading_visibility =
-        restored_chart_trading_visibility(init.restored_chart_state.as_ref());
     WorkspaceSurface {
         chart: init.startup.chart,
         order_book: init.order_book,
@@ -88,6 +97,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         economic_event_risk_message: None,
         chart_link_group: init.chart_link_group,
         chart_link_flags: init.chart_link_flags,
+        chart_time_zone: init.chart_time_zone,
         pending_chart_sync_events: VecDeque::new(),
         pending_linked_instrument: None,
         side_panels: SidePanelVisibility::default(),
@@ -110,7 +120,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         connection_message: init.startup.connection_message,
         provider_transport_rtt_nanos: None,
         trading_pnl: TradingPnlState::default(),
-        chart_trading_visibility,
+        chart_trading_visibility: init.chart_trading_visibility,
         symbol_browser: init.symbol_browser,
         symbol_message: initial_symbol_message(init.startup.provider),
         market_state: WorkspaceMarketState::default(),
@@ -1327,19 +1337,33 @@ impl WorkspaceSurface {
         std::mem::take(&mut self.chart_persistence_dirty)
     }
 
+    /// State to persist while no chart has data to read from (startup, or a symbol or timeframe
+    /// switch still loading). The restored snapshot is consumed by the first chart, so a switch
+    /// falls back to the presentation retained from the chart it is replacing; either way the
+    /// surface-owned time zone is kept, so a save mid-load never resets the pane.
+    fn unloaded_chart_state(&self) -> Option<WorkspaceChartState> {
+        self.restored_chart_state
+            .clone()
+            .or_else(|| self.retained_chart_presentation.chart_state.clone())
+            .map(|mut state| {
+                state.time_zone.clone_from(&self.chart_time_zone);
+                state
+            })
+    }
+
     pub(super) fn workspace_chart_state(&self, cx: &App) -> Option<WorkspaceChartState> {
         let Some(chart) = self.chart.as_ref() else {
-            return self.restored_chart_state.clone();
+            return self.unloaded_chart_state();
         };
         let chart = chart.read(cx);
         if !chart.has_market_data() {
-            return self.restored_chart_state.clone();
+            return self.unloaded_chart_state();
         }
         let chart_state_json = match chart.export_semantic_state_json() {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("Aeris drawings could not be serialized: {error}");
-                return self.restored_chart_state.clone();
+                return self.unloaded_chart_state();
             }
         };
         let price_axis = chart
@@ -1371,7 +1395,7 @@ impl WorkspaceSurface {
             context_panel_height: self.context_panel_height.round().to_u32().unwrap_or(0),
             chart_link_group: u32::from(self.chart_link_group),
             chart_link_flags: u32::from(self.chart_link_flags),
-            time_zone: chart.time_zone_id().to_string(),
+            time_zone: self.chart_time_zone.clone(),
             show_order_management_lines: Some(
                 self.chart_trading_visibility.show_order_management_lines,
             ),
@@ -1492,6 +1516,18 @@ impl WorkspaceSurface {
         let (context_panel_visible, context_panel_tab, chart_link_group, chart_link_flags) =
             restored_context_and_link_state(restored_chart_state.as_ref());
         let context_panel_height = restored_context_panel_height(restored_chart_state.as_ref());
+        let chart_time_zone = restored_chart_time_zone(restored_chart_state.as_ref());
+        let chart_trading_visibility =
+            restored_chart_trading_visibility(restored_chart_state.as_ref());
+        if let Some(chart) = startup_state.chart.as_ref() {
+            // A chart created at startup never takes the restored-state path.
+            let time_zone = chart_time_zone.clone();
+            chart.update(cx, |chart, _| {
+                if let Err(error) = chart.set_time_zone(&time_zone) {
+                    eprintln!("Aeris chart time zone could not be applied: {error}");
+                }
+            });
+        }
         workspace_surface_from_initialization(WorkspaceSurfaceInitialization {
             startup: startup_state,
             market_worker,
@@ -1517,6 +1553,8 @@ impl WorkspaceSurface {
             context_panel_height,
             chart_link_group,
             chart_link_flags,
+            chart_time_zone,
+            chart_trading_visibility,
             chrome_focus: cx.focus_handle().tab_stop(true),
             theme,
         })
@@ -1696,12 +1734,21 @@ impl WorkspaceSurface {
             .collect()
     }
 
-    pub(super) fn chart_time_zone_id(&self, cx: &App) -> &'static str {
-        self.chart
-            .as_ref()
-            .map_or(aeris_chart_integration::DEFAULT_TIME_ZONE, |chart| {
-                chart.read(cx).time_zone_id()
-            })
+    /// Restored and retained snapshots can predate the trader's latest choice, so the
+    /// surface-owned zone is applied last to every chart this pane creates.
+    fn apply_surface_time_zone(&self, chart: &Entity<AerisChartView>, cx: &mut Context<Self>) {
+        let time_zone = self.chart_time_zone.clone();
+        chart.update(cx, |chart, _| {
+            if let Err(error) = chart.set_time_zone(&time_zone) {
+                eprintln!("Aeris chart time zone could not be applied: {error}");
+            }
+        });
+    }
+
+    /// The selected chart time zone, owned by the surface so it reads correctly before the
+    /// chart is created and across chart replacement.
+    pub(super) fn chart_time_zone_id(&self) -> &str {
+        &self.chart_time_zone
     }
 
     pub(super) fn chart_time_zone_clock(&self, cx: &App) -> String {
@@ -1712,7 +1759,7 @@ impl WorkspaceSurface {
     }
 
     fn sync_time_zone_menu_selection(&mut self, cx: &App) {
-        let selected = self.chart_time_zone_id(cx);
+        let selected = self.chart_time_zone_id();
         self.chrome_selection = self
             .time_zone_matches(cx)
             .iter()
@@ -1721,27 +1768,28 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn set_chart_time_zone(&mut self, time_zone: &str, cx: &mut Context<Self>) -> bool {
-        let Some(chart) = &self.chart else {
+        if !aeris_chart_integration::TRADINGVIEW_TIME_ZONES.contains(&time_zone) {
+            self.indicator_message = Some(format!("Unsupported chart time zone: {time_zone}"));
             return false;
-        };
-        match chart.update(cx, |chart, chart_cx| {
-            let changed = chart.set_time_zone(time_zone)?;
-            if changed {
-                chart_cx.notify();
-            }
-            Ok::<_, String>(changed)
-        }) {
-            Ok(true) => {
-                self.chart_persistence_dirty = true;
-                cx.notify();
-                true
-            }
-            Ok(false) => true,
-            Err(error) => {
-                self.indicator_message = Some(error);
-                false
-            }
         }
+        if let Some(chart) = &self.chart
+            && let Err(error) = chart.update(cx, |chart, chart_cx| {
+                let changed = chart.set_time_zone(time_zone)?;
+                if changed {
+                    chart_cx.notify();
+                }
+                Ok::<_, String>(changed)
+            })
+        {
+            self.indicator_message = Some(error);
+            return false;
+        }
+        if self.chart_time_zone != time_zone {
+            self.chart_time_zone = time_zone.to_string();
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
+        true
     }
 
     pub(super) fn apply_highlighted_time_zone(
@@ -2542,6 +2590,7 @@ impl WorkspaceSurface {
                 } else {
                     self.apply_retained_chart_state_to_chart(&chart, cx);
                 }
+                self.apply_surface_time_zone(&chart, cx);
                 replace_chart_price_alert_lines(
                     Some(&chart),
                     &self.price_alerts,

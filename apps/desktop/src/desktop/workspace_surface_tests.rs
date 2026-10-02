@@ -3,6 +3,27 @@
 use super::*;
 
 #[test]
+fn surface_restores_the_persisted_chart_time_zone() {
+    let state = |time_zone: &str| WorkspaceChartState {
+        time_zone: time_zone.to_string(),
+        ..WorkspaceChartState::default()
+    };
+    assert_eq!(
+        restored_chart_time_zone(Some(&state("America/New_York"))),
+        "America/New_York"
+    );
+    // Legacy workspaces without a zone, and fresh panes, use the chart default.
+    assert_eq!(
+        restored_chart_time_zone(Some(&state(""))),
+        aeris_chart_integration::DEFAULT_TIME_ZONE
+    );
+    assert_eq!(
+        restored_chart_time_zone(None),
+        aeris_chart_integration::DEFAULT_TIME_ZONE
+    );
+}
+
+#[test]
 fn ema_studies_default_to_one_pixel_and_explicit_widths_are_kept() {
     let study = |identifier: &str, line_width: u32| WorkspaceChartStudyState {
         identifier: identifier.to_string(),

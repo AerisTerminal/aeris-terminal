@@ -828,7 +828,7 @@ impl TerminalApp {
             appearance: surface.chart_appearance(cx)?,
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
-            time_zone: surface.chart_time_zone_id(cx).to_string(),
+            time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
         })
     }

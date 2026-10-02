@@ -12,13 +12,6 @@ pub(super) fn scaled_overlay_height(rows: f32, separators: f32, scale: MenuScale
         + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
 }
 
-/// Screen-aware scale for the chart and price-axis context menus. They follow the
-/// shared menu scale but keep only part of its growth, so a cursor popup stays
-/// compact on large screens where the symbol and indicator panels grow fully.
-pub(super) fn chart_context_menu_scale(viewport: gpui::Size<Pixels>) -> MenuScale {
-    MenuScale::for_viewport(viewport).with_growth_share(CHART_CONTEXT_MENU_GROWTH_SHARE)
-}
-
 pub(super) fn clamp_overlay_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
@@ -52,14 +45,7 @@ pub(super) fn clamp_chart_context_menu_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    clamp_scaled_overlay_origin(
-        origin,
-        viewport,
-        CHART_CONTEXT_MENU_WIDTH,
-        8.0,
-        5.0,
-        chart_context_menu_scale(viewport),
-    )
+    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 8.0, 5.0)
 }
 
 /// Prefer opening the Y-axis menu into the chart, then keep an edge margin so it
@@ -69,7 +55,7 @@ pub(super) fn clamp_price_axis_menu_origin(
     viewport: gpui::Size<Pixels>,
     axis_on_left: bool,
 ) -> gpui::Point<Pixels> {
-    let scale = chart_context_menu_scale(viewport);
+    let scale = MenuScale::BASE;
     let width = scale.px(CHART_CONTEXT_MENU_WIDTH);
     let height = px(scaled_overlay_height(7.0, 2.0, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
@@ -93,7 +79,7 @@ pub(super) fn clamp_price_axis_flyout_origin(
     flyout: PriceAxisMenuFlyout,
 ) -> gpui::Point<Pixels> {
     let (rows, separators, row, separators_before) = flyout.geometry();
-    let scale = chart_context_menu_scale(viewport);
+    let scale = MenuScale::BASE;
     let width = scale.px(PRICE_AXIS_FLYOUT_WIDTH);
     let height = px(scaled_overlay_height(rows, separators, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
@@ -128,7 +114,7 @@ pub(super) fn chart_context_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let scale = chart_context_menu_scale(viewport);
+    let scale = MenuScale::BASE;
     let origin = clamp_chart_context_menu_origin(menu.position, viewport);
     let popup_bounds = Bounds::new(
         origin,
@@ -378,7 +364,7 @@ pub(super) fn price_axis_menu_layer(
     viewport: gpui::Size<Pixels>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let scale = chart_context_menu_scale(viewport);
+    let scale = MenuScale::BASE;
     let origin = clamp_price_axis_menu_origin(menu.position, viewport, state.left);
     let root_bounds = Bounds::new(
         origin,

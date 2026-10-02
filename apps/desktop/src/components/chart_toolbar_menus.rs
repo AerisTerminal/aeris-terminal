@@ -667,7 +667,7 @@ pub(super) fn time_zone_overlay_content(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let matches = app_state.time_zone_matches(cx);
-    let selected = app_state.chart_time_zone_id(cx);
+    let selected = app_state.chart_time_zone_id();
     let utc_seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()

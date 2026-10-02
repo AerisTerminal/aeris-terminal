@@ -126,8 +126,6 @@ use aeris_terminal_ui::{
     OrderBookLevelSide, ReadOnlyOrderBookView,
 };
 use assets::UiIcon as HugeIcon;
-#[cfg(test)]
-use chart_context_menus::chart_context_menu_scale;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
     chart_settings_menu_layer, overlay_height, price_axis_menu_layer,
@@ -424,8 +422,6 @@ fn current_plan_limits() -> PlanLimits {
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
-/// Share of the shared screen-aware menu growth the chart context menus take.
-const CHART_CONTEXT_MENU_GROWTH_SHARE: f32 = 0.5;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;
@@ -726,6 +722,9 @@ struct WorkspaceSurface {
     economic_event_risk_message: Option<String>,
     chart_link_group: u8,
     chart_link_flags: u8,
+    /// The trader's selected IANA chart time zone. The surface owns it so every chart this
+    /// pane creates (restore, symbol or timeframe swap) and every save use the same value.
+    chart_time_zone: String,
     pending_chart_sync_events: VecDeque<aeris_chart_integration::ChartSyncEvent>,
     pending_linked_instrument: Option<InstallProviderInstrument>,
     side_panels: SidePanelVisibility,

@@ -5,26 +5,26 @@ use super::{
     CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH, CaptionPlatform,
     CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase,
     ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
-    InstrumentMenuSelection, MarketSummaryEntry, MenuScale, OVERLAY_EDGE_MARGIN,
-    PRICE_AXIS_MENU_GAP, PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand,
-    ProviderConnectionPresentation, RithmicSwitchState, SidePanel, SidePanelVisibility,
-    SymbolInputAction, SymbolSelectionTarget, SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP,
-    TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH, TerminalProvider, TimeSalesFilter,
-    TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP, WORKSPACE_TAB_STRIP_PADDING_LEFT,
-    WatchlistDragState, WindowCommand, WindowMoveGestureEvent, WindowMoveGestureTransition,
-    WorkspaceDragState, WorkspaceMaximizeTransition, active_workspace_after_close,
-    aeris_chart_theme, bounded_status_detail, caption_keyboard_activates, caption_pointer_owner,
-    catalog_rejection_message, chart_context_menu_scale, chart_position_id, chart_status_detail,
-    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_control_foreground,
-    chrome_menu_extent, chrome_overlay_progress, chrome_typeahead_char_from, claim_once,
-    clamp_anchored_menu_left, clamp_chart_context_menu_origin, clamp_price_axis_menu_origin,
-    clamped_side_panel_width, connection_presentation, connectivity_chart_state,
-    current_instrument_menu_index, default_rithmic_contract_index, durable_workspace_viewport,
-    fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
-    instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
-    price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
-    ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
-    series_selector_label, should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
+    InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
+    PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
+    RithmicSwitchState, SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget,
+    SymbolSubmitDecision, TIMEFRAME_FLYOUT_GAP, TIMEFRAME_FLYOUT_WIDTH, TIMEFRAME_MENU_WIDTH,
+    TerminalProvider, TimeSalesFilter, TimeSalesSideFilter, TimeframeMenuGroup, WORKSPACE_TAB_GAP,
+    WORKSPACE_TAB_STRIP_PADDING_LEFT, WatchlistDragState, WindowCommand, WindowMoveGestureEvent,
+    WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
+    active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
+    caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
+    chart_position_id, chart_status_detail, chart_surface_notice,
+    chart_time_seconds_from_unix_nanos, chrome_control_foreground, chrome_menu_extent,
+    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
+    connection_presentation, connectivity_chart_state, current_instrument_menu_index,
+    default_rithmic_contract_index, durable_workspace_viewport, fullscreen_escape_command,
+    gpui_color, instrument_listing_refresh_needed, instrument_row_highlighted,
+    instrument_selector_label, instrument_target_after_close, price_axis_flyout_rows,
+    price_axis_root_rows, publication_chart_state, ready_state_can_complete_switch,
+    reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
+    should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
     stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
     switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
@@ -1813,7 +1813,7 @@ fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
 #[test]
 fn chart_context_menu_stays_inside_the_window() {
     let viewport = size(px(800.0), px(600.0));
-    let width = chart_context_menu_scale(viewport).px(CHART_CONTEXT_MENU_WIDTH);
+    let width = px(CHART_CONTEXT_MENU_WIDTH);
     let overflow = clamp_chart_context_menu_origin(point(px(2000.0), px(2000.0)), viewport);
     assert!(overflow.x + width <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
     assert!(overflow.y <= px(600.0) - px(OVERLAY_EDGE_MARGIN));
@@ -1821,34 +1821,15 @@ fn chart_context_menu_stays_inside_the_window() {
         clamp_chart_context_menu_origin(point(px(-20.0), px(-20.0)), size(px(800.0), px(600.0))),
         point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
     );
-}
 
-#[test]
-fn chart_context_menus_grow_gently_on_large_screens() {
-    let laptop = chart_context_menu_scale(size(px(1280.0), px(720.0))).factor();
-    let desktop = chart_context_menu_scale(size(px(1920.0), px(1080.0))).factor();
-    let qhd_viewport = size(px(2560.0), px(1400.0));
-    let qhd = chart_context_menu_scale(qhd_viewport).factor();
-    let large = chart_context_menu_scale(size(px(3840.0), px(2160.0))).factor();
-    assert!(
-        (laptop - 1.0).abs() < f32::EPSILON,
-        "context menus keep the 1x design on ordinary screens"
+    // Context menus keep their 1x design size on large screens.
+    let large = size(px(3840.0), px(2160.0));
+    let overflow = clamp_chart_context_menu_origin(point(px(9000.0), px(9000.0)), large);
+    assert_eq!(
+        overflow.x,
+        px(3840.0) - width - px(OVERLAY_EDGE_MARGIN),
+        "a large viewport does not widen the menu"
     );
-    assert!(desktop > laptop);
-    assert!(qhd > desktop);
-    assert!(
-        qhd < MenuScale::for_viewport(qhd_viewport).factor(),
-        "a cursor popup grows less than the symbol and indicator panels"
-    );
-    assert!(
-        (large - 1.25).abs() < 1e-5,
-        "growth stays compact on very large screens"
-    );
-
-    let viewport = size(px(3840.0), px(2160.0));
-    let width = chart_context_menu_scale(viewport).px(CHART_CONTEXT_MENU_WIDTH);
-    let overflow = clamp_chart_context_menu_origin(point(px(9000.0), px(9000.0)), viewport);
-    assert!(overflow.x + width <= px(3840.0) - px(OVERLAY_EDGE_MARGIN));
 }
 
 #[test]
@@ -1912,32 +1893,21 @@ fn chrome_menus_shrink_to_fit_a_small_viewport() {
     let roomy = chrome_menu_extent(size(px(1440.0), px(900.0)), chrome_height);
     assert!((roomy.width - CHROME_MENU_WIDTH).abs() < f32::EPSILON);
     assert!((roomy.list_height - CHROME_MENU_LIST_HEIGHT).abs() < f32::EPSILON);
-    assert!((roomy.search_height - CHROME_MENU_SEARCH_HEIGHT).abs() < f32::EPSILON);
 
     let cramped = chrome_menu_extent(size(px(800.0), px(600.0)), chrome_height);
     assert!(cramped.width < CHROME_MENU_WIDTH);
     assert!(cramped.width + OVERLAY_EDGE_MARGIN * 2.0 <= 800.0);
     assert!(cramped.list_height < CHROME_MENU_LIST_HEIGHT);
-    let drawn = cramped.search_height + cramped.list_height;
+    let drawn = CHROME_MENU_SEARCH_HEIGHT + cramped.list_height;
     assert!(drawn + chrome_height + OVERLAY_EDGE_MARGIN * 2.0 <= 600.0);
     assert!(drawn <= CHROME_MENU_MAX_HEIGHT);
 }
 
 #[test]
-fn chrome_menus_grow_with_a_large_viewport() {
-    let chrome_height = 44.0;
-    let large = chrome_menu_extent(size(px(3840.0), px(2160.0)), chrome_height);
-    let factor = large.scale.factor();
-    assert!(factor > 1.0);
-    assert!((large.width - CHROME_MENU_WIDTH * factor).abs() < 1e-3);
-    assert!((large.search_height - CHROME_MENU_SEARCH_HEIGHT * factor).abs() < 1e-3);
-    assert!((large.list_height - CHROME_MENU_LIST_HEIGHT * factor).abs() < 1e-3);
-    assert!(large.search_height + large.list_height <= CHROME_MENU_MAX_HEIGHT * factor);
-
-    // A wide but short window scales by its shorter axis and still fits vertically.
-    let short = chrome_menu_extent(size(px(3440.0), px(700.0)), chrome_height);
-    assert!((short.scale.factor() - 1.0).abs() < f32::EPSILON);
-    assert!(short.search_height + short.list_height + chrome_height <= 700.0);
+fn chrome_menus_keep_their_design_size_on_a_large_viewport() {
+    let large = chrome_menu_extent(size(px(3840.0), px(2160.0)), 44.0);
+    assert!((large.width - CHROME_MENU_WIDTH).abs() < f32::EPSILON);
+    assert!((large.list_height - CHROME_MENU_LIST_HEIGHT).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -1945,7 +1915,7 @@ fn chrome_menus_never_exceed_a_tiny_viewport() {
     let tiny = chrome_menu_extent(size(px(240.0), px(180.0)), 44.0);
     assert!(tiny.width <= 240.0);
     assert!(tiny.list_height >= 0.0);
-    assert!(tiny.search_height + tiny.list_height <= 180.0 - 44.0);
+    assert!(CHROME_MENU_SEARCH_HEIGHT + tiny.list_height <= 180.0 - 44.0);
 }
 
 #[test]
@@ -2001,7 +1971,7 @@ fn price_axis_menu_stays_inside_the_window() {
         size(px(800.0), px(600.0)),
         false,
     );
-    let width = chart_context_menu_scale(size(px(800.0), px(600.0))).px(CHART_CONTEXT_MENU_WIDTH);
+    let width = px(CHART_CONTEXT_MENU_WIDTH);
     assert!(overflow.x >= px(OVERLAY_EDGE_MARGIN));
     assert!(overflow.y >= px(OVERLAY_EDGE_MARGIN));
     assert!(overflow.x + width <= px(800.0) - px(OVERLAY_EDGE_MARGIN));
@@ -2010,7 +1980,7 @@ fn price_axis_menu_stays_inside_the_window() {
 
 #[test]
 fn price_axis_menu_opens_into_the_chart() {
-    let width = chart_context_menu_scale(size(px(800.0), px(600.0))).px(CHART_CONTEXT_MENU_WIDTH);
+    let width = px(CHART_CONTEXT_MENU_WIDTH);
     let right_axis = clamp_price_axis_menu_origin(
         point(px(780.0), px(200.0)),
         size(px(800.0), px(600.0)),
