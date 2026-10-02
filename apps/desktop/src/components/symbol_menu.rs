@@ -194,9 +194,9 @@ pub(super) fn instrument_dialog_content(
 
 const SYMBOL_PROVIDER_MENU_WIDTH: f32 = 200.0;
 
-/// Provider dropdown anchored under the search-field logo. Choosing a provider switches the
-/// listing and closes it. A provider with several instrument categories adds a Markets row
-/// whose flyout opens beside the menu, the same way timeframe groups open theirs.
+/// Provider dropdown anchored under the search-field logo. Clicking a provider switches the
+/// listing and closes it. A provider that serves several instrument categories opens its
+/// category flyout when its own row is hovered, exactly like a timeframe group row.
 fn symbol_provider_menu(
     app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
@@ -208,28 +208,45 @@ fn symbol_provider_menu(
         .map(|descriptor| terminal_provider_from_id(descriptor.id))
         .filter(|provider| super::provider_presentation(*provider).is_some())
         .collect();
-    let categories_available = super::provider_presentation(state.menu_provider)
-        .is_some_and(|descriptor| descriptor.search_categories_available);
-    let provider_count = providers.len();
+    let has_categories = |provider: TerminalProvider| {
+        super::provider_presentation(provider)
+            .is_some_and(|descriptor| descriptor.search_categories_available)
+    };
+    let flyout_row = providers
+        .iter()
+        .position(|provider| has_categories(*provider));
+    let last_row = providers.len().saturating_sub(1);
     let provider_rows = providers.into_iter().enumerate().map(|(index, provider)| {
         let row_app = app.clone();
         let hover_app = app.clone();
         let active = provider == state.menu_provider;
-        let last = index + 1 == provider_count && !categories_available;
-        let row = MenuRow::compact(
+        let opens_flyout = has_categories(provider);
+        let mut trailing = div().flex().items_center().gap_1();
+        if active {
+            trailing = trailing.child(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
+        }
+        if opens_flyout {
+            trailing = trailing.child(
+                header_icon(HugeIcon::ArrowRight)
+                    .with_size(px(16.0))
+                    .color(gpui_color(colors.icon)),
+            );
+        }
+        MenuRow::compact(
             ("symbol_provider_row", index),
             terminal_provider_display(provider),
             theme,
         )
         .resting_fill(colors.surface)
         .leading(provider_exchange_mark(provider, px(18.0), false, &colors))
-        .highlighted(active)
+        .highlighted(active || (opens_flyout && state.markets_flyout_open))
         .disabled(state.availability.selection_pending)
-        .flush_in_panel(index == 0, last)
+        .trailing(trailing)
+        .flush_in_panel(index == 0, index == last_row)
         .on_hover(move |hovered, _, cx| {
             if *hovered {
                 hover_app.update(cx, |surface, surface_cx| {
-                    surface.set_symbol_markets_flyout(false, surface_cx);
+                    surface.set_symbol_markets_flyout(opens_flyout, surface_cx);
                 });
             }
         })
@@ -237,12 +254,7 @@ fn symbol_provider_menu(
             row_app.update(cx, |surface, surface_cx| {
                 surface.choose_symbol_provider(provider, window, surface_cx);
             });
-        });
-        if active {
-            row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)))
-        } else {
-            row
-        }
+        })
     });
     let root = div()
         .id("symbol_provider_menu")
@@ -254,10 +266,7 @@ fn symbol_provider_menu(
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.surface))
         .overflow_hidden()
-        .children(provider_rows)
-        .when(categories_available, |root| {
-            root.child(symbol_markets_row(app, state, theme))
-        });
+        .children(provider_rows);
     div()
         .id("symbol_provider_menu_host")
         .absolute()
@@ -270,67 +279,18 @@ fn symbol_provider_menu(
             "symbol_provider_menu_enter",
             PopupAnimationOrigin::TOP_LEFT,
         ))
-        .when(categories_available && state.markets_flyout_open, |host| {
-            host.child(symbol_markets_flyout(app, state, provider_count, theme))
-        })
-}
-
-/// The Markets row: summarises the included categories and opens their flyout.
-fn symbol_markets_row(
-    app: &Entity<WorkspaceSurface>,
-    state: &InstrumentSelectorState,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    let colors = theme.colors;
-    let summary = SymbolSearchCategory::ALL
-        .into_iter()
-        .filter(|category| category.included(state.search_categories))
-        .map(SymbolSearchCategory::label)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let hover_app = app.clone();
-    let click_app = app.clone();
-    MenuRow::compact("symbol_markets_row", "Markets", theme)
-        .resting_fill(colors.surface)
-        .highlighted(state.markets_flyout_open)
-        .trailing(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_secondary))
-                        .child(summary),
-                )
-                .child(
-                    header_icon(HugeIcon::ArrowRight)
-                        .with_size(px(16.0))
-                        .color(gpui_color(colors.icon)),
-                ),
+        .when_some(
+            flyout_row.filter(|_| state.markets_flyout_open),
+            |host, row| host.child(symbol_markets_flyout(app, state, row, theme)),
         )
-        .flush_in_panel(false, true)
-        .on_hover(move |hovered, _, cx| {
-            if *hovered {
-                hover_app.update(cx, |surface, surface_cx| {
-                    surface.set_symbol_markets_flyout(true, surface_cx);
-                });
-            }
-        })
-        .on_click(move |_, _, cx| {
-            click_app.update(cx, |surface, surface_cx| {
-                surface.set_symbol_markets_flyout(true, surface_cx);
-            });
-        })
 }
 
-/// Category toggles beside the provider menu, aligned to the Markets row and styled like the
-/// timeframe flyout. Rows toggle in place; the last included category cannot be cleared.
+/// Category toggles beside the provider menu, aligned to the hovered provider's row and styled
+/// like the timeframe flyout. Rows toggle in place; the last included category cannot be cleared.
 fn symbol_markets_flyout(
     app: &Entity<WorkspaceSurface>,
     state: &InstrumentSelectorState,
-    markets_row_index: usize,
+    provider_row_index: usize,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
@@ -366,7 +326,7 @@ fn symbol_markets_flyout(
         .overflow_hidden()
         .children(rows);
     let top =
-        CHART_CONTEXT_MENU_ROW_HEIGHT * f32::from(u16::try_from(markets_row_index).unwrap_or(0));
+        CHART_CONTEXT_MENU_ROW_HEIGHT * f32::from(u16::try_from(provider_row_index).unwrap_or(0));
     div()
         .id("symbol_markets_flyout_host")
         .absolute()
