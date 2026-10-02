@@ -171,6 +171,7 @@ pub(super) struct BrokerApi {
     futures_sessions: Mutex<Option<(Instant, [MarketSession; 2])>>,
     equity_session: Mutex<Option<(Instant, MarketSession)>>,
     search_control: Mutex<BTreeMap<u64, (u64, Arc<AtomicBool>)>>,
+    startup_search_control: Mutex<BTreeMap<u64, (u64, Arc<AtomicBool>)>>,
     authorization_epoch: AtomicU64,
 }
 #[derive(Default)]
@@ -185,6 +186,22 @@ struct BrokerApiState {
 }
 impl BrokerApi {
     pub(super) fn register_search(&self, consumer: u64, generation: u64) -> Result<(), String> {
+        if generation == STARTUP_CATALOG_COMMAND_GENERATION {
+            let mut searches = self
+                .startup_search_control
+                .lock()
+                .map_err(|_| "Tastytrade startup search control failed")?;
+            if let Some((_, cancellation)) = searches.remove(&consumer) {
+                cancellation.store(true, Ordering::Release);
+            }
+            if searches.len() >= MAXIMUM_CONSUMERS
+                && let Some((_, (_, cancellation))) = searches.pop_first()
+            {
+                cancellation.store(true, Ordering::Release);
+            }
+            searches.insert(consumer, (generation, Arc::new(AtomicBool::new(false))));
+            return Ok(());
+        }
         let mut searches = self
             .search_control
             .lock()
@@ -208,6 +225,11 @@ impl BrokerApi {
     }
     pub(super) fn cancel_searches(&self) {
         if let Ok(mut searches) = self.search_control.lock() {
+            for (_, (_, cancellation)) in std::mem::take(&mut *searches) {
+                cancellation.store(true, Ordering::Release);
+            }
+        }
+        if let Ok(mut searches) = self.startup_search_control.lock() {
             for (_, (_, cancellation)) in std::mem::take(&mut *searches) {
                 cancellation.store(true, Ordering::Release);
             }
@@ -283,33 +305,41 @@ impl BrokerApi {
         stop: &Arc<AtomicBool>,
     ) -> Result<Vec<SearchInstrument>, String> {
         let cancellation = {
-            let mut searches = self
-                .search_control
-                .lock()
-                .map_err(|_| "Tastytrade search control failed")?;
-            match searches.get(&consumer) {
-                Some((current, cancellation))
-                    if *current == generation && *current != STARTUP_CATALOG_COMMAND_GENERATION =>
-                {
-                    Arc::clone(cancellation)
-                }
-                Some((current, _))
-                    if *current > generation && *current != STARTUP_CATALOG_COMMAND_GENERATION =>
-                {
-                    return Err("Tastytrade search superseded".into());
-                }
-                _ => {
-                    if let Some((_, prior)) = searches.remove(&consumer) {
-                        prior.store(true, Ordering::Release);
+            if generation == STARTUP_CATALOG_COMMAND_GENERATION {
+                let searches = self
+                    .startup_search_control
+                    .lock()
+                    .map_err(|_| "Tastytrade startup search control failed")?;
+                searches
+                    .get(&consumer)
+                    .filter(|(current, _)| *current == generation)
+                    .map(|(_, cancellation)| Arc::clone(cancellation))
+                    .ok_or("Tastytrade startup search superseded")?
+            } else {
+                let mut searches = self
+                    .search_control
+                    .lock()
+                    .map_err(|_| "Tastytrade search control failed")?;
+                match searches.get(&consumer) {
+                    Some((current, cancellation)) if *current == generation => {
+                        Arc::clone(cancellation)
                     }
-                    if searches.len() >= MAXIMUM_CONSUMERS
-                        && let Some((_, (_, prior))) = searches.pop_first()
-                    {
-                        prior.store(true, Ordering::Release);
+                    Some((current, _)) if *current > generation => {
+                        return Err("Tastytrade search superseded".into());
                     }
-                    let cancellation = Arc::new(AtomicBool::new(false));
-                    searches.insert(consumer, (generation, Arc::clone(&cancellation)));
-                    cancellation
+                    _ => {
+                        if let Some((_, prior)) = searches.remove(&consumer) {
+                            prior.store(true, Ordering::Release);
+                        }
+                        if searches.len() >= MAXIMUM_CONSUMERS
+                            && let Some((_, (_, prior))) = searches.pop_first()
+                        {
+                            prior.store(true, Ordering::Release);
+                        }
+                        let cancellation = Arc::new(AtomicBool::new(false));
+                        searches.insert(consumer, (generation, Arc::clone(&cancellation)));
+                        cancellation
+                    }
                 }
             }
         };

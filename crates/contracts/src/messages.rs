@@ -686,9 +686,11 @@ pub struct ProviderSessionHours {
     pub timezone: String,
 }
 
-/// Requests one bounded exact provider-instrument search for a market consumer.
+/// Reserves the startup catalog command generation used by desktop pane restore
+/// for provider metadata refreshes and selections.
 pub const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
 
+/// Requests one bounded exact provider-instrument search for a market consumer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchProviderInstruments {
     pub consumer_id: u64,

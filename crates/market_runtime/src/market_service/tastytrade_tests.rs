@@ -17,6 +17,7 @@ fn resolved_instrument_cache_reuses_identity_and_clears_on_authorization_change(
         venue: "NYSE".into(),
         instrument_type: item.instrument_type.clone(),
         tick_size: None,
+        tick_sizes: Vec::new(),
         point_value: None,
         currency: None,
         expiration_date: None,

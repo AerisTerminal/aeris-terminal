@@ -30,11 +30,36 @@ pub struct ResolvedInstrument {
     pub venue: String,
     pub instrument_type: String,
     pub tick_size: Option<i64>,
+    /// The provider's ordered price bands. A threshold is the exclusive upper
+    /// bound for that band; the final band normally has no threshold.
+    pub tick_sizes: Vec<PriceIncrementBand>,
     pub point_value: Option<i64>,
     pub currency: Option<String>,
     pub expiration_date: Option<String>,
     pub first_notice_date: Option<String>,
     pub last_trade_date: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceIncrementBand {
+    pub value: i64,
+    pub threshold: Option<i64>,
+}
+
+impl ResolvedInstrument {
+    #[must_use]
+    pub fn tick_size_for_price(&self, price: Option<i64>) -> Option<i64> {
+        let bands = &self.tick_sizes;
+        let Some(price) = price else {
+            return bands.last().map(|band| band.value).or(self.tick_size);
+        };
+        bands
+            .iter()
+            .find(|band| band.threshold.is_some_and(|threshold| price < threshold))
+            .or_else(|| bands.last())
+            .map(|band| band.value)
+            .or(self.tick_size)
+    }
 }
 
 impl ResolvedInstrument {
@@ -53,6 +78,10 @@ impl ResolvedInstrument {
             venue: future.exchange.clone(),
             instrument_type: "Future".into(),
             tick_size: Some(tick_size),
+            tick_sizes: vec![PriceIncrementBand {
+                value: tick_size,
+                threshold: None,
+            }],
             point_value: Some(point_value),
             currency: future.currency.clone(),
             expiration_date: Some(future.expiration_date.clone()),
@@ -83,30 +112,7 @@ impl ResolvedInstrument {
             .or(requested.exchange.as_deref())
             .filter(|s| valid_identity(s))
             .ok_or("Tastytrade instrument venue missing")?;
-        let mut ticks = Vec::new();
-        if let Some(tick) = data.get("tick-size") {
-            ticks.push(parse_decimal_to_fixed(
-                tick.as_str().ok_or("Tastytrade tick size invalid")?,
-                DATA_SCALE,
-            )?);
-        }
-        if let Some(values) = data.get("tick-sizes").and_then(Value::as_array) {
-            if values.len() > 64 {
-                return Err("Tastytrade tick schedule exceeded bound".into());
-            }
-            for value in values {
-                ticks.push(parse_decimal_to_fixed(
-                    value
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .ok_or("Tastytrade tick schedule value missing")?,
-                    DATA_SCALE,
-                )?);
-            }
-        }
-        if ticks.iter().any(|tick| *tick <= 0) {
-            return Err("Tastytrade tick increment invalid".into());
-        }
+        let tick_sizes = parse_tick_sizes(data)?;
         let point_value = if requested.instrument_type == "Future" {
             Some(parse_decimal_to_fixed(
                 text("notional-multiplier").ok_or("Tastytrade futures multiplier missing")?,
@@ -137,7 +143,8 @@ impl ResolvedInstrument {
             streamer_symbol: streamer_symbol.into(),
             venue: venue.into(),
             instrument_type: requested.instrument_type.clone(),
-            tick_size: ticks.into_iter().min(),
+            tick_size: tick_sizes.last().map(|band| band.value),
+            tick_sizes,
             point_value,
             currency: data
                 .get("currency")
@@ -148,6 +155,60 @@ impl ResolvedInstrument {
             last_trade_date: parse_date("last-trade-date")?,
         })
     }
+}
+
+fn parse_tick_sizes(data: &Value) -> Result<Vec<PriceIncrementBand>, String> {
+    let mut tick_sizes = Vec::new();
+    if let Some(tick) = data.get("tick-size") {
+        tick_sizes.push(PriceIncrementBand {
+            value: parse_decimal_to_fixed(
+                tick.as_str().ok_or("Tastytrade tick size invalid")?,
+                DATA_SCALE,
+            )?,
+            threshold: None,
+        });
+    }
+    if let Some(values) = data.get("tick-sizes").and_then(Value::as_array) {
+        if values.len() > 64 {
+            return Err("Tastytrade tick schedule exceeded bound".into());
+        }
+        for value in values {
+            tick_sizes.push(PriceIncrementBand {
+                value: parse_decimal_to_fixed(
+                    value
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .ok_or("Tastytrade tick schedule value missing")?,
+                    DATA_SCALE,
+                )?,
+                threshold: value
+                    .get("threshold")
+                    .map(|threshold| {
+                        parse_decimal_to_fixed(
+                            threshold
+                                .as_str()
+                                .ok_or("Tastytrade tick schedule threshold invalid")?,
+                            DATA_SCALE,
+                        )
+                    })
+                    .transpose()?,
+            });
+        }
+    }
+    if tick_sizes.is_empty()
+        || tick_sizes
+            .iter()
+            .any(|band| band.value <= 0 || band.threshold.is_some_and(|threshold| threshold <= 0))
+        || tick_sizes.windows(2).any(|bands| {
+            bands[0]
+                .threshold
+                .zip(bands[1].threshold)
+                .is_some_and(|(left, right)| left >= right)
+        })
+    {
+        return Err("Tastytrade tick increment invalid".into());
+    }
+    Ok(tick_sizes)
 }
 
 pub(super) fn valid_identity(value: &str) -> bool {
@@ -259,5 +320,34 @@ mod tests {
         let mut invalid = future;
         invalid.notional_multiplier = "50.000000001".into();
         assert!(ResolvedInstrument::from_future(&invalid).is_err());
+    }
+
+    #[test]
+    fn equity_tick_bands_select_the_current_price_band() {
+        let requested = SearchInstrument {
+            symbol: "AAPL".into(),
+            instrument_type: "Equity".into(),
+            exchange: Some("NASDAQ".into()),
+            description: None,
+        };
+        let response = serde_json::json!({
+            "data": {
+                "symbol": "AAPL",
+                "streamer-symbol": "AAPL",
+                "exchange": "NASDAQ",
+                "tick-sizes": [
+                    {"value": "0.0001", "threshold": "1.0"},
+                    {"value": "0.01"}
+                ]
+            }
+        });
+        let resolved = ResolvedInstrument::from_response(&response, &requested)
+            .expect("banded equity metadata");
+        assert_eq!(
+            resolved.tick_size_for_price(Some(331 * 100_000_000)),
+            Some(1_000_000)
+        );
+        assert_eq!(resolved.tick_size_for_price(Some(50_000_000)), Some(10_000));
+        assert_eq!(resolved.tick_size_for_price(None), Some(1_000_000));
     }
 }

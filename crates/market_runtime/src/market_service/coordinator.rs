@@ -101,7 +101,9 @@ fn run_coordinator(
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_searches: BTreeMap::new(),
+        startup_catalog_searches: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
+        startup_catalog_selections: BTreeMap::new(),
         sessions,
     };
     let demand_flushers = coordinator
@@ -324,7 +326,9 @@ pub(super) struct Coordinator<'a> {
     /// Provider callbacks are fenced here before entering the canonical consumer
     /// outbox, so desktop presentation code never needs a second pending-command map.
     pub(super) catalog_searches: BTreeMap<(ConsumerId, String), u64>,
+    pub(super) startup_catalog_searches: BTreeMap<(ConsumerId, String), u64>,
     pub(super) catalog_selections: BTreeMap<(ConsumerId, String), u64>,
+    pub(super) startup_catalog_selections: BTreeMap<(ConsumerId, String), u64>,
     /// One bounded lifecycle and control slot per registered provider.
     pub(super) sessions: BTreeMap<&'static str, ProviderSessionSlot>,
 }
@@ -354,7 +358,11 @@ impl Coordinator<'_> {
             self.consumer_clients.remove(&consumer_id);
             self.catalog_searches
                 .retain(|(candidate, _), _| *candidate != consumer_id);
+            self.startup_catalog_searches
+                .retain(|(candidate, _), _| *candidate != consumer_id);
             self.catalog_selections
+                .retain(|(candidate, _), _| *candidate != consumer_id);
+            self.startup_catalog_selections
                 .retain(|(candidate, _), _| *candidate != consumer_id);
             self.remove_waiter(consumer_id);
         }
@@ -739,7 +747,11 @@ impl Coordinator<'_> {
         self.consumer_clients.remove(&consumer_id);
         self.catalog_searches
             .retain(|(candidate, _), _| *candidate != consumer_id);
+        self.startup_catalog_searches
+            .retain(|(candidate, _), _| *candidate != consumer_id);
         self.catalog_selections
+            .retain(|(candidate, _), _| *candidate != consumer_id);
+        self.startup_catalog_selections
             .retain(|(candidate, _), _| *candidate != consumer_id);
         self.price_alerts.remove_consumer(consumer_id);
         self.remove_waiter(consumer_id);
@@ -1488,7 +1500,9 @@ mod tests {
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             catalog_searches: BTreeMap::new(),
+            startup_catalog_searches: BTreeMap::new(),
             catalog_selections: BTreeMap::new(),
+            startup_catalog_selections: BTreeMap::new(),
             sessions: super::super::BUILT_IN_PROVIDER_DESCRIPTORS
                 .iter()
                 .map(|descriptor| (descriptor.id, ProviderSessionSlot::default()))
@@ -4305,6 +4319,41 @@ mod tests {
             Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(_))
         ));
         coordinator.handle_catalog_search(result);
+        assert!(!coordinator.catalog_searches.contains_key(&key));
+    }
+
+    #[test]
+    fn startup_and_user_catalog_searches_have_independent_fences() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        let key = (consumer, "tastytrade".to_string());
+        coordinator.startup_catalog_searches.insert(
+            key.clone(),
+            aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
+        );
+        coordinator.catalog_searches.insert(key.clone(), 1);
+
+        coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
+            consumer_id: consumer.0.get(),
+            provider: "tastytrade".into(),
+            provider_generation: 1,
+            search_generation: aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
+            instruments: Vec::new(),
+        });
+        assert!(!coordinator.startup_catalog_searches.contains_key(&key));
+        assert_eq!(coordinator.catalog_searches.get(&key), Some(&1));
+
+        coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
+            consumer_id: consumer.0.get(),
+            provider: "tastytrade".into(),
+            provider_generation: 1,
+            search_generation: 1,
+            instruments: Vec::new(),
+        });
         assert!(!coordinator.catalog_searches.contains_key(&key));
     }
 

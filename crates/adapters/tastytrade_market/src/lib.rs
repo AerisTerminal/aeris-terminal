@@ -19,7 +19,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 mod catalog;
 mod session;
-pub use catalog::{FutureInstrument, ResolvedInstrument, SearchInstrument};
+pub use catalog::{FutureInstrument, PriceIncrementBand, ResolvedInstrument, SearchInstrument};
 pub use session::{
     DATA_SCALE, DxlinkSession, FeedEvent, Subscription, SubscriptionChangeBudget,
     SubscriptionChangeError, TradePrint,
