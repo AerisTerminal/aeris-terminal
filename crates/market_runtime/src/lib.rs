@@ -30,12 +30,41 @@ pub fn migrate_retained_provider_display_symbol(
     instrument: &aeris_contracts::InstallProviderInstrument,
 ) -> Option<String> {
     match instrument.provider.as_str() {
+        "tastytrade" if instrument.instrument_id.starts_with("tastytrade:Future:") => Some(
+            instrument
+                .display_symbol
+                .strip_prefix('/')
+                .unwrap_or(&instrument.display_symbol)
+                .to_string(),
+        ),
         "hyperliquid" => aeris_hyperliquid_market_adapter::legacy_display_label(
             &instrument.instrument_id,
             &instrument.provider_symbol,
             &instrument.display_symbol,
         ),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod display_symbol_tests {
+    use super::migrate_retained_provider_display_symbol;
+    use aeris_contracts::InstallProviderInstrument;
+
+    #[test]
+    fn tastytrade_legacy_future_display_is_migrated_without_touching_identity() {
+        let instrument = InstallProviderInstrument {
+            provider: "tastytrade".into(),
+            instrument_id: "tastytrade:Future:/ESZ6".into(),
+            provider_symbol: "/ESZ26:XCME".into(),
+            display_symbol: "/ESZ6".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            migrate_retained_provider_display_symbol(&instrument).as_deref(),
+            Some("ESZ6")
+        );
+        assert_eq!(instrument.provider_symbol, "/ESZ26:XCME");
     }
 }
 

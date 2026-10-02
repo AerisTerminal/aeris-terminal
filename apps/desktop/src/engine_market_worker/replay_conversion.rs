@@ -13,6 +13,7 @@ use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 pub(crate) fn replay_runtime_snapshot(
     publication: &MarketSeriesSnapshot,
     price_increment: Option<i64>,
+    display_symbol: Option<&str>,
 ) -> Result<ReplaySnapshot, String> {
     let snapshot = publication.snapshot.as_ref();
     let series = &snapshot.series;
@@ -22,7 +23,7 @@ pub(crate) fn replay_runtime_snapshot(
             .map_err(|error| error.to_string())?,
         revision: u64::from(series.definition_version),
         asset_class,
-        symbol,
+        symbol: display_symbol.unwrap_or(&symbol).to_string(),
         venue_id: venue,
         trading_currency,
         precision: InstrumentPrecision::try_new(snapshot.price_scale, snapshot.quantity_scale)
