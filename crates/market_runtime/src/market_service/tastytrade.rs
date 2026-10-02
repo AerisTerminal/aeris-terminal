@@ -1426,7 +1426,20 @@ impl Worker {
                 Ok::<(), String>(())
             })();
             if let Err(error) = result {
-                self.recover(error);
+                if error.contains("DXLink subscription change budget exhausted")
+                    || error.contains("DXLink subscription capacity exhausted")
+                {
+                    // Subscription throttling is bounded demand pressure, not
+                    // a transport failure. Keep the socket and retry the
+                    // reconciliation after the rolling budget cools down.
+                    self.retry_at = Instant::now() + Duration::from_millis(250);
+                    let _ = self.publish(RealtimeEvent::Recovering(
+                        self.epoch(),
+                        format!("Tastytrade subscription reconciliation deferred: {error}"),
+                    ));
+                } else {
+                    self.recover(error);
+                }
             }
             if self.socket.is_none() {
                 thread::sleep(Duration::from_millis(25));
@@ -1791,6 +1804,9 @@ impl Worker {
         if let Err(error) = result
             && let Some(task) = self.histories.remove(&channel)
         {
+            if let Some(socket) = &mut self.socket {
+                let _ = socket.close_channel(channel);
+            }
             self.queue_completion(task.request, Err(error));
         }
     }
@@ -1962,7 +1978,11 @@ impl Worker {
             batch.1.clear();
         }
         if batch.1.len() >= MAXIMUM_TICK_HISTORY {
-            return Err("Tastytrade live transaction exceeded its bound".into());
+            // Drop only the incomplete transaction. The healthy socket and
+            // worker retry counter remain untouched.
+            batch.1.clear();
+            batch.0 = false;
+            return Ok(());
         }
         batch.1.push(IndexedTradeMutation {
             index,

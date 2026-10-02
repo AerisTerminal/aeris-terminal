@@ -130,7 +130,11 @@ pub(super) fn order_book_snapshot(
     }
     publication.top_of_book_only = order_book.top_of_book_only;
     if order_book.top_of_book_only {
-        publication.state = if order_book.top_of_book.is_some() {
+        publication.state = if order_book
+            .top_of_book
+            .as_ref()
+            .is_some_and(|quote| quote.bid.is_some() && quote.ask.is_some())
+        {
             aeris_market_data::OrderBookState::Ready
         } else {
             aeris_market_data::OrderBookState::Recovering(
