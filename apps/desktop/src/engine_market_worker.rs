@@ -20,8 +20,9 @@ use aeris_application::{
 };
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
-    ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument,
-    SeriesCadence, SeriesKey, SeriesLoadState, WorkspacePaneKind, WorkspaceState,
+    ProviderInstrumentSummary, ProviderState, STARTUP_CATALOG_COMMAND_GENERATION,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState,
+    WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
 use aeris_contracts::{WorkspacePaneState, WorkspaceTabState};
@@ -48,7 +49,6 @@ use aeris_desktop::market_worker::{
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
 const INITIAL_GENERATION: u64 = 1;
-const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
 const MESSAGE_CAPACITY: usize = 256;
 const COMMAND_CAPACITY: usize = 32;
 const SUBSCRIPTION_ID: &str = "desktop_runtime_rithmic_bars";

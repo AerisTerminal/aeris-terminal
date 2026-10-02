@@ -15,6 +15,7 @@ use super::{
 use super::{ProviderGeneration, id};
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+    STARTUP_CATALOG_COMMAND_GENERATION,
 };
 use aeris_market_data::{DepthLevel, EventMetadata, QualifiedTimestamp};
 use aeris_tastytrade_market_adapter::{
@@ -25,7 +26,6 @@ use aeris_tastytrade_market_adapter::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const ENTITLEMENT: &str = "tastytrade-authorized";
-const STARTUP_CATALOG_GENERATION: u64 = u32::MAX as u64;
 const CATALOG_UNAVAILABLE_DETAIL: &str =
     "Tastytrade catalog unavailable; reconnect tastytrade in Accounts and retry";
 pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
@@ -190,7 +190,8 @@ impl BrokerApi {
             .lock()
             .map_err(|_| "Tastytrade search control failed")?;
         if searches.get(&consumer).is_some_and(|(current, _)| {
-            *current >= generation && *current != STARTUP_CATALOG_GENERATION
+            (generation == STARTUP_CATALOG_COMMAND_GENERATION && *current != generation)
+                || (*current >= generation && *current != STARTUP_CATALOG_COMMAND_GENERATION)
         }) {
             return Ok(());
         }
@@ -288,12 +289,12 @@ impl BrokerApi {
                 .map_err(|_| "Tastytrade search control failed")?;
             match searches.get(&consumer) {
                 Some((current, cancellation))
-                    if *current == generation && *current != STARTUP_CATALOG_GENERATION =>
+                    if *current == generation && *current != STARTUP_CATALOG_COMMAND_GENERATION =>
                 {
                     Arc::clone(cancellation)
                 }
                 Some((current, _))
-                    if *current > generation && *current != STARTUP_CATALOG_GENERATION =>
+                    if *current > generation && *current != STARTUP_CATALOG_COMMAND_GENERATION =>
                 {
                     return Err("Tastytrade search superseded".into());
                 }

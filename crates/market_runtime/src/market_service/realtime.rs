@@ -23,26 +23,6 @@ use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
 
-enum LivePublicationError {
-    OrderingConflict,
-    Other(String),
-}
-
-impl From<String> for LivePublicationError {
-    fn from(error: String) -> Self {
-        Self::Other(error)
-    }
-}
-
-fn live_publication_error(error: aeris_market_engine::EngineError) -> LivePublicationError {
-    match error {
-        aeris_market_engine::EngineError::ConflictingSeriesGeneration(_) => {
-            LivePublicationError::OrderingConflict
-        }
-        error => LivePublicationError::Other(error.to_string()),
-    }
-}
-
 pub(super) const fn rithmic_invalidation_detail(
     reason: Option<ProviderInvalidationReason>,
 ) -> &'static str {
@@ -1619,22 +1599,35 @@ impl Coordinator<'_> {
         price_scale: u8,
         quantity_scale: u8,
         bars: Vec<MarketBar>,
-    ) -> Result<(), LivePublicationError> {
+    ) -> Result<(), String> {
         for bar in bars {
-            if self
-                .compact_live_series_if_needed(series, generation)
-                .map_err(LivePublicationError::Other)?
-            {
+            if self.compact_live_series_if_needed(series, generation)? {
                 // `take_publication` already drained the provider-owned handoff;
                 // while detached, canonical history must not accept a tail that
                 // is not contiguous with its bounded historical window.
                 break;
             }
             let exchange_timestamp_unix_nanos = bar.exchange_timestamp_unix_nanos;
-            let publications = self
-                .engine
-                .install_realtime_tail(generation, series, price_scale, quantity_scale, bar, true)
-                .map_err(live_publication_error)?;
+            let publications = match self.engine.install_realtime_tail(
+                generation,
+                series,
+                price_scale,
+                quantity_scale,
+                bar,
+                true,
+            ) {
+                Ok(publications) => publications,
+                Err(error) => {
+                    let canonical = self
+                        .engine
+                        .series_snapshot(series)
+                        .and_then(|snapshot| snapshot.bars.last().copied());
+                    return Err(format!(
+                        "{error}; handoff bar sequence={} time={} canonical_tail={canonical:?}",
+                        bar.source_sequence, bar.exchange_timestamp_unix_nanos
+                    ));
+                }
+            };
             for publication in publications {
                 if let Some(events) = self.events.get_mut(&publication.consumer_id) {
                     events.publish_series_update(series_update_message(&publication));
@@ -1665,7 +1658,7 @@ impl Coordinator<'_> {
         price_scale: u8,
         quantity_scale: u8,
         bar: MarketBar,
-    ) -> Result<(), LivePublicationError> {
+    ) -> Result<(), String> {
         if self
             .detached_history
             .contains(&(series.clone(), generation))
@@ -1676,7 +1669,7 @@ impl Coordinator<'_> {
         let publications = self
             .engine
             .replace_realtime_completed_bar(generation, series, price_scale, quantity_scale, bar)
-            .map_err(live_publication_error)?;
+            .map_err(|error| error.to_string())?;
         self.publish_installed_history(&publications);
         match self.execute_study_bar_change(series, exchange_timestamp_unix_nanos) {
             Ok(batch) => {
@@ -3213,21 +3206,13 @@ impl Coordinator<'_> {
                     ),
             };
             if let Err(error) = published {
-                match error {
-                    LivePublicationError::OrderingConflict => eprintln!(
-                        "Aeris live publication discarded an out-of-sequence bar for {}",
-                        series.instrument_id
-                    ),
-                    LivePublicationError::Other(detail) => {
-                        eprintln!("Aeris engine live publication failed: {detail}");
-                        self.rithmic_series_recovering(
-                            &series,
-                            generation,
-                            FailureStage::Publication,
-                            "Live publication requires covering history",
-                        );
-                    }
-                }
+                eprintln!("Aeris engine live publication failed: {error}");
+                self.rithmic_series_recovering(
+                    &series,
+                    generation,
+                    FailureStage::Publication,
+                    "Live publication requires covering history",
+                );
             }
         }
     }
@@ -3399,21 +3384,13 @@ impl Coordinator<'_> {
                     ),
             };
             if let Err(error) = published {
-                match error {
-                    LivePublicationError::OrderingConflict => eprintln!(
-                        "Aeris live publication discarded an out-of-sequence bar for {}",
-                        series.instrument_id
-                    ),
-                    LivePublicationError::Other(detail) => {
-                        eprintln!("Aeris engine live publication failed: {detail}");
-                        self.candle_series_recovering(
-                            &series,
-                            generation,
-                            FailureStage::Publication,
-                            "Live publication requires covering history",
-                        );
-                    }
-                }
+                eprintln!("Aeris engine live publication failed: {error}");
+                self.candle_series_recovering(
+                    &series,
+                    generation,
+                    FailureStage::Publication,
+                    "Live publication requires covering history",
+                );
             }
         }
     }

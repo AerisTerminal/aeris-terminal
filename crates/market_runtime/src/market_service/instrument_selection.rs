@@ -125,8 +125,14 @@ impl Coordinator<'_> {
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
-            self.catalog_searches
-                .insert((consumer_id, provider), generation);
+            let key = (consumer_id, provider);
+            if !(generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION
+                && self.catalog_searches.get(&key).is_some_and(|current| {
+                    *current != aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION
+                }))
+            {
+                self.catalog_searches.insert(key, generation);
+            }
         }
         let _ = reply.send(result);
     }
@@ -149,8 +155,14 @@ impl Coordinator<'_> {
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
-            self.catalog_selections
-                .insert((consumer_id, provider), generation);
+            let key = (consumer_id, provider);
+            if !(generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION
+                && self.catalog_selections.get(&key).is_some_and(|current| {
+                    *current != aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION
+                }))
+            {
+                self.catalog_selections.insert(key, generation);
+            }
         }
         let _ = reply.send(result);
     }

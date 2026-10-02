@@ -687,6 +687,8 @@ pub struct ProviderSessionHours {
 }
 
 /// Requests one bounded exact provider-instrument search for a market consumer.
+pub const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchProviderInstruments {
     pub consumer_id: u64,
