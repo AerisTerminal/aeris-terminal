@@ -1033,6 +1033,19 @@ pub(super) fn exchange_mark(
     colors: &aeris_design_system::ThemeColors,
 ) -> Div {
     let glyph_size = if bordered { size - px(4.0) } else { size };
+    mark_tile(size, bordered, colors).child(ColoredSvgMark {
+        path: logo.path(),
+        size: glyph_size,
+    })
+}
+
+/// Round tile shared by every provider and exchange mark, so a provider drawn with a generic
+/// icon occupies exactly the same footprint as one drawn with its logo.
+pub(super) fn mark_tile(
+    size: Pixels,
+    bordered: bool,
+    colors: &aeris_design_system::ThemeColors,
+) -> Div {
     div()
         .size(size)
         .flex_none()
@@ -1043,10 +1056,6 @@ pub(super) fn exchange_mark(
         .overflow_hidden()
         .when(bordered, |mark| {
             mark.border_1().border_color(gpui_color(colors.border))
-        })
-        .child(ColoredSvgMark {
-            path: logo.path(),
-            size: glyph_size,
         })
 }
 

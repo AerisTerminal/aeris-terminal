@@ -221,8 +221,9 @@ use terminal_chrome::{
 use terminal_chrome::{
     WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme,
     button_activation, button_activation_at, chrome_button_style, chrome_tooltip, exchange_mark,
-    fullscreen_escape_command, header_icon, round_icon_button, series_glyph, terminal_header,
-    window_move_gesture_transition, workspace_title_bar, workspace_title_bar_visible,
+    fullscreen_escape_command, header_icon, mark_tile, round_icon_button, series_glyph,
+    terminal_header, window_move_gesture_transition, workspace_title_bar,
+    workspace_title_bar_visible,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,

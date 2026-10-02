@@ -19,8 +19,10 @@ pub(super) fn provider_exchange_mark(
         Some("hyperliquid") => {
             exchange_mark(assets::ExchangeLogo::Hyperliquid, size, well, colors).into_any_element()
         }
-        _ => header_icon(HugeIcon::Chart)
-            .with_size(size)
+        // No square logo exists for this provider; a generic glyph sits in the same tile and
+        // is inset like the logos' own artwork so every mark reads at one size.
+        _ => mark_tile(size, well, colors)
+            .child(header_icon(HugeIcon::Chart).with_size(size * 0.6))
             .into_any_element(),
     }
 }
