@@ -755,7 +755,10 @@ impl TradeLiveHandoff {
                 continue;
             }
             changed = true;
-            if bar.exchange_timestamp_unix_nanos < newest_timestamp && prior.is_some() {
+            if prior.is_some()
+                && (bar.exchange_timestamp_unix_nanos < newest_timestamp
+                    || self.forming_tail_sequence != Some(bar.source_sequence))
+            {
                 enqueue_bar_transition(
                     &mut self.pending_corrections,
                     bar,
@@ -934,7 +937,9 @@ impl TradeLiveHandoff {
             }
         } else if self.bars[position] != authoritative {
             self.bars[position] = authoritative;
-            if position + 1 < self.bars.len() {
+            if position + 1 < self.bars.len()
+                || self.forming_tail_sequence != Some(authoritative.source_sequence)
+            {
                 enqueue_bar_transition(
                     &mut self.pending_corrections,
                     authoritative,
@@ -981,6 +986,7 @@ impl TradeLiveHandoff {
             .source_sequence
             .checked_add(1)
             .ok_or_else(|| "Trade-built live sequence overflowed".to_string())?;
+        self.forming_tail_sequence = Some(authoritative.source_sequence);
         self.bars.push(authoritative);
         enqueue_bar_transition(
             &mut self.pending_publications,
