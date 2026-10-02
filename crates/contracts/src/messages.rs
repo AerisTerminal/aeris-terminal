@@ -725,6 +725,28 @@ pub struct MarketSessionStatus {
 /// for provider metadata refreshes and selections.
 pub const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
 
+/// Instrument categories a provider search may return. Providers without a category simply
+/// ignore it; a provider that serves a category from a slow remote lookup skips that lookup
+/// entirely when the category is excluded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstrumentSearchCategories {
+    pub futures: bool,
+    pub equities: bool,
+}
+
+impl InstrumentSearchCategories {
+    pub const ALL: Self = Self {
+        futures: true,
+        equities: true,
+    };
+}
+
+impl Default for InstrumentSearchCategories {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// Requests one bounded exact provider-instrument search for a market consumer.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchProviderInstruments {
@@ -733,6 +755,7 @@ pub struct SearchProviderInstruments {
     pub provider: String,
     pub query: String,
     pub maximum_results: u32,
+    pub categories: InstrumentSearchCategories,
 }
 
 /// Selects one exact instrument from the latest completed provider search.

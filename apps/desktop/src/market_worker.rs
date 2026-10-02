@@ -3090,6 +3090,7 @@ mod tests {
             provider: "rithmic".to_string(),
             query: "ES".to_string(),
             maximum_results: 16,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
         };
         let selection = SelectProviderInstrument {
             consumer_id: 0,

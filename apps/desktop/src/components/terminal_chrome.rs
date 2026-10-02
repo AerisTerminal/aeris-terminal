@@ -437,15 +437,9 @@ pub(super) fn workspace_window_controls(
         .child(close)
 }
 
-pub(super) fn header_controls(
-    app: &Entity<WorkspaceSurface>,
-    state: HeaderState,
-) -> impl IntoElement {
-    // Give the global controls an explicit, non-shrinking track. GPUI cannot
-    // infer a stable intrinsic width for this mixed Button/avatar group, which
-    // previously let the flex item collapse to zero even on wide windows.
-    let (side_panel_toggles, context_toggle, link_toggle) = header_panel_toggles(app, &state);
-    let connection = connection_presentation(
+/// Feed health plus, once live, the selected product's market session for the header dot.
+fn header_connection_presentation(state: &HeaderState) -> ConnectionPresentation {
+    connection_presentation(
         state.provider,
         state.connection_state,
         state.transport_rtt_nanos,
@@ -455,7 +449,18 @@ pub(super) fn header_controls(
         state.market_session.as_ref(),
         &state.time_zone_id,
         current_unix_nanos(),
-    );
+    )
+}
+
+pub(super) fn header_controls(
+    app: &Entity<WorkspaceSurface>,
+    state: HeaderState,
+) -> impl IntoElement {
+    // Give the global controls an explicit, non-shrinking track. GPUI cannot
+    // infer a stable intrinsic width for this mixed Button/avatar group, which
+    // previously let the flex item collapse to zero even on wide windows.
+    let (side_panel_toggles, context_toggle, link_toggle) = header_panel_toggles(app, &state);
+    let connection = header_connection_presentation(&state);
     let market_controls = div()
         .h_full()
         .min_w_0()
@@ -484,8 +489,10 @@ pub(super) fn header_controls(
                 },
                 scroll: state.instrument_scroll,
                 target: SymbolSelectionTarget::Chart,
-                // The header trigger never renders the menu body that uses this.
+                // The header trigger never renders the menu body that uses these.
                 tastytrade_disconnected: false,
+                provider_menu_open: false,
+                search_categories: aeris_contracts::InstrumentSearchCategories::ALL,
             },
             &state.theme,
         ))

@@ -88,6 +88,7 @@ pub(super) fn initialize_endpoint(
                 provider: requested.provider.clone(),
                 query: catalog_symbol(&requested),
                 maximum_results: 32,
+                categories: aeris_contracts::InstrumentSearchCategories::ALL,
             },
         );
     }
@@ -136,6 +137,7 @@ fn begin_endpoint_demand(
                 crate::desktop::rithmic_shell::MAXIMUM_RITHMIC_SYMBOL_RESULTS,
             )
             .unwrap_or(u32::MAX),
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
         },
     );
     Ok(())

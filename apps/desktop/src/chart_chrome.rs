@@ -1,4 +1,5 @@
 use aeris_chart_integration::ChartType;
+use aeris_contracts::InstrumentSearchCategories;
 use aeris_design_system::RadiusToken;
 use std::{
     fs::{self, OpenOptions},
@@ -224,6 +225,33 @@ pub fn filter_indicator_specs(query: &str) -> Vec<&'static IndicatorSpec> {
         .collect()
 }
 
+/// An instrument category the symbol menu can include or exclude from search.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymbolSearchCategory {
+    Futures,
+    Equities,
+}
+
+impl SymbolSearchCategory {
+    pub const ALL: [Self; 2] = [Self::Futures, Self::Equities];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Futures => "Futures",
+            Self::Equities => "Stocks",
+        }
+    }
+
+    #[must_use]
+    pub const fn included(self, categories: InstrumentSearchCategories) -> bool {
+        match self {
+            Self::Futures => categories.futures,
+            Self::Equities => categories.equities,
+        }
+    }
+}
+
 /// Durable shell chrome that follows the user across charts and workspaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChartChromePreferences {
@@ -231,6 +259,8 @@ pub struct ChartChromePreferences {
     pub indicator_value_labels_visible: bool,
     pub indicator_price_lines_visible: bool,
     pub chart_type: ChartType,
+    /// Instrument categories the symbol menu searches; at least one is always included.
+    pub symbol_search_categories: InstrumentSearchCategories,
 }
 
 impl Default for ChartChromePreferences {
@@ -240,6 +270,7 @@ impl Default for ChartChromePreferences {
             indicator_value_labels_visible: true,
             indicator_price_lines_visible: true,
             chart_type: ChartType::Candles,
+            symbol_search_categories: InstrumentSearchCategories::ALL,
         }
     }
 }
@@ -352,7 +383,17 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             && let Some(chart_type) = ChartType::from_identifier(value)
         {
             preferences.chart_type = chart_type;
+        } else if let Some(value) = line.strip_prefix("symbol_search_futures=") {
+            preferences.symbol_search_categories.futures = parse_chrome_flag(value);
+        } else if let Some(value) = line.strip_prefix("symbol_search_equities=") {
+            preferences.symbol_search_categories.equities = parse_chrome_flag(value);
         }
+    }
+    // A search that excludes every category would never return anything.
+    if !preferences.symbol_search_categories.futures
+        && !preferences.symbol_search_categories.equities
+    {
+        preferences.symbol_search_categories = InstrumentSearchCategories::ALL;
     }
     preferences
 }
@@ -360,11 +401,13 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
 #[must_use]
 pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> String {
     format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\n",
+        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\n",
         u8::from(preferences.indicator_name_labels_visible),
         u8::from(preferences.indicator_value_labels_visible),
         u8::from(preferences.indicator_price_lines_visible),
-        preferences.chart_type.identifier()
+        preferences.chart_type.identifier(),
+        u8::from(preferences.symbol_search_categories.futures),
+        u8::from(preferences.symbol_search_categories.equities),
     )
 }
 
@@ -591,9 +634,9 @@ fn sync_chart_chrome_directory(path: &Path) -> Result<(), String> {
 mod tests {
     use super::{
         ChartChromePreferences, ChartChromeSaveState, INDICATOR_SPECS, IndicatorKind,
-        IndicatorLocation, IndicatorParameters, chart_chrome_backup_path,
-        chart_chrome_staging_path, encode_chart_chrome_preferences, filter_indicator_specs,
-        load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
+        IndicatorLocation, IndicatorParameters, InstrumentSearchCategories,
+        chart_chrome_backup_path, chart_chrome_staging_path, encode_chart_chrome_preferences,
+        filter_indicator_specs, load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
         wait_for_chart_chrome_generation,
     };
@@ -727,10 +770,24 @@ mod tests {
             indicator_value_labels_visible: true,
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
+            symbol_search_categories: InstrumentSearchCategories {
+                futures: true,
+                equities: false,
+            },
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\n"
+        );
+        assert_eq!(
+            defaults.symbol_search_categories,
+            InstrumentSearchCategories::ALL
+        );
+        assert_eq!(
+            parse_chart_chrome_preferences("symbol_search_futures=0\nsymbol_search_equities=0\n")
+                .symbol_search_categories,
+            InstrumentSearchCategories::ALL,
+            "excluding every category falls back to all"
         );
         let path = temporary_chart_chrome_path("round-trip");
         save_chart_chrome_preferences_to(&path, hidden).expect("temp chrome file writes");
@@ -759,12 +816,14 @@ mod tests {
             indicator_value_labels_visible: true,
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
+            symbol_search_categories: InstrumentSearchCategories::ALL,
         };
         let pending = ChartChromePreferences {
             indicator_name_labels_visible: true,
             indicator_value_labels_visible: false,
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
+            symbol_search_categories: InstrumentSearchCategories::ALL,
         };
         save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
 
@@ -788,12 +847,14 @@ mod tests {
             indicator_value_labels_visible: false,
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
+            symbol_search_categories: InstrumentSearchCategories::ALL,
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
             indicator_value_labels_visible: true,
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
+            symbol_search_categories: InstrumentSearchCategories::ALL,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let (_, inflight) = {
@@ -841,12 +902,14 @@ mod tests {
             indicator_value_labels_visible: false,
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
+            symbol_search_categories: InstrumentSearchCategories::ALL,
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
             indicator_value_labels_visible: true,
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
+            symbol_search_categories: InstrumentSearchCategories::ALL,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let failed_generation = {

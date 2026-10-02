@@ -1010,6 +1010,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     catalog_refresh_on_startup: false,
     ready_label_suffix: " spot",
     depth_available: true,
+    search_categories_available: false,
     connection_kind: aeris_contracts::ProviderConnectionKind::Credentials,
 };
 
@@ -1063,6 +1064,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     catalog_refresh_on_startup: true,
     ready_label_suffix: "",
     depth_available: true,
+    search_categories_available: false,
     connection_kind: aeris_contracts::ProviderConnectionKind::Public,
 };
 

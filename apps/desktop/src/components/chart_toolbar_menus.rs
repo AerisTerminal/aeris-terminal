@@ -237,6 +237,8 @@ pub(super) fn chrome_overlay_content(
                 scroll: app_state.scrolls.instrument.clone(),
                 target: app_state.symbol_selection_target,
                 tastytrade_disconnected: connection.connected == Some(false),
+                provider_menu_open: app_state.menu_state.symbol_provider_menu.is_open(),
+                search_categories: app_state.chart_chrome.symbol_search_categories,
             },
             theme,
         )

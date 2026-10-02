@@ -126,6 +126,7 @@ use aeris_terminal_ui::{
     OrderBookLevelSide, ReadOnlyOrderBookView,
 };
 use assets::UiIcon as HugeIcon;
+use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
     chart_settings_menu_layer, overlay_height, price_axis_menu_layer,
@@ -1194,6 +1195,28 @@ struct WorkspaceMenuState {
     accounts_trigger_bounds: Option<Bounds<Pixels>>,
     /// Why the last quick-timeframe submission was rejected; cleared by an edit or close.
     quick_timeframe_error: Option<QuickTimeframeError>,
+    /// The symbol menu's provider and category dropdown, opened from the search-field logo.
+    symbol_provider_menu: SymbolProviderMenu,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SymbolProviderMenu {
+    #[default]
+    Closed,
+    Open,
+}
+
+impl SymbolProviderMenu {
+    const fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    const fn toggled(self) -> Self {
+        match self {
+            Self::Closed => Self::Open,
+            Self::Open => Self::Closed,
+        }
+    }
 }
 
 /// A rejected quick-timeframe submission. The rejected text is kept so only a real edit

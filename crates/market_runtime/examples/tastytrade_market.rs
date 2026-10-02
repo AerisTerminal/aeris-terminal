@@ -28,6 +28,7 @@ fn run(market: &MarketService) -> Result<(), String> {
             provider: "tastytrade".into(),
             query: query.clone(),
             maximum_results: 100,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
         },
     )?;
     let deadline = Instant::now() + Duration::from_secs(150);
@@ -370,6 +371,7 @@ impl SearchTimings {
                         provider: "tastytrade".into(),
                         query: "/ES".into(),
                         maximum_results: 100,
+                        categories: aeris_contracts::InstrumentSearchCategories::ALL,
                     },
                 )?;
                 Ok(Some(selection_started))
@@ -391,6 +393,7 @@ impl SearchTimings {
                         provider: "tastytrade".into(),
                         query: "SPY".into(),
                         maximum_results: 100,
+                        categories: aeris_contracts::InstrumentSearchCategories::ALL,
                     },
                 )?;
                 Ok(None)
@@ -520,6 +523,7 @@ fn run_soak(market: &MarketService) -> Result<(), String> {
                 provider: "tastytrade".into(),
                 query: (*query).into(),
                 maximum_results: 20,
+                categories: aeris_contracts::InstrumentSearchCategories::ALL,
             },
         )?;
     }
@@ -747,6 +751,7 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
             provider: "tastytrade".into(),
             query: query.clone(),
             maximum_results: 100,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
         },
     )?;
     let deadline = Instant::now() + Duration::from_secs(150);
@@ -884,6 +889,7 @@ fn run_history_load(market: &MarketService) -> Result<(), String> {
             provider: "tastytrade".into(),
             query: "/ES".into(),
             maximum_results: 100,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
         },
     )?;
     let deadline = Instant::now() + Duration::from_secs(90);

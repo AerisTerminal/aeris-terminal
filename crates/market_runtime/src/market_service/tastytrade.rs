@@ -43,6 +43,7 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         catalog_refresh_on_startup: true,
         ready_label_suffix: "",
         depth_available: false,
+        search_categories_available: true,
         connection_kind: aeris_contracts::ProviderConnectionKind::HostedBroker,
     };
 pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescriptor {
@@ -723,7 +724,10 @@ pub(super) fn run_catalog(
         };
         let result: Result<CatalogEvent, String> = (|| match control {
             CatalogControl::Search(search) => {
-                let needs_remote = !search.query.is_empty() && !search.query.starts_with('/');
+                // Equities come only from the slow remote search; skip it when excluded.
+                let needs_remote = search.categories.equities
+                    && !search.query.is_empty()
+                    && !search.query.starts_with('/');
                 let result =
                     search_catalog(&search, &mut futures, &mut searches, api, stop, generation);
                 if result.is_ok() && needs_remote {
@@ -811,7 +815,11 @@ fn remote_search_event(
     }
     let final_result = match reply.result {
         Ok(remote) => {
-            for item in remote {
+            let include_futures = search.categories.futures;
+            for item in remote
+                .into_iter()
+                .filter(|item| include_futures || item.instrument_type != "Future")
+            {
                 if items.len() >= 100 {
                     break;
                 }
@@ -1029,7 +1037,7 @@ fn search_catalog(
     stop: &Arc<AtomicBool>,
     generation: &Arc<AtomicU64>,
 ) -> Result<CatalogEvent, String> {
-    if futures.is_empty() {
+    if search.categories.futures && futures.is_empty() {
         *futures = api.futures(stop).map_err(|error| {
             eprintln!("Aeris tastytrade futures catalog request failed: {error}");
             CATALOG_UNAVAILABLE_DETAIL.to_string()
@@ -1040,7 +1048,8 @@ fn search_catalog(
     let mut matching: Vec<_> = futures
         .iter()
         .filter(|future| {
-            future.active
+            search.categories.futures
+                && future.active
                 && (query.is_empty()
                     || tastytrade_display_symbol(&future.symbol, "Future")
                         .to_ascii_uppercase()

@@ -75,6 +75,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             catalog_refresh_on_startup: false,
             ready_label_suffix: "",
             depth_available: false,
+            search_categories_available: false,
             connection_kind: aeris_contracts::ProviderConnectionKind::Public,
         };
     let fourth = ProviderDescriptor {

@@ -1979,6 +1979,7 @@ impl WorkspaceSurface {
         if self.market_state.symbol_selection_pending {
             return;
         }
+        self.menu_state.symbol_provider_menu = SymbolProviderMenu::Closed;
         if self.symbol_provider != provider {
             self.symbol_provider = provider;
             self.symbol_browser.change_catalog();
@@ -1992,6 +1993,32 @@ impl WorkspaceSurface {
             });
         }
         self.search_symbol_query(query, cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_symbol_provider_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu_state.symbol_provider_menu = self.menu_state.symbol_provider_menu.toggled();
+        cx.notify();
+    }
+
+    /// Includes or excludes one instrument category from symbol search and re-runs the current
+    /// query. The last included category cannot be excluded, so search always returns something.
+    pub(super) fn toggle_symbol_search_category(
+        &mut self,
+        category: SymbolSearchCategory,
+        cx: &mut Context<Self>,
+    ) {
+        let mut categories = self.chart_chrome.symbol_search_categories;
+        match category {
+            SymbolSearchCategory::Futures => categories.futures = !categories.futures,
+            SymbolSearchCategory::Equities => categories.equities = !categories.equities,
+        }
+        if !categories.futures && !categories.equities {
+            return;
+        }
+        self.chart_chrome.symbol_search_categories = categories;
+        self.save_chart_chrome_preferences(cx);
+        self.search_symbol_input(cx);
         cx.notify();
     }
 
@@ -2214,6 +2241,7 @@ impl WorkspaceSurface {
             return;
         }
         if self.chrome_overlay == Some(ChromeOverlay::Instrument) {
+            self.menu_state.symbol_provider_menu = SymbolProviderMenu::Closed;
             self.symbol_selection_target = instrument_target_after_close(
                 self.symbol_selection_target,
                 self.market_state.symbol_selection_pending,
@@ -4074,6 +4102,12 @@ impl WorkspaceSurface {
         if let Some(snapshot) = self.trade_tape.clone() {
             self.apply_trade_tape_to_chart(&snapshot, cx);
         }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
+    }
+
+    /// Queues the durable chrome preferences off the UI thread; the save worker coalesces.
+    fn save_chart_chrome_preferences(&self, cx: &mut Context<Self>) {
         let preferences = self.chart_chrome;
         match chart_chrome::request_chart_chrome_preferences_save(preferences) {
             Ok(true) => cx
@@ -4089,7 +4123,6 @@ impl WorkspaceSurface {
                 eprintln!("Aeris chart chrome could not be saved: {error}");
             }
         }
-        cx.notify();
     }
 
     fn refresh_default_instrument_listing(&mut self, cx: &mut Context<Self>) {
@@ -4147,6 +4180,7 @@ impl WorkspaceSurface {
             query: request.query,
             maximum_results: u32::try_from(self.symbol_browser.maximum_results())
                 .unwrap_or(u32::MAX),
+            categories: self.chart_chrome.symbol_search_categories,
         };
         let dispatched = if self.market_worker.try_search_provider(search).is_ok() {
             self.symbol_message = super::provider_presentation(self.symbol_provider).map_or_else(

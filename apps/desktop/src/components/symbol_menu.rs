@@ -102,6 +102,9 @@ pub(super) struct InstrumentSelectorState {
     pub(super) target: SymbolSelectionTarget,
     /// The runtime reported no stored tastytrade connection; the menu points to Accounts.
     pub(super) tastytrade_disconnected: bool,
+    /// The provider and category dropdown opened from the search-field logo.
+    pub(super) provider_menu_open: bool,
+    pub(super) search_categories: aeris_contracts::InstrumentSearchCategories,
 }
 
 pub(super) struct InstrumentSelectorAvailability {
@@ -139,40 +142,7 @@ pub(super) fn instrument_dialog_content(
                 }),
         );
     }
-    let provider_buttons = aeris_market_runtime::built_in_provider_presentations()
-        .iter()
-        .filter_map(|descriptor| {
-            let provider = terminal_provider_from_id(descriptor.id);
-            (terminal_provider_id(provider) == descriptor.id).then_some(provider)
-        })
-        .enumerate()
-        .map(|(index, provider)| {
-            let app = app.clone();
-            Button::new(("symbol_provider", index))
-                .label(terminal_provider_display(provider))
-                .theme(theme)
-                .text_color(gpui_color(if provider == state.menu_provider {
-                    colors.text_primary
-                } else {
-                    colors.text_muted
-                }))
-                .disabled(state.availability.selection_pending)
-                .on_click(move |_, window, cx| {
-                    app.update(cx, |surface, surface_cx| {
-                        surface.choose_symbol_provider(provider, window, surface_cx);
-                    });
-                })
-        });
     chrome_menu_surface(&colors, extent)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .children(provider_buttons),
-        )
         .child(state.input.as_ref().map_or_else(
             || div().into_any_element(),
             |input| instrument_search_header(input, theme, app, state).into_any_element(),
@@ -216,6 +186,97 @@ pub(super) fn instrument_dialog_content(
                     .child(state.message.clone()),
             )
         })
+        .when(state.provider_menu_open, |menu| {
+            menu.child(symbol_provider_menu(app, state, theme))
+        })
+}
+
+/// Provider and category dropdown anchored under the search-field logo. Choosing a provider
+/// switches the listing and closes it; category rows toggle in place.
+fn symbol_provider_menu(
+    app: &Entity<WorkspaceSurface>,
+    state: &InstrumentSelectorState,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let panel_fill = colors.surface_secondary.over(colors.surface);
+    let providers: Vec<TerminalProvider> = aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .map(|descriptor| terminal_provider_from_id(descriptor.id))
+        .filter(|provider| super::provider_presentation(*provider).is_some())
+        .collect();
+    let categories_available = super::provider_presentation(state.menu_provider)
+        .is_some_and(|descriptor| descriptor.search_categories_available);
+    let last_provider = providers.len().saturating_sub(1);
+    let provider_rows = providers.into_iter().enumerate().map(|(index, provider)| {
+        let row_app = app.clone();
+        let active = provider == state.menu_provider;
+        let row = MenuRow::compact(
+            ("symbol_provider_row", index),
+            terminal_provider_display(provider),
+            theme,
+        )
+        .resting_fill(panel_fill)
+        .leading(provider_exchange_mark(provider, px(18.0), false, &colors))
+        .highlighted(active)
+        .disabled(state.availability.selection_pending)
+        .flush_in_panel(index == 0, index == last_provider && !categories_available)
+        .on_click(move |_, window, cx| {
+            row_app.update(cx, |surface, surface_cx| {
+                surface.choose_symbol_provider(provider, window, surface_cx);
+            });
+        });
+        if active {
+            row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)))
+        } else {
+            row
+        }
+    });
+    let last_category = SymbolSearchCategory::ALL.len().saturating_sub(1);
+    let category_rows = SymbolSearchCategory::ALL
+        .into_iter()
+        .enumerate()
+        .filter(|_| categories_available)
+        .map(|(index, category)| {
+            let row_app = app.clone();
+            let included = category.included(state.search_categories);
+            let row = MenuRow::compact(("symbol_category_row", index), category.label(), theme)
+                .resting_fill(panel_fill)
+                .flush_in_panel(false, index == last_category)
+                .on_click(move |_, _, cx| {
+                    row_app.update(cx, |surface, surface_cx| {
+                        surface.toggle_symbol_search_category(category, surface_cx);
+                    });
+                });
+            if included {
+                row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)))
+            } else {
+                row
+            }
+        });
+    let panel = div()
+        .id("symbol_provider_menu")
+        .absolute()
+        .top(px(CHROME_MENU_SEARCH_HEIGHT + 4.0))
+        .left(px(12.0))
+        .w(px(200.0))
+        .flex()
+        .flex_col()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border))
+        .bg(gpui_color(panel_fill))
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .children(provider_rows)
+        .when(categories_available, |panel| {
+            panel.child(menu_separator(theme)).children(category_rows)
+        });
+    animate_popup_from_origin(
+        panel,
+        "symbol_provider_menu_enter",
+        PopupAnimationOrigin::TOP_LEFT,
+    )
 }
 
 pub(super) fn instrument_dialog_row(
@@ -293,12 +354,32 @@ pub(super) fn instrument_search_header(
         .border_color(gpui_color(colors.border))
         .text_sm()
         .text_color(gpui_color(colors.text_primary))
-        .child(provider_exchange_mark(
-            state.menu_provider,
-            px(CHROME_MENU_SEARCH_ICON_SIZE),
-            false,
-            &colors,
-        ))
+        .child({
+            let toggle_app = app.clone();
+            div()
+                .id("symbol_provider_switcher")
+                .flex_none()
+                .size(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                .cursor_pointer()
+                .when(state.provider_menu_open, |hit| {
+                    hit.bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                })
+                .hover(|hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    toggle_app.update(cx, WorkspaceSurface::toggle_symbol_provider_menu);
+                    cx.stop_propagation();
+                })
+                .child(provider_exchange_mark(
+                    state.menu_provider,
+                    px(CHROME_MENU_SEARCH_ICON_SIZE),
+                    false,
+                    &colors,
+                ))
+        })
         .child(
             Input::new(input)
                 .appearance(false)

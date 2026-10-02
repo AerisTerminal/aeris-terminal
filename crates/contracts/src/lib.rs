@@ -13,9 +13,9 @@ pub use account::{
     LoginAuthorization, RefreshAccountProfile, SignOut,
 };
 pub use messages::{
-    EngineFaultCode, FailureStage, Fault, InstallProviderInstrument, MarketSessionPhase,
-    MarketSessionSource, MarketSessionStatus, PriceAlertCondition, PriceAlertFrequency,
-    PriceAlertStatus, ProviderCatalogRejected, ProviderCatalogRejectionReason,
+    EngineFaultCode, FailureStage, Fault, InstallProviderInstrument, InstrumentSearchCategories,
+    MarketSessionPhase, MarketSessionSource, MarketSessionStatus, PriceAlertCondition,
+    PriceAlertFrequency, PriceAlertStatus, ProviderCatalogRejected, ProviderCatalogRejectionReason,
     ProviderConnectionState, ProviderContractMetadata, ProviderInstrumentSearchResult,
     ProviderInstrumentSummary, ProviderSessionHours, ProviderState,
     STARTUP_CATALOG_COMMAND_GENERATION, SearchProviderInstruments, SelectProviderInstrument,

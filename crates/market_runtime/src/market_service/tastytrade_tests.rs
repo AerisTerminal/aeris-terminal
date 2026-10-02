@@ -178,6 +178,7 @@ fn equity_query_with_loaded_futures_catalog_returns_preliminary_empty_result() {
         provider: "tastytrade".into(),
         query: "SPY".into(),
         maximum_results: 100,
+        categories: aeris_contracts::InstrumentSearchCategories::ALL,
     };
     let event = search_catalog(
         &search,
@@ -217,6 +218,7 @@ fn futures_search_accepts_slashless_and_slash_prefixed_queries() {
                 provider: "tastytrade".into(),
                 query: query.into(),
                 maximum_results: 10,
+                categories: aeris_contracts::InstrumentSearchCategories::ALL,
             },
             &mut vec![future.clone()],
             &mut BTreeMap::new(),
@@ -233,6 +235,37 @@ fn futures_search_accepts_slashless_and_slash_prefixed_queries() {
 }
 
 #[test]
+fn excluded_futures_category_returns_no_catalog_futures() {
+    let future: FutureInstrument = serde_json::from_str(
+        r#"{"symbol":"/ESZ6","streamer-symbol":"/ESZ26:XCME","exchange":"CME","product-code":"ES","expiration-date":"2026-12-18","active":true,"active-month":true,"notional-multiplier":"50.0","tick-size":"0.25"}"#,
+    )
+    .unwrap();
+    let event = search_catalog(
+        &SearchProviderInstruments {
+            consumer_id: 1,
+            search_generation: 1,
+            provider: "tastytrade".into(),
+            query: "/ES".into(),
+            maximum_results: 10,
+            categories: aeris_contracts::InstrumentSearchCategories {
+                futures: false,
+                equities: true,
+            },
+        },
+        &mut vec![future],
+        &mut BTreeMap::new(),
+        &BrokerApi::default(),
+        &Arc::new(AtomicBool::new(false)),
+        &Arc::new(AtomicU64::new(1)),
+    )
+    .unwrap();
+    let CatalogEvent::Search(result) = event else {
+        panic!("catalog search completes locally");
+    };
+    assert!(result.instruments.is_empty());
+}
+
+#[test]
 fn no_match_query_returns_empty_search_result() {
     let search = SearchProviderInstruments {
         consumer_id: 1,
@@ -240,6 +273,7 @@ fn no_match_query_returns_empty_search_result() {
         provider: "tastytrade".into(),
         query: "/NO_SUCH_FUTURE".into(),
         maximum_results: 100,
+        categories: aeris_contracts::InstrumentSearchCategories::ALL,
     };
     let event = search_catalog(
         &search,
@@ -663,6 +697,7 @@ fn futures_search_uses_the_primed_catalog_before_remote_equity_search() {
         provider: "tastytrade".into(),
         query: "ES".into(),
         maximum_results: 10,
+        categories: aeris_contracts::InstrumentSearchCategories::ALL,
     };
     let event = search_catalog(
         &search,
@@ -716,6 +751,7 @@ fn equity_search_worker_debounces_to_the_latest_consumer_query() {
                     provider: "tastytrade".into(),
                     query: query.into(),
                     maximum_results: 10,
+                    categories: aeris_contracts::InstrumentSearchCategories::ALL,
                 },
                 authorization_epoch: 0,
             })
@@ -769,6 +805,7 @@ fn futures_selection_does_not_wait_for_remote_equity_search() {
             provider: "tastytrade".into(),
             query: "ES".into(),
             maximum_results: 10,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
         }))
         .unwrap();
     control_tx

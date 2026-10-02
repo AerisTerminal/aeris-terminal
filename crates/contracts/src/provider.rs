@@ -32,5 +32,7 @@ pub struct ProviderPresentationDescriptor {
     pub catalog_refresh_on_startup: bool,
     pub ready_label_suffix: &'static str,
     pub depth_available: bool,
+    /// Whether search honours `InstrumentSearchCategories` (it serves more than one category).
+    pub search_categories_available: bool,
     pub connection_kind: ProviderConnectionKind,
 }
