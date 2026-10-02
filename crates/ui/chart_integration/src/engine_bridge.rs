@@ -181,6 +181,11 @@ pub(crate) fn price_display_precision(values: impl IntoIterator<Item = i64>, sca
 }
 
 pub(crate) fn replay_display_precision(replay: &ReplaySnapshot) -> u8 {
+    if let Some(increment) = replay.instrument().price_increment
+        && increment > 0
+    {
+        return increment_display_precision(increment, replay.instrument().precision.price_scale());
+    }
     price_display_precision(
         replay.bars().iter().flat_map(|item| {
             let bar = item.value();
@@ -188,6 +193,16 @@ pub(crate) fn replay_display_precision(replay: &ReplaySnapshot) -> u8 {
         }),
         replay.instrument().precision.price_scale(),
     )
+}
+
+fn increment_display_precision(increment: i64, scale: u8) -> u8 {
+    let mut value = increment;
+    let mut places = scale;
+    while places > 0 && value % 10 == 0 {
+        value /= 10;
+        places -= 1;
+    }
+    places
 }
 
 pub(crate) fn install_volume_series(engine: &mut ChartEngine) -> u32 {
@@ -427,7 +442,9 @@ fn fixed_value(value: i64, divisor: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProductPriceBars, fixed_value, price_display_precision};
+    use super::{
+        ProductPriceBars, fixed_value, increment_display_precision, price_display_precision,
+    };
 
     #[test]
     fn drawing_anchor_keeps_its_time_across_bar_intervals() {
@@ -458,6 +475,14 @@ mod tests {
             price_display_precision([7_978_500_000_000, 7_978_500_000_001], 8),
             8
         );
+    }
+
+    #[test]
+    fn increment_precision_overrides_subpenny_bar_values() {
+        assert_eq!(increment_display_precision(1_000_000, 8), 2);
+        assert_eq!(increment_display_precision(25_000_000, 8), 2);
+        assert_eq!(increment_display_precision(1, 8), 8);
+        assert_eq!(price_display_precision([33_105_250_000], 8), 4);
     }
 
     #[test]

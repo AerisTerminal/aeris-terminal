@@ -839,6 +839,7 @@ fn install_resolved(
     session_generation: u64,
     selection_generation: u64,
 ) -> InstallProviderInstrument {
+    let price_increment = resolved.tick_size_for_price(None);
     InstallProviderInstrument {
         provider: "tastytrade".into(),
         session_generation,
@@ -853,7 +854,7 @@ fn install_resolved(
         price_scale: DATA_SCALE,
         quantity_scale: DATA_SCALE,
         entitlement_id: ENTITLEMENT.into(),
-        price_increment: resolved.tick_size,
+        price_increment,
         contract_metadata: (resolved.instrument_type == "Future").then(|| {
             Box::new(ProviderContractMetadata {
                 point_value: resolved.point_value,

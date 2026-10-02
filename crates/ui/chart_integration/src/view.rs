@@ -752,6 +752,7 @@ pub struct AerisChartView {
     pending_study_settings: Option<u64>,
     pending_study_remove: Option<u64>,
     instrument_price_precision: u8,
+    instrument_price_increment: Option<i64>,
     instrument_price_scale: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
@@ -849,6 +850,7 @@ impl AerisChartView {
             pending_study_settings: None,
             pending_study_remove: None,
             instrument_price_precision: 2,
+            instrument_price_increment: None,
             instrument_price_scale: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
@@ -950,6 +952,7 @@ impl AerisChartView {
             pending_study_settings: None,
             pending_study_remove: None,
             instrument_price_precision: replay_display_precision(replay),
+            instrument_price_increment: replay.instrument().price_increment,
             instrument_price_scale: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
@@ -1008,6 +1011,7 @@ impl AerisChartView {
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay_display_precision(replay);
+        self.instrument_price_increment = replay.instrument().price_increment;
         self.instrument_price_scale = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
         self.invalidate_series_layout();
@@ -1510,6 +1514,7 @@ impl AerisChartView {
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay_display_precision(replay);
+        self.instrument_price_increment = replay.instrument().price_increment;
         self.instrument_price_scale = replay.instrument().precision.price_scale();
         self.apply_selected_price_format();
         self.invalidate_series_layout();
@@ -1572,17 +1577,20 @@ impl AerisChartView {
                     self.displayed_provenance.replace_snapshot(snapshot);
                     self.asset_legend_title = replay_legend_title(snapshot);
                     self.instrument_price_precision = replay_display_precision(snapshot);
+                    self.instrument_price_increment = snapshot.instrument().price_increment;
                     self.instrument_price_scale = snapshot.instrument().precision.price_scale();
                 }
                 let previous_precision = self.instrument_price_precision;
-                self.instrument_price_precision =
-                    self.instrument_price_precision.max(price_display_precision(
-                        update.accepted_deltas().iter().flat_map(|item| {
-                            let bar = item.value();
-                            [bar.open, bar.high, bar.low, bar.close]
-                        }),
-                        self.instrument_price_scale,
-                    ));
+                if self.instrument_price_increment.is_none() {
+                    self.instrument_price_precision =
+                        self.instrument_price_precision.max(price_display_precision(
+                            update.accepted_deltas().iter().flat_map(|item| {
+                                let bar = item.value();
+                                [bar.open, bar.high, bar.low, bar.close]
+                            }),
+                            self.instrument_price_scale,
+                        ));
+                }
                 self.displayed_provenance.extend(update.accepted_deltas());
                 apply_merged_chart_data(
                     &mut self.engine,

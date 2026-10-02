@@ -1132,7 +1132,7 @@ mod tests {
             4,
             false,
         );
-        let snapshot = replay_runtime_snapshot(&publication).expect("snapshot converts");
+        let snapshot = replay_runtime_snapshot(&publication, None).expect("snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 2);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.evidence().session_generation, 8);
@@ -2461,7 +2461,7 @@ mod tests {
             1,
             false,
         );
-        let snapshot = replay_runtime_snapshot(&publication).expect("HL snapshot converts");
+        let snapshot = replay_runtime_snapshot(&publication, None).expect("HL snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 8);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.instrument().symbol, "BTC");
@@ -2490,7 +2490,7 @@ mod tests {
             1,
             false,
         );
-        let replay = replay_runtime_snapshot(&snapshot).expect("HL snapshot converts");
+        let replay = replay_runtime_snapshot(&snapshot, None).expect("HL snapshot converts");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
 
         send_publication(&sender, ReplayStreamUpdate::Snapshot(replay), "hyperliquid")

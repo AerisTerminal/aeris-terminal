@@ -89,6 +89,7 @@ fn embedded_instrument() -> Result<InstrumentRevision, ReplayValidationError> {
         venue_id: "XNAS".to_string(),
         trading_currency: "USD".to_string(),
         precision: InstrumentPrecision::try_new(2, 0)?,
+        price_increment: None,
         lifecycle: InstrumentLifecycle::Active,
         contract: None,
     };

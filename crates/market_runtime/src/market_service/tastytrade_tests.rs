@@ -130,6 +130,36 @@ fn no_match_query_returns_empty_search_result() {
 }
 
 #[test]
+fn equity_install_uses_the_upper_band_when_price_is_unknown() {
+    let resolved = ResolvedInstrument {
+        symbol: "AAPL".into(),
+        streamer_symbol: "AAPL".into(),
+        venue: "NASDAQ".into(),
+        instrument_type: "Equity".into(),
+        tick_size: Some(1_000_000),
+        tick_sizes: vec![
+            aeris_tastytrade_market_adapter::PriceIncrementBand {
+                value: 10_000,
+                threshold: Some(100_000_000),
+            },
+            aeris_tastytrade_market_adapter::PriceIncrementBand {
+                value: 1_000_000,
+                threshold: None,
+            },
+        ],
+        point_value: None,
+        currency: Some("USD".into()),
+        expiration_date: None,
+        first_notice_date: None,
+        last_trade_date: None,
+    };
+    assert_eq!(
+        install_resolved(resolved, 1, 1).price_increment,
+        Some(1_000_000)
+    );
+}
+
+#[test]
 fn late_candle_subscription_starts_at_demand_time() {
     let mut starts = BTreeMap::new();
     assert_eq!(candle_start_ms(&mut starts, "ES{=1m}".into(), 100), 100);

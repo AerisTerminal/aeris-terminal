@@ -255,6 +255,8 @@ pub struct InstrumentRevision {
     pub venue_id: String,
     pub trading_currency: String,
     pub precision: InstrumentPrecision,
+    /// Authoritative display and validation increment in `precision.price_scale()` units.
+    pub price_increment: Option<i64>,
     pub lifecycle: InstrumentLifecycle,
     pub contract: Option<ContractMetadata>,
 }
