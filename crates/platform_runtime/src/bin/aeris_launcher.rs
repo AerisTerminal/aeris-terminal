@@ -2795,7 +2795,11 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     fn startup_exit_child(delay_milliseconds: u64, exit_code: i32) -> std::process::Child {
-        let seconds = delay_milliseconds as f64 / 1000.0;
+        let seconds = format!(
+            "{}.{:03}",
+            delay_milliseconds / 1000,
+            delay_milliseconds % 1000
+        );
         Command::new("sh")
             .args(["-c", &format!("sleep {seconds}; exit {exit_code}")])
             .stdin(Stdio::null())
