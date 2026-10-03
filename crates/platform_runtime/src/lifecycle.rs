@@ -1905,7 +1905,13 @@ pub fn verify_release_file(path: &Path, expected: &ReleaseFile) -> Result<(), Li
 }
 
 fn verify_candidate_inventory(root: &Path, expected: &[ReleaseFile]) -> Result<(), LifecycleError> {
-    verify_candidate_inventory_with(root, expected, verify_installed_executable_authenticode)
+    #[cfg(target_os = "windows")]
+    let verify_native_executable = verify_installed_executable_authenticode;
+    // Authenticode is the only native publisher check implemented; other
+    // platforms rely on the signed manifest digests verified for every file.
+    #[cfg(not(target_os = "windows"))]
+    let verify_native_executable = |_: &Path, _: &ReleaseFile| Ok(());
+    verify_candidate_inventory_with(root, expected, verify_native_executable)
 }
 
 fn verify_candidate_inventory_with<F>(
