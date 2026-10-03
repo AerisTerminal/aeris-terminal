@@ -1461,6 +1461,10 @@ mod tests {
 
     #[test]
     fn interrupted_endurance_retains_an_atomic_incomplete_checkpoint() {
+        // The simulated interruption ends the run at its first checkpoint, so
+        // the window only bounds the worst case: a starved runner can oversleep
+        // a short window and complete before any checkpoint is due.
+        let window = Duration::from_secs(30);
         let directory = std::env::temp_dir().join(format!(
             "aeris-endurance-checkpoint-{}-{}",
             std::process::id(),
@@ -1476,7 +1480,7 @@ mod tests {
         let initial = endurance_evidence(
             EnduranceCompletionState::Incomplete,
             0,
-            Duration::from_millis(120),
+            window,
             &EnduranceEvidenceSnapshot {
                 elapsed: Duration::ZERO,
                 counters: &counters,
@@ -1489,14 +1493,11 @@ mod tests {
         write_endurance_evidence_atomically(&report_path, &initial)
             .expect("initial checkpoint is written");
 
-        let result = collect_endurance_with_checkpoints(
-            Duration::from_millis(120),
-            Duration::from_millis(20),
-            |checkpoint| {
+        let result =
+            collect_endurance_with_checkpoints(window, Duration::from_millis(20), |checkpoint| {
                 write_endurance_evidence_atomically(&report_path, checkpoint)?;
                 Err("simulated interruption after checkpoint".into())
-            },
-        );
+            });
         assert!(result.is_err());
         let persisted: serde_json::Value = serde_json::from_slice(
             &std::fs::read(&report_path).expect("checkpoint remains readable"),

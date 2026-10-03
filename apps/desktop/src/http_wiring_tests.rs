@@ -11,6 +11,10 @@ use std::{
 };
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "GPUI's macOS platform must be created on the process main thread, which libtest never provides"
+)]
 fn installed_http_client_loads_remote_avatar_resource() {
     const GIF_1X1: &[u8] = &[
         0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,

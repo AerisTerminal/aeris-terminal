@@ -41,7 +41,9 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace --all-targets --all-features --locked
       - name: Test workspace
-        run: cargo test --workspace --all-features --locked
+        # Each hosted run is a slow round trip; report every failing test
+        # binary at once. Any failure still fails the job.
+        run: cargo test --workspace --all-features --locked --no-fail-fast
       - name: Report remaining disk
         if: always()
         run: df -h /
