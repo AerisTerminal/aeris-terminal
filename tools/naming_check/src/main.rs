@@ -389,12 +389,13 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "c26286d";
+        let expected_revision = "f078d5f";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",
             "aeris_charts_render",
             "aeris_charts_render_gpui",
+            "aeris_charts_native",
         ] {
             assert!(
                 root_manifest.contains(&format!(
@@ -416,6 +417,7 @@ mod tests {
             if contents.contains("aeris_charts_engine.workspace")
                 || contents.contains("aeris_charts_render.workspace")
                 || contents.contains("aeris_charts_render_gpui.workspace")
+                || contents.contains("aeris_charts_native.workspace")
             {
                 assert_eq!(relative, "crates/ui/chart_integration/Cargo.toml");
             }

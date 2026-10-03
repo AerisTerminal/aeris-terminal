@@ -45,7 +45,49 @@ pub(super) fn clamp_chart_context_menu_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    clamp_overlay_origin(origin, viewport, CHART_CONTEXT_MENU_WIDTH, 8.0, 5.0)
+    clamp_overlay_origin(
+        origin,
+        viewport,
+        CHART_CONTEXT_MENU_WIDTH,
+        CHART_CONTEXT_MENU_ROWS,
+        CHART_CONTEXT_MENU_SEPARATORS,
+    )
+}
+
+const CHART_CONTEXT_MENU_ROWS: f32 = 9.0;
+const CHART_CONTEXT_MENU_SEPARATORS: f32 = 5.0;
+/// The "Chart image" row: third row, below one separator.
+const CHART_IMAGE_ROW: f32 = 2.0;
+const CHART_IMAGE_ROW_SEPARATORS_BEFORE: f32 = 1.0;
+
+/// The chart image submenu opens beside its row, to the right when it fits and otherwise
+/// to the left, and stays inside the window.
+pub(super) fn clamp_chart_image_flyout_origin(
+    root: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let scale = MenuScale::BASE;
+    let width = scale.px(CHART_IMAGE_FLYOUT_WIDTH);
+    let height = px(scaled_overlay_height(2.0, 0.0, scale));
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    let gap = px(PRICE_AXIS_FLYOUT_GAP);
+    let right_x = root.x + scale.px(CHART_CONTEXT_MENU_WIDTH) + gap;
+    let left_x = root.x - width - gap;
+    let max_x = (viewport.width - width - margin).max(margin);
+    let x = if right_x <= max_x || left_x < margin {
+        right_x.min(max_x)
+    } else {
+        left_x
+    };
+    let row_y = root.y
+        + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * CHART_IMAGE_ROW
+        + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CHART_IMAGE_ROW_SEPARATORS_BEFORE);
+    point(
+        x.max(margin),
+        row_y
+            .max(margin)
+            .min((viewport.height - height - margin).max(margin)),
+    )
 }
 
 /// Prefer opening the Y-axis menu into the chart, then keep an edge margin so it
@@ -120,12 +162,16 @@ pub(super) fn chart_context_menu_layer(
         origin,
         size(
             scale.px(CHART_CONTEXT_MENU_WIDTH),
-            px(scaled_overlay_height(8.0, 5.0, scale)),
+            px(scaled_overlay_height(
+                CHART_CONTEXT_MENU_ROWS,
+                CHART_CONTEXT_MENU_SEPARATORS,
+                scale,
+            )),
         ),
     );
     let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, popup_bounds);
     let dismiss = terminal.clone();
-    div()
+    let mut layer = div()
         .id("chart_context_menu_scrim")
         .absolute()
         .top_0()
@@ -143,8 +189,52 @@ pub(super) fn chart_context_menu_layer(
             chart_context_menu_panel(terminal, menu, state, origin, scale, theme),
             "chart_context_menu_enter",
             animation_origin,
-        ))
-        .into_any_element()
+        ));
+    if menu.image_flyout_open {
+        let flyout_origin = clamp_chart_image_flyout_origin(origin, viewport);
+        let flyout_bounds = Bounds::new(
+            flyout_origin,
+            size(
+                scale.px(CHART_IMAGE_FLYOUT_WIDTH),
+                px(scaled_overlay_height(2.0, 0.0, scale)),
+            ),
+        );
+        let row_height = scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT);
+        let parent_y = origin.y
+            + row_height * CHART_IMAGE_ROW
+            + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CHART_IMAGE_ROW_SEPARATORS_BEFORE)
+            + row_height / 2.0;
+        let parent_x = if flyout_origin.x < origin.x {
+            origin.x
+        } else {
+            origin.x + scale.px(CHART_CONTEXT_MENU_WIDTH)
+        };
+        let mut flyout = flat_compact_menu_panel(
+            "chart_image_menu",
+            flyout_origin,
+            scale.px(CHART_IMAGE_FLYOUT_WIDTH),
+            theme,
+        );
+        let items = chart_image_menu_items(state);
+        let last = items.len().saturating_sub(1);
+        for (index, item) in items.into_iter().enumerate() {
+            flyout = flyout.child(chart_context_menu_item(
+                terminal,
+                item,
+                theme,
+                menu.clone(),
+                scale,
+                index == 0,
+                index == last,
+            ));
+        }
+        layer = layer.child(animate_popup_from_origin(
+            flyout,
+            "chart_image_menu_enter",
+            PopupAnimationOrigin::from_trigger(point(parent_x, parent_y), flyout_bounds),
+        ));
+    }
+    layer.into_any_element()
 }
 
 pub(super) fn chart_context_menu_panel(
@@ -164,7 +254,7 @@ pub(super) fn chart_context_menu_panel(
     let items = chart_context_menu_items(state);
     let last = items.len().saturating_sub(1);
     for (index, item) in items.into_iter().enumerate() {
-        if matches!(index, 1 | 2 | 4 | 6 | 7) {
+        if matches!(index, 1 | 3 | 5 | 7 | 8) {
             panel = panel.child(menu_separator(theme));
         }
         panel = panel.child(chart_context_menu_item(
@@ -180,7 +270,7 @@ pub(super) fn chart_context_menu_panel(
     panel
 }
 
-pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 8] {
+pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 9] {
     [
         ChartContextMenuItem {
             id: "chart_context_reset_view",
@@ -195,6 +285,13 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
             label: "Copy price",
             enabled: state.enabled(ChartContextMenuState::COPY_PRICE),
             action: ChartContextAction::CopyPrice,
+        },
+        ChartContextMenuItem {
+            id: "chart_context_image",
+            icon: HugeIcon::Camera,
+            label: "Chart image",
+            enabled: state.enabled(ChartContextMenuState::READY),
+            action: ChartContextAction::ImageMenu,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_drawings",
@@ -237,6 +334,26 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
             label: "Settings",
             enabled: true,
             action: ChartContextAction::Settings,
+        },
+    ]
+}
+
+pub(super) fn chart_image_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 2] {
+    let enabled = state.enabled(ChartContextMenuState::READY);
+    [
+        ChartContextMenuItem {
+            id: "chart_image_copy",
+            icon: HugeIcon::Copy,
+            label: "Copy image",
+            enabled,
+            action: ChartContextAction::CopyImage,
+        },
+        ChartContextMenuItem {
+            id: "chart_image_save",
+            icon: HugeIcon::Download,
+            label: "Save image…",
+            enabled,
+            action: ChartContextAction::SaveImage,
         },
     ]
 }
@@ -304,16 +421,38 @@ pub(super) fn chart_context_menu_item(
     } else {
         label
     };
+    let opens_image_menu = action == ChartContextAction::ImageMenu;
     let mut row = MenuRow::compact(id, row_label, theme)
         .scale(scale)
         .leading(leading)
         .disabled(!enabled)
         .destructive(destructive)
+        .highlighted(opens_image_menu && menu.image_flyout_open)
         .flush_in_panel(first, last);
     if action == ChartContextAction::CopyPrice
         && let Some(price) = menu.copy_price.clone()
     {
         row = row.trailing(copy_price_chip(price, enabled, scale, theme));
+    }
+    if opens_image_menu {
+        row = row.trailing(
+            header_icon(HugeIcon::ArrowRight)
+                .with_size(icon_size)
+                .color(icon_color),
+        );
+    }
+    if !matches!(
+        action,
+        ChartContextAction::CopyImage | ChartContextAction::SaveImage
+    ) {
+        let hover_terminal = terminal.clone();
+        row = row.on_hover(move |hovered, _, cx| {
+            if *hovered {
+                hover_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.set_chart_image_flyout(opens_image_menu && enabled, terminal_cx);
+                });
+            }
+        });
     }
     row.on_click(move |event, window, cx| {
         if enabled {

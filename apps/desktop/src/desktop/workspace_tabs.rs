@@ -698,6 +698,7 @@ impl TerminalApp {
                         position: request.position,
                         kind: request.kind,
                         flyout: PriceAxisMenuFlyout::None,
+                        image_flyout_open: false,
                         copy_price: request.copy_price,
                         copy_feedback_generation: None,
                     });
@@ -1618,6 +1619,18 @@ impl TerminalApp {
                 .detach();
                 return;
             }
+            ChartContextAction::ImageMenu => {
+                menu.image_flyout_open = true;
+                self.chart_context_menu = Some(menu);
+            }
+            ChartContextAction::CopyImage => {
+                self.chart_context_menu = None;
+                self.update_context_menu_pane(&menu, WorkspaceSurface::copy_chart_image, cx);
+            }
+            ChartContextAction::SaveImage => {
+                self.chart_context_menu = None;
+                self.update_context_menu_pane(&menu, WorkspaceSurface::save_chart_image, cx);
+            }
             ChartContextAction::Reset => {
                 self.chart_context_menu = None;
                 self.update_context_menu_pane(&menu, WorkspaceSurface::reset_chart_view, cx);
@@ -1746,6 +1759,17 @@ impl TerminalApp {
             *open_left = next_left;
         }
         cx.notify();
+    }
+
+    /// Hovering a chart menu row opens the image submenu on its own row and closes it on any
+    /// other, so the submenu follows the pointer without a dismiss timer.
+    pub(super) fn set_chart_image_flyout(&mut self, open: bool, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.chart_context_menu
+            && menu.image_flyout_open != open
+        {
+            menu.image_flyout_open = open;
+            cx.notify();
+        }
     }
 
     pub(super) fn toggle_price_axis_flyout(

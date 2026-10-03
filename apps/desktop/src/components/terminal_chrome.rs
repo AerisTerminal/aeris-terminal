@@ -504,7 +504,6 @@ pub(super) fn header_controls(
         .child(chart_type_selector(
             app.clone(),
             state.chart_type,
-            state.chart_type_label,
             state.controls.enabled(HeaderControls::CHART_TYPE),
             &state.theme,
         ))
@@ -525,6 +524,11 @@ pub(super) fn header_controls(
             app.clone(),
             DrawingHistoryControl::Redo,
             state.drawing_history,
+            &state.theme,
+        ))
+        .child(chart_image_control(
+            app.clone(),
+            state.controls.enabled(HeaderControls::CHART_IMAGE),
             &state.theme,
         ))
         .children(side_panel_toggles)
@@ -875,6 +879,29 @@ fn drawing_history_control(
     chrome_button_style(button, theme, false, enabled)
 }
 
+/// Copies the chart, with its legend, to the clipboard as an image. Saving to a file lives in
+/// the chart's context menu.
+fn chart_image_control(
+    app: Entity<WorkspaceSurface>,
+    enabled: bool,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    const LABEL: &str = "Copy chart image";
+    let button = Button::new("chart_copy_image")
+        .icon(header_icon(HugeIcon::Camera))
+        .aria_label(LABEL)
+        .tooltip(TooltipSpec::new(LABEL, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+        .w(px(chart_chrome::CHART_CONTROL_SIZE))
+        .disabled(!enabled)
+        .when(enabled, Button::cursor_pointer)
+        .when(!enabled, Button::cursor_not_allowed);
+    let button = button_activation(button, enabled, move |_, cx| {
+        app.update(cx, WorkspaceSurface::copy_chart_image);
+    });
+    chrome_button_style(button, theme, false, enabled)
+}
+
 pub(super) fn header_icon(name: HugeIcon) -> Icon {
     Icon::default().path(name.path())
 }
@@ -1141,13 +1168,11 @@ pub(super) fn series_selector(
 pub(super) fn chart_type_selector(
     app: Entity<WorkspaceSurface>,
     chart_type: ChartType,
-    label: String,
     enabled: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let button = Button::new("chart_type_selector")
         .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
-        .label(label)
         .caret(header_icon(HugeIcon::ChevronDown))
         .disabled(!enabled)
         .when(enabled, Button::cursor_pointer)

@@ -4757,6 +4757,18 @@ impl WorkspaceSurface {
         }
     }
 
+    pub(super) fn copy_chart_image(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, AerisChartView::copy_image);
+        }
+    }
+
+    pub(super) fn save_chart_image(&mut self, cx: &mut Context<Self>) {
+        if let Some(chart) = &self.chart {
+            chart.update(cx, AerisChartView::save_image);
+        }
+    }
+
     pub(super) fn reset_chart_view(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {

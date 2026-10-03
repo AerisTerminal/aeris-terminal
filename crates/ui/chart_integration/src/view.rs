@@ -738,6 +738,8 @@ pub struct AerisChartView {
     /// Engine handle of the visible-range volume profile drawn on the price series.
     volume_profile: Option<aeris_charts_engine::NativePrimitiveId>,
     asset_legend_title: String,
+    /// Instrument symbol of the loaded series, naming exported chart images.
+    asset_symbol: String,
     /// A load the trader is waiting on, shown by the symbol legend itself so the
     /// notice sits where they are already reading the symbol.
     asset_loading: LegendPresence,
@@ -842,6 +844,7 @@ impl AerisChartView {
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: String::new(),
+            asset_symbol: String::new(),
             asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
@@ -945,6 +948,7 @@ impl AerisChartView {
             volume_series,
             volume_legend: LegendPresence::Absent,
             asset_legend_title: replay_legend_title(replay),
+            asset_symbol: replay.instrument().symbol.clone(),
             asset_loading: LegendPresence::Absent,
             legend_panes: Vec::new(),
             frame: ChartFrame::default(),
@@ -1020,6 +1024,7 @@ impl AerisChartView {
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
+        self.asset_symbol.clone_from(&replay.instrument().symbol);
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay_display_precision(replay);
@@ -1523,6 +1528,7 @@ impl AerisChartView {
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
+        self.asset_symbol.clone_from(&replay.instrument().symbol);
         self.price_divisor = replay_price_divisor(replay);
         self.quantity_divisor = replay_quantity_divisor(replay);
         self.instrument_price_precision = replay_display_precision(replay);
@@ -1588,6 +1594,7 @@ impl AerisChartView {
                 if let Some(snapshot) = update.snapshot() {
                     self.displayed_provenance.replace_snapshot(snapshot);
                     self.asset_legend_title = replay_legend_title(snapshot);
+                    self.asset_symbol.clone_from(&snapshot.instrument().symbol);
                     self.instrument_price_precision = replay_display_precision(snapshot);
                     self.instrument_price_increment = snapshot.instrument().price_increment;
                     self.instrument_price_scale = snapshot.instrument().precision.price_scale();
@@ -2255,9 +2262,14 @@ impl AerisChartView {
                 height: f64::from(height),
                 dpr: f64::from(scale_factor),
                 force_layout,
+                allow_axis_shrink: force_layout,
+                force_frame: false,
+                force_axis: false,
+                layout_only: false,
                 fit_content,
                 frame: &mut self.frame,
-                axis_primitives: &mut self.axis_prims,
+                axis_frame: None,
+                axis_primitives: Some(&mut self.axis_prims),
             },
             measure,
             countdown_measure,
@@ -2797,6 +2809,7 @@ impl Render for AerisChartView {
 mod tests;
 
 mod drawings;
+mod export;
 mod indicators;
 mod input;
 mod order_flow;

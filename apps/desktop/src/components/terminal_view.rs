@@ -15,7 +15,6 @@ fn active_header_state(
         instrument_label: terminal_instrument_label(workspace),
         series_label: series_selector_label(workspace.selected_interval()),
         chart_type: workspace.chart_type(cx),
-        chart_type_label: workspace.chart_type(cx).label().to_string(),
         instruments: workspace.instrument_entries(cx),
         symbol_input: workspace.symbol_input.clone(),
         indicator_input: workspace.indicator_input.clone(),

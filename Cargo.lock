@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "ab_glyph"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "owned_ttf_parser",
+]
+
+[[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+
+[[package]]
 name = "accesskit"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -133,19 +149,21 @@ version = "0.2.3"
 dependencies = [
  "aeris_application",
  "aeris_charts_engine",
+ "aeris_charts_native",
  "aeris_charts_render",
  "aeris_charts_render_gpui",
  "aeris_design_system",
  "aeris_terminal_ui",
  "gpui",
  "num-traits",
+ "resvg",
  "serde_json",
 ]
 
 [[package]]
 name = "aeris_charts_core"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c26286d#c26286d11b7aecc015f459a829180bb734d8f77e"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -156,7 +174,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_engine"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c26286d#c26286d11b7aecc015f459a829180bb734d8f77e"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_indicators",
@@ -168,15 +186,28 @@ dependencies = [
 [[package]]
 name = "aeris_charts_indicators"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c26286d#c26286d11b7aecc015f459a829180bb734d8f77e"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
 dependencies = [
  "serde",
 ]
 
 [[package]]
+name = "aeris_charts_native"
+version = "0.3.0"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
+dependencies = [
+ "ab_glyph",
+ "aeris_charts_core",
+ "aeris_charts_engine",
+ "aeris_charts_render",
+ "fontdb 0.24.0",
+ "tiny-skia 0.12.0",
+]
+
+[[package]]
 name = "aeris_charts_render"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c26286d#c26286d11b7aecc015f459a829180bb734d8f77e"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
 dependencies = [
  "aeris_charts_core",
 ]
@@ -184,7 +215,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render_gpui"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=c26286d#c26286d11b7aecc015f459a829180bb734d8f77e"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_engine",
@@ -1702,7 +1733,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be17b688510d934ce13f48a2beba700e11583e281e0fda99c22bb256a14eda73"
 dependencies = [
  "bitflags 2.13.2",
- "fontdb",
+ "fontdb 0.23.0",
  "harfrust",
  "linebender_resource_handle",
  "log",
@@ -2453,6 +2484,19 @@ dependencies = [
  "slotmap",
  "tinyvec",
  "ttf-parser",
+]
+
+[[package]]
+name = "fontdb"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2660c5e9157bf76d2db1294e4a9feba604ef610819a3b591088d0d8392a3290f"
+dependencies = [
+ "fontconfig-parser",
+ "log",
+ "memmap2",
+ "slotmap",
+ "tinyvec",
 ]
 
 [[package]]
@@ -4921,6 +4965,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "owned_ttf_parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5944,7 +5997,7 @@ dependencies = [
  "pico-args",
  "rgb",
  "svgtypes",
- "tiny-skia",
+ "tiny-skia 0.11.4",
  "usvg",
  "zune-jpeg",
 ]
@@ -7196,7 +7249,22 @@ dependencies = [
  "cfg-if",
  "log",
  "png 0.17.16",
- "tiny-skia-path",
+ "tiny-skia-path 0.11.4",
+]
+
+[[package]]
+name = "tiny-skia"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "bytemuck",
+ "cfg-if",
+ "log",
+ "png 0.18.1",
+ "tiny-skia-path 0.12.0",
 ]
 
 [[package]]
@@ -7204,6 +7272,17 @@ name = "tiny-skia-path"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca365c3faccca67d06593c5980fa6c57687de727a03131735bb85f01fdeeb9"
 dependencies = [
  "arrayref",
  "bytemuck",
@@ -7646,7 +7725,7 @@ dependencies = [
  "base64 0.22.1",
  "data-url",
  "flate2",
- "fontdb",
+ "fontdb 0.23.0",
  "imagesize",
  "kurbo",
  "log",
@@ -7657,7 +7736,7 @@ dependencies = [
  "siphasher",
  "strict-num",
  "svgtypes",
- "tiny-skia-path",
+ "tiny-skia-path 0.11.4",
  "unicode-bidi",
  "unicode-script",
  "unicode-vo",

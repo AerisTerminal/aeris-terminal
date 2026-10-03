@@ -14,6 +14,7 @@ pub enum UiIcon {
     ArrowLeft,
     ArrowRightDouble,
     ArrowRight,
+    Camera,
     Close,
     CloseBold,
     Chart,
@@ -21,6 +22,7 @@ pub enum UiIcon {
     ChevronDown,
     Copy,
     CopySuccess,
+    Download,
     Trash,
     EraserIcon,
     Failure,
@@ -50,11 +52,12 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 39] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
         Self::ArrowRight,
+        Self::Camera,
         Self::Close,
         Self::CloseBold,
         Self::Chart,
@@ -62,6 +65,7 @@ impl UiIcon {
         Self::ChevronDown,
         Self::Copy,
         Self::CopySuccess,
+        Self::Download,
         Self::Trash,
         Self::EraserIcon,
         Self::Failure,
@@ -97,6 +101,7 @@ impl UiIcon {
             Self::ArrowLeft => "arrow-left.svg",
             Self::ArrowRightDouble => "arrow-right-double.svg",
             Self::ArrowRight => "arrow-right.svg",
+            Self::Camera => "camera.svg",
             Self::Close => "close.svg",
             Self::CloseBold => "close-bold.svg",
             Self::Chart => "chart.svg",
@@ -104,6 +109,7 @@ impl UiIcon {
             Self::ChevronDown => "chevron-down.svg",
             Self::Copy => "copy.svg",
             Self::CopySuccess => "copy-success.svg",
+            Self::Download => "download.svg",
             Self::Trash => "trash.svg",
             Self::EraserIcon => "eraser.svg",
             Self::Failure => "failure.svg",
@@ -347,12 +353,14 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
             include_bytes!("../assets/icons/ui/arrow-right-double.svg")
         }
         "arrow-right.svg" => include_bytes!("../assets/icons/ui/arrow-right.svg"),
+        "camera.svg" => include_bytes!("../assets/icons/ui/camera.svg"),
         "close.svg" => include_bytes!("../assets/icons/ui/close.svg"),
         "close-bold.svg" => include_bytes!("../assets/icons/ui/close-bold.svg"),
         "chart.svg" => include_bytes!("../assets/icons/ui/chart.svg"),
         "check.svg" => include_bytes!("../assets/icons/ui/check.svg"),
         "chevron-down.svg" => include_bytes!("../assets/icons/ui/chevron-down.svg"),
         "copy.svg" => include_bytes!("../assets/icons/ui/copy.svg"),
+        "download.svg" => include_bytes!("../assets/icons/ui/download.svg"),
         "copy-success.svg" => include_bytes!("../assets/icons/ui/copy-success.svg"),
         "trash.svg" => include_bytes!("../assets/icons/ui/trash.svg"),
         "eraser.svg" => include_bytes!("../assets/icons/ui/eraser.svg"),

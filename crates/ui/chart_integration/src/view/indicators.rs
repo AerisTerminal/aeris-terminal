@@ -150,10 +150,15 @@ impl AerisChartView {
         true
     }
     pub(super) fn legend_rows(&self) -> Vec<LegendRow> {
-        let logical_index = self
-            .engine
-            .crosshair
-            .map(|(x, _)| self.engine.time_scale.coordinate_to_index(x));
+        self.legend_rows_at(
+            self.engine
+                .crosshair
+                .map(|(x, _)| self.engine.time_scale.coordinate_to_index(x)),
+        )
+    }
+
+    /// Legend rows reading out `logical_index`, or the latest bar when `None`.
+    pub(super) fn legend_rows_at(&self, logical_index: Option<i64>) -> Vec<LegendRow> {
         let leading = self
             .volume_legend
             .is_present()

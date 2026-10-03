@@ -136,8 +136,9 @@ use chart_context_menus::{
 };
 #[cfg(test)]
 use chart_context_menus::{
-    PriceAxisMenuRow, chart_context_menu_items, clamp_chart_context_menu_origin,
-    clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
+    PriceAxisMenuRow, chart_context_menu_items, chart_image_menu_items,
+    clamp_chart_context_menu_origin, clamp_chart_image_flyout_origin, clamp_price_axis_menu_origin,
+    price_axis_flyout_rows, price_axis_root_rows,
 };
 use chart_surface::{MarketWorkspaceState, market_workspace};
 use chart_toolbar_menus::{
@@ -434,6 +435,7 @@ const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
+const CHART_IMAGE_FLYOUT_WIDTH: f32 = 180.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;
 const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
@@ -2616,7 +2618,6 @@ struct HeaderState {
     instrument_label: String,
     series_label: String,
     chart_type: ChartType,
-    chart_type_label: String,
     instruments: Vec<InstrumentMenuEntry>,
     symbol_input: Option<Entity<InputState>>,
     indicator_input: Entity<InputState>,
@@ -3070,6 +3071,7 @@ impl HeaderControls {
     const MARKET_PANELS: u8 = 4;
     const INDICATOR: u8 = 8;
     const CHART_TYPE: u8 = 16;
+    const CHART_IMAGE: u8 = 32;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -3088,7 +3090,7 @@ impl HeaderControls {
 
     const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::INDICATOR | Self::CHART_TYPE;
+            self.0 |= Self::INDICATOR | Self::CHART_TYPE | Self::CHART_IMAGE;
         }
         self
     }
@@ -4040,6 +4042,10 @@ struct ChartContextMenuItem {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartContextAction {
     CopyPrice,
+    /// Opens the chart image submenu; the image is taken by its Copy or Save rows.
+    ImageMenu,
+    CopyImage,
+    SaveImage,
     Reset,
     ClearDrawings,
     ClearIndicators,
@@ -4085,6 +4091,7 @@ struct ChartContextMenu {
     position: gpui::Point<Pixels>,
     kind: ChartContextKind,
     flyout: PriceAxisMenuFlyout,
+    image_flyout_open: bool,
     copy_price: Option<SharedString>,
     copy_feedback_generation: Option<u64>,
 }
