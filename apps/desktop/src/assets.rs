@@ -477,6 +477,30 @@ mod tests {
         }
     }
 
+    // `Icon` paints only the SVG alpha mask in one tint, so any paint other than
+    // `currentColor` collapses into a solid silhouette instead of showing its color.
+    #[test]
+    fn monochrome_icons_paint_only_current_color() {
+        let assets = AerisAssets;
+        let paths = DrawingIcon::ALL
+            .into_iter()
+            .map(DrawingIcon::path)
+            .chain(UiIcon::ALL.into_iter().map(UiIcon::path));
+
+        for path in paths {
+            let bytes = assets
+                .load(path.as_ref())
+                .expect("asset lookup")
+                .expect("embedded monochrome icon");
+            let svg = std::str::from_utf8(&bytes)
+                .expect("UTF-8 SVG")
+                .to_ascii_lowercase();
+            for paint in ["#", "rgb(", "white", "black", "opacity"] {
+                assert!(!svg.contains(paint), "{path} paints with {paint}");
+            }
+        }
+    }
+
     #[test]
     fn horizontal_line_uses_the_horizontal_line_glyph_not_the_diagonal_ray() {
         assert_eq!(
@@ -554,7 +578,12 @@ mod tests {
             assert!(paths.insert(path.clone()), "duplicate asset path: {path}");
             let bytes = assets.load(path.as_ref()).unwrap().expect("UI icon");
             let svg = std::str::from_utf8(&bytes).expect("UTF-8 SVG");
-            assert!(svg.contains("viewBox=\"0 0 24 24\""));
+            // Glyphs keep the grid they were drawn on (24, or 18 for marks shown at 18px)
+            // so their edges stay on whole pixels at that display size.
+            assert!(
+                svg.contains("viewBox=\"0 0 24 24\"") || svg.contains("viewBox=\"0 0 18 18\""),
+                "{path}"
+            );
             assert!(svg.contains("currentColor"));
             assert!(!svg.contains('#'));
         }
@@ -581,7 +610,13 @@ mod tests {
                 .unwrap()
                 .expect("series icon");
             let svg = std::str::from_utf8(&bytes).unwrap();
-            assert!(svg.contains("viewBox=\"0 0 24 24\""));
+            // Series marks are drawn on the 18px grid they are displayed at, so every
+            // body, wick and tick edge lands on a whole pixel.
+            assert!(
+                svg.contains("width=\"18\" height=\"18\" viewBox=\"0 0 18 18\""),
+                "{}",
+                icon.path()
+            );
             assert!(!svg.contains("<image"));
             assert!(!svg.contains("<filter"));
         }

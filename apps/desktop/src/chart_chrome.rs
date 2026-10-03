@@ -261,6 +261,41 @@ pub struct ChartChromePreferences {
     pub chart_type: ChartType,
     /// Instrument categories the symbol menu searches; at least one is always included.
     pub symbol_search_categories: InstrumentSearchCategories,
+    pub window_frame: WindowFrame,
+}
+
+/// How the workspace title bar frames the window.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WindowFrame {
+    /// The title bar keeps its row above the workspace.
+    #[default]
+    Framed,
+    /// The title bar leaves the layout and reveals on hover at the top edge.
+    Frameless,
+}
+
+impl WindowFrame {
+    #[must_use]
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            Self::Framed => "framed",
+            Self::Frameless => "frameless",
+        }
+    }
+
+    #[must_use]
+    pub fn from_identifier(value: &str) -> Option<Self> {
+        match value.trim() {
+            "framed" => Some(Self::Framed),
+            "frameless" => Some(Self::Frameless),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn frameless(self) -> bool {
+        matches!(self, Self::Frameless)
+    }
 }
 
 impl Default for ChartChromePreferences {
@@ -271,6 +306,7 @@ impl Default for ChartChromePreferences {
             indicator_price_lines_visible: true,
             chart_type: ChartType::Candles,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            window_frame: WindowFrame::Framed,
         }
     }
 }
@@ -387,6 +423,10 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             preferences.symbol_search_categories.futures = parse_chrome_flag(value);
         } else if let Some(value) = line.strip_prefix("symbol_search_equities=") {
             preferences.symbol_search_categories.equities = parse_chrome_flag(value);
+        } else if let Some(value) = line.strip_prefix("window_frame=")
+            && let Some(window_frame) = WindowFrame::from_identifier(value)
+        {
+            preferences.window_frame = window_frame;
         }
     }
     // A search that excludes every category would never return anything.
@@ -401,13 +441,14 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
 #[must_use]
 pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> String {
     format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\n",
+        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\n",
         u8::from(preferences.indicator_name_labels_visible),
         u8::from(preferences.indicator_value_labels_visible),
         u8::from(preferences.indicator_price_lines_visible),
         preferences.chart_type.identifier(),
         u8::from(preferences.symbol_search_categories.futures),
         u8::from(preferences.symbol_search_categories.equities),
+        preferences.window_frame.identifier(),
     )
 }
 
@@ -634,7 +675,7 @@ fn sync_chart_chrome_directory(path: &Path) -> Result<(), String> {
 mod tests {
     use super::{
         ChartChromePreferences, ChartChromeSaveState, INDICATOR_SPECS, IndicatorKind,
-        IndicatorLocation, IndicatorParameters, InstrumentSearchCategories,
+        IndicatorLocation, IndicatorParameters, InstrumentSearchCategories, WindowFrame,
         chart_chrome_backup_path, chart_chrome_staging_path, encode_chart_chrome_preferences,
         filter_indicator_specs, load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
@@ -774,10 +815,17 @@ mod tests {
                 futures: true,
                 equities: false,
             },
+            window_frame: WindowFrame::Frameless,
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\n"
+        );
+        assert_eq!(defaults.window_frame, WindowFrame::Framed);
+        assert_eq!(
+            parse_chart_chrome_preferences("window_frame=unknown\n").window_frame,
+            WindowFrame::Framed,
+            "an unrecognized frame keeps the framed default"
         );
         assert_eq!(
             defaults.symbol_search_categories,
@@ -817,6 +865,7 @@ mod tests {
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            window_frame: WindowFrame::Framed,
         };
         let pending = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -824,6 +873,7 @@ mod tests {
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            window_frame: WindowFrame::Framed,
         };
         save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
 
@@ -848,6 +898,7 @@ mod tests {
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            window_frame: WindowFrame::Framed,
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -855,6 +906,7 @@ mod tests {
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            window_frame: WindowFrame::Framed,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let (_, inflight) = {
@@ -903,6 +955,7 @@ mod tests {
             indicator_price_lines_visible: true,
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            window_frame: WindowFrame::Framed,
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -910,6 +963,7 @@ mod tests {
             indicator_price_lines_visible: false,
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
+            window_frame: WindowFrame::Framed,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let failed_generation = {

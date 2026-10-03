@@ -1,7 +1,5 @@
 //! Desktop composition and shared presentation types. Behavior lives in owned child modules.
 
-#[path = "components/about_dialog.rs"]
-mod about_dialog;
 #[path = "components/accounts_panel.rs"]
 mod accounts_panel;
 #[path = "assets.rs"]
@@ -28,6 +26,8 @@ mod drawing_toolbar;
 mod engine_market_worker;
 #[path = "frame_poll_gate.rs"]
 mod frame_poll_gate;
+#[path = "components/frameless_title_bar.rs"]
+mod frameless_title_bar;
 #[path = "components/indicator_menu.rs"]
 mod indicator_menu;
 #[path = "desktop/local_state.rs"]
@@ -40,6 +40,8 @@ mod native_ui;
 mod order_book_panel;
 #[path = "components/order_ticket.rs"]
 mod order_ticket;
+#[path = "components/platform_menu.rs"]
+mod platform_menu;
 #[path = "components/price_alert_dialog.rs"]
 mod price_alert_dialog;
 #[cfg(any(test, feature = "diagnostics"))]
@@ -68,7 +70,6 @@ mod watchlist_panel;
 #[path = "components/workspace_layout.rs"]
 mod workspace_layout;
 
-use about_dialog::about_dialog_layer;
 use aeris_application::ReplayStreamUpdate;
 use aeris_chart_integration::{
     AerisChartTheme, AerisChartView, AerisChartWorkspace, ChartAggressorSide, ChartAlertCondition,
@@ -130,7 +131,7 @@ use aeris_terminal_ui::{
 use assets::UiIcon as HugeIcon;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
-    ChartSettingsTemplateView, ChartSettingsView, account_menu_layer, chart_context_menu_layer,
+    ChartSettingsTemplateView, ChartSettingsView, chart_context_menu_layer,
     chart_settings_menu_layer, overlay_height, price_axis_menu_layer,
 };
 #[cfg(test)]
@@ -159,6 +160,10 @@ use chrome_menu::{
 use command_palette::command_palette_layer;
 use context_panel::{ContextPanelHeightDrag, ContextPanelState, context_panel};
 use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
+use frameless_title_bar::{
+    FramelessTitleBar, TitleBarPlacement, frameless_reveal_zone, frameless_title_bar_row,
+    title_bar_placement,
+};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
     Entity, FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit,
@@ -191,6 +196,7 @@ use native_ui::{
 use num_traits::ToPrimitive;
 use order_book_panel::OrderBookPanelState;
 use order_ticket::TradingOrderControlsState;
+use platform_menu::platform_menu_layer;
 use price_alert_dialog::{
     price_alert_dialog_layer, replace_chart_price_alert_lines, runtime_price_alerts,
 };
@@ -226,7 +232,6 @@ use terminal_chrome::{
     button_activation, button_activation_at, chrome_button_style, chrome_tooltip, exchange_mark,
     fullscreen_escape_command, header_icon, mark_tile, round_icon_button, series_glyph,
     terminal_header, window_move_gesture_transition, workspace_title_bar,
-    workspace_title_bar_visible,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
@@ -430,7 +435,6 @@ const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;
-const ACCOUNT_MENU_GAP: f32 = 4.0;
 const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
 const TIME_ZONE_MENU_WIDTH: f32 = 320.0;
@@ -442,7 +446,6 @@ const TIMEFRAME_FLYOUT_GAP: f32 = 5.0;
 const QUICK_TIMEFRAME_POPUP_WIDTH: f32 = 300.0;
 const QUICK_TIMEFRAME_POPUP_TOP: f32 = 64.0;
 const TIMEFRAME_TYPEAHEAD_LIMIT: usize = 8;
-const CHART_SETTINGS_MENU_WIDTH: f32 = 260.0;
 const CHART_SETTINGS_PANEL_WIDTH: f32 = 840.0;
 const CHART_SETTINGS_PANEL_HEIGHT: f32 = 600.0;
 /// Share of the shared screen-aware menu growth the chart settings panel takes, so it stays
@@ -4247,11 +4250,11 @@ struct TerminalApp {
     chart_settings_template_error: Option<String>,
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     chart_settings_persistence_dirty: bool,
-    account_menu_open: bool,
-    account_menu_anchor: Option<gpui::Point<Pixels>>,
+    /// Avatar click point the open platform menu is anchored under.
+    platform_menu_anchor: Option<gpui::Point<Pixels>>,
+    frameless_title_bar: FramelessTitleBar,
     bottom_panel: bottom_panel::BottomPanelState,
     profile_refresh_on_activation: bool,
-    about_dialog_open: bool,
     command_palette_input: Entity<InputState>,
     command_palette_open: bool,
     command_palette_selection: usize,

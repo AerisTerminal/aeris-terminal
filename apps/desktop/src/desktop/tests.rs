@@ -33,7 +33,7 @@ use super::{
     watchlist_drag_destination, watchlist_drag_translation, window_move_gesture_transition,
     workspace_drag_destination, workspace_drag_translation, workspace_label,
     workspace_maximize_transition, workspace_series, workspace_split_ratio, workspace_switch,
-    workspace_title_bar_visible, wrapped_workspace_index,
+    wrapped_workspace_index,
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -756,12 +756,6 @@ fn escape_exits_fullscreen_without_stealing_regular_escape() {
     );
     assert_eq!(fullscreen_escape_command("escape", false), None);
     assert_eq!(fullscreen_escape_command("enter", true), None);
-}
-
-#[test]
-fn fullscreen_hides_workspace_title_bar_and_native_controls() {
-    assert!(!workspace_title_bar_visible(true));
-    assert!(workspace_title_bar_visible(false));
 }
 
 #[test]

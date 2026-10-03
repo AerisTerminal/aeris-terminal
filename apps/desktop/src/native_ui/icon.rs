@@ -64,6 +64,17 @@ impl Icon {
     }
 }
 
+/// Rounds a glyph box to whole device pixels. A rasterized glyph whose box ends between
+/// device pixels resamples every edge, so thin strokes and bars smear unevenly.
+pub(crate) fn device_pixel_size(size: Pixels, scale_factor: f32) -> Pixels {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    gpui::px((f32::from(size) * scale).round().max(1.0) / scale)
+}
+
 impl Styled for Icon {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
@@ -72,9 +83,11 @@ impl Styled for Icon {
 
 impl RenderOnce for Icon {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let size = self
-            .size
-            .unwrap_or_else(|| window.text_style().font_size.to_pixels(window.rem_size()));
+        let size = device_pixel_size(
+            self.size
+                .unwrap_or_else(|| window.text_style().font_size.to_pixels(window.rem_size())),
+            window.scale_factor(),
+        );
         let color = self.color.unwrap_or_else(|| window.text_style().color);
         let mut glyph = svg().path(self.path).flex_none().flex_shrink_0();
         *glyph.style() = self.style;
@@ -101,7 +114,19 @@ impl RenderOnce for Icon {
 
 #[cfg(test)]
 mod tests {
-    use super::Icon;
+    use super::{Icon, device_pixel_size};
+    use gpui::px;
+
+    #[test]
+    fn glyph_sizes_snap_to_whole_device_pixels() {
+        assert_eq!(device_pixel_size(px(18.0), 1.0), px(18.0));
+        assert_eq!(device_pixel_size(px(14.4), 1.0), px(14.0));
+        assert_eq!(device_pixel_size(px(26.67), 1.0), px(27.0));
+        assert_eq!(device_pixel_size(px(12.2), 1.5), px(12.0));
+        assert_eq!(device_pixel_size(px(14.4), 2.0), px(14.5));
+        assert_eq!(device_pixel_size(px(0.2), 1.0), px(1.0));
+        assert_eq!(device_pixel_size(px(18.0), 0.0), px(18.0));
+    }
 
     #[test]
     fn icon_keeps_the_owned_asset_path() {

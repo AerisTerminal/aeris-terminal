@@ -50,12 +50,12 @@ pub(super) fn instrument_selector(
         .label(state.label.clone())
         .caret(header_icon(HugeIcon::ChevronDown))
         .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-        .border_1()
+        .border(px(theme.dimensions.border_width))
         .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface))
+        .bg(gpui_color(theme.colors.surface_secondary))
         .text_color(gpui_color(theme.colors.text_primary))
         .theme(theme)
-        .resting_fill(theme.colors.surface)
+        .resting_fill(theme.colors.surface_secondary)
         .h(px(chart_chrome::CHART_CONTROL_SIZE))
         .px_3()
         .rounded(px(f32::from(
@@ -426,11 +426,14 @@ pub(super) fn instrument_search_header(
                 .items_center()
                 .justify_center()
                 .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                .border(px(theme.dimensions.border_width))
+                .border_color(gpui_color(colors.border_secondary))
+                .bg(gpui_color(colors.surface_secondary))
                 .cursor_pointer()
                 .when(state.provider_menu_open, |hit| {
-                    hit.bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                    hit.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
                 })
-                .hover(|hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                .hover(|hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     toggle_app.update(cx, WorkspaceSurface::toggle_symbol_provider_menu);
                     cx.stop_propagation();

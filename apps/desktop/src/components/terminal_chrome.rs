@@ -1,4 +1,4 @@
-use super::chart_context_menus::account_avatar_button;
+use super::platform_menu::account_avatar_button;
 use super::*;
 use aeris_contracts::{MarketSessionPhase, MarketSessionStatus};
 
@@ -132,10 +132,6 @@ pub(super) const fn window_move_gesture_transition(
             }
         }
     }
-}
-
-pub(super) const fn workspace_title_bar_visible(is_fullscreen: bool) -> bool {
-    !is_fullscreen
 }
 
 pub(super) fn terminal_header(
@@ -995,7 +991,13 @@ struct ColoredSvgMark {
 
 impl RenderOnce for ColoredSvgMark {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        colored_svg_element(&self.path, self.size, window.scale_factor(), cx)
+        let scale = window.scale_factor();
+        colored_svg_element(
+            &self.path,
+            native_ui::icon::device_pixel_size(self.size, scale),
+            scale,
+            cx,
+        )
     }
 }
 

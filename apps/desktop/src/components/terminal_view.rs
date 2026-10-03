@@ -498,34 +498,49 @@ impl TerminalApp {
         })
     }
 
-    fn rendered_title_bar(
+    fn rendered_title_bar(&self, terminal: &Entity<Self>, window: &Window, cx: &App) -> AnyElement {
+        workspace_title_bar(
+            terminal,
+            &WorkspaceTabBarState {
+                workspaces: &self.workspaces,
+                market_summaries: &self.market_summaries,
+                active: self.active,
+                enabled: self.workspace_factory.is_some(),
+                error: self.workspace_error.as_deref(),
+                workspace_drag: self.workspace_drag,
+                theme: self.theme,
+            },
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// The title bar row above the workspace, and for a frameless window the top-edge strip
+    /// that grows the row back. Docked windows always show the row; fullscreen shows neither.
+    fn rendered_title_bars(
         &self,
         terminal: &Entity<Self>,
         window: &Window,
-        fullscreen: bool,
+        placement: TitleBarPlacement,
+        now: Instant,
         cx: &App,
-    ) -> Option<impl IntoElement + use<>> {
-        workspace_title_bar_visible(fullscreen).then(|| {
-            workspace_title_bar(
-                terminal,
-                &WorkspaceTabBarState {
-                    workspaces: &self.workspaces,
-                    market_summaries: &self.market_summaries,
-                    active: self.active,
-                    enabled: self.workspace_factory.is_some(),
-                    error: self.workspace_error.as_deref(),
-                    workspace_drag: self.workspace_drag,
-                    theme: self.theme,
-                },
-                window,
-                cx,
-            )
-        })
-    }
-
-    fn rendered_about_dialog(&self, terminal: &Entity<Self>) -> Option<AnyElement> {
-        self.about_dialog_open
-            .then(|| about_dialog_layer(terminal, self.update_presentation(), &self.theme))
+    ) -> (Option<AnyElement>, Option<AnyElement>) {
+        match placement {
+            TitleBarPlacement::Docked => {
+                (Some(self.rendered_title_bar(terminal, window, cx)), None)
+            }
+            TitleBarPlacement::Frameless => (
+                frameless_title_bar_row(
+                    terminal,
+                    &self.frameless_title_bar,
+                    || self.rendered_title_bar(terminal, window, cx),
+                    now,
+                ),
+                frameless_reveal_zone(terminal, &self.frameless_title_bar),
+            ),
+            TitleBarPlacement::Hidden => (None, None),
+        }
     }
 
     fn rendered_bottom_panel(
@@ -547,7 +562,7 @@ impl TerminalApp {
     fn rendered_chrome_overlay(
         &self,
         active: &Entity<WorkspaceSurface>,
-        fullscreen: bool,
+        title_bar_row_height: f32,
         window: &Window,
         cx: &App,
     ) -> Option<AnyElement> {
@@ -556,12 +571,7 @@ impl TerminalApp {
             active,
             &self.tastytrade_connection,
             &self.theme,
-            chart_chrome::CHART_CHROME_HEIGHT
-                + if fullscreen {
-                    0.0
-                } else {
-                    WORKSPACE_TITLE_BAR_HEIGHT
-                },
+            chart_chrome::CHART_CHROME_HEIGHT + title_bar_row_height,
             window.viewport_size(),
             cx,
         )
@@ -596,8 +606,13 @@ impl Render for TerminalApp {
             .chart
             .as_ref()
             .is_some_and(|chart| chart.read(cx).has_market_data());
-        let fullscreen = window.is_fullscreen();
-        let overlay = self.rendered_chrome_overlay(&active, fullscreen, window, cx);
+        let placement = title_bar_placement(window.is_fullscreen(), self.chart_chrome.window_frame);
+        let now = Instant::now();
+        // Header popups anchor below the title bar row, which moves while a frameless bar
+        // slides; its animation redraws this view every frame, so the anchor follows it.
+        let title_bar_row_height =
+            placement.row_height(self.frameless_title_bar.visibility_at(now));
+        let overlay = self.rendered_chrome_overlay(&active, title_bar_row_height, window, cx);
         let account_dialog = accounts_panel::account_dialog_layer(workspace, &active, &self.theme);
         let (context_menu, settings_menu) = self.chart_surface_menus(
             &terminal,
@@ -606,10 +621,10 @@ impl Render for TerminalApp {
             window.viewport_size(),
             cx,
         );
-        let account_menu = self.account_menu_overlay(&terminal, window.viewport_size());
-        let about_dialog = self.rendered_about_dialog(&terminal);
+        let platform_menu = self.platform_menu_overlay(&terminal, window.viewport_size());
         let command_palette = self.rendered_command_palette(&terminal, cx);
-        let title_bar = self.rendered_title_bar(&terminal, window, fullscreen, cx);
+        let (title_bar, frameless_reveal_zone) =
+            self.rendered_title_bars(&terminal, window, placement, now, cx);
         let header = self.rendered_header(&terminal, &active, cx);
         let bottom_panel = self.rendered_bottom_panel(&terminal, &active, cx);
         let watchlist = self.watchlist_panel_state(cx);
@@ -672,11 +687,11 @@ impl Render for TerminalApp {
             )
             .child(bottom_panel)
             .children(overlay)
+            .children(frameless_reveal_zone)
             .children(account_dialog)
             .children(context_menu)
             .children(settings_menu)
-            .children(account_menu)
-            .children(about_dialog)
+            .children(platform_menu)
             .children(command_palette)
     }
 }

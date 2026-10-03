@@ -179,11 +179,10 @@ impl TerminalApp {
             chart_settings_template_error: None,
             chart_settings_templates: init.chart_settings_templates,
             chart_settings_persistence_dirty: false,
-            account_menu_open: false,
-            account_menu_anchor: None,
+            platform_menu_anchor: None,
+            frameless_title_bar: FramelessTitleBar::default(),
             bottom_panel: bottom_panel::BottomPanelState::default(),
             profile_refresh_on_activation: false,
-            about_dialog_open: false,
             command_palette_input,
             command_palette_open: false,
             command_palette_selection: 0,
@@ -1300,48 +1299,111 @@ impl TerminalApp {
         cx.notify();
     }
 
-    /// Opens the account dropdown under the avatar click point, or closes it
-    /// when already open. The stored anchor keeps the panel glued to the
-    /// avatar's rendered position instead of a fixed screen corner.
-    pub(super) fn toggle_account_menu_at(
+    /// Opens the platform menu under the avatar click point, or closes it when
+    /// open. The anchor keeps the panel glued to the avatar's rendered position.
+    pub(super) fn toggle_platform_menu_at(
         &mut self,
         anchor: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.account_menu_open {
-            self.account_menu_open = false;
-            self.account_menu_anchor = None;
-        } else {
-            self.account_menu_open = true;
-            self.account_menu_anchor = Some(anchor);
-        }
+        self.platform_menu_anchor = match self.platform_menu_anchor {
+            Some(_) => None,
+            None => Some(anchor),
+        };
         cx.notify();
     }
 
-    pub(super) fn close_account_menu(&mut self, cx: &mut Context<Self>) {
-        if self.account_menu_open {
-            self.account_menu_open = false;
-            self.account_menu_anchor = None;
+    pub(super) fn close_platform_menu(&mut self, cx: &mut Context<Self>) {
+        if self.platform_menu_anchor.take().is_some() {
+            self.release_frameless_title_bar(cx);
             cx.notify();
         }
+    }
+
+    /// Menus and drags that start in the frameless title bar keep it on screen until they end.
+    fn frameless_title_bar_pinned(&self) -> bool {
+        self.platform_menu_anchor.is_some()
+            || self.workspace_drag.is_some()
+            || self.window_move_pending
+    }
+
+    /// Grows the frameless bar back. A pointer that only brushes the edge and leaves before
+    /// it ever enters the bar produces no hover-out, so the conceal is armed right away and
+    /// entering the bar retires it.
+    pub(super) fn reveal_frameless_title_bar(&mut self, cx: &mut Context<Self>) {
+        if self.chart_chrome.window_frame.frameless()
+            && self.frameless_title_bar.reveal(Instant::now())
+        {
+            self.release_frameless_title_bar(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn hover_frameless_title_bar(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        self.frameless_title_bar.set_hovered(hovered);
+        if !hovered {
+            self.release_frameless_title_bar(cx);
+        }
+    }
+
+    /// Slides the frameless title bar away after the grace period, unless the pointer comes
+    /// back or something pins it first.
+    fn release_frameless_title_bar(&mut self, cx: &mut Context<Self>) {
+        if !self.chart_chrome.window_frame.frameless()
+            || !self.frameless_title_bar.revealed()
+            || self.frameless_title_bar_pinned()
+        {
+            return;
+        }
+        let ticket = self.frameless_title_bar.request_conceal();
+        cx.spawn(async move |terminal, cx| {
+            cx.background_executor()
+                .timer(frameless_title_bar::CONCEAL_DELAY)
+                .await;
+            let _ = terminal.update(cx, |terminal, terminal_cx| {
+                if terminal
+                    .frameless_title_bar
+                    .conceal_request_is_current(ticket)
+                    && !terminal.frameless_title_bar.hovered()
+                    && !terminal.frameless_title_bar_pinned()
+                    && terminal.frameless_title_bar.conceal(Instant::now())
+                {
+                    terminal_cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Turns frameless mode on or off for every workspace and saves it with the shell chrome.
+    /// Turning it on from the open platform menu keeps the bar on screen under the pointer.
+    pub(super) fn set_window_frame(
+        &mut self,
+        window_frame: chart_chrome::WindowFrame,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chart_chrome.window_frame == window_frame {
+            return;
+        }
+        self.chart_chrome.window_frame = window_frame;
+        if window_frame.frameless() {
+            self.frameless_title_bar.settle_revealed();
+        } else {
+            self.frameless_title_bar.reset();
+        }
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.chart_chrome.window_frame = window_frame;
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
     }
 
     pub(super) fn arm_profile_refresh_after_browser(&mut self) {
         self.profile_refresh_on_activation = true;
-    }
-
-    pub(super) fn open_about_dialog(&mut self, cx: &mut Context<Self>) {
-        self.account_menu_open = false;
-        self.account_menu_anchor = None;
-        self.about_dialog_open = true;
-        cx.notify();
-    }
-
-    pub(super) fn close_about_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.about_dialog_open {
-            self.about_dialog_open = false;
-            cx.notify();
-        }
     }
 
     pub(super) fn retry_update_check(&mut self, cx: &mut Context<Self>) {
@@ -1400,7 +1462,7 @@ impl TerminalApp {
             self.cancel_update_restart_after_persistence_failure(error, cx);
             return;
         }
-        self.about_dialog_open = false;
+        self.platform_menu_anchor = None;
         self.claim_close(cx);
         self.lifecycle.quit_after_shutdown(cx);
         // `quit_after_shutdown` synchronously installs its own account quiesce
@@ -1490,23 +1552,23 @@ impl TerminalApp {
         self.updater.as_ref().map(DesktopUpdater::presentation)
     }
 
-    pub(super) fn account_menu_overlay(
+    pub(super) fn platform_menu_overlay(
         &self,
         terminal: &Entity<Self>,
         viewport: gpui::Size<Pixels>,
     ) -> Option<AnyElement> {
-        if !self.account_menu_open {
-            return None;
-        }
+        let anchor = self.platform_menu_anchor?;
         let account = aeris_desktop::account::DesktopAccount::shared()
             .map_or_else(aeris_desktop::account::unavailable_menu_state, |account| {
                 account.menu_state()
             });
-        Some(account_menu_layer(
+        Some(platform_menu_layer(
             terminal,
             &account,
-            self.account_menu_anchor,
+            anchor,
             viewport,
+            self.update_presentation(),
+            self.chart_chrome.window_frame,
             &self.theme,
         ))
     }
@@ -1718,7 +1780,6 @@ impl TerminalApp {
         self.chart_chrome.indicator_name_labels_visible = names;
         self.chart_chrome.indicator_value_labels_visible = values;
         self.chart_chrome.indicator_price_lines_visible = price_lines;
-        self.chart_chrome.chart_type = self.active_surface().read(cx).chart_type(cx);
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
                 pane.surface.update(cx, |surface, surface_cx| {
@@ -1731,6 +1792,16 @@ impl TerminalApp {
                 });
             }
         }
+        self.save_chart_chrome_preferences(cx);
+    }
+
+    /// Queues the durable chrome preferences off the UI thread. Chart type and symbol search
+    /// categories change inside a workspace, so they are taken from the active one first.
+    fn save_chart_chrome_preferences(&mut self, cx: &mut Context<Self>) {
+        let active = self.active_surface();
+        let active = active.read(cx);
+        self.chart_chrome.chart_type = active.chart_type(cx);
+        self.chart_chrome.symbol_search_categories = active.chart_chrome.symbol_search_categories;
         let preferences = self.chart_chrome;
         match chart_chrome::request_chart_chrome_preferences_save(preferences) {
             Ok(true) => cx
@@ -2015,6 +2086,9 @@ impl TerminalApp {
 
     pub(super) fn end_workspace_drag(&mut self, cx: &mut Context<Self>) {
         if self.workspace_drag.take().is_some() {
+            if !self.frameless_title_bar.hovered() {
+                self.release_frameless_title_bar(cx);
+            }
             cx.notify();
         }
     }
@@ -2361,8 +2435,16 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.theme = self.theme.toggled();
+    pub(super) fn set_theme_mode(
+        &mut self,
+        mode: aeris_design_system::ThemeMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme.mode == mode {
+            return;
+        }
+        self.theme = AerisTheme::for_mode(mode);
         cx.update_global::<gpui_base::Theme, _>(|base, _| *base = base_theme(&self.theme));
         window.refresh();
         for workspace in &self.workspaces {
@@ -2500,8 +2582,9 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.about_dialog_open {
-            self.close_about_dialog(cx);
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.platform_menu_anchor.is_some()
+        {
+            self.close_platform_menu(cx);
             cx.stop_propagation();
             return;
         }
