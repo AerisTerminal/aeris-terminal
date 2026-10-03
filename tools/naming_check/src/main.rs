@@ -719,6 +719,7 @@ mod tests {
         for workflow in [
             ".github/workflows/ci.yml",
             ".github/workflows/live_market_gates.yml",
+            ".github/workflows/macos_preview.yml",
         ] {
             let source = manifest(workflow);
             for line in source.lines().filter(|line| line.contains("cargo ")) {
@@ -1895,6 +1896,75 @@ mod tests {
                 && !workflow.contains("continue-on-error")
                 && !workflow.contains("git config --global"),
             "the hosted macOS lane must stay credential-free and keep failures visible"
+        );
+    }
+
+    #[test]
+    fn macos_preview_build_stays_an_unpublished_manual_artifact() {
+        let workflow = manifest(".github/workflows/macos_preview.yml");
+        assert!(workflow.contains("workflow_dispatch:") && workflow.contains("contents: read"));
+        for trigger in ["push:", "schedule:", "workflow_run", "repository_dispatch"] {
+            assert!(
+                !workflow.contains(trigger),
+                "the macOS preview build must stay manual-dispatch only, found {trigger}"
+            );
+        }
+        assert_eq!(workflow.matches("runs-on:").count(), 1);
+        assert!(workflow.contains("runs-on: macos-latest"));
+        assert!(
+            workflow.contains("AERIS_RITHMIC_KIT_DISABLED: \"1\"")
+                && !workflow.contains("provider_kit")
+                && !workflow.contains("RITHMIC_KIT_ROOT"),
+            "public hosted runners must never receive the licensed Rithmic kit"
+        );
+        // A preview is an expiring workflow artifact, never a published or
+        // updater-visible release, and it is signed ad hoc without identities.
+        for forbidden in [
+            "secrets.",
+            "gh release",
+            "action-gh-release",
+            "notarytool",
+            "release-pair",
+            "AERIS_RELEASE_IDENTITY",
+            "AERIS_INSTALL_GENERATION",
+            "AERIS_RELEASE_VERIFYING_KEY",
+            "continue-on-error",
+            "git config --global",
+        ] {
+            assert!(
+                !workflow.contains(forbidden),
+                "the macOS preview build must stay an unpublished artifact, found {forbidden}"
+            );
+        }
+        assert!(workflow.contains("codesign --force --sign - --timestamp=none"));
+        assert!(workflow.contains("codesign --verify --strict"));
+        assert!(workflow.contains("retention-days: 14"));
+        for bundled in [
+            "apps/desktop/packaging/macos/Info.plist",
+            "apps/desktop/assets/aeris_assets/icons/desktop/macos/aeris.icns",
+        ] {
+            assert!(workflow.contains(bundled));
+            assert!(
+                repository_root().join(bundled).is_file(),
+                "macOS bundle input {bundled} is missing"
+            );
+        }
+
+        let info = manifest("apps/desktop/packaging/macos/Info.plist").replace("\r\n", "\n");
+        for (key, value) in [
+            ("CFBundleExecutable", "aeris_desktop"),
+            ("CFBundleIdentifier", "com.aeris.desktop"),
+            ("CFBundleIconFile", "aeris"),
+            ("CFBundlePackageType", "APPL"),
+        ] {
+            assert!(
+                info.contains(&format!("<key>{key}</key>\n\t<string>{value}</string>")),
+                "macOS bundle {key} must be {value}"
+            );
+        }
+        assert!(
+            manifest("apps/desktop/Cargo.toml").contains("name = \"aeris_desktop\""),
+            "the bundle executable must match the desktop binary"
         );
     }
 

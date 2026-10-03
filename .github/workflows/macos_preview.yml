@@ -1,0 +1,92 @@
+name: macOS preview build
+
+# Builds an ad-hoc signed Apple Silicon `Aeris Terminal.app` for manual
+# testing and keeps it only as a short-lived workflow artifact. It is not a
+# release: nothing is published, notarized, or offered to the updater.
+# Manual dispatch only, and only while the repository is public, because the
+# account carries no paid Actions quota.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aeris-macos-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-macos-preview:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      # Public hosted runners never receive the licensed Rithmic kit.
+      AERIS_RITHMIC_KIT_DISABLED: "1"
+      CARGO_INCREMENTAL: "0"
+      PREVIEW_ROOT: target/macos-preview
+      BUNDLE: target/macos-preview/Aeris Terminal.app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Build release desktop
+        run: cargo build -p aeris_desktop --release --locked
+      - name: Assemble app bundle
+        run: |
+          set -euo pipefail
+          version="$(cargo pkgid -p aeris_desktop | cut -d@ -f2)"
+          rm -rf "$PREVIEW_ROOT"
+          mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
+          cp target/release/aeris_desktop "$BUNDLE/Contents/MacOS/aeris_desktop"
+          cp apps/desktop/assets/aeris_assets/icons/desktop/macos/aeris.icns "$BUNDLE/Contents/Resources/aeris.icns"
+          cp apps/desktop/packaging/macos/Info.plist "$BUNDLE/Contents/Info.plist"
+          /usr/libexec/PlistBuddy \
+            -c "Set :CFBundleShortVersionString $version" \
+            -c "Set :CFBundleVersion ${{ github.run_number }}" \
+            "$BUNDLE/Contents/Info.plist"
+          plutil -lint "$BUNDLE/Contents/Info.plist"
+          lipo -archs "$BUNDLE/Contents/MacOS/aeris_desktop"
+          echo "PREVIEW_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Ad-hoc sign app bundle
+        run: |
+          set -euo pipefail
+          codesign --force --sign - --timestamp=none "$BUNDLE"
+          codesign --verify --strict --verbose=2 "$BUNDLE"
+          codesign --display --verbose=2 "$BUNDLE"
+      - name: Smoke launch app bundle
+        run: |
+          set -euo pipefail
+          log="$PREVIEW_ROOT/smoke-launch.log"
+          "$BUNDLE/Contents/MacOS/aeris_desktop" >"$log" 2>&1 &
+          pid=$!
+          sleep 30
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Aeris Terminal exited during startup"
+            cat "$log"
+            exit 1
+          fi
+          screencapture -x "$PREVIEW_ROOT/smoke-launch.png"
+          kill "$pid"
+          wait "$pid" 2>/dev/null || true
+          cat "$log"
+      - name: Package app bundle
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent "$BUNDLE" "$PREVIEW_ROOT/Aeris-Terminal-$PREVIEW_VERSION-macos-arm64-preview.zip"
+          ls -l "$PREVIEW_ROOT"
+      - name: Upload app bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aeris-terminal-macos-arm64-preview
+          path: target/macos-preview/Aeris-Terminal-*-macos-arm64-preview.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload smoke launch evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aeris-terminal-macos-smoke-launch
+          path: |
+            target/macos-preview/smoke-launch.png
+            target/macos-preview/smoke-launch.log
+          retention-days: 14
