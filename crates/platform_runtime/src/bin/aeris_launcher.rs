@@ -89,6 +89,7 @@ fn show_user_launch_error(error: &str) {
 #[cfg(not(target_os = "windows"))]
 fn show_user_launch_error(_error: &str) {}
 
+#[cfg(any(target_os = "windows", test))]
 fn user_launch_error_message(error: &str) -> String {
     let detail: String = error.chars().take(320).collect();
     format!("Aeris Terminal could not start.\n\n{detail}")
@@ -274,6 +275,10 @@ fn remove_launcher_registration() -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "shares the fallible Windows signature; only Windows creates a launcher shortcut"
+)]
 fn remove_launcher_registration() -> Result<(), String> {
     Ok(())
 }
@@ -284,6 +289,10 @@ fn launcher_registration_absent() -> Result<bool, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "shares the fallible Windows signature; only Windows creates a launcher shortcut"
+)]
 fn launcher_registration_absent() -> Result<bool, String> {
     Ok(true)
 }

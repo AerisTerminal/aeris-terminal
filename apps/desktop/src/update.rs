@@ -413,6 +413,7 @@ fn stable_launcher() -> Result<PathBuf, String> {
 }
 
 fn launcher_is_trusted(launcher: &Path, active_signed_launcher: &Path) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
     let active = aeris_platform_runtime::current_release_identity();
     launcher_is_trusted_with(launcher, active_signed_launcher, |path| {
         #[cfg(target_os = "windows")]
@@ -532,15 +533,18 @@ fn launcher_files_match(left: &Path, right: &Path) -> Result<bool, String> {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn launcher_command(launcher: &std::path::Path) -> Command {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new(launcher);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt as _;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    command.creation_flags(CREATE_NO_WINDOW);
     command
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launcher_command(launcher: &std::path::Path) -> Command {
+    Command::new(launcher)
 }
 
 fn run_launcher_check() -> Result<LauncherUpdateCheck, String> {

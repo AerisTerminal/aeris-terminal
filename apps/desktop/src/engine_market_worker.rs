@@ -952,7 +952,6 @@ mod tests {
         assert_eq!(pending.interval, ChartInterval::Minute5);
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "requires the optimized market runtime and live Hyperliquid public access"]
     fn native_market_runtime_hyperliquid_startup_resolves_stale_default_generation() {
