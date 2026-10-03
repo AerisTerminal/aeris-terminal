@@ -1943,14 +1943,6 @@ where
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
-fn verify_installed_executable_authenticode(
-    _path: &Path,
-    _expected: &ReleaseFile,
-) -> Result<(), LifecycleError> {
-    Ok(())
-}
-
 #[cfg(target_os = "windows")]
 fn verify_installed_executable_authenticode(
     path: &Path,
