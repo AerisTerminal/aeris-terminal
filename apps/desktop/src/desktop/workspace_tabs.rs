@@ -1313,9 +1313,9 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn close_platform_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_platform_menu(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.platform_menu_anchor.take().is_some() {
-            self.release_frameless_title_bar(cx);
+            self.release_frameless_title_bar(window, cx);
             cx.notify();
         }
     }
@@ -1328,27 +1328,21 @@ impl TerminalApp {
     }
 
     /// Grows the frameless bar back. A pointer that only brushes the edge and leaves before
-    /// it ever enters the bar produces no hover-out, so the conceal is armed right away and
-    /// entering the bar retires it.
-    pub(super) fn reveal_frameless_title_bar(&mut self, cx: &mut Context<Self>) {
+    /// it ever enters the bar produces no hover-out, so the conceal is armed right away.
+    pub(super) fn reveal_frameless_title_bar(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.chart_chrome.window_frame.frameless()
             && self.frameless_title_bar.reveal(Instant::now())
         {
-            self.release_frameless_title_bar(cx);
+            self.release_frameless_title_bar(window, cx);
             cx.notify();
         }
     }
 
-    pub(super) fn hover_frameless_title_bar(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        self.frameless_title_bar.set_hovered(hovered);
-        if !hovered {
-            self.release_frameless_title_bar(cx);
-        }
-    }
-
-    /// Slides the frameless title bar away after the grace period, unless the pointer comes
-    /// back or something pins it first.
-    fn release_frameless_title_bar(&mut self, cx: &mut Context<Self>) {
+    /// Slides the frameless title bar away once the pointer has been off it for the grace
+    /// period, unless something pins it first. Hover events depend on pointer motion and on
+    /// which child occludes the bar, so each check reads the pointer position, and a pointer
+    /// still resting on the bar postpones the conceal by another grace period.
+    pub(super) fn release_frameless_title_bar(&mut self, window: &Window, cx: &mut Context<Self>) {
         if !self.chart_chrome.window_frame.frameless()
             || !self.frameless_title_bar.revealed()
             || self.frameless_title_bar_pinned()
@@ -1356,21 +1350,35 @@ impl TerminalApp {
             return;
         }
         let ticket = self.frameless_title_bar.request_conceal();
-        cx.spawn(async move |terminal, cx| {
-            cx.background_executor()
-                .timer(frameless_title_bar::CONCEAL_DELAY)
-                .await;
-            let _ = terminal.update(cx, |terminal, terminal_cx| {
-                if terminal
-                    .frameless_title_bar
-                    .conceal_request_is_current(ticket)
-                    && !terminal.frameless_title_bar.hovered()
-                    && !terminal.frameless_title_bar_pinned()
-                    && terminal.frameless_title_bar.conceal(Instant::now())
-                {
-                    terminal_cx.notify();
+        cx.spawn_in(window, async move |terminal, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(frameless_title_bar::CONCEAL_DELAY)
+                    .await;
+                let held = terminal.update_in(cx, |terminal, window, terminal_cx| {
+                    if !terminal
+                        .frameless_title_bar
+                        .conceal_request_is_current(ticket)
+                        || terminal.frameless_title_bar_pinned()
+                    {
+                        return false;
+                    }
+                    let now = Instant::now();
+                    let pointer_y = window
+                        .is_window_hovered()
+                        .then(|| f32::from(window.mouse_position().y));
+                    if terminal.frameless_title_bar.holds_pointer(pointer_y, now) {
+                        return true;
+                    }
+                    if terminal.frameless_title_bar.conceal(now) {
+                        terminal_cx.notify();
+                    }
+                    false
+                });
+                if !matches!(held, Ok(true)) {
+                    break;
                 }
-            });
+            }
         })
         .detach();
     }
@@ -2084,11 +2092,9 @@ impl TerminalApp {
         }
     }
 
-    pub(super) fn end_workspace_drag(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn end_workspace_drag(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.workspace_drag.take().is_some() {
-            if !self.frameless_title_bar.hovered() {
-                self.release_frameless_title_bar(cx);
-            }
+            self.release_frameless_title_bar(window, cx);
             cx.notify();
         }
     }
@@ -2584,7 +2590,7 @@ impl TerminalApp {
         }
         if event.keystroke.key.eq_ignore_ascii_case("escape") && self.platform_menu_anchor.is_some()
         {
-            self.close_platform_menu(cx);
+            self.close_platform_menu(window, cx);
             cx.stop_propagation();
             return;
         }
@@ -2607,7 +2613,7 @@ impl TerminalApp {
         }
         if self.workspace_drag.is_some() && event.keystroke.key.as_str() == "escape" {
             cx.stop_active_drag(window);
-            self.end_workspace_drag(cx);
+            self.end_workspace_drag(window, cx);
             cx.stop_propagation();
             return;
         }
@@ -2631,7 +2637,7 @@ impl TerminalApp {
             self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
             if self.workspace_drag.is_some() {
                 cx.stop_active_drag(window);
-                self.end_workspace_drag(cx);
+                self.end_workspace_drag(window, cx);
             }
         }
         if became_active {

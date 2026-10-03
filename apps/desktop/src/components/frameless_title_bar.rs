@@ -74,11 +74,10 @@ impl Slide {
 #[derive(Debug, Default)]
 pub(super) struct FramelessTitleBar {
     revealed: bool,
-    hovered: bool,
     slide: Option<Slide>,
     /// Restarts the slide animation each time the direction changes.
     generation: u64,
-    /// Fences delayed conceal requests; any newer reveal or hover retires older ones.
+    /// Fences delayed conceal requests; any newer reveal retires older ones.
     conceal_ticket: u64,
 }
 
@@ -87,8 +86,13 @@ impl FramelessTitleBar {
         self.revealed
     }
 
-    pub(super) const fn hovered(&self) -> bool {
-        self.hovered
+    /// Whether a pointer at `pointer_y` (window coordinates, `None` when the pointer is
+    /// outside the window) rests on the bar. Hover events only fire on pointer motion, and
+    /// the bar grows under a pointer that is standing still, so the conceal decision reads
+    /// the pointer position instead of the last hover event.
+    pub(super) fn holds_pointer(&self, pointer_y: Option<f32>, now: Instant) -> bool {
+        let row_height = TitleBarPlacement::Frameless.row_height(self.visibility_at(now));
+        pointer_y.is_some_and(|y| (0.0..row_height).contains(&y))
     }
 
     /// Starts sliding in. Returns whether anything changed.
@@ -109,14 +113,6 @@ impl FramelessTitleBar {
         }
         self.slide_to(0.0, CONCEAL_DURATION, now);
         true
-    }
-
-    /// Records pointer presence over the bar. Entering retires pending conceals.
-    pub(super) fn set_hovered(&mut self, hovered: bool) {
-        self.hovered = hovered;
-        if hovered {
-            self.retire_conceal_requests();
-        }
     }
 
     /// Ticket for a conceal that runs after [`CONCEAL_DELAY`] unless retired first.
@@ -205,10 +201,12 @@ pub(super) fn frameless_title_bar_row(
         .flex_col()
         .justify_end()
         .overflow_hidden()
-        .on_hover(move |hovered, _, cx| {
-            hover_terminal.update(cx, |terminal, terminal_cx| {
-                terminal.hover_frameless_title_bar(*hovered, terminal_cx);
-            });
+        .on_hover(move |hovered, window, cx| {
+            if !*hovered {
+                hover_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.release_frameless_title_bar(window, terminal_cx);
+                });
+            }
         })
         .child(
             div()
@@ -248,10 +246,10 @@ pub(super) fn frameless_reveal_zone(
             .left_0()
             .right_0()
             .h(px(REVEAL_ZONE_HEIGHT))
-            .on_hover(move |hovered, _, cx| {
+            .on_hover(move |hovered, window, cx| {
                 if *hovered {
                     reveal_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.reveal_frameless_title_bar(terminal_cx);
+                        terminal.reveal_frameless_title_bar(window, terminal_cx);
                     });
                 }
             })
@@ -328,15 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn hover_and_reveal_retire_pending_conceals() {
+    fn newer_requests_retire_pending_conceals() {
         let now = Instant::now();
         let mut bar = FramelessTitleBar::default();
         bar.reveal(now);
         let ticket = bar.request_conceal();
         assert!(bar.conceal_request_is_current(ticket));
-        bar.set_hovered(true);
+        let newer = bar.request_conceal();
         assert!(!bar.conceal_request_is_current(ticket));
-        bar.set_hovered(false);
+        assert!(bar.conceal_request_is_current(newer));
         let ticket = bar.request_conceal();
         bar.reveal(now);
         assert!(!bar.conceal_request_is_current(ticket));
@@ -344,6 +342,26 @@ mod tests {
         bar.reset();
         assert!(!bar.conceal_request_is_current(ticket));
         assert!(!bar.revealed());
+    }
+
+    #[test]
+    fn a_still_pointer_the_bar_grew_under_holds_it_open() {
+        let start = Instant::now();
+        let mut bar = FramelessTitleBar::default();
+        assert!(
+            !bar.holds_pointer(Some(2.0), start),
+            "a collapsed bar holds nothing"
+        );
+        bar.reveal(start);
+        let shown = start + REVEAL_DURATION;
+        assert!(bar.holds_pointer(Some(2.0), shown));
+        assert!(bar.holds_pointer(Some(WORKSPACE_TITLE_BAR_HEIGHT - 1.0), shown));
+        assert!(!bar.holds_pointer(Some(WORKSPACE_TITLE_BAR_HEIGHT), shown));
+        assert!(!bar.holds_pointer(Some(-1.0), shown));
+        assert!(
+            !bar.holds_pointer(None, shown),
+            "a pointer outside the window"
+        );
     }
 
     #[test]

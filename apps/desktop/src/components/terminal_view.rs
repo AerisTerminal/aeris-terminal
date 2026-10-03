@@ -649,7 +649,7 @@ impl Render for TerminalApp {
                 MouseButton::Left,
                 cx.listener(|terminal, _, window, cx| {
                     terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
-                    terminal.end_workspace_drag(cx);
+                    terminal.end_workspace_drag(window, cx);
                     terminal.end_watchlist_drag(cx);
                 }),
             )
@@ -1272,8 +1272,8 @@ pub(super) fn workspace_tab_strip(
                 );
             });
         })
-        .on_drop(move |_: &WorkspaceTabDrag, _, cx| {
-            end_terminal.update(cx, TerminalApp::end_workspace_drag);
+        .on_drop(move |_: &WorkspaceTabDrag, window, cx| {
+            end_terminal.update(cx, |terminal, cx| terminal.end_workspace_drag(window, cx));
         })
         .children(enabled.then_some(tabs).into_iter().flatten())
         .children(enabled.then(|| {

@@ -247,9 +247,9 @@ pub(super) fn platform_menu_layer(
         .right_0()
         .bottom_0()
         .occlude()
-        .on_any_mouse_down(move |_, _, cx| {
+        .on_any_mouse_down(move |_, window, cx| {
             dismiss.update(cx, |terminal, terminal_cx| {
-                terminal.close_platform_menu(terminal_cx);
+                terminal.close_platform_menu(window, terminal_cx);
             });
             cx.stop_propagation();
         })
@@ -490,9 +490,9 @@ fn account_action_rows(
                 .disabled(!enabled)
                 .destructive(action.destructive())
                 .flush_in_panel(!layout.identity && index == 0, false)
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
-                        run_account_action(terminal, action, terminal_cx);
+                        run_account_action(terminal, action, window, terminal_cx);
                     });
                 })
                 .into_any_element()
@@ -503,6 +503,7 @@ fn account_action_rows(
 fn run_account_action(
     terminal: &mut TerminalApp,
     action: AccountAction,
+    window: &Window,
     cx: &mut Context<TerminalApp>,
 ) {
     match action {
@@ -518,7 +519,7 @@ fn run_account_action(
             }
         }
     }
-    terminal.close_platform_menu(cx);
+    terminal.close_platform_menu(window, cx);
 }
 
 fn section_title(title: &'static str, theme: &AerisTheme) -> Div {
