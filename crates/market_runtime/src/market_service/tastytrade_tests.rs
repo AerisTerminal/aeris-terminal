@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use super::*;
+use aeris_tastytrade_market_adapter::SessionWindow;
 #[test]
 fn resolved_instrument_cache_reuses_identity_and_clears_on_authorization_change() {
     let api = BrokerApi::default();
@@ -399,23 +400,53 @@ fn bar() -> MarketBar {
 fn session_at(open: i64, close: i64) -> MarketSession {
     MarketSession {
         collection: MarketCollection::Cme,
-        start_unix_nanos: open,
-        regular_open_unix_nanos: open,
-        regular_close_unix_nanos: close,
-        close_unix_nanos: close,
-        next_start_unix_nanos: close + 86_400_000_000_000,
-        next_regular_open_unix_nanos: close + 86_400_000_000_000,
-        next_regular_close_unix_nanos: close + 172_800_000_000_000,
-        next_close_unix_nanos: close + 172_800_000_000_000,
+        current: Some(window_at(open, open, close, close)),
+        next: Some(window_at(
+            close + 86_400_000_000_000,
+            close + 86_400_000_000_000,
+            close + 172_800_000_000_000,
+            close + 172_800_000_000_000,
+        )),
     }
+}
+fn window_at(start: i64, regular_open: i64, regular_close: i64, close: i64) -> SessionWindow {
+    SessionWindow {
+        start_unix_nanos: start,
+        regular_open_unix_nanos: regular_open,
+        regular_close_unix_nanos: regular_close,
+        close_unix_nanos: close,
+    }
+}
+
+#[test]
+fn closed_calendar_without_a_current_window_reports_closed_until_the_next_open() {
+    let session = MarketSession {
+        collection: MarketCollection::Cme,
+        current: None,
+        next: Some(window_at(1_000, 1_000, 2_000, 2_000)),
+    };
+    let instrument_id = "tastytrade:Future:/ESZ6:XCME";
+    let closed = session_status_at(instrument_id, session, 500);
+    assert_eq!(closed.phase, MarketSessionPhase::Closed);
+    assert_eq!(closed.next_open_unix_nanos, Some(1_000));
+    assert_eq!(closed.session_start_unix_nanos, Some(1_000));
+    assert_eq!(closed.session_end_unix_nanos, Some(2_000));
+    assert_eq!(
+        session_status_at(instrument_id, session, 1_500).phase,
+        MarketSessionPhase::Regular
+    );
+    assert_eq!(
+        session_status_at(instrument_id, session, 2_000).phase,
+        MarketSessionPhase::Unknown
+    );
 }
 
 #[test]
 fn dated_equity_session_phases_follow_regular_and_extended_boundaries() {
     let mut session = session_at(100, 400);
     session.collection = MarketCollection::Equity;
-    session.regular_open_unix_nanos = 200;
-    session.regular_close_unix_nanos = 300;
+    session.current = Some(window_at(100, 200, 300, 400));
+    let next = session.next.unwrap();
     let instrument_id = "tastytrade:Equity:AAPL";
     for (now, expected) in [
         (99, MarketSessionPhase::Closed),
@@ -441,18 +472,15 @@ fn dated_equity_session_phases_follow_regular_and_extended_boundaries() {
     assert_eq!(extended.session_end_unix_nanos, Some(400));
     assert_eq!(
         session_status_at(instrument_id, session, 400).next_open_unix_nanos,
-        Some(session.next_start_unix_nanos)
+        Some(next.start_unix_nanos)
     );
     assert_eq!(
-        session_status_at(instrument_id, session, session.next_close_unix_nanos).phase,
+        session_status_at(instrument_id, session, next.close_unix_nanos).phase,
         MarketSessionPhase::Unknown,
         "an expired calendar must not imply a holiday or continuous trading"
     );
     session.collection = MarketCollection::Cme;
-    session.next_start_unix_nanos = 1_000;
-    session.next_regular_open_unix_nanos = 1_100;
-    session.next_regular_close_unix_nanos = 1_200;
-    session.next_close_unix_nanos = 1_300;
+    session.next = Some(window_at(1_000, 1_100, 1_200, 1_300));
     assert_eq!(
         session_status_at(instrument_id, session, 150).phase,
         MarketSessionPhase::Overnight
@@ -720,8 +748,14 @@ fn futures_search_uses_the_primed_catalog_before_remote_equity_search() {
             .streamer_symbol,
         "/ESZ26:XCME"
     );
+    let calendar_revision = api.calendar_revision();
     api.clear().unwrap();
     assert_eq!(api.authorization_epoch.load(Ordering::Acquire), 1);
+    assert_ne!(
+        api.calendar_revision(),
+        calendar_revision,
+        "statuses computed from a cleared calendar must be recomputed"
+    );
 }
 #[test]
 fn equity_search_worker_debounces_to_the_latest_consumer_query() {

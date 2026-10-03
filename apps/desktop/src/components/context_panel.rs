@@ -1,7 +1,7 @@
 use super::{
     AerisTheme, AnyElement, Context, ContextCredentialDialogState, ContextPanelTab,
     ContextSnapshot, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    ScrollHandle, StatefulInteractiveElement, Styled, Window, WorkspaceSurface,
+    ScrollHandle, StatefulInteractiveElement, Styled, Tab, TabList, Window, WorkspaceSurface,
     chrome_close_button, chrome_tooltip, div, gpui_color, platform_tabular_numerals, px,
 };
 use crate::desktop::native_ui::input::Input;
@@ -78,7 +78,7 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                 .px_2()
                 .border_b_1()
                 .border_color(gpui_color(theme.colors.border))
-                .children(tabs)
+                .child(TabList::new("context_panel_tabs", "Market context", theme).children(tabs))
                 .child(div().flex_1())
                 .child(
                     div()
@@ -252,26 +252,8 @@ fn context_tab(
     selected: ContextPanelTab,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    div()
-        .id(("context_panel_tab", index))
-        .h(px(24.0))
-        .px_2()
-        .flex()
-        .items_center()
-        .rounded(px(4.0))
-        .bg(gpui_color(if candidate == selected {
-            theme.colors.primary
-        } else {
-            theme.colors.hover_bg
-        }))
-        .text_color(gpui_color(if candidate == selected {
-            theme.colors.surface
-        } else {
-            theme.colors.text_muted
-        }))
-        .text_xs()
-        .cursor_pointer()
-        .role(Role::Tab)
+    Tab::new(("context_panel_tab", index), theme)
+        .selected(candidate == selected)
         .aria_label(format!("Show {} context", candidate.label()))
         .on_click(move |_, _, cx| {
             app.update(cx, |surface, surface_cx| {

@@ -377,55 +377,24 @@ fn study_settings_header(
     dialog: &StudySettingsDialogState,
     theme: &AerisTheme,
 ) -> Div {
-    let colors = theme.colors;
     let cancel = app.clone();
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_3()
-        .py_2()
-        .border_b_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .child("Study settings"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(dialog.title.clone()),
-                ),
-        )
-        .child(chrome_close_button(
-            "study_settings_close",
-            theme,
-            move |_, cx| {
-                cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
-            },
-        ))
+    modal_header(
+        "study_settings_close",
+        "Study settings",
+        Some(dialog.title.clone().into_any_element()),
+        theme,
+        move |_, cx| {
+            cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
+        },
+    )
 }
 
 fn study_settings_footer(app: &Entity<WorkspaceSurface>, busy: bool, theme: &AerisTheme) -> Div {
-    let colors = theme.colors;
     let reset = app.clone();
     let cancel = app.clone();
     let save = app.clone();
-    div()
-        .flex()
-        .items_center()
+    modal_footer(theme)
         .justify_between()
-        .gap_2()
-        .p_4()
-        .border_t_1()
-        .border_color(gpui_color(colors.border_secondary))
         .child(
             Button::new("study_settings_reset")
                 .variant(theme, ButtonVariant::Destructive)
@@ -451,7 +420,7 @@ fn study_settings_footer(app: &Entity<WorkspaceSurface>, busy: bool, theme: &Aer
                 )
                 .child(
                     Button::new("study_settings_save")
-                        .variant(theme, ButtonVariant::Filled)
+                        .variant(theme, ButtonVariant::Positive)
                         .label(if busy { "Applying…" } else { "Apply" })
                         .loading(busy)
                         .disabled(busy)
@@ -468,7 +437,6 @@ pub(super) fn study_settings_dialog_layer(
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
-    let colors = theme.colors;
     let dismiss = app.clone();
     let busy = app
         .read(cx)
@@ -479,37 +447,13 @@ pub(super) fn study_settings_dialog_layer(
     let header = study_settings_header(app, dialog, theme);
     let footer = study_settings_footer(app, busy, theme);
 
-    div()
-        .id("study_settings_dialog_scrim")
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .occlude()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui_color(colors.surface.with_alpha(0.72)))
-        .on_any_mouse_down(move |_, _, cx| {
-            dismiss.update(cx, WorkspaceSurface::close_study_settings_dialog);
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .id("study_settings_dialog")
-                .w(px(500.0))
-                .max_h(px(640.0))
-                .flex()
-                .flex_col()
-                .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface))
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                .child(header)
-                .child(body)
-                .child(footer),
-        )
-        .into_any_element()
+    ModalLayer::new("study_settings_dialog", px(500.0), theme, move |_, cx| {
+        dismiss.update(cx, WorkspaceSurface::close_study_settings_dialog);
+    })
+    .max_height(px(640.0))
+    .radius(RadiusToken::Medium)
+    .child(header)
+    .child(body)
+    .child(footer)
+    .into_any_element()
 }

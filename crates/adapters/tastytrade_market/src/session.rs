@@ -182,6 +182,41 @@ impl SubscriptionChangeBudget {
     }
 }
 
+const TRANSPORT_PING_INTERVAL: Duration = Duration::from_secs(10);
+
+/// WebSocket ping/pong round-trip measurement. `DXLink` KEEPALIVE frames are
+/// sent independently by each side, so they cannot time a round trip.
+#[derive(Default)]
+struct TransportPing {
+    last_sent: Option<Instant>,
+    awaiting_pong: bool,
+    measured: Option<u64>,
+}
+
+impl TransportPing {
+    /// The first ping goes out immediately; later pings follow every interval
+    /// whether or not the previous one was answered, so a dropped pong cannot
+    /// stop measurement.
+    fn due(&self, now: Instant) -> bool {
+        self.last_sent
+            .is_none_or(|sent| now.saturating_duration_since(sent) >= TRANSPORT_PING_INTERVAL)
+    }
+
+    fn sent(&mut self, now: Instant) {
+        self.last_sent = Some(now);
+        self.awaiting_pong = true;
+    }
+
+    fn answered(&mut self, received_at: Instant) {
+        let Some(sent) = self.last_sent.filter(|_| self.awaiting_pong) else {
+            return;
+        };
+        self.awaiting_pong = false;
+        let nanos = received_at.saturating_duration_since(sent).as_nanos();
+        self.measured = Some(u64::try_from(nanos).unwrap_or(u64::MAX).max(1));
+    }
+}
+
 pub struct DxlinkSession {
     socket: MarketSocket,
     channels: BTreeMap<u64, Channel>,
@@ -189,6 +224,7 @@ pub struct DxlinkSession {
     keepalive_interval: Duration,
     keepalive_at: Instant,
     last_received: Instant,
+    transport_ping: TransportPing,
     stop: Arc<AtomicBool>,
     authorization_deadline: Option<Instant>,
     decode_failures_in_window: u8,
@@ -214,6 +250,7 @@ impl DxlinkSession {
             keepalive_interval: Duration::from_secs(30),
             keepalive_at: Instant::now() + Duration::from_secs(30),
             last_received: Instant::now(),
+            transport_ping: TransportPing::default(),
             stop: Arc::clone(stop),
             authorization_deadline: None,
             decode_failures_in_window: 0,
@@ -421,6 +458,11 @@ impl DxlinkSession {
         Ok(())
     }
 
+    /// Takes the newest WebSocket ping round trip, measured once per answered ping.
+    pub fn take_transport_rtt_nanos(&mut self) -> Option<u64> {
+        self.transport_ping.measured.take()
+    }
+
     /// Reads one validated event; a timeout on a healthy quiet feed returns None.
     /// # Errors
     /// Rejects malformed data, overload, cancellation and disconnected sessions.
@@ -570,6 +612,10 @@ impl DxlinkSession {
             self.send(&json!({"type":"KEEPALIVE","channel":0}))?;
             self.keepalive_at = Instant::now() + self.keepalive_interval;
         }
+        if self.transport_ping.due(Instant::now()) {
+            self.socket.send_ping().map_err(|e| e.to_string())?;
+            self.transport_ping.sent(Instant::now());
+        }
         if self.last_received.elapsed() > Duration::from_secs(120) {
             return Err("DXLink heartbeat expired".into());
         }
@@ -583,6 +629,7 @@ impl DxlinkSession {
             }
             Ok(MarketSocketEvent::Pong) => {
                 self.last_received = Instant::now();
+                self.transport_ping.answered(self.last_received);
                 Ok(None)
             }
             Err(e) if e.is_read_timeout() => Ok(None),
@@ -872,7 +919,26 @@ mod tests {
     }
     type TestSocket = tungstenite::WebSocket<std::net::TcpStream>;
     fn receive(socket: &mut TestSocket) -> Value {
-        serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap()
+        loop {
+            match socket.read().unwrap() {
+                // Tungstenite queues the pong; the next write flushes it.
+                tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_) => {}
+                message => return serde_json::from_str(message.to_text().unwrap()).unwrap(),
+            }
+        }
+    }
+    #[test]
+    fn transport_ping_measures_one_round_trip_per_answered_ping() {
+        let started = Instant::now();
+        let mut ping = TransportPing::default();
+        assert!(ping.due(started), "first ping measures RTT immediately");
+        ping.sent(started);
+        assert!(!ping.due(started + Duration::from_secs(1)));
+        ping.answered(started + Duration::from_millis(18));
+        assert_eq!(ping.measured.take(), Some(18_000_000));
+        ping.answered(started + Duration::from_millis(40));
+        assert_eq!(ping.measured, None, "a duplicate pong is not a new sample");
+        assert!(ping.due(started + TRANSPORT_PING_INTERVAL));
     }
     fn send(socket: &mut TestSocket, value: &Value) {
         socket

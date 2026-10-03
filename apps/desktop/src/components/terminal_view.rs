@@ -598,6 +598,7 @@ impl Render for TerminalApp {
             .is_some_and(|chart| chart.read(cx).has_market_data());
         let fullscreen = window.is_fullscreen();
         let overlay = self.rendered_chrome_overlay(&active, fullscreen, window, cx);
+        let account_dialog = accounts_panel::account_dialog_layer(workspace, &active, &self.theme);
         let (context_menu, settings_menu) = self.chart_surface_menus(
             &terminal,
             pane_count,
@@ -671,6 +672,7 @@ impl Render for TerminalApp {
             )
             .child(bottom_panel)
             .children(overlay)
+            .children(account_dialog)
             .children(context_menu)
             .children(settings_menu)
             .children(account_menu)
@@ -1124,8 +1126,7 @@ fn workspace_tab(
     let mouse_focus = workspace.focus.clone();
     let (resting_fill, selected_fill) = workspace_tab_surface_colors(&theme);
     Tab::new(("workspace_tab", tab_id), &theme)
-        .resting_fill(resting_fill)
-        .selected_fill(selected_fill)
+        .chrome(resting_fill, selected_fill)
         .selected(selected)
         .w(px(width))
         .h(px(chart_chrome::CHART_CONTROL_SIZE))

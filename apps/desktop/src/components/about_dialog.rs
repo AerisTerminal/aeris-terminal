@@ -65,7 +65,7 @@ fn about_dialog_header(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> An
         .items_start()
         .justify_between()
         .p_4()
-        .border_b_1()
+        .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border_secondary))
         .child(
             div()
@@ -196,43 +196,16 @@ pub(super) fn about_dialog_layer(
     update: Option<&UpdatePresentation>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     let dismiss = terminal.clone();
     let view = about_update_view(update, theme);
-    div()
-        .id("about_dialog_scrim")
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .occlude()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui_color(colors.surface.with_alpha(0.72)))
-        .on_any_mouse_down(move |_, _, cx| {
-            dismiss.update(cx, |terminal, terminal_cx| {
-                terminal.close_about_dialog(terminal_cx);
-            });
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .id("about_dialog")
-                .w(px(420.0))
-                .flex()
-                .flex_col()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface))
-                .shadow_lg()
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                .child(about_dialog_header(terminal, theme))
-                .child(about_dialog_body(terminal, update, &view, theme)),
-        )
-        .into_any_element()
+    ModalLayer::new("about_dialog", px(420.0), theme, move |_, cx| {
+        dismiss.update(cx, |terminal, terminal_cx| {
+            terminal.close_about_dialog(terminal_cx);
+        });
+    })
+    .child(about_dialog_header(terminal, theme))
+    .child(about_dialog_body(terminal, update, &view, theme))
+    .into_any_element()
 }
 
 fn about_detail_row(

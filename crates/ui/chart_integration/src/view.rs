@@ -1927,6 +1927,13 @@ impl AerisChartView {
         Ok(())
     }
 
+    /// Reports whether the instrument's market session is trading. A closed session hides the
+    /// candle-close countdown; the user's countdown preference is unchanged.
+    pub fn set_market_trading(&mut self, trading: bool) {
+        self.engine.set_bar_countdown_active(trading);
+        self.invalidate_series_frame();
+    }
+
     /// Applies one stable Aeris Charts crosshair mode.
     pub fn set_crosshair_mode(&mut self, mode: u8) -> bool {
         if !self.engine.set_configured_crosshair_mode(mode) {

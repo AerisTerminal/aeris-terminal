@@ -11,6 +11,9 @@ pub(crate) enum ButtonVariant {
     Secondary,
     Ghost,
     Destructive,
+    /// Affirmative confirm action. The `positive` status token has no interaction states, so
+    /// this reuses the `buy-*` ramp, which carries the same `positive` hue with every state.
+    Positive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,10 +39,12 @@ pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> B
         ),
         ButtonVariant::Ghost => (colors.surface, colors.text_secondary, None),
         ButtonVariant::Destructive => (colors.danger, colors.danger_foreground, None),
+        ButtonVariant::Positive => (colors.buy, colors.buy_foreground, None),
     };
     let (hover, active) = match variant {
         ButtonVariant::Filled => (colors.button_fill_hover, colors.button_fill_active),
         ButtonVariant::Destructive => (colors.danger_hover, colors.danger_active),
+        ButtonVariant::Positive => (colors.buy_hover, colors.buy_active),
         ButtonVariant::Secondary | ButtonVariant::Ghost => (colors.hover_bg, colors.active_bg),
     };
     let (disabled_fill, disabled_foreground, focus_ring) = match variant {
@@ -47,6 +52,11 @@ pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> B
             Some(colors.danger_disabled),
             Some(colors.danger_disabled_foreground),
             colors.danger_ring,
+        ),
+        ButtonVariant::Positive => (
+            Some(colors.buy_disabled),
+            Some(colors.buy_disabled_foreground),
+            colors.buy_ring,
         ),
         ButtonVariant::Filled | ButtonVariant::Secondary | ButtonVariant::Ghost => {
             (None, None, colors.ring)
@@ -192,6 +202,19 @@ mod tests {
                 Some(theme.colors.danger_disabled_foreground)
             );
             assert_eq!(destructive.focus_ring, theme.colors.danger_ring);
+
+            let positive = button_appearance(&theme, ButtonVariant::Positive);
+            assert_eq!(positive.fill, theme.colors.positive);
+            assert_eq!(positive.fill, theme.colors.buy);
+            assert_eq!(positive.foreground, theme.colors.buy_foreground);
+            assert_eq!(positive.hover, theme.colors.buy_hover);
+            assert_eq!(positive.active, theme.colors.buy_active);
+            assert_eq!(positive.disabled_fill, Some(theme.colors.buy_disabled));
+            assert_eq!(
+                positive.disabled_foreground,
+                Some(theme.colors.buy_disabled_foreground)
+            );
+            assert_eq!(positive.focus_ring, theme.colors.buy_ring);
 
             let field = input_appearance(&theme);
             assert_eq!(

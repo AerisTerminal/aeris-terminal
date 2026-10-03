@@ -15,6 +15,11 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
   `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `surface-overlay` for scrims,
   `hover-bg` / `active-bg` for hover and press. Hover and press change the fill only, no shadows.
+- Tabs and segmented controls use `TabList` + `Tab` (`apps/desktop/src/native_ui/tab.rs`), the native
+  Theme System `.ui-tabs` / `.ui-tab`: a `surface-raised` track with no border; unselected tabs have no fill
+  and `text-interactive` text, and hover / press change the text only (`text-hover` / `text-active`, never
+  `hover-bg`); the selected tab is raised onto `surface` with a `border` outline and `text-active`. Callers
+  add only layout; never restyle a tab's colors, borders or radius.
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
 

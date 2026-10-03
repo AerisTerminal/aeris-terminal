@@ -32,6 +32,8 @@ mod frame_poll_gate;
 mod indicator_menu;
 #[path = "desktop/local_state.rs"]
 mod local_state;
+#[path = "components/modal_dialog.rs"]
+mod modal_dialog;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
 #[path = "components/order_book_panel.rs"]
@@ -168,6 +170,7 @@ use gpui_platform::application;
 use indicator_menu::{
     IndicatorDialogState, indicator_dialog_content, indicator_selector, native_indicator,
 };
+use modal_dialog::{ConfirmationDialog, ConfirmationTone, ModalLayer, modal_footer, modal_header};
 use native_ui::{
     color_picker::{ColorPicker, normalize_hex_color},
     control::Button,
@@ -181,7 +184,7 @@ use native_ui::{
     platform_font_weight, platform_tabular_numerals,
     rem_scale::{design_rems, rem_scaled},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
-    tab::Tab,
+    tab::{Tab, TabList},
     theme::{ButtonVariant, base_theme, gpui_color},
     tooltip::{TooltipSpec, with_tooltip},
 };

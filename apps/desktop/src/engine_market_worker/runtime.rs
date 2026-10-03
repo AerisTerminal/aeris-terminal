@@ -92,21 +92,9 @@ fn run_attached_workers(
             }
         }
         endpoints.retain(|record| record.endpoint.active);
-        if Instant::now() >= next_session_status_at {
-            let now = super::now_unix_nanos();
-            for record in endpoints
-                .iter()
-                .filter(|record| record.endpoint.active && !record.catalog_only)
-            {
-                let status = market.market_session_status(&record.product, now);
-                if let Err(error) = record
-                    .endpoint
-                    .messages
-                    .send(MarketWorkerMessage::MarketSessionStatus(status))
-                {
-                    eprintln!("Aeris market session status was not delivered: {error}");
-                }
-            }
+        let session_tick_due = Instant::now() >= next_session_status_at;
+        publish_session_statuses(market, endpoints, session_tick_due);
+        if session_tick_due {
             next_session_status_at = Instant::now() + Duration::from_secs(60);
         }
         let consumer_budgets = endpoints
@@ -140,6 +128,47 @@ fn run_attached_workers(
         }
     }
     Ok(())
+}
+
+/// Sends each chart its market session status when its product or the runtime calendar
+/// changed since the last send, and on every `tick_due` so phase boundaries are crossed.
+fn publish_session_statuses(
+    market: &MarketService,
+    endpoints: &mut [EndpointRecord],
+    tick_due: bool,
+) {
+    let revision = market.market_session_revision();
+    let mut now = None;
+    for record in endpoints
+        .iter_mut()
+        .filter(|record| record.endpoint.active && !record.catalog_only)
+    {
+        if !tick_due
+            && !session_status_stale(
+                record.session_status_sent.as_ref(),
+                &record.product.instrument_id,
+                revision,
+            )
+        {
+            continue;
+        }
+        let now = *now.get_or_insert_with(super::now_unix_nanos);
+        let status = market.market_session_status(&record.product, now);
+        if let Err(error) = record
+            .endpoint
+            .messages
+            .send(MarketWorkerMessage::MarketSessionStatus(status))
+        {
+            eprintln!("Aeris market session status was not delivered: {error}");
+        }
+        record.session_status_sent = Some((record.product.instrument_id.clone(), revision));
+    }
+}
+
+fn session_status_stale(sent: Option<&(String, u64)>, instrument_id: &str, revision: u64) -> bool {
+    sent.is_none_or(|(sent_instrument, sent_revision)| {
+        sent_instrument != instrument_id || *sent_revision != revision
+    })
 }
 
 fn process_pending_foreground_selection(
@@ -379,4 +408,28 @@ pub(super) fn retire_endpoint(
     let _ = market.remove_consumer(client_id, endpoint.consumer_id);
     endpoint.active = false;
     let _ = endpoint.shutdown.try_send(());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_status_is_resent_when_the_calendar_or_product_changes() {
+        let sent = ("tastytrade:Future:/GCZ6".to_string(), 3);
+        assert!(session_status_stale(None, "tastytrade:Future:/GCZ6", 0));
+        assert!(!session_status_stale(
+            Some(&sent),
+            "tastytrade:Future:/GCZ6",
+            3
+        ));
+        assert!(
+            session_status_stale(Some(&sent), "tastytrade:Future:/GCZ6", 4),
+            "a status computed before the calendar loaded must be replaced"
+        );
+        assert!(
+            session_status_stale(Some(&sent), "tastytrade:Future:/ESZ6", 3),
+            "a chart that switched instrument needs its own status"
+        );
+    }
 }

@@ -25,43 +25,51 @@ pub use session::{
     SubscriptionChangeError, TradePrint,
 };
 
-/// Provider-reported current exchange session. Times are UTC nanoseconds.
+/// One dated exchange trading window. Times are UTC nanoseconds and satisfy
+/// `start <= regular_open < regular_close <= close`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MarketSession {
-    pub collection: MarketCollection,
+pub struct SessionWindow {
     pub start_unix_nanos: i64,
     pub regular_open_unix_nanos: i64,
     pub regular_close_unix_nanos: i64,
     pub close_unix_nanos: i64,
-    pub next_start_unix_nanos: i64,
-    pub next_regular_open_unix_nanos: i64,
-    pub next_regular_close_unix_nanos: i64,
-    pub next_close_unix_nanos: i64,
+}
+
+impl SessionWindow {
+    #[must_use]
+    pub fn contains(self, now: i64) -> bool {
+        (self.start_unix_nanos..self.close_unix_nanos).contains(&now)
+    }
+}
+
+/// Provider-reported exchange calendar. The provider omits the current window while the
+/// exchange is closed (weekends, holidays), so either window may be absent, but never both.
+/// When both are present, `next` starts after `current`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MarketSession {
+    pub collection: MarketCollection,
+    pub current: Option<SessionWindow>,
+    pub next: Option<SessionWindow>,
 }
 
 impl MarketSession {
     #[must_use]
     pub fn contains(self, now: i64) -> bool {
-        (self.start_unix_nanos..self.close_unix_nanos).contains(&now)
-            || (self.next_start_unix_nanos > self.start_unix_nanos
-                && (self.next_start_unix_nanos..self.next_close_unix_nanos).contains(&now))
+        self.current.is_some_and(|window| window.contains(now))
+            || self.next.is_some_and(|window| window.contains(now))
     }
 
     #[must_use]
     pub fn replay_start(self, now: i64) -> Option<i64> {
-        if self.next_start_unix_nanos > self.start_unix_nanos
-            && now >= self.next_start_unix_nanos
-            && now < self.next_close_unix_nanos
-        {
-            Some(self.next_start_unix_nanos)
-        } else if now >= self.start_unix_nanos
-            && (self.next_start_unix_nanos <= self.start_unix_nanos
-                || now < self.next_start_unix_nanos)
-        {
-            Some(self.start_unix_nanos)
-        } else {
-            None
+        if let Some(next) = self.next.filter(|next| next.contains(now)) {
+            return Some(next.start_unix_nanos);
         }
+        self.current
+            .filter(|current| {
+                now >= current.start_unix_nanos
+                    && self.next.is_none_or(|next| now < next.start_unix_nanos)
+            })
+            .map(|current| current.start_unix_nanos)
     }
 }
 
@@ -648,46 +656,40 @@ struct FuturesSessionsData {
     items: Vec<CurrentMarketSession>,
 }
 
+/// `GET /market-time/.../sessions/current` item. Only `instrument-collection` and `state` are
+/// always present: the current window's times are absent while the exchange is closed, and
+/// `next-session` may be absent when no upcoming session is scheduled.
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct CurrentMarketSession {
     instrument_collection: String,
-    start_at: String,
-    open_at: Option<String>,
-    close_at: String,
-    close_at_ext: Option<String>,
-    #[serde(rename = "next-session")]
-    next_window: MarketSessionWindow,
+    state: ProviderSessionState,
+    #[serde(flatten)]
+    window: MarketSessionWindow,
+    next_session: Option<MarketSessionWindow>,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+enum ProviderSessionState {
+    Open,
+    Closed,
+    #[serde(rename = "Pre-market")]
+    PreMarket,
+    Extended,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct MarketSessionWindow {
-    start_at: String,
+    start_at: Option<String>,
     open_at: Option<String>,
-    close_at: String,
+    close_at: Option<String>,
     close_at_ext: Option<String>,
 }
 
 fn parse_futures_sessions(value: serde_json::Value) -> Result<[MarketSession; 2], String> {
-    let items = value
-        .pointer("/data/items")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("Tastytrade futures calendar items missing")?;
-    let missing_next = items.iter().any(|item| item.get("next-session").is_none());
-    let missing_start = items.iter().any(|item| item.get("start-at").is_none());
-    let missing_close = items.iter().any(|item| item.get("close-at").is_none());
-    let response: FuturesSessionsResponse = serde_json::from_value(value).map_err(|_| {
-        if missing_next {
-            "Tastytrade futures calendar next session missing"
-        } else if missing_start {
-            "Tastytrade futures calendar start missing"
-        } else if missing_close {
-            "Tastytrade futures calendar close missing"
-        } else {
-            "Tastytrade futures calendar fields invalid"
-        }
-    })?;
+    let response: FuturesSessionsResponse =
+        serde_json::from_value(value).map_err(|_| "Tastytrade futures calendar fields invalid")?;
     if response.data.items.len() > 8 {
         return Err("Tastytrade futures sessions exceeded their bound".into());
     }
@@ -733,64 +735,83 @@ fn parse_market_session(
     item: &CurrentMarketSession,
     collection: MarketCollection,
 ) -> Result<MarketSession, String> {
-    let parse = |value: &str| {
-        chrono::DateTime::parse_from_rfc3339(value)
-            .ok()
-            .and_then(|time| time.timestamp_nanos_opt())
-            .ok_or("Tastytrade market session time is invalid".to_string())
+    let current = parse_session_window(&item.window, "current")?;
+    if current.is_none() && item.state != ProviderSessionState::Closed {
+        return Err("Tastytrade market session is active without a current window".into());
+    }
+    // The provider can return an auxiliary next-session window that predates its current
+    // window. Only a next window starting after the current one describes a later session,
+    // so a stale one is dropped before its remaining fields are validated.
+    let next = match item.next_session.as_ref() {
+        Some(window)
+            if current.is_some_and(|current| {
+                window
+                    .start_at
+                    .as_deref()
+                    .and_then(provider_time_unix_nanos)
+                    .is_some_and(|start| start <= current.start_unix_nanos)
+            }) =>
+        {
+            None
+        }
+        Some(window) => parse_session_window(window, "next")?,
+        None => None,
     };
-    let start_unix_nanos = parse(&item.start_at)?;
-    let regular_open_unix_nanos = parse(item.open_at.as_deref().unwrap_or(&item.start_at))?;
-    let regular_close_unix_nanos = parse(&item.close_at)?;
-    let close_unix_nanos = parse(item.close_at_ext.as_deref().unwrap_or(&item.close_at))?;
-    let next_start_unix_nanos = parse(&item.next_window.start_at)?;
-    let next_regular_open_unix_nanos = parse(
-        item.next_window
-            .open_at
-            .as_deref()
-            .unwrap_or(&item.next_window.start_at),
-    )?;
-    let next_regular_close_unix_nanos = parse(&item.next_window.close_at)?;
-    let next_close_unix_nanos = parse(
-        item.next_window
-            .close_at_ext
-            .as_deref()
-            .unwrap_or(&item.next_window.close_at),
-    )?;
-    let valid_span = |start: i64, close: i64| {
-        close
-            .checked_sub(start)
-            .is_some_and(|span| span > 0 && span <= 48 * 60 * 60 * 1_000_000_000)
-    };
-    if !valid_span(start_unix_nanos, close_unix_nanos) {
-        return Err("Tastytrade current market session interval is invalid".into());
+    if current.is_none() && next.is_none() {
+        return Err("Tastytrade market session has no dated window".into());
     }
-    if !valid_span(next_start_unix_nanos, next_close_unix_nanos) {
-        return Err("Tastytrade next market session interval is invalid".into());
-    }
-    if !(start_unix_nanos <= regular_open_unix_nanos
-        && regular_open_unix_nanos < regular_close_unix_nanos
-        && regular_close_unix_nanos <= close_unix_nanos
-        && (next_start_unix_nanos <= start_unix_nanos
-            || (next_start_unix_nanos <= next_regular_open_unix_nanos
-                && next_regular_open_unix_nanos < next_regular_close_unix_nanos
-                && next_regular_close_unix_nanos <= next_close_unix_nanos)))
-    {
-        return Err("Tastytrade regular market session interval is invalid".into());
-    }
-    // The provider can return an auxiliary next-session window that predates
-    // its current window. Keep only the current window eligible for replay then.
     Ok(MarketSession {
         collection,
+        current,
+        next,
+    })
+}
+
+/// Parses one window. A window without its start or close time is absent; a window with both
+/// must be well-formed.
+fn parse_session_window(
+    window: &MarketSessionWindow,
+    label: &str,
+) -> Result<Option<SessionWindow>, String> {
+    let (Some(start_at), Some(close_at)) = (window.start_at.as_deref(), window.close_at.as_deref())
+    else {
+        return if window.start_at.is_some() || window.close_at.is_some() {
+            Err(format!("Tastytrade {label} market session is incomplete"))
+        } else {
+            Ok(None)
+        };
+    };
+    let parse = |value: &str| {
+        provider_time_unix_nanos(value)
+            .ok_or(format!("Tastytrade {label} market session time is invalid"))
+    };
+    let start_unix_nanos = parse(start_at)?;
+    let regular_open_unix_nanos = parse(window.open_at.as_deref().unwrap_or(start_at))?;
+    let regular_close_unix_nanos = parse(close_at)?;
+    let close_unix_nanos = parse(window.close_at_ext.as_deref().unwrap_or(close_at))?;
+    let span_valid = close_unix_nanos
+        .checked_sub(start_unix_nanos)
+        .is_some_and(|span| span > 0 && span <= 48 * 60 * 60 * 1_000_000_000);
+    let ordered = start_unix_nanos <= regular_open_unix_nanos
+        && regular_open_unix_nanos < regular_close_unix_nanos
+        && regular_close_unix_nanos <= close_unix_nanos;
+    if !(span_valid && ordered) {
+        return Err(format!(
+            "Tastytrade {label} market session interval is invalid"
+        ));
+    }
+    Ok(Some(SessionWindow {
         start_unix_nanos,
         regular_open_unix_nanos,
         regular_close_unix_nanos,
         close_unix_nanos,
-        next_start_unix_nanos,
-        next_regular_open_unix_nanos,
-        next_regular_close_unix_nanos,
-        next_close_unix_nanos,
-    })
+    }))
+}
+
+fn provider_time_unix_nanos(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|time| time.timestamp_nanos_opt())
 }
 
 fn percent_encode_path_segment(value: &str) -> String {
@@ -1073,7 +1094,7 @@ mod tests {
 
     #[test]
     fn current_futures_sessions_validate_both_exchange_windows() {
-        let body = r#"{"data":{"items":[{"instrument-collection":"CME","start-at":"2026-10-01T22:00:00Z","close-at":"2026-10-02T21:00:00Z","next-session":{"start-at":"2026-10-04T22:00:00Z","close-at":"2026-10-05T21:00:00Z"}},{"instrument-collection":"CFE","start-at":"2026-10-01T13:00:00Z","close-at":"2026-10-01T21:00:00Z","next-session":{"start-at":"2026-10-02T13:00:00Z","close-at":"2026-10-02T21:00:00Z"}}]}}"#;
+        let body = r#"{"data":{"items":[{"instrument-collection":"CME","state":"Open","start-at":"2026-10-01T22:00:00Z","close-at":"2026-10-02T21:00:00Z","next-session":{"start-at":"2026-10-04T22:00:00Z","close-at":"2026-10-05T21:00:00Z"}},{"instrument-collection":"CFE","state":"Open","start-at":"2026-10-01T13:00:00Z","close-at":"2026-10-01T21:00:00Z","next-session":{"start-at":"2026-10-02T13:00:00Z","close-at":"2026-10-02T21:00:00Z"}}]}}"#;
         let (origin, server) = fake_api(vec![(
             "/market-time/futures/sessions/current",
             200,
@@ -1089,25 +1110,77 @@ mod tests {
             .expect("valid current sessions");
         assert_eq!(sessions[0].collection, MarketCollection::Cme);
         assert_eq!(sessions[1].collection, MarketCollection::Cfe);
-        assert!(sessions[0].start_unix_nanos < sessions[0].close_unix_nanos);
+        let current = sessions[0]
+            .current
+            .expect("open session has a current window");
+        let next = sessions[0].next.expect("scheduled next window");
+        assert!(current.start_unix_nanos < current.close_unix_nanos);
         assert_eq!(
-            sessions[0].replay_start(sessions[0].start_unix_nanos + 1),
-            Some(sessions[0].start_unix_nanos)
+            sessions[0].replay_start(current.start_unix_nanos + 1),
+            Some(current.start_unix_nanos)
         );
         assert_eq!(
-            sessions[0].replay_start(sessions[0].next_start_unix_nanos + 1),
-            Some(sessions[0].next_start_unix_nanos)
+            sessions[0].replay_start(next.start_unix_nanos + 1),
+            Some(next.start_unix_nanos)
         );
-        assert_eq!(
-            sessions[0].replay_start(sessions[0].start_unix_nanos - 1),
-            None
-        );
+        assert_eq!(sessions[0].replay_start(current.start_unix_nanos - 1), None);
         server.join().expect("fixture server completes");
     }
 
     #[test]
+    fn closed_futures_calendar_keeps_the_next_session_without_a_current_window() {
+        // Weekend shape documented by the provider: no current times, only the next session.
+        let closed = serde_json::json!({"data":{"items":[{
+            "instrument-collection":"CME",
+            "state":"Closed",
+            "next-session":{
+                "instrument-collection":"CME",
+                "session-date":"2026-10-05",
+                "start-at":"2026-10-04T22:00:00Z",
+                "open-at":"2026-10-04T22:00:00Z",
+                "close-at":"2026-10-05T21:00:00Z"
+            },
+            "previous-session":{
+                "instrument-collection":"CME",
+                "session-date":"2026-10-02",
+                "start-at":"2026-10-01T22:00:00Z",
+                "open-at":"2026-10-01T22:00:00Z",
+                "close-at":"2026-10-02T21:00:00Z"
+            }
+        },{
+            "instrument-collection":"CFE",
+            "state":"Closed",
+            "next-session":{
+                "instrument-collection":"CFE",
+                "session-date":"2026-10-05",
+                "start-at":"2026-10-04T22:00:00Z",
+                "open-at":"2026-10-05T13:30:00Z",
+                "close-at":"2026-10-05T20:15:00Z",
+                "close-at-ext":"2026-10-05T21:00:00Z"
+            }
+        }]}});
+        let [cme, cfe] = parse_futures_sessions(closed).expect("closed calendar is valid");
+        assert_eq!(cme.current, None);
+        let next = cme.next.expect("next CME session");
+        assert_eq!(
+            Some(next.start_unix_nanos),
+            provider_time_unix_nanos("2026-10-04T22:00:00Z")
+        );
+        let saturday = provider_time_unix_nanos("2026-10-03T12:00:00Z").unwrap();
+        assert!(!cme.contains(saturday));
+        assert_eq!(cme.replay_start(saturday), None);
+        assert_eq!(
+            cme.replay_start(next.start_unix_nanos),
+            Some(next.start_unix_nanos)
+        );
+        let cfe_next = cfe.next.expect("next CFE session");
+        assert!(cfe_next.regular_open_unix_nanos > cfe_next.start_unix_nanos);
+        assert!(cfe_next.close_unix_nanos > cfe_next.regular_close_unix_nanos);
+    }
+
+    #[test]
     fn current_equity_session_bounds_trade_replay_and_rejects_wrong_collection() {
-        let body = r#"{"data":{"instrument-collection":"Equity","start-at":"2026-10-01T08:00:00Z","open-at":"2026-10-01T13:30:00Z","close-at":"2026-10-01T20:00:00Z","close-at-ext":"2026-10-02T00:00:00Z","next-session":{"start-at":"2026-10-01T23:00:00Z","close-at":"2026-10-02T20:00:00Z","close-at-ext":"2026-10-03T00:00:00Z"}}}"#;
+        let body = r#"{"data":{"instrument-collection":"Equity","state":"Open","start-at":"2026-10-01T08:00:00Z","open-at":"2026-10-01T13:30:00Z","close-at":"2026-10-01T20:00:00Z","close-at-ext":"2026-10-02T00:00:00Z","next-session":{"start-at":"2026-10-01T23:00:00Z","close-at":"2026-10-02T20:00:00Z","close-at-ext":"2026-10-03T00:00:00Z"}}}"#;
         let (origin, server) = fake_api(vec![(
             "/market-time/equities/sessions/current",
             200,
@@ -1122,17 +1195,19 @@ mod tests {
             .current_equity_session(&fixture_capability(), &Arc::new(AtomicBool::new(false)))
             .expect("valid equity session");
         assert_eq!(session.collection, MarketCollection::Equity);
+        let current = session.current.expect("current equity window");
+        let next = session.next.expect("next equity window");
         assert_eq!(
-            session.replay_start(session.next_start_unix_nanos - 1),
-            Some(session.start_unix_nanos)
+            session.replay_start(next.start_unix_nanos - 1),
+            Some(current.start_unix_nanos)
         );
         assert_eq!(
-            session.replay_start(session.close_unix_nanos - 1),
-            Some(session.next_start_unix_nanos)
+            session.replay_start(current.close_unix_nanos - 1),
+            Some(next.start_unix_nanos)
         );
         assert_eq!(
-            session.replay_start(session.next_start_unix_nanos + 1),
-            Some(session.next_start_unix_nanos)
+            session.replay_start(next.start_unix_nanos + 1),
+            Some(next.start_unix_nanos)
         );
         server.join().expect("fixture server completes");
         let mut wrong: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -1141,32 +1216,81 @@ mod tests {
         let mut reversed: serde_json::Value = serde_json::from_str(body).unwrap();
         reversed["data"]["next-session"]["start-at"] = "2026-09-30T08:00:00Z".into();
         reversed["data"]["next-session"]["close-at-ext"] = "2026-10-01T00:00:00Z".into();
-        let current = parse_equity_session(&reversed).expect("current window stays valid");
+        let stale = parse_equity_session(&reversed).expect("current window stays valid");
+        let current = stale.current.expect("current window");
         assert_eq!(
-            current.replay_start(current.start_unix_nanos + 1),
+            stale.next, None,
+            "a predating next window is not a later session"
+        );
+        assert_eq!(
+            stale.replay_start(current.start_unix_nanos + 1),
             Some(current.start_unix_nanos)
         );
         assert_eq!(
-            current.replay_start(current.next_start_unix_nanos + 1),
+            stale.replay_start(provider_time_unix_nanos("2026-09-30T08:00:01Z").unwrap()),
             None
         );
     }
 
     #[test]
     fn futures_calendar_rejects_missing_or_invalid_session_bounds() {
-        let missing = serde_json::json!({"data":{"items":[{
+        let cfe = serde_json::json!({
+            "instrument-collection":"CFE",
+            "state":"Open",
+            "start-at":"2026-10-01T13:00:00Z",
+            "close-at":"2026-10-01T21:00:00Z"
+        });
+        let with_cme = |cme: serde_json::Value| {
+            parse_futures_sessions(serde_json::json!({"data":{"items":[cme, cfe.clone()]}}))
+        };
+        let no_next = with_cme(serde_json::json!({
             "instrument-collection":"CME",
+            "state":"Open",
             "start-at":"2026-10-01T22:00:00Z",
             "close-at":"2026-10-02T21:00:00Z"
-        }]}});
-        assert!(parse_futures_sessions(missing).is_err());
+        }))
+        .expect("an unscheduled next session is optional");
+        assert_eq!(no_next[0].next, None);
+        assert!(
+            with_cme(serde_json::json!({
+                "instrument-collection":"CME",
+                "start-at":"2026-10-01T22:00:00Z",
+                "close-at":"2026-10-02T21:00:00Z"
+            }))
+            .is_err(),
+            "state is required"
+        );
+        assert!(
+            with_cme(serde_json::json!({"instrument-collection":"CME","state":"Closed"})).is_err(),
+            "a calendar without any dated window is unusable"
+        );
+        assert!(
+            with_cme(serde_json::json!({
+                "instrument-collection":"CME",
+                "state":"Open",
+                "next-session":{"start-at":"2026-10-04T22:00:00Z","close-at":"2026-10-05T21:00:00Z"}
+            }))
+            .is_err(),
+            "an open market must report its current window"
+        );
+        assert!(
+            with_cme(serde_json::json!({
+                "instrument-collection":"CME",
+                "state":"Open",
+                "start-at":"2026-10-01T22:00:00Z"
+            }))
+            .is_err(),
+            "a window with a start but no close is incomplete"
+        );
         let reversed = serde_json::json!({"data":{"items":[{
             "instrument-collection":"CME",
+            "state":"Open",
             "start-at":"2026-10-02T22:00:00Z",
             "close-at":"2026-10-02T21:00:00Z",
             "next-session":{"start-at":"2026-10-04T22:00:00Z","close-at":"2026-10-05T21:00:00Z"}
         },{
             "instrument-collection":"CFE",
+            "state":"Open",
             "start-at":"2026-10-01T13:00:00Z",
             "close-at":"2026-10-01T21:00:00Z",
             "next-session":{"start-at":"2026-10-02T13:00:00Z","close-at":"2026-10-02T21:00:00Z"}

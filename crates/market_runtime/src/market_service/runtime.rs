@@ -1001,6 +1001,13 @@ impl ProviderDispatch<'_> {
 }
 
 impl MarketService {
+    /// Revision of the runtime-owned exchange calendars. It changes whenever a calendar is
+    /// loaded, refreshed or cleared; a session status computed under an older revision is stale.
+    #[must_use]
+    pub fn market_session_revision(&self) -> u64 {
+        self.runtime.broker_api.calendar_revision()
+    }
+
     /// Returns the runtime-owned dated session projection for one installed instrument.
     #[must_use]
     pub fn market_session_status(

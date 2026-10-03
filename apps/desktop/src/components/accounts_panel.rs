@@ -236,7 +236,7 @@ fn practice_accounts(
     let trading = &app_state.trading_pnl;
     let selected = trading.order_entry.selected_account_id.as_ref();
     let mut list = div().flex().flex_col().gap_1();
-    if trading.accounts.is_empty() && trading.account_creator.is_none() {
+    if trading.accounts.is_empty() {
         list = list.child(
             div()
                 .text_xs()
@@ -252,17 +252,6 @@ fn practice_accounts(
             selected == Some(&account.id),
             theme,
         ));
-    }
-    if let Some(account_id) = trading.account_delete_confirmation.as_ref() {
-        list = list.child(delete_confirmation(
-            app,
-            account_id,
-            &trading.accounts,
-            theme,
-        ));
-    }
-    if let Some(creator) = trading.account_creator.as_ref() {
-        return list.child(create_account_form(app, creator, theme));
     }
     let open = app.clone();
     list.child(
@@ -409,12 +398,31 @@ fn delete_account_button(
         })
 }
 
-fn delete_confirmation(
+/// The practice-account create or delete dialog, centered over the whole window. It is rendered
+/// above the accounts panel that opened it, which stays open underneath.
+pub(super) fn account_dialog_layer(
+    app_state: &WorkspaceSurface,
+    app: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
+) -> Option<AnyElement> {
+    let trading = &app_state.trading_pnl;
+    if let Some(creator) = trading.account_creator.as_ref() {
+        return Some(create_account_dialog(app, creator, theme).into_any_element());
+    }
+    trading
+        .account_delete_confirmation
+        .as_ref()
+        .map(|account_id| {
+            delete_account_dialog(app, account_id, &trading.accounts, theme).into_any_element()
+        })
+}
+
+fn delete_account_dialog(
     app: &Entity<WorkspaceSurface>,
     account_id: &aeris_trading::TradingAccountId,
     accounts: &[aeris_trading::TradingAccount],
     theme: &AerisTheme,
-) -> impl IntoElement {
+) -> ConfirmationDialog {
     let display_name = accounts
         .iter()
         .find(|account| &account.id == account_id)
@@ -423,58 +431,29 @@ fn delete_confirmation(
     let account_key = account_id.as_str().to_string();
     let cancel = app.clone();
     let confirm = app.clone();
-    card("accounts_delete_confirmation", theme)
-        .border_color(gpui_color(theme.colors.danger_ring))
-        .child(
-            div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .child("Delete practice account?"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_secondary))
-                .child(format!(
-                    "Delete {display_name} permanently, including its open positions, working \
-                     orders, fills, P/L history, risk state, and local copier references. This \
-                     cannot be undone."
-                )),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new("accounts_delete_cancel")
-                        .variant(theme, ButtonVariant::Secondary)
-                        .label("Cancel")
-                        .with_size(px(CONTROL_HEIGHT))
-                        .on_click(move |_, _, cx| {
-                            cancel.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_delete_confirmation = None;
-                                surface_cx.notify();
-                            });
-                        }),
-                )
-                .child(
-                    Button::new("accounts_delete_confirm")
-                        .variant(theme, ButtonVariant::Destructive)
-                        .label("Delete")
-                        .with_size(px(CONTROL_HEIGHT))
-                        .on_click(move |_, _, cx| {
-                            confirm.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_delete_confirmation = None;
-                                surface_cx.notify();
-                            });
-                            aeris_desktop::trading::delete_practice_account(
-                                account_key.clone(),
-                                cx,
-                            );
-                        }),
-                ),
-        )
+    ConfirmationDialog::new(
+        "accounts_delete_dialog",
+        "Delete practice account?",
+        ConfirmationTone::Destructive,
+        theme,
+        move |_, cx| {
+            cancel.update(cx, |surface, surface_cx| {
+                surface.trading_pnl.account_delete_confirmation = None;
+                surface_cx.notify();
+            });
+        },
+        move |_, cx| {
+            confirm.update(cx, |surface, surface_cx| {
+                surface.trading_pnl.account_delete_confirmation = None;
+                surface_cx.notify();
+            });
+            aeris_desktop::trading::delete_practice_account(account_key.clone(), cx);
+        },
+    )
+    .message(format!(
+        "Delete {display_name} permanently, including its open positions, working orders, \
+         fills, P/L history, risk state, and local copier references. This cannot be undone."
+    ))
 }
 
 fn open_practice_account_form(
@@ -499,61 +478,43 @@ fn open_practice_account_form(
     cx.notify();
 }
 
-fn create_account_form(
+fn create_account_dialog(
     app: &Entity<WorkspaceSurface>,
     creator: &PracticeAccountDialogState,
     theme: &AerisTheme,
-) -> impl IntoElement {
+) -> ConfirmationDialog {
     let cancel = app.clone();
     let create = app.clone();
     let name = creator.name.clone();
     let equity = creator.equity.clone();
-    card("accounts_create_form", theme)
-        .child(
-            div()
-                .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .child("New practice account"),
-        )
-        .child(Input::new(&creator.name).platform(theme))
-        .child(Input::new(&creator.equity).platform(theme))
-        .child(
-            div()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child("Starting equity in USD"),
-        )
-        .child(
-            div()
-                .flex()
-                .justify_end()
-                .gap_2()
-                .child(
-                    Button::new("accounts_create_cancel")
-                        .variant(theme, ButtonVariant::Secondary)
-                        .label("Cancel")
-                        .with_size(px(CONTROL_HEIGHT))
-                        .on_click(move |_, _, cx| {
-                            cancel.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_creator = None;
-                                surface_cx.notify();
-                            });
-                        }),
-                )
-                .child(
-                    Button::new("accounts_create_confirm")
-                        .variant(theme, ButtonVariant::Filled)
-                        .label("Create account")
-                        .with_size(px(CONTROL_HEIGHT))
-                        .on_click(move |_, _, cx| {
-                            let name = name.read(cx).value().to_string();
-                            let equity = equity.read(cx).value().to_string();
-                            create.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.account_creator = None;
-                                surface_cx.notify();
-                            });
-                            aeris_desktop::trading::create_practice_account(name, &equity, cx);
-                        }),
-                ),
-        )
+    ConfirmationDialog::new(
+        "accounts_create_dialog",
+        "New practice account",
+        ConfirmationTone::Positive,
+        theme,
+        move |_, cx| {
+            cancel.update(cx, |surface, surface_cx| {
+                surface.trading_pnl.account_creator = None;
+                surface_cx.notify();
+            });
+        },
+        move |_, cx| {
+            let name = name.read(cx).value().to_string();
+            let equity = equity.read(cx).value().to_string();
+            create.update(cx, |surface, surface_cx| {
+                surface.trading_pnl.account_creator = None;
+                surface_cx.notify();
+            });
+            aeris_desktop::trading::create_practice_account(name, &equity, cx);
+        },
+    )
+    .confirm_label("Create account")
+    .child(Input::new(&creator.name).platform(theme))
+    .child(Input::new(&creator.equity).platform(theme))
+    .child(
+        div()
+            .text_xs()
+            .text_color(gpui_color(theme.colors.text_muted))
+            .child("Starting equity in USD"),
+    )
 }

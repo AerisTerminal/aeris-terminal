@@ -3,6 +3,50 @@
 use super::*;
 
 #[test]
+fn chart_countdown_stops_only_for_the_products_closed_session() {
+    use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+    let product = InstallProviderInstrument {
+        instrument_id: "tastytrade:Future:/GCZ6".into(),
+        ..InstallProviderInstrument::default()
+    };
+    let status = |instrument_id: &str, phase| MarketSessionStatus {
+        instrument_id: instrument_id.into(),
+        phase,
+        source: MarketSessionSource::ProviderCalendar,
+        session_start_unix_nanos: None,
+        session_end_unix_nanos: None,
+        next_open_unix_nanos: None,
+    };
+    let closed = status("tastytrade:Future:/GCZ6", MarketSessionPhase::Closed);
+    assert!(!chart_market_trading(Some(&closed), Some(&product)));
+    for phase in [
+        MarketSessionPhase::Regular,
+        MarketSessionPhase::Overnight,
+        MarketSessionPhase::AlwaysOpen,
+        MarketSessionPhase::Unknown,
+    ] {
+        assert!(
+            chart_market_trading(
+                Some(&status("tastytrade:Future:/GCZ6", phase)),
+                Some(&product)
+            ),
+            "{phase:?} keeps the countdown"
+        );
+    }
+    assert!(chart_market_trading(None, Some(&product)));
+    assert!(
+        chart_market_trading(
+            Some(&status(
+                "tastytrade:Future:/ESZ6",
+                MarketSessionPhase::Closed
+            )),
+            Some(&product)
+        ),
+        "another product's closed session does not stop this chart"
+    );
+}
+
+#[test]
 fn surface_restores_the_persisted_chart_time_zone() {
     let state = |time_zone: &str| WorkspaceChartState {
         time_zone: time_zone.to_string(),

@@ -13,6 +13,23 @@ fn reconnect_status_is_plain_language_and_clears_after_streaming_resumes() {
 }
 
 #[test]
+fn tastytrade_heartbeat_carries_measured_transport_rtt() {
+    let event = ProviderRuntimeEvent::Realtime(ProviderEvent::tastytrade(
+        tastytrade::RealtimeEvent::Heartbeat(3, 18_000_000),
+    ));
+    let metadata = event.metadata().expect("realtime event metadata");
+    assert_eq!(metadata.provider, "tastytrade");
+    assert_eq!(metadata.generation, 3);
+    assert!(!metadata.reconnecting);
+    assert_eq!(metadata.transport_rtt_nanos, Some(18_000_000));
+
+    let lifecycle = ProviderRuntimeLifecycle::default();
+    lifecycle.observe_generation(3, false);
+    lifecycle.observe_transport_rtt(3, 18_000_000);
+    assert_eq!(lifecycle.transport_rtt_nanos(), Some(18_000_000));
+}
+
+#[test]
 fn first_connection_reports_no_interruption() {
     let lifecycle = ProviderRuntimeLifecycle::default();
     lifecycle.observe_generation(1, true);

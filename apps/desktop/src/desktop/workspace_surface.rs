@@ -207,6 +207,18 @@ fn chart_bridge_label(chart: Option<&Entity<AerisChartView>>, cx: &App) -> Strin
     )
 }
 
+/// Only a provider calendar that positively reports the product's session as closed stops the
+/// bar countdown; an unknown or missing calendar (e.g. providers without one) keeps it running.
+fn chart_market_trading(
+    status: Option<&aeris_contracts::MarketSessionStatus>,
+    product: Option<&InstallProviderInstrument>,
+) -> bool {
+    !status.is_some_and(|status| {
+        status.phase == aeris_contracts::MarketSessionPhase::Closed
+            && product.is_some_and(|product| product.instrument_id == status.instrument_id)
+    })
+}
+
 fn order_flow_aggregation(interval: ChartInterval) -> OrderFlowAggregation {
     match interval.aggregation() {
         ChartAggregation::Trades(count) => OrderFlowAggregation::Trades(count.get()),
@@ -2636,6 +2648,7 @@ impl WorkspaceSurface {
                     self.apply_retained_chart_state_to_chart(&chart, cx);
                 }
                 self.apply_surface_time_zone(&chart, cx);
+                self.apply_market_session_to_chart(&chart, cx);
                 replace_chart_price_alert_lines(
                     Some(&chart),
                     &self.price_alerts,
@@ -2976,7 +2989,23 @@ impl WorkspaceSurface {
     ) {
         // The header market indicator reads this for the selected product only.
         self.market_session_status = Some(status);
+        if let Some(chart) = self.chart.clone() {
+            self.apply_market_session_to_chart(&chart, cx);
+        }
         cx.notify();
+    }
+
+    fn apply_market_session_to_chart(
+        &self,
+        chart: &Entity<AerisChartView>,
+        cx: &mut Context<Self>,
+    ) {
+        let trading =
+            chart_market_trading(self.market_session_status.as_ref(), self.product.as_ref());
+        chart.update(cx, |chart, chart_cx| {
+            chart.set_market_trading(trading);
+            chart_cx.notify();
+        });
     }
 
     fn apply_trade_tape(

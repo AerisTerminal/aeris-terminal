@@ -92,6 +92,8 @@ struct EndpointRecord {
     interval: ChartInterval,
     catalog_only: bool,
     startup_resolution: Option<StartupResolution>,
+    /// Instrument and calendar revision of the last session status sent to the chart.
+    session_status_sent: Option<(String, u64)>,
     endpoint: WorkerEndpoint,
 }
 
@@ -527,6 +529,7 @@ fn worker_endpoint(
         interval,
         catalog_only: false,
         startup_resolution: None,
+        session_status_sent: None,
         endpoint: WorkerEndpoint {
             consumer_id,
             messages: message_tx,

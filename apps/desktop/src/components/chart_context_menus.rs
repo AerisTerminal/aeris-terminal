@@ -1286,73 +1286,34 @@ fn chart_settings_template_save_dialog(
     error: Option<&str>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     let cancel = terminal.clone();
     let save = terminal.clone();
     let save_menu = menu.clone();
-    div()
-        .id("chart_template_save_scrim")
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui_color(colors.surface.with_alpha(0.72)))
-        .child(
-            div()
-                .w(design_rems(420.0))
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .child("Save chart template"),
-                )
-                .children(input.map(|input| Input::new(input).platform(theme)))
-                .children(error.map(|error| {
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.danger))
-                        .child(error.to_string())
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("chart_template_cancel")
-                                .variant(theme, ButtonVariant::Secondary)
-                                .h(design_rems(32.0))
-                                .label("Cancel")
-                                .on_click(move |_, _, cx| {
-                                    cancel.update(cx, |terminal, terminal_cx| {
-                                        terminal.cancel_chart_settings_template_save(terminal_cx);
-                                    });
-                                }),
-                        )
-                        .child(
-                            Button::new("chart_template_confirm")
-                                .variant(theme, ButtonVariant::Filled)
-                                .h(design_rems(32.0))
-                                .label("Save")
-                                .on_click(move |_, _, cx| {
-                                    save.update(cx, |terminal, terminal_cx| {
-                                        terminal
-                                            .save_chart_settings_template(&save_menu, terminal_cx);
-                                    });
-                                }),
-                        ),
-                ),
-        )
-        .into_any_element()
+    ConfirmationDialog::new(
+        "chart_template_save_dialog",
+        "Save chart template",
+        ConfirmationTone::Positive,
+        theme,
+        move |_, cx| {
+            cancel.update(cx, |terminal, terminal_cx| {
+                terminal.cancel_chart_settings_template_save(terminal_cx);
+            });
+        },
+        move |_, cx| {
+            save.update(cx, |terminal, terminal_cx| {
+                terminal.save_chart_settings_template(&save_menu, terminal_cx);
+            });
+        },
+    )
+    .confirm_label("Save")
+    .children(input.map(|input| Input::new(input).platform(theme)))
+    .children(error.map(|error| {
+        div()
+            .text_xs()
+            .text_color(gpui_color(theme.colors.danger))
+            .child(error.to_string())
+    }))
+    .into_any_element()
 }
 
 fn chart_series_settings(
@@ -2299,32 +2260,14 @@ fn settings_choice_row(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let mut controls = div()
-        .id(label)
-        .flex()
-        .items_center()
-        .gap_1()
-        .p(design_rems(2.0))
-        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .role(Role::TabList)
-        .aria_label(label);
+    let mut controls = TabList::new(label, label, theme);
     for (index, (choice, selected, action)) in choices.iter().copied().enumerate() {
         let terminal = terminal.clone();
         let menu = menu.clone();
         controls = controls.child(
             Tab::new((label, index), theme)
-                .segmented()
                 .selected(selected)
                 .aria_label(choice)
-                .px_2()
-                .h(design_rems(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
                 .on_click(move |_, _, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
                         terminal.apply_chart_settings_action(&menu, action, terminal_cx);

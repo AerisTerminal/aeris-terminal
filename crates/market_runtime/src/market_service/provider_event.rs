@@ -167,6 +167,7 @@ impl ProviderEvent {
         let kind = match event {
             Wire::Connecting(_) => ProviderEventKind::Connecting,
             Wire::Connected(_) => ProviderEventKind::Connected,
+            Wire::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(Some(rtt)),
             Wire::Recovering(_, detail) => ProviderEventKind::Recovering {
                 detail: "Tastytrade feed requires recovery",
                 provider_detail: Some(detail),

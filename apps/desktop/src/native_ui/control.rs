@@ -24,6 +24,8 @@ type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 const DEFAULT_CONTROL_SIZE: Pixels = px(32.0);
 const DEFAULT_ICON_SIZE: Pixels = px(16.0);
+const VARIANT_BUTTON_HEIGHT: Pixels = px(28.0);
+const VARIANT_BUTTON_PADDING_X: Pixels = px(10.0);
 const CUSTOM_ICON_SCALE: f32 = 0.75;
 
 fn control_geometry(content_size: Option<Pixels>) -> (Pixels, Pixels) {
@@ -189,8 +191,12 @@ impl Control {
         let appearance = button_appearance(theme, variant);
         self.resting_fill = Some(appearance.fill);
         self.surface = Some(appearance);
-        self.h(DEFAULT_CONTROL_SIZE)
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        // Theme System `Button` default size: h-7, px-2.5, text-sm, `--radius-button`. Every
+        // variant shares it so paired dialog actions always line up.
+        self.h(VARIANT_BUTTON_HEIGHT)
+            .px(VARIANT_BUTTON_PADDING_X)
+            .text_sm()
+            .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
     }
 
     /// The opaque fill this control rests on; hover/selected states composite

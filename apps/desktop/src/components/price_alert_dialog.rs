@@ -614,49 +614,28 @@ fn price_alert_dialog_header(
     price: &str,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
-    div()
+    let subtitle = div()
         .flex()
         .items_center()
-        .justify_between()
-        .px_3()
-        .py_2()
-        .border_b_1()
-        .border_color(gpui_color(colors.border_secondary))
+        .gap_1()
+        .child(format!("{symbol} at"))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .child("Create price alert"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(format!("{symbol} at"))
-                        .child(
-                            div()
-                                .font_family(aeris_design_system::platform_font_family())
-                                .font_features(platform_tabular_numerals())
-                                .child(price.to_string()),
-                        ),
-                ),
+                .font_family(aeris_design_system::platform_font_family())
+                .font_features(platform_tabular_numerals())
+                .child(price.to_string()),
         )
-        .child(chrome_close_button(
-            "price_alert_close",
-            theme,
-            move |_, cx| {
-                close.update(cx, WorkspaceSurface::close_price_alert_dialog);
-            },
-        ))
-        .into_any_element()
+        .into_any_element();
+    modal_header(
+        "price_alert_close",
+        "Create price alert",
+        Some(subtitle),
+        theme,
+        move |_, cx| {
+            close.update(cx, WorkspaceSurface::close_price_alert_dialog);
+        },
+    )
+    .into_any_element()
 }
 
 fn price_alert_dialog_footer(
@@ -665,14 +644,7 @@ fn price_alert_dialog_footer(
     capacity_reached: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
-    div()
-        .flex()
-        .justify_end()
-        .gap_2()
-        .p_4()
-        .border_t_1()
-        .border_color(gpui_color(colors.border_secondary))
+    modal_footer(theme)
         .child(
             Button::new("price_alert_cancel")
                 .variant(theme, ButtonVariant::Secondary)
@@ -683,7 +655,7 @@ fn price_alert_dialog_footer(
         )
         .child(
             Button::new("price_alert_create")
-                .variant(theme, ButtonVariant::Filled)
+                .variant(theme, ButtonVariant::Positive)
                 .icon(header_icon(HugeIcon::Add))
                 .label("Create alert")
                 .disabled(capacity_reached)
@@ -777,7 +749,6 @@ pub(super) fn price_alert_dialog_layer(
     message: Option<&str>,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     let dismiss = app.clone();
     let dismiss_dropdown = app.clone();
     let cancel = app.clone();
@@ -789,53 +760,23 @@ pub(super) fn price_alert_dialog_layer(
     );
     let existing = alerts_for_instrument(alerts, &dialog.instrument);
 
-    div()
-        .id("price_alert_dialog_scrim")
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .occlude()
-        .flex()
-        .items_center()
-        .justify_center()
-        .p_4()
-        .bg(gpui_color(colors.surface.with_alpha(0.72)))
-        .on_any_mouse_down(move |_, _, cx| {
-            dismiss.update(cx, WorkspaceSurface::close_price_alert_dialog);
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .id("price_alert_dialog")
-                .w(px(460.0))
-                .max_w(relative(1.0))
-                .max_h(px(600.0))
-                .max_h(relative(1.0))
-                .flex()
-                .flex_col()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface))
-                .shadow_lg()
-                .on_any_mouse_down(move |_, _, cx| {
-                    dismiss_dropdown.update(cx, WorkspaceSurface::close_price_alert_dropdown);
-                    cx.stop_propagation();
-                })
-                .child(price_alert_dialog_header(cancel, symbol, &price, theme))
-                .child(price_alert_dialog_body(
-                    &app, dialog, &existing, message, theme,
-                ))
-                .child(price_alert_dialog_footer(
-                    app,
-                    create,
-                    alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER,
-                    theme,
-                )),
-        )
-        .into_any_element()
+    ModalLayer::new("price_alert_dialog", px(460.0), theme, move |_, cx| {
+        dismiss.update(cx, WorkspaceSurface::close_price_alert_dialog);
+    })
+    .on_panel_mouse_down(move |_, cx| {
+        dismiss_dropdown.update(cx, WorkspaceSurface::close_price_alert_dropdown);
+    })
+    .child(price_alert_dialog_header(cancel, symbol, &price, theme))
+    .child(price_alert_dialog_body(
+        &app, dialog, &existing, message, theme,
+    ))
+    .child(price_alert_dialog_footer(
+        app,
+        create,
+        alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER,
+        theme,
+    ))
+    .into_any_element()
 }
 
 #[cfg(test)]

@@ -191,6 +191,19 @@ impl MarketSocket {
             .map_err(|_| MarketSocketError::Send)
     }
 
+    /// Sends one WebSocket ping frame; the peer's pong surfaces as
+    /// [`MarketSocketEvent::Pong`] so the worker can measure transport RTT.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket write fails or is cancelled.
+    pub fn send_ping(&mut self) -> Result<(), MarketSocketError> {
+        self.set_write_deadline(write_deadline());
+        self.socket
+            .send(Message::Ping(Vec::new().into()))
+            .map_err(|_| MarketSocketError::Send)
+    }
+
     /// Reads one feed event, waiting at most until `deadline`.
     ///
     /// Ping frames are answered in place and never surface; only text and
@@ -523,6 +536,39 @@ mod tests {
                 .expect("ping does not disconnect the client"),
             MarketSocketEvent::Text("still connected".to_string())
         );
+        server.join().expect("server finishes");
+    }
+
+    #[test]
+    fn client_ping_surfaces_the_peer_pong() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback binds");
+        let address = listener.local_addr().expect("loopback address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client connects");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("server read timeout");
+            let mut socket = tungstenite::accept(stream).expect("websocket handshake");
+            assert!(matches!(
+                socket.read().expect("client sends ping"),
+                Message::Ping(_)
+            ));
+            // Tungstenite queues the pong while reading; flush it to the client.
+            socket.flush().expect("server flushes pong");
+            let _ = socket.read();
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut socket, _) =
+            MarketSocket::connect(&format!("ws://{address}/"), Duration::from_secs(3), &stop)
+                .expect("client connects");
+        socket.send_ping().expect("client sends ping");
+        assert_eq!(
+            socket
+                .read_event(Instant::now() + Duration::from_secs(3))
+                .expect("pong arrives"),
+            MarketSocketEvent::Pong
+        );
+        socket.close();
         server.join().expect("server finishes");
     }
 

@@ -137,6 +137,7 @@ pub(super) enum RealtimeControl {
 pub(super) enum RealtimeEvent {
     Connecting(u64),
     Connected(u64),
+    Heartbeat(u64, u64),
     Recovering(u64, String),
     Failed(u64, String),
     Disconnected(u64),
@@ -152,6 +153,7 @@ impl RealtimeEvent {
         match self {
             Self::Connecting(g)
             | Self::Connected(g)
+            | Self::Heartbeat(g, _)
             | Self::Recovering(g, _)
             | Self::Failed(g, _)
             | Self::Disconnected(g)
@@ -171,6 +173,7 @@ pub(super) struct BrokerApi {
     state: Mutex<BrokerApiState>,
     futures_sessions: Mutex<Option<(Instant, [MarketSession; 2])>>,
     equity_session: Mutex<Option<(Instant, MarketSession)>>,
+    calendar_revision: AtomicU64,
     search_control: Mutex<BTreeMap<u64, (u64, Arc<AtomicBool>)>>,
     startup_search_control: Mutex<BTreeMap<u64, (u64, Arc<AtomicBool>)>>,
     authorization_epoch: AtomicU64,
@@ -296,6 +299,7 @@ impl BrokerApi {
             .equity_session
             .lock()
             .map_err(|_| "Tastytrade session cache failed")? = None;
+        self.calendar_revision.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
     fn search(
@@ -484,6 +488,7 @@ impl BrokerApi {
             return Err("Tastytrade futures calendar request retired".into());
         }
         *cache = Some((Instant::now(), sessions));
+        self.calendar_revision.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
     fn refresh_equity_session(&self, stop: &Arc<AtomicBool>) -> Result<(), String> {
@@ -499,7 +504,13 @@ impl BrokerApi {
             return Err("Tastytrade equity calendar request retired".into());
         }
         *cache = Some((Instant::now(), session));
+        self.calendar_revision.fetch_add(1, Ordering::AcqRel);
         Ok(())
+    }
+    /// Changes whenever a cached calendar is replaced or cleared, so status projections
+    /// computed from an older calendar can be recomputed.
+    pub(super) fn calendar_revision(&self) -> u64 {
+        self.calendar_revision.load(Ordering::Acquire)
     }
     fn market_session(&self, instrument: &InstallProviderInstrument) -> Option<MarketSession> {
         let collection = market_collection(instrument)?;
@@ -592,58 +603,50 @@ fn tastytrade_market_collection(
 }
 
 fn session_status_at(instrument_id: &str, session: MarketSession, now: i64) -> MarketSessionStatus {
-    let windows = [
-        (
-            session.start_unix_nanos,
-            session.regular_open_unix_nanos,
-            session.regular_close_unix_nanos,
-            session.close_unix_nanos,
-        ),
-        (
-            session.next_start_unix_nanos,
-            session.next_regular_open_unix_nanos,
-            session.next_regular_close_unix_nanos,
-            session.next_close_unix_nanos,
-        ),
-    ];
-    let valid_count = if session.next_start_unix_nanos > session.start_unix_nanos {
-        2
-    } else {
-        1
-    };
+    let windows = [session.current, session.next];
     let active = windows
-        .iter()
-        .take(valid_count)
-        .copied()
-        .find(|(start, _, _, end)| (*start..*end).contains(&now));
-    let next_open = windows
-        .iter()
-        .take(valid_count)
-        .map(|(start, _, _, _)| *start)
-        .filter(|start| *start > now)
-        .min();
-    let (phase, start, end) = if let Some((start, regular_open, regular_close, end)) = active {
-        let (phase, phase_start, phase_end) = if now < regular_open {
-            let phase = if session.collection == MarketCollection::Equity {
-                MarketSessionPhase::PreMarket
+        .into_iter()
+        .flatten()
+        .find(|window| window.contains(now));
+    let upcoming = windows
+        .into_iter()
+        .flatten()
+        .filter(|window| window.start_unix_nanos > now)
+        .min_by_key(|window| window.start_unix_nanos);
+    let (phase, start, end) = if let Some(window) = active {
+        let extended_phase = |equity_phase| {
+            if session.collection == MarketCollection::Equity {
+                equity_phase
             } else {
                 MarketSessionPhase::Overnight
-            };
-            (phase, start, regular_open)
-        } else if now >= regular_close {
-            let phase = if session.collection == MarketCollection::Equity {
-                MarketSessionPhase::PostMarket
-            } else {
-                MarketSessionPhase::Overnight
-            };
-            (phase, regular_close, end)
+            }
+        };
+        let (phase, phase_start, phase_end) = if now < window.regular_open_unix_nanos {
+            (
+                extended_phase(MarketSessionPhase::PreMarket),
+                window.start_unix_nanos,
+                window.regular_open_unix_nanos,
+            )
+        } else if now >= window.regular_close_unix_nanos {
+            (
+                extended_phase(MarketSessionPhase::PostMarket),
+                window.regular_close_unix_nanos,
+                window.close_unix_nanos,
+            )
         } else {
-            (MarketSessionPhase::Regular, regular_open, regular_close)
+            (
+                MarketSessionPhase::Regular,
+                window.regular_open_unix_nanos,
+                window.regular_close_unix_nanos,
+            )
         };
         (phase, Some(phase_start), Some(phase_end))
-    } else if next_open.is_some() {
-        let (start, _, _, end) = windows[0];
-        (MarketSessionPhase::Closed, Some(start), Some(end))
+    } else if let Some(window) = upcoming {
+        (
+            MarketSessionPhase::Closed,
+            Some(window.start_unix_nanos),
+            Some(window.close_unix_nanos),
+        )
     } else {
         (MarketSessionPhase::Unknown, None, None)
     };
@@ -653,7 +656,7 @@ fn session_status_at(instrument_id: &str, session: MarketSession, now: i64) -> M
         source: MarketSessionSource::ProviderCalendar,
         session_start_unix_nanos: start,
         session_end_unix_nanos: end,
-        next_open_unix_nanos: next_open,
+        next_open_unix_nanos: upcoming.map(|window| window.start_unix_nanos),
     }
 }
 
@@ -1656,6 +1659,13 @@ impl Worker {
                         break;
                     };
                     self.accept(event)?;
+                }
+                if let Some(rtt) = self
+                    .socket
+                    .as_mut()
+                    .and_then(DxlinkSession::take_transport_rtt_nanos)
+                {
+                    self.publish(RealtimeEvent::Heartbeat(self.epoch(), rtt))?;
                 }
                 Ok::<(), String>(())
             })();
