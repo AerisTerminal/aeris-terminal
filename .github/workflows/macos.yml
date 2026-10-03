@@ -1,0 +1,47 @@
+name: macOS
+
+# Native macOS qualification on a GitHub-hosted runner. Hosted minutes are
+# free only while the repository is public; the account carries no paid
+# Actions quota. The workflow is therefore manual-dispatch only: it never
+# queues automatically, so a private repository never accumulates failed
+# runs. Dispatch it only while the repository is public.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aeris-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace-macos:
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      # Public hosted runners never receive the licensed Rithmic kit.
+      AERIS_RITHMIC_KIT_DISABLED: "1"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Describe runner
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          sysctl -n hw.ncpu hw.memsize
+          df -h /
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Build workspace
+        run: cargo build --workspace --all-targets --all-features --locked
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
+      - name: Report remaining disk
+        if: always()
+        run: df -h /

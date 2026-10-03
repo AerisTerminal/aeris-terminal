@@ -1858,6 +1858,67 @@ mod tests {
     }
 
     #[test]
+    fn hosted_macos_qualification_stays_manual_and_kitless() {
+        // Hosted minutes are free only while the repository is public, so the
+        // macOS lane must never queue on its own.
+        let workflow = manifest(".github/workflows/macos.yml");
+        assert!(workflow.contains("workflow_dispatch:") && workflow.contains("contents: read"));
+        for trigger in ["push:", "schedule:", "workflow_run", "repository_dispatch"] {
+            assert!(
+                !workflow.contains(trigger),
+                "hosted macOS qualification must stay manual-dispatch only, found {trigger}"
+            );
+        }
+        assert_eq!(workflow.matches("runs-on:").count(), 1);
+        assert!(workflow.contains("runs-on: macos-latest"));
+        assert!(!workflow.contains("self-hosted"));
+        for gate in [
+            "cargo fmt --all -- --check",
+            "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+            "cargo build --workspace --all-targets --all-features --locked",
+            "cargo test --workspace --all-features --locked",
+        ] {
+            assert_eq!(
+                workflow.matches(gate).count(),
+                1,
+                "the macOS lane must run {gate}"
+            );
+        }
+        assert!(
+            workflow.contains("AERIS_RITHMIC_KIT_DISABLED: \"1\"")
+                && !workflow.contains("provider_kit")
+                && !workflow.contains("RITHMIC_KIT_ROOT"),
+            "public hosted runners must never receive the licensed Rithmic kit"
+        );
+        assert!(
+            !workflow.contains("secrets.")
+                && !workflow.contains("continue-on-error")
+                && !workflow.contains("git config --global"),
+            "the hosted macOS lane must stay credential-free and keep failures visible"
+        );
+    }
+
+    #[test]
+    fn workflows_never_run_fork_pull_requests() {
+        // Self-hosted lanes run on maintainer hardware, one holding provider
+        // credentials. A pull-request trigger would let fork code reach them
+        // whenever the repository is public.
+        let workflows = fs::read_dir(repository_root().join(".github/workflows"))
+            .expect("workflow directory is readable")
+            .map(|entry| entry.expect("workflow entry is readable").path())
+            .collect::<Vec<_>>();
+        assert!(!workflows.is_empty());
+        for path in workflows {
+            let workflow = fs::read_to_string(&path).expect("workflow");
+            assert!(
+                !workflow.contains("pull_request"),
+                "{} must not run on pull requests",
+                relative_string(&path)
+            );
+        }
+    }
+
+    #[test]
     fn live_market_gates_use_public_chart_source() {
         let workflow = manifest(".github/workflows/live_market_gates.yml");
         assert!(
