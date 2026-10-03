@@ -70,6 +70,14 @@ pub(crate) fn shared_market_runtime() -> Result<MarketService, String> {
     MARKET_RUNTIME.get_or_init(MarketService::start).clone()
 }
 
+/// Returns the shared runtime only if something already started it, so quit
+/// never starts provider sessions just to stop them.
+pub(crate) fn started_market_runtime() -> Option<MarketService> {
+    MARKET_RUNTIME
+        .get()
+        .and_then(|runtime| runtime.as_ref().ok().cloned())
+}
+
 pub(super) fn chart_streams(depth_visible: bool) -> StreamRequirements {
     let streams = StreamRequirements::BARS
         .with(MarketStream::Trades)
@@ -1278,6 +1286,59 @@ mod tests {
         assert!(
             drained_states(&receiver).is_empty(),
             "a repair behind a live chart must not put it back into loading"
+        );
+    }
+
+    /// A provider that answers with no history (a closed market) is settled,
+    /// not failing. Presenting it as recovering invalidated the replay stream
+    /// and re-requested the identical empty history about once a minute.
+    #[test]
+    fn empty_provider_history_presents_as_awaiting_data_not_recovering() {
+        let (sender, receiver) =
+            market_worker_channel(NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN));
+        let mut live = true;
+        let empty = MarketSeriesState {
+            consumer_id: MarketConsumerId(NonZeroU64::MIN),
+            generation: MarketGenerationId(NonZeroU64::MIN),
+            series: None,
+            state: SeriesLoadState::Empty,
+            detail: Some("waiting for live trades".to_string()),
+        };
+
+        apply_series_state(empty.clone(), "rithmic", true, &mut live, &sender)
+            .expect("an empty provider answer is not a failure");
+        assert_eq!(
+            drained_states(&receiver),
+            vec![(
+                ChartState::AwaitingData,
+                "waiting for live trades".to_string()
+            )]
+        );
+        assert!(!live, "a series without history is not live");
+
+        apply_series_state(
+            MarketSeriesState {
+                detail: None,
+                ..empty
+            },
+            "rithmic",
+            true,
+            &mut live,
+            &sender,
+        )
+        .expect("an empty provider answer is not a failure");
+        let states = drained_states(&receiver);
+        assert_eq!(
+            states,
+            vec![(
+                ChartState::AwaitingData,
+                "Rithmic has no market history for this period yet".to_string()
+            )]
+        );
+        assert!(
+            states
+                .iter()
+                .all(|(state, _)| !matches!(state, ChartState::Recovering | ChartState::Error))
         );
     }
 

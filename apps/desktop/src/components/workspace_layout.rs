@@ -296,9 +296,9 @@ pub(super) fn workspace_pane_element(
                         position: event.position,
                         kind: ChartContextKind::Pane,
                         flyout: PriceAxisMenuFlyout::None,
-                        image_flyout_open: false,
+                        capture_flyout_open: false,
                         copy_price: None,
-                        copy_feedback_generation: None,
+                        copy_feedback: None,
                     },
                     terminal_cx,
                 );

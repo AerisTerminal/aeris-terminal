@@ -2701,7 +2701,7 @@ impl WorkspaceSurface {
         // coverage the chart is showing retained history — promoting it here is
         // what presented a stale chart as ready for the seconds before the
         // provider page and the live handoff landed.
-        if next_state == ChartState::Ready && self.chart_state == ChartState::Loading {
+        if next_state == ChartState::Ready && self.chart_state.awaits_engine_readiness() {
             cx.notify();
         } else if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
@@ -3415,7 +3415,7 @@ impl WorkspaceSurface {
         // The pending-switch tracker is provider-neutral: both engine
         // providers resolve selections through the same marker flow.
         let engine_provider = super::provider_presentation(self.provider).is_some();
-        if self.stale_ready_during_engine_switch(state, engine_provider) {
+        if self.stale_settled_state_during_engine_switch(state, engine_provider) {
             return;
         }
         if state == ChartState::Error && engine_provider {
@@ -3438,6 +3438,15 @@ impl WorkspaceSurface {
                 || format!("{} market ready", terminal_provider_display(self.provider)),
                 |product| super::provider_ready_message(self.provider, product),
             );
+        } else if engine_provider && state == ChartState::AwaitingData {
+            // The selection itself succeeded. A chart still showing the previous
+            // series stays covered (`Swapping`) until the replacement's first
+            // snapshot; a replacement already on screen is simply this series.
+            if self.rithmic_switch == RithmicSwitchState::Initializing {
+                self.rithmic_switch = RithmicSwitchState::Idle;
+                self.rithmic_previous_selection = None;
+            }
+            self.market_state.symbol_selection_pending = false;
         }
         self.set_chart_state(state, message, cx);
     }
@@ -3457,13 +3466,21 @@ impl WorkspaceSurface {
         self.apply_connection_state(state, message, cx);
     }
 
-    fn stale_ready_during_engine_switch(&self, state: ChartState, engine_provider: bool) -> bool {
+    fn stale_settled_state_during_engine_switch(
+        &self,
+        state: ChartState,
+        engine_provider: bool,
+    ) -> bool {
         // The previous series can report one last Ready after the catalog
         // response but before the worker processes the new EngineSelect
         // command. Keep the switch pending until its marker/snapshot lands.
-        state == ChartState::Ready
-            && engine_provider
-            && !ready_state_can_complete_switch(self.rithmic_switch)
+        // The same holds for a settled no-data state queued before the marker.
+        engine_provider
+            && match state {
+                ChartState::Ready => !ready_state_can_complete_switch(self.rithmic_switch),
+                ChartState::AwaitingData => self.rithmic_switch.is_pending(),
+                _ => false,
+            }
     }
 
     fn apply_provider_catalog_event(
@@ -3734,6 +3751,7 @@ impl WorkspaceSurface {
         self.connection_message = Some(stable_connection_message(state, message));
         if autoload_catalog {
             self.market_state.rithmic_autoload_started = true;
+            self.market_state.rithmic_autoload_selection_pending = true;
             let _ = self.search_symbol_query(default_listing_query(self.provider), cx);
         }
         cx.notify();
@@ -4448,10 +4466,11 @@ impl WorkspaceSurface {
             self.symbol_message = format!("No exact market matched {symbol}");
         }
         if self.symbol_provider == TerminalProvider::Rithmic
-            && self.market_state.rithmic_autoload_started
+            && self.market_state.rithmic_autoload_selection_pending
             && self.symbol_browser.selected().is_none()
             && let Some(index) = default_rithmic_contract_index(self.symbol_browser.results())
         {
+            self.market_state.rithmic_autoload_selection_pending = false;
             self.select_rithmic_symbol(index, cx);
         }
         self.dispatch_retained_symbol_search(cx);
@@ -4757,15 +4776,19 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn copy_chart_image(&mut self, cx: &mut Context<Self>) {
-        if let Some(chart) = &self.chart {
-            chart.update(cx, AerisChartView::copy_image);
-        }
+    /// Copies the chart capture; the task resolves `true` once the image is on the clipboard.
+    pub(super) fn copy_chart_capture(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Task<bool>> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.update(cx, AerisChartView::copy_capture))
     }
 
-    pub(super) fn save_chart_image(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_chart_capture(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
-            chart.update(cx, AerisChartView::save_image);
+            chart.update(cx, AerisChartView::save_capture);
         }
     }
 

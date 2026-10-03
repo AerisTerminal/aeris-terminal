@@ -361,6 +361,36 @@ enum DeferredHistoryRequest {
     Range(HistoryRange),
 }
 
+/// A current (unranged) covering request that the provider answered
+/// successfully with no bars, e.g. a closed market.
+///
+/// Repeating the identical request returns the identical nothing, and to
+/// providers such as Rithmic that repetition is forbidden polling. The answer
+/// is final for its provider generation except for one request justified by
+/// new evidence: a live trade newer than the empty replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmptyCurrentHistory {
+    /// Covering requests are suppressed until a live trade after this
+    /// provider replay boundary arrives.
+    AwaitingLiveTrade { boundary_unix_nanos: i64 },
+    /// The one trade-triggered covering request has been issued.
+    LiveTradeRequested,
+    /// The trade-triggered request was empty too; covering requests stay
+    /// suppressed until the provider generation or the demanded series changes.
+    Final,
+}
+
+impl EmptyCurrentHistory {
+    const fn suppresses_current_requests(self) -> bool {
+        matches!(self, Self::AwaitingLiveTrade { .. } | Self::Final)
+    }
+}
+
+const EMPTY_CURRENT_HISTORY_DETAIL: &str =
+    "No market history is available for this period yet; waiting for live trades";
+const EMPTY_CURRENT_HISTORY_RETAINED_DETAIL: &str =
+    "No current market history is available yet; showing retained history until live trades arrive";
+
 #[derive(Clone, Copy)]
 pub(crate) struct HistoryFetchWindow {
     pub(crate) maximum_bars: usize,

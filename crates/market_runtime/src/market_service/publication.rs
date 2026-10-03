@@ -511,14 +511,10 @@ impl Coordinator<'_> {
     ) -> Result<(), String> {
         let needs_covering_repair =
             self.prepare_cached_demand(series, provider_generation, &publication.snapshot)?;
+        let (repair_state, repair_detail) = self.covering_repair_state(series);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             if needs_covering_repair {
-                publish_state(
-                    events,
-                    publication,
-                    SeriesLoadState::Partial,
-                    Some("Refreshing provider coverage"),
-                );
+                publish_state(events, publication, repair_state, Some(repair_detail));
             } else {
                 publish_ready(events, publication);
             }

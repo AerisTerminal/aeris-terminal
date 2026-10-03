@@ -154,6 +154,7 @@ dependencies = [
  "aeris_charts_render_gpui",
  "aeris_design_system",
  "aeris_terminal_ui",
+ "arboard",
  "gpui",
  "num-traits",
  "resvg",
@@ -163,7 +164,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_core"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=2aca568#2aca56878c1e28a243b365be98fa07f3c6bc298f"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -174,7 +175,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_engine"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=2aca568#2aca56878c1e28a243b365be98fa07f3c6bc298f"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_indicators",
@@ -186,7 +187,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_indicators"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=2aca568#2aca56878c1e28a243b365be98fa07f3c6bc298f"
 dependencies = [
  "serde",
 ]
@@ -194,7 +195,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_native"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=2aca568#2aca56878c1e28a243b365be98fa07f3c6bc298f"
 dependencies = [
  "ab_glyph",
  "aeris_charts_core",
@@ -207,7 +208,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=2aca568#2aca56878c1e28a243b365be98fa07f3c6bc298f"
 dependencies = [
  "aeris_charts_core",
 ]
@@ -215,7 +216,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render_gpui"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=f078d5f#f078d5f90445900e9a0d9a9a2ecabb722aa35016"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=2aca568#2aca56878c1e28a243b365be98fa07f3c6bc298f"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_engine",
@@ -548,6 +549,26 @@ name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+
+[[package]]
+name = "arboard"
+version = "3.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf"
+dependencies = [
+ "clipboard-win",
+ "image",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "parking_lot",
+ "percent-encoding",
+ "windows-sys 0.59.0",
+ "x11rb",
+]
 
 [[package]]
 name = "arg_enum_proc_macro"
@@ -1362,6 +1383,15 @@ dependencies = [
  "glob",
  "libc",
  "libloading",
+]
+
+[[package]]
+name = "clipboard-win"
+version = "5.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+dependencies = [
+ "error-code",
 ]
 
 [[package]]
@@ -2253,8 +2283,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "error-code"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "etagere"
@@ -5406,7 +5442,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -5617,7 +5653,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6129,7 +6165,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6197,7 +6233,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7123,7 +7159,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8395,7 +8431,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -45,13 +45,15 @@ impl AerisChartView {
                 ChartInputEvent::ContextMenu(menu) => {
                     self.pending_context_menu = Some(self.context_menu_request(menu));
                 }
-                // Terminal has no pane click, crosshair, or drawing-created subscribers, and the
-                // engine runs drawing text editing through the GPUI input adapter.
+                // Terminal has no pane click, crosshair, drawing-created, or delta-tooltip range
+                // subscribers, and the engine runs drawing text editing through the GPUI input
+                // adapter.
                 ChartInputEvent::Click { .. }
                 | ChartInputEvent::DoubleClick { .. }
                 | ChartInputEvent::CrosshairLeft
                 | ChartInputEvent::TextEditorOpened(_)
-                | ChartInputEvent::DrawingCreated(_) => {}
+                | ChartInputEvent::DrawingCreated(_)
+                | ChartInputEvent::DeltaTooltipChanged => {}
                 ChartInputEvent::RemoveSeries(series) => {
                     if self.remove_series_selection(series) {
                         self.engine.set_selected_series(None);

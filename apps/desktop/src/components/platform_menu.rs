@@ -30,6 +30,9 @@ const WINDOW_SECTION_HEIGHT: f32 =
 const ABOUT_BRAND_HEIGHT: f32 = 40.0;
 const ABOUT_DETAIL_HEIGHT: f32 = 26.0;
 const ABOUT_UPDATE_HEIGHT: f32 = 44.0;
+/// Room for the four provider notices at the menu width; the block scrolls
+/// rather than clipping if a font fallback wraps them onto more lines.
+const ABOUT_NOTICES_HEIGHT: f32 = 200.0;
 const THEME_MODES: [ThemeMode; 2] = [ThemeMode::Light, ThemeMode::Dark];
 
 type ThemeSelect = Rc<dyn Fn(ThemeMode, &mut Window, &mut App)>;
@@ -324,6 +327,7 @@ fn about_section_height(details: usize) -> f32 {
     SECTION_TITLE_HEIGHT
         + ABOUT_BRAND_HEIGHT
         + details.to_f32().unwrap_or_default() * ABOUT_DETAIL_HEIGHT
+        + ABOUT_NOTICES_HEIGHT
         + ABOUT_UPDATE_HEIGHT
         + SECTION_BOTTOM_PADDING
 }
@@ -825,7 +829,82 @@ fn about_section(
                         .child(value),
                 )
         }))
+        .child(provider_notices(current_utc_year(), theme))
         .child(update_row(update, on_update, theme))
+}
+
+/// Copyright and trademark notices Rithmic requires wherever the terminal shows
+/// its own; the year follows the clock as their wording asks.
+fn provider_notice_texts(year: i64) -> [String; 3] {
+    [
+        format!(
+            "The R | Protocol API™ software is Copyright © {year} by Rithmic, LLC. \
+             All rights reserved."
+        ),
+        "Trading Platform by Rithmic™ is a trademark of Rithmic, LLC. All rights reserved."
+            .to_string(),
+        format!(
+            "The OMNE™ software is Copyright © {year} by Omnesys, LLC and Omnesys \
+             Technologies, Inc. All rights reserved."
+        ),
+    ]
+}
+
+const POWERED_BY_OMNE_NOTICE: &str =
+    "is a trademark of Omnesys, LLC and Omnesys Technologies, Inc. All rights reserved.";
+
+fn provider_notices(year: i64, theme: &AerisTheme) -> impl IntoElement {
+    let muted = gpui_color(theme.colors.text_muted);
+    div()
+        .id("about_provider_notices")
+        .h(px(ABOUT_NOTICES_HEIGHT))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .py_1()
+        .overflow_y_scroll()
+        .text_xs()
+        .text_color(muted)
+        .children(
+            provider_notice_texts(year)
+                .into_iter()
+                .map(|notice| div().flex_none().child(notice)),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(super::terminal_chrome::AttributionMarkImage {
+                    mark: assets::AttributionMark::PoweredByOmne,
+                    mode: theme.mode,
+                })
+                .child(POWERED_BY_OMNE_NOTICE),
+        )
+}
+
+fn current_utc_year() -> i64 {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|now| i64::try_from(now.as_secs()).ok())
+        .unwrap_or(0);
+    utc_year(seconds)
+}
+
+/// Gregorian year of a Unix timestamp (Hinnant's days-to-civil algorithm).
+fn utc_year(unix_seconds: i64) -> i64 {
+    let days = unix_seconds.div_euclid(86_400) + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let year = year_of_era + era * 400;
+    if month_index >= 10 { year + 1 } else { year }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1025,6 +1104,24 @@ mod tests {
             + about_section_height(1)
             + 4.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
         assert!((signed_in.height(border) - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn utc_year_handles_year_boundaries_and_leap_days() {
+        assert_eq!(utc_year(0), 1970);
+        assert_eq!(utc_year(951_782_400), 2000); // 2000-02-29
+        assert_eq!(utc_year(1_798_761_599), 2026); // 2026-12-31T23:59:59Z
+        assert_eq!(utc_year(1_798_761_600), 2027); // 2027-01-01T00:00:00Z
+        assert_eq!(utc_year(-1), 1969);
+    }
+
+    #[test]
+    fn provider_notices_carry_the_requested_year_and_owners() {
+        let notices = provider_notice_texts(2026);
+        assert!(notices[0].contains("R | Protocol API™") && notices[0].contains("© 2026"));
+        assert!(notices[1].starts_with("Trading Platform by Rithmic™ is a trademark"));
+        assert!(notices[2].contains("OMNE™") && notices[2].contains("© 2026"));
+        assert!(POWERED_BY_OMNE_NOTICE.contains("Omnesys Technologies, Inc."));
     }
 
     #[test]

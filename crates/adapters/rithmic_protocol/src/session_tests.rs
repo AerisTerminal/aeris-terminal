@@ -1,11 +1,15 @@
 #![cfg(rithmic_kit)]
 
 use crate::{
-    DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage, DecodedTimeBar,
-    DecodedTimeBarType, HistorySource, RITHMIC_APPLICATION_NAME, ReplayKind, RetryDisposition,
-    RithmicApplication, RithmicCredentials, RithmicSessionError, RithmicSessionLimits,
-    RithmicSessionMessage, RithmicTestSession, TimeBarReplayRequest, TimeBarType,
-    endpoint::RithmicEndpoint, generated::rti,
+    DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage, DecodedOrderMessage,
+    DecodedPnlMessage, DecodedTimeBar, DecodedTimeBarType, HistorySource, ProviderSessionDriver,
+    ProviderSessionEvent, RITHMIC_APPLICATION_NAME, ReplayKind, RetryDisposition,
+    RithmicAccountKey, RithmicApplication, RithmicCallbackLimits, RithmicCredentialBytes,
+    RithmicCredentials, RithmicOrderPlantMessage, RithmicPnlPlantMessage, RithmicProviderConfig,
+    RithmicProviderDriver, RithmicProviderEvents, RithmicRequestKind, RithmicRequestOutcome,
+    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession,
+    SessionGeneration, TimeBarReplayRequest, TimeBarType, endpoint::RithmicEndpoint,
+    generated::rti, session::STOPPING_LOGOUT_TIMEOUT,
 };
 use prost::Message as _;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -15,7 +19,12 @@ use rustls::{
 };
 use std::{
     net::{SocketAddr, TcpListener, TcpStream},
-    sync::Arc,
+    num::{NonZeroU64, NonZeroUsize},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::sync_channel,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -25,6 +34,13 @@ const FIXTURE_USER: &str = "local-fixture-user";
 const FIXTURE_PASSWORD: &str = "local-fixture-password";
 const TEST_SYSTEM: &str = "Rithmic Test";
 const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(3);
+/// Budget `MarketService::shutdown` receives from the desktop on quit.
+const DESKTOP_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
+const FIXTURE_ACCOUNT: RithmicAccountKey<'static> = RithmicAccountKey {
+    fcm_id: "fixture-fcm",
+    ib_id: "fixture-ib",
+    account_id: "fixture-account",
+};
 
 type ServerWebSocket = WebSocket<StreamOwned<ServerConnection, TcpStream>>;
 
@@ -225,6 +241,153 @@ fn authenticated_close_deadline_survives_continuous_control_frames() {
 }
 
 #[test]
+fn stop_interrupts_a_blocked_tls_read_and_still_logs_out() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-stop-read-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let mut ticker = accept_ticker_login(&listener, &server_config)?;
+            assert_logout_request(&read_binary(&mut ticker)?);
+            ticker
+                .send(Message::binary(logout_response()))
+                .map_err(|error| error.to_string())?;
+            require_close(&mut ticker)?;
+            finish_server_close(&mut ticker)
+        })
+        .expect("spawn stop read fixture");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut connection = RithmicTestSession::connect_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        fixture_limits(),
+        Some(Arc::clone(&stop)),
+        client_config,
+    )
+    .expect("discover and log in over local TLS");
+    let stopper_flag = Arc::clone(&stop);
+    let stopper = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        stopper_flag.store(true, Ordering::Release);
+    });
+    let started = Instant::now();
+    assert_eq!(
+        connection.read_next_until(started + Duration::from_secs(5)),
+        Err(RithmicSessionError::Cancelled)
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    stopper.join().expect("stopper thread joins");
+    connection
+        .close()
+        .expect("a stopped session still logs out and closes");
+    server
+        .join()
+        .expect("stop read fixture did not panic")
+        .expect("stop read lifecycle completed");
+}
+
+#[test]
+fn driver_stop_logs_out_a_streaming_ticker_session_before_closing() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let (ready_tx, ready_rx) = sync_channel(1);
+    let server = thread::Builder::new()
+        .name("rithmic-driver-logout-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let mut ticker = accept_ticker_login(&listener, &server_config)?;
+            assert_heartbeat_request(&read_binary(&mut ticker)?);
+            ticker
+                .send(Message::binary(heartbeat_response()))
+                .map_err(|error| error.to_string())?;
+            ready_tx.send(()).map_err(|error| error.to_string())?;
+            assert_logout_request(&read_binary(&mut ticker)?);
+            ticker
+                .send(Message::binary(logout_response()))
+                .map_err(|error| error.to_string())?;
+            require_close(&mut ticker)?;
+            finish_server_close(&mut ticker)
+        })
+        .expect("spawn driver logout fixture");
+
+    let (mut driver, events) = fixture_driver(endpoint, client_config);
+    let credentials = fixture_credential_bytes();
+    driver
+        .start_session(session_generation(1), credentials.as_bytes())
+        .expect("ticker session starts");
+    wait_for_instruments(&events);
+    ready_rx
+        .recv_timeout(SERVER_IO_TIMEOUT)
+        .expect("fixture answers the first heartbeat");
+
+    let started = Instant::now();
+    driver
+        .stop_session(session_generation(1))
+        .expect("streaming session stops");
+    // The acknowledged logout returns well before the logout bound, so the
+    // driver never needed its abort fallback.
+    assert!(started.elapsed() < STOPPING_LOGOUT_TIMEOUT);
+    server
+        .join()
+        .expect("driver logout fixture did not panic")
+        .expect("driver logout lifecycle completed");
+}
+
+#[test]
+fn driver_stop_is_bounded_when_logout_is_never_acknowledged() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let (ready_tx, ready_rx) = sync_channel(1);
+    let server = thread::Builder::new()
+        .name("rithmic-driver-silent-logout-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let mut ticker = accept_ticker_login(&listener, &server_config)?;
+            assert_heartbeat_request(&read_binary(&mut ticker)?);
+            ticker
+                .send(Message::binary(heartbeat_response()))
+                .map_err(|error| error.to_string())?;
+            ready_tx.send(()).map_err(|error| error.to_string())?;
+            assert_logout_request(&read_binary(&mut ticker)?);
+            // Never acknowledge; wait for the client to drop the connection.
+            while ticker.read().is_ok() {}
+            Ok(())
+        })
+        .expect("spawn silent logout fixture");
+
+    let (mut driver, events) = fixture_driver(endpoint, client_config);
+    let credentials = fixture_credential_bytes();
+    driver
+        .start_session(session_generation(1), credentials.as_bytes())
+        .expect("ticker session starts");
+    wait_for_instruments(&events);
+    ready_rx
+        .recv_timeout(SERVER_IO_TIMEOUT)
+        .expect("fixture answers the first heartbeat");
+
+    let started = Instant::now();
+    driver
+        .stop_session(session_generation(1))
+        .expect("unacknowledged session still stops");
+    let elapsed = started.elapsed();
+    assert!(elapsed >= STOPPING_LOGOUT_TIMEOUT);
+    assert!(elapsed < DESKTOP_SHUTDOWN_BUDGET);
+    server
+        .join()
+        .expect("silent logout fixture did not panic")
+        .expect("silent logout lifecycle completed");
+}
+
+#[test]
 fn history_replay_uses_fresh_history_plant_connection_over_tls() {
     let fixture = LocalTlsFixture::bind();
     let endpoint = fixture.endpoint;
@@ -319,6 +482,202 @@ fn history_replay_uses_fresh_history_plant_connection_over_tls() {
         .join()
         .expect("local history TLS server did not panic")
         .expect("local history TLS lifecycle completed");
+}
+
+#[test]
+fn order_stream_subscribes_before_snapshot_over_tls() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-order-plant-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
+            assert_system_discovery_request(&read_binary(&mut discovery)?);
+            discovery
+                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)?;
+            drop(discovery);
+
+            let (mut order, _) = accept_websocket(&listener, &server_config)?;
+            assert_trading_login_request(
+                &read_binary(&mut order)?,
+                rti::request_login::SysInfraType::OrderPlant,
+            )?;
+            order
+                .send(Message::binary(login_response(true, &[])))
+                .map_err(|error| error.to_string())?;
+            let subscribe =
+                rti::RequestSubscribeForOrderUpdates::decode(read_binary(&mut order)?.as_slice())
+                    .map_err(|error| error.to_string())?;
+            if subscribe.template_id != 308
+                || subscribe.account_id.as_deref() != Some(FIXTURE_ACCOUNT.account_id)
+            {
+                return Err("expected the order-update subscription first".to_string());
+            }
+            order
+                .send(Message::binary(order_notification(None)))
+                .map_err(|error| error.to_string())?;
+            order
+                .send(Message::binary(order_updates_response()))
+                .map_err(|error| error.to_string())?;
+            let snapshot = rti::RequestShowOrders::decode(read_binary(&mut order)?.as_slice())
+                .map_err(|error| error.to_string())?;
+            if snapshot.template_id != 320
+                || snapshot.account_id.as_deref() != Some(FIXTURE_ACCOUNT.account_id)
+            {
+                return Err("expected the order snapshot after the acknowledgement".to_string());
+            }
+            order
+                .send(Message::binary(order_notification(Some(true))))
+                .map_err(|error| error.to_string())?;
+            order
+                .send(Message::binary(show_orders_response()))
+                .map_err(|error| error.to_string())?;
+            assert_logout_request(&read_binary(&mut order)?);
+            order
+                .send(Message::binary(logout_response()))
+                .map_err(|error| error.to_string())?;
+            require_close(&mut order)?;
+            finish_server_close(&mut order)
+        })
+        .expect("spawn local order-plant TLS server");
+
+    let mut connection = RithmicTestSession::connect_order_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        fixture_limits(),
+        client_config,
+    )
+    .expect("discover and log in to the order plant");
+    assert_eq!(connection.login_metadata().plant.name(), "order");
+    assert_eq!(
+        connection.request_order_snapshot(FIXTURE_ACCOUNT),
+        Err(RithmicSessionError::RequestNotPermitted)
+    );
+    connection
+        .start_order_stream(FIXTURE_ACCOUNT, Instant::now() + Duration::from_secs(3))
+        .expect("subscribe, then request the snapshot");
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the retained live update")),
+        DecodedOrderMessage::OrderNotification(update) if !update.order.is_snapshot
+    ));
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the snapshot row")),
+        DecodedOrderMessage::OrderNotification(update) if update.order.is_snapshot
+    ));
+    assert!(matches!(
+        order_payload(connection.read_next().expect("read the snapshot completion")),
+        DecodedOrderMessage::RequestComplete(completion)
+            if completion.request == RithmicRequestKind::ShowOrders
+                && completion.outcome.is_accepted()
+    ));
+    connection.close().expect("close order-plant connection");
+    server
+        .join()
+        .expect("local order-plant TLS server did not panic")
+        .expect("local order-plant TLS lifecycle completed");
+}
+
+#[test]
+fn pnl_stream_subscribes_before_snapshot_over_tls() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-pnl-plant-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
+            assert_system_discovery_request(&read_binary(&mut discovery)?);
+            discovery
+                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)?;
+            drop(discovery);
+
+            let (mut pnl, _) = accept_websocket(&listener, &server_config)?;
+            assert_trading_login_request(
+                &read_binary(&mut pnl)?,
+                rti::request_login::SysInfraType::PnlPlant,
+            )?;
+            pnl.send(Message::binary(login_response(true, &[])))
+                .map_err(|error| error.to_string())?;
+            let subscribe =
+                rti::RequestPnLPositionUpdates::decode(read_binary(&mut pnl)?.as_slice())
+                    .map_err(|error| error.to_string())?;
+            if subscribe.template_id != 400
+                || subscribe.request
+                    != Some(rti::request_pn_l_position_updates::Request::Subscribe.into())
+            {
+                return Err("expected the PnL subscription first".to_string());
+            }
+            pnl.send(Message::binary(pnl_updates_response()))
+                .map_err(|error| error.to_string())?;
+            let snapshot =
+                rti::RequestPnLPositionSnapshot::decode(read_binary(&mut pnl)?.as_slice())
+                    .map_err(|error| error.to_string())?;
+            if snapshot.template_id != 402 {
+                return Err("expected the PnL snapshot after the acknowledgement".to_string());
+            }
+            pnl.send(Message::binary(account_pnl_snapshot()))
+                .map_err(|error| error.to_string())?;
+            pnl.send(Message::binary(pnl_snapshot_response()))
+                .map_err(|error| error.to_string())?;
+            assert_logout_request(&read_binary(&mut pnl)?);
+            pnl.send(Message::binary(logout_response()))
+                .map_err(|error| error.to_string())?;
+            require_close(&mut pnl)?;
+            finish_server_close(&mut pnl)
+        })
+        .expect("spawn local PnL-plant TLS server");
+
+    let mut connection = RithmicTestSession::connect_pnl_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        fixture_limits(),
+        client_config,
+    )
+    .expect("discover and log in to the PnL plant");
+    assert_eq!(connection.login_metadata().plant.name(), "pnl");
+    assert_eq!(
+        connection.request_position_snapshot(FIXTURE_ACCOUNT),
+        Err(RithmicSessionError::RequestNotPermitted)
+    );
+    connection
+        .start_pnl_stream(FIXTURE_ACCOUNT, Instant::now() + Duration::from_secs(3))
+        .expect("subscribe, then request the snapshot");
+    assert!(matches!(
+        pnl_payload(connection.read_next().expect("read the account snapshot")),
+        DecodedPnlMessage::Account(account)
+            if account.is_snapshot
+                && account.account_balance.map(|value| (value.units(), value.scale()))
+                    == Some((5_000_025, 2))
+    ));
+    assert_eq!(
+        pnl_payload(
+            connection
+                .read_next()
+                .expect("read the snapshot completion")
+        ),
+        DecodedPnlMessage::RequestComplete {
+            request: RithmicRequestKind::PnlSnapshot,
+            outcome: RithmicRequestOutcome::Accepted,
+        }
+    );
+    connection.close().expect("close PnL-plant connection");
+    server
+        .join()
+        .expect("local PnL-plant TLS server did not panic")
+        .expect("local PnL-plant TLS lifecycle completed");
 }
 
 #[test]
@@ -478,6 +837,96 @@ fn accept_websocket(
         .map_err(|error| error.to_string())
 }
 
+/// Serves system discovery, then accepts the fresh ticker login.
+fn accept_ticker_login(
+    listener: &TcpListener,
+    server_config: &Arc<ServerConfig>,
+) -> Result<ServerWebSocket, String> {
+    let (mut discovery, _) = accept_websocket(listener, server_config)?;
+    assert_system_discovery_request(&read_binary(&mut discovery)?);
+    discovery
+        .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
+        .map_err(|error| error.to_string())?;
+    discovery.close(None).map_err(|error| error.to_string())?;
+    finish_server_close(&mut discovery)?;
+    drop(discovery);
+
+    let (mut ticker, _) = accept_websocket(listener, server_config)?;
+    assert_login_request(&read_binary(&mut ticker)?)?;
+    ticker
+        .send(Message::binary(login_response(true, &[])))
+        .map_err(|error| error.to_string())?;
+    Ok(ticker)
+}
+
+/// Production ticker session driver whose login targets the local fixture.
+fn fixture_driver(
+    endpoint: RithmicEndpoint,
+    client_config: ClientConfig,
+) -> (RithmicProviderDriver, RithmicProviderEvents) {
+    let config = RithmicProviderConfig::try_new(
+        RITHMIC_APPLICATION_NAME,
+        "0.1.0",
+        fixture_limits(),
+        Duration::from_secs(30),
+        Vec::new(),
+    )
+    .expect("fixture provider configuration validates");
+    let callback_limits = RithmicCallbackLimits::try_new(
+        NonZeroUsize::new(64).expect("nonzero events"),
+        NonZeroUsize::new(64 * 1024).expect("nonzero bytes"),
+        NonZeroUsize::new(32).expect("nonzero depth"),
+    )
+    .expect("fixture callback limits validate");
+    RithmicProviderDriver::with_ticker_connector(
+        config,
+        callback_limits,
+        Arc::new(move |credentials, application, limits, stop, abort| {
+            RithmicTestSession::connect_with_abort(
+                endpoint,
+                credentials,
+                application,
+                limits,
+                stop,
+                abort,
+                client_config.clone(),
+            )
+        }),
+    )
+}
+
+fn fixture_credential_bytes() -> RithmicCredentialBytes {
+    RithmicCredentialBytes::try_encode(FIXTURE_USER, FIXTURE_PASSWORD)
+        .expect("fixture credentials encode")
+}
+
+fn session_generation(value: u64) -> SessionGeneration {
+    SessionGeneration::new(NonZeroU64::new(value).expect("nonzero session generation"))
+}
+
+fn wait_for_instruments(events: &RithmicProviderEvents) {
+    let deadline = Instant::now() + SERVER_IO_TIMEOUT;
+    while Instant::now() < deadline {
+        match events.try_recv() {
+            Some(callback)
+                if matches!(
+                    callback.event,
+                    ProviderSessionEvent::InstrumentsDiscovered { .. }
+                ) =>
+            {
+                return;
+            }
+            Some(callback) => assert!(
+                !matches!(callback.event, ProviderSessionEvent::Invalidated { .. }),
+                "fixture session failed: {:?}",
+                callback.event
+            ),
+            None => thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    panic!("fixture session did not reach streaming");
+}
+
 fn read_binary(socket: &mut ServerWebSocket) -> Result<Vec<u8>, String> {
     loop {
         match socket.read().map_err(|error| error.to_string())? {
@@ -552,6 +1001,105 @@ fn assert_history_login_request(frame: &[u8]) -> Result<(), String> {
         return Err("history login request did not match the bounded fixture".to_string());
     }
     Ok(())
+}
+
+fn assert_trading_login_request(
+    frame: &[u8],
+    plant: rti::request_login::SysInfraType,
+) -> Result<(), String> {
+    let request = rti::RequestLogin::decode(frame).map_err(|error| error.to_string())?;
+    if request.template_id != 10
+        || request.user.as_deref() != Some(FIXTURE_USER)
+        || request.password.as_deref() != Some(FIXTURE_PASSWORD)
+        || request.app_name.as_deref() != Some(RITHMIC_APPLICATION_NAME)
+        || request.system_name.as_deref() != Some(TEST_SYSTEM)
+        || request.infra_type != Some(plant.into())
+        || request.aggregated_quotes.is_some()
+    {
+        return Err("trading-plant login request did not match the fixture".to_string());
+    }
+    Ok(())
+}
+
+fn order_payload(message: RithmicOrderPlantMessage) -> DecodedOrderMessage {
+    match message {
+        RithmicOrderPlantMessage::Order(message) => *message,
+        RithmicOrderPlantMessage::Control(control) => {
+            panic!("expected an order-plant payload, got {control:?}")
+        }
+    }
+}
+
+fn pnl_payload(message: RithmicPnlPlantMessage) -> DecodedPnlMessage {
+    match message {
+        RithmicPnlPlantMessage::Pnl(message) => *message,
+        RithmicPnlPlantMessage::Control(control) => {
+            panic!("expected a PnL-plant payload, got {control:?}")
+        }
+    }
+}
+
+fn pnl_updates_response() -> Vec<u8> {
+    rti::ResponsePnLPositionUpdates {
+        template_id: 401,
+        rp_code: vec!["0".to_string()],
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn pnl_snapshot_response() -> Vec<u8> {
+    rti::ResponsePnLPositionSnapshot {
+        template_id: 403,
+        rp_code: vec!["0".to_string()],
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn account_pnl_snapshot() -> Vec<u8> {
+    rti::AccountPnLPositionUpdate {
+        template_id: 451,
+        is_snapshot: Some(true),
+        account_id: Some(FIXTURE_ACCOUNT.account_id.to_string()),
+        account_balance: Some("50000.25".to_string()),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn order_updates_response() -> Vec<u8> {
+    rti::ResponseSubscribeForOrderUpdates {
+        template_id: 309,
+        rp_code: vec!["0".to_string()],
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn show_orders_response() -> Vec<u8> {
+    rti::ResponseShowOrders {
+        template_id: 321,
+        rp_code: vec!["0".to_string()],
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn order_notification(is_snapshot: Option<bool>) -> Vec<u8> {
+    rti::RithmicOrderNotification {
+        template_id: 351,
+        notify_type: Some(rti::rithmic_order_notification::NotifyType::Open.into()),
+        is_snapshot,
+        basket_id: Some("fixture-basket".to_string()),
+        account_id: Some(FIXTURE_ACCOUNT.account_id.to_string()),
+        symbol: Some("ESM7".to_string()),
+        exchange: Some("CME".to_string()),
+        quantity: Some(1),
+        price: Some(5_100.25),
+        ..Default::default()
+    }
+    .encode_to_vec()
 }
 
 fn assert_time_replay_request(frame: &[u8]) {

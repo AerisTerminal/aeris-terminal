@@ -276,8 +276,14 @@ fn run_catalog_session(
     let mut searches = BTreeMap::new();
     let mut selections = BTreeMap::new();
     let mut initial_control = Some(initial_control);
-    if apply_current_environment(&mut runtime, &events, &mut retries, *environment_state).is_err() {
-        return CatalogSessionExit::Retry(generation);
+    if let Err(error) =
+        apply_current_environment(&mut runtime, &events, &mut retries, *environment_state)
+    {
+        eprintln!("Aeris Rithmic catalog session could not start: {error}");
+        if let Some(control) = initial_control.take() {
+            reject_catalog_control(channels.catalog_publications, control, Some(generation));
+        }
+        return retry_catalog_session(&mut runtime, generation);
     }
     loop {
         match poll_catalog_environment(
@@ -822,9 +828,13 @@ pub(crate) fn run(
         coordinator_wake,
         reconnect_delay,
     );
-    let Ok(mut environment) = start_environment_monitors() else {
-        reject_unavailable_provider(channels);
-        return;
+    let mut environment = match start_environment_monitors() {
+        Ok(environment) => environment,
+        Err(error) => {
+            eprintln!("Aeris Rithmic provider is unavailable: {error}");
+            reject_unavailable_provider(channels);
+            return;
+        }
     };
     let mut last_generation = 0_u64;
     loop {
@@ -975,10 +985,14 @@ fn handle_idle_catalog(
         Err(RecvTimeoutError::Timeout) => return IdleCatalogOutcome::Unchanged,
         Err(RecvTimeoutError::Disconnected) => return IdleCatalogOutcome::Closed,
     };
-    let Ok((runtime, events)) = open_catalog_runtime() else {
-        reject_catalog_control(channels.catalog_publications, control, None);
-        thread::park_timeout(channels.reconnect_delay);
-        return IdleCatalogOutcome::Unchanged;
+    let (runtime, events) = match open_catalog_runtime() {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("Aeris Rithmic catalog runtime could not open: {error}");
+            reject_catalog_control(channels.catalog_publications, control, None);
+            thread::park_timeout(channels.reconnect_delay);
+            return IdleCatalogOutcome::Unchanged;
+        }
     };
     let generation = next_generation(last_generation, last_generation);
     let (environment_events, environment_state) = environment.parts();
@@ -1579,7 +1593,7 @@ fn apply_current_environment(
     if state.network != NetworkEvent::Unavailable && !state.suspended {
         runtime
             .request_connection()
-            .map_err(|_| "Rithmic connection could not start".to_string())?;
+            .map_err(|error| format!("Rithmic connection could not start: {error}"))?;
     }
     Ok(())
 }

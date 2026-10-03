@@ -105,6 +105,7 @@ impl DesktopLifecycle {
             .collect::<Vec<_>>();
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
         let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
+        let market = engine_market_worker::started_market_runtime();
         let trading = self.trading.clone();
         let context = self.context.clone();
         Some(cx.background_executor().spawn(async move {
@@ -139,6 +140,13 @@ impl DesktopLifecycle {
                         "desktop market worker did not retire before its deadline".to_string(),
                     );
                 }
+            }
+            // Provider sessions log out only through the runtime shutdown;
+            // process exit alone drops the plant sockets without a logout.
+            if let Some(market) = market
+                && let Err(error) = market.shutdown(Duration::from_secs(2))
+            {
+                failure = Some(error);
             }
             if let Err(error) = trading.shutdown(Duration::from_secs(2)) {
                 failure = Some(error);

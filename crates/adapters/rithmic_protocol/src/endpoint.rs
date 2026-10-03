@@ -118,6 +118,11 @@ pub enum RithmicSessionError {
     Deadline,
     Transport,
     RequestInFlight,
+    /// The request is invalid for this plant or for the session's current
+    /// ordering state, for example a snapshot before its update subscription.
+    RequestNotPermitted,
+    /// The provider refused a request that the session depends on.
+    RequestRejected,
     UnexpectedMessage,
     Protocol,
     TestSystemUnavailable,
@@ -138,6 +143,8 @@ impl RithmicSessionError {
             | Self::Tls
             | Self::Handshake
             | Self::RequestInFlight
+            | Self::RequestNotPermitted
+            | Self::RequestRejected
             | Self::UnexpectedMessage
             | Self::Protocol
             | Self::TestSystemUnavailable
@@ -167,6 +174,10 @@ impl fmt::Display for RithmicSessionError {
             Self::Deadline => "Rithmic session deadline expired",
             Self::Transport => "Rithmic transport failed",
             Self::RequestInFlight => "a Rithmic request of this kind is already in flight",
+            Self::RequestNotPermitted => {
+                "the Rithmic request is not permitted in this session state"
+            }
+            Self::RequestRejected => "Rithmic rejected a required session request",
             Self::UnexpectedMessage => "Rithmic returned an unexpected message",
             Self::Protocol => "Rithmic protocol validation failed",
             Self::TestSystemUnavailable => "Rithmic Test is unavailable",

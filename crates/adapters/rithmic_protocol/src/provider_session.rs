@@ -13,10 +13,10 @@ use crate::{
     DepthByOrderSnapshotMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
     InstrumentReference, InstrumentReferenceRequest, InstrumentType, MarketDataSubscription,
     MarketIdentity, ProviderTimestamp, QuoteLevel, QuoteSideUpdate, RetryDisposition,
-    RithmicApplication, RithmicCredentialBytes, RithmicSessionError, RithmicSessionLimits,
-    RithmicSessionMessage, RithmicTestSession, SearchPattern, SubscriptionAction,
-    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest, SymbolSearchResult,
-    TradeAggressor,
+    RithmicApplication, RithmicCredentialBytes, RithmicCredentials, RithmicSessionError,
+    RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession, RithmicTickerConnection,
+    SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
+    SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
 };
 use aeris_market_data::{
     AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
@@ -32,7 +32,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
+        mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -55,6 +55,13 @@ const SESSION_COMMAND_BATCH: usize = 4;
 /// market command. This is deliberately much smaller than a UI frame so warm
 /// symbol changes reach the live session without a human-visible pause.
 const SESSION_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(2);
+/// How long a stopping session may take to leave its read loop and log out
+/// before the driver aborts its socket. Stop-aware socket I/O notices the stop
+/// within one 100 ms poll slice, the stopping logout is bounded by
+/// `STOPPING_LOGOUT_TIMEOUT`, and the remaining margin covers the close frame,
+/// keeping the whole stop well inside the 2 s desktop shutdown budget.
+const SESSION_STOP_GRACE: Duration =
+    crate::session::STOPPING_LOGOUT_TIMEOUT.saturating_add(Duration::from_millis(250));
 const MAXIMUM_INITIAL_SUBSCRIPTION_MESSAGES: usize = 256;
 const MAXIMUM_INITIAL_DBO_SNAPSHOT_MESSAGES: usize = 8_192;
 const MAXIMUM_CALLBACK_EVENTS: usize = 4_096;
@@ -1043,7 +1050,24 @@ struct ActiveSession {
     generation: SessionGeneration,
     stop: Arc<AtomicBool>,
     abort: Arc<ConnectionAbort>,
+    /// Disconnects when the session thread exits, giving stop a timed wait.
+    finished: Receiver<()>,
     handle: JoinHandle<()>,
+}
+
+impl ActiveSession {
+    /// Requests a graceful stop so the session thread can log out, then
+    /// aborts the socket only if the thread outlives the bounded grace period.
+    fn stop_and_join(self) {
+        self.stop.store(true, Ordering::Release);
+        if matches!(
+            self.finished.recv_timeout(SESSION_STOP_GRACE),
+            Err(RecvTimeoutError::Timeout)
+        ) {
+            self.abort.abort();
+        }
+        let _ = self.handle.join();
+    }
 }
 
 enum RithmicSessionCommand {
@@ -1317,6 +1341,16 @@ impl RithmicProviderDriver {
         Self::with_task_and_wake(config, callback_limits, task, None)
     }
 
+    /// Driver running the production ticker session against a substituted login.
+    #[cfg(all(test, rithmic_kit))]
+    pub(crate) fn with_ticker_connector(
+        config: RithmicProviderConfig,
+        callback_limits: RithmicCallbackLimits,
+        connect: Arc<TickerConnector>,
+    ) -> (Self, RithmicProviderEvents) {
+        Self::with_task_and_wake(config, callback_limits, ticker_session_task(connect), None)
+    }
+
     fn with_task_and_wake(
         config: RithmicProviderConfig,
         callback_limits: RithmicCallbackLimits,
@@ -1444,9 +1478,11 @@ impl ProviderSessionDriver for RithmicProviderDriver {
         let panic_emitter = emitter.clone();
         let task_stop = Arc::clone(&stop);
         let task_abort = Arc::clone(&abort);
+        let (finished_tx, finished) = sync_channel::<()>(0);
         let handle = thread::Builder::new()
             .name(format!("rithmic-session-{}", generation.get()))
             .spawn(move || {
+                let _finished = finished_tx;
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     task(
                         config,
@@ -1474,6 +1510,7 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             generation,
             stop,
             abort,
+            finished,
             handle,
         });
         Ok(())
@@ -1488,10 +1525,8 @@ impl ProviderSessionDriver for RithmicProviderDriver {
             self.active = Some(active);
             return Err(RithmicProviderDriverError::StaleGeneration);
         }
-        active.stop.store(true, Ordering::Release);
-        active.abort.abort();
         self.clear_commands(generation);
-        let _ = active.handle.join();
+        active.stop_and_join();
         Ok(())
     }
 }
@@ -1499,10 +1534,8 @@ impl ProviderSessionDriver for RithmicProviderDriver {
 impl Drop for RithmicProviderDriver {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
-            active.stop.store(true, Ordering::Release);
-            active.abort.abort();
             self.clear_commands(active.generation);
-            let _ = active.handle.join();
+            active.stop_and_join();
         }
     }
 }
@@ -1826,9 +1859,24 @@ fn ensure_streaming_generation<V: CredentialVault>(
     }
 }
 
+/// Opens the authenticated ticker login for one session generation.
+pub(crate) type TickerConnector = dyn Fn(
+        RithmicCredentials<'_>,
+        RithmicApplication<'_>,
+        RithmicSessionLimits,
+        Arc<AtomicBool>,
+        &ConnectionAbort,
+    ) -> Result<RithmicTickerConnection, RithmicSessionError>
+    + Send
+    + Sync;
+
 fn direct_session_task() -> Arc<SessionTask> {
+    ticker_session_task(Arc::new(RithmicTestSession::discover_and_login_with_abort))
+}
+
+fn ticker_session_task(connect: Arc<TickerConnector>) -> Arc<SessionTask> {
     Arc::new(
-        |config, generation, credential_bytes, stop, abort, commands, emitter| {
+        move |config, generation, credential_bytes, stop, abort, commands, emitter| {
             if !emitter.send(ProviderSessionEvent::DiscoveryStarted) {
                 return;
             }
@@ -1840,7 +1888,7 @@ fn direct_session_task() -> Arc<SessionTask> {
                     );
                     return;
                 };
-                RithmicTestSession::discover_and_login_with_abort(
+                connect(
                     credentials,
                     RithmicApplication {
                         name: &config.application_name,
@@ -1861,64 +1909,17 @@ fn direct_session_task() -> Arc<SessionTask> {
                     return;
                 }
             };
-            if !emitter.record_timing(
-                connection.heartbeat_interval(),
-                config.session_limits.response_timeout,
-                config.message_silence_timeout,
-            ) {
-                emitter.invalid(
-                    ProviderInvalidationReason::MalformedMessage,
-                    RetryDisposition::Terminal,
-                );
-                return;
-            }
-            if !emitter.send(ProviderSessionEvent::SystemsDiscovered {
-                environments: vec![RithmicProviderConfig::environment()],
-            }) || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
+            let result = stream_ticker(
+                &mut connection,
+                &config,
                 generation,
-                state: AuthenticationState::Accepted,
-            }) {
-                stop.store(true, Ordering::Release);
-            }
+                &stop,
+                &commands,
+                &emitter,
+            );
             if stop.load(Ordering::Acquire) {
-                let _ = connection.close();
-                return;
-            }
-            let initial_messages = install_subscriptions(&mut connection, &config, &stop);
-            let initial_messages = match initial_messages {
-                Ok(messages) => messages,
-                Err(error) => {
-                    if error != RithmicSessionError::Cancelled && !stop.load(Ordering::Acquire) {
-                        let (reason, retry) = session_failure(error);
-                        emitter.invalid(reason, retry);
-                    }
-                    return;
-                }
-            };
-            if !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
-                generation,
-                instruments: config
-                    .instruments
-                    .iter()
-                    .map(|instrument| instrument.descriptor.clone())
-                    .collect(),
-            }) {
-                stop.store(true, Ordering::Release);
-            }
-            let result = if stop.load(Ordering::Acquire) {
-                Ok(())
-            } else {
-                collect_market(
-                    &mut connection,
-                    &config,
-                    generation,
-                    &stop,
-                    &commands,
-                    &emitter,
-                    initial_messages,
-                )
-            };
-            if stop.load(Ordering::Acquire) {
+                // The connection's session-end record reports whether the
+                // provider acknowledged this logout.
                 let _ = connection.close();
                 return;
             }
@@ -1926,6 +1927,64 @@ fn direct_session_task() -> Arc<SessionTask> {
                 emitter.invalid(reason, retry);
             }
         },
+    )
+}
+
+/// Runs one authenticated ticker login until stop or failure. Every return
+/// with `stop` set leaves the logout to the caller.
+fn stream_ticker(
+    connection: &mut RithmicTickerConnection,
+    config: &RithmicProviderConfig,
+    generation: SessionGeneration,
+    stop: &AtomicBool,
+    commands: &Receiver<RithmicSessionCommand>,
+    emitter: &SessionEmitter,
+) -> Result<(), (ProviderInvalidationReason, RetryDisposition)> {
+    if !emitter.record_timing(
+        connection.heartbeat_interval(),
+        config.session_limits.response_timeout,
+        config.message_silence_timeout,
+    ) {
+        return Err((
+            ProviderInvalidationReason::MalformedMessage,
+            RetryDisposition::Terminal,
+        ));
+    }
+    if !emitter.send(ProviderSessionEvent::SystemsDiscovered {
+        environments: vec![RithmicProviderConfig::environment()],
+    }) || !emitter.send(ProviderSessionEvent::AuthenticationChanged {
+        generation,
+        state: AuthenticationState::Accepted,
+    }) {
+        stop.store(true, Ordering::Release);
+    }
+    if stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let initial_messages = match install_subscriptions(connection, config, stop) {
+        Ok(messages) => messages,
+        Err(_) if stop.load(Ordering::Acquire) => return Ok(()),
+        Err(error) => return Err(session_failure(error)),
+    };
+    if !emitter.send(ProviderSessionEvent::InstrumentsDiscovered {
+        generation,
+        instruments: config
+            .instruments
+            .iter()
+            .map(|instrument| instrument.descriptor.clone())
+            .collect(),
+    }) {
+        stop.store(true, Ordering::Release);
+        return Ok(());
+    }
+    collect_market(
+        connection,
+        config,
+        generation,
+        stop,
+        commands,
+        emitter,
+        initial_messages,
     )
 }
 
@@ -2010,6 +2069,8 @@ fn session_failure(error: RithmicSessionError) -> (ProviderInvalidationReason, R
         RithmicSessionError::Protocol
         | RithmicSessionError::UnexpectedMessage
         | RithmicSessionError::RequestInFlight
+        | RithmicSessionError::RequestNotPermitted
+        | RithmicSessionError::RequestRejected
         | RithmicSessionError::InvalidEndpoint
         | RithmicSessionError::InvalidLimits => ProviderInvalidationReason::MalformedMessage,
         RithmicSessionError::Cancelled
@@ -3044,7 +3105,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_stop_aborts_the_active_socket_before_joining() {
+    fn driver_stop_aborts_an_unresponsive_socket_after_the_grace_period() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local abort fixture");
         let client = TcpStream::connect(listener.local_addr().expect("read fixture address"))
             .expect("connect local abort fixture");
@@ -3078,14 +3139,18 @@ mod tests {
             .expect("fixture reaches blocking read");
 
         let (stopped_tx, stopped_rx) = sync_channel(1);
+        let started = Instant::now();
         let stopper = thread::spawn(move || {
             let result = driver.stop_session(generation(8));
             let _ = stopped_tx.send(result);
         });
-        let stop_result = stopped_rx.recv_timeout(Duration::from_secs(1));
+        let stop_result = stopped_rx.recv_timeout(SESSION_STOP_GRACE + Duration::from_secs(1));
+        let elapsed = started.elapsed();
         drop(client);
         stopper.join().expect("stopper thread joins");
         assert_eq!(stop_result, Ok(Ok(())));
+        assert!(elapsed >= SESSION_STOP_GRACE);
+        assert!(elapsed < Duration::from_secs(2));
     }
 
     fn search(search_generation: usize) -> RithmicSymbolSearch {

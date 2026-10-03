@@ -9,8 +9,8 @@ use super::{
     ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
     ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderSessionSlot,
     ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
-    SeriesLive, SeriesLiveMap, SeriesLoadState, StreamRequirements, StudyMarketLeaseChangeKind,
-    StudyRuntime, StudyRuntimeConfig, authorize_consumer, publish_state, thread,
+    SeriesLive, SeriesLiveMap, StreamRequirements, StudyMarketLeaseChangeKind, StudyRuntime,
+    StudyRuntimeConfig, authorize_consumer, publish_state, thread,
 };
 #[cfg(test)]
 use super::{CandleLiveHandoff, TradeLiveHandoff};
@@ -91,6 +91,7 @@ fn run_coordinator(
         history_deferred: BTreeMap::new(),
         history_confirmed_empty: BTreeMap::new(),
         history_backwards_exhausted: BTreeSet::new(),
+        history_current_empty: BTreeMap::new(),
         detached_history: BTreeSet::new(),
         history_cancellations: BTreeMap::new(),
         history_retries: BTreeMap::new(),
@@ -318,6 +319,10 @@ pub(super) struct Coordinator<'a> {
     pub(super) history_confirmed_empty: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
     /// Series for which a provider snapshot proved no older candles are available.
     pub(super) history_backwards_exhausted: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
+    /// Current covering requests the provider answered with no bars; bounded
+    /// to demanded series of the current provider generation.
+    pub(super) history_current_empty:
+        BTreeMap<(BarSeriesKey, ProviderGeneration), super::EmptyCurrentHistory>,
     /// Series whose bounded canonical working window is intentionally away from
     /// the live tail. The provider handoff remains active; live publication is
     /// gated until current history reseeds this canonical window.
@@ -656,13 +661,9 @@ impl Coordinator<'_> {
             }
             if let Some(publication) = publication {
                 if needs_covering_repair {
+                    let (state, detail) = self.covering_repair_state(&publication.snapshot.series);
                     if let Some(events) = self.events.get_mut(&publication.consumer_id) {
-                        publish_state(
-                            events,
-                            &publication,
-                            SeriesLoadState::Partial,
-                            Some("Refreshing provider coverage"),
-                        );
+                        publish_state(events, &publication, state, Some(detail));
                     }
                 } else {
                     self.publish_current_snapshot(&publication);
@@ -1298,7 +1299,7 @@ mod tests {
         FormingBar, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
         HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistorySnapshot,
         INITIAL_HISTORY_BARS, LiveHistoryState, MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
-        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderRealtimeDispatch,
+        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderRealtimeDispatch, SeriesLoadState,
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -1507,6 +1508,7 @@ mod tests {
             history_deferred: BTreeMap::new(),
             history_confirmed_empty: BTreeMap::new(),
             history_backwards_exhausted: BTreeSet::new(),
+            history_current_empty: BTreeMap::new(),
             detached_history: BTreeSet::new(),
             history_cancellations: BTreeMap::new(),
             history_retries: BTreeMap::new(),
@@ -3615,6 +3617,202 @@ mod tests {
         assert_eq!(coordinator.history_confirmed_empty.get(&key), Some(&range));
         assert!(!coordinator.history_inflight.contains_key(&key));
         assert!(!coordinator.history_retries.contains_key(&key));
+    }
+
+    fn empty_history_snapshot(boundary_unix_nanos: i64) -> HistorySnapshot {
+        HistorySnapshot {
+            price_scale: 2,
+            quantity_scale: 0,
+            bars: Vec::new(),
+            forming: None,
+            handoff_boundary_unix_nanos: Some(boundary_unix_nanos),
+            backwards_exhausted: false,
+        }
+    }
+
+    fn take_series_state(
+        coordinator: &mut Coordinator<'_>,
+        consumer_id: ConsumerId,
+    ) -> Option<crate::MarketSeriesState> {
+        match coordinator
+            .events
+            .get_mut(&consumer_id)?
+            .series_state
+            .take()?
+        {
+            MarketRuntimeEvent::SeriesState(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn demand_series(
+        coordinator: &mut Coordinator<'_>,
+        consumer_id: ConsumerId,
+        demand_generation: u64,
+        selected: &BarSeriesKey,
+    ) {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_demand(
+            client(1),
+            selected,
+            StreamRequirements::BARS,
+            DemandWaiter {
+                consumer_id,
+                generation: generation(demand_generation),
+                started_at: Instant::now(),
+            },
+            &reply,
+        );
+        result
+            .recv()
+            .expect("demand reply arrives")
+            .expect("demand is accepted");
+    }
+
+    fn assert_no_history_request(
+        history_receiver: &std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        reason: &str,
+    ) {
+        assert!(
+            matches!(
+                history_receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "{reason}"
+        );
+    }
+
+    fn connected_rithmic_coordinator() -> (
+        Coordinator<'static>,
+        std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+    ) {
+        let mut coordinator = coordinator();
+        let (history_sender, history_receiver) = std::sync::mpsc::sync_channel(4);
+        coordinator.providers.records.insert(
+            "rithmic",
+            super::super::ProviderDispatchRecord {
+                descriptor: super::super::RITHMIC_DESCRIPTOR,
+                history: Box::leak(Box::new(history_sender)),
+                lifecycle: None,
+                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                catalog: super::super::ProviderCatalogDispatch::Disabled,
+            },
+        );
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Connecting(1),
+        ));
+        coordinator
+            .install_provider_instrument(&instrument())
+            .expect("Rithmic instrument installs");
+        (coordinator, history_receiver)
+    }
+
+    /// Rithmic Test answers a closed-market current replay with zero bars. That
+    /// answer used to be reported as a retryable failure, and every heartbeat
+    /// and every desktop recovery then logged in to the history plant again
+    /// for the same empty window: polling the provider forbids.
+    #[test]
+    fn empty_current_history_is_final_until_live_trade_or_new_generation() {
+        let (mut coordinator, history_receiver) = connected_rithmic_coordinator();
+        let first_generation = ProviderGeneration(nonzero(1));
+        let consumer = consumer(1);
+        let selected = series();
+        let key = (selected.clone(), first_generation);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+
+        demand_series(&mut coordinator, consumer, 1, &selected);
+        let request = history_receiver
+            .try_recv()
+            .expect("the first demand requests covering history");
+        assert_eq!(request.provider_generation, first_generation);
+        assert!(request.range.is_none());
+
+        coordinator.history_completed(
+            &selected,
+            first_generation,
+            None,
+            Ok(empty_history_snapshot(60_000_000_000)),
+        );
+
+        assert!(!coordinator.history_inflight.contains_key(&key));
+        assert!(!coordinator.history_retries.contains_key(&key));
+        assert!(coordinator.engine.series_snapshot(&selected).is_none());
+        let events = coordinator.events.get(&consumer).expect("consumer outbox");
+        assert!(
+            events.demand_error.is_none(),
+            "an empty provider answer is not a retryable failure"
+        );
+        let state = take_series_state(&mut coordinator, consumer).expect("series state");
+        assert_eq!(state.state, SeriesLoadState::Empty);
+        assert_eq!(state.generation, generation(1));
+        assert!(
+            coordinator.engine.has_subscription(&selected),
+            "the live subscription stays up while history is empty"
+        );
+
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Heartbeat(1, None),
+        ));
+        coordinator.retry_history();
+        demand_series(&mut coordinator, consumer, 2, &selected);
+        assert_no_history_request(
+            &history_receiver,
+            "heartbeats, retry ticks and an identical demand do not re-request",
+        );
+        let state = take_series_state(&mut coordinator, consumer).expect("re-stated state");
+        assert_eq!(state.state, SeriesLoadState::Empty);
+        assert_eq!(state.generation, generation(2));
+        assert!(!coordinator.pending.contains_key(&selected));
+
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(&selected, 1, 30_000_000_000)),
+        ));
+        assert_no_history_request(
+            &history_receiver,
+            "a trade the empty replay already covered is not new evidence",
+        );
+
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(&selected, 2, 120_000_000_000)),
+        ));
+        let request = history_receiver
+            .try_recv()
+            .expect("the first newer live trade allows one covering request");
+        assert_eq!(request.provider_generation, first_generation);
+        assert!(request.range.is_none());
+
+        coordinator.history_completed(
+            &selected,
+            first_generation,
+            None,
+            Ok(empty_history_snapshot(150_000_000_000)),
+        );
+        assert_eq!(
+            coordinator.history_current_empty.get(&key),
+            Some(&super::super::EmptyCurrentHistory::Final)
+        );
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(&selected, 3, 180_000_000_000)),
+        ));
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Heartbeat(1, None),
+        ));
+        assert_no_history_request(
+            &history_receiver,
+            "a second empty answer is final for the provider generation",
+        );
+
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Connecting(2),
+        ));
+        let request = history_receiver
+            .try_recv()
+            .expect("a new provider generation requests covering history again");
+        assert_eq!(request.provider_generation, ProviderGeneration(nonzero(2)));
+        assert!(request.range.is_none());
     }
 
     #[test]

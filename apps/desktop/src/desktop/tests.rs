@@ -1798,12 +1798,12 @@ fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
     let retained_chart_controls = HeaderControls::from_state(true, false).with_chart_controls(true);
     assert!(retained_chart_controls.enabled(HeaderControls::INDICATOR));
     assert!(retained_chart_controls.enabled(HeaderControls::CHART_TYPE));
-    assert!(retained_chart_controls.enabled(HeaderControls::CHART_IMAGE));
+    assert!(retained_chart_controls.enabled(HeaderControls::CHART_CAPTURE));
 
     let empty_chart_controls = HeaderControls::from_state(true, false).with_chart_controls(false);
     assert!(!empty_chart_controls.enabled(HeaderControls::INDICATOR));
     assert!(!empty_chart_controls.enabled(HeaderControls::CHART_TYPE));
-    assert!(!empty_chart_controls.enabled(HeaderControls::CHART_IMAGE));
+    assert!(!empty_chart_controls.enabled(HeaderControls::CHART_CAPTURE));
 }
 
 #[test]
@@ -1829,10 +1829,10 @@ fn chart_context_menu_stays_inside_the_window() {
 }
 
 #[test]
-fn chart_image_submenu_opens_beside_its_row_inside_the_window() {
+fn capture_chart_submenu_opens_beside_its_row_inside_the_window() {
     let viewport = size(px(1200.0), px(800.0));
     let root = point(px(100.0), px(100.0));
-    let right = super::clamp_chart_image_flyout_origin(root, viewport);
+    let right = super::clamp_chart_capture_flyout_origin(root, viewport);
     assert_eq!(
         right.x,
         root.x + px(CHART_CONTEXT_MENU_WIDTH) + px(super::PRICE_AXIS_FLYOUT_GAP)
@@ -1843,14 +1843,16 @@ fn chart_image_submenu_opens_beside_its_row_inside_the_window() {
     );
 
     let near_right_edge = point(px(1200.0 - CHART_CONTEXT_MENU_WIDTH - 8.0), px(100.0));
-    let left = super::clamp_chart_image_flyout_origin(near_right_edge, viewport);
+    let left = super::clamp_chart_capture_flyout_origin(near_right_edge, viewport);
     assert_eq!(
         left.x,
-        near_right_edge.x - px(super::CHART_IMAGE_FLYOUT_WIDTH) - px(super::PRICE_AXIS_FLYOUT_GAP)
+        near_right_edge.x
+            - px(super::CHART_CAPTURE_FLYOUT_WIDTH)
+            - px(super::PRICE_AXIS_FLYOUT_GAP)
     );
 
     let bottom = point(px(100.0), px(790.0));
-    let clamped = super::clamp_chart_image_flyout_origin(bottom, viewport);
+    let clamped = super::clamp_chart_capture_flyout_origin(bottom, viewport);
     assert!(clamped.y + px(super::overlay_height(2.0, 0.0)) <= px(800.0 - OVERLAY_EDGE_MARGIN));
 }
 
@@ -1876,22 +1878,23 @@ fn chart_context_remove_actions_use_destructive_color() {
         flags: super::ChartContextMenuState::COPY_PRICE,
     });
     assert!(copy_ready[1].enabled);
-    assert_eq!(items[2].action, super::ChartContextAction::ImageMenu);
+    assert_eq!(items[2].action, super::ChartContextAction::CaptureMenu);
+    assert_eq!(items[2].label, "Capture chart");
     assert!(!items[2].enabled);
     let ready = super::ChartContextMenuState {
         pane_count: 1,
         flags: super::ChartContextMenuState::READY,
     };
     assert!(super::chart_context_menu_items(ready)[2].enabled);
-    let image_menu = super::chart_image_menu_items(ready);
+    let capture_menu = super::chart_capture_menu_items(ready);
     assert_eq!(
-        image_menu.map(|item| item.action),
+        capture_menu.map(|item| item.action),
         [
-            super::ChartContextAction::CopyImage,
-            super::ChartContextAction::SaveImage
+            super::ChartContextAction::CopyCapture,
+            super::ChartContextAction::SaveCapture
         ]
     );
-    assert!(image_menu.iter().all(|item| item.enabled));
+    assert!(capture_menu.iter().all(|item| item.enabled));
     let trash = items
         .into_iter()
         .filter(|item| item.action.is_destructive())
@@ -1901,16 +1904,19 @@ fn chart_context_remove_actions_use_destructive_color() {
 }
 
 #[test]
-fn copy_price_feedback_generation_fences_stale_close_timers() {
+fn copy_feedback_generation_fences_stale_close_timers() {
     let menu = super::ChartContextMenu {
         workspace_id: 1,
         pane_id: 2,
         position: point(px(20.0), px(20.0)),
         kind: super::ChartContextKind::Pane,
         flyout: super::PriceAxisMenuFlyout::None,
-        image_flyout_open: false,
+        capture_flyout_open: true,
         copy_price: Some("123.45".into()),
-        copy_feedback_generation: Some(7),
+        copy_feedback: Some(super::ChartCopyFeedback {
+            action: super::ChartContextAction::CopyCapture,
+            generation: 7,
+        }),
     };
 
     assert!(super::TerminalApp::chart_context_copy_feedback_is_current(

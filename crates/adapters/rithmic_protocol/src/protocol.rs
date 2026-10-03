@@ -33,7 +33,7 @@ impl RithmicProtocolBackend {
         matches!(self, Self::Kit(_))
     }
 
-    /// Encodes one allowlisted read-only request when the kit is available.
+    /// Encodes one allowlisted request when the kit is available.
     ///
     /// # Errors
     ///
@@ -103,9 +103,37 @@ impl RithmicProtocolBackend {
             Self::Unavailable(_) => Err(ProtocolError::KitUnavailable),
         }
     }
+
+    /// Decodes one bounded order-plant reply or notification. Returns
+    /// `Ok(None)` for a schema-valid no-data row that carries no content.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded protocol error or [`ProtocolError::KitUnavailable`].
+    pub fn decode_order(
+        &self,
+        frame: &[u8],
+    ) -> Result<Option<crate::DecodedOrderMessage>, ProtocolError> {
+        match self {
+            Self::Kit(codec) => codec.decode_order(frame),
+            Self::Unavailable(_) => Err(ProtocolError::KitUnavailable),
+        }
+    }
+
+    /// Decodes one bounded PnL-plant reply or update.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded protocol error or [`ProtocolError::KitUnavailable`].
+    pub fn decode_pnl(&self, frame: &[u8]) -> Result<crate::DecodedPnlMessage, ProtocolError> {
+        match self {
+            Self::Kit(codec) => codec.decode_pnl(frame),
+            Self::Unavailable(_) => Err(ProtocolError::KitUnavailable),
+        }
+    }
 }
 
-/// Credentials and identity required for one read-only plant login.
+/// Credentials and identity required for one plant login.
 #[derive(Clone, Copy)]
 pub struct LoginRequest<'a> {
     pub user: &'a str,
@@ -113,7 +141,7 @@ pub struct LoginRequest<'a> {
     pub app_name: &'a str,
     pub app_version: &'a str,
     pub system_name: &'a str,
-    pub plant: ReadOnlyPlant,
+    pub plant: RithmicPlant,
 }
 
 impl fmt::Debug for LoginRequest<'_> {
@@ -130,19 +158,24 @@ impl fmt::Debug for LoginRequest<'_> {
     }
 }
 
-/// Rithmic infrastructure plants used by the read-only terminal.
+/// Rithmic infrastructure plants used by the terminal. Each authenticated
+/// connection belongs to exactly one plant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReadOnlyPlant {
+pub enum RithmicPlant {
     Ticker,
     History,
+    Order,
+    Pnl,
 }
 
-impl ReadOnlyPlant {
+impl RithmicPlant {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Ticker => "ticker",
             Self::History => "history",
+            Self::Order => "order",
+            Self::Pnl => "pnl",
         }
     }
 }
@@ -274,7 +307,7 @@ pub struct TickBarReplayRequest<'a> {
     pub maximum_bars: u16,
 }
 
-/// Outbound requests accepted by the read-only protocol boundary.
+/// Outbound requests accepted by the protocol boundary.
 #[derive(Clone, Copy)]
 pub enum OutboundRequest<'a> {
     DiscoverSystems,
@@ -290,6 +323,30 @@ pub enum OutboundRequest<'a> {
     TimeBarReplay(TimeBarReplayRequest<'a>),
     TickBarUpdate(TickBarSubscription<'a>),
     TickBarReplay(TickBarReplayRequest<'a>),
+    Order(crate::OrderPlantRequest<'a>),
+    Pnl(crate::PnlPlantRequest<'a>),
+}
+
+impl OutboundRequest<'_> {
+    /// Reports whether this request may be sent on an authenticated session of
+    /// `plant`. Session-level requests are valid on every plant.
+    #[must_use]
+    pub const fn permitted_on(&self, plant: RithmicPlant) -> bool {
+        match self {
+            Self::DiscoverSystems | Self::Login(_) | Self::Logout | Self::Heartbeat => true,
+            Self::MarketData(_)
+            | Self::DepthByOrder(_)
+            | Self::DepthByOrderSnapshot(_)
+            | Self::SearchSymbols(_)
+            | Self::InstrumentReference(_) => matches!(plant, RithmicPlant::Ticker),
+            Self::TimeBarUpdate(_)
+            | Self::TimeBarReplay(_)
+            | Self::TickBarUpdate(_)
+            | Self::TickBarReplay(_) => matches!(plant, RithmicPlant::History),
+            Self::Order(_) => matches!(plant, RithmicPlant::Order),
+            Self::Pnl(_) => matches!(plant, RithmicPlant::Pnl),
+        }
+    }
 }
 
 impl fmt::Debug for OutboundRequest<'_> {
@@ -308,6 +365,8 @@ impl fmt::Debug for OutboundRequest<'_> {
             Self::TimeBarReplay(_) => formatter.write_str("TimeBarReplay"),
             Self::TickBarUpdate(_) => formatter.write_str("TickBarUpdate"),
             Self::TickBarReplay(_) => formatter.write_str("TickBarReplay"),
+            Self::Order(request) => request.fmt(formatter),
+            Self::Pnl(request) => request.fmt(formatter),
         }
     }
 }
@@ -378,7 +437,7 @@ pub enum DecodedControlMessage {
 pub struct RithmicProtocolCodec;
 
 impl RithmicProtocolCodec {
-    /// Encodes one allowlisted read-only request as one binary WebSocket message.
+    /// Encodes one allowlisted request as one binary WebSocket message.
     ///
     /// # Errors
     ///
@@ -433,6 +492,28 @@ impl RithmicProtocolCodec {
     ) -> Result<crate::DecodedHistoryMessage, ProtocolError> {
         crate::history::decode(frame)
     }
+
+    /// Decodes one bounded order-plant WebSocket message. Returns `Ok(None)` for
+    /// a schema-valid no-data row that carries no content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, unsupported, or unbounded input.
+    pub fn decode_order(
+        self,
+        frame: &[u8],
+    ) -> Result<Option<crate::DecodedOrderMessage>, ProtocolError> {
+        crate::order_plant::decode(frame)
+    }
+
+    /// Decodes one bounded PnL-plant WebSocket message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, unsupported, or unbounded input.
+    pub fn decode_pnl(self, frame: &[u8]) -> Result<crate::DecodedPnlMessage, ProtocolError> {
+        crate::pnl_plant::decode(frame)
+    }
 }
 
 /// Bounded protocol or kit-availability failure.
@@ -447,6 +528,9 @@ pub enum ProtocolError {
     TemplateVersionMismatch,
     EmptyMarketDataSelection,
     InvalidRange,
+    RangeTooLong { maximum_seconds: i32 },
+    InvalidQuantity,
+    UnrepresentableDecimal(&'static str),
     InvalidPeriod,
     InvalidMaximumBars,
     FrameTooLarge { requested: usize, maximum: usize },
@@ -497,7 +581,7 @@ mod kit {
     use super::{
         DecodedControlMessage, DepthByOrderSnapshotRequest, InstrumentReferenceRequest,
         InstrumentType, LoginRequest, MarketDataSubscription, OutboundRequest, ProtocolError,
-        ReadOnlyPlant, SearchPattern, SensitiveFrame, SubscriptionAction, SymbolSearchRequest,
+        RithmicPlant, SearchPattern, SensitiveFrame, SubscriptionAction, SymbolSearchRequest,
         TickBarReplayRequest, TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription,
         TimeBarType,
     };
@@ -534,7 +618,9 @@ mod kit {
     const TICK_BAR_REPLAY_REQUEST: i32 = 206;
     const REJECT: i32 = 75;
     const FORCED_LOGOUT: i32 = 77;
-    pub(super) const READ_ONLY_OUTBOUND_TEMPLATES: &[i32] = &[
+    /// Session, ticker, and history templates; order- and PnL-plant templates are
+    /// allowlisted by their own modules.
+    pub(super) const MARKET_OUTBOUND_TEMPLATES: &[i32] = &[
         LOGIN_REQUEST,
         LOGOUT_REQUEST,
         REFERENCE_DATA_REQUEST,
@@ -583,8 +669,16 @@ mod kit {
             OutboundRequest::TimeBarReplay(request) => encode_time_bar_replay(request)?,
             OutboundRequest::TickBarUpdate(request) => encode_tick_bar_update(request)?,
             OutboundRequest::TickBarReplay(request) => encode_tick_bar_replay(request)?,
+            OutboundRequest::Order(request) => crate::order_plant::encode(request)?,
+            OutboundRequest::Pnl(request) => crate::pnl_plant::encode(request)?,
         };
         bound_outbound_frame(bytes)
+    }
+
+    pub(super) fn is_outbound_template(template: i32) -> bool {
+        MARKET_OUTBOUND_TEMPLATES.contains(&template)
+            || crate::order_plant::OUTBOUND_TEMPLATES.contains(&template)
+            || crate::pnl_plant::OUTBOUND_TEMPLATES.contains(&template)
     }
 
     fn encode_login(request: LoginRequest<'_>) -> Result<Vec<u8>, ProtocolError> {
@@ -597,8 +691,10 @@ mod kit {
             return Err(ProtocolError::UnsupportedSystem);
         }
         let (infra_type, aggregated_quotes) = match request.plant {
-            ReadOnlyPlant::Ticker => (rti::request_login::SysInfraType::TickerPlant, Some(false)),
-            ReadOnlyPlant::History => (rti::request_login::SysInfraType::HistoryPlant, None),
+            RithmicPlant::Ticker => (rti::request_login::SysInfraType::TickerPlant, Some(false)),
+            RithmicPlant::History => (rti::request_login::SysInfraType::HistoryPlant, None),
+            RithmicPlant::Order => (rti::request_login::SysInfraType::OrderPlant, None),
+            RithmicPlant::Pnl => (rti::request_login::SysInfraType::PnlPlant, None),
         };
         let mut message = rti::RequestLogin {
             template_id: LOGIN_REQUEST,
@@ -911,7 +1007,7 @@ mod kit {
         let template = rti::MessageType::decode(bytes.as_slice())
             .map_err(|_| ProtocolError::Decode)?
             .template_id;
-        if !READ_ONLY_OUTBOUND_TEMPLATES.contains(&template) {
+        if !is_outbound_template(template) {
             return Err(ProtocolError::ForbiddenOutboundTemplate(template));
         }
         Ok(SensitiveFrame(bytes))
@@ -1118,10 +1214,25 @@ mod tests {
             .template_id
     }
 
-    #[test]
-    fn outbound_surface_emits_only_read_only_templates() {
-        let codec = RithmicProtocolCodec;
-        let requests = [
+    const FIXTURE_ACCOUNT: crate::RithmicAccountKey<'static> = crate::RithmicAccountKey {
+        fcm_id: "fixture-fcm",
+        ib_id: "fixture-ib",
+        account_id: "fixture-account",
+    };
+
+    fn fixture_price(units: i64) -> crate::RithmicDecimal {
+        crate::RithmicDecimal::try_new(units, 2).expect("fixture scale is bounded")
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn every_outbound_request() -> Vec<OutboundRequest<'static>> {
+        use crate::{
+            AccountListRequest, CancelAllOrdersRequest, CancelOrderRequest, ExecutionReplayRequest,
+            FillHistoryRequest, ModifyOrderRequest, NewOrderRequest, OrderPlantRequest,
+            PnlPlantRequest, PnlPositionUpdatesRequest, RithmicOrderDuration,
+            RithmicOrderPlacement, RithmicOrderSide, RithmicOrderType, TradeRoutesRequest,
+        };
+        let mut requests = vec![
             OutboundRequest::DiscoverSystems,
             OutboundRequest::Login(LoginRequest {
                 user: "fixture-user",
@@ -1129,7 +1240,7 @@ mod tests {
                 app_name: RITHMIC_APPLICATION_NAME,
                 app_version: "0.1.0",
                 system_name: "Rithmic Test",
-                plant: ReadOnlyPlant::Ticker,
+                plant: RithmicPlant::Ticker,
             }),
             OutboundRequest::Logout,
             OutboundRequest::Heartbeat,
@@ -1192,7 +1303,82 @@ mod tests {
                 maximum_bars: 100,
             }),
         ];
-        let emitted = requests
+        let order = [
+            OrderPlantRequest::LoginInfo,
+            OrderPlantRequest::AccountList(AccountListRequest {
+                fcm_id: Some("fixture-fcm"),
+                ib_id: Some("fixture-ib"),
+            }),
+            OrderPlantRequest::SubscribeOrderUpdates(FIXTURE_ACCOUNT),
+            OrderPlantRequest::TradeRoutes(TradeRoutesRequest {
+                subscribe_for_updates: true,
+            }),
+            OrderPlantRequest::NewOrder(NewOrderRequest {
+                account: FIXTURE_ACCOUNT,
+                user_tag: "fixture-client-order-1",
+                symbol: "ESM7",
+                exchange: "CME",
+                trade_route: "fixture-route",
+                side: RithmicOrderSide::Buy,
+                quantity: 1,
+                duration: RithmicOrderDuration::Day,
+                order_type: RithmicOrderType::Limit {
+                    price: fixture_price(510_025),
+                },
+                placement: RithmicOrderPlacement::Manual,
+            }),
+            OrderPlantRequest::ModifyOrder(ModifyOrderRequest {
+                account: FIXTURE_ACCOUNT,
+                basket_id: "fixture-basket",
+                symbol: "ESM7",
+                exchange: "CME",
+                quantity: 2,
+                order_type: RithmicOrderType::Limit {
+                    price: fixture_price(510_000),
+                },
+                placement: RithmicOrderPlacement::Manual,
+            }),
+            OrderPlantRequest::CancelOrder(CancelOrderRequest {
+                account: FIXTURE_ACCOUNT,
+                basket_id: "fixture-basket",
+                placement: RithmicOrderPlacement::Manual,
+            }),
+            OrderPlantRequest::ShowOrders(FIXTURE_ACCOUNT),
+            OrderPlantRequest::CancelAllOrders(CancelAllOrdersRequest {
+                account: FIXTURE_ACCOUNT,
+                placement: RithmicOrderPlacement::Manual,
+            }),
+            OrderPlantRequest::ReplayExecutions(ExecutionReplayRequest {
+                account: FIXTURE_ACCOUNT,
+                start_seconds: 1_800_000_000,
+                finish_seconds: 1_800_003_600,
+            }),
+            OrderPlantRequest::ShowFillHistory(FillHistoryRequest {
+                account: FIXTURE_ACCOUNT,
+                start_seconds: 1_800_000_000,
+                finish_seconds: 1_800_003_600,
+                maximum_records: Some(100),
+            }),
+        ];
+        requests.extend(order.into_iter().map(OutboundRequest::Order));
+        requests.extend(
+            [
+                PnlPlantRequest::PositionUpdates(PnlPositionUpdatesRequest {
+                    account: FIXTURE_ACCOUNT,
+                    action: SubscriptionAction::Subscribe,
+                }),
+                PnlPlantRequest::PositionSnapshot(FIXTURE_ACCOUNT),
+            ]
+            .into_iter()
+            .map(OutboundRequest::Pnl),
+        );
+        requests
+    }
+
+    #[test]
+    fn outbound_surface_emits_only_allowlisted_templates() {
+        let codec = RithmicProtocolCodec;
+        let emitted = every_outbound_request()
             .into_iter()
             .map(|request| {
                 let frame = codec.encode(request).expect("request encodes");
@@ -1201,16 +1387,63 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             emitted,
-            [16, 10, 12, 18, 100, 117, 115, 109, 14, 200, 202, 204, 206]
+            [
+                16, 10, 12, 18, 100, 117, 115, 109, 14, 200, 202, 204, 206, 300, 302, 308, 310,
+                312, 314, 316, 320, 346, 3506, 3512, 400, 402
+            ]
         );
         assert_eq!(
             emitted.len(),
-            kit::READ_ONLY_OUTBOUND_TEMPLATES.len(),
+            kit::MARKET_OUTBOUND_TEMPLATES.len()
+                + crate::order_plant::OUTBOUND_TEMPLATES.len()
+                + crate::pnl_plant::OUTBOUND_TEMPLATES.len(),
             "the test must enumerate every public outbound request variant"
         );
-        assert!(emitted.iter().all(|template| *template < 300));
-        assert!(!kit::READ_ONLY_OUTBOUND_TEMPLATES.contains(&312));
-        assert!(!kit::READ_ONLY_OUTBOUND_TEMPLATES.contains(&3512));
+        assert!(
+            emitted
+                .iter()
+                .all(|template| kit::is_outbound_template(*template))
+        );
+        for unsupported in [330, 332, 3500, 3502, 3504] {
+            assert!(
+                !kit::is_outbound_template(unsupported),
+                "template {unsupported} is not part of the supported surface"
+            );
+        }
+    }
+
+    #[test]
+    fn plant_scoped_requests_are_permitted_only_on_their_plant() {
+        let plants = [
+            RithmicPlant::Ticker,
+            RithmicPlant::History,
+            RithmicPlant::Order,
+            RithmicPlant::Pnl,
+        ];
+        for request in every_outbound_request() {
+            let permitted = plants
+                .into_iter()
+                .filter(|plant| request.permitted_on(*plant))
+                .collect::<Vec<_>>();
+            let expected: &[RithmicPlant] = match request {
+                OutboundRequest::DiscoverSystems
+                | OutboundRequest::Login(_)
+                | OutboundRequest::Logout
+                | OutboundRequest::Heartbeat => &plants,
+                OutboundRequest::MarketData(_)
+                | OutboundRequest::DepthByOrder(_)
+                | OutboundRequest::DepthByOrderSnapshot(_)
+                | OutboundRequest::SearchSymbols(_)
+                | OutboundRequest::InstrumentReference(_) => &[RithmicPlant::Ticker],
+                OutboundRequest::TimeBarUpdate(_)
+                | OutboundRequest::TimeBarReplay(_)
+                | OutboundRequest::TickBarUpdate(_)
+                | OutboundRequest::TickBarReplay(_) => &[RithmicPlant::History],
+                OutboundRequest::Order(_) => &[RithmicPlant::Order],
+                OutboundRequest::Pnl(_) => &[RithmicPlant::Pnl],
+            };
+            assert_eq!(permitted, expected, "{request:?}");
+        }
     }
 
     #[test]
@@ -1322,7 +1555,7 @@ mod tests {
             app_name: RITHMIC_APPLICATION_NAME,
             app_version: "0.1.0",
             system_name: "Rithmic Test",
-            plant: ReadOnlyPlant::History,
+            plant: RithmicPlant::History,
         };
         let debug = format!("{:?}", OutboundRequest::Login(login));
         assert!(!debug.contains("fixture-user"));
@@ -1381,13 +1614,23 @@ mod tests {
         let codec = RithmicProtocolCodec;
         for (plant, expected_infra, expected_aggregated_quotes) in [
             (
-                ReadOnlyPlant::Ticker,
+                RithmicPlant::Ticker,
                 rti::request_login::SysInfraType::TickerPlant,
                 Some(false),
             ),
             (
-                ReadOnlyPlant::History,
+                RithmicPlant::History,
                 rti::request_login::SysInfraType::HistoryPlant,
+                None,
+            ),
+            (
+                RithmicPlant::Order,
+                rti::request_login::SysInfraType::OrderPlant,
+                None,
+            ),
+            (
+                RithmicPlant::Pnl,
+                rti::request_login::SysInfraType::PnlPlant,
                 None,
             ),
         ] {

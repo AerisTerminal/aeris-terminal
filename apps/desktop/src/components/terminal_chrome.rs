@@ -526,9 +526,9 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .child(chart_image_control(
+        .child(capture_chart_control(
             app.clone(),
-            state.controls.enabled(HeaderControls::CHART_IMAGE),
+            state.controls.enabled(HeaderControls::CHART_CAPTURE),
             &state.theme,
         ))
         .children(side_panel_toggles)
@@ -551,6 +551,70 @@ pub(super) fn header_controls(
         .child(market_controls)
         .child(accounts)
         .child(time_zone)
+}
+
+/// Rithmic requires its attribution marks to stay visible for as long as the
+/// terminal holds a Rithmic session, including while that session recovers.
+pub(super) fn shows_rithmic_attribution(
+    provider: TerminalProvider,
+    state: FeedConnectionState,
+) -> bool {
+    provider == TerminalProvider::Rithmic
+        && matches!(
+            state,
+            FeedConnectionState::Authenticating
+                | FeedConnectionState::Streaming
+                | FeedConnectionState::Recovering
+        )
+}
+
+/// Draws an attribution mark from the artwork pre-rendered for the window's density, at
+/// that artwork's own pixel size, so the GPU never resamples it.
+#[derive(IntoElement)]
+pub(super) struct AttributionMarkImage {
+    pub(super) mark: assets::AttributionMark,
+    pub(super) mode: aeris_design_system::ThemeMode,
+}
+
+impl RenderOnce for AttributionMarkImage {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let density = assets::MarkDensity::for_scale(window.scale_factor());
+        img(self.mark.path(self.mode, density))
+            .flex_none()
+            .w(px(self.mark.width(self.mode)))
+            .h(px(assets::AttributionMark::HEIGHT))
+            .object_fit(ObjectFit::Fill)
+    }
+}
+
+pub(super) fn rithmic_attribution(theme: &AerisTheme) -> impl IntoElement + use<> {
+    let mark = |mark| AttributionMarkImage {
+        mark,
+        mode: theme.mode,
+    };
+    div()
+        .id("rithmic_attribution")
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(gpui_color(theme.colors.text_muted))
+                .child("Connected to Rithmic"),
+        )
+        .child(mark(assets::AttributionMark::MarketDataByRithmic))
+        .child(
+            div()
+                .w(px(theme.dimensions.border_width))
+                .h(px(assets::AttributionMark::HEIGHT))
+                .bg(gpui_color(theme.colors.border)),
+        )
+        .child(mark(assets::AttributionMark::PoweredByOmne))
 }
 
 fn header_panel_toggles(
@@ -620,21 +684,21 @@ pub(super) fn side_panel_toggle(
     let (id, icon, toggle, command_id) = match panel {
         SidePanel::OrderBook => (
             "order_book_toggle",
-            HugeIcon::SidebarRight,
+            HugeIcon::DataPanel,
             WorkspaceSurface::toggle_order_book
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleOrderBook,
         ),
         SidePanel::TimeSales => (
             "time_sales_toggle",
-            HugeIcon::SidebarRight,
+            HugeIcon::DataPanel,
             WorkspaceSurface::toggle_time_sales
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleTimeSales,
         ),
         SidePanel::Watchlist => (
             "watchlist_toggle",
-            HugeIcon::SidebarRight,
+            HugeIcon::DataPanel,
             WorkspaceSurface::toggle_watchlist
                 as fn(&mut WorkspaceSurface, &mut Context<WorkspaceSurface>),
             aeris_desktop::command_registry::CommandId::ToggleWatchlist,
@@ -879,15 +943,15 @@ fn drawing_history_control(
     chrome_button_style(button, theme, false, enabled)
 }
 
-/// Copies the chart, with its legend, to the clipboard as an image. Saving to a file lives in
-/// the chart's context menu.
-fn chart_image_control(
+/// Captures the chart, with its legend, to the clipboard. Saving to a file lives in the chart's
+/// context menu.
+fn capture_chart_control(
     app: Entity<WorkspaceSurface>,
     enabled: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    const LABEL: &str = "Copy chart image";
-    let button = Button::new("chart_copy_image")
+    const LABEL: &str = "Capture chart";
+    let button = Button::new("capture_chart")
         .icon(header_icon(HugeIcon::Camera))
         .aria_label(LABEL)
         .tooltip(TooltipSpec::new(LABEL, theme).show_delay(TOOLTIP_OPEN_DELAY))
@@ -897,7 +961,9 @@ fn chart_image_control(
         .when(enabled, Button::cursor_pointer)
         .when(!enabled, Button::cursor_not_allowed);
     let button = button_activation(button, enabled, move |_, cx| {
-        app.update(cx, WorkspaceSurface::copy_chart_image);
+        if let Some(copied) = app.update(cx, WorkspaceSurface::copy_chart_capture) {
+            copied.detach();
+        }
     });
     chrome_button_style(button, theme, false, enabled)
 }
@@ -1173,7 +1239,8 @@ pub(super) fn chart_type_selector(
 ) -> impl IntoElement {
     let button = Button::new("chart_type_selector")
         .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
-        .caret(header_icon(HugeIcon::ChevronDown))
+        .aria_label(chart_type.label())
+        .w(px(chart_chrome::CHART_CONTROL_SIZE))
         .disabled(!enabled)
         .when(enabled, Button::cursor_pointer)
         .when(!enabled, Button::cursor_not_allowed);
@@ -1544,7 +1611,32 @@ pub(super) const fn aeris_chart_theme(mode: ThemeMode) -> AerisChartTheme {
 
 #[cfg(test)]
 mod tests {
-    use super::{WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT};
+    use super::{
+        FeedConnectionState, TerminalProvider, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
+        shows_rithmic_attribution,
+    };
+
+    #[test]
+    fn rithmic_attribution_follows_the_rithmic_session_only() {
+        for state in [
+            FeedConnectionState::Authenticating,
+            FeedConnectionState::Streaming,
+            FeedConnectionState::Recovering,
+        ] {
+            assert!(shows_rithmic_attribution(TerminalProvider::Rithmic, state));
+            assert!(!shows_rithmic_attribution(
+                TerminalProvider::Tastytrade,
+                state
+            ));
+        }
+        for state in [
+            FeedConnectionState::Disconnected,
+            FeedConnectionState::Discovering,
+            FeedConnectionState::Stopped,
+        ] {
+            assert!(!shows_rithmic_attribution(TerminalProvider::Rithmic, state));
+        }
+    }
 
     #[test]
     fn round_icon_glyph_centres_on_whole_device_pixels_at_supported_scales() {

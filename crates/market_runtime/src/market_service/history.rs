@@ -1,6 +1,7 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, CandleHandoffSeed, Command,
-    ConsumerId, Coordinator, DeferredHistoryRequest, DemandWaiter, FailureStage, FormingBar,
+    ConsumerId, Coordinator, DeferredHistoryRequest, DemandWaiter, EMPTY_CURRENT_HISTORY_DETAIL,
+    EMPTY_CURRENT_HISTORY_RETAINED_DETAIL, EmptyCurrentHistory, FailureStage, FormingBar,
     GenerationId, HISTORY_CAPACITY_EXHAUSTED, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
     HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest,
     HistorySnapshot, HistorySource, INITIAL_HISTORY_BARS, InstallProviderInstrument, Instant,
@@ -572,6 +573,20 @@ impl Coordinator<'_> {
         provider_generation: ProviderGeneration,
         waiter: DemandWaiter,
     ) {
+        if self.current_history_known_empty(series, provider_generation) {
+            // The provider already answered this series for this generation.
+            // A re-stated demand is answered from that record, not re-fetched.
+            if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
+                events.series_state = Some(series_state(
+                    waiter.consumer_id,
+                    waiter.generation,
+                    series.clone(),
+                    SeriesLoadState::Empty,
+                    Some(EMPTY_CURRENT_HISTORY_DETAIL.to_string()),
+                ));
+            }
+            return;
+        }
         let first = !self.pending.contains_key(series);
         if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
             events.series_state = Some(series_state(
@@ -875,6 +890,12 @@ impl Coordinator<'_> {
             };
             Some(missing)
         } else {
+            if self.current_history_known_empty(series, generation) {
+                // Every recovery trigger (heartbeat, re-stated demand, study
+                // lease, retry ticket) funnels through here; none of them is new
+                // evidence against the provider's empty answer.
+                return Ok(());
+            }
             None
         };
         if let Some(inflight) = self.history_inflight.get(&key).copied() {
@@ -1115,7 +1136,7 @@ impl Coordinator<'_> {
             return;
         };
         if snapshot.bars.is_empty() {
-            self.handle_empty_history(series, generation, range, snapshot.backwards_exhausted);
+            self.handle_empty_history(series, generation, range, &snapshot);
             return;
         }
         let repaired_timestamp_span = range.and_then(|_| {
@@ -1190,6 +1211,10 @@ impl Coordinator<'_> {
         self.execute_studies_after_history_install(series, repaired_timestamp_span);
         self.history_confirmed_empty
             .remove(&(series.clone(), generation));
+        if range.is_none() {
+            self.history_current_empty
+                .remove(&(series.clone(), generation));
+        }
         // Re-check visible coverage after every successful non-empty install.
         // A provider may return a partial page; the canonical snapshot remains
         // the sole coverage fact and determines whether more older data is due.
@@ -1205,11 +1230,11 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         range: Option<HistoryRange>,
-        backwards_exhausted: bool,
+        snapshot: &HistorySnapshot,
     ) {
+        let key = (series.clone(), generation);
         if let Some(range) = range {
-            let key = (series.clone(), generation);
-            if backwards_exhausted {
+            if snapshot.backwards_exhausted {
                 self.history_backwards_exhausted.insert(key.clone());
                 self.history_deferred.remove(&key);
             }
@@ -1218,11 +1243,132 @@ impl Coordinator<'_> {
                 .and_modify(|existing| merge_confirmed_empty_range(existing, range))
                 .or_insert(range);
             self.dispatch_deferred_history(series, generation);
-        } else {
-            let _ = self.cancel_live_history_reseed(series);
-            self.history_deferred.remove(&(series.clone(), generation));
-            self.history_failed(series, generation);
+            return;
         }
+        let _ = self.cancel_live_history_reseed(series);
+        self.history_deferred.remove(&key);
+        if self.live_history_ready(series) {
+            // A live edge is already installed; this was only a refill of a
+            // detached window and the live handoff remains authoritative.
+            self.history_failed(series, generation);
+            return;
+        }
+        let recorded = match self.history_current_empty.get(&key) {
+            Some(EmptyCurrentHistory::LiveTradeRequested | EmptyCurrentHistory::Final) => {
+                EmptyCurrentHistory::Final
+            }
+            Some(EmptyCurrentHistory::AwaitingLiveTrade { .. }) | None => {
+                EmptyCurrentHistory::AwaitingLiveTrade {
+                    boundary_unix_nanos: snapshot.handoff_boundary_unix_nanos.unwrap_or(i64::MIN),
+                }
+            }
+        };
+        eprintln!(
+            "Aeris market covering history for {} generation={} is empty; {}",
+            series.instrument_id,
+            generation.0.get(),
+            if recorded == EmptyCurrentHistory::Final {
+                "no further requests this session"
+            } else {
+                "waiting for a live trade"
+            }
+        );
+        // Only the generation being answered can still be current; keeping one
+        // record per series bounds this map across repeated reconnects.
+        self.history_current_empty
+            .retain(|(recorded_series, _), _| recorded_series != series);
+        self.history_current_empty.insert(key, recorded);
+        self.pending.remove(series);
+        let detail = if self.engine.series_snapshot(series).is_some() {
+            EMPTY_CURRENT_HISTORY_RETAINED_DETAIL
+        } else {
+            EMPTY_CURRENT_HISTORY_DETAIL
+        };
+        self.broadcast_series_resolution_for(series, SeriesLoadState::Empty, Some(detail));
+    }
+
+    pub(super) fn current_history_known_empty(
+        &self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> bool {
+        self.history_current_empty
+            .get(&(series.clone(), generation))
+            .is_some_and(|recorded| recorded.suppresses_current_requests())
+    }
+
+    /// Load state and detail for a retained snapshot whose covering repair is
+    /// outstanding, or that the provider has already answered with no bars.
+    pub(super) fn covering_repair_state(
+        &self,
+        series: &BarSeriesKey,
+    ) -> (SeriesLoadState, &'static str) {
+        let known_empty = self
+            .engine
+            .provider_status(&series.provider_id)
+            .and_then(|status| status.generation)
+            .is_some_and(|generation| self.current_history_known_empty(series, generation));
+        if known_empty {
+            (
+                SeriesLoadState::Empty,
+                EMPTY_CURRENT_HISTORY_RETAINED_DETAIL,
+            )
+        } else {
+            (SeriesLoadState::Partial, "Refreshing provider coverage")
+        }
+    }
+
+    /// Issues the single covering request an empty current answer allows, once
+    /// a live trade proves the provider now has data after that answer.
+    pub(super) fn request_current_history_after_live_trade(
+        &mut self,
+        provider: &str,
+        generation: ProviderGeneration,
+        instrument_id: &str,
+        entitlement_id: &str,
+        exchange_unix_nanos: i64,
+    ) {
+        if self.history_current_empty.is_empty() {
+            return;
+        }
+        let due = self
+            .history_current_empty
+            .iter()
+            .filter(|((series, recorded_generation), recorded)| {
+                *recorded_generation == generation
+                    && series.provider_id == provider
+                    && series.instrument_id == instrument_id
+                    && series.entitlement_id == entitlement_id
+                    && matches!(
+                        recorded,
+                        EmptyCurrentHistory::AwaitingLiveTrade { boundary_unix_nanos }
+                            if exchange_unix_nanos > *boundary_unix_nanos
+                    )
+            })
+            .map(|((series, _), _)| series.clone())
+            .collect::<Vec<_>>();
+        for series in due {
+            self.history_current_empty.insert(
+                (series.clone(), generation),
+                EmptyCurrentHistory::LiveTradeRequested,
+            );
+            eprintln!(
+                "Aeris market live trade arrived for {} generation={}; requesting covering history",
+                series.instrument_id,
+                generation.0.get()
+            );
+            self.request_series_history_recovery(&series, generation);
+        }
+    }
+
+    fn live_history_ready(&self, series: &BarSeriesKey) -> bool {
+        self.series_live
+            .trade(series)
+            .is_some_and(|live| live.history_state == super::LiveHistoryState::Ready)
+            || self
+                .series_live
+                .candle(series)
+                .is_some_and(|live| live.history_state == super::LiveHistoryState::Ready)
     }
 
     fn execute_studies_after_history_install(
@@ -1704,6 +1850,15 @@ impl Coordinator<'_> {
             .into_iter()
             .collect::<BTreeSet<_>>();
         self.history_confirmed_empty
+            .retain(|(series, generation), _| {
+                demanded_series.contains(series)
+                    && self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .and_then(|status| status.generation)
+                        == Some(*generation)
+            });
+        self.history_current_empty
             .retain(|(series, generation), _| {
                 demanded_series.contains(series)
                     && self

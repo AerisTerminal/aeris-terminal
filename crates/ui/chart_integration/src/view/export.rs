@@ -1,5 +1,5 @@
-//! Chart image export: the Aeris Charts frame with the product legend and the Aeris logo
-//! lockup, copied to the clipboard or saved as PNG.
+//! Chart capture: the Aeris Charts frame with the product legend and the Aeris logo lockup,
+//! copied to the clipboard or saved as PNG.
 //!
 //! Aeris Charts captures and rasterizes the chart (panes, axes and trading layer, never the
 //! crosshair). Terminal adds only its own presentation on top: the legend rows it shows on
@@ -18,7 +18,9 @@ use aeris_design_system::{
     BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, ThemeColor, TypographyRole, brand_font_family,
     platform_font_stack, platform_typography,
 };
-use gpui::{ClipboardItem, Context, Image, ImageFormat};
+#[cfg(not(windows))]
+use gpui::{ClipboardItem, Image, ImageFormat};
+use gpui::{Context, Task};
 use num_traits::ToPrimitive;
 use resvg::{tiny_skia, usvg};
 use std::path::{Path, PathBuf};
@@ -42,7 +44,7 @@ const BRAND_LOGO_SVG: &[u8] =
 const BRAND_LOGO_IMAGE_KEY: u64 = 0xae15_b0a0_0000_0000;
 
 /// A chart frame captured on the UI thread, rasterized later on a background thread.
-struct ChartImageExport {
+struct ChartCapture {
     image: PreparedChartImage,
     /// "Created with Aeris" and the capture time in the chart's time zone.
     caption: String,
@@ -110,15 +112,38 @@ struct ExportPalette {
     bearish: Color,
 }
 
-impl ChartImageExport {
+impl ChartCapture {
     /// Rasterize the chart with its legend and brand lockup as PNG bytes. Runs off the UI thread.
     fn render_png(&self) -> Result<Vec<u8>, String> {
+        self.image.render_png(&self.overlay()?)
+    }
+
+    /// Rasterize the capture and place it on the Windows clipboard. Runs off the UI thread.
+    ///
+    /// GPUI's Windows clipboard offers images only as the registered "PNG" format, which most
+    /// Windows apps never paste. arboard also writes `CF_DIBV5`, from which Windows derives
+    /// `CF_DIB` and `CF_BITMAP`, so the capture pastes wherever a browser-copied image does.
+    #[cfg(windows)]
+    fn copy_to_clipboard(&self) -> Result<(), String> {
+        let image = self.image.render(&self.overlay()?)?;
+        let dimension = |value: u32| usize::try_from(value).map_err(|error| error.to_string());
+        let image = arboard::ImageData {
+            width: dimension(image.width)?,
+            height: dimension(image.height)?,
+            bytes: image.pixels.into(),
+        };
+        arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_image(image))
+            .map_err(|error| error.to_string())
+    }
+
+    fn overlay(&self) -> Result<Vec<Prim>, String> {
         register_export_fonts()?;
         let mut overlay = Vec::new();
         self.caption_overlay(&mut overlay);
         self.legend_overlay(&mut overlay);
         self.brand_overlay(&mut overlay)?;
-        self.image.render_png(&overlay)
+        Ok(overlay)
     }
 
     /// The caption on the first legend row of the top plot, muted so the legend leads.
@@ -323,7 +348,7 @@ fn export_directory() -> PathBuf {
 impl AerisChartView {
     /// Capture the chart as it is shown, with its latest-bar legend and no crosshair. The
     /// capture invalidates the engine's retained frame, so callers repaint the live chart.
-    fn capture_image(&mut self, utc_seconds: i64) -> Result<ChartImageExport, String> {
+    fn capture(&mut self, utc_seconds: i64) -> Result<ChartCapture, String> {
         let image = prepare_engine_image(
             &mut self.engine,
             ImageExportOptions {
@@ -353,7 +378,7 @@ impl AerisChartView {
         };
         let (caption, file_name) =
             capture_labels(&self.asset_symbol, self.time_zone_id(), utc_seconds);
-        Ok(ChartImageExport {
+        Ok(ChartCapture {
             image: image?,
             caption,
             file_name,
@@ -362,40 +387,62 @@ impl AerisChartView {
         })
     }
 
-    /// Copy the chart image to the clipboard as PNG.
-    pub fn copy_image(&mut self, cx: &mut Context<Self>) {
-        let captured = self.capture_image(unix_now());
+    /// Copy the chart capture to the clipboard as PNG. The task resolves to whether the
+    /// clipboard now holds the capture.
+    pub fn copy_capture(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+        let captured = self.capture(unix_now());
         cx.notify();
         let export = match captured {
             Ok(export) => export,
             Err(error) => {
-                eprintln!("Chart image copy failed: {error}");
-                return;
+                eprintln!("Chart capture copy failed: {error}");
+                return Task::ready(false);
             }
         };
-        let render = cx
-            .background_executor()
-            .spawn(async move { export.render_png() });
-        cx.spawn(async move |_, cx| match render.await {
-            Ok(png) => cx.update(|cx| {
-                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
-                    ImageFormat::Png,
-                    png,
-                )));
-            }),
-            Err(error) => eprintln!("Chart image copy failed: {error}"),
-        })
-        .detach();
+        #[cfg(windows)]
+        {
+            let copy = cx
+                .background_executor()
+                .spawn(async move { export.copy_to_clipboard() });
+            cx.spawn(async move |_, _| match copy.await {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("Chart capture copy failed: {error}");
+                    false
+                }
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let render = cx
+                .background_executor()
+                .spawn(async move { export.render_png() });
+            cx.spawn(async move |_, cx| match render.await {
+                Ok(png) => {
+                    cx.update(|cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                            ImageFormat::Png,
+                            png,
+                        )));
+                    });
+                    true
+                }
+                Err(error) => {
+                    eprintln!("Chart capture copy failed: {error}");
+                    false
+                }
+            })
+        }
     }
 
-    /// Ask where to save the chart image, then write it as PNG off the UI thread.
-    pub fn save_image(&mut self, cx: &mut Context<Self>) {
-        let captured = self.capture_image(unix_now());
+    /// Ask where to save the chart capture, then write it as PNG off the UI thread.
+    pub fn save_capture(&mut self, cx: &mut Context<Self>) {
+        let captured = self.capture(unix_now());
         cx.notify();
         let export = match captured {
             Ok(export) => export,
             Err(error) => {
-                eprintln!("Chart image save failed: {error}");
+                eprintln!("Chart capture save failed: {error}");
                 return;
             }
         };
@@ -405,7 +452,7 @@ impl AerisChartView {
                 Ok(Ok(Some(path))) => path,
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    eprintln!("Chart image save failed: {error}");
+                    eprintln!("Chart capture save failed: {error}");
                     return;
                 }
             };
@@ -414,7 +461,7 @@ impl AerisChartView {
                 .spawn(async move { write_png(&export, &path) })
                 .await;
             if let Err(error) = written {
-                eprintln!("Chart image save failed: {error}");
+                eprintln!("Chart capture save failed: {error}");
             }
         })
         .detach();
@@ -429,7 +476,7 @@ fn unix_now() -> i64 {
         })
 }
 
-fn write_png(export: &ChartImageExport, path: &Path) -> Result<(), String> {
+fn write_png(export: &ChartCapture, path: &Path) -> Result<(), String> {
     let png = export.render_png()?;
     std::fs::write(path, png).map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -453,7 +500,7 @@ mod tests {
         chart.engine.crosshair = Some((40.0, 40.0));
 
         let export = chart
-            .capture_image(1_791_025_812)
+            .capture(1_791_025_812)
             .expect("a laid-out chart exports");
         let mut overlay = Vec::new();
         export.caption_overlay(&mut overlay);

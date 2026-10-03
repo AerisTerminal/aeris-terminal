@@ -22,6 +22,7 @@ pub enum UiIcon {
     ChevronDown,
     Copy,
     CopySuccess,
+    DataPanel,
     Download,
     Trash,
     EraserIcon,
@@ -34,7 +35,6 @@ pub enum UiIcon {
     Search,
     Settings,
     SidebarLeft,
-    SidebarRight,
     SplitSideBySide,
     SplitStacked,
     Sun,
@@ -65,6 +65,7 @@ impl UiIcon {
         Self::ChevronDown,
         Self::Copy,
         Self::CopySuccess,
+        Self::DataPanel,
         Self::Download,
         Self::Trash,
         Self::EraserIcon,
@@ -77,7 +78,6 @@ impl UiIcon {
         Self::Search,
         Self::Settings,
         Self::SidebarLeft,
-        Self::SidebarRight,
         Self::SplitSideBySide,
         Self::SplitStacked,
         Self::Sun,
@@ -109,6 +109,7 @@ impl UiIcon {
             Self::ChevronDown => "chevron-down.svg",
             Self::Copy => "copy.svg",
             Self::CopySuccess => "copy-success.svg",
+            Self::DataPanel => "data-panel.svg",
             Self::Download => "download.svg",
             Self::Trash => "trash.svg",
             Self::EraserIcon => "eraser.svg",
@@ -121,7 +122,6 @@ impl UiIcon {
             Self::Search => "search.svg",
             Self::Settings => "settings.svg",
             Self::SidebarLeft => "sidebar-left.svg",
-            Self::SidebarRight => "sidebar-right.svg",
             Self::SplitSideBySide => "split-side-by-side.svg",
             Self::SplitStacked => "split-stacked.svg",
             Self::Sun => "sun.svg",
@@ -302,6 +302,91 @@ impl ProviderLogo {
     }
 }
 
+/// Rithmic's required attribution artwork. Each mark ships pre-rendered at the exact
+/// device pixels of both densities: GPUI samples images without mipmaps, so shrinking
+/// the large original aliases the marks' fine lettering into noise.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttributionMark {
+    MarketDataByRithmic,
+    PoweredByOmne,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarkDensity {
+    Standard,
+    High,
+}
+
+impl MarkDensity {
+    pub const ALL: [Self; 2] = [Self::Standard, Self::High];
+
+    #[must_use]
+    pub fn for_scale(window_scale: f32) -> Self {
+        if window_scale <= 1.0 {
+            Self::Standard
+        } else {
+            Self::High
+        }
+    }
+
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Standard => "1x",
+            Self::High => "2x",
+        }
+    }
+}
+
+impl AttributionMark {
+    pub const ALL: [Self; 2] = [Self::MarketDataByRithmic, Self::PoweredByOmne];
+    /// Logical height; the standard asset is exactly this many pixels tall.
+    pub const HEIGHT: f32 = 18.0;
+
+    /// Logical width, equal to the standard asset's pixel width so neither
+    /// density is resampled at draw time.
+    #[must_use]
+    pub const fn width(self, mode: aeris_design_system::ThemeMode) -> f32 {
+        match (self, mode) {
+            (Self::MarketDataByRithmic, _) => 140.0,
+            (Self::PoweredByOmne, aeris_design_system::ThemeMode::Light) => 134.0,
+            (Self::PoweredByOmne, aeris_design_system::ThemeMode::Dark) => 118.0,
+        }
+    }
+
+    #[must_use]
+    pub fn path(self, mode: aeris_design_system::ThemeMode, density: MarkDensity) -> SharedString {
+        let name = match self {
+            Self::MarketDataByRithmic => "market_data_by_rithmic",
+            Self::PoweredByOmne => "powered_by_omne",
+        };
+        // Light themes take the dark-ink artwork and dark themes the light-ink artwork.
+        let ink = match mode {
+            aeris_design_system::ThemeMode::Light => "dark",
+            aeris_design_system::ThemeMode::Dark => "light",
+        };
+        format!(
+            "{PROVIDER_ASSET_PREFIX}{name}_{ink}_{}.png",
+            density.suffix()
+        )
+        .into()
+    }
+
+    fn all_paths() -> impl Iterator<Item = SharedString> {
+        Self::ALL.into_iter().flat_map(|mark| {
+            [
+                aeris_design_system::ThemeMode::Light,
+                aeris_design_system::ThemeMode::Dark,
+            ]
+            .into_iter()
+            .flat_map(move |mode| {
+                MarkDensity::ALL
+                    .into_iter()
+                    .map(move |density| mark.path(mode, density))
+            })
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AerisAssets;
 
@@ -325,6 +410,7 @@ impl AssetSource for AerisAssets {
             .chain(BrandAsset::ALL.into_iter().map(BrandAsset::path))
             .chain(ExchangeLogo::ALL.into_iter().map(ExchangeLogo::path))
             .chain(ProviderLogo::ALL.into_iter().map(ProviderLogo::path))
+            .chain(AttributionMark::all_paths())
             .filter(|asset| path.is_empty() || asset.starts_with(path))
             .collect())
     }
@@ -362,6 +448,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "copy.svg" => include_bytes!("../assets/icons/ui/copy.svg"),
         "download.svg" => include_bytes!("../assets/icons/ui/download.svg"),
         "copy-success.svg" => include_bytes!("../assets/icons/ui/copy-success.svg"),
+        "data-panel.svg" => include_bytes!("../assets/icons/ui/data-panel.svg"),
         "trash.svg" => include_bytes!("../assets/icons/ui/trash.svg"),
         "eraser.svg" => include_bytes!("../assets/icons/ui/eraser.svg"),
         "failure.svg" => include_bytes!("../assets/icons/ui/failure.svg"),
@@ -373,7 +460,6 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "search.svg" => include_bytes!("../assets/icons/ui/search.svg"),
         "settings.svg" => include_bytes!("../assets/icons/ui/settings.svg"),
         "sidebar-left.svg" => include_bytes!("../assets/icons/ui/sidebar-left.svg"),
-        "sidebar-right.svg" => include_bytes!("../assets/icons/ui/sidebar-right.svg"),
         "split-side-by-side.svg" => include_bytes!("../assets/icons/ui/split-side-by-side.svg"),
         "split-stacked.svg" => include_bytes!("../assets/icons/ui/split-stacked.svg"),
         "sun.svg" => include_bytes!("../assets/icons/ui/sun.svg"),
@@ -436,6 +522,38 @@ fn provider_asset(path: &str) -> Option<&'static [u8]> {
         }
         "tastytrades_dark.png" => {
             include_bytes!("../assets/exchange_assets/provider_logo/tastytrades_dark.png")
+        }
+        "market_data_by_rithmic_light_1x.png" => {
+            include_bytes!(
+                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_light_1x.png"
+            )
+        }
+        "market_data_by_rithmic_light_2x.png" => {
+            include_bytes!(
+                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_light_2x.png"
+            )
+        }
+        "market_data_by_rithmic_dark_1x.png" => {
+            include_bytes!(
+                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_dark_1x.png"
+            )
+        }
+        "market_data_by_rithmic_dark_2x.png" => {
+            include_bytes!(
+                "../assets/exchange_assets/provider_logo/market_data_by_rithmic_dark_2x.png"
+            )
+        }
+        "powered_by_omne_light_1x.png" => {
+            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_light_1x.png")
+        }
+        "powered_by_omne_light_2x.png" => {
+            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_light_2x.png")
+        }
+        "powered_by_omne_dark_1x.png" => {
+            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_dark_1x.png")
+        }
+        "powered_by_omne_dark_2x.png" => {
+            include_bytes!("../assets/exchange_assets/provider_logo/powered_by_omne_dark_2x.png")
         }
         _ => return None,
     })
@@ -556,6 +674,7 @@ mod tests {
                 + BrandAsset::ALL.len()
                 + ExchangeLogo::ALL.len()
                 + ProviderLogo::ALL.len()
+                + AttributionMark::all_paths().count()
         );
         assert_eq!(
             assets
@@ -607,6 +726,44 @@ mod tests {
                 .expect("provider wordmark");
             assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{}", logo.path());
         }
+    }
+
+    #[test]
+    fn attribution_marks_match_their_drawn_device_pixels_exactly() {
+        let assets = AerisAssets;
+        for mark in AttributionMark::ALL {
+            for mode in [
+                aeris_design_system::ThemeMode::Light,
+                aeris_design_system::ThemeMode::Dark,
+            ] {
+                for (density, scale) in [(MarkDensity::Standard, 1.0), (MarkDensity::High, 2.0)] {
+                    let path = mark.path(mode, density);
+                    let bytes = assets
+                        .load(path.as_ref())
+                        .unwrap()
+                        .expect("attribution mark");
+                    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path}");
+                    let dimension = |offset: usize| {
+                        f64::from(u32::from_be_bytes(
+                            bytes[offset..offset + 4].try_into().unwrap(),
+                        ))
+                    };
+                    let logical_width = f64::from(mark.width(mode));
+                    let logical_height = f64::from(AttributionMark::HEIGHT);
+                    // The high-density artwork may round its width by a pixel.
+                    assert!(
+                        (dimension(16) - logical_width * scale).abs() <= 1.0,
+                        "{path} width"
+                    );
+                    assert!(
+                        (dimension(20) - logical_height * scale).abs() < f64::EPSILON,
+                        "{path} height"
+                    );
+                }
+            }
+        }
+        assert_eq!(MarkDensity::for_scale(1.0), MarkDensity::Standard);
+        assert_eq!(MarkDensity::for_scale(1.25), MarkDensity::High);
     }
 
     #[test]

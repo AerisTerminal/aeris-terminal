@@ -244,6 +244,8 @@ pub(super) struct BottomPanelView<'a> {
     pub(super) state: &'a BottomPanelState,
     /// The active chart formats trade times in its selected zone.
     pub(super) chart: Option<Entity<AerisChartView>>,
+    /// The active pane holds a Rithmic session, so its attribution marks show.
+    pub(super) rithmic_attribution: bool,
 }
 
 pub(super) fn bottom_panel(
@@ -255,6 +257,7 @@ pub(super) fn bottom_panel(
         terminal,
         state,
         chart,
+        rithmic_attribution,
     } = view;
     let open = state.trade_history_open;
     let resize_terminal = terminal.clone();
@@ -269,7 +272,12 @@ pub(super) fn bottom_panel(
         .border_t(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border))
         .bg(gpui_color(colors.surface))
-        .child(trade_history_header(terminal, state, theme))
+        .child(trade_history_header(
+            terminal,
+            state,
+            rithmic_attribution,
+            theme,
+        ))
         .when(open, |panel| {
             panel
                 .child(trade_history_column_header(
@@ -311,6 +319,7 @@ fn trade_history_resize_handle() -> impl IntoElement {
 fn trade_history_header(
     terminal: &Entity<TerminalApp>,
     state: &BottomPanelState,
+    rithmic_attribution: bool,
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;
@@ -342,6 +351,9 @@ fn trade_history_header(
             ))
         })
         .child(div().flex_1())
+        .when(rithmic_attribution, |header| {
+            header.child(super::terminal_chrome::rithmic_attribution(theme))
+        })
         .child(trade_history_expand_button(terminal, open, theme))
 }
 

@@ -116,17 +116,28 @@ fn validate_history_identity(
     // provider generation is the current engine/session fence. Requiring those
     // to be equal forces an unrelated catalog re-selection after every
     // reconnect and makes multi-instrument recovery impossible.
-    if provider_generation == 0
-        || installed.provider != "rithmic"
-        || installed.instrument_id != series.instrument_id
-        || installed.entitlement_id != series.entitlement_id
-        || installed.session_generation == 0
-        || installed.session_generation > provider_generation
-        || series.definition_version != 1
-    {
-        return Err("Rithmic history identity is inconsistent".to_string());
-    }
-    Ok(())
+    let mismatch = if provider_generation == 0 {
+        Some("provider generation is unset")
+    } else if installed.provider != "rithmic" {
+        Some("installed provider is not Rithmic")
+    } else if installed.instrument_id != series.instrument_id {
+        Some("installed instrument differs from the series")
+    } else if installed.entitlement_id != series.entitlement_id {
+        Some("installed entitlement differs from the series")
+    } else if installed.session_generation == 0 {
+        Some("installed session generation is unset")
+    } else if installed.session_generation > provider_generation {
+        Some("installed session is newer than the request")
+    } else if series.definition_version != 1 {
+        Some("series definition version is unsupported")
+    } else {
+        None
+    };
+    mismatch.map_or(Ok(()), |reason| {
+        Err(format!(
+            "Rithmic history identity is inconsistent: {reason}"
+        ))
+    })
 }
 
 /// Runs both replay passes and returns closed history, the open period, and the
@@ -152,7 +163,7 @@ fn collect_replay(
         bars.drain(..bars.len() - maximum_visible_bars);
     }
     if bars.is_empty() {
-        return empty_replay_result(replay);
+        return Ok(empty_replay_result(replay));
     }
     for (index, bar) in bars.iter_mut().enumerate() {
         bar.source_sequence = u64::try_from(index)
@@ -164,14 +175,12 @@ fn collect_replay(
     Ok((bars, forming, boundary))
 }
 
-fn empty_replay_result(
-    replay: ReplayEnvelope,
-) -> Result<(Vec<MarketBar>, Option<FormingBar>, i64), String> {
-    if replay.allow_empty {
-        Ok((Vec::new(), None, replay.range.end_unix_nanos))
-    } else {
-        Err("Rithmic returned no completed historical bars".to_string())
-    }
+/// A replay that completed with no bars is the provider's answer for that
+/// window, not a transport fault: retrying the same window returns the same
+/// nothing and costs another history-plant login. It is reported as an empty
+/// snapshot so the market service records it once instead of retrying.
+fn empty_replay_result(replay: ReplayEnvelope) -> (Vec<MarketBar>, Option<FormingBar>, i64) {
+    (Vec::new(), None, replay.range.end_unix_nanos)
 }
 
 /// Separates the period the replay caught mid-flight from closed history.
@@ -384,10 +393,6 @@ struct ReplayEnvelope {
     range: HistoryRange,
     maximum_bars: NonZeroUsize,
     forming: FormingPlan,
-    /// An explicit viewport repair may legitimately land before the provider's
-    /// available history. Current-history loads still treat an empty page as a
-    /// failure because they need a covering baseline for the live handoff.
-    allow_empty: bool,
 }
 
 fn replay_envelope(
@@ -456,7 +461,6 @@ fn replay_envelope(
         range: history_range(start_seconds, end_seconds)?,
         maximum_bars: NonZeroUsize::new(theoretical_bars).unwrap_or(NonZeroUsize::MIN),
         forming,
-        allow_empty: false,
     })
 }
 
@@ -476,7 +480,6 @@ fn explicit_replay_envelope(
         // invent an open bucket. The existing realtime handoff remains owner
         // of the forming candle while the repair replaces completed history.
         forming: FormingPlan::Closed,
-        allow_empty: true,
     })
 }
 
@@ -539,7 +542,6 @@ fn aggregate_replay_envelope(
         // Splitting an open one here would need that calendar, so the live
         // handoff opens it from trades as it always has.
         forming: FormingPlan::Closed,
-        allow_empty: false,
     })
 }
 
@@ -621,6 +623,16 @@ mod tests {
     }
 
     #[test]
+    fn identity_rejection_names_the_field_that_disagrees() {
+        let newer = validate_history_identity(&series(), 7, &installed(8)).unwrap_err();
+        assert!(newer.ends_with("installed session is newer than the request"));
+        let mut other = installed(3);
+        other.entitlement_id = "rithmic-test:CME:ES".to_string();
+        let entitlement = validate_history_identity(&series(), 7, &other).unwrap_err();
+        assert!(entitlement.ends_with("installed entitlement differs from the series"));
+    }
+
+    #[test]
     fn history_budget_preserves_runtime_requests_up_to_protocol_capacity() {
         assert_eq!(bounded_visible_bars(600), 600);
         assert_eq!(bounded_visible_bars(8_192), 8_192);
@@ -643,19 +655,21 @@ mod tests {
         assert_eq!(replay.range.start_unix_nanos, 1_000_000_000);
         assert_eq!(replay.range.end_unix_nanos, 62_000_000_000);
 
-        let (bars, forming, boundary) =
-            empty_replay_result(replay).expect("an empty viewport repair is valid coverage");
+        let (bars, forming, boundary) = empty_replay_result(replay);
         assert!(bars.is_empty());
         assert!(forming.is_none());
         assert_eq!(boundary, 62_000_000_000);
     }
 
     #[test]
-    fn empty_current_history_still_requires_a_covering_baseline() {
+    fn empty_current_replay_is_reported_as_an_empty_snapshot_not_an_error() {
         let now = UNIX_EPOCH + Duration::from_hours(240);
         let replay =
             replay_envelope(ChartInterval::Minute1, 100, now).expect("current replay envelope");
 
-        assert!(empty_replay_result(replay).is_err());
+        let (bars, forming, boundary) = empty_replay_result(replay);
+        assert!(bars.is_empty());
+        assert!(forming.is_none());
+        assert_eq!(boundary, replay.range.end_unix_nanos);
     }
 }

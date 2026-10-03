@@ -136,9 +136,9 @@ use chart_context_menus::{
 };
 #[cfg(test)]
 use chart_context_menus::{
-    PriceAxisMenuRow, chart_context_menu_items, chart_image_menu_items,
-    clamp_chart_context_menu_origin, clamp_chart_image_flyout_origin, clamp_price_axis_menu_origin,
-    price_axis_flyout_rows, price_axis_root_rows,
+    PriceAxisMenuRow, chart_capture_menu_items, chart_context_menu_items,
+    clamp_chart_capture_flyout_origin, clamp_chart_context_menu_origin,
+    clamp_price_axis_menu_origin, price_axis_flyout_rows, price_axis_root_rows,
 };
 use chart_surface::{MarketWorkspaceState, market_workspace};
 use chart_toolbar_menus::{
@@ -435,7 +435,7 @@ const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
 const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
-const CHART_IMAGE_FLYOUT_WIDTH: f32 = 180.0;
+const CHART_CAPTURE_FLYOUT_WIDTH: f32 = 180.0;
 const PRICE_AXIS_MENU_GAP: f32 = 4.0;
 const OVERLAY_EDGE_MARGIN: f32 = 8.0;
 const TIMEFRAME_MENU_WIDTH: f32 = 168.0;
@@ -478,8 +478,8 @@ const WORKSPACE_TAB_EXCHANGE_GLYPH: f32 = 16.0;
 const TOOLTIP_OPEN_DELAY: Duration = Duration::from_millis(400);
 const CHROME_OVERLAY_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 const CHROME_OVERLAY_EXIT_DURATION: Duration = Duration::from_millis(100);
-const COPY_PRICE_FEEDBACK_DURATION: Duration = Duration::from_millis(600);
-const COPY_PRICE_SUCCESS_ANIMATION_DURATION: Duration = Duration::from_millis(180);
+const CHART_COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(600);
+const CHART_COPY_SUCCESS_ANIMATION_DURATION: Duration = Duration::from_millis(180);
 
 mod lifecycle;
 use lifecycle::DesktopLifecycle;
@@ -1245,6 +1245,9 @@ struct QuickTimeframeError {
 struct WorkspaceMarketState {
     symbol_selection_pending: bool,
     rithmic_autoload_started: bool,
+    /// The startup listing may pick the default contract exactly once; later
+    /// searches belong to the trader and must never re-select on their behalf.
+    rithmic_autoload_selection_pending: bool,
 }
 
 #[derive(Default)]
@@ -2971,7 +2974,7 @@ fn chart_surface_notice(
     };
     let detail = bounded_status_detail(detail, state.label());
     match state {
-        ChartState::Loading => Some(ChartSurfaceNotice {
+        ChartState::Loading | ChartState::AwaitingData => Some(ChartSurfaceNotice {
             label: state.label(),
             detail,
             placement,
@@ -3071,7 +3074,7 @@ impl HeaderControls {
     const MARKET_PANELS: u8 = 4;
     const INDICATOR: u8 = 8;
     const CHART_TYPE: u8 = 16;
-    const CHART_IMAGE: u8 = 32;
+    const CHART_CAPTURE: u8 = 32;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -3090,7 +3093,7 @@ impl HeaderControls {
 
     const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::INDICATOR | Self::CHART_TYPE | Self::CHART_IMAGE;
+            self.0 |= Self::INDICATOR | Self::CHART_TYPE | Self::CHART_CAPTURE;
         }
         self
     }
@@ -4042,10 +4045,10 @@ struct ChartContextMenuItem {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartContextAction {
     CopyPrice,
-    /// Opens the chart image submenu; the image is taken by its Copy or Save rows.
-    ImageMenu,
-    CopyImage,
-    SaveImage,
+    /// Opens the capture chart submenu; the capture is taken by its Copy or Save rows.
+    CaptureMenu,
+    CopyCapture,
+    SaveCapture,
     Reset,
     ClearDrawings,
     ClearIndicators,
@@ -4091,9 +4094,17 @@ struct ChartContextMenu {
     position: gpui::Point<Pixels>,
     kind: ChartContextKind,
     flyout: PriceAxisMenuFlyout,
-    image_flyout_open: bool,
+    capture_flyout_open: bool,
     copy_price: Option<SharedString>,
-    copy_feedback_generation: Option<u64>,
+    copy_feedback: Option<ChartCopyFeedback>,
+}
+
+/// The "Copied" confirmation on the row whose copy finished; the generation fences the timer
+/// that closes the menu afterwards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChartCopyFeedback {
+    action: ChartContextAction,
+    generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

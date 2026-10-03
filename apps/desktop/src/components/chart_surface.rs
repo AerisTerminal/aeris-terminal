@@ -54,6 +54,44 @@ pub(super) fn chart_pane_host(chart: Option<&Entity<AerisChartView>>) -> Div {
         .children(chart.cloned())
 }
 
+fn opaque_status_overlay(
+    id: &'static str,
+    notice: ChartSurfaceNotice,
+    leading: Option<Loader>,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    div()
+        .id(id)
+        .absolute()
+        .occlude()
+        .role(Role::Status)
+        .aria_label(notice.label)
+        // A centered status surface is deliberately opaque. On first launch
+        // there is no chart to read, and during a switch the retained chart
+        // belongs to the previous selection.
+        .bg(gpui_color(colors.surface))
+        .gap_2()
+        .children(leading)
+        .child(
+            div()
+                .text_sm()
+                .text_color(gpui_color(colors.text_primary))
+                .child(notice.label),
+        )
+        .children(notice.detail.map(|detail| {
+            div()
+                .text_xs()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(detail)
+        }))
+        .inset_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+}
+
 pub(super) fn chart_notice(
     notice: ChartSurfaceNotice,
     theme: &AerisTheme,
@@ -69,36 +107,15 @@ pub(super) fn chart_notice(
         let spinner = Loader::from_path("chart_notice_loader", HugeIcon::Loader.path())
             .with_size(px(40.0))
             .color(gpui_color(colors.icon));
-        let overlay = div()
-            .id("chart_loading_status")
-            .absolute()
-            .occlude()
-            .role(Role::Status)
-            .aria_label(notice.label)
-            // A loading surface is deliberately opaque. On first launch there
-            // is no chart to read, and during a switch the retained chart belongs
-            // to the previous selection.
-            .bg(gpui_color(colors.surface))
-            .gap_2()
-            .child(spinner)
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(gpui_color(colors.text_primary))
-                    .child(notice.label),
-            )
-            .children(notice.detail.clone().map(|detail| {
-                div()
-                    .text_xs()
-                    .text_color(gpui_color(colors.text_secondary))
-                    .child(detail)
-            }));
-        return overlay
-            .inset_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
+        return opaque_status_overlay("chart_loading_status", notice, Some(spinner), theme)
+            .into_any_element();
+    }
+    if notice.label == ChartState::AwaitingData.label()
+        && notice.placement == ChartNoticePlacement::Center
+    {
+        // Settled, not in progress: the same opaque surface as loading, without
+        // a spinner that would suggest the wait is ours.
+        return opaque_status_overlay("chart_awaiting_data_status", notice, None, theme)
             .into_any_element();
     }
     let tone = match notice.tone {

@@ -3,6 +3,8 @@ use aeris_platform_runtime::cancel_tcp_stream_io;
 use rustls::{ClientConfig, RootCertStore};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
+    error::Error,
+    fmt,
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
     sync::{
@@ -17,6 +19,26 @@ use tungstenite::{Connector, WebSocket, protocol::WebSocketConfig, stream::Maybe
 const NETWORK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TCP_CONNECT_ATTEMPT_LIMIT: Duration = Duration::from_secs(1);
 pub(crate) type RithmicWebSocket = WebSocket<MaybeTlsStream<DeadlineTcpStream>>;
+
+/// Marker payload for socket I/O refused because the session owner requested a stop.
+#[derive(Debug)]
+struct StopRequested;
+
+impl fmt::Display for StopRequested {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Rithmic session stop requested")
+    }
+}
+
+impl Error for StopRequested {}
+
+/// Whether an I/O failure came from a requested stop rather than the network.
+pub(crate) fn is_cancellation(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Interrupted
+        || error
+            .get_ref()
+            .is_some_and(<dyn Error + Send + Sync>::is::<StopRequested>)
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct ConnectionAbort {
@@ -93,7 +115,7 @@ pub(crate) fn connect_websocket(
     .map(|(socket, _)| socket)
     .map_err(|error| match error {
         tungstenite::HandshakeError::Failure(tungstenite::Error::Io(error))
-            if error.kind() == io::ErrorKind::Interrupted =>
+            if is_cancellation(&error) =>
         {
             RithmicSessionError::Cancelled
         }
@@ -117,6 +139,14 @@ pub(crate) fn set_deadline(socket: &mut RithmicWebSocket, deadline: Instant) {
         MaybeTlsStream::Plain(stream) => stream.set_deadline(deadline),
         MaybeTlsStream::Rustls(stream) => stream.get_mut().set_deadline(deadline),
         _ => {}
+    }
+}
+
+pub(crate) fn stop_requested(socket: &RithmicWebSocket) -> bool {
+    match socket.get_ref() {
+        MaybeTlsStream::Plain(stream) => stream.stop_requested(),
+        MaybeTlsStream::Rustls(stream) => stream.get_ref().stop_requested(),
+        _ => false,
     }
 }
 
@@ -144,13 +174,20 @@ impl DeadlineTcpStream {
         self.stop = None;
     }
 
-    fn operation_timeout(&self) -> io::Result<Duration> {
-        if self
-            .stop
+    fn stop_requested(&self) -> bool {
+        self.stop
             .as_ref()
             .is_some_and(|stop| stop.load(Ordering::Acquire))
-        {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
+
+    fn operation_timeout(&self) -> io::Result<Duration> {
+        if self.stop_requested() {
+            // rustls retries `Interrupted` inside `complete_io` without
+            // returning, so a stop must surface as a terminal error kind.
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                StopRequested,
+            ));
         }
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

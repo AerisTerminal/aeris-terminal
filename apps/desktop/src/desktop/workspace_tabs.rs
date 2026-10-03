@@ -698,9 +698,9 @@ impl TerminalApp {
                         position: request.position,
                         kind: request.kind,
                         flyout: PriceAxisMenuFlyout::None,
-                        image_flyout_open: false,
+                        capture_flyout_open: false,
                         copy_price: request.copy_price,
-                        copy_feedback_generation: None,
+                        copy_feedback: None,
                     });
                 }
             }
@@ -759,7 +759,7 @@ impl TerminalApp {
         mut menu: ChartContextMenu,
         cx: &mut Context<Self>,
     ) {
-        menu.copy_feedback_generation = None;
+        menu.copy_feedback = None;
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
         self.close_chart_settings_menu(cx);
         self.chart_settings_color_picker = None;
@@ -1590,46 +1590,58 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         self.select_pane(menu.workspace_id, menu.pane_id, cx);
-        menu.copy_feedback_generation = None;
+        menu.copy_feedback = None;
         match action {
             ChartContextAction::CopyPrice => {
                 if let Some(price) = menu.copy_price.as_deref() {
                     cx.write_to_clipboard(ClipboardItem::new_string(price.to_string()));
                 }
-                self.chart_context_copy_feedback_generation = self
-                    .chart_context_copy_feedback_generation
-                    .saturating_add(1);
-                let generation = self.chart_context_copy_feedback_generation;
-                menu.copy_feedback_generation = Some(generation);
                 self.chart_context_menu = Some(menu);
-                cx.notify();
+                self.show_chart_copy_feedback(action, window, cx);
+                return;
+            }
+            ChartContextAction::CaptureMenu => {
+                menu.capture_flyout_open = true;
+                self.chart_context_menu = Some(menu);
+            }
+            ChartContextAction::CopyCapture => {
+                let mut copied = None;
+                self.update_context_menu_pane(
+                    &menu,
+                    |surface, surface_cx| copied = surface.copy_chart_capture(surface_cx),
+                    cx,
+                );
+                let Some(copied) = copied else {
+                    self.chart_context_menu = None;
+                    cx.notify();
+                    return;
+                };
+                // The menu stays open while the capture renders off the UI thread, then confirms
+                // on the same row as Copy price does.
+                self.chart_context_menu = Some(menu.clone());
                 cx.spawn_in(window, async move |terminal, cx| {
-                    cx.background_executor()
-                        .timer(COPY_PRICE_FEEDBACK_DURATION)
-                        .await;
-                    let _ = terminal.update_in(cx, |terminal, _, terminal_cx| {
-                        if Self::chart_context_copy_feedback_is_current(
-                            terminal.chart_context_menu.as_ref(),
-                            generation,
-                        ) {
+                    let copied = copied.await;
+                    let _ = terminal.update_in(cx, |terminal, window, terminal_cx| {
+                        let still_open = terminal.chart_context_menu.as_ref().is_some_and(|open| {
+                            open.workspace_id == menu.workspace_id
+                                && open.pane_id == menu.pane_id
+                                && open.position == menu.position
+                        });
+                        if !still_open {
+                            return;
+                        }
+                        if copied {
+                            terminal.show_chart_copy_feedback(action, window, terminal_cx);
+                        } else {
                             terminal.close_chart_context_menu(terminal_cx);
                         }
                     });
                 })
                 .detach();
-                return;
             }
-            ChartContextAction::ImageMenu => {
-                menu.image_flyout_open = true;
-                self.chart_context_menu = Some(menu);
-            }
-            ChartContextAction::CopyImage => {
+            ChartContextAction::SaveCapture => {
                 self.chart_context_menu = None;
-                self.update_context_menu_pane(&menu, WorkspaceSurface::copy_chart_image, cx);
-            }
-            ChartContextAction::SaveImage => {
-                self.chart_context_menu = None;
-                self.update_context_menu_pane(&menu, WorkspaceSurface::save_chart_image, cx);
+                self.update_context_menu_pane(&menu, WorkspaceSurface::save_chart_capture, cx);
             }
             ChartContextAction::Reset => {
                 self.chart_context_menu = None;
@@ -1667,11 +1679,45 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Shows "Copied" on the open menu's `action` row, then closes the menu unless a newer copy
+    /// or a reopened menu has taken over.
+    fn show_chart_copy_feedback(
+        &mut self,
+        action: ChartContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = &mut self.chart_context_menu else {
+            return;
+        };
+        self.chart_context_copy_feedback_generation = self
+            .chart_context_copy_feedback_generation
+            .saturating_add(1);
+        let generation = self.chart_context_copy_feedback_generation;
+        menu.copy_feedback = Some(ChartCopyFeedback { action, generation });
+        cx.notify();
+        cx.spawn_in(window, async move |terminal, cx| {
+            cx.background_executor()
+                .timer(CHART_COPY_FEEDBACK_DURATION)
+                .await;
+            let _ = terminal.update_in(cx, |terminal, _, terminal_cx| {
+                if Self::chart_context_copy_feedback_is_current(
+                    terminal.chart_context_menu.as_ref(),
+                    generation,
+                ) {
+                    terminal.close_chart_context_menu(terminal_cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn chart_context_copy_feedback_is_current(
         menu: Option<&ChartContextMenu>,
         generation: u64,
     ) -> bool {
-        menu.and_then(|menu| menu.copy_feedback_generation) == Some(generation)
+        menu.and_then(|menu| menu.copy_feedback)
+            .is_some_and(|feedback| feedback.generation == generation)
     }
 
     fn update_context_menu_pane(
@@ -1761,13 +1807,13 @@ impl TerminalApp {
         cx.notify();
     }
 
-    /// Hovering a chart menu row opens the image submenu on its own row and closes it on any
-    /// other, so the submenu follows the pointer without a dismiss timer.
-    pub(super) fn set_chart_image_flyout(&mut self, open: bool, cx: &mut Context<Self>) {
+    /// Hovering a chart menu row opens the capture chart submenu on its own row and closes it on
+    /// any other, so the submenu follows the pointer without a dismiss timer.
+    pub(super) fn set_chart_capture_flyout(&mut self, open: bool, cx: &mut Context<Self>) {
         if let Some(menu) = &mut self.chart_context_menu
-            && menu.image_flyout_open != open
+            && menu.capture_flyout_open != open
         {
-            menu.image_flyout_open = open;
+            menu.capture_flyout_open = open;
             cx.notify();
         }
     }

@@ -80,10 +80,23 @@ pub(super) fn apply_series_state(
             )?;
             Ok(())
         }
-        SeriesLoadState::Empty
-        | SeriesLoadState::Resolving
-        | SeriesLoadState::Partial
-        | SeriesLoadState::Superseded => Ok(()),
+        // The provider answered with no history and the runtime keeps the live
+        // subscription up. This is a settled state, not a fault: presenting it
+        // as recovering would invalidate the replay stream and re-request the
+        // same empty history.
+        SeriesLoadState::Empty => {
+            *live = false;
+            announce(
+                ChartState::AwaitingData,
+                state.detail.unwrap_or_else(|| {
+                    format!("{provider_name} has no market history for this period yet")
+                }),
+            )?;
+            Ok(())
+        }
+        SeriesLoadState::Resolving | SeriesLoadState::Partial | SeriesLoadState::Superseded => {
+            Ok(())
+        }
     }
 }
 

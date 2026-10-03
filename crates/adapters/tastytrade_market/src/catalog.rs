@@ -186,6 +186,7 @@ fn documented_quote_currency(
                     "ES" | "MES"
                         | "NQ"
                         | "MNQ"
+                        | "NNQ"
                         | "RTY"
                         | "M2K"
                         | "CL"
@@ -344,6 +345,7 @@ mod tests {
     fn documented_currency_defaults_are_limited_to_verified_products() {
         for (venue, code) in [
             ("CME", "MES"),
+            ("CME", "NNQ"),
             ("CME", "RTY"),
             ("CME", "CL"),
             ("CME", "GC"),

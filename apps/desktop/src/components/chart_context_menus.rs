@@ -56,18 +56,18 @@ pub(super) fn clamp_chart_context_menu_origin(
 
 const CHART_CONTEXT_MENU_ROWS: f32 = 9.0;
 const CHART_CONTEXT_MENU_SEPARATORS: f32 = 5.0;
-/// The "Chart image" row: third row, below one separator.
-const CHART_IMAGE_ROW: f32 = 2.0;
-const CHART_IMAGE_ROW_SEPARATORS_BEFORE: f32 = 1.0;
+/// The "Capture chart" row: third row, below one separator.
+const CAPTURE_CHART_ROW: f32 = 2.0;
+const CAPTURE_CHART_ROW_SEPARATORS_BEFORE: f32 = 1.0;
 
-/// The chart image submenu opens beside its row, to the right when it fits and otherwise
+/// The capture chart submenu opens beside its row, to the right when it fits and otherwise
 /// to the left, and stays inside the window.
-pub(super) fn clamp_chart_image_flyout_origin(
+pub(super) fn clamp_chart_capture_flyout_origin(
     root: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
     let scale = MenuScale::BASE;
-    let width = scale.px(CHART_IMAGE_FLYOUT_WIDTH);
+    let width = scale.px(CHART_CAPTURE_FLYOUT_WIDTH);
     let height = px(scaled_overlay_height(2.0, 0.0, scale));
     let margin = px(OVERLAY_EDGE_MARGIN);
     let gap = px(PRICE_AXIS_FLYOUT_GAP);
@@ -80,8 +80,8 @@ pub(super) fn clamp_chart_image_flyout_origin(
         left_x
     };
     let row_y = root.y
-        + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * CHART_IMAGE_ROW
-        + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CHART_IMAGE_ROW_SEPARATORS_BEFORE);
+        + scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT) * CAPTURE_CHART_ROW
+        + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CAPTURE_CHART_ROW_SEPARATORS_BEFORE);
     point(
         x.max(margin),
         row_y
@@ -190,19 +190,19 @@ pub(super) fn chart_context_menu_layer(
             "chart_context_menu_enter",
             animation_origin,
         ));
-    if menu.image_flyout_open {
-        let flyout_origin = clamp_chart_image_flyout_origin(origin, viewport);
+    if menu.capture_flyout_open {
+        let flyout_origin = clamp_chart_capture_flyout_origin(origin, viewport);
         let flyout_bounds = Bounds::new(
             flyout_origin,
             size(
-                scale.px(CHART_IMAGE_FLYOUT_WIDTH),
+                scale.px(CHART_CAPTURE_FLYOUT_WIDTH),
                 px(scaled_overlay_height(2.0, 0.0, scale)),
             ),
         );
         let row_height = scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT);
         let parent_y = origin.y
-            + row_height * CHART_IMAGE_ROW
-            + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CHART_IMAGE_ROW_SEPARATORS_BEFORE)
+            + row_height * CAPTURE_CHART_ROW
+            + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CAPTURE_CHART_ROW_SEPARATORS_BEFORE)
             + row_height / 2.0;
         let parent_x = if flyout_origin.x < origin.x {
             origin.x
@@ -210,12 +210,12 @@ pub(super) fn chart_context_menu_layer(
             origin.x + scale.px(CHART_CONTEXT_MENU_WIDTH)
         };
         let mut flyout = flat_compact_menu_panel(
-            "chart_image_menu",
+            "capture_chart_menu",
             flyout_origin,
-            scale.px(CHART_IMAGE_FLYOUT_WIDTH),
+            scale.px(CHART_CAPTURE_FLYOUT_WIDTH),
             theme,
         );
-        let items = chart_image_menu_items(state);
+        let items = chart_capture_menu_items(state);
         let last = items.len().saturating_sub(1);
         for (index, item) in items.into_iter().enumerate() {
             flyout = flyout.child(chart_context_menu_item(
@@ -230,7 +230,7 @@ pub(super) fn chart_context_menu_layer(
         }
         layer = layer.child(animate_popup_from_origin(
             flyout,
-            "chart_image_menu_enter",
+            "capture_chart_menu_enter",
             PopupAnimationOrigin::from_trigger(point(parent_x, parent_y), flyout_bounds),
         ));
     }
@@ -287,11 +287,11 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
             action: ChartContextAction::CopyPrice,
         },
         ChartContextMenuItem {
-            id: "chart_context_image",
+            id: "chart_context_capture",
             icon: HugeIcon::Camera,
-            label: "Chart image",
+            label: "Capture chart",
             enabled: state.enabled(ChartContextMenuState::READY),
-            action: ChartContextAction::ImageMenu,
+            action: ChartContextAction::CaptureMenu,
         },
         ChartContextMenuItem {
             id: "chart_context_remove_drawings",
@@ -338,22 +338,22 @@ pub(super) fn chart_context_menu_items(state: ChartContextMenuState) -> [ChartCo
     ]
 }
 
-pub(super) fn chart_image_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 2] {
+pub(super) fn chart_capture_menu_items(state: ChartContextMenuState) -> [ChartContextMenuItem; 2] {
     let enabled = state.enabled(ChartContextMenuState::READY);
     [
         ChartContextMenuItem {
-            id: "chart_image_copy",
+            id: "capture_chart_copy",
             icon: HugeIcon::Copy,
             label: "Copy image",
             enabled,
-            action: ChartContextAction::CopyImage,
+            action: ChartContextAction::CopyCapture,
         },
         ChartContextMenuItem {
-            id: "chart_image_save",
+            id: "capture_chart_save",
             icon: HugeIcon::Download,
             label: "Save image…",
             enabled,
-            action: ChartContextAction::SaveImage,
+            action: ChartContextAction::SaveCapture,
         },
     ]
 }
@@ -370,9 +370,10 @@ pub(super) fn chart_context_menu_item(
     let icon_size = scale.px(16.0);
     let action_terminal = terminal.clone();
     let destructive = item.action.is_destructive();
-    let copy_feedback_generation = (item.action == ChartContextAction::CopyPrice)
-        .then_some(menu.copy_feedback_generation)
-        .flatten();
+    let copy_feedback_generation = menu
+        .copy_feedback
+        .filter(|feedback| feedback.action == item.action)
+        .map(|feedback| feedback.generation);
     let icon_color = gpui_color(if destructive {
         if item.enabled {
             theme.colors.danger
@@ -405,8 +406,8 @@ pub(super) fn chart_context_menu_item(
                     .color(icon_color),
             )
             .with_animation(
-                ("copy_price_success", generation),
-                Animation::new(COPY_PRICE_SUCCESS_ANIMATION_DURATION).with_easing(ease_out_quint()),
+                ("chart_copy_success", generation),
+                Animation::new(CHART_COPY_SUCCESS_ANIMATION_DURATION).with_easing(ease_out_quint()),
                 |icon, delta| icon.opacity(delta).mt(px((1.0 - delta) * 2.0)),
             )
             .into_any_element()
@@ -421,20 +422,20 @@ pub(super) fn chart_context_menu_item(
     } else {
         label
     };
-    let opens_image_menu = action == ChartContextAction::ImageMenu;
+    let opens_capture_menu = action == ChartContextAction::CaptureMenu;
     let mut row = MenuRow::compact(id, row_label, theme)
         .scale(scale)
         .leading(leading)
         .disabled(!enabled)
         .destructive(destructive)
-        .highlighted(opens_image_menu && menu.image_flyout_open)
+        .highlighted(opens_capture_menu && menu.capture_flyout_open)
         .flush_in_panel(first, last);
     if action == ChartContextAction::CopyPrice
         && let Some(price) = menu.copy_price.clone()
     {
         row = row.trailing(copy_price_chip(price, enabled, scale, theme));
     }
-    if opens_image_menu {
+    if opens_capture_menu {
         row = row.trailing(
             header_icon(HugeIcon::ArrowRight)
                 .with_size(icon_size)
@@ -443,13 +444,13 @@ pub(super) fn chart_context_menu_item(
     }
     if !matches!(
         action,
-        ChartContextAction::CopyImage | ChartContextAction::SaveImage
+        ChartContextAction::CopyCapture | ChartContextAction::SaveCapture
     ) {
         let hover_terminal = terminal.clone();
         row = row.on_hover(move |hovered, _, cx| {
             if *hovered {
                 hover_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.set_chart_image_flyout(opens_image_menu && enabled, terminal_cx);
+                    terminal.set_chart_capture_flyout(opens_capture_menu && enabled, terminal_cx);
                 });
             }
         });

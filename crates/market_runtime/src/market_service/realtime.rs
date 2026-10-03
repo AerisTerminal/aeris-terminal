@@ -2328,6 +2328,12 @@ impl Coordinator<'_> {
                 self.evaluate_price_alert_trade(trade);
             }
         }
+        self.request_history_after_indexed_trades(
+            provider,
+            provider_generation,
+            instrument,
+            changes,
+        );
         if let Some(observed) = changes
             .iter()
             .filter_map(|change| change.trade.as_ref())
@@ -2343,6 +2349,30 @@ impl Coordinator<'_> {
             );
         }
         self.broadcast_order_book(provider, &instrument.instrument_id);
+    }
+
+    fn request_history_after_indexed_trades(
+        &mut self,
+        provider: &str,
+        generation: ProviderGeneration,
+        instrument: &InstallProviderInstrument,
+        changes: &[IndexedTradeMutation],
+    ) {
+        if let Some(newest) = changes
+            .iter()
+            .filter(|change| change.kind == super::IndexedTradeKind::New)
+            .filter_map(|change| change.trade.as_ref())
+            .filter_map(|trade| trade.metadata.timestamps.exchange_unix_nanos)
+            .max()
+        {
+            self.request_current_history_after_live_trade(
+                provider,
+                generation,
+                &instrument.instrument_id,
+                &instrument.entitlement_id,
+                newest,
+            );
+        }
     }
 
     fn request_indexed_trade_recovery(
@@ -2398,16 +2428,56 @@ impl Coordinator<'_> {
             for trade in trades {
                 self.rithmic_trade(provider, generation, trade);
             }
-            return;
-        }
-        let mut dirty_books = BTreeSet::new();
-        for trade in trades {
-            if let Some(instrument_id) = self.candle_provider_trade(provider, generation, trade) {
-                dirty_books.insert(instrument_id);
+        } else {
+            let mut dirty_books = BTreeSet::new();
+            for trade in trades {
+                if let Some(instrument_id) = self.candle_provider_trade(provider, generation, trade)
+                {
+                    dirty_books.insert(instrument_id);
+                }
+            }
+            for instrument_id in dirty_books {
+                self.broadcast_order_book(provider, &instrument_id);
             }
         }
-        for instrument_id in dirty_books {
-            self.broadcast_order_book(provider, &instrument_id);
+        self.request_history_after_live_trades(provider, generation, trades);
+    }
+
+    fn request_history_after_live_trades(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        trades: &[MarketTrade],
+    ) {
+        if self.history_current_empty.is_empty() {
+            return;
+        }
+        let Ok(generation) = id(generation).map(ProviderGeneration) else {
+            return;
+        };
+        if self
+            .engine
+            .provider_status(provider)
+            .and_then(|status| status.generation)
+            != Some(generation)
+        {
+            return;
+        }
+        for trade in trades {
+            if trade.metadata.provider_id != provider
+                || trade.metadata.session_generation != generation.0.get()
+            {
+                continue;
+            }
+            if let Some(exchange_unix_nanos) = trade.metadata.timestamps.exchange_unix_nanos {
+                self.request_current_history_after_live_trade(
+                    provider,
+                    generation,
+                    &trade.metadata.instrument_id,
+                    &trade.metadata.entitlement_id,
+                    exchange_unix_nanos,
+                );
+            }
         }
     }
 

@@ -205,7 +205,7 @@ pub(crate) fn decode(frame: &[u8]) -> Result<Option<DecodedMarketMessage>, Proto
         150 => decode_trade(frame),
         151 => decode_quote(frame).map(Some),
         156 => decode_order_book(frame).map(Some),
-        116 => decode_depth_by_order_snapshot(frame).map(Some),
+        116 => decode_depth_by_order_snapshot(frame),
         160 => decode_depth_by_order(frame).map(Some),
         161 => decode_depth_by_order_end(frame).map(Some),
         template => Err(ProtocolError::UnsupportedTemplate(template)),
@@ -214,7 +214,9 @@ pub(crate) fn decode(frame: &[u8]) -> Result<Option<DecodedMarketMessage>, Proto
 
 #[cfg(rithmic_kit)]
 #[allow(clippy::too_many_lines)]
-fn decode_depth_by_order_snapshot(frame: &[u8]) -> Result<DecodedMarketMessage, ProtocolError> {
+fn decode_depth_by_order_snapshot(
+    frame: &[u8],
+) -> Result<Option<DecodedMarketMessage>, ProtocolError> {
     use crate::generated::rti;
     use prost::Message;
 
@@ -230,6 +232,12 @@ fn decode_depth_by_order_snapshot(frame: &[u8]) -> Result<DecodedMarketMessage, 
         message.rp_code.is_empty(),
     ) {
         (false, true) => {
+            if is_empty_book_frame(&message) {
+                // Observed on Rithmic Test with a closed market: the handler
+                // reports `["7", "no data"]` with no level before the terminal
+                // frame. That is an empty book, not a rejected request.
+                return Ok(None);
+            }
             if !accepted_snapshot_code(&message.rq_handler_rp_code) {
                 return Err(ProtocolError::RejectedDataFrame);
             }
@@ -289,7 +297,7 @@ fn decode_depth_by_order_snapshot(frame: &[u8]) -> Result<DecodedMarketMessage, 
                     })
                 })
                 .collect::<Result<Vec<_>, ProtocolError>>()?;
-            Ok(DecodedMarketMessage::DepthByOrderSnapshot(
+            Ok(Some(DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::Level(DepthByOrderSnapshotLevel {
                     identity,
                     sequence_number,
@@ -297,7 +305,7 @@ fn decode_depth_by_order_snapshot(frame: &[u8]) -> Result<DecodedMarketMessage, 
                     price,
                     orders,
                 }),
-            ))
+            )))
         }
         (true, false) => {
             let accepted = accepted_snapshot_code(&message.rp_code);
@@ -323,13 +331,13 @@ fn decode_depth_by_order_snapshot(frame: &[u8]) -> Result<DecodedMarketMessage, 
                     ));
                 }
             };
-            Ok(DecodedMarketMessage::DepthByOrderSnapshot(
+            Ok(Some(DecodedMarketMessage::DepthByOrderSnapshot(
                 DepthByOrderSnapshotMessage::Complete {
                     accepted,
                     identity,
                     sequence_number: message.sequence_number.filter(|sequence| *sequence != 0),
                 },
-            ))
+            )))
         }
         _ => Err(ProtocolError::ResponseCodeShape),
     }
@@ -373,6 +381,22 @@ fn validate_snapshot_code_field(
 #[cfg(rithmic_kit)]
 fn accepted_snapshot_code(codes: &[String]) -> bool {
     codes.len() == 1 && codes[0] == "0"
+}
+
+#[cfg(rithmic_kit)]
+const NO_DATA_RESPONSE_CODE: &str = "7";
+
+#[cfg(rithmic_kit)]
+fn is_empty_book_frame(message: &crate::generated::rti::ResponseDepthByOrderSnapshot) -> bool {
+    message
+        .rq_handler_rp_code
+        .first()
+        .is_some_and(|code| code == NO_DATA_RESPONSE_CODE)
+        && message.depth_side.is_none()
+        && message.depth_price.is_none()
+        && message.depth_size.is_empty()
+        && message.depth_order_priority.is_empty()
+        && message.exchange_order_id.is_empty()
 }
 
 #[cfg(not(rithmic_kit))]
@@ -1049,6 +1073,51 @@ mod tests {
                     sequence_number: Some(40),
                 }
             )) if symbol == "ESM7" && exchange == "CME"
+        ));
+    }
+
+    #[test]
+    fn empty_book_depth_by_order_snapshot_frame_is_skipped_not_rejected() {
+        let empty = rti::ResponseDepthByOrderSnapshot {
+            template_id: 116,
+            user_msg: Vec::new(),
+            rq_handler_rp_code: vec!["7".to_string(), "no data".to_string()],
+            rp_code: Vec::new(),
+            exchange: None,
+            symbol: None,
+            sequence_number: None,
+            depth_side: None,
+            depth_price: None,
+            depth_size: Vec::new(),
+            depth_order_priority: Vec::new(),
+            exchange_order_id: Vec::new(),
+        }
+        .encode_to_vec();
+        assert_eq!(
+            RithmicProtocolCodec
+                .decode_market(&empty)
+                .expect("empty-book frame decodes"),
+            None
+        );
+
+        let rejected_level = rti::ResponseDepthByOrderSnapshot {
+            template_id: 116,
+            user_msg: Vec::new(),
+            rq_handler_rp_code: vec!["7".to_string(), "no data".to_string()],
+            rp_code: Vec::new(),
+            exchange: Some("CME".to_string()),
+            symbol: Some("MNQZ6".to_string()),
+            sequence_number: None,
+            depth_side: Some(rti::response_depth_by_order_snapshot::TransactionType::Buy.into()),
+            depth_price: Some(20_000.0),
+            depth_size: vec![1],
+            depth_order_priority: vec![1],
+            exchange_order_id: vec!["bid-1".to_string()],
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            RithmicProtocolCodec.decode_market(&rejected_level),
+            Err(ProtocolError::RejectedDataFrame)
         ));
     }
 

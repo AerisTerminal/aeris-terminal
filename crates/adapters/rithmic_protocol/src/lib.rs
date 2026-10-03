@@ -1,4 +1,5 @@
-//! Bounded, read-only R|Protocol encoding and decoding.
+//! Bounded R|Protocol encoding, decoding, and plant sessions for market data,
+//! history, orders, and P&L.
 
 /// Canonical application identity registered with Rithmic and sent in every
 /// R|Protocol login. Keep this as the single source of truth so production,
@@ -16,11 +17,16 @@ mod calendar;
 mod catalog;
 mod collectors;
 mod credentials;
+mod decimal;
 mod endpoint;
 mod history;
 mod history_adapter;
 mod market;
 mod network;
+mod order_plant;
+mod order_session;
+mod plant_common;
+mod pnl_plant;
 mod protocol;
 mod provider_runtime;
 mod provider_session;
@@ -44,6 +50,7 @@ pub use credentials::{
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_CREDENTIAL_FIELD_BYTES,
     RithmicCredentialBytes, RithmicCredentialError,
 };
+pub use decimal::{MAXIMUM_RITHMIC_DECIMAL_SCALE, RithmicDecimal};
 pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};
 pub use history::{
     BarIdentity, DecodedHistoryMessage, DecodedTickBar, DecodedTimeBar, DecodedTimeBarType,
@@ -64,10 +71,31 @@ pub use market::{
     OrderBookUpdate, OrderBookUpdateKind, ProviderTimestamp, QuoteLevel, QuoteSideUpdate,
     QuoteUpdate, TradeAggressor, TradeUpdate,
 };
+pub use order_plant::{
+    AccountListRequest, CancelAllOrdersRequest, CancelOrderRequest, DecodedOrderMessage,
+    ExecutionReplayRequest, FillHistoryRequest, MAXIMUM_FILL_HISTORY_RECORDS,
+    MAXIMUM_FILL_HISTORY_WINDOW_SECONDS, ModifyOrderRequest, NewOrderRequest, OrderPlantRequest,
+    RithmicAccount, RithmicExchangeNotifyType, RithmicExchangeOrderNotification, RithmicFill,
+    RithmicFillHistoryRow, RithmicLoginInfo, RithmicOrderCommandReply, RithmicOrderDetails,
+    RithmicOrderDuration, RithmicOrderNotification, RithmicOrderNotifyType, RithmicOrderPlacement,
+    RithmicOrderSide, RithmicOrderType, RithmicReportedPriceType, RithmicReportedSide,
+    RithmicRequestCompletion, RithmicTradeRoute, RithmicUserType, TradeRoutesRequest,
+};
+pub use order_session::{
+    MAXIMUM_STREAM_START_MESSAGES, MAXIMUM_TRACKED_RITHMIC_ACCOUNTS, RithmicOrderConnection,
+    RithmicOrderPlantMessage, RithmicPnlConnection, RithmicPnlPlantMessage,
+};
+pub use plant_common::{
+    RithmicAccountKey, RithmicAccountRef, RithmicRequestKind, RithmicRequestOutcome,
+};
+pub use pnl_plant::{
+    DecodedPnlMessage, PnlPlantRequest, PnlPositionUpdatesRequest, RithmicAccountPnl,
+    RithmicInstrumentPnl, RithmicPositionQuantities,
+};
 pub use protocol::{
     DecodedControlMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
     InstrumentReferenceRequest, InstrumentType, LoginRequest, MarketDataSubscription,
-    OutboundRequest, ProtocolError, ReadOnlyPlant, RithmicKitUnavailable, RithmicProtocolBackend,
+    OutboundRequest, ProtocolError, RithmicKitUnavailable, RithmicPlant, RithmicProtocolBackend,
     RithmicProtocolCodec, SearchPattern, SensitiveFrame, SubscriptionAction, SymbolSearchRequest,
     TickBarReplayRequest, TickBarSubscription, TimeBarReplayRequest, TimeBarSubscription,
     TimeBarType,

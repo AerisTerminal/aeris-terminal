@@ -548,11 +548,18 @@ impl TerminalApp {
         active: &Entity<WorkspaceSurface>,
         cx: &App,
     ) -> impl IntoElement + use<> {
+        let surface = active.read(cx);
         bottom_panel::bottom_panel(
             bottom_panel::BottomPanelView {
                 terminal,
                 state: &self.bottom_panel,
-                chart: active.read(cx).chart.clone(),
+                chart: surface.chart.clone(),
+                rithmic_attribution: terminal_chrome::shows_rithmic_attribution(
+                    surface.provider,
+                    surface
+                        .connection_state
+                        .unwrap_or(FeedConnectionState::Disconnected),
+                ),
             },
             &self.theme,
         )

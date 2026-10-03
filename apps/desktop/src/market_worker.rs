@@ -93,6 +93,9 @@ pub enum ChartState {
     Ready,
     Stale,
     Recovering,
+    /// The provider answered the demand with no market history; the live
+    /// subscription stays up and nothing is wrong or retrying.
+    AwaitingData,
     Error,
 }
 
@@ -104,8 +107,16 @@ impl ChartState {
             Self::Ready => "Chart ready",
             Self::Stale => "Chart stale",
             Self::Recovering => "Reconnecting chart",
+            Self::AwaitingData => "Waiting for market data",
             Self::Error => "Chart unavailable",
         }
+    }
+
+    /// States that only an engine readiness report may leave; a bar
+    /// publication alone does not make the chart current.
+    #[must_use]
+    pub const fn awaits_engine_readiness(self) -> bool {
+        matches!(self, Self::Loading | Self::AwaitingData)
     }
 }
 
@@ -1688,6 +1699,7 @@ mod tests {
         assert_eq!(ChartState::Ready.label(), "Chart ready");
         assert_eq!(ChartState::Stale.label(), "Chart stale");
         assert_eq!(ChartState::Recovering.label(), "Reconnecting chart");
+        assert_eq!(ChartState::AwaitingData.label(), "Waiting for market data");
         assert_eq!(ChartState::Error.label(), "Chart unavailable");
     }
 

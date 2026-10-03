@@ -1,13 +1,14 @@
 use crate::{
     DecodedCatalogMessage, DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage,
     DepthByOrderSnapshotRequest, DepthByOrderSubscription, InstrumentReferenceRequest,
-    LoginRequest, MarketDataSubscription, OutboundRequest, ProtocolError, ReadOnlyPlant,
-    ReplayKind, RithmicProtocolBackend, RithmicProtocolCodec, RithmicSessionError,
-    RithmicSessionLimits, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
+    LoginRequest, MarketDataSubscription, OutboundRequest, ProtocolError, ReplayKind,
+    RithmicOrderConnection, RithmicPlant, RithmicPnlConnection, RithmicProtocolBackend,
+    RithmicProtocolCodec, RithmicSessionError, RithmicSessionLimits, SymbolSearchRequest,
+    TickBarReplayRequest, TimeBarReplayRequest,
     endpoint::RithmicEndpoint,
     network::{
         ConnectionAbort, RithmicWebSocket, begin_shutdown, connect_websocket, default_tls_config,
-        set_deadline,
+        is_cancellation, set_deadline, stop_requested,
     },
 };
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -20,6 +21,12 @@ use std::{
 use tungstenite::{Bytes, Message};
 
 const TEST_SYSTEM: &str = "Rithmic Test";
+
+/// Logout budget once the session owner has requested a stop. Shutdown paths
+/// must finish within the desktop's shutdown budget, so a stopping session
+/// waits at most this long for the provider's logout acknowledgement even when
+/// the configured `close_timeout` is longer.
+pub(crate) const STOPPING_LOGOUT_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct ConnectionControl<'a> {
     stop: Option<Arc<AtomicBool>>,
@@ -55,13 +62,13 @@ pub struct RithmicApplication<'a> {
 /// in its server logs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RithmicLoginMetadata {
-    pub plant: ReadOnlyPlant,
+    pub plant: RithmicPlant,
     pub system_name: &'static str,
     pub unique_user_id: Option<String>,
     pub started_at_utc: String,
 }
 
-/// One sanitized inbound message from the authenticated read-only session.
+/// One sanitized inbound message from an authenticated ticker or history session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RithmicSessionMessage {
     Control(DecodedControlMessage),
@@ -118,9 +125,59 @@ impl RithmicTestSession {
             limits,
             ConnectionControl { stop, abort: None },
             tls_config,
-            ReadOnlyPlant::History,
+            RithmicPlant::History,
         )
         .map(RithmicHistoryConnection::new)
+    }
+
+    /// Performs system discovery, then logs in to the order plant on a fresh
+    /// WSS connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted terminal or transient session failure.
+    pub fn discover_and_login_orders(
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        stop: Option<Arc<AtomicBool>>,
+    ) -> Result<RithmicOrderConnection, RithmicSessionError> {
+        let tls_config = default_tls_config()?;
+        Self::connect_plant_with(
+            RithmicEndpoint::TEST,
+            credentials,
+            application,
+            limits,
+            ConnectionControl { stop, abort: None },
+            tls_config,
+            RithmicPlant::Order,
+        )
+        .map(RithmicOrderConnection::new)
+    }
+
+    /// Performs system discovery, then logs in to the P&L plant on a fresh WSS
+    /// connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted terminal or transient session failure.
+    pub fn discover_and_login_pnl(
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        stop: Option<Arc<AtomicBool>>,
+    ) -> Result<RithmicPnlConnection, RithmicSessionError> {
+        let tls_config = default_tls_config()?;
+        Self::connect_plant_with(
+            RithmicEndpoint::TEST,
+            credentials,
+            application,
+            limits,
+            ConnectionControl { stop, abort: None },
+            tls_config,
+            RithmicPlant::Pnl,
+        )
+        .map(RithmicPnlConnection::new)
     }
 
     pub(crate) fn connect_with(
@@ -138,7 +195,7 @@ impl RithmicTestSession {
             limits,
             ConnectionControl { stop, abort: None },
             tls_config,
-            ReadOnlyPlant::Ticker,
+            RithmicPlant::Ticker,
         )
         .map(RithmicTickerConnection::new)
     }
@@ -161,9 +218,80 @@ impl RithmicTestSession {
                 abort: Some(abort),
             },
             tls_config,
-            ReadOnlyPlant::Ticker,
+            RithmicPlant::Ticker,
         )
         .map(RithmicTickerConnection::new)
+    }
+
+    #[cfg(all(test, rithmic_kit))]
+    pub(crate) fn connect_with_abort(
+        endpoint: RithmicEndpoint,
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        stop: Arc<AtomicBool>,
+        abort: &ConnectionAbort,
+        tls_config: ClientConfig,
+    ) -> Result<RithmicTickerConnection, RithmicSessionError> {
+        Self::connect_plant_with(
+            endpoint,
+            credentials,
+            application,
+            limits,
+            ConnectionControl {
+                stop: Some(stop),
+                abort: Some(abort),
+            },
+            tls_config,
+            RithmicPlant::Ticker,
+        )
+        .map(RithmicTickerConnection::new)
+    }
+
+    #[cfg(all(test, rithmic_kit))]
+    pub(crate) fn connect_order_with(
+        endpoint: RithmicEndpoint,
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        tls_config: ClientConfig,
+    ) -> Result<RithmicOrderConnection, RithmicSessionError> {
+        Self::connect_plant_with(
+            endpoint,
+            credentials,
+            application,
+            limits,
+            ConnectionControl {
+                stop: None,
+                abort: None,
+            },
+            tls_config,
+            RithmicPlant::Order,
+        )
+        .map(RithmicOrderConnection::new)
+    }
+
+    #[cfg(all(test, rithmic_kit))]
+    pub(crate) fn connect_pnl_with(
+        endpoint: RithmicEndpoint,
+        credentials: RithmicCredentials<'_>,
+        application: RithmicApplication<'_>,
+        limits: RithmicSessionLimits,
+        tls_config: ClientConfig,
+    ) -> Result<RithmicPnlConnection, RithmicSessionError> {
+        Self::connect_plant_with(
+            endpoint,
+            credentials,
+            application,
+            limits,
+            ConnectionControl {
+                stop: None,
+                abort: None,
+            },
+            tls_config,
+            RithmicPlant::Pnl,
+        )
+        .map(RithmicPnlConnection::new)
     }
 
     #[cfg(all(test, rithmic_kit))]
@@ -182,7 +310,7 @@ impl RithmicTestSession {
             limits,
             ConnectionControl { stop, abort: None },
             tls_config,
-            ReadOnlyPlant::History,
+            RithmicPlant::History,
         )
         .map(RithmicHistoryConnection::new)
     }
@@ -194,7 +322,7 @@ impl RithmicTestSession {
         limits: RithmicSessionLimits,
         control: ConnectionControl<'_>,
         tls_config: ClientConfig,
-        plant: ReadOnlyPlant,
+        plant: RithmicPlant,
     ) -> Result<AuthenticatedConnection, RithmicSessionError> {
         let endpoint = endpoint.validate()?;
         let limits = limits.validate()?;
@@ -259,12 +387,13 @@ impl RithmicTestSession {
                     unique_user_id,
                     started_at_utc: utc_timestamp(SystemTime::now()),
                 };
-                log_session_event("login", &metadata, None);
+                log_session_event(&session_event_record("login", &metadata, None));
                 Ok(AuthenticatedConnection {
                     socket,
                     heartbeat_interval,
                     limits,
                     metadata,
+                    logout_confirmed: false,
                 })
             }
             DecodedControlMessage::Login {
@@ -275,23 +404,31 @@ impl RithmicTestSession {
     }
 }
 
-struct AuthenticatedConnection {
+pub(crate) struct AuthenticatedConnection {
     socket: RithmicWebSocket,
     heartbeat_interval: Duration,
     limits: RithmicSessionLimits,
     metadata: RithmicLoginMetadata,
+    logout_confirmed: bool,
 }
 
 impl AuthenticatedConnection {
-    const fn heartbeat_interval(&self) -> Duration {
+    pub(crate) const fn heartbeat_interval(&self) -> Duration {
         self.heartbeat_interval
     }
 
-    const fn login_metadata(&self) -> &RithmicLoginMetadata {
+    pub(crate) const fn limits(&self) -> RithmicSessionLimits {
+        self.limits
+    }
+
+    pub(crate) const fn login_metadata(&self) -> &RithmicLoginMetadata {
         &self.metadata
     }
 
-    fn send(&mut self, request: OutboundRequest<'_>) -> Result<(), RithmicSessionError> {
+    pub(crate) fn send(&mut self, request: OutboundRequest<'_>) -> Result<(), RithmicSessionError> {
+        if !request.permitted_on(self.metadata.plant) {
+            return Err(RithmicSessionError::RequestNotPermitted);
+        }
         set_deadline(
             &mut self.socket,
             Instant::now() + self.limits.response_timeout,
@@ -320,13 +457,32 @@ impl AuthenticatedConnection {
         }
     }
 
-    fn close(mut self) -> Result<(), RithmicSessionError> {
-        let deadline = Instant::now() + self.limits.close_timeout;
+    /// Reads one binary provider frame for a plant-specific decoder.
+    pub(crate) fn read_frame_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Bytes, RithmicSessionError> {
+        set_deadline(&mut self.socket, deadline);
+        read_binary_until(&mut self.socket, deadline)
+    }
+
+    /// Logs out, waits for the provider acknowledgement, then sends the
+    /// WebSocket close frame. A session whose owner requested a stop waits at
+    /// most [`STOPPING_LOGOUT_TIMEOUT`] for the acknowledgement.
+    pub(crate) fn close(mut self) -> Result<(), RithmicSessionError> {
+        let timeout = if stop_requested(&self.socket) {
+            self.limits.close_timeout.min(STOPPING_LOGOUT_TIMEOUT)
+        } else {
+            self.limits.close_timeout
+        };
+        let deadline = Instant::now() + timeout;
         begin_shutdown(&mut self.socket, deadline);
         let backend = RithmicProtocolBackend::detected();
         send_request(&mut self.socket, &backend, OutboundRequest::Logout)?;
-        let mut acknowledged = false;
-        for _ in 0..64 {
+        // A streaming plant keeps delivering market frames until the logout is
+        // processed, so frames are drained until the acknowledgement or the
+        // deadline rather than for a fixed frame count.
+        loop {
             let frame = read_binary_until(&mut self.socket, deadline)?;
             let control = match backend.decode_control(&frame) {
                 Ok(control) => control,
@@ -335,10 +491,7 @@ impl AuthenticatedConnection {
             };
             match control {
                 DecodedControlMessage::Logout { accepted: true }
-                | DecodedControlMessage::ForcedLogout => {
-                    acknowledged = true;
-                    break;
-                }
+                | DecodedControlMessage::ForcedLogout => break,
                 DecodedControlMessage::Reject
                 | DecodedControlMessage::Logout { accepted: false } => {
                     return Err(RithmicSessionError::Protocol);
@@ -346,9 +499,7 @@ impl AuthenticatedConnection {
                 _ => {}
             }
         }
-        if !acknowledged {
-            return Err(RithmicSessionError::Deadline);
-        }
+        self.logout_confirmed = true;
         self.socket
             .close(None)
             .map_err(|_| RithmicSessionError::Transport)
@@ -358,7 +509,14 @@ impl AuthenticatedConnection {
 impl Drop for AuthenticatedConnection {
     fn drop(&mut self) {
         let ended_at_utc = utc_timestamp(SystemTime::now());
-        log_session_event("end", &self.metadata, Some(&ended_at_utc));
+        log_session_event(&session_event_record(
+            "end",
+            &self.metadata,
+            Some(SessionEnd {
+                ended_at_utc: &ended_at_utc,
+                logout_confirmed: self.logout_confirmed,
+            }),
+        ));
     }
 }
 
@@ -366,19 +524,40 @@ fn utc_timestamp(timestamp: SystemTime) -> String {
     DateTime::<Utc>::from(timestamp).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn log_session_event(event: &str, metadata: &RithmicLoginMetadata, ended_at_utc: Option<&str>) {
-    let record = serde_json::json!({
+struct SessionEnd<'a> {
+    ended_at_utc: &'a str,
+    logout_confirmed: bool,
+}
+
+fn session_event_record(
+    event: &str,
+    metadata: &RithmicLoginMetadata,
+    end: Option<SessionEnd<'_>>,
+) -> serde_json::Value {
+    let mut record = serde_json::json!({
         "event": event,
         "system": metadata.system_name,
         "plant": metadata.plant.name(),
         "unique_user_id": metadata.unique_user_id,
         "started_at_utc": metadata.started_at_utc,
-        "ended_at_utc": ended_at_utc,
+        "ended_at_utc": end.as_ref().map(|end| end.ended_at_utc),
     });
+    if let (Some(end), Some(fields)) = (end, record.as_object_mut()) {
+        let logout = if end.logout_confirmed {
+            "confirmed"
+        } else {
+            "unconfirmed"
+        };
+        fields.insert("logout".to_string(), logout.into());
+    }
+    record
+}
+
+fn log_session_event(record: &serde_json::Value) {
     eprintln!("AERIS_RITHMIC_SESSION {record}");
 }
 
-/// Authenticated read-only ticker-plant connection.
+/// Authenticated ticker-plant connection.
 pub struct RithmicTickerConnection {
     connection: AuthenticatedConnection,
     search_in_flight: bool,
@@ -531,7 +710,7 @@ impl RithmicTickerConnection {
     }
 }
 
-/// Authenticated read-only history-plant connection.
+/// Authenticated history-plant connection.
 pub struct RithmicHistoryConnection {
     connection: AuthenticatedConnection,
     replay_in_flight: Option<ReplayKind>,
@@ -750,7 +929,7 @@ fn finish_discovery_close(
     }
 }
 
-fn map_protocol_error(error: ProtocolError) -> RithmicSessionError {
+pub(crate) fn map_protocol_error(error: ProtocolError) -> RithmicSessionError {
     eprintln!("Rithmic protocol category: {error:?}");
     match error {
         ProtocolError::KitUnavailable => RithmicSessionError::KitUnavailable,
@@ -761,9 +940,7 @@ fn map_protocol_error(error: ProtocolError) -> RithmicSessionError {
 
 fn map_websocket_error(error: tungstenite::Error) -> RithmicSessionError {
     match error {
-        tungstenite::Error::Io(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-            RithmicSessionError::Cancelled
-        }
+        tungstenite::Error::Io(error) if is_cancellation(&error) => RithmicSessionError::Cancelled,
         tungstenite::Error::Io(error)
             if matches!(
                 error.kind(),
@@ -774,5 +951,57 @@ fn map_websocket_error(error: tungstenite::Error) -> RithmicSessionError {
         }
         tungstenite::Error::Capacity(_) => RithmicSessionError::Protocol,
         _ => RithmicSessionError::Transport,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata() -> RithmicLoginMetadata {
+        RithmicLoginMetadata {
+            plant: RithmicPlant::Ticker,
+            system_name: TEST_SYSTEM,
+            unique_user_id: Some("fixture-unique-user-id".to_string()),
+            started_at_utc: "2026-01-02T03:04:05.006Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn session_end_record_distinguishes_confirmed_from_unconfirmed_logout() {
+        let login = session_event_record("login", &metadata(), None);
+        assert_eq!(
+            login,
+            serde_json::json!({
+                "event": "login",
+                "system": TEST_SYSTEM,
+                "plant": "ticker",
+                "unique_user_id": "fixture-unique-user-id",
+                "started_at_utc": "2026-01-02T03:04:05.006Z",
+                "ended_at_utc": null,
+            })
+        );
+        for (logout_confirmed, logout) in [(true, "confirmed"), (false, "unconfirmed")] {
+            let end = session_event_record(
+                "end",
+                &metadata(),
+                Some(SessionEnd {
+                    ended_at_utc: "2026-01-02T03:05:00.000Z",
+                    logout_confirmed,
+                }),
+            );
+            assert_eq!(
+                end,
+                serde_json::json!({
+                    "event": "end",
+                    "system": TEST_SYSTEM,
+                    "plant": "ticker",
+                    "unique_user_id": "fixture-unique-user-id",
+                    "started_at_utc": "2026-01-02T03:04:05.006Z",
+                    "ended_at_utc": "2026-01-02T03:05:00.000Z",
+                    "logout": logout,
+                })
+            );
+        }
     }
 }
