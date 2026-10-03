@@ -69,16 +69,28 @@ jobs:
           kill "$pid"
           wait "$pid" 2>/dev/null || true
           cat "$log"
-      - name: Package app bundle
+      # A disk image is one file that survives transfer through Windows and chat
+      # apps; opening it mounts a volume the tester runs the app from directly.
+      - name: Package app bundle disk image
         run: |
           set -euo pipefail
-          ditto -c -k --keepParent "$BUNDLE" "$PREVIEW_ROOT/Aeris-Terminal-$PREVIEW_VERSION-macos-arm64-preview.zip"
+          stage="$PREVIEW_ROOT/dmg-root"
+          image="$PREVIEW_ROOT/Aeris-Terminal-$PREVIEW_VERSION-macos-arm64-preview.dmg"
+          mount="$PREVIEW_ROOT/dmg-verify"
+          mkdir -p "$stage"
+          ditto "$BUNDLE" "$stage/Aeris Terminal.app"
+          hdiutil create -volname "Aeris Terminal" -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$image"
+          hdiutil verify "$image"
+          mkdir -p "$mount"
+          hdiutil attach "$image" -readonly -nobrowse -mountpoint "$mount"
+          codesign --verify --strict --verbose=2 "$mount/Aeris Terminal.app"
+          hdiutil detach "$mount"
           ls -l "$PREVIEW_ROOT"
-      - name: Upload app bundle
+      - name: Upload app bundle disk image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: aeris-terminal-macos-arm64-preview
-          path: target/macos-preview/Aeris-Terminal-*-macos-arm64-preview.zip
+          path: target/macos-preview/Aeris-Terminal-*-macos-arm64-preview.dmg
           if-no-files-found: error
           retention-days: 14
       - name: Upload smoke launch evidence

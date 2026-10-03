@@ -1938,6 +1938,12 @@ mod tests {
         }
         assert!(workflow.contains("codesign --force --sign - --timestamp=none"));
         assert!(workflow.contains("codesign --verify --strict"));
+        assert!(
+            workflow.contains("hdiutil verify")
+                && workflow.contains("macos-arm64-preview.dmg")
+                && !workflow.contains(".zip"),
+            "the macOS preview ships as one verified disk image"
+        );
         assert!(workflow.contains("retention-days: 14"));
         for bundled in [
             "apps/desktop/packaging/macos/Info.plist",
