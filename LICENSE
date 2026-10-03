@@ -1,10 +1,46 @@
-Copyright (c) 2026 The Aeris Terminal authors. All rights reserved.
+Aeris Terminal - Proprietary License
 
-This repository and all of its contents are proprietary and confidential.
-Public visibility of this repository does not grant any license. No right to
-use, copy, modify, merge, publish, distribute, sublicense, or sell any part of
-this software, in source or binary form, is granted, express or implied,
-without prior written permission from the copyright holders.
+Copyright (c) 2026 Devraj Mahar. All rights reserved.
 
-Third-party components keep their own licenses, including the vendored
-third_party/gpui_base (Apache License 2.0, see third_party/gpui_base/LICENSE-APACHE).
+This repository, including all source code, history, documentation, designs,
+assets, build scripts and any compiled output (the "Software"), is the
+exclusive property of Devraj Mahar. It is proprietary and confidential.
+
+NO LICENSE IS GRANTED. The repository may be publicly visible for a limited
+time for build verification only. Public visibility is not permission. Unless
+you hold a separate written license signed by Devraj Mahar, you may not, in
+whole or in part, by any means:
+
+  - clone, download, mirror, archive, or otherwise copy the Software;
+  - fork the Software, or use, modify, or redistribute any fork of it;
+  - modify, translate, or create derivative works of the Software;
+  - compile, build, install, execute, or deploy the Software;
+  - distribute, publish, sublicense, sell, rent, lease, or transfer the
+    Software or any copy of it;
+  - reverse engineer, decompile, or disassemble any compiled form of the
+    Software;
+  - use the Software, or any part of it, to train, fine-tune, or evaluate
+    machine-learning or AI models, or include it in any dataset;
+  - use the Software for any commercial or non-commercial purpose.
+
+GitHub's Terms of Service give GitHub users the limited ability to view this
+repository and to fork it within GitHub while it is public. That ability is
+the only access permitted. It grants no right to use, copy outside GitHub,
+modify, build, run, or distribute the Software or any fork, and any fork must
+be deleted on request.
+
+The "Aeris" and "Aeris Terminal" names, logos, and branding are not licensed.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. IN NO EVENT
+SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY ARISING FROM ANY USE OF THE SOFTWARE.
+
+Unauthorized use is copyright infringement and may result in civil and
+criminal liability. Devraj Mahar reserves all rights and remedies.
+
+Third-party components remain under their own licenses, including the
+vendored third_party/gpui_base (Apache License 2.0, see
+third_party/gpui_base/LICENSE-APACHE). Third-party names and logos remain
+the property of their respective owners.
+
+Permission requests: devrajmahar15@gmail.com
