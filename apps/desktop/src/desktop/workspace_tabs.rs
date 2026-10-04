@@ -1,6 +1,7 @@
 //! Workspace tabs.
 
 use super::*;
+use aeris_observability::diagnostic;
 
 pub(super) fn move_item<T>(items: &mut Vec<T>, source: usize, destination: usize) -> bool {
     if items.is_empty() {
@@ -41,7 +42,7 @@ fn start_market_summary(
                 Some(worker)
             }
             Err(error) => {
-                eprintln!("market summary demand could not start: {error}");
+                diagnostic!("market summary demand could not start: {error}");
                 None
             }
         }
@@ -140,7 +141,7 @@ impl TerminalApp {
             })
             .transpose()
             .unwrap_or_else(|error| {
-                eprintln!("Aeris workspace persistence could not start: {error}");
+                diagnostic!("Aeris workspace persistence could not start: {error}");
                 None
             });
         let persisted_layout = workspace_layout_tabs(&workspaces, cx);
@@ -1405,7 +1406,7 @@ impl TerminalApp {
         if let Some(updater) = self.updater.as_mut()
             && let Err(error) = updater.request_check()
         {
-            eprintln!("Aeris update check degraded: {error}");
+            diagnostic!("Aeris update check degraded: {error}");
         }
         cx.notify();
     }
@@ -1414,7 +1415,7 @@ impl TerminalApp {
         if let Some(updater) = self.updater.as_mut()
             && let Err(error) = updater.request_restart()
         {
-            eprintln!("Aeris update restart degraded: {error}");
+            diagnostic!("Aeris update restart degraded: {error}");
         }
         cx.notify();
     }
@@ -1872,13 +1873,13 @@ impl TerminalApp {
                 .background_executor()
                 .spawn(async move {
                     if let Err(error) = chart_chrome::run_chart_chrome_preferences_save_worker() {
-                        eprintln!("Aeris chart chrome could not be saved: {error}");
+                        diagnostic!("Aeris chart chrome could not be saved: {error}");
                     }
                 })
                 .detach(),
             Ok(false) => {}
             Err(error) => {
-                eprintln!("Aeris chart chrome could not be saved: {error}");
+                diagnostic!("Aeris chart chrome could not be saved: {error}");
             }
         }
     }
@@ -2525,7 +2526,7 @@ impl TerminalApp {
             |account| account.request_sign_in(),
         );
         if let Err(error) = result {
-            eprintln!("Aeris sign-in degraded: {error}");
+            diagnostic!("Aeris sign-in degraded: {error}");
         }
         cx.notify();
     }
@@ -2536,7 +2537,7 @@ impl TerminalApp {
             |account| account.request_sign_out(),
         );
         if let Err(error) = result {
-            eprintln!("Aeris sign-out degraded: {error}");
+            diagnostic!("Aeris sign-out degraded: {error}");
         }
         cx.notify();
     }
@@ -2547,7 +2548,7 @@ impl TerminalApp {
             |account| account.reopen_browser(),
         );
         if let Err(error) = result {
-            eprintln!("Aeris browser reopen degraded: {error}");
+            diagnostic!("Aeris browser reopen degraded: {error}");
         }
         cx.notify();
     }
@@ -2558,7 +2559,7 @@ impl TerminalApp {
             |account| account.request_cancel(),
         );
         if let Err(error) = result {
-            eprintln!("Aeris sign-in cancellation degraded: {error}");
+            diagnostic!("Aeris sign-in cancellation degraded: {error}");
         }
         cx.notify();
     }
@@ -2702,7 +2703,7 @@ impl TerminalApp {
                 if let Some(account) = aeris_desktop::account::DesktopAccount::shared()
                     && let Err(error) = account.request_profile_refresh()
                 {
-                    eprintln!("Aeris profile refresh degraded: {error}");
+                    diagnostic!("Aeris profile refresh degraded: {error}");
                 }
             }
             self.schedule_market_frame(window, cx);

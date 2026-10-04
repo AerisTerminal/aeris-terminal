@@ -5,6 +5,7 @@
 
 pub const AUTH_BACKEND_CONFIGURED: bool = cfg!(test);
 
+use aeris_observability::diagnostic;
 use std::{
     sync::{
         Arc, Mutex, OnceLock,
@@ -31,7 +32,7 @@ pub fn open_manage_profile() -> Result<(), String> {
         .name("aeris-open-profile".to_string())
         .spawn(|| {
             if let Err(error) = aeris_platform_runtime::open_system_browser(MANAGE_PROFILE_URL) {
-                eprintln!("Aeris profile browser open degraded: {error}");
+                diagnostic!("Aeris profile browser open degraded: {error}");
             }
         })
         .map(|_| ())

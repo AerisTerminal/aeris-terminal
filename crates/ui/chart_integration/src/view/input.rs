@@ -8,6 +8,7 @@ use super::{
 };
 use aeris_charts_engine::{ChartContextMenu, ChartInputEvent, ChartRegion, PriceScaleTarget};
 use aeris_charts_render_gpui::input::cursor_style;
+use aeris_observability::diagnostic;
 use gpui::{CursorStyle, KeyUpEvent, PinchEvent, Point};
 use num_traits::ToPrimitive;
 
@@ -123,7 +124,7 @@ impl AerisChartView {
             self.live_evidence_mouse_downs = self.live_evidence_mouse_downs.saturating_add(1);
             let x: f32 = event.position.x.into();
             let y: f32 = event.position.y.into();
-            eprintln!("AERIS_CHART_MOUSE_DOWN {{\"x\":{x},\"y\":{y}}}");
+            diagnostic!("AERIS_CHART_MOUSE_DOWN {{\"x\":{x},\"y\":{y}}}");
         }
         if let Some(focus_handle) = &self.focus_handle {
             window.focus(focus_handle, cx);

@@ -22,6 +22,7 @@ use aeris_market_data::{
     AggressorSide, BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, MarketTrade,
     QualifiedTimestamp, TopOfBookQuote,
 };
+use aeris_observability::diagnostic;
 use aeris_platform_runtime::{CredentialVault, PowerEvent};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -1168,7 +1169,7 @@ impl SessionEmitter {
             )
             .is_err();
         if generation_mismatch || invalid {
-            eprintln!(
+            diagnostic!(
                 "Rithmic callback validation failed: event={} generation_mismatch={generation_mismatch}",
                 provider_event_kind(&event)
             );

@@ -1,5 +1,6 @@
 //! Bounded operating-system user-notification delivery.
 
+use aeris_observability::diagnostic;
 use std::{
     fmt,
     sync::{OnceLock, mpsc},
@@ -111,7 +112,7 @@ fn notification_worker(receiver: &mpsc::Receiver<NativeUserNotification>) {
         #[cfg(target_os = "macos")]
         native.sound_name("Default");
         if let Err(error) = native.show() {
-            eprintln!("Aeris operating-system notification failed: {error}");
+            diagnostic!("Aeris operating-system notification failed: {error}");
         }
     }
 }

@@ -10,6 +10,7 @@ use super::{
     TradeHandoffSeed, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
     fail_waiters, publish_state, series_state, thread, try_enqueue_history,
 };
+use aeris_observability::diagnostic;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewportRefillPlan {
@@ -505,7 +506,7 @@ impl Coordinator<'_> {
         generation: ProviderGeneration,
     ) {
         if let Err(error) = self.enqueue_history_recovery(series, generation) {
-            eprintln!(
+            diagnostic!(
                 "Aeris market history enqueue failed for {}: {error}",
                 series.instrument_id
             );
@@ -530,7 +531,7 @@ impl Coordinator<'_> {
                     self.history_retries.entry((series.clone(), generation))
                 {
                     entry.insert((Instant::now() + HISTORY_RETRY_DELAY, 0, range));
-                    eprintln!(
+                    diagnostic!(
                         "Aeris market history queue full for {}; bounded retry scheduled",
                         series.instrument_id
                     );
@@ -626,9 +627,10 @@ impl Coordinator<'_> {
             .history_retries
             .get(&key)
             .map_or(1, |(_, attempts, _)| attempts.saturating_add(1));
-        eprintln!(
+        diagnostic!(
             "Aeris engine {} history attempt {attempts} failed for {}: {error}",
-            series.provider_id, series.instrument_id
+            series.provider_id,
+            series.instrument_id
         );
         if attempts > MAXIMUM_HISTORY_RETRIES {
             if range.is_some() {
@@ -951,7 +953,7 @@ impl Coordinator<'_> {
         match try_enqueue_history(history, request) {
             Ok(()) => {
                 if range.is_none() {
-                    eprintln!(
+                    diagnostic!(
                         "Aeris market covering history requested for {} generation={}",
                         series.instrument_id,
                         generation.0.get()
@@ -1087,7 +1089,7 @@ impl Coordinator<'_> {
         match result {
             Ok(snapshot) => {
                 if range.is_none() {
-                    eprintln!(
+                    diagnostic!(
                         "Aeris market covering history completed for {} generation={} bars={}",
                         series.instrument_id,
                         generation.0.get(),
@@ -1202,7 +1204,7 @@ impl Coordinator<'_> {
         self.pending.remove(series);
         self.series_live_if_ready(series);
         if range.is_none() && replacing_existing {
-            eprintln!(
+            diagnostic!(
                 "Aeris market series recovery finished for {} generation={}",
                 series.instrument_id,
                 generation.0.get()
@@ -1263,7 +1265,7 @@ impl Coordinator<'_> {
                 }
             }
         };
-        eprintln!(
+        diagnostic!(
             "Aeris market covering history for {} generation={} is empty; {}",
             series.instrument_id,
             generation.0.get(),
@@ -1352,7 +1354,7 @@ impl Coordinator<'_> {
                 (series.clone(), generation),
                 EmptyCurrentHistory::LiveTradeRequested,
             );
-            eprintln!(
+            diagnostic!(
                 "Aeris market live trade arrived for {} generation={}; requesting covering history",
                 series.instrument_id,
                 generation.0.get()
@@ -1389,11 +1391,11 @@ impl Coordinator<'_> {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {
-                    eprintln!("Aeris study execution after history install failed: {error}");
+                    diagnostic!("Aeris study execution after history install failed: {error}");
                 }
             }
             Err(error) => {
-                eprintln!("Aeris study execution after history install failed: {error}");
+                diagnostic!("Aeris study execution after history install failed: {error}");
             }
         }
     }
@@ -1410,7 +1412,7 @@ impl Coordinator<'_> {
         if let Err(error) =
             self.enqueue_history_request_with_capacity_retry(series, generation, range)
         {
-            eprintln!(
+            diagnostic!(
                 "Aeris market deferred history enqueue failed for {}: {error}",
                 series.instrument_id
             );

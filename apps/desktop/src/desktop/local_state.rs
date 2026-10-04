@@ -1,3 +1,4 @@
+use aeris_observability::diagnostic;
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
@@ -40,7 +41,7 @@ mod legacy_workspace_envelope {
 
 pub(super) fn load_workspace() -> WorkspaceState {
     load_workspace_result().unwrap_or_else(|error| {
-        eprintln!("Aeris workspace restore skipped: {error}");
+        diagnostic!("Aeris workspace restore skipped: {error}");
         default_workspace()
     })
 }
@@ -78,11 +79,11 @@ fn load_workspace_result() -> Result<WorkspaceState, String> {
             if let Err(error) = fs::remove_file(&legacy)
                 && error.kind() != std::io::ErrorKind::NotFound
             {
-                eprintln!("Aeris legacy workspace cleanup deferred: {error}");
+                diagnostic!("Aeris legacy workspace cleanup deferred: {error}");
             }
         }
         Err(error) => {
-            eprintln!("Aeris workspace migration could not persist the current format: {error}");
+            diagnostic!("Aeris workspace migration could not persist the current format: {error}");
         }
     }
     Ok(workspace)

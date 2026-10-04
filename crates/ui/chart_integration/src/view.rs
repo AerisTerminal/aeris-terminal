@@ -43,6 +43,7 @@ use aeris_design_system::{
     AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_font_stack,
     platform_typography,
 };
+use aeris_observability::diagnostic;
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
     KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -1680,7 +1681,7 @@ impl AerisChartView {
             Ok(_) => SeriesMutation::None,
             Err(error) => {
                 bridge.mark_stream_invalid();
-                eprintln!("replay update rejected; snapshot required: {error}");
+                diagnostic!("replay update rejected; snapshot required: {error}");
                 SeriesMutation::None
             }
         }
@@ -2415,7 +2416,7 @@ impl AerisChartView {
             let elapsed = rebuild_started.elapsed();
             if self.live_evidence_enabled && self.live_evidence_rebuilds < 256 {
                 self.live_evidence_rebuilds = self.live_evidence_rebuilds.saturating_add(1);
-                eprintln!(
+                diagnostic!(
                     "AERIS_CHART_REBUILD {{\"micros\":{},\"layout\":{},\"data\":\"{}\"}}",
                     elapsed.as_micros(),
                     layout_recomputed,
@@ -2423,7 +2424,7 @@ impl AerisChartView {
                 );
             }
             if elapsed.as_millis() >= 4 {
-                eprintln!(
+                diagnostic!(
                     "chart rebuild: {} ms (layout={})",
                     elapsed.as_millis(),
                     layout_recomputed
@@ -2448,13 +2449,13 @@ impl AerisChartView {
             self.renderer
                 .paint_frame(&prepared, viewport, window.scale_factor(), window, cx)
         {
-            eprintln!("Aeris Charts frame skipped: {error}");
+            diagnostic!("Aeris Charts frame skipped: {error}");
         }
         #[cfg(feature = "diagnostics")]
         {
             let elapsed = paint_started.elapsed();
             if elapsed.as_millis() >= 4 {
-                eprintln!("chart paint: {} ms", elapsed.as_millis());
+                diagnostic!("chart paint: {} ms", elapsed.as_millis());
             }
         }
     }

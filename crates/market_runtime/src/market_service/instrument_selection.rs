@@ -7,6 +7,7 @@ use super::{
 };
 use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent};
+use aeris_observability::diagnostic;
 
 pub(super) fn id(value: u64) -> Result<NonZeroU64, String> {
     NonZeroU64::new(value).ok_or_else(|| "market identity must be non-zero".to_string())
@@ -286,7 +287,7 @@ impl Coordinator<'_> {
             return;
         }
         self.session_mut(provider).catalog_degraded = Some(generation);
-        eprintln!("Aeris engine {provider} catalog refresh degraded: {detail}");
+        diagnostic!("Aeris engine {provider} catalog refresh degraded: {detail}");
     }
 
     /// Clears catalog degradation after a success from the same provider

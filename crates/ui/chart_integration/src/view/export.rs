@@ -18,6 +18,7 @@ use aeris_design_system::{
     BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, ThemeColor, TypographyRole, brand_font_family,
     platform_font_stack, platform_typography,
 };
+use aeris_observability::diagnostic;
 #[cfg(not(windows))]
 use gpui::{ClipboardItem, Image, ImageFormat};
 use gpui::{Context, Task};
@@ -395,7 +396,7 @@ impl AerisChartView {
         let export = match captured {
             Ok(export) => export,
             Err(error) => {
-                eprintln!("Chart capture copy failed: {error}");
+                diagnostic!("Chart capture copy failed: {error}");
                 return Task::ready(false);
             }
         };
@@ -407,7 +408,7 @@ impl AerisChartView {
             cx.spawn(async move |_, _| match copy.await {
                 Ok(()) => true,
                 Err(error) => {
-                    eprintln!("Chart capture copy failed: {error}");
+                    diagnostic!("Chart capture copy failed: {error}");
                     false
                 }
             })
@@ -428,7 +429,7 @@ impl AerisChartView {
                     true
                 }
                 Err(error) => {
-                    eprintln!("Chart capture copy failed: {error}");
+                    diagnostic!("Chart capture copy failed: {error}");
                     false
                 }
             })
@@ -442,7 +443,7 @@ impl AerisChartView {
         let export = match captured {
             Ok(export) => export,
             Err(error) => {
-                eprintln!("Chart capture save failed: {error}");
+                diagnostic!("Chart capture save failed: {error}");
                 return;
             }
         };
@@ -452,7 +453,7 @@ impl AerisChartView {
                 Ok(Ok(Some(path))) => path,
                 Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
-                    eprintln!("Chart capture save failed: {error}");
+                    diagnostic!("Chart capture save failed: {error}");
                     return;
                 }
             };
@@ -461,7 +462,7 @@ impl AerisChartView {
                 .spawn(async move { write_png(&export, &path) })
                 .await;
             if let Err(error) = written {
-                eprintln!("Chart capture save failed: {error}");
+                diagnostic!("Chart capture save failed: {error}");
             }
         })
         .detach();

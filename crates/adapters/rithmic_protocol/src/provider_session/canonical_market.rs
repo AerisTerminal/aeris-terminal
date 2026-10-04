@@ -1,5 +1,6 @@
 //! Canonical market.
 
+use aeris_observability::diagnostic;
 use std::time::{Duration, Instant};
 
 use super::{
@@ -545,7 +546,7 @@ fn order_level_outcome(
         Ok(outcome) => Some(outcome),
         Err((reason, _)) => {
             if assembler.recover(Instant::now()) {
-                eprintln!("Aeris Rithmic order-level depth resnapshot requested: {reason:?}");
+                diagnostic!("Aeris Rithmic order-level depth resnapshot requested: {reason:?}");
                 if !depth_resnapshots
                     .iter()
                     .any(|pending| pending == instrument_id)
@@ -553,7 +554,7 @@ fn order_level_outcome(
                     depth_resnapshots.push_back(instrument_id.to_string());
                 }
             } else {
-                eprintln!(
+                diagnostic!(
                     "Aeris Rithmic order-level depth disabled for this session after repeated {reason:?}"
                 );
             }

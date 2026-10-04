@@ -11,6 +11,7 @@ use crate::{
         is_cancellation, set_deadline, stop_requested,
     },
 };
+use aeris_observability::diagnostic;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rustls::ClientConfig;
 use std::{
@@ -554,7 +555,7 @@ fn session_event_record(
 }
 
 fn log_session_event(record: &serde_json::Value) {
-    eprintln!("AERIS_RITHMIC_SESSION {record}");
+    diagnostic!("AERIS_RITHMIC_SESSION {record}");
 }
 
 /// Authenticated ticker-plant connection.
@@ -930,7 +931,7 @@ fn finish_discovery_close(
 }
 
 pub(crate) fn map_protocol_error(error: ProtocolError) -> RithmicSessionError {
-    eprintln!("Rithmic protocol category: {error:?}");
+    diagnostic!("Rithmic protocol category: {error:?}");
     match error {
         ProtocolError::KitUnavailable => RithmicSessionError::KitUnavailable,
         ProtocolError::TemplateVersionMismatch => RithmicSessionError::SchemaMismatch,

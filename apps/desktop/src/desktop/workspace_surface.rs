@@ -1,6 +1,7 @@
 //! Workspace surface.
 
 use super::*;
+use aeris_observability::diagnostic;
 
 /// The persisted chart time zone, or the chart default for legacy workspaces without one.
 fn restored_chart_time_zone(restored: Option<&WorkspaceChartState>) -> String {
@@ -1464,7 +1465,7 @@ impl WorkspaceSurface {
         let chart_state_json = match chart.export_semantic_state_json() {
             Ok(state) => state,
             Err(error) => {
-                eprintln!("Aeris drawings could not be serialized: {error}");
+                diagnostic!("Aeris drawings could not be serialized: {error}");
                 return self.unloaded_chart_state();
             }
         };
@@ -1552,7 +1553,7 @@ impl WorkspaceSurface {
         };
         chart.update(cx, |chart, _| {
             if let Err(error) = chart.set_time_zone(time_zone) {
-                eprintln!("Aeris persisted chart time zone could not be restored: {error}");
+                diagnostic!("Aeris persisted chart time zone could not be restored: {error}");
             }
             if let Some(order_flow) = order_flow {
                 let _ = chart.set_order_flow_settings(order_flow);
@@ -1564,13 +1565,13 @@ impl WorkspaceSurface {
                 let _ = chart.set_appearance_settings(appearance);
             }
             if let Err(error) = chart.restore_indicator_states(&indicators) {
-                eprintln!("Aeris persisted indicators could not be restored: {error}");
+                diagnostic!("Aeris persisted indicators could not be restored: {error}");
             }
             if restore_drawings
                 && !drawing_json.is_empty()
                 && let Err(error) = chart.import_semantic_state_json(&drawing_json, &locked)
             {
-                eprintln!("Aeris persisted drawings could not be restored: {error}");
+                diagnostic!("Aeris persisted drawings could not be restored: {error}");
             }
             if let Some(price_axis) = price_axis {
                 let _ = chart.restore_price_axis_menu_state(price_axis);
@@ -1626,7 +1627,7 @@ impl WorkspaceSurface {
             let time_zone = chart_time_zone.clone();
             chart.update(cx, |chart, _| {
                 if let Err(error) = chart.set_time_zone(&time_zone) {
-                    eprintln!("Aeris chart time zone could not be applied: {error}");
+                    diagnostic!("Aeris chart time zone could not be applied: {error}");
                 }
             });
         }
@@ -1842,7 +1843,7 @@ impl WorkspaceSurface {
         let time_zone = self.chart_time_zone.clone();
         chart.update(cx, |chart, _| {
             if let Err(error) = chart.set_time_zone(&time_zone) {
-                eprintln!("Aeris chart time zone could not be applied: {error}");
+                diagnostic!("Aeris chart time zone could not be applied: {error}");
             }
         });
     }
@@ -2684,16 +2685,16 @@ impl WorkspaceSurface {
                     interior_gaps.map_or_else(|| "null".to_string(), |value| value.to_string());
                 let interval_nanos =
                     interval_nanos.map_or_else(|| "null".to_string(), |value| value.to_string());
-                eprintln!(
+                diagnostic!(
                     "AERIS_LIVE_SNAPSHOT {{\"bar_count\":{},\"first_timestamp\":{first_timestamp},\"last_timestamp\":{last_timestamp},\"interior_gaps\":{interior_gaps},\"interval_nanos\":{interval_nanos}}}",
                     snapshot.bars().len()
                 );
             }
-            ReplayStreamUpdate::Delta(delta) => eprintln!(
+            ReplayStreamUpdate::Delta(delta) => diagnostic!(
                 "AERIS_LIVE_UPDATE {{\"kind\":\"delta\",\"timestamp\":{}}}",
                 delta.item().provenance().exchange_timestamp_unix_nanos
             ),
-            ReplayStreamUpdate::Tail(tail) => eprintln!(
+            ReplayStreamUpdate::Tail(tail) => diagnostic!(
                 "AERIS_LIVE_UPDATE {{\"kind\":\"tail\",\"timestamp\":{},\"forming\":{}}}",
                 tail.item().provenance().exchange_timestamp_unix_nanos,
                 tail.forming()
@@ -2767,7 +2768,9 @@ impl WorkspaceSurface {
                 let (accepted, recovery_pending) = chart.update(cx, |chart, _| {
                     let accepted = chart.try_queue_replay_update(update).is_ok();
                     if !accepted {
-                        eprintln!("bounded chart queue overflowed; canonical resnapshot required");
+                        diagnostic!(
+                            "bounded chart queue overflowed; canonical resnapshot required"
+                        );
                     }
                     (accepted, chart.replay_bridge_metrics().recovery_pending)
                 });
@@ -2857,7 +2860,7 @@ impl WorkspaceSurface {
                     return;
                 }
                 self.apply_market_state_message(ChartState::Error, error.clone(), cx);
-                eprintln!("fixture recovery {request_id} failed: {error}");
+                diagnostic!("fixture recovery {request_id} failed: {error}");
                 return;
             }
         };
@@ -2903,7 +2906,7 @@ impl WorkspaceSurface {
                     chart_cx.notify();
                 });
                 self.apply_market_state_message(ChartState::Error, error.to_string(), cx);
-                eprintln!("fixture recovery {request_id} was rejected: {error}");
+                diagnostic!("fixture recovery {request_id} was rejected: {error}");
             }
         }
     }
@@ -2915,7 +2918,7 @@ impl WorkspaceSurface {
                 chart_cx.notify();
             });
         }
-        eprintln!("market worker invalidated the stream: {message}");
+        diagnostic!("market worker invalidated the stream: {message}");
     }
 
     /// Reports whether an engine selection handoff must keep the chart covered.
@@ -2977,7 +2980,7 @@ impl WorkspaceSurface {
             MarketWorkerMessage::Update(publication) => self.apply_publication(publication, cx),
             MarketWorkerMessage::Diagnostics(snapshot) => {
                 #[cfg(feature = "diagnostics")]
-                eprintln!("desktop market diagnostics: {snapshot:?}");
+                diagnostic!("desktop market diagnostics: {snapshot:?}");
                 #[cfg(not(feature = "diagnostics"))]
                 drop(snapshot);
             }
@@ -3145,7 +3148,7 @@ impl WorkspaceSurface {
         if let Err(error) =
             notification.and_then(aeris_platform_runtime::try_send_user_notification)
         {
-            eprintln!("Aeris order-flow notification was not delivered: {error}");
+            diagnostic!("Aeris order-flow notification was not delivered: {error}");
         }
         cx.notify();
     }
@@ -3438,7 +3441,7 @@ impl WorkspaceSurface {
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    eprintln!("Aeris study output could not be displayed: {error}");
+                    diagnostic!("Aeris study output could not be displayed: {error}");
                 }
             }
         });
@@ -3943,7 +3946,7 @@ impl WorkspaceSurface {
         let states = self.retained_chart_presentation.indicators.clone();
         let result = chart.update(cx, |chart, _| chart.restore_indicator_states(&states));
         if let Err(error) = result {
-            eprintln!("Aeris chart indicators could not be restored: {error}");
+            diagnostic!("Aeris chart indicators could not be restored: {error}");
         }
     }
 
@@ -4267,13 +4270,13 @@ impl WorkspaceSurface {
                 .background_executor()
                 .spawn(async move {
                     if let Err(error) = chart_chrome::run_chart_chrome_preferences_save_worker() {
-                        eprintln!("Aeris chart chrome could not be saved: {error}");
+                        diagnostic!("Aeris chart chrome could not be saved: {error}");
                     }
                 })
                 .detach(),
             Ok(false) => {}
             Err(error) => {
-                eprintln!("Aeris chart chrome could not be saved: {error}");
+                diagnostic!("Aeris chart chrome could not be saved: {error}");
             }
         }
     }

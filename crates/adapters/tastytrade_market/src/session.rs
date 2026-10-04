@@ -3,6 +3,7 @@
 
 use crate::QuoteToken;
 use aeris_market_data::{AggressorSide, MarketBar, parse_decimal_to_fixed};
+use aeris_observability::diagnostic;
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
@@ -493,7 +494,7 @@ impl DxlinkSession {
                     }
                     self.decode_failures_in_window =
                         self.decode_failures_in_window.saturating_add(1);
-                    eprintln!(
+                    diagnostic!(
                         "Aeris DXLink rejected malformed feed data ({}/8)",
                         self.decode_failures_in_window
                     );

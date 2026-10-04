@@ -871,6 +871,76 @@ mod tests {
     }
 
     #[test]
+    fn production_diagnostics_never_panic_on_a_closed_stderr() {
+        // `eprintln!` panics when stderr is a closed pipe. On the GPUI main thread that panic
+        // cannot unwind out of the window procedure and aborts the desktop; on a runtime worker
+        // it ends the worker. Command-line tools, build scripts and tests keep `eprintln!`.
+        for path in production_rust_sources() {
+            let relative = relative_string(&path);
+            if relative.contains("/src/bin/")
+                || relative.contains("/examples/")
+                || relative.contains("/tests/")
+                || relative.ends_with("/build.rs")
+                || relative.ends_with("tests.rs")
+            {
+                continue;
+            }
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            if contents.starts_with("#![cfg(test)]") {
+                continue;
+            }
+            assert!(
+                !lines_outside_test_modules(&contents)
+                    .iter()
+                    .any(|line| line.contains("eprintln!(")),
+                "{relative} writes diagnostics with eprintln!; use aeris_observability::diagnostic!"
+            );
+        }
+    }
+
+    /// Lines outside `#[cfg(test)]` modules at any nesting depth. Relies on rustfmt placing a
+    /// module's closing brace alone at the module's indentation.
+    fn lines_outside_test_modules(contents: &str) -> Vec<&str> {
+        let mut lines = contents.lines().peekable();
+        let mut production = Vec::new();
+        while let Some(line) = lines.next() {
+            if line.trim() == "#[cfg(test)]"
+                && let Some(module) = lines.peek()
+                && module.trim_start().starts_with("mod ")
+                && module.ends_with('{')
+            {
+                let close = format!("{}}}", &module[..module.len() - module.trim_start().len()]);
+                for skipped in lines.by_ref() {
+                    if skipped == close {
+                        break;
+                    }
+                }
+                continue;
+            }
+            production.push(line);
+        }
+        production
+    }
+
+    #[test]
+    fn nested_test_modules_are_not_production_lines() {
+        let source = "fn a() {}\npub mod inner {\n    fn b() {}\n\n    #[cfg(test)]\n    mod tests {\n        fn c() {}\n    }\n\n    fn d() {}\n}\n";
+        assert_eq!(
+            lines_outside_test_modules(source),
+            [
+                "fn a() {}",
+                "pub mod inner {",
+                "    fn b() {}",
+                "",
+                "",
+                "    fn d() {}",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
     fn dead_code_suppressions_remain_at_external_decode_boundaries() {
         let allowed = BTreeSet::from(["crates/adapters/rithmic_protocol/src/lib.rs"]);
 

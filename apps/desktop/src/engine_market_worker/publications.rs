@@ -10,6 +10,7 @@ use super::{
     provider_display_name, replay_runtime_snapshot, replay_runtime_tail_update,
     runtime_generation_from_snapshot, runtime_order_book_frame, series_key, worker_identity,
 };
+use aeris_observability::diagnostic;
 
 /// Applies one series-readiness transition, reporting a live handoff to the UI.
 /// Turns the engine's load state into the state the chart presents.
@@ -246,7 +247,7 @@ fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
         aeris_platform_runtime::NativeUserNotification::try_new("Aeris price alert", body);
     match notification.and_then(aeris_platform_runtime::try_send_user_notification) {
         Ok(()) => {}
-        Err(error) => eprintln!("Aeris price alert notification was not delivered: {error}"),
+        Err(error) => diagnostic!("Aeris price alert notification was not delivered: {error}"),
     }
 }
 

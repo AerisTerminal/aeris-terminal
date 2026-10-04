@@ -3,6 +3,7 @@
 //! with a preview card per mode, Window with frameless mode, and About with version, system,
 //! build mode and updates.
 
+use aeris_observability::diagnostic;
 use std::rc::Rc;
 
 use super::*;
@@ -517,7 +518,7 @@ fn run_account_action(
         AccountAction::Reopen => TerminalApp::reopen_browser_page(cx),
         AccountAction::ManageProfile => {
             if let Err(error) = aeris_desktop::account::open_manage_profile() {
-                eprintln!("Aeris profile browser open degraded: {error}");
+                diagnostic!("Aeris profile browser open degraded: {error}");
             } else {
                 terminal.arm_profile_refresh_after_browser();
             }

@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 aeris_account = { path = "../domain/account" }
 aeris_contracts = { path = "../contracts" }
+aeris_observability = { path = "../observability" }
 aeris_platform_runtime = { path = "../platform_runtime" }
 base64.workspace = true
 ed25519-dalek.workspace = true

@@ -11,6 +11,7 @@ pub mod loopback;
 pub mod oidc;
 pub mod pkce;
 
+use aeris_observability::diagnostic;
 use std::{
     fs::{self, OpenOptions},
     io::ErrorKind,
@@ -1359,7 +1360,7 @@ impl AccountService {
                 .name("aeris-account-revoke".to_string())
                 .spawn(move || {
                     if oidc::revoke_refresh(&endpoints, &token).is_err() {
-                        eprintln!("Aeris sign-out revocation degraded");
+                        diagnostic!("Aeris sign-out revocation degraded");
                     }
                 })
                 .ok();
@@ -1926,7 +1927,7 @@ fn lock_state(
 
 /// Redacted lease observation: outcome class only, never identities.
 fn note_lease(outcome: &str) {
-    eprintln!("Aeris lease: {outcome}");
+    diagnostic!("Aeris lease: {outcome}");
 }
 
 /// Sleeps until the next lease round in interruptible slices. Returns false

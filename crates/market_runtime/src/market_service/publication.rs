@@ -8,6 +8,7 @@ use crate::{
     MarketDemandError, MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesState,
     MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
 };
+use aeris_observability::diagnostic;
 use std::sync::Arc;
 
 pub(super) fn fail_waiters(
@@ -795,7 +796,7 @@ impl Coordinator<'_> {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Aeris engine series-queue overflow recovery failed: {error}");
+                    diagnostic!("Aeris engine series-queue overflow recovery failed: {error}");
                 }
             }
             if let Some(events) = self.events.get_mut(&consumer_id) {

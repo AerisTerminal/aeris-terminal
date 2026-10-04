@@ -19,6 +19,7 @@ use crate::hyperliquid_display_depth::{
 use crate::study::{
     StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyQuoteView, StudyTradeWindow,
 };
+use aeris_observability::diagnostic;
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
@@ -1540,13 +1541,13 @@ impl Coordinator<'_> {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {
-                    eprintln!("Aeris live non-bar study execution failed: {error}");
+                    diagnostic!("Aeris live non-bar study execution failed: {error}");
                 }
             }
             Err(error) => {
                 // Native study failure must not change acceptance/recovery of
                 // authoritative provider state.
-                eprintln!("Aeris live non-bar study execution failed: {error}");
+                diagnostic!("Aeris live non-bar study execution failed: {error}");
             }
         }
     }
@@ -1707,14 +1708,14 @@ impl Coordinator<'_> {
                 Ok(batch) => {
                     self.publish_study_outputs(&batch.executed);
                     for error in batch.errors {
-                        eprintln!("Aeris live study execution failed: {error}");
+                        diagnostic!("Aeris live study execution failed: {error}");
                     }
                 }
                 Err(error) => {
                     // Study failure is isolated from canonical market publication.
                     // A user calculation must never force provider recovery or make
                     // an accepted market tail look discontinuous.
-                    eprintln!("Aeris live study execution failed: {error}");
+                    diagnostic!("Aeris live study execution failed: {error}");
                 }
             }
         }
@@ -1769,10 +1770,10 @@ impl Coordinator<'_> {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {
-                    eprintln!("Aeris live study execution failed: {error}");
+                    diagnostic!("Aeris live study execution failed: {error}");
                 }
             }
-            Err(error) => eprintln!("Aeris live study execution failed: {error}"),
+            Err(error) => diagnostic!("Aeris live study execution failed: {error}"),
         }
         Ok(())
     }
@@ -2301,7 +2302,7 @@ impl Coordinator<'_> {
                     Ok(()) => None,
                     Err(error) => {
                         if live.history_state != LiveHistoryState::AwaitingHistory {
-                            eprintln!(
+                            diagnostic!(
                                 "Aeris market indexed trade rejected for {}: {error}",
                                 series.instrument_id
                             );
@@ -2514,7 +2515,7 @@ impl Coordinator<'_> {
                     |(series, live)| match live.accept_provider_candle(symbol, candle) {
                         Ok(()) => None,
                         Err(error) => {
-                            eprintln!(
+                            diagnostic!(
                                 "Aeris market provider candle rejected for {}: {error}",
                                 series.instrument_id
                             );
@@ -2873,7 +2874,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        eprintln!(
+        diagnostic!(
             "Aeris market series recovery started for {}: {detail}",
             series.instrument_id
         );
@@ -3134,7 +3135,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        eprintln!(
+        diagnostic!(
             "Aeris market series recovery started for {}: {detail}",
             series.instrument_id
         );
@@ -3424,7 +3425,7 @@ impl Coordinator<'_> {
                     ),
             };
             if let Err(error) = published {
-                eprintln!("Aeris engine live publication failed: {error}");
+                diagnostic!("Aeris engine live publication failed: {error}");
                 self.rithmic_series_recovering(
                     &series,
                     generation,
@@ -3665,7 +3666,7 @@ impl Coordinator<'_> {
                     ),
             };
             if let Err(error) = published {
-                eprintln!("Aeris engine live publication failed: {error}");
+                diagnostic!("Aeris engine live publication failed: {error}");
                 self.candle_series_recovering(
                     &series,
                     generation,

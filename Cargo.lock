@@ -123,6 +123,7 @@ version = "0.2.3"
 dependencies = [
  "aeris_account",
  "aeris_contracts",
+ "aeris_observability",
  "aeris_platform_runtime",
  "base64 0.23.1",
  "ed25519-dalek",
@@ -153,6 +154,7 @@ dependencies = [
  "aeris_charts_render",
  "aeris_charts_render_gpui",
  "aeris_design_system",
+ "aeris_observability",
  "aeris_terminal_ui",
  "arboard",
  "gpui",
@@ -320,6 +322,7 @@ dependencies = [
  "aeris_hyperliquid_market_adapter",
  "aeris_market_data",
  "aeris_market_engine",
+ "aeris_observability",
  "aeris_platform_runtime",
  "aeris_provider_history",
  "aeris_rithmic_protocol_adapter",
@@ -342,6 +345,7 @@ version = "0.2.3"
 name = "aeris_platform_runtime"
 version = "0.2.3"
 dependencies = [
+ "aeris_observability",
  "base64 0.23.1",
  "display-info",
  "ed25519-dalek",
@@ -408,6 +412,7 @@ name = "aeris_tastytrade_market_adapter"
 version = "0.2.3"
 dependencies = [
  "aeris_market_data",
+ "aeris_observability",
  "aeris_platform_runtime",
  "base64 0.23.1",
  "chrono",

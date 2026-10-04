@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aeris_observability = { path = "../observability" }
 base64.workspace = true
 ed25519-dalek.workspace = true
 serde.workspace = true

@@ -10,6 +10,7 @@ publish.workspace = true
 aeris_contracts = { path = "../contracts" }
 aeris_market_data = { path = "../domain/market_data" }
 aeris_market_engine = { path = "../market_engine" }
+aeris_observability = { path = "../observability" }
 aeris_platform_runtime = { path = "../platform_runtime" }
 aeris_provider_history = { path = "../provider_history" }
 aeris_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }

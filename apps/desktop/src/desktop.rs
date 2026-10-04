@@ -130,6 +130,7 @@ use aeris_market_runtime::{
     StreamRequirements,
 };
 use aeris_observability::FeedConnectionState;
+use aeris_observability::diagnostic;
 use aeris_terminal_ui::{
     OrderBookColumn, OrderBookColumnVisibility, OrderBookLevelClick, OrderBookLevelDrop,
     OrderBookLevelSide, ReadOnlyOrderBookView,
@@ -257,7 +258,7 @@ use workspace_layout::{
 fn install_platform_http_client(cx: &mut App) {
     match ReqwestClient::user_agent(concat!("Aeris/", env!("CARGO_PKG_VERSION"))) {
         Ok(client) => cx.set_http_client(Arc::new(client)),
-        Err(error) => eprintln!("Aeris image networking degraded: {error}"),
+        Err(error) => diagnostic!("Aeris image networking degraded: {error}"),
     }
 }
 
@@ -268,7 +269,7 @@ fn retain_account_refresh_quiesce_for_exit(
     let quiesce = match account_refresh {
         Ok(quiesce) => quiesce,
         Err(error) => {
-            eprintln!(
+            diagnostic!(
                 "Aeris refused {context} because account refresh could not be quiesced: {error}"
             );
             loop {
@@ -284,7 +285,7 @@ fn retain_account_refresh_quiesce_for_exit(
         }
         Err(error) => error,
     };
-    eprintln!("Aeris account shutdown retrying after: {first_error}");
+    diagnostic!("Aeris account shutdown retrying after: {first_error}");
     let second_error = match quiesce.wait() {
         Ok(()) => {
             quiesce.retain_until_process_exit();
@@ -292,7 +293,7 @@ fn retain_account_refresh_quiesce_for_exit(
         }
         Err(error) => error,
     };
-    eprintln!(
+    diagnostic!(
         "Aeris refused {context} because durable account refresh did not settle: {second_error}"
     );
     // This startup/background path has no GPUI lifecycle to return to. Keep the
@@ -322,7 +323,7 @@ fn native_account_session_shutdown_guard(
         let quiesce = match begin_quiesce() {
             Ok(quiesce) => quiesce,
             Err(error) => {
-                eprintln!("Aeris session shutdown was blocked: {error}");
+                diagnostic!("Aeris session shutdown was blocked: {error}");
                 return None;
             }
         };
@@ -331,7 +332,7 @@ fn native_account_session_shutdown_guard(
                 quiesce,
             )),
             Err(error) => {
-                eprintln!("Aeris session shutdown was blocked: {error}");
+                diagnostic!("Aeris session shutdown was blocked: {error}");
                 None
             }
         }
@@ -4655,7 +4656,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         }
         if argument == "--rithmic-test" {
             if arguments.next().is_some() {
-                eprintln!("usage: aeris_desktop --rithmic-test");
+                diagnostic!("usage: aeris_desktop --rithmic-test");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -4666,7 +4667,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             )
         } else if argument == "--multi-chart" {
             if arguments.next().is_some() {
-                eprintln!("usage: aeris_desktop --multi-chart");
+                diagnostic!("usage: aeris_desktop --multi-chart");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -4677,7 +4678,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             )
         } else if argument == "--workspace-tabs" {
             if arguments.next().is_some() {
-                eprintln!("usage: aeris_desktop --workspace-tabs");
+                diagnostic!("usage: aeris_desktop --workspace-tabs");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();
@@ -4686,7 +4687,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             workspace_factory = Some(group.factory);
             (Vec::new(), group.initial, lifecycle)
         } else {
-            eprintln!("unsupported argument: {}", argument.to_string_lossy());
+            diagnostic!("unsupported argument: {}", argument.to_string_lossy());
             exit_after_account_refresh_quiesce(2);
         }
     } else {
@@ -4714,36 +4715,36 @@ pub(super) fn run() {
     let mut lifecycle_arguments = std::env::args_os().skip(1);
     if lifecycle_arguments.next().as_deref() == Some(std::ffi::OsStr::new("--desktop-readiness")) {
         if let Err(error) = run_desktop_readiness_command(lifecycle_arguments) {
-            eprintln!("Aeris desktop readiness failed: {error}");
+            diagnostic!("Aeris desktop readiness failed: {error}");
             std::process::exit(1);
         }
         return;
     }
     if let Err(error) = aeris_platform_runtime::migrate_legacy_native_data_root() {
-        eprintln!("Aeris legacy local state migration deferred: {error}");
+        diagnostic!("Aeris legacy local state migration deferred: {error}");
     }
     if std::env::args_os().len() == 1
         && let Err(error) = schedule_versioned_launcher_promotion()
     {
-        eprintln!("Aeris launcher promotion deferred: {error}");
+        diagnostic!("Aeris launcher promotion deferred: {error}");
     }
     let trading = match start_trading_service() {
         Ok(trading) => trading,
         Err(error) => {
-            eprintln!("Aeris trading owner could not start: {error}");
+            diagnostic!("Aeris trading owner could not start: {error}");
             exit_after_account_refresh_quiesce(1);
         }
     };
     let context = match start_context_service() {
         Ok(context) => context,
         Err(error) => {
-            eprintln!("Aeris context owner could not start: {error}");
+            diagnostic!("Aeris context owner could not start: {error}");
             let _ = trading.shutdown(Duration::from_secs(2));
             exit_after_account_refresh_quiesce(1);
         }
     };
     if let Err(error) = aeris_desktop::trading::install(trading.clone()) {
-        eprintln!("Aeris trading owner could not be installed: {error}");
+        diagnostic!("Aeris trading owner could not be installed: {error}");
         let _ = trading.shutdown(Duration::from_secs(2));
         exit_after_account_refresh_quiesce(1);
     }
@@ -4755,7 +4756,7 @@ pub(super) fn run() {
             exit_after_account_refresh_quiesce(0);
         }
         Err(error) => {
-            eprintln!("Aeris market worker could not start: {error}");
+            diagnostic!("Aeris market worker could not start: {error}");
             let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
             exit_after_account_refresh_quiesce(1);
@@ -4764,7 +4765,7 @@ pub(super) fn run() {
     let market = match engine_market_worker::shared_market_runtime() {
         Ok(market) => market,
         Err(error) => {
-            eprintln!("Aeris practice market calendar could not start: {error}");
+            diagnostic!("Aeris practice market calendar could not start: {error}");
             let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
             exit_after_account_refresh_quiesce(1);
@@ -4783,7 +4784,7 @@ pub(super) fn run() {
             )
         },
     )) {
-        eprintln!("Aeris practice market calendar could not be installed: {error}");
+        diagnostic!("Aeris practice market calendar could not be installed: {error}");
         let _ = context.shutdown(Duration::from_secs(2));
         let _ = trading.shutdown(Duration::from_secs(2));
         exit_after_account_refresh_quiesce(1);
@@ -4854,7 +4855,7 @@ fn mount_desktop(
     let layout = configured.layout;
     let chart_chrome = configured.chart_chrome;
     if let Err(error) = validate_trading_keymap() {
-        eprintln!("Aeris trading keymap is invalid: {error}");
+        diagnostic!("Aeris trading keymap is invalid: {error}");
         return None;
     }
     bind_desktop_keys(cx);
@@ -4865,7 +4866,7 @@ fn mount_desktop(
             if let Some(quit) = quit
                 && let Err(error) = quit.await
             {
-                eprintln!("Aeris desktop shutdown failed: {error}");
+                diagnostic!("Aeris desktop shutdown failed: {error}");
             }
         }
     })

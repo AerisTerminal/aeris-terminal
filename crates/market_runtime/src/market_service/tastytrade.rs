@@ -18,6 +18,7 @@ use aeris_contracts::{
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, STARTUP_CATALOG_COMMAND_GENERATION,
 };
 use aeris_market_data::{DepthLevel, EventMetadata, QualifiedTimestamp};
+use aeris_observability::diagnostic;
 use aeris_tastytrade_market_adapter::{
     ConnectionCapability, DATA_SCALE, DxlinkSession, FeedEvent, FutureInstrument, MarketCollection,
     MarketSession, QuoteToken, ResolvedInstrument, SearchInstrument, Subscription,
@@ -688,7 +689,7 @@ pub(super) fn run_catalog(
         .name("aeris-tastytrade-equity-search".into())
         .spawn(move || run_remote_search(&remote_rx, &reply_tx, &remote_api, &remote_stop));
     let Ok(remote_worker) = remote_worker else {
-        eprintln!("Aeris tastytrade equity search worker could not start");
+        diagnostic!("Aeris tastytrade equity search worker could not start");
         return;
     };
     let mut searches = BTreeMap::<u64, (u64, Vec<SearchInstrument>)>::new();
@@ -762,7 +763,7 @@ pub(super) fn run_catalog(
             continue;
         }
         let event = result.unwrap_or_else(|error| {
-            eprintln!("Aeris tastytrade catalog request failed: {error}");
+            diagnostic!("Aeris tastytrade catalog request failed: {error}");
             CatalogEvent::Rejected {
                 rejection: ProviderCatalogRejected {
                     consumer_id: consumer,
@@ -794,7 +795,7 @@ fn refresh_catalog(
                 *refresh_at = Instant::now() + Duration::from_mins(30);
             }
             Err(error) => {
-                eprintln!("Aeris tastytrade futures catalog refresh failed: {error}");
+                diagnostic!("Aeris tastytrade futures catalog refresh failed: {error}");
                 *refresh_at = Instant::now() + Duration::from_mins(1);
                 return Some(CATALOG_UNAVAILABLE_DETAIL.into());
             }
@@ -836,7 +837,7 @@ fn remote_search_event(
             true
         }
         Err(error) => {
-            eprintln!("Aeris tastytrade equity search unavailable: {error}");
+            diagnostic!("Aeris tastytrade equity search unavailable: {error}");
             !items.is_empty()
         }
     };
@@ -925,7 +926,7 @@ fn run_remote_search(
             session_refresh_at = match api.refresh_futures_sessions(stop) {
                 Ok(()) => Instant::now() + Duration::from_mins(5),
                 Err(error) => {
-                    eprintln!("Aeris tastytrade futures calendar unavailable: {error}");
+                    diagnostic!("Aeris tastytrade futures calendar unavailable: {error}");
                     Instant::now() + Duration::from_secs(30)
                 }
             };
@@ -934,7 +935,7 @@ fn run_remote_search(
             equity_refresh_at = match api.refresh_equity_session(stop) {
                 Ok(()) => Instant::now() + Duration::from_mins(5),
                 Err(error) => {
-                    eprintln!("Aeris tastytrade equity calendar unavailable: {error}");
+                    diagnostic!("Aeris tastytrade equity calendar unavailable: {error}");
                     Instant::now() + Duration::from_secs(30)
                 }
             };
@@ -1042,7 +1043,7 @@ fn search_catalog(
 ) -> Result<CatalogEvent, String> {
     if search.categories.futures && futures.is_empty() {
         *futures = api.futures(stop).map_err(|error| {
-            eprintln!("Aeris tastytrade futures catalog request failed: {error}");
+            diagnostic!("Aeris tastytrade futures catalog request failed: {error}");
             CATALOG_UNAVAILABLE_DETAIL.to_string()
         })?;
     }
@@ -1915,9 +1916,11 @@ impl Worker {
             .ok_or("Tastytrade channel identity overflowed")?;
         match HistoryTask::begin(&request, self.channel, socket) {
             Ok(task) => {
-                eprintln!(
+                diagnostic!(
                     "Aeris tastytrade history channel opened instrument={} channel={} symbol={}",
-                    request.series.instrument_id, self.channel, task.symbol
+                    request.series.instrument_id,
+                    self.channel,
+                    task.symbol
                 );
                 self.histories.insert(self.channel, task);
             }
@@ -1963,7 +1966,7 @@ impl Worker {
                 continue;
             };
             if task.candle_state != CandleHistoryState::Published {
-                eprintln!(
+                diagnostic!(
                     "Aeris tastytrade history channel ended instrument={} channel={} candles={} state={:?} cancelled={cancelled}",
                     task.request.series.instrument_id,
                     channel,
@@ -2086,7 +2089,7 @@ impl Worker {
         }
         if let Err(error) = task.accept(event, epoch, &mut self.ordinal) {
             self.loaded_tapes.remove(&task.instrument.instrument_id);
-            eprintln!("Tastytrade tape series recovery: {error}");
+            diagnostic!("Tastytrade tape series recovery: {error}");
             self.publish(RealtimeEvent::TradeRecovery(epoch, task.instrument))?;
         } else {
             self.tape = Some(task);
@@ -2374,7 +2377,7 @@ impl Worker {
         }
     }
     fn recover(&mut self, error: String) {
-        eprintln!("Aeris tastytrade transport recovery: {error}");
+        diagnostic!("Aeris tastytrade transport recovery: {error}");
         self.socket = None;
         self.tape = None;
         self.loaded_tapes.clear();
@@ -2398,7 +2401,7 @@ impl Worker {
             RealtimeEvent::Recovering(self.epoch(), detail)
         };
         if let Err(publish_error) = self.publish(event) {
-            eprintln!("Aeris tastytrade provider state publication failed: {publish_error}");
+            diagnostic!("Aeris tastytrade provider state publication failed: {publish_error}");
             if self.paused {
                 self.ports.wake.report_failure("tastytrade", self.epoch());
             }

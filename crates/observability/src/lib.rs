@@ -1,8 +1,10 @@
-//! Bounded low-overhead latency vocabulary and deterministic reports.
+//! Bounded low-overhead latency vocabulary, deterministic reports and operator diagnostics.
 
+mod diagnostic_output;
 mod feed_diagnostics;
 mod overhead;
 
+pub use diagnostic_output::write_diagnostic;
 pub use feed_diagnostics::{
     ClockRelativeAge, DiagnosticsError, DiagnosticsQueue, FeedConnectionState, FeedCounter,
     FeedCounterSnapshot, FeedDiagnostics, FeedDiagnosticsSnapshot, FeedIdentity, FeedRateSnapshot,

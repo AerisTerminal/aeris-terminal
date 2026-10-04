@@ -1,6 +1,7 @@
 //! Single-process desktop shutdown coordination.
 
 use super::*;
+use aeris_observability::diagnostic;
 
 pub(super) struct DesktopShutdownError {
     detail: String,
@@ -186,7 +187,7 @@ impl DesktopLifecycle {
         cx.spawn(async move |cx| {
             if let Err(error) = shutdown.await {
                 let blocks_exit = error.blocks_exit;
-                eprintln!("Aeris desktop shutdown failed: {error}");
+                diagnostic!("Aeris desktop shutdown failed: {error}");
                 if blocks_exit {
                     lifecycle.shutdown_started.set(false);
                     if retry_account_failure {

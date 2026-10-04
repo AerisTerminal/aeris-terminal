@@ -21,6 +21,7 @@ use crate::{
         StudyRuntimeError,
     },
 };
+use aeris_observability::diagnostic;
 
 pub(super) struct OwnedCoordinatorChannels {
     pub(super) commands: Receiver<Command>,
@@ -225,7 +226,9 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                     descriptor.overflow_recovery_detail,
                 ),
             }
-            eprintln!("Aeris market {provider} event queue overflowed at generation {generation}");
+            diagnostic!(
+                "Aeris market {provider} event queue overflowed at generation {generation}"
+            );
         }
         for (provider, slot) in wake.slots.iter() {
             let generation = slot.pending_failure.swap(0, Ordering::AcqRel);
@@ -235,7 +238,7 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                     generation,
                     "Market data retry limit reached; reconnect the provider in Accounts",
                 );
-                eprintln!(
+                diagnostic!(
                     "Aeris market {provider} stopped after retry limit at generation {generation}"
                 );
             }
@@ -391,7 +394,7 @@ impl Coordinator<'_> {
             self.remove_waiter(consumer_id);
         }
         if removed_study && let Err(error) = self.reconcile_study_market_data() {
-            eprintln!("Aeris study cleanup failed during client detach: {error}");
+            diagnostic!("Aeris study cleanup failed during client detach: {error}");
         }
         if removed_consumer {
             self.mark_alert_demand_changed();
@@ -873,7 +876,7 @@ impl Coordinator<'_> {
             Err(error) => {
                 self.studies.restore_subtree_checkpoint(checkpoint);
                 if let Err(rollback_error) = self.reconcile_study_market_data() {
-                    eprintln!("Aeris study reinitialization rollback failed: {rollback_error}");
+                    diagnostic!("Aeris study reinitialization rollback failed: {rollback_error}");
                 }
                 Err(error)
             }
@@ -1130,7 +1133,7 @@ impl Coordinator<'_> {
                 book.update_instrument(instrument);
             } else {
                 let Some(descriptor) = self.providers.descriptor(&instrument.provider) else {
-                    eprintln!("Aeris market instrument references an unregistered provider");
+                    diagnostic!("Aeris market instrument references an unregistered provider");
                     continue;
                 };
                 self.order_books.insert(

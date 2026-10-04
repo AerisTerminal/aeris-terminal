@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 aeris_platform_runtime = { path = "../../platform_runtime" }
 aeris_market_data = { path = "../../domain/market_data" }
+aeris_observability = { path = "../../observability" }
 base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true

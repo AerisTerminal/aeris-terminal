@@ -11,6 +11,7 @@
 //! timeframe, tab, and layout changes only resend the desired subscription
 //! set over the same connection.
 
+use aeris_observability::diagnostic;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -542,18 +543,18 @@ pub(crate) fn run(
                 SessionExit::Closed if !wake.overflowed("hyperliquid", generation) => return,
                 SessionExit::Closed => {}
                 SessionExit::Parked => {
-                    eprintln!("Aeris Hyperliquid realtime parked by demand owner");
+                    diagnostic!("Aeris Hyperliquid realtime parked by demand owner");
                     stopped = true;
                 }
                 SessionExit::Reconnect(reason) => {
-                    eprintln!("Aeris Hyperliquid realtime reconnecting: {reason}");
+                    diagnostic!("Aeris Hyperliquid realtime reconnecting: {reason}");
                 }
             },
             Err(error) => {
                 if stop.load(Ordering::Acquire) {
                     return;
                 }
-                eprintln!("Aeris Hyperliquid connection failed: {error}");
+                diagnostic!("Aeris Hyperliquid connection failed: {error}");
                 if emit(
                     events,
                     HyperliquidRealtimeEvent::Recovering(generation),
@@ -1293,7 +1294,7 @@ fn quantity_scale_for(
 fn note_decode_failure(decode_failures: &mut u32, reason: &str) {
     *decode_failures = decode_failures.saturating_add(1);
     if *decode_failures == 1 || (*decode_failures).is_multiple_of(10) {
-        eprintln!(
+        diagnostic!(
             "Aeris engine Hyperliquid feed dropped malformed data: {reason} ({} this connection)",
             *decode_failures,
         );

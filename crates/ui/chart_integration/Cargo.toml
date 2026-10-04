@@ -12,6 +12,7 @@ diagnostics = []
 [dependencies]
 aeris_application = { path = "../../application" }
 aeris_design_system = { path = "../design_system" }
+aeris_observability = { path = "../../observability" }
 aeris_terminal_ui = { path = "../terminal_ui", default-features = false }
 gpui.workspace = true
 num-traits = "=0.2.19"

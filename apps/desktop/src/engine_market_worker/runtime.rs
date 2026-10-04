@@ -8,6 +8,7 @@ use super::{
     process_command, set_resource_class, shared_market_runtime, thread,
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
+use aeris_observability::diagnostic;
 use std::time::{Duration, Instant};
 
 pub(super) fn run_workers(
@@ -159,7 +160,7 @@ fn publish_session_statuses(
             .messages
             .send(MarketWorkerMessage::MarketSessionStatus(status))
         {
-            eprintln!("Aeris market session status was not delivered: {error}");
+            diagnostic!("Aeris market session status was not delivered: {error}");
         }
         record.session_status_sent = Some((record.product.instrument_id.clone(), revision));
     }

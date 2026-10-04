@@ -1,3 +1,4 @@
+use aeris_observability::diagnostic;
 use std::fmt::Write as _;
 
 use super::*;
@@ -43,7 +44,7 @@ pub(super) fn replace_chart_price_alert_lines(
         .collect();
     chart.update(cx, |chart, chart_cx| {
         if let Err(error) = chart.replace_price_alert_lines(ChartAlertSnapshot { lines }) {
-            eprintln!("Aeris chart alert indicators could not be installed: {error}");
+            diagnostic!("Aeris chart alert indicators could not be installed: {error}");
         }
         chart_cx.notify();
     });

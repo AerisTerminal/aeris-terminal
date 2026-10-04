@@ -1,5 +1,6 @@
 //! Engine-owned Rithmic trade-session lifecycle.
 
+use aeris_observability::diagnostic;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -279,7 +280,7 @@ fn run_catalog_session(
     if let Err(error) =
         apply_current_environment(&mut runtime, &events, &mut retries, *environment_state)
     {
-        eprintln!("Aeris Rithmic catalog session could not start: {error}");
+        diagnostic!("Aeris Rithmic catalog session could not start: {error}");
         if let Some(control) = initial_control.take() {
             reject_catalog_control(channels.catalog_publications, control, Some(generation));
         }
@@ -386,7 +387,7 @@ fn run_catalog_session(
         let restarted = match retries.retry_due(&mut runtime, Instant::now()) {
             Ok(started) => started.is_some(),
             Err(error) => {
-                eprintln!("Aeris Rithmic reconnect start failed: {error}");
+                diagnostic!("Aeris Rithmic reconnect start failed: {error}");
                 if retries.ticket().is_none() {
                     reject_pending_catalog(
                         channels.catalog_publications,
@@ -831,7 +832,7 @@ pub(crate) fn run(
     let mut environment = match start_environment_monitors() {
         Ok(environment) => environment,
         Err(error) => {
-            eprintln!("Aeris Rithmic provider is unavailable: {error}");
+            diagnostic!("Aeris Rithmic provider is unavailable: {error}");
             reject_unavailable_provider(channels);
             return;
         }
@@ -988,7 +989,7 @@ fn handle_idle_catalog(
     let (runtime, events) = match open_catalog_runtime() {
         Ok(opened) => opened,
         Err(error) => {
-            eprintln!("Aeris Rithmic catalog runtime could not open: {error}");
+            diagnostic!("Aeris Rithmic catalog runtime could not open: {error}");
             reject_catalog_control(channels.catalog_publications, control, None);
             thread::park_timeout(channels.reconnect_delay);
             return IdleCatalogOutcome::Unchanged;
@@ -1316,7 +1317,7 @@ fn run_demand(
         let restarted = match retries.retry_due(&mut runtime, Instant::now()) {
             Ok(started) => started.is_some(),
             Err(error) => {
-                eprintln!("Aeris Rithmic reconnect start failed: {error}");
+                diagnostic!("Aeris Rithmic reconnect start failed: {error}");
                 if retries.ticket().is_none() {
                     channels.publish_realtime(RithmicRealtimeEvent::Failed(generation, error));
                     let _ = runtime.stop();
@@ -1414,14 +1415,14 @@ fn drain_live_events(
             },
             Ok(Some(AppliedRithmicEvent::RetryScheduled(ticket))) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("Aeris Rithmic live session recovering: {:?}", ticket.reason);
+                diagnostic!("Aeris Rithmic live session recovering: {:?}", ticket.reason);
                 *subscription_generation = None;
                 let reason = Some(ticket.reason);
                 channels.publish_realtime(RithmicRealtimeEvent::Recovering(generation, reason));
             }
             Ok(Some(AppliedRithmicEvent::TerminalFailure { reason, .. })) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("Aeris Rithmic live session failed: {reason:?}");
+                diagnostic!("Aeris Rithmic live session failed: {reason:?}");
                 channels
                     .publish_realtime(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
                 let _ = runtime.stop();
@@ -1435,7 +1436,7 @@ fn drain_live_events(
             }
             Err(error) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
-                eprintln!("Aeris Rithmic live callback failed: {error}");
+                diagnostic!("Aeris Rithmic live callback failed: {error}");
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
                 return Some(wait_for_replacement(
