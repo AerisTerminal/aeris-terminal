@@ -193,7 +193,7 @@ fn empty_snapshot_uses_an_explicit_global_sequence_watermark() {
             41,
         ))
         .expect("explicit empty watermark permits contiguous cutover");
-    assert!(batch.snapshot.items().is_empty());
+    assert_eq!(batch.snapshot.items(), []);
     assert_eq!(batch.live, vec![sequenced(42, "live-42")]);
     assert_eq!(
         coordinator

@@ -38,7 +38,7 @@ fn auth_issuer_uses_aeris_override_or_remains_unconfigured() {
         "AXIUSFLOW_AUTH_ISSUER" => Some("https://legacy.example/api/auth".to_string()),
         _ => None,
     });
-    assert!(legacy.is_empty());
+    assert_eq!(legacy, "");
 
     assert_eq!(configured_auth_issuer(|_| None), super::DEFAULT_AUTH_ISSUER);
 }
@@ -1462,8 +1462,8 @@ fn expired_lease_state_fails_closed_without_an_expiry_worker() {
         );
         let view = service.account_status();
         assert_eq!(view.state, AccountSessionState::ReauthenticationRequired);
-        assert!(view.account_id.is_empty());
-        assert!(view.plan_id.is_empty());
+        assert_eq!(view.account_id, "");
+        assert_eq!(view.plan_id, "");
     }
 }
 
@@ -1489,8 +1489,8 @@ fn lease_worker_start_failure_retires_current_access() {
     service.fail_lease_worker_start(9);
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::TerminalError);
-    assert!(view.account_id.is_empty());
-    assert!(view.plan_id.is_empty());
+    assert_eq!(view.account_id, "");
+    assert_eq!(view.plan_id, "");
     assert!(!service.is_authenticated());
 }
 
@@ -2733,9 +2733,9 @@ fn retired_completion_results_cannot_mutate_current_state() {
     // user's profile may leak into the current session.
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::SignedOut);
-    assert!(view.display_name.is_empty());
-    assert!(view.email.is_empty());
-    assert!(view.photo_url.is_empty());
+    assert_eq!(view.display_name, "");
+    assert_eq!(view.email, "");
+    assert_eq!(view.photo_url, "");
 }
 
 #[test]
@@ -2777,10 +2777,10 @@ fn vault_failure_reports_without_activating_or_leaking_profile() {
     // never renders as success.
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::TerminalError);
-    assert!(view.account_id.is_empty());
-    assert!(view.display_name.is_empty());
-    assert!(view.email.is_empty());
-    assert!(view.photo_url.is_empty());
+    assert_eq!(view.account_id, "");
+    assert_eq!(view.display_name, "");
+    assert_eq!(view.email, "");
+    assert_eq!(view.photo_url, "");
 }
 
 #[test]
@@ -2806,9 +2806,9 @@ fn account_switch_replaces_profile_without_carryover() {
     let signed_out = service
         .sign_out_with(&vault)
         .expect("first account signs out durably");
-    assert!(signed_out.display_name.is_empty());
-    assert!(signed_out.email.is_empty());
-    assert!(signed_out.photo_url.is_empty());
+    assert_eq!(signed_out.display_name, "");
+    assert_eq!(signed_out.email, "");
+    assert_eq!(signed_out.photo_url, "");
     service
         .endpoints
         .lock()
@@ -2869,10 +2869,10 @@ fn sign_out_clears_state_and_deletes_vault_material() {
         .sign_out_with(&vault)
         .expect("account signs out durably");
     assert_eq!(view.state, AccountSessionState::SignedOut);
-    assert!(view.account_id.is_empty());
-    assert!(view.display_name.is_empty());
-    assert!(view.email.is_empty());
-    assert!(view.photo_url.is_empty());
+    assert_eq!(view.account_id, "");
+    assert_eq!(view.display_name, "");
+    assert_eq!(view.email, "");
+    assert_eq!(view.photo_url, "");
     // Refresh and lease material are gone; the device key stays for
     // complete uninstall to remove.
     assert!(vault.load(REFRESH_VAULT_KEY).expect("load reads").is_none());
@@ -2894,7 +2894,7 @@ fn sign_out_clears_state_and_deletes_vault_material() {
     );
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::SignedOut);
-    assert!(view.display_name.is_empty());
+    assert_eq!(view.display_name, "");
 }
 
 #[test]
@@ -2929,8 +2929,8 @@ fn sign_out_refresh_delete_failure_is_actionable_and_survives_restart() {
     );
     let signed_out = service.account_status();
     assert_eq!(signed_out.state, AccountSessionState::SignedOut);
-    assert!(signed_out.account_id.is_empty());
-    assert!(signed_out.display_name.is_empty());
+    assert_eq!(signed_out.account_id, "");
+    assert_eq!(signed_out.display_name, "");
     assert!(
         vault
             .load(REFRESH_VAULT_KEY)
@@ -3014,8 +3014,8 @@ fn retired_lease_warmup_cannot_touch_a_newer_session() {
     service.apply_lease_outcome(51, RefreshOutcome::Refreshed(PlanId::Elite));
     let view = service.account_status();
     assert_eq!(view.state, AccountSessionState::SignedOut);
-    assert!(view.account_id.is_empty());
-    assert!(view.plan_id.is_empty());
-    assert!(view.display_name.is_empty());
+    assert_eq!(view.account_id, "");
+    assert_eq!(view.plan_id, "");
+    assert_eq!(view.display_name, "");
     assert!(!service.is_authenticated());
 }

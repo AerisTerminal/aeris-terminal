@@ -90,23 +90,6 @@ impl ProductPriceBars {
         self.times.last().copied()
     }
 
-    /// Median high-low range of the newest `count` bars with a positive range.
-    pub(crate) fn recent_median_range(&self, count: usize) -> Option<f64> {
-        let start = self.high.len().saturating_sub(count);
-        let mut ranges = self.high[start..]
-            .iter()
-            .zip(&self.low[start..])
-            .map(|(high, low)| high - low)
-            .filter(|range| range.is_finite() && *range > 0.0)
-            .collect::<Vec<_>>();
-        if ranges.is_empty() {
-            return None;
-        }
-        let middle = ranges.len() / 2;
-        ranges.select_nth_unstable_by(middle, f64::total_cmp);
-        Some(ranges[middle])
-    }
-
     fn replace(
         &mut self,
         times: Vec<f64>,
@@ -275,7 +258,11 @@ pub(crate) fn apply_merged_chart_data(
     for (time, ohlc, _) in &rows {
         product_bars.update_bar(*time, *ohlc);
     }
-    let accepted = engine.update_series_bars(0, rows.iter().map(|(time, ohlc, _)| (*time, *ohlc)));
+    let accepted = engine.update_series_bars(
+        0,
+        rows.iter()
+            .map(|(time, ohlc, _)| (*time, chart_type.primary_values(*ohlc))),
+    );
     debug_assert_eq!(accepted, update.accepted_deltas().len());
     let accepted_volume =
         engine.update_series_bars(volume_series, rows.into_iter().map(|(_, _, volume)| volume));
@@ -299,6 +286,18 @@ pub(crate) fn install_product_price_series(
 ) {
     apply_product_series_kind(engine, chart_type);
     if product_bars.is_empty() {
+        return;
+    }
+    if chart_type == ChartType::Footprint {
+        let whitespace = vec![f64::NAN; product_bars.times.len()];
+        let _ = engine.set_series_data(
+            0,
+            &product_bars.times,
+            &whitespace,
+            &whitespace,
+            &whitespace,
+            &whitespace,
+        );
         return;
     }
     let _ = engine.set_series_data(

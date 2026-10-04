@@ -1652,12 +1652,12 @@ mod tests {
                 .expect("idle network restoration is recorded"),
             None
         );
-        assert!(
+        assert_eq!(
             driver
                 .lock()
                 .expect("driver state lock is available")
-                .starts
-                .is_empty()
+                .starts,
+            []
         );
         assert_eq!(
             runtime.state().expect("state is available"),
@@ -1685,12 +1685,12 @@ mod tests {
             runtime.connect(ConnectTrigger::NetworkRestored),
             Err(RithmicProviderRuntimeError::InvalidTransition)
         );
-        assert!(
+        assert_eq!(
             driver
                 .lock()
                 .expect("driver state lock is available")
-                .starts
-                .is_empty()
+                .starts,
+            []
         );
     }
 
@@ -1706,12 +1706,12 @@ mod tests {
                 .expect("offline connection intent is retained"),
             None
         );
-        assert!(
+        assert_eq!(
             driver
                 .lock()
                 .expect("driver state lock is available")
-                .starts
-                .is_empty()
+                .starts,
+            []
         );
         let generation = runtime
             .handle_network_event(NetworkEvent::Available)

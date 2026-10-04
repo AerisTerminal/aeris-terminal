@@ -30,7 +30,7 @@ mod tests {
     #[test]
     fn build_identity_is_nonempty_and_bounded() {
         let identity = current_release_identity();
-        assert!(!identity.release_identity.is_empty());
+        assert_ne!(identity.release_identity, "");
         assert!(identity.release_identity.len() <= 128);
     }
 }

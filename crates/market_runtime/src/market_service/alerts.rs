@@ -367,7 +367,10 @@ mod tests {
             )
             .expect("alerts install");
         let instrument = instrument();
-        assert!(registry.evaluate(&instrument, 1, 1, 9_900, 1).is_empty());
+        assert_eq!(
+            registry.evaluate(&instrument, 1, 1, 9_900, 1),
+            [] as [MarketPriceAlertTrigger; 0]
+        );
         let first = registry.evaluate(&instrument, 1, 2, 10_100, 2);
         assert_eq!(first.len(), 2);
         assert!(
@@ -399,8 +402,14 @@ mod tests {
             )
             .expect("alert installs");
         let instrument = instrument();
-        assert!(registry.evaluate(&instrument, 1, 1, 9_900, 1).is_empty());
-        assert!(registry.evaluate(&instrument, 2, 1, 10_100, 2).is_empty());
+        assert_eq!(
+            registry.evaluate(&instrument, 1, 1, 9_900, 1),
+            [] as [MarketPriceAlertTrigger; 0]
+        );
+        assert_eq!(
+            registry.evaluate(&instrument, 2, 1, 10_100, 2),
+            [] as [MarketPriceAlertTrigger; 0]
+        );
         assert_eq!(registry.evaluate(&instrument, 2, 2, 9_900, 3).len(), 1);
     }
 }

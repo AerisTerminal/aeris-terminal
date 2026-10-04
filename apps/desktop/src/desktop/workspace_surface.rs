@@ -2702,6 +2702,47 @@ impl WorkspaceSurface {
         }
     }
 
+    /// Replaces the chart with one built from a covering snapshot and every retained surface
+    /// state, before it is first drawn.
+    fn install_snapshot_chart(
+        &mut self,
+        snapshot: &aeris_application::ReplaySnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let chart_theme = aeris_chart_theme(self.theme.mode);
+        let chart = cx.new(move |_| AerisChartView::with_replay_and_theme(snapshot, chart_theme));
+        self.apply_chart_chrome_to_chart(&chart, cx);
+        if let Some(restored) = self.restored_chart_state.take() {
+            Self::apply_restored_chart_state(&chart, &restored, true, cx);
+        } else {
+            self.apply_retained_chart_state_to_chart(&chart, cx);
+        }
+        self.apply_surface_time_zone(&chart, cx);
+        self.apply_market_session_to_chart(&chart, cx);
+        replace_chart_price_alert_lines(
+            Some(&chart),
+            &self.price_alerts,
+            self.product.as_ref(),
+            cx,
+        );
+        if let Some((start, end)) = self.restored_viewport {
+            chart.update(cx, |chart, _| {
+                chart.set_visible_time_range_unix_nanos(start, end);
+            });
+        }
+        self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
+        self.last_chart_clock_revision = chart.read(cx).clock_revision();
+        observe_chart(Some(&chart), cx);
+        self.chart = Some(chart);
+        // Interval switches keep the instrument's tape; project it into the new chart now
+        // instead of leaving the footprint empty until the next tape revision.
+        if let Some(tape) = self.trade_tape.clone() {
+            self.apply_trade_tape_to_chart(&tape, cx);
+        }
+        self.synchronize_runtime_studies(cx);
+        self.rithmic_switch = RithmicSwitchState::Initializing;
+    }
+
     pub(super) fn apply_publication(
         &mut self,
         publication: MarketWorkerPublication,
@@ -2729,34 +2770,7 @@ impl WorkspaceSurface {
             (existing, aeris_application::ReplayStreamUpdate::Snapshot(snapshot))
                 if existing.is_none() || swapping =>
             {
-                let chart_theme = aeris_chart_theme(self.theme.mode);
-                let chart =
-                    cx.new(move |_| AerisChartView::with_replay_and_theme(&snapshot, chart_theme));
-                self.apply_chart_chrome_to_chart(&chart, cx);
-                if let Some(restored) = self.restored_chart_state.take() {
-                    Self::apply_restored_chart_state(&chart, &restored, true, cx);
-                } else {
-                    self.apply_retained_chart_state_to_chart(&chart, cx);
-                }
-                self.apply_surface_time_zone(&chart, cx);
-                self.apply_market_session_to_chart(&chart, cx);
-                replace_chart_price_alert_lines(
-                    Some(&chart),
-                    &self.price_alerts,
-                    self.product.as_ref(),
-                    cx,
-                );
-                if let Some((start, end)) = self.restored_viewport {
-                    chart.update(cx, |chart, _| {
-                        chart.set_visible_time_range_unix_nanos(start, end);
-                    });
-                }
-                self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
-                self.last_chart_clock_revision = chart.read(cx).clock_revision();
-                observe_chart(Some(&chart), cx);
-                self.chart = Some(chart);
-                self.synchronize_runtime_studies(cx);
-                self.rithmic_switch = RithmicSwitchState::Initializing;
+                self.install_snapshot_chart(&snapshot, cx);
                 ChartState::Ready
             }
             (Some(_), _) if swapping => {

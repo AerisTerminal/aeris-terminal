@@ -664,7 +664,7 @@ fn native_non_bar_burst_soak_keeps_output_and_demand_bounded() {
             )
             .expect("non-bar burst event recalculates");
         assert_eq!(batch.executed, vec![study]);
-        assert!(batch.errors.is_empty());
+        assert_eq!(batch.errors, [] as [StudyRuntimeError; 0]);
     }
 
     assert_eq!(runtime.output_points, bars().len());
@@ -1352,7 +1352,7 @@ fn non_bar_live_change_recomputes_the_containing_tail_row_from_borrowed_market_s
         )
         .expect("quote change recalculates");
     assert_eq!(batch.executed, vec![study]);
-    assert!(batch.errors.is_empty());
+    assert_eq!(batch.errors, [] as [StudyRuntimeError; 0]);
     assert_eq!(
         runtime
             .output_series(study.output(0))
@@ -1425,7 +1425,7 @@ fn non_bar_change_updates_only_its_containing_row_and_ignores_outside_coverage()
         )
         .expect("late first-bar quote recalculates");
     assert_eq!(changed.executed, vec![study]);
-    assert!(changed.errors.is_empty());
+    assert_eq!(changed.errors, [] as [StudyRuntimeError; 0]);
     assert_eq!(
         runtime
             .output_series(study.output(0))
@@ -1453,8 +1453,8 @@ fn non_bar_change_updates_only_its_containing_row_and_ignores_outside_coverage()
                 &mut |_| true,
             )
             .expect("out-of-coverage quote is ignored");
-        assert!(ignored.executed.is_empty());
-        assert!(ignored.errors.is_empty());
+        assert_eq!(ignored.executed, [] as [StudyInstanceId; 0]);
+        assert_eq!(ignored.errors, [] as [StudyRuntimeError; 0]);
     }
     assert_eq!(
         runtime
@@ -1537,8 +1537,8 @@ fn non_bar_change_inside_fixed_time_history_gap_is_ignored() {
             &mut |_| true,
         )
         .expect("internal-gap quote is ignored");
-    assert!(gap_change.executed.is_empty());
-    assert!(gap_change.errors.is_empty());
+    assert_eq!(gap_change.executed, [] as [StudyInstanceId; 0]);
+    assert_eq!(gap_change.errors, [] as [StudyRuntimeError; 0]);
     assert_eq!(runtime.output_series(study.output(0)), Some(&committed));
 
     let mut contained_lookup = |_input: &StudyMarketInput| Some(second_live);
@@ -1560,7 +1560,7 @@ fn non_bar_change_inside_fixed_time_history_gap_is_ignored() {
         )
         .expect("event inside the later bar recalculates");
     assert_eq!(contained.executed, vec![study]);
-    assert!(contained.errors.is_empty());
+    assert_eq!(contained.errors, [] as [StudyRuntimeError; 0]);
     assert_eq!(
         runtime
             .output_series(study.output(0))
@@ -1615,7 +1615,7 @@ fn ranged_history_change_reuses_state_and_recomputes_only_repaired_rows() {
         )
         .expect("ranged repair executes incrementally");
     assert_eq!(batch.executed, vec![study]);
-    assert!(batch.errors.is_empty());
+    assert_eq!(batch.errors, [] as [StudyRuntimeError; 0]);
     assert_eq!(committed_test_state(&mut runtime, study).executions, 2);
     assert_eq!(
         runtime
@@ -2904,7 +2904,10 @@ fn study_market_lease_capacity_preflight_does_not_partially_mutate_engine() {
         ))
     ));
     assert_eq!(engine.data_lease_count(), 0);
-    assert!(engine.subscriptions().is_empty());
+    assert_eq!(
+        engine.subscriptions(),
+        [] as [(BarSeriesKey, aeris_market_engine::SubscriptionStatus); 0]
+    );
 }
 
 #[test]

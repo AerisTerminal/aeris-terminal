@@ -494,7 +494,7 @@ mod tests {
                 .last()
                 .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
         );
-        assert!(!page.bars.is_empty());
+        assert_ne!(page.bars, [] as [aeris_market_data::MarketBar; 0]);
     }
     #[test]
     #[ignore = "drives the live Hyperliquid public info endpoint"]
@@ -526,7 +526,7 @@ mod tests {
                 .last()
                 .map_or(0, |bar| bar.exchange_timestamp_unix_nanos),
         );
-        assert!(!page.bars.is_empty());
+        assert_ne!(page.bars, [] as [aeris_market_data::MarketBar; 0]);
     }
     #[test]
     #[ignore = "drives the live Hyperliquid public info endpoint"]

@@ -2386,7 +2386,7 @@ mod tests {
         )
         .expect("discovery-only configuration validates");
 
-        assert!(config.instruments.is_empty());
+        assert_eq!(config.instruments, [] as [RithmicProviderInstrument; 0]);
         assert_eq!(
             RithmicProviderConfig::environment(),
             ProviderEnvironment {

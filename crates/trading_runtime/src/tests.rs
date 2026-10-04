@@ -227,11 +227,11 @@ fn practice_calendar_rejects_closed_market_and_requires_a_new_quote_to_fill() {
     service
         .place_order(market_order("open-session-buy", OrderSide::Buy, 5, 1_500))
         .expect("open market accepts order");
-    assert!(
+    assert_eq!(
         service
             .observe_market(observation(9_975, 10_000, 5, 1_600))
-            .expect("submission quote is valid")
-            .is_empty()
+            .expect("submission quote is valid"),
+        [] as [aeris_trading::Fill; 0]
     );
     assert_eq!(
         service
@@ -365,12 +365,9 @@ fn future_and_equity_practice_round_trips_use_their_point_values() {
 fn practice_accounts_are_user_created_with_durable_opening_equity() {
     let directory = TestDirectory::new("practice-account");
     let service = TradingService::start(config(&directory)).expect("service starts");
-    assert!(
-        service
-            .snapshot()
-            .expect("empty snapshot")
-            .accounts
-            .is_empty()
+    assert_eq!(
+        service.snapshot().expect("empty snapshot").accounts,
+        [] as [aeris_trading::TradingAccount; 0]
     );
     let created = service
         .create_practice_account(CreatePracticeAccount {
@@ -622,7 +619,7 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
         .find(|order| order.client_order_id.as_str() == "must-not-fill")
         .expect("order retained");
     assert_eq!(order.filled_quantity.units(), 0);
-    assert!(snapshot.fills.is_empty());
+    assert_eq!(snapshot.fills, [] as [aeris_trading::Fill; 0]);
     assert_eq!(
         snapshot
             .positions
@@ -1659,12 +1656,9 @@ fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
     restarted
         .unlock_account(TradingAccountId::try_new("aeris-sim-1").expect("account"))
         .expect("unlock stores");
-    assert!(
-        restarted
-            .snapshot()
-            .expect("snapshot")
-            .risk_locks
-            .is_empty()
+    assert_eq!(
+        restarted.snapshot().expect("snapshot").risk_locks,
+        [] as [risk::RiskLock; 0]
     );
     restarted
         .shutdown(Duration::from_secs(2))
@@ -2167,7 +2161,7 @@ fn published_observations_fill_resting_orders_once_and_never_regress() {
         .publish_market_observation(observation(499_950, 499_975, 2, 3_000))
         .expect("stale quote is offered");
     let snapshot = service.snapshot().expect("snapshot");
-    assert!(snapshot.fills.is_empty());
+    assert_eq!(snapshot.fills, [] as [aeris_trading::Fill; 0]);
     assert_eq!(snapshot.market_observation_error, None);
 
     service

@@ -218,7 +218,7 @@ mod tests {
         };
         let confirmed = snapshot_from_page(empty(), true)
             .expect("an older range before the available history is confirmed empty");
-        assert!(confirmed.bars.is_empty());
+        assert_eq!(confirmed.bars, [] as [aeris_market_data::MarketBar; 0]);
         assert!(confirmed.forming.is_none());
         assert_eq!(confirmed.handoff_boundary_unix_nanos, None);
 

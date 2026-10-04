@@ -8,6 +8,7 @@ use super::{
 };
 use aeris_charts_engine::{ChartContextMenu, ChartInputEvent, ChartRegion, PriceScaleTarget};
 use aeris_charts_render_gpui::input::cursor_style;
+#[cfg(feature = "diagnostics")]
 use aeris_observability::diagnostic;
 use gpui::{CursorStyle, KeyUpEvent, PinchEvent, Point};
 use num_traits::ToPrimitive;

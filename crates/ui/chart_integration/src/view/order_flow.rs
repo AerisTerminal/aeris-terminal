@@ -2,6 +2,7 @@ use super::{
     AerisChartView, BigTradesFilter, BigTradesSettings, ChartTheme, FootprintDisplayMode,
     OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, platform_theme,
 };
+use aeris_charts_render::color::Color;
 use num_traits::ToPrimitive;
 
 use aeris_charts_engine::{
@@ -11,8 +12,6 @@ use aeris_charts_engine::{
 };
 
 const SWEEP_AGGREGATION_WINDOW_MICROS: i64 = 100_000;
-/// Recent price bars sampled for the automatic row size.
-const AUTO_ROW_SAMPLE_BARS: usize = 64;
 
 /// Tape-derived study panes backed by the chart's shared order-flow stream.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -233,13 +232,10 @@ impl AerisChartView {
                 0,
                 OrderFlowPresentationOptions {
                     aggregation: aggregation_options,
-                    visual: FootprintVisualOptions {
-                        cell_mode: cell_mode(self.order_flow_settings.display_mode),
-                        ..FootprintVisualOptions::default()
-                    },
-                    recent_median_price_range: self
-                        .product_bars
-                        .recent_median_range(AUTO_ROW_SAMPLE_BARS),
+                    visual: footprint_visual_options(
+                        cell_mode(self.order_flow_settings.display_mode),
+                        self.theme,
+                    ),
                     show_footprint: self.chart_type == super::ChartType::Footprint,
                     show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
                     show_delta_histogram: self.order_flow_settings.show_delta_histogram,
@@ -276,6 +272,13 @@ impl AerisChartView {
         self.order_flow_state
             .as_ref()
             .and_then(|state| state.presentation.footprint_series())
+    }
+
+    /// Whether the footprint has received any trade tape to draw.
+    pub(super) fn has_footprint_bars(&self) -> bool {
+        self.footprint_series_id()
+            .and_then(|id| self.engine.footprint_bars(id))
+            .is_some_and(|bars| !bars.is_empty())
     }
 
     /// Whether a tape-derived study pane is currently drawn.
@@ -373,6 +376,29 @@ impl AerisChartView {
         }
     }
 
+    /// Retokenizes the drawn footprint's cell colors for the current theme.
+    pub(super) fn sync_footprint_visual_options(&mut self) {
+        let Some(id) = self.footprint_series_id() else {
+            return;
+        };
+        let Some(mut options) = self.engine.footprint_series_options(id) else {
+            return;
+        };
+        let mut visual = footprint_visual_options(options.visual.cell_mode, self.theme);
+        visual.adaptive_rows = options.visual.adaptive_rows;
+        if visual == options.visual {
+            return;
+        }
+        options.visual = visual;
+        if self
+            .engine
+            .apply_footprint_series_options(id, options)
+            .is_ok()
+        {
+            self.invalidate_series_frame();
+        }
+    }
+
     pub(super) fn drawn_big_trades(&self) -> Option<aeris_charts_engine::NativePrimitiveId> {
         self.order_flow_state
             .as_ref()
@@ -401,6 +427,29 @@ fn big_trades_options(settings: BigTradesSettings, theme: ChartTheme) -> BigTrad
         buy_border_color: colors.bullish.css_rgba(),
         sell_border_color: colors.bearish.css_rgba(),
         ..BigTradesOptions::default()
+    }
+}
+
+/// Footprint cells in the chart direction tokens: sells on `bearish`, buys on `bullish`. The
+/// engine derives the track, volume-bar, and imbalance shades from these hues.
+fn footprint_visual_options(
+    cell_mode: FootprintCellMode,
+    theme: ChartTheme,
+) -> FootprintVisualOptions {
+    let colors = platform_theme(theme).colors;
+    let defaults = FootprintVisualOptions::default();
+    let token = |value: String, fallback: Color| Color::parse_css(&value).unwrap_or(fallback);
+    let bullish = token(colors.bullish.css_rgba(), defaults.ask_color);
+    let bearish = token(colors.bearish.css_rgba(), defaults.bid_color);
+    FootprintVisualOptions {
+        cell_mode,
+        bid_color: bearish,
+        ask_color: bullish,
+        positive_delta_color: bullish,
+        negative_delta_color: bearish,
+        stacked_bid_color: bearish,
+        stacked_ask_color: bullish,
+        ..defaults
     }
 }
 

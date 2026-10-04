@@ -199,49 +199,24 @@ impl AerisChartView {
                 logical_index,
                 primary_title: &self.asset_legend_title,
                 show_primary_ohlc: self.chart_type.shows_ohlc_legend(),
+                // The footprint carries the bar values over its whitespace price series.
+                primary_values_series: self.footprint_series_id(),
                 leading_series: &leading,
                 trailing_series: &trailing,
             })
             .into_iter()
-            .filter_map(|row| {
-                let item = match row.identity {
-                    FinancialLegendIdentity::Primary => LegendItem::Asset,
-                    FinancialLegendIdentity::Host(VOLUME_LEGEND_IDENTITY) => LegendItem::Volume,
-                    FinancialLegendIdentity::Host(CVD_LEGEND_IDENTITY) => {
-                        LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta)
-                    }
-                    FinancialLegendIdentity::Host(DELTA_LEGEND_IDENTITY) => {
-                        LegendItem::OrderFlow(OrderFlowStudy::Delta)
-                    }
-                    FinancialLegendIdentity::Host(_) => return None,
-                    FinancialLegendIdentity::Indicator(binding) => LegendItem::Indicator(binding),
-                    FinancialLegendIdentity::ExternalStudy(study_id) => LegendItem::Study {
-                        study_id,
-                        series_id: row.first_series_id,
-                    },
-                };
-                Some(LegendRow {
-                    item,
-                    pane: row.pane,
-                    title: row.title,
-                    values: row
-                        .values
-                        .into_iter()
-                        .map(|value| LegendValue {
-                            text: value.text,
-                            color: value.color,
-                        })
-                        .collect(),
-                    values_tone: match row.tone {
-                        FinancialLegendTone::Neutral => LegendValueTone::Neutral,
-                        FinancialLegendTone::Bullish => LegendValueTone::Bullish,
-                        FinancialLegendTone::Bearish => LegendValueTone::Bearish,
-                    },
-                    visible: row.visible,
-                    settings_available: row.settings_available,
-                })
-            })
+            .filter_map(legend_row)
             .collect::<Vec<_>>();
+        if self.chart_type == ChartType::Footprint
+            && !self.has_footprint_bars()
+            && let Some(asset) = rows.iter_mut().find(|row| row.item == LegendItem::Asset)
+        {
+            asset.values = vec![LegendValue {
+                text: "Waiting for order flow".to_string(),
+                color: None,
+            }];
+            asset.values_tone = LegendValueTone::Neutral;
+        }
         if let Some(visible) = self.volume_profile_visible() {
             let item = LegendItem::VolumeProfile;
             insert_price_pane_legend_row(&mut rows, item, "Volume Profile", visible, false);
@@ -458,6 +433,45 @@ impl AerisChartView {
         self.legend_panes = panes;
         true
     }
+}
+
+fn legend_row(row: aeris_charts_engine::FinancialLegendRow) -> Option<LegendRow> {
+    let item = match row.identity {
+        FinancialLegendIdentity::Primary => LegendItem::Asset,
+        FinancialLegendIdentity::Host(VOLUME_LEGEND_IDENTITY) => LegendItem::Volume,
+        FinancialLegendIdentity::Host(CVD_LEGEND_IDENTITY) => {
+            LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta)
+        }
+        FinancialLegendIdentity::Host(DELTA_LEGEND_IDENTITY) => {
+            LegendItem::OrderFlow(OrderFlowStudy::Delta)
+        }
+        FinancialLegendIdentity::Host(_) => return None,
+        FinancialLegendIdentity::Indicator(binding) => LegendItem::Indicator(binding),
+        FinancialLegendIdentity::ExternalStudy(study_id) => LegendItem::Study {
+            study_id,
+            series_id: row.first_series_id,
+        },
+    };
+    Some(LegendRow {
+        item,
+        pane: row.pane,
+        title: row.title,
+        values: row
+            .values
+            .into_iter()
+            .map(|value| LegendValue {
+                text: value.text,
+                color: value.color,
+            })
+            .collect(),
+        values_tone: match row.tone {
+            FinancialLegendTone::Neutral => LegendValueTone::Neutral,
+            FinancialLegendTone::Bullish => LegendValueTone::Bullish,
+            FinancialLegendTone::Bearish => LegendValueTone::Bearish,
+        },
+        visible: row.visible,
+        settings_available: row.settings_available,
+    })
 }
 
 /// The volume profile and big trades are engine-owned price-pane primitives, not series, so the

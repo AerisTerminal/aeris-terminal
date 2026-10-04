@@ -878,13 +878,13 @@ mod tests {
             .expect("chart")
             .time_zone = "Mars/Olympus_Mons".to_string();
         let sanitized = sanitize_workspace(workspace);
-        assert!(
+        assert_eq!(
             sanitized.workspace_tabs[0].panes[0]
                 .chart
                 .as_ref()
                 .expect("chart")
-                .time_zone
-                .is_empty()
+                .time_zone,
+            ""
         );
     }
 

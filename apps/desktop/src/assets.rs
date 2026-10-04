@@ -682,11 +682,9 @@ mod tests {
                 .expect("filtered assets"),
             vec![DrawingIcon::TrendLine.path()]
         );
-        assert!(
-            assets
-                .list("hugeicons/")
-                .expect("removed namespace")
-                .is_empty()
+        assert_eq!(
+            assets.list("hugeicons/").expect("removed namespace"),
+            [] as [SharedString; 0]
         );
         assert!(
             assets

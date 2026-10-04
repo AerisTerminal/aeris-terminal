@@ -197,19 +197,19 @@ impl WorkspaceMarketFactory {
 
 fn allocate_workspace_id(next_workspace_id: &AtomicU64) -> Result<u64, String> {
     next_workspace_id
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
         .map_err(|_| "workspace identity space is exhausted".to_string())
 }
 
 fn allocate_consumer_id(next_consumer_id: &AtomicU64) -> Result<u64, String> {
     next_consumer_id
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
         .map_err(|_| "market consumer identity space is exhausted".to_string())
 }
 
 fn allocate_pane_id(next_pane_id: &AtomicU64) -> Result<u64, String> {
     next_pane_id
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
         .map_err(|_| "workspace pane identity space is exhausted".to_string())
 }
 
@@ -974,7 +974,10 @@ mod tests {
                         update: ReplayStreamUpdate::Snapshot(snapshot),
                         ..
                     }) => {
-                        assert!(!snapshot.bars().is_empty());
+                        assert_ne!(
+                            snapshot.bars(),
+                            [] as [aeris_application::Provenanced<aeris_market_data::MarketBar>; 0]
+                        );
                         return;
                     }
                     MarketWorkerMessage::State {

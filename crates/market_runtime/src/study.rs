@@ -190,7 +190,6 @@ impl<'a> StudyTradeWindow<'a> {
     }
 
     /// Iterates retained trade samples from oldest to newest without allocating.
-    #[must_use]
     pub fn iter(self) -> impl ExactSizeIterator<Item = StudyTradeSample> + 'a {
         self.trades.iter().map(study_trade_sample)
     }
@@ -319,13 +318,11 @@ impl<'a> StudyDepthView<'a> {
     }
 
     /// Returns canonical bid levels from best to worst without allocating.
-    #[must_use]
     pub fn bids(self) -> impl ExactSizeIterator<Item = DepthLevel> + 'a {
         self.book.bid_levels()
     }
 
     /// Returns canonical ask levels from best to worst without allocating.
-    #[must_use]
     pub fn asks(self) -> impl ExactSizeIterator<Item = DepthLevel> + 'a {
         self.book.ask_levels()
     }

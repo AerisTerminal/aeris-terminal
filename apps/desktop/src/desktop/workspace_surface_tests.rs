@@ -1053,7 +1053,10 @@ fn automatic_study_removal_retries_after_full_without_resurrecting_presentation_
     assert!(!studies.removing.contains(&study_id));
     assert!(studies.suppresses_output(study_id));
     assert_eq!(runtime_study_count(&studies), 0);
-    assert!(persisted_runtime_study_states(&studies, |_| None).is_empty());
+    assert_eq!(
+        persisted_runtime_study_states(&studies, |_| None),
+        [] as [aeris_contracts::WorkspaceChartStudyState; 0]
+    );
 
     assert!(dispatch_automatic_study_removals(
         &mut studies,
@@ -1070,7 +1073,7 @@ fn automatic_study_removal_retries_after_full_without_resurrecting_presentation_
     )));
 
     assert!(studies.remove_runtime_subtree(&[study_id]));
-    assert!(studies.active.is_empty());
+    assert_eq!(studies.active, [] as [RuntimeStudyState; 0]);
     assert!(!studies.automatic_removals.contains(&study_id));
     assert!(!studies.removing.contains(&study_id));
 }
@@ -1130,7 +1133,7 @@ fn clearing_unregistered_runtime_studies_cancels_pending_and_drops_deferred_work
     });
 
     assert!(discard_unregistered_runtime_studies(&mut studies));
-    assert!(studies.deferred.is_empty());
+    assert_eq!(studies.deferred, [] as [PendingRuntimeStudyState; 0]);
     assert!(
         studies
             .pending

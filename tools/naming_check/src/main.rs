@@ -389,7 +389,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "9fc3f2b";
+        let expected_revision = "a8dad8a";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",
@@ -1811,7 +1811,7 @@ mod tests {
         ] {
             sources.extend(production_sources_under(root));
         }
-        assert!(!sources.is_empty());
+        assert_ne!(sources, [] as [std::path::PathBuf; 0]);
         for path in sources {
             let contents = fs::read_to_string(&path).expect("source");
             let production = production_prefix(&contents);
@@ -2053,7 +2053,7 @@ mod tests {
             .expect("workflow directory is readable")
             .map(|entry| entry.expect("workflow entry is readable").path())
             .collect::<Vec<_>>();
-        assert!(!workflows.is_empty());
+        assert_ne!(workflows, [] as [std::path::PathBuf; 0]);
         for path in workflows {
             let workflow = fs::read_to_string(&path).expect("workflow");
             assert!(

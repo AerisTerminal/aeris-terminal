@@ -3427,7 +3427,10 @@ mod tests {
         );
         coordinator.prune_history_tracking();
         assert!(coordinator.history_confirmed_empty.contains_key(&empty_key));
-        assert!(coordinator.evict_unreferenced_series().is_empty());
+        assert_eq!(
+            coordinator.evict_unreferenced_series(),
+            [] as [BarSeriesKey; 0]
+        );
         assert!(coordinator.engine.series_snapshot(&first).is_some());
 
         coordinator

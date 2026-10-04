@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn development_menu_reports_mode_under_about_without_account_rows() {
         let account = aeris_desktop::account::unavailable_menu_state();
-        assert!(account_actions(&account).is_empty());
+        assert_eq!(account_actions(&account), [] as [AccountAction; 0]);
         assert!(identity_header(&account, &AerisTheme::dark()).is_none());
         let details = about_details(&account, None);
         assert_eq!(details.len(), 2);

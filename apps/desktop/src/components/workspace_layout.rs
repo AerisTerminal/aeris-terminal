@@ -808,8 +808,14 @@ mod tests {
         assert_eq!(stale.orders.len(), 1);
 
         let cleared = authoritative_chart_trading_projection(None);
-        assert!(cleared.orders.is_empty());
-        assert!(cleared.positions.is_empty());
+        assert_eq!(
+            cleared.orders,
+            [] as [aeris_chart_integration::ChartWorkingOrder; 0]
+        );
+        assert_eq!(
+            cleared.positions,
+            [] as [aeris_chart_integration::ChartTradingPosition; 0]
+        );
     }
 
     #[test]
@@ -854,7 +860,10 @@ mod tests {
                 show_execution_marks: true,
             },
         );
-        assert!(filtered.positions.is_empty());
+        assert_eq!(
+            filtered.positions,
+            [] as [aeris_chart_integration::ChartTradingPosition; 0]
+        );
         assert_eq!(filtered.executions.len(), 1);
         assert_eq!(snapshot.positions.len(), 1);
 
@@ -866,6 +875,9 @@ mod tests {
             },
         );
         assert_eq!(filtered.positions.len(), 1);
-        assert!(filtered.executions.is_empty());
+        assert_eq!(
+            filtered.executions,
+            [] as [aeris_chart_integration::ChartTradingExecution; 0]
+        );
     }
 }

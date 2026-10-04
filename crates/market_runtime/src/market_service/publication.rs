@@ -1000,7 +1000,10 @@ mod tests {
             snapshot.publication.state,
             aeris_market_data::OrderBookState::Ready
         );
-        assert!(snapshot.publication.bids.is_empty());
+        assert_eq!(
+            snapshot.publication.bids,
+            [] as [aeris_market_data::DepthLevel; 0]
+        );
         assert!(snapshot.publication.best_bid.is_some());
     }
 }

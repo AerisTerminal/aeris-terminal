@@ -276,7 +276,7 @@ mod tests {
             2,
         )
         .expect("one-sided");
-        assert!(decoded.snapshot.bids.is_empty());
+        assert_eq!(decoded.snapshot.bids, [] as [DepthLevel; 0]);
         assert_eq!(decoded.snapshot.asks.len(), 1);
     }
 

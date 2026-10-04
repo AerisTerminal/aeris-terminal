@@ -174,13 +174,11 @@ impl OrderBook {
     }
 
     /// Iterates canonical bid levels from best to worst without allocating.
-    #[must_use]
     pub fn bid_levels(&self) -> impl ExactSizeIterator<Item = DepthLevel> + '_ {
         self.bids.values().rev().copied()
     }
 
     /// Iterates canonical ask levels from best to worst without allocating.
-    #[must_use]
     pub fn ask_levels(&self) -> impl ExactSizeIterator<Item = DepthLevel> + '_ {
         self.asks.values().copied()
     }
@@ -536,7 +534,7 @@ mod tests {
             book.state(),
             OrderBookState::Recovering(OrderBookRecoveryReason::CrossedBook)
         );
-        assert!(book.publication().bids.is_empty());
+        assert_eq!(book.publication().bids, [] as [DepthLevel; 0]);
     }
 
     #[test]
@@ -605,7 +603,7 @@ mod tests {
                 OrderBookRecoveryReason::InvalidUpdate
             ))
         );
-        assert!(book.publication().asks.is_empty());
+        assert_eq!(book.publication().asks, [] as [DepthLevel; 0]);
     }
 
     #[test]

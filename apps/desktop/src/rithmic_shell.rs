@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(first.query, "ES");
         let second = browser.begin_search("NQ").expect("query validates");
         assert!(!browser.apply_results(first.request_id, vec![result("ESM7")]));
-        assert!(browser.results().is_empty());
+        assert_eq!(browser.results(), [] as [ProviderInstrumentSummary; 0]);
         assert!(browser.apply_results(second.request_id, vec![result("NQM7")]));
 
         let first_selection = browser.select(0).expect("result can be selected");
@@ -436,7 +436,7 @@ mod tests {
 
         browser.invalidate_session();
 
-        assert!(browser.results().is_empty());
+        assert_eq!(browser.results(), [] as [ProviderInstrumentSummary; 0]);
         assert!(browser.selected().is_none());
         assert!(!browser.apply_results(search.request_id, vec![result("ESM7")]));
         let next = browser.begin_search("ES").expect("new session can search");
@@ -533,7 +533,7 @@ mod tests {
         );
         assert!(browser.search_pending());
         assert!(!browser.has_retained_search());
-        assert!(browser.results().is_empty());
+        assert_eq!(browser.results(), [] as [ProviderInstrumentSummary; 0]);
 
         assert!(browser.apply_results(active.request_id, vec![result("ESU6")]));
         assert!(browser.begin_retained_search().is_none());
@@ -575,7 +575,7 @@ mod tests {
         assert!(browser.confirm_selection(selection.generation));
 
         assert!(browser.consume_completed_search(selection.search_generation));
-        assert!(browser.results().is_empty());
+        assert_eq!(browser.results(), [] as [ProviderInstrumentSummary; 0]);
         assert!(browser.select(0).is_none());
         assert!(!browser.consume_completed_search(selection.search_generation));
         assert_eq!(browser.selected(), Some(&selection));

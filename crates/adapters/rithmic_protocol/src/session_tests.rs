@@ -966,7 +966,7 @@ fn assert_system_discovery_request(frame: &[u8]) {
     let request =
         rti::RequestRithmicSystemInfo::decode(frame).expect("decode system discovery request");
     assert_eq!(request.template_id, 16);
-    assert!(request.user_msg.is_empty());
+    assert_eq!(request.user_msg, [] as [String; 0]);
 }
 
 fn assert_login_request(frame: &[u8]) -> Result<(), String> {
@@ -1120,13 +1120,13 @@ fn assert_time_replay_request(frame: &[u8]) {
 fn assert_logout_request(frame: &[u8]) {
     let request = rti::RequestLogout::decode(frame).expect("decode logout request");
     assert_eq!(request.template_id, 12);
-    assert!(request.user_msg.is_empty());
+    assert_eq!(request.user_msg, [] as [String; 0]);
 }
 
 fn assert_heartbeat_request(frame: &[u8]) {
     let request = rti::RequestHeartbeat::decode(frame).expect("decode heartbeat request");
     assert_eq!(request.template_id, 18);
-    assert!(request.user_msg.is_empty());
+    assert_eq!(request.user_msg, [] as [String; 0]);
     assert_eq!(request.ssboe, None);
     assert_eq!(request.usecs, None);
 }

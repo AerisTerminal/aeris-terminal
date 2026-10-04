@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn environment_exposes_only_discovered_state() {
         let environment = DisplayEnvironment::default();
-        assert!(environment.outputs().is_empty());
+        assert_eq!(environment.outputs(), []);
         assert_eq!(environment.presentation_clock(), None);
     }
 
@@ -909,7 +909,7 @@ mod tests {
             CapabilityAvailability::Available
         );
         let environment = NativeDisplayProbe::probe().expect("Windows display APIs are available");
-        assert!(!environment.outputs().is_empty());
+        assert_ne!(environment.outputs(), []);
         for output in environment.outputs() {
             assert!(output.name().is_some_and(|name| !name.is_empty()));
             assert!(output.refresh_millihertz().is_some_and(|rate| rate > 0));

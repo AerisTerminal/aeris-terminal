@@ -499,11 +499,18 @@ impl ChartType {
             .find(|chart_type| chart_type.identifier() == value.trim())
     }
 
+    /// Values the product price series holds for one OHLC bar. A footprint keeps only the bar
+    /// grid on the price series (whitespace), so no candle exists behind or beside it and bars
+    /// the trade tape does not cover stay empty.
+    pub(crate) const fn primary_values(self, ohlc: [f64; 4]) -> [f64; 4] {
+        match self {
+            Self::Footprint => [f64::NAN; 4],
+            _ => ohlc,
+        }
+    }
+
     pub(crate) const fn series_kind(self) -> aeris_charts_engine::SeriesKind {
         match self {
-            // The product price series keeps the footprint's price scale, time axis and
-            // OHLC legend; the order-flow presentation stops drawing it, so bars the
-            // trade tape does not cover stay empty.
             Self::Candles | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
             Self::Line | Self::LineWithMarkers => aeris_charts_engine::SeriesKind::Line,
@@ -1323,6 +1330,7 @@ impl AerisChartView {
         self.engine.set_theme(theme);
         apply_platform_chrome_contract(&mut self.engine, time_visible);
         self.sync_big_trades_options();
+        self.sync_footprint_visual_options();
         self.invalidate_series_layout();
     }
 
@@ -1843,6 +1851,10 @@ impl AerisChartView {
         }
         self.chart_type = chart_type;
         self.apply_price_series_kind();
+        // An unfitted chart opens the footprint zoom on its first layout instead.
+        if chart_type == ChartType::Footprint && self.fitted {
+            self.engine.fit_footprint_viewport();
+        }
         self.mark_user_state_changed();
     }
 
@@ -2310,6 +2322,16 @@ impl AerisChartView {
         )
     }
 
+    /// Opens a freshly installed market: a footprint at its cluster zoom on the live edge,
+    /// any other chart type on its latest bars.
+    fn open_initial_viewport(&mut self) -> bool {
+        if self.chart_type == ChartType::Footprint {
+            self.engine.fit_footprint_viewport();
+            return true;
+        }
+        self.narrow_to_initial_window()
+    }
+
     /// Opens a freshly installed market on its latest bars instead of fitting everything
     /// loaded. Older history is indicator warm-up and back-scroll runway, so long studies
     /// are already converged at the visible left edge.
@@ -2395,7 +2417,7 @@ impl AerisChartView {
         );
         // The fit needs the laid-out width, so a freshly installed market that holds
         // more than its opening window is narrowed and laid out once more.
-        if fit_content && preparation.layout_recomputed && self.narrow_to_initial_window() {
+        if fit_content && preparation.layout_recomputed && self.open_initial_viewport() {
             preparation = self.prepare_frame(dimensions, true, false, measure, countdown_measure);
         }
         if !preparation.frame_built {

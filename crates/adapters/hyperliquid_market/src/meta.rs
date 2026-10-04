@@ -538,7 +538,7 @@ mod tests {
     fn search_ranks_display_before_wire_and_stable_id() {
         let catalog = decode_catalog(&bundle()).expect("catalog");
         let results = catalog.search("btc", 10);
-        assert!(!results.is_empty());
+        assert_ne!(results, [] as [HyperliquidInstrument; 0]);
         assert!(
             results
                 .iter()

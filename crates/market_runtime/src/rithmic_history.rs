@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(replay.range.end_unix_nanos, 62_000_000_000);
 
         let (bars, forming, boundary) = empty_replay_result(replay);
-        assert!(bars.is_empty());
+        assert_eq!(bars, [] as [MarketBar; 0]);
         assert!(forming.is_none());
         assert_eq!(boundary, 62_000_000_000);
     }
@@ -668,7 +668,7 @@ mod tests {
             replay_envelope(ChartInterval::Minute1, 100, now).expect("current replay envelope");
 
         let (bars, forming, boundary) = empty_replay_result(replay);
-        assert!(bars.is_empty());
+        assert_eq!(bars, [] as [MarketBar; 0]);
         assert!(forming.is_none());
         assert_eq!(boundary, replay.range.end_unix_nanos);
     }

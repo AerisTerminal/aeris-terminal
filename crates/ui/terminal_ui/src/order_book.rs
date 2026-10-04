@@ -366,7 +366,7 @@ mod tests {
             frame.best_ask.as_ref().map(|level| level.price),
             Some(20_050)
         );
-        assert!(frame.rows.is_empty());
+        assert_eq!(frame.rows, [] as [aeris_market_data::OrderBookRow; 0]);
         assert!(frame.top_of_book_only);
     }
 

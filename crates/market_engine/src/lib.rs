@@ -1253,11 +1253,11 @@ mod tests {
                 .expect("replacement demand installs"),
             None
         );
-        assert!(
+        assert_eq!(
             engine
                 .install_history(provider_generation(1), &btc, 2, 8, bars(2))
-                .expect("late BTC remains cacheable")
-                .is_empty()
+                .expect("late BTC remains cacheable"),
+            [] as [publication::ConsumerPublication; 0]
         );
         assert!(!engine.has_publication(id(1)));
         let publication = engine
@@ -1449,10 +1449,9 @@ mod tests {
 
         let protected = engine.demanded_series();
         assert_eq!(protected, vec![first.clone()]);
-        assert!(
-            engine
-                .evict_unsubscribed_series(0, 0, &protected)
-                .is_empty()
+        assert_eq!(
+            engine.evict_unsubscribed_series(0, 0, &protected),
+            [] as [aeris_market_data::BarSeriesKey; 0]
         );
         assert!(engine.series_snapshot(&first).is_some());
 
@@ -1579,7 +1578,7 @@ mod tests {
         let publication = engine
             .install_realtime(provider_generation(1), &btc, 2, 8, revised, true)
             .expect("forming bar revises");
-        assert!(publication.is_empty());
+        assert_eq!(publication, [] as [publication::ConsumerPublication; 0]);
         let mut corrupted = bars(4);
         corrupted[0].close = 106;
         assert!(matches!(
@@ -1938,7 +1937,7 @@ mod tests {
         let completed = engine
             .install_history(provider_generation(1), &btc, 2, 8, bars(2))
             .expect("completed history preserves the live forming tail");
-        assert!(completed.is_empty());
+        assert_eq!(completed, [] as [publication::ConsumerPublication; 0]);
         let snapshot = engine
             .series_snapshot(&btc)
             .expect("history remains cached");
@@ -2070,10 +2069,9 @@ mod tests {
         assert_eq!(cached.bars.len(), 2);
         assert_eq!(engine.metrics().active_consumers, 0);
         assert_eq!(engine.demanded_series(), vec![btc.clone()]);
-        assert!(
-            engine
-                .evict_unsubscribed_series(0, 0, &engine.demanded_series())
-                .is_empty()
+        assert_eq!(
+            engine.evict_unsubscribed_series(0, 0, &engine.demanded_series()),
+            [] as [aeris_market_data::BarSeriesKey; 0]
         );
 
         assert!(engine.release_data_lease(study_lease));
@@ -2262,11 +2260,11 @@ mod tests {
         );
         assert!(!engine.has_subscription(&btc));
         assert!(!engine.has_publication(id(1)));
-        assert!(
+        assert_eq!(
             engine
                 .install_realtime(provider_generation(1), &btc, 2, 8, bars(3), true)
-                .expect("parked state remains cacheable")
-                .is_empty()
+                .expect("parked state remains cacheable"),
+            [] as [publication::ConsumerPublication; 0]
         );
 
         let publication = engine

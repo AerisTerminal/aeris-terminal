@@ -1446,7 +1446,7 @@ mod tests {
         // Initials never come back empty: the avatar always has content
         // when the photo is absent or fails to load.
         for (name, email) in [("", ""), (" - ", ""), ("", "@")] {
-            assert!(!profile_initials(name, email).is_empty());
+            assert_ne!(profile_initials(name, email), "");
         }
     }
 
@@ -1476,7 +1476,7 @@ mod tests {
 
     #[test]
     fn manage_profile_has_no_unconfigured_endpoint() {
-        assert!(MANAGE_PROFILE_URL.is_empty());
+        assert_eq!(MANAGE_PROFILE_URL, "");
     }
 
     #[test]
@@ -1527,9 +1527,9 @@ mod tests {
             AccountResponse::SignedOut(view(AccountSessionState::SignedOut)),
         );
         let signed_out = session.presentation();
-        assert!(signed_out.display_name.is_empty());
-        assert!(signed_out.email.is_empty());
-        assert!(signed_out.photo_url.is_empty());
+        assert_eq!(signed_out.display_name, "");
+        assert_eq!(signed_out.email, "");
+        assert_eq!(signed_out.photo_url, "");
     }
 
     #[test]
@@ -1563,9 +1563,9 @@ mod tests {
 
         let presentation = session.presentation();
         assert_eq!(presentation.action, "Sign in");
-        assert!(presentation.display_name.is_empty());
-        assert!(presentation.email.is_empty());
-        assert!(presentation.photo_url.is_empty());
+        assert_eq!(presentation.display_name, "");
+        assert_eq!(presentation.email, "");
+        assert_eq!(presentation.photo_url, "");
         assert_eq!(
             session.error().as_deref(),
             Some("sign-out could not remove saved credentials; retry sign-out")
@@ -1889,7 +1889,7 @@ mod tests {
         let presentation = session.presentation();
         assert_eq!(presentation.display_name, "Ada Trader");
         assert_eq!(presentation.email, "ada@example.com");
-        assert!(!presentation.photo_url.is_empty());
+        assert_ne!(presentation.photo_url, "");
         assert!(session.error().is_none());
         // Terminal state closes the transaction and drops the URL.
         assert!(!session.shared.login_open.load(Ordering::Acquire));
@@ -2019,7 +2019,7 @@ mod tests {
             },
         );
         assert_eq!(session.presentation().action, "Waiting for browser");
-        assert!(session.presentation().display_name.is_empty());
+        assert_eq!(session.presentation().display_name, "");
     }
 
     #[test]
@@ -2069,9 +2069,9 @@ mod tests {
             session.presentation().action == "Sign in"
         });
         let cleared = session.presentation();
-        assert!(cleared.display_name.is_empty());
-        assert!(cleared.email.is_empty());
-        assert!(cleared.photo_url.is_empty());
+        assert_eq!(cleared.display_name, "");
+        assert_eq!(cleared.email, "");
+        assert_eq!(cleared.photo_url, "");
         // A second user signs in on a fresh generation with no carryover.
         session.request_sign_in().expect("second sign-in queues");
         wait_for(&session, "authorizing again", || {

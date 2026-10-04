@@ -424,7 +424,10 @@ fn sweep_classifier_requires_same_side_time_proximity_and_multiple_levels() {
     assert!((sweeps[0].total_volume - 21.0).abs() < f64::EPSILON);
 
     trades[1].aggressor = aeris_charts_engine::AggressorSide::Sell;
-    assert!(classify_order_flow_sweeps(&trades).is_empty());
+    assert_eq!(
+        classify_order_flow_sweeps(&trades),
+        [] as [OrderFlowSweep; 0]
+    );
 }
 
 fn apply_two_print_tape(chart: &mut AerisChartView) {
@@ -607,8 +610,11 @@ fn sweeps_must_outsize_nine_in_ten_recent_prints() {
     for trade in &mut trades[..9] {
         trade.volume = 8.0;
     }
-    assert!(classify_order_flow_sweeps(&trades).is_empty());
-    assert!(classify_order_flow_sweeps(&[]).is_empty());
+    assert_eq!(
+        classify_order_flow_sweeps(&trades),
+        [] as [OrderFlowSweep; 0]
+    );
+    assert_eq!(classify_order_flow_sweeps(&[]), [] as [OrderFlowSweep; 0]);
 }
 
 #[test]
@@ -830,7 +836,10 @@ fn externally_applied_time_range_is_not_echoed_to_the_link_coordinator() {
         })
         .expect("local range event");
     target.apply_external_sync_event(&event.kind);
-    assert!(target.take_sync_events().is_empty());
+    assert_eq!(
+        target.take_sync_events(),
+        [] as [aeris_charts_engine::ChartSyncEvent; 0]
+    );
     assert_eq!(target.engine.visible_time_range(), Some((from, to)));
 }
 
@@ -960,7 +969,7 @@ fn session_plan_levels_are_bounded_transient_lines_restored_with_the_price_serie
     chart
         .replace_session_plan_levels(Vec::new())
         .expect("empty projection clears plan lines");
-    assert!(chart.session_plan_levels().is_empty());
+    assert_eq!(chart.session_plan_levels(), [] as [(f64, String); 0]);
     assert!(series_entry(&chart, 0).price_lines.is_empty());
 }
 
@@ -1017,7 +1026,7 @@ fn brushable_area_composes_over_area_series_and_restores_ohlc() {
         .expect("embedded replay validates");
     let mut chart = AerisChartView::with_replay(&replay);
     let original = chart.engine.series_data(0);
-    assert!(!original.is_empty());
+    assert_ne!(original, [] as [aeris_charts_engine::SeriesDataPoint; 0]);
     let original_high = original[0].high;
 
     chart.set_chart_type(ChartType::BrushableArea);
@@ -1135,8 +1144,8 @@ fn series_updates_dirty_layout_without_discarding_viewport_dimensions() {
 
     assert_eq!(chart.built_for, (1280.0, 720.0, 1.25));
     assert!(chart.layout_dirty);
-    assert!(chart.frame.panes.is_empty());
-    assert!(chart.axis_prims.is_empty());
+    assert_eq!(chart.frame.panes, [] as [aeris_charts_engine::FramePane; 0]);
+    assert_eq!(chart.axis_prims, [] as [Prim; 0]);
 }
 
 #[test]
@@ -1208,6 +1217,57 @@ fn chart_applies_live_tail_replace_and_append_in_one_frame_boundary() {
     assert_eq!(
         chart.expected_replay_sequence(),
         initial_expected.checked_add(1)
+    );
+}
+
+#[test]
+fn live_bars_stay_whitespace_under_a_footprint_and_return_on_candles() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 2 })
+        .expect("embedded replay validates");
+    let mut chart = AerisChartView::with_replay(&replay);
+    chart.set_chart_type(ChartType::Footprint);
+    let expected = chart
+        .expected_replay_sequence()
+        .expect("snapshot establishes sequence");
+    let appended = EmbeddedReplaySource
+        .load_delta(expected.saturating_sub(1))
+        .expect("fixture delta loads")
+        .expect("fixture delta exists");
+    let appended = ReplayTailUpdate::try_new(
+        appended.item().clone(),
+        replay.evidence().publication_generation + 1,
+        true,
+        ReplayTailOperation::Append,
+    )
+    .expect("append validates");
+    chart
+        .try_queue_replay_update(ReplayStreamUpdate::Tail(appended))
+        .expect("append queues");
+    assert_eq!(chart.apply_pending_data(), SeriesMutation::Append);
+    let (times, columns) = chart
+        .engine
+        .data_layer()
+        .series_data(0)
+        .expect("price data");
+    assert_eq!(times.len(), 3);
+    assert!(
+        columns
+            .iter()
+            .all(|column| column.iter().all(|value| value.is_nan())),
+        "a live bar must not draw a candle under the footprint"
+    );
+
+    chart.set_chart_type(ChartType::Candles);
+    let (_, columns) = chart
+        .engine
+        .data_layer()
+        .series_data(0)
+        .expect("price data");
+    assert!(
+        columns
+            .iter()
+            .all(|column| column.iter().all(|value| value.is_finite()))
     );
 }
 
@@ -2535,12 +2595,12 @@ fn legend_visibility_preserves_rows_and_indicator_removal_clears_bindings() {
         .add_indicator(ChartIndicator::Sma)
         .expect("SMA is created")[0];
 
-    assert!(!chart.legend_rows()[0].values.is_empty());
+    assert_ne!(chart.legend_rows()[0].values, [] as [LegendValue; 0]);
     assert!(chart.set_legend_item_visible(LegendItem::Asset, false));
     assert!(!series_entry(&chart, 0).visible);
     assert_eq!(chart.legend_rows()[0].item, LegendItem::Asset);
     assert!(!chart.legend_rows()[0].visible);
-    assert!(chart.legend_rows()[0].values.is_empty());
+    assert_eq!(chart.legend_rows()[0].values, [] as [LegendValue; 0]);
     assert!(chart.set_legend_item_visible(LegendItem::Indicator(sma), false));
     assert!(!series_entry(&chart, sma).visible);
     let sma_row = chart
@@ -2549,7 +2609,7 @@ fn legend_visibility_preserves_rows_and_indicator_removal_clears_bindings() {
         .find(|row| row.item == LegendItem::Indicator(sma))
         .expect("SMA legend remains while hidden");
     assert!(!sma_row.visible);
-    assert!(sma_row.values.is_empty());
+    assert_eq!(sma_row.values, [] as [LegendValue; 0]);
     assert!(chart.set_legend_item_visible(LegendItem::Indicator(sma), true));
     assert!(series_entry(&chart, sma).visible);
     assert!(
@@ -2586,7 +2646,7 @@ fn hidden_volume_keeps_its_legend_until_removed() {
         .find(|row| row.item == LegendItem::Volume)
         .expect("volume legend remains while hidden");
     assert!(!volume_row.visible);
-    assert!(volume_row.values.is_empty());
+    assert_eq!(volume_row.values, [] as [LegendValue; 0]);
     assert!(chart.remove_legend_indicator(LegendItem::Volume));
     assert!(!chart.has_indicators());
     assert!(
@@ -2854,7 +2914,10 @@ fn study_output_projection_preserves_gaps_fences_generations_and_removes_cleanly
     }));
 
     assert!(chart.remove_study_outputs(&[7]));
-    assert!(chart.engine.external_study_outputs().is_empty());
+    assert_eq!(
+        chart.engine.external_study_outputs(),
+        [] as [aeris_charts_engine::ExternalStudyOutputInfo; 0]
+    );
     assert_eq!(chart.study_visible(7), None);
     assert!(
         chart
@@ -2960,7 +3023,10 @@ fn study_output_projection_rejects_invalid_presentation_before_creating_series()
         ),
         Err(ChartStudyOutputError::InvalidPresentation)
     );
-    assert!(chart.engine.external_study_outputs().is_empty());
+    assert_eq!(
+        chart.engine.external_study_outputs(),
+        [] as [aeris_charts_engine::ExternalStudyOutputInfo; 0]
+    );
     assert_eq!(chart.engine.series.len(), initial_series);
 }
 
@@ -3238,7 +3304,10 @@ fn study_output_projection_rejects_subsecond_time_without_mutating_chart_state()
         ),
         Err(ChartStudyOutputError::UnsupportedTimestampPrecision)
     );
-    assert!(chart.engine.external_study_outputs().is_empty());
+    assert_eq!(
+        chart.engine.external_study_outputs(),
+        [] as [aeris_charts_engine::ExternalStudyOutputInfo; 0]
+    );
     assert_eq!(chart.engine.series.len(), initial_series);
 }
 
@@ -4185,31 +4254,48 @@ fn chart_cursors_map_to_visible_native_gpui_cursors() {
     );
 }
 
-#[test]
-fn footprint_draws_only_bars_the_trade_tape_covers() {
+fn price_series_values(chart: &AerisChartView) -> (Vec<i64>, Vec<f64>) {
+    let (times, columns) = chart
+        .engine
+        .data_layer()
+        .series_data(0)
+        .expect("price data");
+    (
+        times.to_vec(),
+        columns
+            .iter()
+            .flat_map(|column| column.iter().copied())
+            .collect(),
+    )
+}
+
+fn asset_legend_values(chart: &AerisChartView) -> Vec<String> {
+    chart
+        .legend_rows()
+        .into_iter()
+        .find(|row| row.item == LegendItem::Asset)
+        .expect("asset row")
+        .values
+        .into_iter()
+        .map(|value| value.text)
+        .collect()
+}
+
+fn footprint_chart() -> AerisChartView {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
     let mut chart = AerisChartView::empty();
     chart.load_replay(&replay).expect("snapshot installs");
     chart.set_chart_type(ChartType::Footprint);
-    let price = series_entry(&chart, 0);
-    assert_eq!(price.kind, aeris_charts_engine::SeriesKind::Candlestick);
-    assert!(
-        price.visible,
-        "the price series keeps the scale, axis and OHLC legend"
-    );
+    chart
+}
 
-    let times = chart
-        .engine
-        .data_layer()
-        .series_data(0)
-        .expect("price data")
-        .0
-        .to_vec();
+/// Applies a tape that covers only the chart's last bar.
+fn apply_last_bar_tape(chart: &mut AerisChartView) -> (OrderFlowAggregation, Vec<OrderFlowTrade>) {
+    let (times, _) = price_series_values(chart);
     let spacing = times[1] - times[0];
-    let last = *times.last().expect("bars");
-    let last_micros = last * 1_000_000;
+    let last_micros = *times.last().expect("bars") * 1_000_000;
     let trades = vec![
         order_flow_trade(1, last_micros, 2.0),
         order_flow_trade(2, last_micros + 1, 3.0),
@@ -4219,11 +4305,27 @@ fn footprint_draws_only_bars_the_trade_tape_covers() {
     chart
         .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
         .expect("tape applies");
-    assert_eq!(
-        series_entry(&chart, 0).render_before_time,
-        Some(i64::MIN),
-        "no candle is drawn, so bars before the tape stay empty"
+    (aggregation, trades)
+}
+
+#[test]
+fn footprint_draws_only_bars_the_trade_tape_covers() {
+    let mut chart = footprint_chart();
+    let price = series_entry(&chart, 0);
+    assert_eq!(price.kind, aeris_charts_engine::SeriesKind::Candlestick);
+    assert!(
+        price.visible,
+        "the price series keeps the bar grid and time axis"
     );
+    let (times, values) = price_series_values(&chart);
+    assert!(
+        values.iter().all(|value| value.is_nan()),
+        "a footprint price series is whitespace, so no candle exists to draw"
+    );
+    assert_eq!(asset_legend_values(&chart), ["Waiting for order flow"]);
+
+    apply_last_bar_tape(&mut chart);
+    assert_eq!(series_entry(&chart, 0).render_before_time, None);
     assert_eq!(
         chart
             .engine
@@ -4232,15 +4334,39 @@ fn footprint_draws_only_bars_the_trade_tape_covers() {
             .len(),
         1
     );
-    let mut footprint = chart.footprint_series_id().expect("footprint series");
+    let footprint = chart.footprint_series_id().expect("footprint series");
     let footprint_entry = series_entry(&chart, footprint);
-    assert!(!footprint_entry.last_value_visible);
-    assert!(!footprint_entry.price_line_visible);
     assert!(
-        !footprint_entry.countdown_visible,
-        "the product price series owns the only price chrome and countdown"
+        footprint_entry.last_value_visible
+            && footprint_entry.price_line_visible
+            && footprint_entry.countdown_visible,
+        "the footprint owns the price chrome over its whitespace price series"
+    );
+    let read_out = asset_legend_values(&chart);
+    assert_eq!(
+        read_out.len(),
+        4,
+        "the legend reads the footprint bar's OHLC"
+    );
+    assert!(
+        read_out.iter().all(|value| !value.ends_with("--")),
+        "{read_out:?}"
     );
 
+    chart.set_chart_type(ChartType::Candles);
+    assert!(chart.footprint_series_id().is_none());
+    let (candle_times, candle_values) = price_series_values(&chart);
+    assert_eq!(candle_times, times);
+    assert!(
+        candle_values.iter().all(|value| value.is_finite()),
+        "leaving the footprint restores the product OHLC"
+    );
+}
+
+#[test]
+fn footprint_legend_keeps_one_price_row_and_order_flow_rows_follow_settings() {
+    let mut chart = footprint_chart();
+    let (aggregation, trades) = apply_last_bar_tape(&mut chart);
     let rows = chart.legend_rows();
     let price_rows = rows
         .iter()
@@ -4255,7 +4381,7 @@ fn footprint_draws_only_bars_the_trade_tape_covers() {
     );
     assert!(!chart.has_indicators());
 
-    footprint = enable_cvd_and_delta(&mut chart, aggregation, &trades);
+    let footprint = enable_cvd_and_delta(&mut chart, aggregation, &trades);
     let rows = chart.legend_rows();
     assert!(rows.iter().any(|row| {
         row.item == LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta) && row.title == "CVD"
@@ -4292,22 +4418,6 @@ fn footprint_draws_only_bars_the_trade_tape_covers() {
         .expect("tape rebuilds after clearing indicators");
     assert!(chart.footprint_series_id().is_some());
     assert!(!chart.has_indicators());
-
-    chart.set_chart_type(ChartType::Candles);
-    assert_eq!(series_entry(&chart, 0).render_before_time, None);
-    assert!(chart.footprint_series_id().is_none());
-}
-
-#[test]
-fn automatic_footprint_rows_target_legible_one_two_five_steps() {
-    use aeris_charts_engine::auto_footprint_ticks_per_row;
-    assert_eq!(auto_footprint_ticks_per_row(None, 1.0), 1);
-    assert_eq!(auto_footprint_ticks_per_row(Some(10.0), 1.0), 1);
-    // BTC one-minute bars around $110 at a $1 tick: about 4.6 ticks per row.
-    assert_eq!(auto_footprint_ticks_per_row(Some(110.0), 1.0), 5);
-    assert_eq!(auto_footprint_ticks_per_row(Some(1_000.0), 1.0), 50);
-    assert_eq!(auto_footprint_ticks_per_row(Some(3_000.0), 1.0), 200);
-    assert_eq!(auto_footprint_ticks_per_row(Some(f64::NAN), 1.0), 1);
 }
 
 #[test]

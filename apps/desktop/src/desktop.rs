@@ -3377,7 +3377,10 @@ mod desktop_readiness_workspace_tests {
             WorkspacePaneKind::OrderBook as i32;
         let parser_valid_but_unbootable =
             super::local_state::sanitize_workspace(parser_valid_but_unbootable);
-        assert!(!parser_valid_but_unbootable.workspace_tabs.is_empty());
+        assert_ne!(
+            parser_valid_but_unbootable.workspace_tabs,
+            [] as [aeris_contracts::WorkspaceTabState; 0]
+        );
         assert!(
             validate_workspace_boot_for_readiness(&parser_valid_but_unbootable).is_err(),
             "readiness must reject persistence that production startup cannot turn into chart workers"

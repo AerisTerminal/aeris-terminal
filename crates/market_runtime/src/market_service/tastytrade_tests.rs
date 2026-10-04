@@ -196,7 +196,7 @@ fn equity_query_with_loaded_futures_catalog_returns_preliminary_empty_result() {
     let CatalogEvent::Search(result) = event else {
         panic!("equity queries need a preliminary result before remote search");
     };
-    assert!(result.instruments.is_empty());
+    assert_eq!(result.instruments, [] as [ProviderInstrumentSummary; 0]);
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn excluded_futures_category_returns_no_catalog_futures() {
     let CatalogEvent::Search(result) = event else {
         panic!("catalog search completes locally");
     };
-    assert!(result.instruments.is_empty());
+    assert_eq!(result.instruments, [] as [ProviderInstrumentSummary; 0]);
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn no_match_query_returns_empty_search_result() {
     let CatalogEvent::Search(result) = event else {
         panic!("a no-match query must return an empty search result");
     };
-    assert!(result.instruments.is_empty());
+    assert_eq!(result.instruments, [] as [ProviderInstrumentSummary; 0]);
 }
 
 #[test]
@@ -606,7 +606,7 @@ fn newer_only_dxlink_snapshot_marks_backwards_history_exhausted() {
     let snapshot = task
         .snapshot_at(newest.exchange_timestamp_unix_nanos, None)
         .unwrap();
-    assert!(snapshot.bars.is_empty());
+    assert_eq!(snapshot.bars, [] as [MarketBar; 0]);
     assert!(snapshot.backwards_exhausted);
 }
 #[test]
