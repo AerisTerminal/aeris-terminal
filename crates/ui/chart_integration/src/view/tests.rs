@@ -289,21 +289,16 @@ fn cvd_and_delta_run_on_every_primary_chart_presentation() {
 }
 
 #[test]
-fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_eviction() {
+fn footprint_keeps_bars_after_runtime_prefix_eviction_and_rebuilds_after_a_gap() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
     let first = vec![
         order_flow_trade(1, 1_000_000, 2.0),
         order_flow_trade(2, 1_500_000, 3.0),
     ];
     chart
-        .apply_order_flow_trades(
-            "instrument:test",
-            7,
-            OrderFlowAggregation::TimeMicros(60_000_000),
-            0.25,
-            &first,
-        )
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &first)
         .expect("initial covering tape");
     let footprint_series = chart
         .engine
@@ -321,34 +316,59 @@ fn footprint_uses_incremental_suffixes_and_rebuilds_after_runtime_prefix_evictio
     let mut appended = first.clone();
     appended.push(third.clone());
     chart
-        .apply_order_flow_trades(
-            "instrument:test",
-            7,
-            OrderFlowAggregation::TimeMicros(60_000_000),
-            0.25,
-            &appended,
-        )
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &appended)
         .expect("tip suffix");
     let after_tip = chart
         .engine
         .footprint_work_stats(footprint_series)
         .expect("stats");
     assert!(after_tip.incremental_ticks > after_covering.incremental_ticks);
+    let total_volume = |chart: &AerisChartView| {
+        chart
+            .engine
+            .footprint_bars(footprint_series)
+            .expect("footprint bars")
+            .iter()
+            .map(|bar| bar.total_volume)
+            .sum::<f64>()
+    };
 
+    // The runtime's sliding window evicts trade 1, then every trade, while the
+    // chart keeps the bars it already built from them.
+    let fourth = order_flow_trade(4, 61_000_000, 7.0);
     chart
         .apply_order_flow_trades(
             "instrument:test",
             7,
-            OrderFlowAggregation::TimeMicros(60_000_000),
+            aggregation,
             0.25,
-            &[first[1].clone(), third],
+            &[first[1].clone(), third, fourth],
         )
-        .expect("covering replacement after prefix eviction");
-    let bars = chart
-        .engine
-        .footprint_bars(footprint_series)
-        .expect("footprint bars");
-    assert!((bars.iter().map(|bar| bar.total_volume).sum::<f64>() - 8.0).abs() < f64::EPSILON);
+        .expect("suffix after prefix eviction");
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &[])
+        .expect("empty window after full eviction");
+    assert!((total_volume(&chart) - 17.0).abs() < f64::EPSILON);
+    assert_eq!(
+        chart
+            .engine
+            .footprint_bars(footprint_series)
+            .expect("footprint bars")
+            .len(),
+        2
+    );
+
+    // A gap means unseen trades were evicted, so the current window is installed whole.
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &[order_flow_trade(9, 121_000_000, 11.0)],
+        )
+        .expect("covering replacement after a gap");
+    assert!((total_volume(&chart) - 11.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -3979,7 +3999,7 @@ fn chart_cursors_map_to_visible_native_gpui_cursors() {
 }
 
 #[test]
-fn footprint_draws_candle_history_and_owns_bars_from_the_first_tape_trade() {
+fn footprint_draws_only_bars_the_trade_tape_covers() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
@@ -3988,7 +4008,10 @@ fn footprint_draws_candle_history_and_owns_bars_from_the_first_tape_trade() {
     chart.set_chart_type(ChartType::Footprint);
     let price = series_entry(&chart, 0);
     assert_eq!(price.kind, aeris_charts_engine::SeriesKind::Candlestick);
-    assert!(price.visible, "history stays drawn as candles");
+    assert!(
+        price.visible,
+        "the price series keeps the scale, axis and OHLC legend"
+    );
 
     let times = chart
         .engine
@@ -4011,8 +4034,16 @@ fn footprint_draws_candle_history_and_owns_bars_from_the_first_tape_trade() {
         .expect("tape applies");
     assert_eq!(
         series_entry(&chart, 0).render_before_time,
-        Some(last),
-        "candles stop where the footprint begins"
+        Some(i64::MIN),
+        "no candle is drawn, so bars before the tape stay empty"
+    );
+    assert_eq!(
+        chart
+            .engine
+            .footprint_bars(chart.footprint_series_id().expect("footprint series"))
+            .expect("footprint bars")
+            .len(),
+        1
     );
     let mut footprint = chart.footprint_series_id().expect("footprint series");
     let footprint_entry = series_entry(&chart, footprint);

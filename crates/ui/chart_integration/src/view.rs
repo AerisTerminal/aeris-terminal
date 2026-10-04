@@ -471,8 +471,9 @@ impl ChartType {
 
     pub(crate) const fn series_kind(self) -> aeris_charts_engine::SeriesKind {
         match self {
-            // Footprint bars before the live trade tape have no clusters; the product
-            // price series draws them as candles and hands its tail to the footprint.
+            // The product price series keeps the footprint's price scale, time axis and
+            // OHLC legend; the order-flow presentation stops drawing it, so bars the
+            // trade tape does not cover stay empty.
             Self::Candles | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
             Self::Line | Self::LineWithMarkers => aeris_charts_engine::SeriesKind::Line,

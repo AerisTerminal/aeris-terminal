@@ -35,7 +35,6 @@ pub(super) struct OrderFlowChartState {
     provider_generation: u64,
     aggregation: OrderFlowAggregation,
     tick_size_bits: u64,
-    first_ingestion_ordinal: Option<u64>,
     last_ingestion_ordinal: Option<u64>,
     presentation: OrderFlowPresentation,
 }
@@ -86,7 +85,6 @@ impl AerisChartView {
     /// Invalidates an incremental prefix after a canonical history/correction rewrite.
     pub fn invalidate_order_flow_prefix(&mut self) {
         if let Some(state) = &mut self.order_flow_state {
-            state.first_ingestion_ordinal = None;
             state.last_ingestion_ordinal = None;
         }
     }
@@ -97,8 +95,10 @@ impl AerisChartView {
     }
 
     /// Projects one runtime-authoritative bounded tape into the chart-owned
-    /// footprint cache. Prefix eviction or session changes install a covering
-    /// image; a stable retained prefix updates only the new suffix.
+    /// footprint cache. While the runtime's sliding window continues the applied
+    /// tape without a gap, only its new suffix is sent, so the chart keeps bars
+    /// whose trades the runtime has since evicted. A gap, rewrite, or session
+    /// change installs a covering image of the current window.
     ///
     /// # Errors
     /// Returns an error for invalid identity, aggregation, fixed-point projection,
@@ -153,9 +153,12 @@ impl AerisChartView {
 
         let first = trades.first().map(|trade| trade.ingestion_ordinal);
         let last = trades.last().map(|trade| trade.ingestion_ordinal);
-        let can_append = state.first_ingestion_ordinal == first
-            && state.last_ingestion_ordinal.is_some()
-            && state.last_ingestion_ordinal < last;
+        let can_append = state
+            .last_ingestion_ordinal
+            .is_some_and(|applied| match (first, last) {
+                (Some(first), Some(last)) => first <= applied.saturating_add(1) && last >= applied,
+                _ => true,
+            });
         let presentation = state.presentation;
         let prior_last = state.last_ingestion_ordinal;
         let mut converted = if can_append {
@@ -179,8 +182,11 @@ impl AerisChartView {
             .update_order_flow_presentation(presentation, converted, can_append)
             .map_err(|error| error.to_string())?;
         if let Some(state) = &mut self.order_flow_state {
-            state.first_ingestion_ordinal = first;
-            state.last_ingestion_ordinal = last;
+            state.last_ingestion_ordinal = if can_append {
+                last.max(prior_last)
+            } else {
+                last
+            };
         }
         self.invalidate_series_layout();
         Ok(())
@@ -233,7 +239,6 @@ impl AerisChartView {
             provider_generation,
             aggregation,
             tick_size_bits: tick_size.to_bits(),
-            first_ingestion_ordinal: None,
             last_ingestion_ordinal: None,
             presentation,
         });
