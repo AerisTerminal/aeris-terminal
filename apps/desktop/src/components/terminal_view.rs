@@ -478,6 +478,7 @@ impl TerminalApp {
         self.schedule_market_frame(window, cx);
         self.reconcile_active_drags(cx);
         self.track_window_activation(window, cx);
+        self.track_fullscreen_hint(window, cx);
         self.absorb_render_requests(window, cx);
         self.synchronize_linked_charts(cx);
         self.dispatch_due_economic_event_rules(cx);
@@ -643,6 +644,7 @@ impl Render for TerminalApp {
             &self.theme,
             cx,
         );
+        let fullscreen_hint = fullscreen_hint_layer(&self.fullscreen_hint, &self.theme);
         let fullscreen_focus = self.chrome_focus.clone();
         div()
             .relative()
@@ -692,6 +694,7 @@ impl Render for TerminalApp {
                     .child(market),
             )
             .child(bottom_panel)
+            .children(fullscreen_hint)
             .children(overlay)
             .children(frameless_reveal_zone)
             .children(account_dialog)

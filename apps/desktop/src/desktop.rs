@@ -30,6 +30,8 @@ mod engine_market_worker;
 mod frame_poll_gate;
 #[path = "components/frameless_title_bar.rs"]
 mod frameless_title_bar;
+#[path = "components/fullscreen_hint.rs"]
+mod fullscreen_hint;
 #[path = "components/indicator_menu.rs"]
 mod indicator_menu;
 #[path = "desktop/local_state.rs"]
@@ -170,6 +172,7 @@ use frameless_title_bar::{
     FramelessTitleBar, TitleBarPlacement, frameless_reveal_zone, frameless_title_bar_row,
     title_bar_placement,
 };
+use fullscreen_hint::{FullscreenHint, fullscreen_hint_layer};
 use gpui::{
     Animation, AnimationExt, AnyElement, App, AssetSource, Bounds, ClipboardItem, Context, Div,
     Entity, FocusHandle, Hsla, ImageSource, KeyBinding, KeyDownEvent, MouseButton, ObjectFit,
@@ -4292,6 +4295,7 @@ struct TerminalApp {
     /// Avatar click point the open platform menu is anchored under.
     platform_menu_anchor: Option<gpui::Point<Pixels>>,
     frameless_title_bar: FramelessTitleBar,
+    fullscreen_hint: FullscreenHint,
     bottom_panel: bottom_panel::BottomPanelState,
     profile_refresh_on_activation: bool,
     command_palette_input: Entity<InputState>,

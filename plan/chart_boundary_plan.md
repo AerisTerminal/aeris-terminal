@@ -348,7 +348,7 @@ persisted keep their meaning; CB9t and CB10t change only in-memory types.
 
 | ID | Question | Options | Status |
 | --- | --- | --- | --- |
-| D1 | Who owns the sweep volume threshold once classification leaves the chart crate? | (a) `market_runtime` owns its own documented rule; the panel and bubbles may differ. (b) Move the adaptive rule into `domain/market_data` and have Aeris Charts accept the threshold from the host for bubbles. | **Decided:** (a). Bubbles are the Aeris Charts big-trades indicator with its own filter; the sweep rule (90th percentile of the tape's print volumes, in `order_flow.rs` today) moves with classification under CB11 |
+| D1 | Who owns the sweep volume threshold once classification leaves the chart crate? | (a) `market_runtime` owns its own documented rule; the panel and bubbles may differ. (b) Move the adaptive rule into `domain/market_data` and have Aeris Charts accept the threshold from the host for bubbles. | **Decided:** (a). Bubbles are the Aeris Charts big-trades indicator with its own adjustable filter, and (b) would hand that engine-owned filter back to the host. The sweep rule (a run must outsize the 90th-percentile print of the latest 512, in `order_flow.rs` today) moves with classification under CB11 |
 | D2 | When can the legacy drawing reader be removed? | (a) Keep indefinitely. (b) Remove after one released version has rewritten documents. | **Open**; no release path exists yet, so (a) until one does |
 
 ---

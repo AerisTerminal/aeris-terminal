@@ -181,6 +181,7 @@ impl TerminalApp {
             chart_settings_persistence_dirty: false,
             platform_menu_anchor: None,
             frameless_title_bar: FramelessTitleBar::default(),
+            fullscreen_hint: FullscreenHint::default(),
             bottom_panel: bottom_panel::BottomPanelState::default(),
             profile_refresh_on_activation: false,
             command_palette_input,
