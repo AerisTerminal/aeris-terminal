@@ -1,11 +1,11 @@
 use super::{
-    AerisChartView, FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
-    OrderFlowTrade,
+    AerisChartView, BigTradesFilter, BigTradesSettings, ChartTheme, FootprintDisplayMode,
+    OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, platform_theme,
 };
 use num_traits::ToPrimitive;
 
 use aeris_charts_engine::{
-    FootprintAggregationOptions, FootprintBarAggregation, FootprintCellMode,
+    BigTradesOptions, FootprintAggregationOptions, FootprintBarAggregation, FootprintCellMode,
     FootprintImbalanceOptions, FootprintTrade, FootprintVisualOptions, OrderFlowPresentation,
     OrderFlowPresentationOptions,
 };
@@ -54,23 +54,48 @@ impl AerisChartView {
         self.order_flow_settings
     }
 
-    /// Sets the durable order-flow presentation and rebuilds only chart-derived state.
+    /// Sets the durable order-flow presentation and rebuilds only chart-derived state. A change
+    /// confined to the settings of an existing big-trades indicator restyles it in place.
     ///
     /// # Errors
-    /// Returns an error when the configured threshold is non-finite or negative.
+    /// Returns an error when a fixed big-trades minimum volume is not finite and positive.
     pub fn set_order_flow_settings(&mut self, settings: OrderFlowSettings) -> Result<bool, String> {
-        if !settings.trade_bubble_minimum_volume.is_finite()
-            || settings.trade_bubble_minimum_volume < 0.0
+        if let Some(BigTradesSettings {
+            filter: BigTradesFilter::Fixed { minimum_volume },
+            ..
+        }) = settings.big_trades
+            && !(minimum_volume.is_finite() && minimum_volume > 0.0)
         {
-            return Err("trade-bubble minimum volume must be finite and non-negative".to_string());
+            return Err("big-trades minimum volume must be finite and positive".to_string());
         }
         if self.order_flow_settings == settings {
             return Ok(false);
         }
-        self.teardown_order_flow();
+        let restyle_only = self.order_flow_settings.big_trades.is_some()
+            && settings.big_trades.is_some()
+            && OrderFlowSettings {
+                big_trades: None,
+                ..self.order_flow_settings
+            } == OrderFlowSettings {
+                big_trades: None,
+                ..settings
+            };
         self.order_flow_settings = settings;
+        if restyle_only {
+            self.sync_big_trades_options();
+        } else {
+            self.teardown_order_flow();
+        }
         self.mark_user_state_changed();
         Ok(true)
+    }
+
+    /// The minimum order volume the drawn big-trades indicator applies; `None` before it is
+    /// drawn and while its automatic filter is still sampling.
+    #[must_use]
+    pub fn big_trades_threshold(&self) -> Option<f64> {
+        let id = self.drawn_big_trades()?;
+        self.engine.big_trades_snapshot(id)?.threshold
     }
 
     /// Instrument ticks per footprint row currently drawn, resolving the automatic size.
@@ -132,13 +157,7 @@ impl AerisChartView {
             self.teardown_order_flow();
         }
         if self.order_flow_state.is_none() {
-            self.configure_order_flow(
-                identity,
-                provider_generation,
-                aggregation,
-                tick_size,
-                trades,
-            )?;
+            self.configure_order_flow(identity, provider_generation, aggregation, tick_size)?;
         }
         let state = self
             .order_flow_state
@@ -198,7 +217,6 @@ impl AerisChartView {
         provider_generation: u64,
         aggregation: OrderFlowAggregation,
         tick_size: f64,
-        trades: &[OrderFlowTrade],
     ) -> Result<(), String> {
         let aggregation_options = FootprintAggregationOptions {
             tick_size,
@@ -208,7 +226,6 @@ impl AerisChartView {
             bars: chart_aggregation(aggregation, self.product_bars.last_time())?,
             imbalance: FootprintImbalanceOptions::default(),
         };
-        let trade_volumes = trades.iter().map(|trade| trade.volume).collect::<Vec<_>>();
         let presentation = self
             .engine
             .add_order_flow_presentation(
@@ -226,12 +243,11 @@ impl AerisChartView {
                     show_footprint: self.chart_type == super::ChartType::Footprint,
                     show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
                     show_delta_histogram: self.order_flow_settings.show_delta_histogram,
-                    show_trade_bubbles: self.order_flow_settings.show_trade_bubbles,
-                    trade_bubble_minimum_volume: self
+                    big_trades: self
                         .order_flow_settings
-                        .trade_bubble_minimum_volume,
+                        .big_trades
+                        .map(|settings| big_trades_options(settings, self.theme)),
                 },
-                &trade_volumes,
             )
             .map_err(|error| error.to_string())?;
         self.order_flow_state = Some(OrderFlowChartState {
@@ -311,10 +327,80 @@ impl AerisChartView {
         self.set_order_flow_settings(settings).unwrap_or(false)
     }
 
+    /// Removes the big-trades indicator through the durable order-flow settings owner, so the
+    /// removal persists and the indicator menu can add it back.
+    pub(super) fn remove_big_trades(&mut self) -> bool {
+        if self.order_flow_settings.big_trades.is_none() {
+            return false;
+        }
+        self.set_order_flow_settings(OrderFlowSettings {
+            big_trades: None,
+            ..self.order_flow_settings
+        })
+        .unwrap_or(false)
+    }
+
+    pub(super) fn set_big_trades_visible(&mut self, visible: bool) -> bool {
+        let Some(big_trades) = self
+            .order_flow_settings
+            .big_trades
+            .filter(|big_trades| big_trades.visible != visible)
+        else {
+            return false;
+        };
+        self.set_order_flow_settings(OrderFlowSettings {
+            big_trades: Some(BigTradesSettings {
+                visible,
+                ..big_trades
+            }),
+            ..self.order_flow_settings
+        })
+        .unwrap_or(false)
+    }
+
+    /// Restyles the drawn big-trades indicator from the durable settings and current theme.
+    pub(super) fn sync_big_trades_options(&mut self) {
+        let (Some(settings), Some(id)) =
+            (self.order_flow_settings.big_trades, self.drawn_big_trades())
+        else {
+            return;
+        };
+        let options = big_trades_options(settings, self.theme);
+        if self.engine.big_trades_options(id) != Some(&options)
+            && self.engine.set_big_trades_options(id, options).is_ok()
+        {
+            self.invalidate_series_frame();
+        }
+    }
+
+    pub(super) fn drawn_big_trades(&self) -> Option<aeris_charts_engine::NativePrimitiveId> {
+        self.order_flow_state
+            .as_ref()
+            .and_then(|state| state.presentation.big_trades())
+    }
+
     fn order_flow_presentation_requested(&self) -> bool {
         self.chart_type == super::ChartType::Footprint
             || self.order_flow_settings.show_cumulative_delta
             || self.order_flow_settings.show_delta_histogram
+            || self.order_flow_settings.big_trades.is_some()
+    }
+}
+
+/// Engine options for durable big-trades settings: translucent token fills outlined with the
+/// chart direction colors, labelled in the chart's own text color.
+fn big_trades_options(settings: BigTradesSettings, theme: ChartTheme) -> BigTradesOptions {
+    let colors = platform_theme(theme).colors;
+    BigTradesOptions {
+        filter: settings.filter,
+        size: settings.size,
+        show_volume: settings.show_volume,
+        visible: settings.visible,
+        buy_color: colors.buy_bubble.css_rgba(),
+        sell_color: colors.sell_bubble.css_rgba(),
+        buy_border_color: colors.bullish.css_rgba(),
+        sell_border_color: colors.bearish.css_rgba(),
+        ..BigTradesOptions::default()
     }
 }
 
@@ -358,20 +444,29 @@ const fn cell_mode(mode: FootprintDisplayMode) -> FootprintCellMode {
     }
 }
 
-fn adaptive_bubble_threshold(configured: f64, trades: &[OrderFlowTrade]) -> f64 {
-    let volumes = trades.iter().map(|trade| trade.volume).collect::<Vec<_>>();
-    aeris_charts_engine::adaptive_trade_bubble_threshold(configured, &volumes)
+/// The 90th percentile of the positive print volumes, so a sweep is a run that together outsizes
+/// nine in ten recent prints. `f64::MAX` when there is no positive print.
+fn sweep_volume_threshold(trades: &[OrderFlowTrade]) -> f64 {
+    let mut volumes = trades
+        .iter()
+        .map(|trade| trade.volume)
+        .filter(|volume| volume.is_finite() && *volume > 0.0)
+        .collect::<Vec<_>>();
+    if volumes.is_empty() {
+        return f64::MAX;
+    }
+    let index = volumes.len().saturating_mul(9).saturating_sub(1) / 10;
+    volumes.select_nth_unstable_by(index, f64::total_cmp);
+    volumes[index]
 }
 
 /// Groups consecutive aggressor-side prints that cross at least two price
-/// levels inside the bounded sweep window. Provider order is preserved; no
-/// opaque trade identifier is interpreted as sequence evidence.
+/// levels inside the bounded sweep window and outsize the recent prints.
+/// Provider order is preserved; no opaque trade identifier is interpreted as
+/// sequence evidence.
 #[must_use]
-pub fn classify_order_flow_sweeps(
-    trades: &[OrderFlowTrade],
-    configured_minimum_volume: f64,
-) -> Vec<OrderFlowSweep> {
-    let threshold = adaptive_bubble_threshold(configured_minimum_volume, trades);
+pub fn classify_order_flow_sweeps(trades: &[OrderFlowTrade]) -> Vec<OrderFlowSweep> {
+    let threshold = sweep_volume_threshold(trades);
     let mut sweeps = Vec::new();
     let mut start = 0;
     while start < trades.len() {

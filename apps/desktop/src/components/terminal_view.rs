@@ -469,7 +469,7 @@ impl TerminalApp {
         self.absorb_pane_activate_requests(cx);
         self.absorb_watchlist_requests(cx);
         self.absorb_chart_context_menu_requests(cx);
-        self.absorb_study_settings_requests(window, cx);
+        self.absorb_settings_requests(window, cx);
         self.absorb_study_remove_requests(cx);
     }
 

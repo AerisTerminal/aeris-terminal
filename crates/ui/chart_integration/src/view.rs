@@ -23,6 +23,7 @@ use aeris_charts_engine::{
     IndicatorKind, InteractionOptions, PriceScaleMode, PriceScaleTarget, SeriesChromeFlag,
     TradingIntent, TradingSnapshot,
 };
+pub use aeris_charts_engine::{BigTradesFilter, BigTradesIntensity, BigTradesSize};
 pub use aeris_charts_engine::{
     ExternalStudyError as ChartStudyOutputError,
     ExternalStudyInputRequirements as ChartStudyInputRequirements,
@@ -362,9 +363,8 @@ pub struct OrderFlowSettings {
     pub display_mode: FootprintDisplayMode,
     pub show_cumulative_delta: bool,
     pub show_delta_histogram: bool,
-    pub show_trade_bubbles: bool,
-    /// Zero selects an adaptive threshold from the current bounded tape.
-    pub trade_bubble_minimum_volume: f64,
+    /// Big-trades bubbles over the price series; `None` while the indicator is not added.
+    pub big_trades: Option<BigTradesSettings>,
     /// Instrument ticks per footprint row. Zero selects an automatic row size from recent bar
     /// ranges so cells stay legible on every timeframe.
     pub ticks_per_row: u32,
@@ -376,11 +376,40 @@ impl Default for OrderFlowSettings {
             display_mode: FootprintDisplayMode::BidAsk,
             show_cumulative_delta: false,
             show_delta_histogram: false,
-            show_trade_bubbles: true,
-            trade_bubble_minimum_volume: 0.0,
+            big_trades: None,
             ticks_per_row: 0,
         }
     }
+}
+
+/// Durable big-trades indicator settings. Aeris Charts rebuilds and filters the orders; the
+/// bubble colors always follow the platform theme tokens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BigTradesSettings {
+    pub filter: BigTradesFilter,
+    pub size: BigTradesSize,
+    pub show_volume: bool,
+    pub visible: bool,
+}
+
+impl Default for BigTradesSettings {
+    fn default() -> Self {
+        let defaults = aeris_charts_engine::BigTradesOptions::default();
+        Self {
+            filter: defaults.filter,
+            size: defaults.size,
+            show_volume: defaults.show_volume,
+            visible: defaults.visible,
+        }
+    }
+}
+
+/// A legend settings control the host answers by opening that item's settings dialog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChartSettingsRequest {
+    /// One runtime-managed study, by its runtime study identity.
+    Study(u64),
+    BigTrades,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -611,6 +640,7 @@ enum LegendItem {
     Indicator(u32),
     Study { study_id: u64, series_id: u32 },
     OrderFlow(OrderFlowStudy),
+    BigTrades,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -649,6 +679,7 @@ impl LegendItem {
             Self::Study { series_id, .. } => (1_u64 << 63) | u64::from(series_id),
             Self::OrderFlow(study) => (1_u64 << 62) | study as u64,
             Self::VolumeProfile => 1_u64 << 61,
+            Self::BigTrades => 1_u64 << 60,
         }
     }
 }
@@ -762,7 +793,7 @@ pub struct AerisChartView {
     pointer_interaction: PointerInteractionState,
     pending_context_menu: Option<ChartContextRequest>,
     pending_activate: ActivationRequest,
-    pending_study_settings: Option<u64>,
+    pending_settings_request: Option<ChartSettingsRequest>,
     pending_study_remove: Option<u64>,
     instrument_price_precision: u8,
     instrument_price_increment: Option<i64>,
@@ -862,7 +893,7 @@ impl AerisChartView {
             pointer_interaction: PointerInteractionState::Active,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
-            pending_study_settings: None,
+            pending_settings_request: None,
             pending_study_remove: None,
             instrument_price_precision: 2,
             instrument_price_increment: None,
@@ -966,7 +997,7 @@ impl AerisChartView {
             pointer_interaction: PointerInteractionState::Active,
             pending_context_menu: None,
             pending_activate: ActivationRequest::None,
-            pending_study_settings: None,
+            pending_settings_request: None,
             pending_study_remove: None,
             instrument_price_precision: replay_display_precision(replay),
             instrument_price_increment: replay.instrument().price_increment,
@@ -1062,9 +1093,9 @@ impl AerisChartView {
         pending
     }
 
-    /// Takes a pending host request to edit one runtime-managed study.
-    pub fn take_study_settings_request(&mut self) -> Option<u64> {
-        self.pending_study_settings.take()
+    /// Takes the latest pending host request to open a legend item's settings.
+    pub fn take_settings_request(&mut self) -> Option<ChartSettingsRequest> {
+        self.pending_settings_request.take()
     }
 
     /// Takes a pending host request to remove one runtime-managed study.
@@ -1290,6 +1321,7 @@ impl AerisChartView {
         self.theme = theme;
         self.engine.set_theme(theme);
         apply_platform_chrome_contract(&mut self.engine, time_visible);
+        self.sync_big_trades_options();
         self.invalidate_series_layout();
     }
 
@@ -2604,7 +2636,9 @@ fn legend_row_controls(
         .items_center()
         .gap_1()
         .child(visibility);
-    if row.settings_available && matches!(row.item, LegendItem::Study { .. }) {
+    if row.settings_available
+        && matches!(row.item, LegendItem::Study { .. } | LegendItem::BigTrades)
+    {
         controls = controls.child(
             legend_control(chart, row.item, LegendControl::Settings, palette)
                 .invisible()
@@ -2688,8 +2722,15 @@ fn legend_control(
         .on_click(move |_, _, cx| {
             action_chart.update(cx, |chart, chart_cx| {
                 if matches!(control, LegendControl::Settings) {
-                    if let LegendItem::Study { study_id, .. } = item {
-                        chart.pending_study_settings = Some(study_id);
+                    let request = match item {
+                        LegendItem::Study { study_id, .. } => {
+                            Some(ChartSettingsRequest::Study(study_id))
+                        }
+                        LegendItem::BigTrades => Some(ChartSettingsRequest::BigTrades),
+                        _ => None,
+                    };
+                    if let Some(request) = request {
+                        chart.pending_settings_request = Some(request);
                         chart_cx.notify();
                     }
                     return;

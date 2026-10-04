@@ -136,6 +136,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         indicator_message: None,
         studies: init.studies,
         study_settings_dialog: None,
+        big_trades_dialog: None,
         chrome_overlay: None,
         chrome_overlay_phase: ChromeOverlayPhase::Opening,
         chrome_overlay_generation: 0,
@@ -162,7 +163,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         last_chart_clock_revision: 0,
         pending_chart_context_menu: None,
         pending_pane_activate: PaneActivationRequest::None,
-        pending_study_settings_request: None,
+        pending_settings_request: None,
         pending_study_remove_request: None,
         resource_class: ConsumerResourceClass::Foreground,
         chart_chrome: init.chart_chrome,
@@ -400,20 +401,22 @@ fn restored_appearance_color(
     }
 }
 
-/// Tape-derived study panes the indicator menu can add back after removal.
+/// Tape-derived order-flow indicators the indicator menu can add back after removal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OrderFlowMenuStudy {
     CumulativeDelta,
     Delta,
+    BigTrades,
 }
 
 impl OrderFlowMenuStudy {
-    pub(super) const ALL: [Self; 2] = [Self::CumulativeDelta, Self::Delta];
+    pub(super) const ALL: [Self; 3] = [Self::CumulativeDelta, Self::Delta, Self::BigTrades];
 
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::CumulativeDelta => "Cumulative delta (CVD)",
             Self::Delta => "Delta histogram",
+            Self::BigTrades => "Big trades",
         }
     }
 
@@ -421,7 +424,95 @@ impl OrderFlowMenuStudy {
         match self {
             Self::CumulativeDelta => settings.show_cumulative_delta,
             Self::Delta => settings.show_delta_histogram,
+            Self::BigTrades => settings.big_trades.is_some(),
         }
+    }
+}
+
+fn persisted_big_trades(settings: BigTradesSettings) -> WorkspaceBigTradesState {
+    let (filter, minimum_volume) = match settings.filter {
+        BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Weak,
+        } => (0, 0.0),
+        BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Medium,
+        } => (1, 0.0),
+        BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Strong,
+        } => (2, 0.0),
+        BigTradesFilter::Fixed { minimum_volume } => (3, minimum_volume),
+    };
+    WorkspaceBigTradesState {
+        filter,
+        minimum_volume_bits: minimum_volume.to_bits(),
+        size: match settings.size {
+            BigTradesSize::Small => 0,
+            BigTradesSize::Medium => 1,
+            BigTradesSize::Large => 2,
+        },
+        show_volume: settings.show_volume,
+        hidden: !settings.visible,
+    }
+}
+
+fn restored_big_trades(state: &WorkspaceBigTradesState) -> Option<BigTradesSettings> {
+    let filter = match state.filter {
+        0 => BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Weak,
+        },
+        1 => BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Medium,
+        },
+        2 => BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Strong,
+        },
+        3 => BigTradesFilter::Fixed {
+            minimum_volume: Some(f64::from_bits(state.minimum_volume_bits))
+                .filter(|volume| volume.is_finite() && *volume > 0.0)?,
+        },
+        _ => return None,
+    };
+    let size = match state.size {
+        0 => BigTradesSize::Small,
+        1 => BigTradesSize::Medium,
+        2 => BigTradesSize::Large,
+        _ => return None,
+    };
+    Some(BigTradesSettings {
+        filter,
+        size,
+        show_volume: state.show_volume,
+        visible: !state.hidden,
+    })
+}
+
+/// The automatic intensity of a filter, or its fixed minimum volume.
+const fn big_trades_filter_draft(
+    filter: BigTradesFilter,
+) -> (Option<BigTradesIntensity>, Option<f64>) {
+    match filter {
+        BigTradesFilter::Auto { intensity } => (Some(intensity), None),
+        BigTradesFilter::Fixed { minimum_volume } => (None, Some(minimum_volume)),
+    }
+}
+
+fn parse_big_trades_minimum_volume(text: &str) -> Result<f64, String> {
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|volume| volume.is_finite() && *volume > 0.0)
+        .ok_or_else(|| "Minimum volume must be a number greater than zero".to_string())
+}
+
+/// Editable text for an order volume. Sums of fractional prints carry binary rounding noise, so
+/// the text is rounded unless that would erase a tiny but valid volume.
+fn big_trades_volume_text(volume: f64) -> String {
+    let rounded = format!("{volume:.6}");
+    let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.parse::<f64>().is_ok_and(|value| value > 0.0) {
+        trimmed.to_string()
+    } else {
+        volume.to_string()
     }
 }
 
@@ -438,10 +529,9 @@ fn persisted_order_flow_settings(settings: OrderFlowSettings) -> WorkspaceOrderF
         },
         show_cumulative_delta: settings.show_cumulative_delta,
         show_delta_histogram: settings.show_delta_histogram,
-        show_trade_bubbles: settings.show_trade_bubbles,
-        trade_bubble_minimum_volume_bits: settings.trade_bubble_minimum_volume.to_bits(),
         ticks_per_row: settings.ticks_per_row,
         study_visibility_revision: 1,
+        big_trades: settings.big_trades.map(persisted_big_trades),
     }
 }
 
@@ -458,19 +548,19 @@ fn restored_order_flow_settings(
         6 => FootprintDisplayMode::BidAskHistogram,
         _ => return None,
     };
-    let trade_bubble_minimum_volume = f64::from_bits(settings.trade_bubble_minimum_volume_bits);
-    trade_bubble_minimum_volume
-        .is_finite()
-        .then_some(OrderFlowSettings {
-            display_mode,
-            show_cumulative_delta: settings.study_visibility_revision >= 1
-                && settings.show_cumulative_delta,
-            show_delta_histogram: settings.study_visibility_revision >= 1
-                && settings.show_delta_histogram,
-            show_trade_bubbles: settings.show_trade_bubbles,
-            trade_bubble_minimum_volume,
-            ticks_per_row: settings.ticks_per_row,
-        })
+    let big_trades = match &settings.big_trades {
+        Some(state) => Some(restored_big_trades(state)?),
+        None => None,
+    };
+    Some(OrderFlowSettings {
+        display_mode,
+        show_cumulative_delta: settings.study_visibility_revision >= 1
+            && settings.show_cumulative_delta,
+        show_delta_histogram: settings.study_visibility_revision >= 1
+            && settings.show_delta_histogram,
+        big_trades,
+        ticks_per_row: settings.ticks_per_row,
+    })
 }
 
 const fn chart_study_plot(plot: StudyPlotKind) -> ChartStudyPlotKind {
@@ -3912,7 +4002,7 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Shows a tape-derived study pane through the order-flow settings owner.
+    /// Adds a tape-derived order-flow indicator through the order-flow settings owner.
     pub(super) fn add_order_flow_study(
         &mut self,
         study: OrderFlowMenuStudy,
@@ -3924,6 +4014,9 @@ impl WorkspaceSurface {
         match study {
             OrderFlowMenuStudy::CumulativeDelta => settings.show_cumulative_delta = true,
             OrderFlowMenuStudy::Delta => settings.show_delta_histogram = true,
+            OrderFlowMenuStudy::BigTrades => {
+                settings.big_trades = Some(settings.big_trades.unwrap_or_default());
+            }
         }
         self.set_chart_order_flow_settings(settings, cx);
         true
@@ -4099,12 +4192,8 @@ impl WorkspaceSurface {
         ) else {
             return;
         };
-        let threshold = chart
-            .read(cx)
-            .order_flow_settings()
-            .trade_bubble_minimum_volume;
         let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
-        self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..], threshold).into();
+        self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..]).into();
         let price_divisor = 10_f64.powi(i32::from(snapshot.price_scale));
         // Footprint rows are keyed by the instrument's price increment. Without a
         // provider-published increment the chart stays on candles; none is guessed.
@@ -4957,6 +5046,7 @@ impl WorkspaceSurface {
             _subscriptions: subscriptions,
             message: None,
         });
+        self.big_trades_dialog = None;
         self.indicator_message = None;
         self.chrome_overlay = None;
         self.timeframe_menu_flyout = None;
@@ -5191,6 +5281,152 @@ impl WorkspaceSurface {
     fn show_study_settings_message(&mut self, message: Option<String>, cx: &mut Context<Self>) {
         if let Some(dialog) = &mut self.study_settings_dialog {
             dialog.message = message;
+        }
+        cx.notify();
+    }
+
+    /// Opens a draft of the chart's big-trades settings. An automatic filter seeds the fixed
+    /// minimum with the volume it currently applies, so switching to a fixed filter starts there.
+    pub(super) fn open_big_trades_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((settings, threshold)) = self.chart.as_ref().map(|chart| {
+            let chart = chart.read(cx);
+            (
+                chart.order_flow_settings().big_trades,
+                chart.big_trades_threshold(),
+            )
+        }) else {
+            return;
+        };
+        let Some(settings) = settings else {
+            self.indicator_message = Some("Big trades is no longer on this chart".to_string());
+            cx.notify();
+            return;
+        };
+        let (intensity, fixed_minimum) = big_trades_filter_draft(settings.filter);
+        let minimum_volume =
+            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Order volume"));
+        if let Some(volume) = fixed_minimum.or(threshold) {
+            minimum_volume.update(cx, |input, input_cx| {
+                input.set_value(big_trades_volume_text(volume), window, input_cx);
+            });
+        }
+        self.big_trades_dialog = Some(BigTradesDialogState {
+            intensity,
+            size: settings.size,
+            show_volume: settings.show_volume,
+            minimum_volume,
+            message: None,
+        });
+        self.study_settings_dialog = None;
+        self.indicator_message = None;
+        self.chrome_overlay = None;
+        self.timeframe_menu_flyout = None;
+        self.chrome_selection = 0;
+        cx.notify();
+    }
+
+    pub(super) fn close_big_trades_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.big_trades_dialog.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_big_trades_dialog_filter(
+        &mut self,
+        intensity: Option<BigTradesIntensity>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &mut self.big_trades_dialog
+            && dialog.intensity != intensity
+        {
+            dialog.intensity = intensity;
+            dialog.message = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_big_trades_dialog_size(
+        &mut self,
+        size: BigTradesSize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &mut self.big_trades_dialog
+            && dialog.size != size
+        {
+            dialog.size = size;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_big_trades_dialog_show_volume(
+        &mut self,
+        show_volume: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &mut self.big_trades_dialog
+            && dialog.show_volume != show_volume
+        {
+            dialog.show_volume = show_volume;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn reset_big_trades_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.big_trades_dialog else {
+            return;
+        };
+        let defaults = BigTradesSettings::default();
+        let (intensity, fixed_minimum) = big_trades_filter_draft(defaults.filter);
+        if let Some(volume) = fixed_minimum {
+            dialog.minimum_volume.update(cx, |input, input_cx| {
+                input.set_value(big_trades_volume_text(volume), window, input_cx);
+            });
+        }
+        dialog.intensity = intensity;
+        dialog.size = defaults.size;
+        dialog.show_volume = defaults.show_volume;
+        dialog.message = None;
+        cx.notify();
+    }
+
+    /// Applies the draft through the order-flow settings owner. Visibility stays with the legend.
+    pub(super) fn apply_big_trades_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = &self.big_trades_dialog else {
+            return;
+        };
+        let filter = match dialog.intensity {
+            Some(intensity) => Ok(BigTradesFilter::Auto { intensity }),
+            None => {
+                parse_big_trades_minimum_volume(dialog.minimum_volume.read(cx).value().as_ref())
+                    .map(|minimum_volume| BigTradesFilter::Fixed { minimum_volume })
+            }
+        };
+        let (size, show_volume) = (dialog.size, dialog.show_volume);
+        let filter = match filter {
+            Ok(filter) => filter,
+            Err(message) => return self.show_big_trades_message(message, cx),
+        };
+        let Some(mut settings) = self.chart_order_flow_settings(cx) else {
+            return self.show_big_trades_message("The chart is unavailable".to_string(), cx);
+        };
+        let Some(current) = settings.big_trades else {
+            let message = "Big trades is no longer on this chart".to_string();
+            return self.show_big_trades_message(message, cx);
+        };
+        settings.big_trades = Some(BigTradesSettings {
+            filter,
+            size,
+            show_volume,
+            visible: current.visible,
+        });
+        self.big_trades_dialog = None;
+        self.set_chart_order_flow_settings(settings, cx);
+        cx.notify();
+    }
+
+    fn show_big_trades_message(&mut self, message: String, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.big_trades_dialog {
+            dialog.message = Some(message);
         }
         cx.notify();
     }

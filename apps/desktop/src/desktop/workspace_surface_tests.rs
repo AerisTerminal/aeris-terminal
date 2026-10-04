@@ -124,10 +124,9 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
         display_mode: 0,
         show_cumulative_delta: true,
         show_delta_histogram: true,
-        show_trade_bubbles: true,
-        trade_bubble_minimum_volume_bits: 0,
         ticks_per_row: 0,
         study_visibility_revision: 0,
+        big_trades: None,
     };
     let restored = restored_order_flow_settings(&legacy).expect("legacy settings restore");
     assert!(!restored.show_cumulative_delta);
@@ -142,6 +141,129 @@ fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
     let restored = restored_order_flow_settings(&persisted).expect("current settings restore");
     assert!(restored.show_cumulative_delta);
     assert!(restored.show_delta_histogram);
+}
+
+#[test]
+fn retired_footprint_trade_bubbles_restore_without_big_trades() {
+    use prost::Message as _;
+    let mut legacy = WorkspaceOrderFlowSettingsState {
+        display_mode: 0,
+        show_cumulative_delta: false,
+        show_delta_histogram: false,
+        ticks_per_row: 0,
+        study_visibility_revision: 1,
+        big_trades: None,
+    }
+    .encode_to_vec();
+    // Tag 4 (varint) enabled the footprint trade bubbles; tag 5 (fixed64) held their threshold.
+    legacy.extend_from_slice(&[0x20, 0x01, 0x29]);
+    legacy.extend_from_slice(&25.0_f64.to_bits().to_le_bytes());
+    let decoded = WorkspaceOrderFlowSettingsState::decode(legacy.as_slice())
+        .expect("a workspace saved with trade bubbles still decodes");
+    let restored = restored_order_flow_settings(&decoded).expect("legacy settings restore");
+    assert_eq!(restored.big_trades, None, "big trades is opt-in");
+}
+
+#[test]
+fn big_trades_settings_round_trip_and_invalid_state_is_rejected() {
+    let filters = [
+        BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Weak,
+        },
+        BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Medium,
+        },
+        BigTradesFilter::Auto {
+            intensity: BigTradesIntensity::Strong,
+        },
+        BigTradesFilter::Fixed {
+            minimum_volume: 12.5,
+        },
+    ];
+    for filter in filters {
+        for size in [
+            BigTradesSize::Small,
+            BigTradesSize::Medium,
+            BigTradesSize::Large,
+        ] {
+            let settings = OrderFlowSettings {
+                big_trades: Some(BigTradesSettings {
+                    filter,
+                    size,
+                    show_volume: false,
+                    visible: false,
+                }),
+                ..OrderFlowSettings::default()
+            };
+            let persisted = persisted_order_flow_settings(settings);
+            assert_eq!(restored_order_flow_settings(&persisted), Some(settings));
+        }
+    }
+    assert_eq!(
+        persisted_order_flow_settings(OrderFlowSettings::default()).big_trades,
+        None
+    );
+    let defaults = persisted_order_flow_settings(OrderFlowSettings {
+        big_trades: Some(BigTradesSettings::default()),
+        ..OrderFlowSettings::default()
+    });
+    assert!(
+        !defaults.big_trades.expect("added").hidden,
+        "an indicator is visible unless the trader hid it"
+    );
+
+    let valid = WorkspaceBigTradesState {
+        filter: 3,
+        minimum_volume_bits: 10.0_f64.to_bits(),
+        size: 1,
+        show_volume: true,
+        hidden: false,
+    };
+    for invalid in [
+        WorkspaceBigTradesState {
+            filter: 4,
+            ..valid.clone()
+        },
+        WorkspaceBigTradesState {
+            size: 3,
+            ..valid.clone()
+        },
+        WorkspaceBigTradesState {
+            minimum_volume_bits: 0.0_f64.to_bits(),
+            ..valid.clone()
+        },
+        WorkspaceBigTradesState {
+            minimum_volume_bits: (-5.0_f64).to_bits(),
+            ..valid.clone()
+        },
+        WorkspaceBigTradesState {
+            minimum_volume_bits: f64::NAN.to_bits(),
+            ..valid.clone()
+        },
+    ] {
+        let state = WorkspaceOrderFlowSettingsState {
+            study_visibility_revision: 1,
+            big_trades: Some(invalid.clone()),
+            ..WorkspaceOrderFlowSettingsState::default()
+        };
+        assert_eq!(restored_order_flow_settings(&state), None, "{invalid:?}");
+    }
+}
+
+#[test]
+fn big_trades_minimum_volume_text_is_validated_and_readable() {
+    assert_eq!(parse_big_trades_minimum_volume(" 50 "), Ok(50.0));
+    assert_eq!(parse_big_trades_minimum_volume("12.5"), Ok(12.5));
+    for invalid in ["", "abc", "0", "-3", "NaN", "inf"] {
+        assert!(
+            parse_big_trades_minimum_volume(invalid).is_err(),
+            "{invalid:?} is rejected"
+        );
+    }
+    assert_eq!(big_trades_volume_text(37.0), "37");
+    assert_eq!(big_trades_volume_text(12.5), "12.5");
+    assert_eq!(big_trades_volume_text(0.1 + 0.2), "0.3");
+    assert_eq!(big_trades_volume_text(0.000_000_01), "0.00000001");
 }
 
 fn custom_package_calculate(

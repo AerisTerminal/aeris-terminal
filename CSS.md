@@ -13,8 +13,10 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   never `rounded(px(N))`.
 - Borders use `theme.dimensions.border_width` (`--border-width`), never `border_1()` or `px(1.0)`.
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
-  `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `surface-overlay` for scrims,
-  `hover-bg` / `active-bg` for hover and press. Hover and press change the fill only, no shadows.
+  `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `buy-bubble` /
+  `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `surface-overlay`
+  for scrims, `hover-bg` / `active-bg` for hover and press. Hover and press change the fill only, no
+  shadows.
 - Tabs and segmented controls use `TabList` + `Tab` (`apps/desktop/src/native_ui/tab.rs`), the native
   Theme System `.ui-tabs` / `.ui-tab`: a `surface-raised` track with no border; unselected tabs have no fill
   and `text-interactive` text, and hover / press change the text only (`text-hover` / `text-active`, never
@@ -148,6 +150,9 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   /* Chart */
   --bullish: #089981;
   --bearish: #f7525f;
+  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 
 .dark {
@@ -255,5 +260,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   /* Chart */
   --bullish: #089981;
   --bearish: #f7525f;
+  /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
+  --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
+  --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
 }
 ```

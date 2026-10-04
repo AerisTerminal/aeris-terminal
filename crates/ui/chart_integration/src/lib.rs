@@ -37,8 +37,9 @@ pub use aeris_charts_engine::{
 };
 pub use bridge::ChartBridgeMetrics;
 pub use view::{
-    AerisChartView, ChartAppearanceSettings, ChartContextKind, ChartContextRequest,
-    ChartDrawingKind, ChartIndicator, ChartIndicatorError, ChartIndicatorState,
+    AerisChartView, BigTradesFilter, BigTradesIntensity, BigTradesSettings, BigTradesSize,
+    ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingKind,
+    ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartSettingsRequest,
     ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
     ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
     ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType, DrawingsLockSummary,

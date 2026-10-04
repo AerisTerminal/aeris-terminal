@@ -124,6 +124,7 @@ impl AerisChartView {
             || [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta]
                 .into_iter()
                 .any(|study| self.has_order_flow_study(study))
+            || self.order_flow_settings.big_trades.is_some()
     }
     /// Removes every native indicator and hides the reusable volume series.
     ///
@@ -142,6 +143,7 @@ impl AerisChartView {
                 cleared |= self.remove_order_flow_study(study);
             }
         }
+        cleared |= self.remove_big_trades();
         if !cleared {
             return false;
         }
@@ -240,31 +242,17 @@ impl AerisChartView {
                 })
             })
             .collect::<Vec<_>>();
-        self.insert_volume_profile_legend_row(&mut rows);
+        if let Some(visible) = self.volume_profile_visible() {
+            let item = LegendItem::VolumeProfile;
+            insert_price_pane_legend_row(&mut rows, item, "Volume Profile", visible, false);
+        }
+        // The row follows the durable settings rather than the drawn indicator, so a chart whose
+        // tape is unavailable can still edit or remove it.
+        if let Some(big_trades) = self.order_flow_settings.big_trades {
+            let item = LegendItem::BigTrades;
+            insert_price_pane_legend_row(&mut rows, item, "Big Trades", big_trades.visible, true);
+        }
         rows
-    }
-    /// The profile is an engine-owned price-pane primitive, not a series, so the financial
-    /// legend has no row for it; the host adds one so it can be hidden or removed.
-    fn insert_volume_profile_legend_row(&self, rows: &mut Vec<LegendRow>) {
-        let Some(visible) = self.volume_profile_visible() else {
-            return;
-        };
-        let position = rows
-            .iter()
-            .position(|row| row.pane != 0)
-            .unwrap_or(rows.len());
-        rows.insert(
-            position,
-            LegendRow {
-                item: LegendItem::VolumeProfile,
-                pane: 0,
-                title: "Volume Profile".to_string(),
-                values: Vec::new(),
-                values_tone: LegendValueTone::Neutral,
-                visible,
-                settings_available: false,
-            },
-        );
     }
     fn volume_profile_visible(&self) -> Option<bool> {
         self.volume_profile
@@ -287,6 +275,9 @@ impl AerisChartView {
                 self.mark_user_state_changed();
             }
             return changed;
+        }
+        if item == LegendItem::BigTrades {
+            return self.set_big_trades_visible(visible);
         }
         let ids: Vec<u32> = match item {
             // The footprint presents the same product price series, so they toggle together.
@@ -324,7 +315,7 @@ impl AerisChartView {
                 }
                 return changed;
             }
-            LegendItem::Study { .. } | LegendItem::OrderFlow(_) => {
+            LegendItem::Study { .. } | LegendItem::OrderFlow(_) | LegendItem::BigTrades => {
                 unreachable!("study and order-flow visibility handled above")
             }
         };
@@ -353,6 +344,7 @@ impl AerisChartView {
                 true
             }
             LegendItem::OrderFlow(study) => return self.remove_order_flow_study(study),
+            LegendItem::BigTrades => return self.remove_big_trades(),
             LegendItem::VolumeProfile => self.remove_volume_profile(),
             LegendItem::Asset | LegendItem::Volume | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => self.engine.remove_indicator_binding(binding),
@@ -466,4 +458,31 @@ impl AerisChartView {
         self.legend_panes = panes;
         true
     }
+}
+
+/// The volume profile and big trades are engine-owned price-pane primitives, not series, so the
+/// financial legend has no row for them; the host adds one so they can be hidden or removed.
+fn insert_price_pane_legend_row(
+    rows: &mut Vec<LegendRow>,
+    item: LegendItem,
+    title: &str,
+    visible: bool,
+    settings_available: bool,
+) {
+    let position = rows
+        .iter()
+        .position(|row| row.pane != 0)
+        .unwrap_or(rows.len());
+    rows.insert(
+        position,
+        LegendRow {
+            item,
+            pane: 0,
+            title: title.to_string(),
+            values: Vec::new(),
+            values_tone: LegendValueTone::Neutral,
+            visible,
+            settings_available,
+        },
+    );
 }

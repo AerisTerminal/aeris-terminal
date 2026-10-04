@@ -24,7 +24,7 @@ Aeris Charts repository may mirror them in its own `plan/Expansion.md`.
 
 ## 1. Status
 
-Updated 2026-10-03. A batch is **Complete** only when it is exercised through the real desktop path
+Updated 2026-10-04. A batch is **Complete** only when it is exercised through the real desktop path
 (load, timeframe switch, restart, restore), not when a unit test alone passes.
 
 | Batch | Repository | Items | Status | Blocked by |
@@ -35,7 +35,7 @@ Updated 2026-10-03. A batch is **Complete** only when it is exercised through th
 | [TB1](#tb1--drawing-persistence-and-shadow-series-removal) Drawing persistence, shadow series removal | Terminal | CB1t, CB2t, CB3t | **Open** | P1 |
 | [TB2](#tb2--replace-host-patches-and-internal-access) Host patches and internal access | Terminal | CB4t, CB5t, CB6t, CB7t, CB8t, CB13, CB15t | **Open** | P1 |
 | [TB3](#tb3--single-catalog-and-typed-state) Single catalog and typed state | Terminal | CB9t, CB10 | **Open** | P1 |
-| [TB4](#tb4--misplaced-product-code) Misplaced product code | Terminal | CB11, CB12, CB13 | **Open** | D1 (CB11 only) |
+| [TB4](#tb4--misplaced-product-code) Misplaced product code | Terminal | CB11, CB12, CB13 | **Open** | — |
 | [TB5](#tb5--boundary-guards) Boundary guards | Terminal | CB14 | **Open** | TB1–TB4 |
 
 **Order:** AC1 and AC2 are independent of each other and can ship in one Aeris Charts push. P1 bumps
@@ -203,8 +203,9 @@ suffix `e` is the Aeris Charts half, `t` is the Terminal half.
 
 ### CB11 — Sweep classification lives in the chart crate
 
-- **Evidence:** `classify_order_flow_sweeps` (`order_flow.rs:356-419`) feeds only the Time & Sales
-  panel (`workspace_surface.rs:4060`, `time_sales_panel.rs:279`) and runs on the UI thread.
+- **Evidence:** `classify_order_flow_sweeps` and its threshold (`order_flow.rs:447-519`) feed only
+  the Time & Sales panel (`workspace_surface.rs:4196`, `time_sales_panel.rs:279`) and run on the UI
+  thread.
 - **Change:** move classification next to the canonical tape in `market_runtime` (published with
   `MarketTradeTapeSnapshot`, computed off the UI thread, bounded by the tape), with
   `OrderFlowSweep` in `domain/market_data`. Threshold ownership per D1.
@@ -317,7 +318,7 @@ Terminal. CB9t, CB10t.
 
 ### TB4 — Misplaced product code
 
-Terminal. CB11 (after D1), CB12.
+Terminal. CB11, CB12.
 
 ### TB5 — Boundary guards
 
@@ -347,7 +348,7 @@ persisted keep their meaning; CB9t and CB10t change only in-memory types.
 
 | ID | Question | Options | Status |
 | --- | --- | --- | --- |
-| D1 | Who owns the sweep volume threshold once classification leaves the chart crate? Today it reuses the engine's trade-bubble rule. | (a) `market_runtime` owns its own documented rule; the panel and bubbles may differ. (b) Move the adaptive rule into `domain/market_data` and have Aeris Charts accept the threshold from the host for bubbles. | **Open** |
+| D1 | Who owns the sweep volume threshold once classification leaves the chart crate? | (a) `market_runtime` owns its own documented rule; the panel and bubbles may differ. (b) Move the adaptive rule into `domain/market_data` and have Aeris Charts accept the threshold from the host for bubbles. | **Decided:** (a). Bubbles are the Aeris Charts big-trades indicator with its own filter; the sweep rule (90th percentile of the tape's print volumes, in `order_flow.rs` today) moves with classification under CB11 |
 | D2 | When can the legacy drawing reader be removed? | (a) Keep indefinitely. (b) Remove after one released version has rewritten documents. | **Open**; no release path exists yet, so (a) until one does |
 
 ---

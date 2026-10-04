@@ -229,6 +229,18 @@ impl ThemeColor {
         self.alpha
     }
 
+    /// Returns the CSS `rgba()` form for renderers that take CSS color strings.
+    #[must_use]
+    pub fn css_rgba(self) -> String {
+        format!(
+            "rgba({}, {}, {}, {:.4})",
+            channel_to_u8(self.red),
+            channel_to_u8(self.green),
+            channel_to_u8(self.blue),
+            self.alpha.clamp(0.0, 1.0)
+        )
+    }
+
     /// Returns a packed `0xRRGGBB` value for native UI color constructors.
     #[must_use]
     pub fn rgb_u32(self) -> u32 {
@@ -572,6 +584,26 @@ mod tests {
     }
 
     #[test]
+    fn big_trade_bubbles_are_translucent_chart_direction_colors() {
+        let light = AerisTheme::light().colors;
+        let dark = AerisTheme::dark().colors;
+        assert_eq!(light.buy_bubble, ThemeColor::from_rgba8(8, 153, 129, 89));
+        assert_eq!(light.sell_bubble, ThemeColor::from_rgba8(247, 82, 95, 89));
+        assert_eq!(dark.buy_bubble, light.buy_bubble);
+        assert_eq!(dark.sell_bubble, light.sell_bubble);
+        assert_eq!(light.buy_bubble.css_rgba(), "rgba(8, 153, 129, 0.3490)");
+        assert_eq!(light.bearish.css_rgba(), "rgba(247, 82, 95, 1.0000)");
+        assert_eq!(
+            token_source(&AerisTheme::light().color_tokens(), "buy-bubble"),
+            "color-mix(in srgb, #089981 35%, transparent)"
+        );
+        assert_eq!(
+            token_source(&AerisTheme::dark().color_tokens(), "sell-bubble"),
+            "color-mix(in srgb, #f7525f 35%, transparent)"
+        );
+    }
+
+    #[test]
     fn trade_button_tokens_match_the_platform_contract() {
         let light = AerisTheme::light().colors;
         let dark = AerisTheme::dark().colors;
@@ -789,6 +821,8 @@ mod tests {
         assert!(css.contains("/* Chart */"));
         assert!(css.contains("--bullish: #089981;"));
         assert!(css.contains("--bearish: #f7525f;"));
+        assert!(css.contains("--buy-bubble: color-mix(in srgb, #089981 35%, transparent);"));
+        assert!(css.contains("--sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);"));
         assert_eq!(platform_font_family(), "HK Grotesk");
         assert_eq!(platform_font_stack(), "\"HK Grotesk\", sans-serif");
 

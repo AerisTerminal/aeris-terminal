@@ -710,26 +710,27 @@ impl TerminalApp {
         }
     }
 
-    pub(super) fn absorb_study_settings_requests(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn absorb_settings_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut requested = None;
         for workspace in &self.workspaces {
             for pane in &workspace.panes {
-                let study_id = pane.surface.update(cx, |surface, _| {
-                    surface.pending_study_settings_request.take()
-                });
-                if let Some(study_id) = study_id {
-                    requested = Some((workspace.id, pane.id, pane.surface.clone(), study_id));
+                let request = pane
+                    .surface
+                    .update(cx, |surface, _| surface.pending_settings_request.take());
+                if let Some(request) = request {
+                    requested = Some((workspace.id, pane.id, pane.surface.clone(), request));
                 }
             }
         }
-        if let Some((workspace_id, pane_id, surface, study_id)) = requested {
+        if let Some((workspace_id, pane_id, surface, request)) = requested {
             self.select_pane(workspace_id, pane_id, cx);
-            surface.update(cx, |surface, surface_cx| {
-                surface.open_study_settings_dialog(study_id, window, surface_cx);
+            surface.update(cx, |surface, surface_cx| match request {
+                LegendSettingsRequest::Study(study_id) => {
+                    surface.open_study_settings_dialog(study_id, window, surface_cx);
+                }
+                LegendSettingsRequest::BigTrades => {
+                    surface.open_big_trades_dialog(window, surface_cx);
+                }
             });
         }
     }
@@ -967,8 +968,6 @@ impl TerminalApp {
             ChartSettingsAction::FootprintMode(_)
                 | ChartSettingsAction::ToggleCumulativeDelta
                 | ChartSettingsAction::ToggleDeltaHistogram
-                | ChartSettingsAction::ToggleTradeBubbles
-                | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
                 | ChartSettingsAction::FootprintTicksPerRow(_)
         ) {
             return false;
@@ -983,16 +982,6 @@ impl TerminalApp {
             }
             ChartSettingsAction::ToggleDeltaHistogram => {
                 settings.show_delta_histogram = !settings.show_delta_histogram;
-            }
-            ChartSettingsAction::ToggleTradeBubbles => {
-                settings.show_trade_bubbles = !settings.show_trade_bubbles;
-            }
-            ChartSettingsAction::TradeBubbleMinimumVolumeBits(bits) => {
-                let value = f64::from_bits(bits);
-                if !value.is_finite() || value < 0.0 {
-                    return true;
-                }
-                settings.trade_bubble_minimum_volume = value;
             }
             ChartSettingsAction::FootprintTicksPerRow(ticks) => settings.ticks_per_row = ticks,
             _ => unreachable!(),
@@ -1055,8 +1044,6 @@ impl TerminalApp {
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::ToggleCumulativeDelta
             | ChartSettingsAction::ToggleDeltaHistogram
-            | ChartSettingsAction::ToggleTradeBubbles
-            | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks => unreachable!(),
@@ -1094,8 +1081,6 @@ impl TerminalApp {
             | ChartSettingsAction::FootprintMode(_)
             | ChartSettingsAction::ToggleCumulativeDelta
             | ChartSettingsAction::ToggleDeltaHistogram
-            | ChartSettingsAction::ToggleTradeBubbles
-            | ChartSettingsAction::TradeBubbleMinimumVolumeBits(_)
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks => unreachable!(),

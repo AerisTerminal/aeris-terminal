@@ -304,7 +304,7 @@ pub struct WorkspaceChartState {
     /// executor; this stores only product-authored presentation preferences.
     #[prost(message, optional, tag = "9")]
     pub appearance: Option<WorkspaceChartAppearanceState>,
-    /// Footprint/CVD/delta and trade-bubble presentation. The retained trade
+    /// Footprint/CVD/delta and big-trades presentation. The retained trade
     /// tape itself remains runtime-owned and is never persisted here.
     #[prost(message, optional, tag = "10")]
     pub order_flow: Option<WorkspaceOrderFlowSettingsState>,
@@ -335,6 +335,7 @@ pub struct WorkspaceChartState {
     pub show_execution_marks: Option<bool>,
 }
 
+/// Tags 4 and 5 held the retired footprint trade-bubble toggle and threshold; never reuse them.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceOrderFlowSettingsState {
     #[prost(uint32, tag = "1")]
@@ -343,11 +344,6 @@ pub struct WorkspaceOrderFlowSettingsState {
     pub show_cumulative_delta: bool,
     #[prost(bool, tag = "3")]
     pub show_delta_histogram: bool,
-    #[prost(bool, tag = "4")]
-    pub show_trade_bubbles: bool,
-    /// Exact IEEE-754 bits; zero retains the adaptive per-contract threshold.
-    #[prost(fixed64, tag = "5")]
-    pub trade_bubble_minimum_volume_bits: u64,
     /// Instrument ticks per footprint row; zero (and absent in older workspaces) is automatic.
     #[prost(uint32, tag = "6")]
     pub ticks_per_row: u32,
@@ -355,6 +351,27 @@ pub struct WorkspaceOrderFlowSettingsState {
     /// Older workspaces omit this field and are migrated away from the former default-on panes.
     #[prost(uint32, tag = "7")]
     pub study_visibility_revision: u32,
+    /// The big-trades indicator; absent when it is not added, including every workspace saved
+    /// before it replaced the footprint trade bubbles.
+    #[prost(message, optional, tag = "8")]
+    pub big_trades: Option<WorkspaceBigTradesState>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceBigTradesState {
+    /// 0, 1 and 2 select the weak, medium and strong automatic filter; 3 the fixed minimum.
+    #[prost(uint32, tag = "1")]
+    pub filter: u32,
+    /// Exact IEEE-754 bits of the fixed minimum order volume.
+    #[prost(fixed64, tag = "2")]
+    pub minimum_volume_bits: u64,
+    /// 0 small, 1 medium, 2 large bubbles.
+    #[prost(uint32, tag = "3")]
+    pub size: u32,
+    #[prost(bool, tag = "4")]
+    pub show_volume: bool,
+    #[prost(bool, tag = "5")]
+    pub hidden: bool,
 }
 
 /// Durable chart presentation preferences that are independent of market data.

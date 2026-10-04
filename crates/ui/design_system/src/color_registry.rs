@@ -94,6 +94,10 @@ macro_rules! platform_color_registry {
             bullish => "bullish",
             /// Chart candles and volume only. Aeris Charts remains authoritative for chart rendering.
             bearish => "bearish",
+            /// Big-trade bubble fill on charts; outline the bubble with `bullish`.
+            buy_bubble => "buy-bubble",
+            /// Big-trade bubble fill on charts; outline the bubble with `bearish`.
+            sell_bubble => "sell-bubble",
         }
     };
 }

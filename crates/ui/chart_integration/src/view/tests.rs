@@ -418,13 +418,197 @@ fn sweep_classifier_requires_same_side_time_proximity_and_multiple_levels() {
         trade.aggressor = aeris_charts_engine::AggressorSide::Buy;
         trade.price = 100.0 + index.to_f64().expect("small index") * 0.25;
     }
-    let sweeps = classify_order_flow_sweeps(&trades, 10.0);
+    let sweeps = classify_order_flow_sweeps(&trades);
     assert_eq!(sweeps.len(), 1);
     assert_eq!(sweeps[0].price_levels, 3);
     assert!((sweeps[0].total_volume - 21.0).abs() < f64::EPSILON);
 
     trades[1].aggressor = aeris_charts_engine::AggressorSide::Sell;
-    assert!(classify_order_flow_sweeps(&trades, 10.0).is_empty());
+    assert!(classify_order_flow_sweeps(&trades).is_empty());
+}
+
+fn apply_two_print_tape(chart: &mut AerisChartView) {
+    let trades = [
+        order_flow_trade(1, 1_000_000, 2.0),
+        order_flow_trade(2, 2_000_000, 3.0),
+    ];
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
+        .expect("tape applies");
+}
+
+fn candle_chart_with_big_trades(
+    big_trades: BigTradesSettings,
+) -> (AerisChartView, aeris_charts_engine::NativePrimitiveId) {
+    let mut chart = AerisChartView::empty();
+    let mut settings = chart.order_flow_settings();
+    settings.big_trades = Some(big_trades);
+    assert!(
+        chart
+            .set_order_flow_settings(settings)
+            .expect("settings apply")
+    );
+    apply_two_print_tape(&mut chart);
+    let id = chart.drawn_big_trades().expect("big trades over candles");
+    (chart, id)
+}
+
+#[test]
+fn big_trades_follow_durable_settings_on_every_price_presentation() {
+    let mut chart = AerisChartView::empty();
+    apply_two_print_tape(&mut chart);
+    assert!(
+        chart.order_flow_state.is_none(),
+        "a candle chart requests no tape before big trades are added"
+    );
+
+    let (mut chart, id) = candle_chart_with_big_trades(BigTradesSettings {
+        size: BigTradesSize::Large,
+        ..BigTradesSettings::default()
+    });
+    assert!(chart.has_indicators());
+    assert!(chart.footprint_series_id().is_none());
+    let colors = AerisTheme::dark().colors;
+    let options = chart.engine.big_trades_options(id).expect("options");
+    assert_eq!(options.buy_color, colors.buy_bubble.css_rgba());
+    assert_eq!(options.sell_color, colors.sell_bubble.css_rgba());
+    assert_eq!(options.buy_border_color, colors.bullish.css_rgba());
+    assert_eq!(options.sell_border_color, colors.bearish.css_rgba());
+    let row = chart
+        .legend_rows()
+        .into_iter()
+        .find(|row| row.item == LegendItem::BigTrades)
+        .expect("big trades legend row");
+    assert_eq!(row.title, "Big Trades");
+    assert!(row.visible && row.settings_available);
+
+    // The footprint rebuild keeps the bubbles over the shared product price series.
+    chart.set_chart_type(ChartType::Footprint);
+    apply_two_print_tape(&mut chart);
+    assert!(chart.footprint_series_id().is_some());
+    let id = chart
+        .drawn_big_trades()
+        .expect("big trades over the footprint");
+    assert_eq!(
+        chart.engine.big_trades_options(id).expect("options").size,
+        BigTradesSize::Large
+    );
+
+    assert!(chart.remove_legend_indicator(LegendItem::BigTrades));
+    assert_eq!(chart.order_flow_settings().big_trades, None);
+    assert!(
+        !chart
+            .legend_rows()
+            .iter()
+            .any(|row| row.item == LegendItem::BigTrades)
+    );
+    apply_two_print_tape(&mut chart);
+    assert_eq!(chart.drawn_big_trades(), None);
+    assert!(!chart.has_indicators());
+}
+
+#[test]
+fn big_trades_settings_restyle_the_drawn_indicator_in_place() {
+    let (mut chart, id) = candle_chart_with_big_trades(BigTradesSettings::default());
+    assert!(chart.set_legend_item_visible(LegendItem::BigTrades, false));
+    assert!(
+        !chart
+            .order_flow_settings()
+            .big_trades
+            .expect("added")
+            .visible
+    );
+    assert_eq!(chart.drawn_big_trades(), Some(id));
+    assert!(
+        !chart
+            .engine
+            .big_trades_options(id)
+            .expect("options")
+            .visible
+    );
+    let mut settings = chart.order_flow_settings();
+    settings.big_trades = Some(BigTradesSettings {
+        filter: BigTradesFilter::Fixed {
+            minimum_volume: 2.0,
+        },
+        size: BigTradesSize::Large,
+        show_volume: false,
+        visible: true,
+    });
+    assert!(chart.set_order_flow_settings(settings).expect("restyle"));
+    assert_eq!(chart.drawn_big_trades(), Some(id));
+    let options = chart.engine.big_trades_options(id).expect("options");
+    assert_eq!(options.size, BigTradesSize::Large);
+    assert!(!options.show_volume && options.visible);
+    assert_eq!(chart.big_trades_threshold(), Some(2.0));
+    assert_eq!(
+        chart
+            .engine
+            .big_trades_snapshot(id)
+            .expect("snapshot")
+            .bubbles
+            .len(),
+        2
+    );
+    let mut invalid = settings;
+    invalid.big_trades = Some(BigTradesSettings {
+        filter: BigTradesFilter::Fixed {
+            minimum_volume: 0.0,
+        },
+        ..BigTradesSettings::default()
+    });
+    assert!(chart.set_order_flow_settings(invalid).is_err());
+    assert_eq!(chart.order_flow_settings(), settings);
+
+    chart.set_theme(ChartTheme::Light);
+    assert_eq!(chart.drawn_big_trades(), Some(id));
+    assert_eq!(
+        chart
+            .engine
+            .big_trades_options(id)
+            .expect("options")
+            .buy_color,
+        AerisTheme::light().colors.buy_bubble.css_rgba()
+    );
+}
+
+#[test]
+fn sweeps_must_outsize_nine_in_ten_recent_prints() {
+    // Nine one-lot prints and a two-level buy run of 2 + 3 lots.
+    let mut trades = (1..=9)
+        .map(|ordinal| {
+            order_flow_trade(
+                ordinal,
+                i64::try_from(ordinal).expect("small") * 1_000_000,
+                1.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (offset, volume) in [(0, 2.0), (1, 3.0)] {
+        let mut trade = order_flow_trade(
+            10 + offset,
+            20_000_000 + i64::try_from(offset).expect("small"),
+            volume,
+        );
+        trade.aggressor = aeris_charts_engine::AggressorSide::Buy;
+        trade.price = 200.0 + offset.to_f64().expect("small") * 0.25;
+        trades.push(trade);
+    }
+    let sweeps = classify_order_flow_sweeps(&trades);
+    assert_eq!(
+        sweeps.len(),
+        1,
+        "a run above the 90th percentile print is a sweep"
+    );
+    assert!((sweeps[0].total_volume - 5.0).abs() < f64::EPSILON);
+
+    // The same run among larger prints no longer stands out.
+    for trade in &mut trades[..9] {
+        trade.volume = 8.0;
+    }
+    assert!(classify_order_flow_sweeps(&trades).is_empty());
+    assert!(classify_order_flow_sweeps(&[]).is_empty());
 }
 
 #[test]
@@ -2801,13 +2985,16 @@ fn study_legend_control_ids_do_not_overflow_or_alias_control_kinds() {
 }
 
 #[test]
-fn study_settings_requests_are_bounded_to_one_latest_study_identity() {
+fn settings_requests_are_bounded_to_one_latest_legend_item() {
     let mut chart = AerisChartView::empty();
-    assert_eq!(chart.take_study_settings_request(), None);
-    chart.pending_study_settings = Some(7);
-    chart.pending_study_settings = Some(9);
-    assert_eq!(chart.take_study_settings_request(), Some(9));
-    assert_eq!(chart.take_study_settings_request(), None);
+    assert_eq!(chart.take_settings_request(), None);
+    chart.pending_settings_request = Some(ChartSettingsRequest::Study(7));
+    chart.pending_settings_request = Some(ChartSettingsRequest::Study(9));
+    assert_eq!(
+        chart.take_settings_request(),
+        Some(ChartSettingsRequest::Study(9))
+    );
+    assert_eq!(chart.take_settings_request(), None);
 }
 
 #[test]

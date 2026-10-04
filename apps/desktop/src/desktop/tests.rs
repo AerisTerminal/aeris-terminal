@@ -409,6 +409,16 @@ mod timeframe_input {
                 .account_creator
                 .as_ref()
                 .map(|creator| creator.name.clone());
+            let big_trades_dialog = surface.big_trades_dialog.as_ref().map(|dialog| {
+                div()
+                    .size_full()
+                    .debug_selector(|| "big_trades_dialog".into())
+                    .child(big_trades_dialog_layer(
+                        &self.0,
+                        dialog,
+                        &AerisTheme::dark(),
+                    ))
+            });
             div()
                 .size_full()
                 .track_focus(&surface.chrome_focus)
@@ -422,6 +432,7 @@ mod timeframe_input {
                 }))
                 .when(quick, |root| root.child(Input::new(&input)))
                 .when_some(practice_name, |root, input| root.child(Input::new(&input)))
+                .children(big_trades_dialog)
         }
     }
 
@@ -633,6 +644,219 @@ mod timeframe_input {
             })
             .collect::<Vec<_>>();
         assert_eq!(selections, [ChartInterval::Day1]);
+    }
+
+    fn install_chart(
+        surface: &Entity<WorkspaceSurface>,
+        big_trades: Option<BigTradesSettings>,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.chart = Some(cx.new(|_| AerisChartView::empty()));
+                surface.set_chart_order_flow_settings(
+                    OrderFlowSettings {
+                        big_trades,
+                        ..OrderFlowSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+    }
+
+    fn chart_big_trades(
+        surface: &Entity<WorkspaceSurface>,
+        cx: &VisualTestContext,
+    ) -> Option<BigTradesSettings> {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .chart_order_flow_settings(cx)
+                .and_then(|settings| settings.big_trades)
+        })
+    }
+
+    fn big_trades_minimum_input(
+        surface: &Entity<WorkspaceSurface>,
+        cx: &VisualTestContext,
+    ) -> Entity<InputState> {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .big_trades_dialog
+                .as_ref()
+                .expect("big trades dialog is open")
+                .minimum_volume
+                .clone()
+        })
+    }
+
+    #[gpui::test]
+    fn big_trades_settings_open_only_while_the_indicator_is_on_the_chart(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        install_chart(&surface, None, cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_big_trades_dialog(window, cx);
+                assert!(surface.big_trades_dialog.is_none());
+                assert!(
+                    surface.indicator_message.is_some(),
+                    "a settings request for a removed indicator is reported"
+                );
+                assert!(
+                    surface
+                        .add_order_flow_study(workspace_surface::OrderFlowMenuStudy::BigTrades, cx)
+                );
+                surface.open_big_trades_dialog(window, cx);
+                assert!(surface.big_trades_dialog.is_some());
+                assert!(surface.indicator_message.is_none());
+            });
+        });
+        assert_eq!(
+            chart_big_trades(&surface, cx),
+            Some(BigTradesSettings::default()),
+            "the indicator menu adds the default indicator"
+        );
+    }
+
+    #[gpui::test]
+    fn big_trades_dialog_applies_only_a_valid_draft_and_keeps_visibility(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        let hidden = BigTradesSettings {
+            visible: false,
+            ..BigTradesSettings::default()
+        };
+        install_chart(&surface, Some(hidden), cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| surface.open_big_trades_dialog(window, cx));
+        });
+        assert!(cx.debug_bounds("big_trades_dialog").is_some());
+        let input = big_trades_minimum_input(&surface, cx);
+        cx.read(|cx| {
+            let dialog = surface.read(cx).big_trades_dialog.as_ref().expect("dialog");
+            assert_eq!(
+                dialog
+                    .intensity
+                    .map(|intensity| BigTradesFilter::Auto { intensity }),
+                Some(hidden.filter)
+            );
+            assert_eq!(dialog.size, hidden.size);
+            assert_eq!(dialog.show_volume, hidden.show_volume);
+            assert_eq!(
+                input.read(cx).value(),
+                "",
+                "nothing is drawn yet, so no automatic threshold seeds the fixed minimum"
+            );
+        });
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("0", window, cx));
+            surface.update(cx, |surface, cx| {
+                surface.set_big_trades_dialog_filter(None, cx);
+                surface.set_big_trades_dialog_size(BigTradesSize::Large, cx);
+                surface.set_big_trades_dialog_show_volume(false, cx);
+                surface.chart_persistence_dirty = false;
+                surface.apply_big_trades_dialog(cx);
+            });
+        });
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            let message = surface
+                .big_trades_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.message.as_deref());
+            assert!(
+                message.is_some_and(|message| message.contains("greater than zero")),
+                "an invalid minimum keeps the dialog open: {message:?}"
+            );
+            assert!(!surface.chart_persistence_dirty);
+        });
+        assert!(
+            cx.debug_bounds("big_trades_dialog").is_some(),
+            "the fixed draft renders its minimum volume input"
+        );
+        assert_eq!(chart_big_trades(&surface, cx), Some(hidden));
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value(" 25.5 ", window, cx));
+            surface.update(cx, WorkspaceSurface::apply_big_trades_dialog);
+        });
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert!(surface.big_trades_dialog.is_none());
+            assert!(surface.chart_persistence_dirty);
+        });
+        assert!(cx.debug_bounds("big_trades_dialog").is_none());
+        assert_eq!(
+            chart_big_trades(&surface, cx),
+            Some(BigTradesSettings {
+                filter: BigTradesFilter::Fixed {
+                    minimum_volume: 25.5
+                },
+                size: BigTradesSize::Large,
+                show_volume: false,
+                visible: false,
+            }),
+            "the draft applies while the legend keeps owning visibility"
+        );
+    }
+
+    #[gpui::test]
+    fn big_trades_dialog_reopens_on_the_fixed_minimum_and_resets_only_the_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        let fixed = BigTradesSettings {
+            filter: BigTradesFilter::Fixed {
+                minimum_volume: 0.1 + 0.2,
+            },
+            size: BigTradesSize::Small,
+            show_volume: false,
+            visible: true,
+        };
+        install_chart(&surface, Some(fixed), cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| surface.open_big_trades_dialog(window, cx));
+        });
+        let input = big_trades_minimum_input(&surface, cx);
+        cx.read(|cx| {
+            let dialog = surface.read(cx).big_trades_dialog.as_ref().expect("dialog");
+            assert_eq!(dialog.intensity, None);
+            assert_eq!(dialog.size, BigTradesSize::Small);
+            assert!(!dialog.show_volume);
+            assert_eq!(
+                input.read(cx).value(),
+                "0.3",
+                "a fractional minimum reads without binary rounding noise"
+            );
+        });
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.reset_big_trades_dialog(window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let defaults = BigTradesSettings::default();
+            let dialog = surface.read(cx).big_trades_dialog.as_ref().expect("dialog");
+            assert_eq!(
+                dialog
+                    .intensity
+                    .map(|intensity| BigTradesFilter::Auto { intensity }),
+                Some(defaults.filter)
+            );
+            assert_eq!(dialog.size, defaults.size);
+            assert_eq!(dialog.show_volume, defaults.show_volume);
+        });
+
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_big_trades_dialog));
+        assert!(cx.debug_bounds("big_trades_dialog").is_none());
+        assert_eq!(
+            chart_big_trades(&surface, cx),
+            Some(fixed),
+            "only Apply changes the chart"
+        );
     }
 }
 

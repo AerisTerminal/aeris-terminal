@@ -672,10 +672,11 @@ fn valid_study_series(series: &SeriesKey) -> bool {
 mod tests {
     use super::*;
     use aeris_contracts::{
-        WorkspaceChartIndicatorState, WorkspaceChartState, WorkspaceChartStudyState,
-        WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-        WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-        WorkspaceStudyMarketStream, WorkspaceStudySettingState, workspace_study_setting_state,
+        WorkspaceBigTradesState, WorkspaceChartIndicatorState, WorkspaceChartState,
+        WorkspaceChartStudyState, WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState,
+        WorkspacePriceAxisState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+        WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+        workspace_study_setting_state,
     };
 
     fn temporary_workspace_path() -> PathBuf {
@@ -822,10 +823,15 @@ mod tests {
                 display_mode: 2,
                 show_cumulative_delta: true,
                 show_delta_histogram: true,
-                show_trade_bubbles: true,
-                trade_bubble_minimum_volume_bits: 25.0_f64.to_bits(),
                 ticks_per_row: 5,
                 study_visibility_revision: 1,
+                big_trades: Some(WorkspaceBigTradesState {
+                    filter: 3,
+                    minimum_volume_bits: 25.0_f64.to_bits(),
+                    size: 2,
+                    show_volume: false,
+                    hidden: true,
+                }),
             }),
             context_panel_visible: true,
             context_panel_tab: 2,

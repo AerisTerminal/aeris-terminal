@@ -1584,17 +1584,6 @@ fn footprint_series_settings(
             ChartSettingsAction::ToggleDeltaHistogram,
             theme,
         ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Large trades and sweeps",
-            settings.show_trade_bubbles,
-            ChartSettingsAction::ToggleTradeBubbles,
-            theme,
-        ))
-        .child(footprint_threshold_settings(
-            terminal, menu, settings, theme,
-        ))
         .into_any_element()
 }
 
@@ -1637,44 +1626,6 @@ fn footprint_row_size_settings(
             theme,
         ))
         .into_any_element()
-}
-
-fn footprint_threshold_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    settings: OrderFlowSettings,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let selected = settings.trade_bubble_minimum_volume.to_bits();
-    settings_choice_row(
-        terminal,
-        menu,
-        "Large threshold",
-        &[
-            (
-                "Auto",
-                selected == 0.0_f64.to_bits(),
-                ChartSettingsAction::TradeBubbleMinimumVolumeBits(0.0_f64.to_bits()),
-            ),
-            (
-                "10",
-                selected == 10.0_f64.to_bits(),
-                ChartSettingsAction::TradeBubbleMinimumVolumeBits(10.0_f64.to_bits()),
-            ),
-            (
-                "50",
-                selected == 50.0_f64.to_bits(),
-                ChartSettingsAction::TradeBubbleMinimumVolumeBits(50.0_f64.to_bits()),
-            ),
-            (
-                "100",
-                selected == 100.0_f64.to_bits(),
-                ChartSettingsAction::TradeBubbleMinimumVolumeBits(100.0_f64.to_bits()),
-            ),
-        ],
-        theme,
-    )
-    .into_any_element()
 }
 
 fn candle_series_settings(

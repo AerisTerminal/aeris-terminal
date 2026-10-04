@@ -4,6 +4,8 @@
 mod accounts_panel;
 #[path = "assets.rs"]
 mod assets;
+#[path = "components/big_trades_dialog.rs"]
+mod big_trades_dialog;
 #[path = "components/bottom_panel.rs"]
 mod bottom_panel;
 #[path = "chart_chrome.rs"]
@@ -72,17 +74,18 @@ mod workspace_layout;
 
 use aeris_application::ReplayStreamUpdate;
 use aeris_chart_integration::{
-    AerisChartTheme, AerisChartView, AerisChartWorkspace, ChartAggressorSide, ChartAlertCondition,
+    AerisChartTheme, AerisChartView, AerisChartWorkspace, BigTradesFilter, BigTradesIntensity,
+    BigTradesSettings, BigTradesSize, ChartAggressorSide, ChartAlertCondition,
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
     ChartDrawingKind, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
     ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
     ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind, ChartOrderRole,
-    ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSplitDirection,
-    ChartStudyInputRequirements, ChartStudyInputStream, ChartStudyOutputDescriptor,
-    ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle, ChartStudyScaleTarget,
-    ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
+    ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSettingsRequest,
+    ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
+    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
     ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
     ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction, ChartTradingPosition,
     ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
@@ -95,13 +98,14 @@ use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionKind,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceChartAppearanceState,
-    WorkspaceChartIndicatorState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
-    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceBigTradesState,
+    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
+    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
+    WorkspaceLayoutState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
@@ -129,6 +133,7 @@ use aeris_terminal_ui::{
     OrderBookLevelSide, ReadOnlyOrderBookView,
 };
 use assets::UiIcon as HugeIcon;
+use big_trades_dialog::big_trades_dialog_layer;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, chart_context_menu_layer,
@@ -773,6 +778,7 @@ struct WorkspaceSurface {
     indicator_message: Option<String>,
     studies: RuntimeStudiesState,
     study_settings_dialog: Option<StudySettingsDialogState>,
+    big_trades_dialog: Option<BigTradesDialogState>,
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
@@ -803,7 +809,7 @@ struct WorkspaceSurface {
     last_chart_clock_revision: u64,
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
-    pending_study_settings_request: Option<StudyInstanceId>,
+    pending_settings_request: Option<LegendSettingsRequest>,
     pending_study_remove_request: Option<StudyInstanceId>,
     resource_class: ConsumerResourceClass,
     chart_chrome: chart_chrome::ChartChromePreferences,
@@ -1050,6 +1056,23 @@ struct PendingRuntimeStudyState {
 struct PendingStudyReinitialization {
     series: BarSeriesKey,
     replacement_persisted: Option<WorkspaceChartStudyState>,
+}
+
+/// A legend settings control waiting for the workspace to select its pane and open the dialog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegendSettingsRequest {
+    Study(StudyInstanceId),
+    BigTrades,
+}
+
+/// Draft big-trades settings; the chart changes only when the draft is applied.
+struct BigTradesDialogState {
+    /// `None` selects the fixed minimum typed into `minimum_volume`.
+    intensity: Option<BigTradesIntensity>,
+    size: BigTradesSize,
+    show_volume: bool,
+    minimum_volume: Entity<InputState>,
+    message: Option<String>,
 }
 
 struct StudySettingsDialogState {
@@ -2477,23 +2500,17 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 app.last_chart_clock_revision = clock_revision;
                 cx.notify();
             }
-            let (
-                activate,
-                request,
-                study_settings_request,
-                study_remove_request,
-                intents,
-                sync_events,
-            ) = chart.update(cx, |chart, _| {
-                (
-                    chart.take_activate_request(),
-                    chart.take_context_menu_request(),
-                    chart.take_study_settings_request(),
-                    chart.take_study_remove_request(),
-                    chart.take_trading_intents(),
-                    chart.take_sync_events(),
-                )
-            });
+            let (activate, request, settings_request, study_remove_request, intents, sync_events) =
+                chart.update(cx, |chart, _| {
+                    (
+                        chart.take_activate_request(),
+                        chart.take_context_menu_request(),
+                        chart.take_settings_request(),
+                        chart.take_study_remove_request(),
+                        chart.take_trading_intents(),
+                        chart.take_sync_events(),
+                    )
+                });
             let had_sync_events = !sync_events.is_empty();
             for event in sync_events {
                 if app.pending_chart_sync_events.len() == CHART_SYNC_EVENTS_PER_SURFACE {
@@ -2516,9 +2533,15 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
             if let Some(request) = request {
                 app.pending_chart_context_menu = Some(request);
             }
-            let had_study_settings_request = study_settings_request.is_some();
-            if let Some(study_id) = study_settings_request.and_then(StudyInstanceId::try_from_u64) {
-                app.pending_study_settings_request = Some(study_id);
+            let had_settings_request = settings_request.is_some();
+            let settings_request = settings_request.and_then(|request| match request {
+                ChartSettingsRequest::Study(study_id) => {
+                    StudyInstanceId::try_from_u64(study_id).map(LegendSettingsRequest::Study)
+                }
+                ChartSettingsRequest::BigTrades => Some(LegendSettingsRequest::BigTrades),
+            });
+            if let Some(request) = settings_request {
+                app.pending_settings_request = Some(request);
             }
             let had_study_remove_request = study_remove_request.is_some();
             if let Some(study_id) = study_remove_request.and_then(StudyInstanceId::try_from_u64) {
@@ -2530,7 +2553,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
             if activate
                 || had_menu
                 || had_alert_request
-                || had_study_settings_request
+                || had_settings_request
                 || had_study_remove_request
                 || had_sync_events
             {
@@ -4184,8 +4207,6 @@ enum ChartSettingsAction {
     FootprintMode(FootprintDisplayMode),
     ToggleCumulativeDelta,
     ToggleDeltaHistogram,
-    ToggleTradeBubbles,
-    TradeBubbleMinimumVolumeBits(u64),
     /// Instrument ticks per footprint row; zero is automatic.
     FootprintTicksPerRow(u32),
     ToggleOrderManagementLines,
