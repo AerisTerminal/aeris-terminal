@@ -1,4 +1,4 @@
-use aeris_market_data::BarPeriod;
+use aeris_market_data::{BarPeriod, MarketBar};
 
 use crate::{CanonicalMarketSeriesSnapshot, RetainedMarketTrade};
 
@@ -22,14 +22,15 @@ pub struct DeltaDivergenceEvidence {
     pub observed_unix_nanos: i64,
 }
 
-/// Evaluates the latest two completed fixed-time bars against the canonical
-/// classified tape. `None` means either no divergence or insufficient tape
-/// coverage; the rule never fills a missing interval with invented flow.
-#[must_use]
-pub fn detect_delta_divergence(
+/// Source sequence of the completed bar the divergence rule would evaluate, so a
+/// publisher can skip the tape scan for a bar whose trigger already fired.
+pub(crate) fn delta_divergence_completed_bar_sequence(
     series: &CanonicalMarketSeriesSnapshot,
-    trades: &[RetainedMarketTrade],
-) -> Option<DeltaDivergenceEvidence> {
+) -> Option<u64> {
+    divergence_bars(series).map(|(_, _, completed)| completed.source_sequence)
+}
+
+fn divergence_bars(series: &CanonicalMarketSeriesSnapshot) -> Option<(u32, MarketBar, MarketBar)> {
     let BarPeriod::Time { seconds } = series.series.period else {
         return None;
     };
@@ -39,6 +40,18 @@ pub fn detect_delta_divergence(
         .saturating_sub(usize::from(series.forming));
     let previous = *series.bars.get(completed_len.checked_sub(2)?)?;
     let completed = *series.bars.get(completed_len.checked_sub(1)?)?;
+    Some((seconds, previous, completed))
+}
+
+/// Evaluates the latest two completed fixed-time bars against the canonical
+/// classified tape. `None` means either no divergence or insufficient tape
+/// coverage; the rule never fills a missing interval with invented flow.
+#[must_use]
+pub fn detect_delta_divergence(
+    series: &CanonicalMarketSeriesSnapshot,
+    trades: &[RetainedMarketTrade],
+) -> Option<DeltaDivergenceEvidence> {
+    let (seconds, previous, completed) = divergence_bars(series)?;
     let interval_nanos = i64::from(seconds).checked_mul(1_000_000_000)?;
     let window_start = previous.exchange_timestamp_unix_nanos;
     let previous_end = previous
@@ -198,5 +211,27 @@ mod tests {
             trade(3, 120, AggressorSide::Buy),
         ];
         assert!(detect_delta_divergence(&series(100, 101), &trades).is_none());
+    }
+
+    #[test]
+    fn watermark_precheck_names_the_bar_the_rule_evaluates() {
+        let trades = vec![
+            trade(1, 0, AggressorSide::Buy),
+            trade(2, 30, AggressorSide::Buy),
+            trade(3, 60, AggressorSide::Sell),
+            trade(4, 90, AggressorSide::Sell),
+            trade(5, 120, AggressorSide::Buy),
+        ];
+        let forming = series(100, 101);
+        let evidence = detect_delta_divergence(&forming, &trades).expect("divergence");
+        assert_eq!(
+            delta_divergence_completed_bar_sequence(&forming),
+            Some(evidence.completed_bar_source_sequence)
+        );
+        let closed = SeriesSnapshot {
+            forming: false,
+            ..forming
+        };
+        assert_eq!(delta_divergence_completed_bar_sequence(&closed), Some(3));
     }
 }

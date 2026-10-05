@@ -209,6 +209,61 @@ fn footprint_rebuilds_after_runtime_rewrite_and_reconnect_without_accepting_reti
         .unwrap();
 }
 
+#[test]
+fn order_flow_resume_ordinal_scopes_suffix_projection_and_appends_skip_forced_layout() {
+    let mut chart = AerisChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    let resume = |chart: &AerisChartView, generation, tick| {
+        chart.order_flow_resume_ordinal("instrument:test", generation, aggregation, tick)
+    };
+    assert_eq!(resume(&chart, 7, 0.25), None);
+    let tape = (1..=6)
+        .map(|ordinal| order_flow_trade(ordinal, i64::try_from(ordinal).unwrap() * 1_000_000, 1.0))
+        .collect::<Vec<_>>();
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &tape[..4])
+        .expect("covering tape");
+    assert!(chart.layout_dirty, "a covering install lays out");
+    assert_eq!(resume(&chart, 7, 0.25), Some(4));
+    assert_eq!(resume(&chart, 8, 0.25), None, "another provider generation");
+    assert_eq!(resume(&chart, 7, 0.5), None, "another price increment");
+    assert_eq!(
+        chart.order_flow_resume_ordinal("instrument:other", 7, aggregation, 0.25),
+        None
+    );
+
+    // A host sends one already-applied trade plus the new suffix.
+    chart.layout_dirty = false;
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &tape[3..])
+        .expect("suffix append");
+    assert!(
+        !chart.layout_dirty,
+        "a tip append invalidates only the frame"
+    );
+    assert_eq!(resume(&chart, 7, 0.25), Some(6));
+
+    let mut full = AerisChartView::empty();
+    full.set_chart_type(ChartType::Footprint);
+    full.apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &tape)
+        .expect("full tape");
+    let bars = |chart: &AerisChartView| {
+        chart
+            .engine
+            .footprint_bars(chart.footprint_series_id().expect("footprint"))
+            .expect("bars")
+    };
+    assert_eq!(bars(&chart), bars(&full));
+
+    chart.invalidate_order_flow_prefix();
+    assert_eq!(
+        resume(&chart, 7, 0.25),
+        None,
+        "a rewrite needs the covering window"
+    );
+}
+
 fn enable_cvd_and_delta(
     chart: &mut AerisChartView,
     aggregation: OrderFlowAggregation,

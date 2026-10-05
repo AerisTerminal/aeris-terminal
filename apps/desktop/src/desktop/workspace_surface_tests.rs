@@ -1174,3 +1174,42 @@ fn durable_study_output_dependency_resolves_to_the_restored_runtime_identity() {
         vec![StudyDependency::Output(upstream_id.output(0))]
     );
 }
+
+fn retained_tape_trade(ordinal: u64) -> aeris_market_runtime::RetainedMarketTrade {
+    let nanos = i64::try_from(ordinal).expect("small ordinal") * 1_000_000_000;
+    aeris_market_runtime::RetainedMarketTrade {
+        ingestion_ordinal: ordinal,
+        observed_unix_nanos: nanos,
+        trade: Arc::new(aeris_market_data::MarketTrade {
+            metadata: aeris_market_data::EventMetadata {
+                provider_id: "provider".into(),
+                instrument_id: "instrument".into(),
+                entitlement_id: "entitlement".into(),
+                session_generation: 1,
+                source_sequence: ordinal,
+                timestamps: aeris_market_data::QualifiedTimestamp {
+                    exchange_unix_nanos: Some(nanos),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: nanos,
+                },
+            },
+            trade_id: format!("trade-{ordinal}"),
+            price: 100,
+            quantity: 1,
+            aggressor: aeris_market_data::AggressorSide::Buy,
+        }),
+    }
+}
+
+#[test]
+fn order_flow_projection_keeps_one_applied_trade_and_the_sweep_window() {
+    let trades = (10..=20).map(retained_tape_trade).collect::<Vec<_>>();
+    assert_eq!(order_flow_projection_start(&trades, None, 2), 0);
+    // Ordinal 15 is index 5; keep it as continuity evidence for ordinals 16..=20.
+    assert_eq!(order_flow_projection_start(&trades, Some(15), 2), 5);
+    // The sweep window reaches further back than the unapplied suffix.
+    assert_eq!(order_flow_projection_start(&trades, Some(20), 2), 9);
+    // An applied ordinal older than the window still sends the covering window.
+    assert_eq!(order_flow_projection_start(&trades, Some(3), 2), 0);
+    assert_eq!(order_flow_projection_start(&[], Some(3), 2), 0);
+}

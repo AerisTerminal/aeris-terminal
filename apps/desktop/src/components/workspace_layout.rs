@@ -380,10 +380,11 @@ pub(super) fn workspace_market_area(
             time_sales: TimeSalesPanelState {
                 app: active_surface.clone(),
                 tape: surface.trade_tape.as_ref(),
+                rows_cache: &surface.time_sales.rows,
                 sweeps: &surface.trade_sweeps,
                 product: surface.product.as_ref(),
                 book: order_book_frame.as_ref(),
-                filter: surface.time_sales_filter,
+                filter: surface.time_sales.filter,
                 scroll: &surface.scrolls.time_sales,
             },
             watchlist,

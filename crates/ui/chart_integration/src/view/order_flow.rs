@@ -206,8 +206,39 @@ impl AerisChartView {
                 last
             };
         }
-        self.invalidate_series_layout();
+        // The engine re-lays out on its own series revision; forcing layout on every
+        // tick would also let the price axis shrink and jitter while the tape streams.
+        if can_append {
+            self.invalidate_series_frame();
+        } else {
+            self.invalidate_series_layout();
+        }
         Ok(())
+    }
+
+    /// The last ingestion ordinal the chart applied for exactly this tape, so a host can
+    /// project only the runtime window's new suffix. `None` means the next update must
+    /// carry the covering window (no tape, a different tape, or an invalidated prefix).
+    #[must_use]
+    pub fn order_flow_resume_ordinal(
+        &self,
+        identity: &str,
+        provider_generation: u64,
+        aggregation: OrderFlowAggregation,
+        tick_size: f64,
+    ) -> Option<u64> {
+        if !self.order_flow_presentation_requested() {
+            return None;
+        }
+        self.order_flow_state
+            .as_ref()
+            .filter(|state| {
+                state.identity == identity
+                    && state.provider_generation == provider_generation
+                    && state.aggregation == aggregation
+                    && state.tick_size_bits == tick_size.to_bits()
+            })
+            .and_then(|state| state.last_ingestion_ordinal)
     }
 
     fn configure_order_flow(

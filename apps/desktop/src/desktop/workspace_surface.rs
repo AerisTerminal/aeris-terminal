@@ -87,7 +87,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         order_book: init.order_book,
         trade_tape: None,
         trade_sweeps: Arc::from([]),
-        time_sales_filter: TimeSalesFilter::default(),
+        time_sales: TimeSalesState::default(),
         context_view: init.context_view,
         context_snapshot: init.context_snapshot,
         context_panel_visible: init.context_panel_visible,
@@ -247,11 +247,29 @@ fn scaled_market_value(value: i64, scale: u8) -> Option<f64> {
     converted.is_finite().then_some(converted)
 }
 
+/// The first retained trade a chart update still needs. Keeping one trade the chart
+/// already applied preserves the window's continuity evidence, and the trailing
+/// `tail_window` trades are always projected for the sweep classifier.
+fn order_flow_projection_start(
+    trades: &[aeris_market_runtime::RetainedMarketTrade],
+    resume_ordinal: Option<u64>,
+    tail_window: usize,
+) -> usize {
+    let Some(applied) = resume_ordinal else {
+        return 0;
+    };
+    let next = trades.partition_point(|trade| trade.ingestion_ordinal <= applied);
+    next.saturating_sub(1)
+        .min(trades.len().saturating_sub(tail_window))
+}
+
 fn chart_order_flow_trades(
     snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot,
+    start: usize,
 ) -> Option<Vec<OrderFlowTrade>> {
     snapshot
         .trades
+        .get(start..)?
         .iter()
         .map(|retained| {
             let trade = retained.trade.as_ref();
@@ -3664,6 +3682,7 @@ impl WorkspaceSurface {
             });
             self.trade_tape = None;
             self.trade_sweeps = Arc::from([]);
+            self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
         }
         self.rithmic_pending_sequence = None;
         self.rithmic_switch = if self.chart.is_some() {
@@ -3697,6 +3716,7 @@ impl WorkspaceSurface {
         });
         self.trade_tape = None;
         self.trade_sweeps = Arc::from([]);
+        self.time_sales.rows = time_sales_panel::TimeSalesRowsCache::default();
         let restored = product
             .and_then(|product| self.market_worker.try_select_engine(product, interval).ok());
         if let Some(sequence) = restored {
@@ -4067,12 +4087,12 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn cycle_time_sales_side_filter(&mut self, cx: &mut Context<Self>) {
-        self.time_sales_filter.side = self.time_sales_filter.side.next();
+        self.time_sales.filter.side = self.time_sales.filter.side.next();
         cx.notify();
     }
 
     pub(super) fn cycle_time_sales_size_filter(&mut self, cx: &mut Context<Self>) {
-        self.time_sales_filter.minimum_quantity = match self.time_sales_filter.minimum_quantity {
+        self.time_sales.filter.minimum_quantity = match self.time_sales.filter.minimum_quantity {
             value if value < 1.0 => 1.0,
             value if value < 10.0 => 10.0,
             value if value < 100.0 => 100.0,
@@ -4082,7 +4102,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn cycle_time_sales_price_filter(&mut self, cx: &mut Context<Self>) {
-        self.time_sales_filter.price_range_ticks = match self.time_sales_filter.price_range_ticks {
+        self.time_sales.filter.price_range_ticks = match self.time_sales.filter.price_range_ticks {
             None => Some(10),
             Some(10) => Some(50),
             Some(_) => None,
@@ -4091,7 +4111,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn reset_time_sales_filter(&mut self, cx: &mut Context<Self>) {
-        if self.time_sales_filter.reset() {
+        if self.time_sales.filter.reset() {
             cx.notify();
         }
     }
@@ -4202,26 +4222,56 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         const SWEEP_CLASSIFICATION_WINDOW: usize = 512;
-        let (Some(chart), Some(product), Some(trades)) = (
-            self.chart.as_ref(),
-            self.product.as_ref(),
-            chart_order_flow_trades(snapshot),
-        ) else {
+        let (Some(chart), Some(product)) = (self.chart.as_ref(), self.product.as_ref()) else {
             return;
         };
-        let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
-        self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..]).into();
         let price_divisor = 10_f64.powi(i32::from(snapshot.price_scale));
         // Footprint rows are keyed by the instrument's price increment. Without a
         // provider-published increment the chart stays on candles; none is guessed.
-        let Some(tick_size) = product
+        let tick_size = product
             .price_increment
             .and_then(|increment| {
                 num_traits::ToPrimitive::to_f64(&increment)
                     .map(|increment| increment / price_divisor)
             })
-            .filter(|tick| tick.is_finite() && *tick > 0.0)
-        else {
+            .filter(|tick| tick.is_finite() && *tick > 0.0);
+        let identity = product.instrument_id.clone();
+        let aggregation = order_flow_aggregation(self.interval);
+        let rewritten = self
+            .trade_tape
+            .as_ref()
+            .is_some_and(|prior| prior.rewrite_generation != snapshot.rewrite_generation);
+        let resume_ordinal = chart.update(cx, |chart, _| {
+            if rewritten {
+                chart.invalidate_order_flow_prefix();
+            }
+            tick_size.and_then(|tick_size| {
+                chart.order_flow_resume_ordinal(
+                    &identity,
+                    snapshot.provider_generation,
+                    aggregation,
+                    tick_size,
+                )
+            })
+        });
+        let start = if tick_size.is_some() {
+            order_flow_projection_start(
+                &snapshot.trades,
+                resume_ordinal,
+                SWEEP_CLASSIFICATION_WINDOW,
+            )
+        } else {
+            snapshot
+                .trades
+                .len()
+                .saturating_sub(SWEEP_CLASSIFICATION_WINDOW)
+        };
+        let Some(trades) = chart_order_flow_trades(snapshot, start) else {
+            return;
+        };
+        let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
+        self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..]).into();
+        let Some(tick_size) = tick_size else {
             chart.update(cx, |chart, chart_cx| {
                 chart.clear_order_flow_trades();
                 chart_cx.notify();
@@ -4232,16 +4282,7 @@ impl WorkspaceSurface {
             ));
             return;
         };
-        let identity = product.instrument_id.clone();
-        let aggregation = order_flow_aggregation(self.interval);
         let result = chart.update(cx, |chart, chart_cx| {
-            if self
-                .trade_tape
-                .as_ref()
-                .is_some_and(|prior| prior.rewrite_generation != snapshot.rewrite_generation)
-            {
-                chart.invalidate_order_flow_prefix();
-            }
             let result = chart.apply_order_flow_trades(
                 &identity,
                 snapshot.provider_generation,

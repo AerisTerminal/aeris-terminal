@@ -145,6 +145,7 @@ impl ProviderOrderBook {
             trade_tape_rewrite_generation: 0,
             indexed_trade_ordinals: BTreeMap::new(),
             trade_tape_dirty: true,
+            trade_tape_published_at: None,
             retention_clock_unix_nanos: 0,
         }
     }

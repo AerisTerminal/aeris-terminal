@@ -659,6 +659,7 @@ struct ProviderOrderBook {
     trade_tape_rewrite_generation: u64,
     indexed_trade_ordinals: BTreeMap<String, u64>,
     trade_tape_dirty: bool,
+    trade_tape_published_at: Option<std::time::Instant>,
     retention_clock_unix_nanos: i64,
 }
 

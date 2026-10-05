@@ -730,7 +730,7 @@ struct WorkspaceSurface {
     order_book: Entity<ReadOnlyOrderBookView>,
     trade_tape: Option<aeris_market_runtime::MarketTradeTapeSnapshot>,
     trade_sweeps: Arc<[OrderFlowSweep]>,
-    time_sales_filter: TimeSalesFilter,
+    time_sales: TimeSalesState,
     context_view: Option<ContextView>,
     context_snapshot: Arc<ContextSnapshot>,
     context_panel_visible: bool,
@@ -927,6 +927,13 @@ impl TimeSalesSideFilter {
             Self::Sell => Self::All,
         }
     }
+}
+
+/// The Time & Sales filter and the rows it last projected from the trade tape.
+#[derive(Default)]
+struct TimeSalesState {
+    filter: TimeSalesFilter,
+    rows: time_sales_panel::TimeSalesRowsCache,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

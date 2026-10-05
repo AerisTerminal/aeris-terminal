@@ -10,6 +10,7 @@ use crate::{
 };
 use aeris_observability::diagnostic;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub(super) fn fail_waiters(
     events: &mut BTreeMap<ConsumerId, ConsumerEvents>,
@@ -687,14 +688,23 @@ impl Coordinator<'_> {
         }
     }
 
-    /// Publishes one coalesced tape image per coordinator drain. The image is
-    /// shared across consumers and slow consumers keep one latest bounded
-    /// replacement instead of accumulating an unbounded event queue.
+    /// Publishes one coalesced tape image per instrument at most once per
+    /// coordinator tick, so a fast tape costs one bounded copy per display frame
+    /// rather than one per drain. A deferred image stays dirty and the idle wait
+    /// publishes it within the next tick. The image is shared across consumers and
+    /// slow consumers keep one latest bounded replacement instead of accumulating
+    /// an unbounded event queue.
     pub(super) fn broadcast_dirty_trade_tapes(&mut self) {
+        let now = Instant::now();
         let dirty = self
             .order_books
             .iter()
-            .filter(|(_, book)| book.trade_tape_dirty)
+            .filter(|(_, book)| {
+                book.trade_tape_dirty
+                    && book.trade_tape_published_at.is_none_or(|published| {
+                        now.duration_since(published) >= super::COORDINATOR_TICK
+                    })
+            })
             .map(|(identity, _)| identity.clone())
             .collect::<Vec<_>>();
         for (provider, instrument_id) in dirty {
@@ -731,6 +741,7 @@ impl Coordinator<'_> {
             .collect::<Vec<_>>()
             .into();
         order_book.trade_tape_dirty = false;
+        order_book.trade_tape_published_at = Some(Instant::now());
         for (consumer_id, generation, series) in consumers {
             let Some(snapshot) =
                 trade_tape_snapshot(consumer_id, generation, order_book, Arc::clone(&trades))
@@ -743,15 +754,22 @@ impl Coordinator<'_> {
             let Some(canonical) = self.engine.series_snapshot(&series) else {
                 continue;
             };
+            let fired =
+                crate::order_flow_alerts::delta_divergence_completed_bar_sequence(&canonical)
+                    .is_some_and(|sequence| {
+                        self.delta_divergence_watermarks.get(&consumer_id)
+                            == Some(&(generation, sequence))
+                    });
+            if fired {
+                continue;
+            }
             let Some(evidence) = crate::detect_delta_divergence(&canonical, &trades) else {
                 continue;
             };
-            let watermark = (generation, evidence.completed_bar_source_sequence);
-            if self.delta_divergence_watermarks.get(&consumer_id) == Some(&watermark) {
-                continue;
-            }
-            self.delta_divergence_watermarks
-                .insert(consumer_id, watermark);
+            self.delta_divergence_watermarks.insert(
+                consumer_id,
+                (generation, evidence.completed_bar_source_sequence),
+            );
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 events.delta_divergence = Some(MarketRuntimeEvent::DeltaDivergenceTriggered(
                     crate::MarketDeltaDivergenceTrigger {
