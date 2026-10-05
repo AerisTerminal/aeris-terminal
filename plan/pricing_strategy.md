@@ -121,8 +121,9 @@ the 2026 benchmark bands, not Aeris data.
 
 ## Sell only what ships
 
-Live trading needs Rithmic onboarding (batch T5), the copier is still open in T2, and order flow is
-T3. Charging before live trading works would sell simulated trading only. Keep the beta free, price
+Live trading needs Rithmic onboarding (batch T5). The copier (M2.7) and order flow (T3) work today,
+but only on simulated accounts and live market data, not on live broker accounts. Charging before
+live trading works would sell simulated trading only. Keep the beta free, price
 plans on the site as "at launch", and start billing when Pro features are real.
 
 ## Open questions to settle

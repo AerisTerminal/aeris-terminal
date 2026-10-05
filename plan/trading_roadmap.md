@@ -24,13 +24,14 @@ Item IDs are stable: **T** batches, **PF** foundations, **M** features, **D** de
 6. [Decisions](#6-decisions)
 7. [Constraints](#7-constraints)
 8. [Current baseline](#8-current-baseline)
-9. [Delivery and verification](#9-delivery-and-verification)
+9. [Broker coverage](#9-broker-coverage)
+10. [Delivery and verification](#10-delivery-and-verification)
 
 ---
 
 ## 1. Status
 
-Updated 2026-09-28. A status is **Complete** only when every item works through the real runtime and
+Updated 2026-10-05. A status is **Complete** only when every item works through the real runtime and
 desktop path, not when a unit test alone passes.
 
 | Batch | Scope | Status | Blocked by |
@@ -39,7 +40,7 @@ desktop path, not when a unit test alone passes.
 | [T2](#t2--trading-execution-and-risk-on-the-simulated-venue) Trading, execution and risk | M2.1–M2.8, M3.1–M3.4, M7.2 | **Partial**: engine complete, desktop gaps | — |
 | [T3](#t3--order-flow-on-hyperliquid-data) Order flow | PF5, M1.2, M1.4, M1.5, M1.7 | **Complete** | — |
 | [T4](#t4--context-and-workspace) Context and workspace | D6, M5.1–M5.5, M7.1, M7.4 | **Complete**; keyed sources not live-qualified | Maintainer API keys (qualification only) |
-| [T5](#t5--rithmic-live-trading) Rithmic live trading | PF1, PF2, PF4, M1.6, live T2 | **Blocked** | Rithmic onboarding and conformance; D4 |
+| [T5](#t5--rithmic-live-trading) Rithmic live trading | PF1, PF2, PF4, M1.6, live T2 | **Blocked**; adapter order and PnL plant sessions exist, not wired to `trading_runtime` | Rithmic onboarding and conformance; D4 |
 | [T6](#t6--record-replay-and-review) Record, replay and review | D2, PF8, M4.1–M4.4 | **Open** | D2; data licensing checklist |
 | [T7](#t7--institutional-depth) Institutional depth | M1.1, M1.3, M1.8, M4.5, M5.6, M5.7 | **Open** | T6; Aeris Charts B4–B7; licensing checklist |
 | [T8](#t8--power-users) Power users | M6.1–M6.5, M7.3, M7.5–M7.8, PF10 | **Open** | D5; Aeris Charts B9; a release path for M7.8 |
@@ -62,7 +63,7 @@ Close T2 before starting new batches. None of this has an external blocker.
 | Rule-profile editor | M3.1, M3.2, M5.1 | `TradingService::register_risk_profile` has no desktop caller, so no profile can be created and event flatten/lock rules can never activate | Create, edit and version prop-firm profiles per account in the desktop |
 | Session-plan editor | M3.3 (planned hours), M3.4 | `register_session_plan` has no desktop caller; the panel always shows "Plan · None" | Create the plan and checklist before the session; show the adherence review |
 | Bracket-template editor | M2.3 | `register_strategy_template` has no desktop caller; only ad hoc chart brackets exist, so the ticket's Bracket selector is always "Off" | Create, edit and enable templates, including trailing, break-even and scale-out |
-| Lock lifecycle | M2.6, M3.2 | `RiskLock` has no expiry and `unlock_account` has no desktop caller, so a kill switch or tripped rule locks the account permanently | Session-boundary reset per profile, and a deliberate, confirmed unlock path |
+| Lock lifecycle | M2.6, M3.2 | `RiskLock` has no expiry; `trading::unlock_simulated_account` wraps `unlock_account` but no UI action calls it, so a kill switch or tripped rule locks the account permanently | Session-boundary reset per profile, and a deliberate, confirmed unlock path |
 | Hotkey coverage | M2.5, M7.2 | Only buy and sell at market, cancel all, flatten and kill are bound; bindings cannot be changed | Buy and sell at bid and ask, reverse, per-hotkey confirmation, user rebinding with conflict detection |
 | Keyed context qualification | T4 | EIA, USDA NASS/FAS and FRED paths never exercised with real keys | Live-qualify with maintainer keys |
 
@@ -202,8 +203,15 @@ resizable with a persisted height (`5cb343a`).
 **Scope:** PF1, PF2, PF4, M1.6, live qualification of T2 · **Needs:** T1, T2; Aeris Charts B1 (PD1),
 B6 (PD8) · **Status:** Blocked until Rithmic grants live accounts and order-routing conformance
 
-- [ ] Order plant and PnL plant templates verified against the licensed Provider Kit.
-- [ ] **PF1** Order routing with idempotent client order IDs.
+- [~] Order plant and PnL plant sessions in `rithmic_protocol` (`11625ca7`): login info, account
+      list, trade routes, order updates and snapshot, submit, modify, cancel, cancel all, execution
+      replay, fill history, and position snapshot and updates, with allowlisted outbound templates
+      and fixed-point decimals. Verification against the licensed Provider Kit and a live Rithmic
+      Test exchange is not recorded.
+- [ ] Production endpoints and a system/gateway picker from Rithmic's system list; the adapter
+      connects only to the hardcoded Rithmic Test endpoint (`endpoint.rs`).
+- [ ] **PF1** Order routing with idempotent client order IDs, as a `trading_runtime` venue beside
+      the simulated venue.
 - [ ] **PF2** Positions, PnL, balance, margin and broker risk limits.
 - [ ] Rithmic conformance passed.
 - [ ] T2 features qualified on live accounts, including the copier across several accounts.
@@ -279,7 +287,7 @@ derived results, and journal statistics are reproducible from stored records.
 | --- | --- | --- | --- | --- | --- |
 | M1.1 | Liquidity heatmap: resting depth over time with trades, color scaling, thresholds, minimum size | Absent | Feed canonical depth and PF5 trades into the chart; settings UI | F3, OF15, PD8, PD9 | T7 |
 | M1.2 | Footprint: bid×ask, delta, total and imbalance views; POC; stacked imbalances | Present | Consumes PF5; configurable and persisted | F2, OF12, PD10 | T3 |
-| M1.3 | Volume profile, VWAP bands and TPO: session, composite, fixed-range, anchored | Absent (visible-range profile exists in Aeris Charts) | Session definitions from PF6; profile settings; toolbar tools | OF3–OF10, F6 | T7 |
+| M1.3 | Volume profile, VWAP bands and TPO: session, composite, fixed-range, anchored | Absent (Volume Profile (Visible Range) is in the indicator menu since `df9f2cef`) | Session definitions from PF6; profile settings; toolbar tools | OF3–OF10, F6 | T7 |
 | M1.4 | Cumulative delta and delta divergence | Present | Shared-tape delta and completed-bar divergence alerts | F2, OF1, OF2 | T3 |
 | M1.5 | Big trades and sweeps with adaptive per-contract thresholds | Present | Bounded sweep grouping; adaptive or explicit threshold | F2, OF11, PD8 | T3 |
 | M1.6 | Order-level intelligence: queue position, icebergs, pulled liquidity, size clustering | Absent | Deterministic detectors over PF4, labeled as estimates; DOM columns | PD8, PD1 | T5 |
@@ -374,8 +382,8 @@ and release time; missing keys or outages show "unavailable", never invented val
 
 | ID | Foundation | Batch | Status |
 | --- | --- | --- | --- |
-| PF1 | Rithmic order routing | T5 | Absent |
-| PF2 | Rithmic PnL plant and account state | T5 | Absent |
+| PF1 | Rithmic order routing | T5 | Partial (adapter sessions only) |
+| PF2 | Rithmic PnL plant and account state | T5 | Partial (adapter sessions only) |
 | PF3 | Canonical trading domain | T1 | Delivered |
 | PF4 | Canonical order-level book publication | T5 | Absent |
 | PF5 | Trade tape publication | T3 | Delivered |
@@ -383,7 +391,7 @@ and release time; missing keys or outages show "unavailable", never invented val
 | PF7 | Local store for user-owned records | T1 | Delivered |
 | PF8 | Session recording store | T6 | Absent |
 | PF9 | Local simulated venue | T1 | Delivered |
-| PF10 | Additional providers (CQG, dxFeed) | T8 | Absent |
+| PF10 | Additional trading providers (see [Broker coverage](#9-broker-coverage)) | T8 | Absent |
 
 **PF1 — Rithmic order routing.** Submit, modify and cancel market, limit, stop and stop-limit
 orders; server-side brackets, OCO and trailing stops where Rithmic supports them; status, fill and
@@ -421,7 +429,10 @@ only; never a history cache for live charts. Gate: D2 and the licensing checklis
 **PF9 — Local simulated venue.** Same contracts as PF1–PF3, driven by live or replayed data. Touch
 fills now, queue-aware fills later (M4.5). Simulated accounts are always visually distinct.
 
-**PF10 — Additional providers.** CQG and dxFeed behind the same provider-neutral contracts, per D5.
+**PF10 — Additional trading providers.** Broker, exchange or futures-commission-merchant (FCM) routes
+behind the same provider-neutral market and trading contracts, chosen per D5 from the candidates in
+[Broker coverage](#9-broker-coverage). tastytrade market data already runs through the provider
+registry; CQG and dxFeed remain candidates for futures data.
 
 ---
 
@@ -433,7 +444,7 @@ fills now, queue-aware fills later (M4.5). Simulated accounts are always visuall
 | D2 | Session recording versus the ban on market-history persistence | PF8, M4, M6.4 | **Open.** Recommendation: allow an explicit opt-in, user-owned recording store that never feeds the history cache; amend `AGENTS.md` and `tools/naming_check` in the same change |
 | D3 | Local storage engine for user-owned records | PF7 | **Decided:** SQLite through the pinned bundled `rusqlite`; do not add another store |
 | D4 | Order-level data leaving the Rithmic adapter | PF4, M1.6 | **Open.** Recommendation: a bounded canonical view in `domain/market_data`, keeping provider identity, local order and sequence evidence separate |
-| D5 | First additional provider | PF10 | **Open.** Recommendation: defer until Rithmic trading is qualified; choose by user demand |
+| D5 | First additional trading provider | PF10 | **Open.** Recommendation: defer until Rithmic trading is qualified; choose by user demand. Conflicts with `plan/go-to-market-strategy.md`, whose 90-day plan ships cTrader and starts Hyperliquid builder-code revenue before Rithmic is qualified; the maintainer must pick one order and record it here |
 | D6 | Calendar distribution without a backend | M5.1 | **Decided:** fetch official BLS, BEA, Federal Reserve and EIA schedules directly through `context_runtime` |
 
 ---
@@ -478,20 +489,21 @@ Record the reviewed policy versions in the feature's release notes.
 
 ## 8. Current baseline
 
-Source-confirmed 2026-09-28. This records what exists, not a claim of completeness.
+Source-confirmed 2026-10-05. This records what exists, not a claim of completeness.
 
 | Area | Present today | Where |
 | --- | --- | --- |
-| Rithmic market data | Ticker and History plants: login, heartbeat, symbol search, reference data, quotes, trades with aggressor, tick and time bars, depth by order with snapshot | `crates/adapters/rithmic_protocol` |
+| Rithmic market data | Ticker and History plants: login, heartbeat, symbol search, reference data, quotes, trades with aggressor, tick and time bars, depth by order with snapshot; Rithmic Test endpoint only | `crates/adapters/rithmic_protocol` |
 | Rithmic order-level book | Assembled in the adapter (up to 131,072 orders); published only as aggregated levels | `provider_session/canonical_market.rs` |
-| Rithmic trading | **Absent**: no Order or PnL plant | `protocol.rs` allowlist |
+| Rithmic trading | Order and PnL plant sessions in the adapter (accounts, trade routes, submit, modify, cancel, fills, positions); **not wired** into `trading_runtime` or the desktop | `order_plant.rs`, `pnl_plant.rs`, `order_session.rs` |
+| tastytrade | Level 1 futures and equities through DXLink: candles, quotes, every `TimeAndSale` with aggressor side, runtime-owned futures catalog; trusted third-party authorization with the `read` scope, access tokens issued by the Aeris AWS broker; no depth, no account data, no orders | `crates/adapters/tastytrade_market`, `market_service/tastytrade.rs` |
 | Hyperliquid | Public candles, L2 snapshots, BBO, trades, catalog and asset context; no orders | `crates/adapters/hyperliquid_market` |
-| CQG, dxFeed | **Absent** | — |
+| CQG, dxFeed, crypto exchanges, forex/CFD | **Absent** | — |
 | Market ownership | `MarketEngine` demand; `market_runtime` merges history and live state and publishes series, books, study outputs, alerts and one trade tape | `market_engine`, `market_runtime` |
 | Instrument metadata | Price increment plus canonical tick, point value, currency, expiry and session fields | `contracts`, `domain/instruments` |
 | Trading | Simulated venue, accounts, orders, fills, positions, PnL, copier, rules, locks, discipline, plans and templates in one owner; editors for profiles, plans and templates absent | `crates/trading_runtime`, `apps/desktop/src/trading.rs` |
 | Order book panel | Trading ladder, order entry, copier, P/L, account actions, time and sales | `crates/ui/terminal_ui`, `components/chart_surface.rs` |
-| Charts | Candles, bars, line, area, baseline, footprint; drawings; trading and plan overlays; delta, CVD, bubbles; split workspace; study indicators. Profile and heatmap unwired | `crates/ui/chart_integration` |
+| Charts | Candles, bars, line, area, baseline, footprint; drawings; trading and plan overlays; delta, CVD, bubbles; split workspace; study indicators; visible-range volume profile. Session profiles and heatmap unwired | `crates/ui/chart_integration` |
 | Studies | Runtime and SDK Phases A–E; editor and sandbox pending | `plan/study_runtime_sdk_roadmap.md` |
 | Alerts | Price and delta-divergence alerts with OS notifications | `market_runtime`, `platform_runtime` |
 | Context data | Official schedules, EIA/NOAA, CFTC, USDA and FRED through one bounded owner | `crates/context_runtime`, `components/context_panel.rs` |
@@ -503,7 +515,70 @@ Source-confirmed 2026-09-28. This records what exists, not a claim of completene
 
 ---
 
-## 9. Delivery and verification
+## 9. Broker coverage
+
+Engineering readiness per route, updated 2026-10-05. Commercial targets, pricing and legal cautions
+live in `plan/go-to-market-strategy.md`. Never advertise a route before the broker approves Aeris.
+
+| Route | Reaches | Market data | Accounts and trading | Gate |
+| --- | --- | --- | --- | --- |
+| Rithmic | Futures prop firms (Bulenox, Tradeify, Alpha Futures, Take Profit Trader, Phidias, TradeDay) and brokers (Discount Trading, AMP Futures, Stage 5) | Present, full depth; Rithmic Test only | Adapter sessions only | Onboarding, production systems, conformance |
+| tastytrade | tastytrade customers: futures and equities | Present, Level 1 | Absent | `read` scope approved; `trade` scope only after traction |
+| Hyperliquid | Crypto perps and spot; US users blocked | Present, public | Absent | Builder code (100 USDC) and agent-wallet approval |
+| Crypto exchanges | OKX, Bybit, KuCoin, Binance, Kraken, Coinbase, Bitget, Gate, Deribit, Delta Exchange India, CoinDCX | Absent; public WebSocket, no login | Absent | Broker program per exchange; Indian legal check on rebates; geo-blocking |
+| cTrader Open API | IC Markets, Pepperstone, FP Markets, FxPro, BlackBull and other cTrader brokers; no US brokers | Absent | Absent | Spotware app review |
+| Other forex/CFD | TradeLocker, DXtrade, Match-Trader, OANDA, IBKR TWS, Capital.com, IG | Absent | Absent | Per route |
+| Excluded | MT4/MT5 brokers, Topstep, NinjaTrader/Tradovate | — | — | Not pursued |
+
+### Completing a route
+
+Every route reuses T2 unchanged, so close [Next work](#2-next-work) first: prop-firm and broker
+pilots depend on rule profiles, unlock and templates working. The order between routes is D5.
+
+**Rithmic (T5)**
+
+1. Settle onboarding in writing: dev-kit, API and conformance costs, any per-user vendor fee, and
+   whether Rithmic accepts an Indian individual or company.
+2. Verify every order and PnL plant template against the licensed Provider Kit and exercise the
+   adapter sessions on Rithmic Test.
+3. Add production endpoints and a system/gateway picker; confirm per-system enablement with Rithmic.
+4. **PF1:** a Rithmic venue in `trading_runtime` beside the simulated venue, with idempotent client
+   order IDs fenced by session generation and every command through the M3.2 checks.
+5. **PF2:** positions, PnL, balance, margin and broker limits projected into the canonical trading
+   domain.
+6. Pass conformance, then qualify T2 on live accounts, including the copier.
+7. D4, PF4 and M1.6.
+8. Get listed on rithmic.com/platforms and by a broker before prop-firm outreach.
+
+**tastytrade**
+
+1. Finish the US cash-hours timing probe and visual check (`plan/provider_integration_plan.md`,
+   Phase 1).
+2. Define the provider-neutral, read-only account observation contract in `trading_runtime`
+   (positions, PnL, journal, balances) under the existing `read` scope, with contract and restart
+   tests; then wire tastytrade to it.
+3. Order execution only after traction: `trade` scope, sandbox testing and legal review.
+
+**Hyperliquid and crypto exchanges**
+
+1. One adapter crate per exchange under `crates/adapters`, registered through a
+   `ProviderDescriptor`; the registry needs no coordinator change for a new provider.
+2. Credentials only in the native vault: OAuth with PKCE where offered, otherwise trade-only API
+   keys, rejecting keys with withdrawal permission on connect. Hyperliquid trades through an
+   approved agent wallet that cannot withdraw.
+3. A `trading_runtime` venue for orders, fills and positions through the M3.2 path, attaching the
+   broker or builder code each program requires.
+4. Geo-blocking per exchange, and the Indian legal and CA check before taking any rebate.
+
+**cTrader and other forex/CFD**
+
+1. Register the cTrader Open API app early; Spotware's review gates production use.
+2. Adapter, descriptor, vault-held tokens and a `trading_runtime` venue, as for crypto.
+3. No forex marketing to Indian residents; US users only through CFTC-registered firms.
+
+---
+
+## 10. Delivery and verification
 
 ### How a batch is delivered
 
