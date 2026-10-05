@@ -143,6 +143,25 @@ Rules for every route:
 4. **Growth:** about $10,000 setup and a $2,500–4,000 monthly minimum. Includes custom branding, a display for the firm's risk rules and priority support.
 5. **Enterprise:** custom pricing, with source-code escrow and a written support agreement.
 
+**Exclusivity (any tier, only if the firm asks):**
+- **Price:** at least **$100,000 per year**, renewed yearly. Never sell it as a one-time or permanent fee.
+- **Charged on top:** the exclusivity fee buys only the exclusivity. Setup, the monthly minimum and
+  per-account fees are still charged in full.
+- **Why it costs this much:** every firm turned away is lost revenue, and an exclusive firm gets a
+  dedicated branded build that Aeris develops, distributes and maintains for it alone. Price the fee
+  as the revenue expected from 3–5 other firms over the same term.
+- **Term:** 12 months; renewal at Aeris's option.
+- **Scope:** one named category only, for example "no other futures prop-firm white label." Plain
+  listings with other firms, brokers, and direct sales to traders stay open.
+- **Earned, not permanent:** if the firm misses its agreed seat or revenue minimum, exclusivity ends
+  automatically.
+- **Ownership:** Aeris keeps all code and intellectual property in every case. The firm receives a
+  non-exclusive (or, with this fee, category-exclusive), non-transferable licence to its branded
+  build, not ownership of the product.
+
+For a large firm such as FTMO, which bought OANDA for about $422 million (Finance Magnates,
+September 2026), $100,000 a year is a small line item, so don't discount it.
+
 **Reference points:**
 - Match-Trader white label: $2,500–4,000 a month.
 - TradeLocker: about $5,000 a month for 1,000 live accounts.
