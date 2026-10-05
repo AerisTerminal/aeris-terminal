@@ -129,6 +129,9 @@ pub struct MarketOrderBookSnapshot {
 pub struct RetainedMarketTrade {
     pub ingestion_ordinal: u64,
     pub observed_unix_nanos: i64,
+    /// Exchange trading date of the print, in days since the Unix epoch, from the venue's
+    /// session calendar. `None` when the venue has no supported calendar; none is guessed.
+    pub trading_day: Option<i64>,
     pub trade: std::sync::Arc<aeris_market_data::MarketTrade>,
 }
 

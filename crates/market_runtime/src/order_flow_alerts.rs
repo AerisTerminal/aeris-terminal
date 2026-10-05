@@ -142,6 +142,7 @@ mod tests {
         RetainedMarketTrade {
             ingestion_ordinal: sequence,
             observed_unix_nanos: timestamp_seconds * 1_000_000_000,
+            trading_day: None,
             trade: Arc::new(MarketTrade {
                 metadata: EventMetadata {
                     provider_id: "hyperliquid".to_string(),

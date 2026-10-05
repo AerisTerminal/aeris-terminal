@@ -1180,6 +1180,7 @@ fn retained_tape_trade(ordinal: u64) -> aeris_market_runtime::RetainedMarketTrad
     aeris_market_runtime::RetainedMarketTrade {
         ingestion_ordinal: ordinal,
         observed_unix_nanos: nanos,
+        trading_day: None,
         trade: Arc::new(aeris_market_data::MarketTrade {
             metadata: aeris_market_data::EventMetadata {
                 provider_id: "provider".into(),

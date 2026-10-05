@@ -289,7 +289,7 @@ fn chart_order_flow_trades(
                     aeris_market_data::AggressorSide::Sell => ChartAggressorSide::Sell,
                     aeris_market_data::AggressorSide::Unknown => ChartAggressorSide::Unknown,
                 },
-                session_id: snapshot.provider_generation,
+                session_id: retained.trading_day.and_then(|day| u64::try_from(day).ok()),
             })
         })
         .collect()

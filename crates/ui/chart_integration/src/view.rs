@@ -427,7 +427,9 @@ pub struct OrderFlowTrade {
     pub price: f64,
     pub volume: f64,
     pub aggressor: aeris_charts_engine::AggressorSide,
-    pub session_id: u64,
+    /// Exchange trading session of the print. Session CVD resets and the footprint's session
+    /// history budget follow it; `None` treats the tape as one continuous session.
+    pub session_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1846,10 +1848,8 @@ impl AerisChartView {
         if self.chart_type == chart_type {
             return;
         }
-        if self.chart_type == ChartType::Footprint || chart_type == ChartType::Footprint {
-            self.teardown_order_flow();
-        }
         self.chart_type = chart_type;
+        self.reconfigure_order_flow();
         self.apply_price_series_kind();
         // An unfitted chart opens the footprint zoom on its first layout instead.
         if chart_type == ChartType::Footprint && self.fitted {

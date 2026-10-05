@@ -790,6 +790,7 @@ fn live_microstructure_fixture() -> LiveMicrostructureFixture {
     let trades = VecDeque::from([crate::RetainedMarketTrade {
         ingestion_ordinal: 1,
         observed_unix_nanos: trade_metadata.timestamps.received_unix_nanos,
+        trading_day: None,
         trade: std::sync::Arc::new(aeris_market_data::MarketTrade {
             metadata: trade_metadata,
             trade_id: "fixture-trade".to_string(),

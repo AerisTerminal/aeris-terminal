@@ -35,7 +35,9 @@ pub(super) struct OrderFlowChartState {
     aggregation: OrderFlowAggregation,
     tick_size_bits: u64,
     last_ingestion_ordinal: Option<u64>,
-    presentation: OrderFlowPresentation,
+    /// Newest print time applied, where a reconnected or gapped tape resumes.
+    last_timestamp_micros: Option<i64>,
+    pub(super) presentation: OrderFlowPresentation,
 }
 
 impl OrderFlowChartState {
@@ -53,8 +55,8 @@ impl AerisChartView {
         self.order_flow_settings
     }
 
-    /// Sets the durable order-flow presentation and rebuilds only chart-derived state. A change
-    /// confined to the settings of an existing big-trades indicator restyles it in place.
+    /// Sets the durable order-flow presentation. The drawn presentation is reconfigured in
+    /// place, so its footprint history survives row, display, study, and big-trades changes.
     ///
     /// # Errors
     /// Returns an error when a fixed big-trades minimum volume is not finite and positive.
@@ -70,21 +72,8 @@ impl AerisChartView {
         if self.order_flow_settings == settings {
             return Ok(false);
         }
-        let restyle_only = self.order_flow_settings.big_trades.is_some()
-            && settings.big_trades.is_some()
-            && OrderFlowSettings {
-                big_trades: None,
-                ..self.order_flow_settings
-            } == OrderFlowSettings {
-                big_trades: None,
-                ..settings
-            };
         self.order_flow_settings = settings;
-        if restyle_only {
-            self.sync_big_trades_options();
-        } else {
-            self.teardown_order_flow();
-        }
+        self.reconfigure_order_flow();
         self.mark_user_state_changed();
         Ok(true)
     }
@@ -121,8 +110,12 @@ impl AerisChartView {
     /// Projects one runtime-authoritative bounded tape into the chart-owned
     /// footprint cache. While the runtime's sliding window continues the applied
     /// tape without a gap, only its new suffix is sent, so the chart keeps bars
-    /// whose trades the runtime has since evicted. A gap, rewrite, or session
-    /// change installs a covering image of the current window.
+    /// whose trades the runtime has since evicted. After a gap or a reconnect the
+    /// window's prints newer than the chart's newest print are appended, keeping the
+    /// history; only a rewrite of the same session's window installs a covering image.
+    ///
+    /// Once drawn, the presentation keeps following the tape while no order-flow view is
+    /// shown, so switching back to a footprint finds its history.
     ///
     /// # Errors
     /// Returns an error for invalid identity, aggregation, fixed-point projection,
@@ -135,7 +128,7 @@ impl AerisChartView {
         tick_size: f64,
         trades: &[OrderFlowTrade],
     ) -> Result<(), String> {
-        if !self.order_flow_presentation_requested() {
+        if !self.order_flow_presentation_requested() && self.order_flow_state.is_none() {
             return Ok(());
         }
         if identity.is_empty() || !tick_size.is_finite() || tick_size <= 0.0 {
@@ -150,65 +143,69 @@ impl AerisChartView {
         {
             self.teardown_order_flow();
         }
-        if self.order_flow_state.as_ref().is_some_and(|state| {
-            state.identity == identity && state.provider_generation < provider_generation
-        }) {
-            self.teardown_order_flow();
-        }
         if self.order_flow_state.is_none() {
             self.configure_order_flow(identity, provider_generation, aggregation, tick_size)?;
         }
         let state = self
             .order_flow_state
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| "order-flow chart state was not configured".to_string())?;
         if state.identity != identity
-            || state.provider_generation != provider_generation
+            || state.provider_generation > provider_generation
             || state.aggregation != aggregation
         {
             return Err("order-flow tape identity changed without replacing the chart".to_string());
         }
+        // A reconnected provider session restarts its tape and ingestion ordinals.
+        let reconnected = state.provider_generation < provider_generation;
+        if reconnected {
+            state.provider_generation = provider_generation;
+            state.last_ingestion_ordinal = None;
+        }
 
         let first = trades.first().map(|trade| trade.ingestion_ordinal);
         let last = trades.last().map(|trade| trade.ingestion_ordinal);
-        let can_append = state
-            .last_ingestion_ordinal
-            .is_some_and(|applied| match (first, last) {
-                (Some(first), Some(last)) => first <= applied.saturating_add(1) && last >= applied,
-                _ => true,
-            });
-        let presentation = state.presentation;
         let prior_last = state.last_ingestion_ordinal;
-        let mut converted = if can_append {
-            let suffix_start = trades.partition_point(|trade| {
-                prior_last.is_some_and(|last| trade.ingestion_ordinal <= last)
-            });
-            trades[suffix_start..]
-                .iter()
-                .map(order_flow_trade)
-                .collect::<Result<Vec<_>, _>>()?
+        let contiguous = prior_last.is_some_and(|applied| match (first, last) {
+            (Some(first), Some(last)) => first <= applied.saturating_add(1) && last >= applied,
+            _ => true,
+        });
+        // Within one provider session ordinals only grow, so every print after the applied one
+        // is new, even across a gap. A reconnect restarts them; its prints newer than the
+        // chart's newest continue the same bars. Without either, the window is installed whole.
+        let resume_after = if reconnected {
+            state.last_timestamp_micros
         } else {
-            trades
-                .iter()
-                .map(order_flow_trade)
-                .collect::<Result<Vec<_>, _>>()?
+            None
         };
-        if !can_append {
+        let append = prior_last.is_some() || resume_after.is_some();
+        let start = trades.partition_point(|trade| {
+            prior_last.is_some_and(|last| trade.ingestion_ordinal <= last)
+        });
+        let mut converted = trades[start..]
+            .iter()
+            .filter(|trade| resume_after.is_none_or(|after| trade.timestamp_micros > after))
+            .map(order_flow_trade)
+            .collect::<Result<Vec<_>, _>>()?;
+        if !append {
             converted.sort_by_key(|trade| trade.timestamp_micros);
         }
+        let newest = converted.iter().map(|trade| trade.timestamp_micros).max();
+        let presentation = state.presentation;
         self.engine
-            .update_order_flow_presentation(presentation, converted, can_append)
+            .update_order_flow_presentation(presentation, converted, append)
             .map_err(|error| error.to_string())?;
         if let Some(state) = &mut self.order_flow_state {
-            state.last_ingestion_ordinal = if can_append {
-                last.max(prior_last)
+            state.last_ingestion_ordinal = last.max(prior_last);
+            state.last_timestamp_micros = if append {
+                newest.max(state.last_timestamp_micros)
             } else {
-                last
+                newest
             };
         }
         // The engine re-lays out on its own series revision; forcing layout on every
         // tick would also let the price axis shrink and jitter while the tape streams.
-        if can_append {
+        if contiguous {
             self.invalidate_series_frame();
         } else {
             self.invalidate_series_layout();
@@ -227,9 +224,6 @@ impl AerisChartView {
         aggregation: OrderFlowAggregation,
         tick_size: f64,
     ) -> Option<u64> {
-        if !self.order_flow_presentation_requested() {
-            return None;
-        }
         self.order_flow_state
             .as_ref()
             .filter(|state| {
@@ -248,34 +242,17 @@ impl AerisChartView {
         aggregation: OrderFlowAggregation,
         tick_size: f64,
     ) -> Result<(), String> {
-        let aggregation_options = FootprintAggregationOptions {
+        let options = self.order_flow_presentation_options(FootprintAggregationOptions {
             tick_size,
             ticks_per_row: self.order_flow_settings.ticks_per_row,
             // Footprint bars share the price series' bar opens (weekly bars do not
             // open on the epoch's Thursday), so both presentations use one grid.
             bars: chart_aggregation(aggregation, self.product_bars.last_time())?,
             imbalance: FootprintImbalanceOptions::default(),
-        };
+        });
         let presentation = self
             .engine
-            .add_order_flow_presentation(
-                identity,
-                0,
-                OrderFlowPresentationOptions {
-                    aggregation: aggregation_options,
-                    visual: footprint_visual_options(
-                        cell_mode(self.order_flow_settings.display_mode),
-                        self.theme,
-                    ),
-                    show_footprint: self.chart_type == super::ChartType::Footprint,
-                    show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
-                    show_delta_histogram: self.order_flow_settings.show_delta_histogram,
-                    big_trades: self
-                        .order_flow_settings
-                        .big_trades
-                        .map(|settings| big_trades_options(settings, self.theme)),
-                },
-            )
+            .add_order_flow_presentation(identity, 0, options)
             .map_err(|error| error.to_string())?;
         self.order_flow_state = Some(OrderFlowChartState {
             identity: identity.to_string(),
@@ -283,9 +260,65 @@ impl AerisChartView {
             aggregation,
             tick_size_bits: tick_size.to_bits(),
             last_ingestion_ordinal: None,
+            last_timestamp_micros: None,
             presentation,
         });
         Ok(())
+    }
+
+    /// Brings the drawn presentation to the durable settings and chart type on its existing
+    /// stream, keeping every footprint bar. A presentation the engine cannot reconfigure is
+    /// removed and rebuilt from the next tape.
+    pub(super) fn reconfigure_order_flow(&mut self) {
+        let Some(stream) = self
+            .order_flow_state
+            .as_ref()
+            .map(|state| state.presentation.trade_stream())
+        else {
+            return;
+        };
+        let Some(current) = self
+            .engine
+            .trade_stream(stream)
+            .map(aeris_charts_engine::FootprintAggregator::options)
+        else {
+            self.teardown_order_flow();
+            return;
+        };
+        let options = self.order_flow_presentation_options(FootprintAggregationOptions {
+            ticks_per_row: self.order_flow_settings.ticks_per_row,
+            ..current
+        });
+        let reconfigured = self.order_flow_state.as_mut().is_some_and(|state| {
+            self.engine
+                .reconfigure_order_flow_presentation(&mut state.presentation, options)
+                .is_ok()
+        });
+        if reconfigured {
+            self.invalidate_series_layout();
+        } else {
+            self.teardown_order_flow();
+        }
+    }
+
+    fn order_flow_presentation_options(
+        &self,
+        aggregation: FootprintAggregationOptions,
+    ) -> OrderFlowPresentationOptions {
+        OrderFlowPresentationOptions {
+            aggregation,
+            visual: footprint_visual_options(
+                cell_mode(self.order_flow_settings.display_mode),
+                self.theme,
+            ),
+            show_footprint: self.chart_type == super::ChartType::Footprint,
+            show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
+            show_delta_histogram: self.order_flow_settings.show_delta_histogram,
+            big_trades: self
+                .order_flow_settings
+                .big_trades
+                .map(|settings| big_trades_options(settings, self.theme)),
+        }
     }
 
     pub(super) fn teardown_order_flow(&mut self) {
@@ -308,8 +341,8 @@ impl AerisChartView {
     /// Whether the footprint has received any trade tape to draw.
     pub(super) fn has_footprint_bars(&self) -> bool {
         self.footprint_series_id()
-            .and_then(|id| self.engine.footprint_bars(id))
-            .is_some_and(|bars| !bars.is_empty())
+            .and_then(|id| self.engine.footprint_bar(id, 0))
+            .is_some()
     }
 
     /// Whether a tape-derived study pane is currently drawn.
@@ -614,7 +647,7 @@ fn order_flow_trade(trade: &OrderFlowTrade) -> Result<FootprintTrade, String> {
         // false numeric sequence/correction semantics.
         trade_id: None,
         conditions: 0,
-        session_id: Some(trade.session_id),
+        session_id: trade.session_id,
     })
 }
 

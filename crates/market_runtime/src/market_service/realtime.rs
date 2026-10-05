@@ -262,9 +262,19 @@ impl ProviderOrderBook {
         }
         let ingestion_ordinal = self.next_trade_ingestion_ordinal;
         self.next_trade_ingestion_ordinal = self.next_trade_ingestion_ordinal.saturating_add(1);
+        let timestamps = &trade.metadata.timestamps;
+        let trading_day =
+            RithmicExchangeCalendar::for_venue(&self.instrument.venue_id).map(|calendar| {
+                let timestamp_nanos = timestamps
+                    .exchange_unix_nanos
+                    .or(timestamps.provider_unix_nanos)
+                    .unwrap_or(timestamps.received_unix_nanos);
+                calendar.trading_day(timestamp_nanos.div_euclid(1_000_000_000))
+            });
         let retained = crate::RetainedMarketTrade {
             ingestion_ordinal,
             observed_unix_nanos,
+            trading_day,
             trade: std::sync::Arc::new(trade.clone()),
         };
         if self.trade_continuity == super::TradeContinuity::Indexed {
@@ -4345,6 +4355,50 @@ mod tests {
                 AggressorSide::Buy,
             ))
         );
+    }
+
+    #[test]
+    fn retained_trades_carry_the_venue_trading_day() {
+        // Sunday 2026-08-16 (Unix day 20,681) 17:00 CDT opens Monday's CME trading date.
+        let session_open = (20_681 * 86_400 + 22 * 3_600) * 1_000_000_000;
+        let mut book = ProviderOrderBook::new(
+            ladder_instrument(1),
+            super::super::TradeContinuity::Sequence,
+            false,
+        );
+        for (sequence, received) in [(1, session_open - 1), (2, session_open)] {
+            assert!(book.accept_recent_trade(&ladder_trade(
+                1,
+                sequence,
+                received,
+                20_000,
+                1,
+                AggressorSide::Buy,
+            )));
+        }
+        let days = book
+            .recent_trades
+            .iter()
+            .map(|trade| trade.trading_day)
+            .collect::<Vec<_>>();
+        assert_eq!(days, [Some(20_681), Some(20_682)]);
+
+        let mut unknown_venue = ladder_instrument(1);
+        unknown_venue.venue_id = "UNKNOWN".to_string();
+        let mut book = ProviderOrderBook::new(
+            unknown_venue,
+            super::super::TradeContinuity::Sequence,
+            false,
+        );
+        assert!(book.accept_recent_trade(&ladder_trade(
+            1,
+            1,
+            session_open,
+            20_000,
+            1,
+            AggressorSide::Buy,
+        )));
+        assert_eq!(book.recent_trades[0].trading_day, None);
     }
 
     #[test]

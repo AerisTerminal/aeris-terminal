@@ -162,12 +162,22 @@ fn order_flow_trade(ordinal: u64, timestamp_micros: i64, volume: f64) -> OrderFl
         } else {
             aeris_charts_engine::AggressorSide::Buy
         },
-        session_id: 7,
+        session_id: Some(7),
     }
 }
 
+fn footprint_total_volume(chart: &AerisChartView) -> f64 {
+    chart
+        .engine
+        .footprint_bars(chart.footprint_series_id().expect("footprint"))
+        .expect("footprint bars")
+        .iter()
+        .map(|bar| bar.total_volume)
+        .sum()
+}
+
 #[test]
-fn footprint_rebuilds_after_runtime_rewrite_and_reconnect_without_accepting_retired_sessions() {
+fn footprint_rewrites_its_window_and_keeps_history_across_a_reconnect() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
     let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
@@ -183,30 +193,111 @@ fn footprint_rebuilds_after_runtime_rewrite_and_reconnect_without_accepting_reti
     chart
         .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
         .unwrap();
-    let series = chart.footprint_series_id().unwrap();
-    let total = chart
-        .engine
-        .footprint_bars(series)
+    assert!((footprint_total_volume(&chart) - 8.0).abs() < f64::EPSILON);
+    let stream = chart
+        .order_flow_state
+        .as_ref()
         .unwrap()
-        .iter()
-        .map(|bar| bar.total_volume)
-        .sum::<f64>();
-    assert!((total - 8.0).abs() < f64::EPSILON);
-    for trade in &mut trades {
-        trade.session_id = 8;
-    }
+        .presentation
+        .trade_stream();
+
+    // The reconnected session restarts its ordinals; a print the chart already holds is not
+    // counted twice, and the session's new prints continue the same bars.
+    let reconnected = [
+        order_flow_trade(1, 2_000_000, 3.0),
+        order_flow_trade(2, 3_000_000, 4.0),
+    ];
+    chart.invalidate_order_flow_prefix();
     chart
-        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &trades)
+        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &reconnected)
         .unwrap();
-    assert!(chart.footprint_series_id().is_some());
+    assert_eq!(
+        chart
+            .order_flow_state
+            .as_ref()
+            .unwrap()
+            .presentation
+            .trade_stream(),
+        stream
+    );
+    assert!((footprint_total_volume(&chart) - 12.0).abs() < f64::EPSILON);
+    assert_eq!(
+        chart.order_flow_resume_ordinal("instrument:test", 8, aggregation, 0.25),
+        Some(2)
+    );
     assert!(
         chart
             .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
-            .is_err()
+            .is_err(),
+        "a retired provider session never mutates the chart"
     );
     chart
-        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &trades)
+        .apply_order_flow_trades("instrument:test", 8, aggregation, 0.25, &reconnected)
         .unwrap();
+    assert!((footprint_total_volume(&chart) - 12.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn order_flow_settings_and_chart_type_changes_keep_footprint_history() {
+    let mut chart = AerisChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    let first = vec![
+        order_flow_trade(1, 1_000_000, 2.0),
+        order_flow_trade(2, 61_000_000, 3.0),
+    ];
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &first)
+        .unwrap();
+    let stream = chart
+        .order_flow_state
+        .as_ref()
+        .unwrap()
+        .presentation
+        .trade_stream();
+    // The runtime window has since evicted both prints.
+    let window = [order_flow_trade(3, 121_000_000, 5.0)];
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &window)
+        .unwrap();
+    assert!((footprint_total_volume(&chart) - 10.0).abs() < f64::EPSILON);
+
+    let mut settings = chart.order_flow_settings();
+    settings.ticks_per_row = 4;
+    settings.display_mode = FootprintDisplayMode::Delta;
+    settings.show_cumulative_delta = true;
+    settings.big_trades = Some(BigTradesSettings::default());
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    assert_eq!(chart.footprint_ticks_per_row(), Some(4));
+    assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
+    assert!(chart.drawn_big_trades().is_some());
+    assert!((footprint_total_volume(&chart) - 10.0).abs() < f64::EPSILON);
+
+    settings.show_cumulative_delta = false;
+    settings.big_trades = None;
+    assert!(chart.set_order_flow_settings(settings).unwrap());
+    // Candles with no tape study still follow the stream, so the footprint returns whole.
+    chart.set_chart_type(ChartType::Candles);
+    assert!(chart.footprint_series_id().is_none());
+    let window = [
+        order_flow_trade(3, 121_000_000, 5.0),
+        order_flow_trade(4, 122_000_000, 1.0),
+    ];
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &window)
+        .unwrap();
+    chart.set_chart_type(ChartType::Footprint);
+    assert!(chart.has_footprint_bars());
+    assert!((footprint_total_volume(&chart) - 11.0).abs() < f64::EPSILON);
+    assert_eq!(
+        chart
+            .order_flow_state
+            .as_ref()
+            .unwrap()
+            .presentation
+            .trade_stream(),
+        stream
+    );
 }
 
 #[test]
@@ -324,19 +415,22 @@ fn cvd_and_delta_run_on_every_primary_chart_presentation() {
         .expect("line chart advances order-flow studies");
 
     chart.set_chart_type(ChartType::Footprint);
-    assert!(chart.order_flow_state.is_none());
+    assert!(
+        chart.footprint_series_id().is_some(),
+        "the footprint joins the existing stream"
+    );
+    assert!(chart.has_footprint_bars());
     chart
         .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
-        .expect("footprint transition rebuilds the shared presentation");
-    assert!(chart.footprint_series_id().is_some());
+        .expect("footprint advances on the shared presentation");
     assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
     assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
 
     chart.set_chart_type(ChartType::Bars);
-    assert!(chart.order_flow_state.is_none());
+    assert!(chart.order_flow_state.is_some());
     chart
         .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &trades)
-        .expect("bar transition rebuilds only the study panes");
+        .expect("bars keep only the study panes");
     assert!(chart.footprint_series_id().is_none());
     assert!(chart.has_order_flow_study(OrderFlowStudy::CumulativeDelta));
     assert!(chart.has_order_flow_study(OrderFlowStudy::Delta));
@@ -344,7 +438,7 @@ fn cvd_and_delta_run_on_every_primary_chart_presentation() {
 }
 
 #[test]
-fn footprint_keeps_bars_after_runtime_prefix_eviction_and_rebuilds_after_a_gap() {
+fn footprint_keeps_bars_after_runtime_prefix_eviction_and_across_a_gap() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);
     let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
@@ -413,17 +507,31 @@ fn footprint_keeps_bars_after_runtime_prefix_eviction_and_rebuilds_after_a_gap()
         2
     );
 
-    // A gap means unseen trades were evicted, so the current window is installed whole.
+    // A gap means unseen trades were evicted; the built bars stay and the window continues them.
     chart
         .apply_order_flow_trades(
             "instrument:test",
             7,
             aggregation,
             0.25,
-            &[order_flow_trade(9, 121_000_000, 11.0)],
+            &[
+                order_flow_trade(8, 61_000_000, 7.0),
+                order_flow_trade(9, 121_000_000, 11.0),
+            ],
         )
-        .expect("covering replacement after a gap");
-    assert!((total_volume(&chart) - 11.0).abs() < f64::EPSILON);
+        .expect("window continues the bars after a gap");
+    assert!(
+        (total_volume(&chart) - 35.0).abs() < f64::EPSILON,
+        "a new print sharing the newest print's microsecond still counts"
+    );
+    assert_eq!(
+        chart
+            .engine
+            .footprint_bars(footprint_series)
+            .expect("footprint bars")
+            .len(),
+        3
+    );
 }
 
 #[test]

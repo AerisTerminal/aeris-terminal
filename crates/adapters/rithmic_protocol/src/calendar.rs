@@ -55,6 +55,16 @@ impl RithmicExchangeCalendar {
             }
         }
     }
+
+    /// Returns the exchange trading date containing one exchange timestamp, in days since the
+    /// Unix epoch. A CME Globex date opens at 17:00 Chicago time on the previous evening, so a
+    /// Sunday-evening print belongs to Monday.
+    #[must_use]
+    pub fn trading_day(self, exchange_timestamp_seconds: i64) -> i64 {
+        match self.kind {
+            CalendarKind::CmeGlobex => cme_trading_day(exchange_timestamp_seconds),
+        }
+    }
 }
 
 fn cme_trading_day(timestamp_seconds: i64) -> i64 {
@@ -197,6 +207,23 @@ mod tests {
         assert_eq!(
             chicago_utc_offset_seconds(utc_seconds(2007, 11, 4, 7)),
             -21_600
+        );
+    }
+
+    #[test]
+    fn cme_trading_day_opens_at_the_previous_evening_session() {
+        let calendar = RithmicExchangeCalendar::for_venue("CME").expect("CME calendar");
+        let monday = days_from_civil(2026, 8, 17);
+        // 16:59 and 17:00 Chicago (CDT) on Sunday 2026-08-16.
+        assert_eq!(
+            calendar.trading_day(utc_seconds(2026, 8, 16, 22) - 60),
+            monday - 1
+        );
+        assert_eq!(calendar.trading_day(utc_seconds(2026, 8, 16, 22)), monday);
+        assert_eq!(calendar.trading_day(utc_seconds(2026, 8, 17, 20)), monday);
+        assert_eq!(
+            calendar.trading_day(utc_seconds(2026, 8, 17, 22)),
+            monday + 1
         );
     }
 
