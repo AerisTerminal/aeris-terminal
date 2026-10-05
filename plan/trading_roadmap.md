@@ -43,14 +43,16 @@ desktop path, not when a unit test alone passes.
 | [T5](#t5--rithmic-live-trading) Rithmic live trading | PF1, PF2, PF4, M1.6, live T2 | **Blocked**; adapter order and PnL plant sessions exist, not wired to `trading_runtime` | Rithmic onboarding and conformance; D4 |
 | [T6](#t6--record-replay-and-review) Record, replay and review | D2, PF8, M4.1–M4.4 | **Open** | D2; data licensing checklist |
 | [T7](#t7--institutional-depth) Institutional depth | M1.1, M1.3, M1.8, M4.5, M5.6, M5.7 | **Open** | T6; Aeris Charts B4–B7; licensing checklist |
-| [T8](#t8--power-users) Power users | M6.1–M6.5, M7.3, M7.5–M7.8, PF10 | **Open** | D5; Aeris Charts B9; a release path for M7.8 |
+| [T8](#t8--power-users) Power users | M6.1–M6.5, M7.3, M7.5–M7.8 | **Open** | Aeris Charts B9; a release path for M7.8 |
+| [T9](#t9--ctrader-forex-and-cfd) cTrader forex and CFD | PF10, PF11, D7 | **Open**; Spotware application not yet submitted | Spotware approval; D7 |
 
-**Progress:** 3 of 8 batches complete, T2 partial. Of 45 catalog features, 17 are Present, 15 are
-Partial and 13 are Absent (see [Feature catalog](#4-feature-catalog)). Foundations: 5 of 10 delivered.
+**Progress:** 3 of 9 batches complete, T2 partial. Of 45 catalog features, 17 are Present, 15 are
+Partial and 13 are Absent (see [Feature catalog](#4-feature-catalog)). Foundations: 5 of 11 delivered.
 
 **Order:** T1 unblocks T2, T5, T6 and part of T7. T2 and T3 are independent. T5 starts when Rithmic
-onboarding clears and reuses T2 unchanged against the live venue. T6 needs T1's store and T2's
-execution log. Record any change of order here.
+onboarding clears and reuses T2 unchanged against the live venue. T9 runs in parallel with T5 and
+does not wait for Rithmic (D5); PF11, the live-venue contract, is built once in T9 and reused by
+T5's PF1. T6 needs T1's store and T2's execution log. Record any change of order here.
 
 ---
 
@@ -256,7 +258,7 @@ derived results, and journal statistics are reproducible from stored records.
 
 ### T8 — Power users
 
-**Scope:** M6.1–M6.5, M7.3, M7.5–M7.8, PF10, study roadmap Phases F–L · **Needs:** Aeris Charts B9
+**Scope:** M6.1–M6.5, M7.3, M7.5–M7.8, study roadmap Phases F–L · **Needs:** Aeris Charts B9
 (I4) · **Status:** Open
 
 - [ ] **M6.1** Order-flow, rule-meter, event and study alerts.
@@ -269,10 +271,93 @@ derived results, and journal statistics are reproducible from stored records.
 - [ ] **M7.6** Themes and accessibility.
 - [ ] **M7.7** Layout and settings sync through a user-controlled folder.
 - [ ] **M7.8** Distribution and updates once a release path is approved.
-- [ ] **D5** decided; **PF10** additional provider.
 - [ ] Broad gate green; pushed.
 
 **Acceptance:** the [definition of completion](#definition-of-completion) is met.
+
+### T9 — cTrader forex and CFD
+
+**Scope:** PF10, PF11, D7 · **Needs:** T1, T2 · **Status:** Open; runs in parallel with T5 (D5)
+
+One cTrader Open API application reaches every cTrader broker (IC Markets, Pepperstone, FP Markets,
+FxPro, BlackBull and others) through the user's own cTrader ID, without a contract per broker.
+
+**Provider facts** (Spotware documentation, checked 2026-10-05; items marked "(verify)" must be
+confirmed against the current docs, the pinned `.proto` files or demo responses before code depends
+on them):
+
+- **Registration:** sign in to the Open API portal (`openapi.ctrader.com`) with a cTrader ID and add
+  an application. Its status becomes "Submitted"; Spotware reviews it and replies by email with an
+  approval or a request for more details. Approval issues the Partner's Credentials (client ID and
+  client secret) under the Open API terms of use. No review time is published.
+- **User authorization:** OAuth 2.0. The user signs in with their cTrader ID and grants access to
+  their trading accounts; the authorization code is exchanged for an access token and a refresh
+  token. The refresh token does not expire. Access-token lifetime and the refresh request (verify).
+- **Every connection:** `ProtoOAApplicationAuthReq` with `clientId` **and `clientSecret`**, then
+  `ProtoOAGetAccountListByAccessTokenReq`, then `ProtoOAAccountAuthReq` for each trading account.
+  Live and demo accounts use separate proxies.
+- **Transport:** TLS socket; Protobuf only on port 5035, JSON only on port 5036. Use Protobuf from
+  Spotware's published `.proto` files (`spotware/openapi-proto-messages`), pinned to a revision.
+- **Limits:** 50 requests per second per connection for non-historical requests; historical
+  requests have a lower limit (verify the exact value); overload returns a 429-class error.
+- **Data:** symbol lists, spot bid/ask subscriptions, trendbars, tick data and depth quotes (verify
+  depth availability per broker). These are OTC instruments with no exchange trade tape or
+  aggressor side, so footprint, CVD, big trades and time and sales do not apply; the descriptor
+  must declare that instead of inventing trades from quotes.
+- **Trading:** new, amend and cancel orders, close position, execution events and reconcile
+  (verify message names, volume units, price scale, and netting versus hedging account semantics
+  against the pinned `.proto` files).
+
+**Client secret (D7).** The tastytrade broker in `aeris-website` (`infra/backend/tastytrade/`)
+keeps its client secret on AWS and gives the desktop only access tokens. cTrader also needs the
+secret inside `ProtoOAApplicationAuthReq` on every desktop connection, so that pattern does not
+cover it. Relaying the socket through AWS would break operating constraint 1 and the data
+licensing rules. Ask Spotware in the application how a distributed desktop app should hold the
+secret, and decide D7 before any code handles it.
+
+**Onboarding (maintainer)**
+
+- [ ] Create a cTrader ID; open free demo accounts at two cTrader brokers for qualification.
+- [ ] Register the Aeris application: name, a description of Aeris as a local desktop terminal
+      (data goes from the broker straight to the user's machine), website, logo, and a redirect
+      URI on the Aeris AWS broker (for example `/oauth/ctrader/callback`).
+- [ ] Ask Spotware in writing: client-secret handling for a distributed desktop app (D7);
+      commercial use and white-label builds for brokers; whether any broker must enable the
+      application separately; depth availability; cTrader name and logo attribution rules.
+- [ ] Receive approval; store the client secret only in AWS Secrets Manager. Never paste it into
+      chat, source, CI, logs or environment files.
+
+**Engineering**
+
+- [ ] **D7** decided and recorded in [Decisions](#6-decisions).
+- [ ] AWS broker routes in `aeris-website` `infra/backend/ctrader/`, following the tastytrade
+      handler: start, callback, status, access token, disconnect; refresh on the server; tests;
+      deployed through CDK.
+- [ ] **PF10** `crates/adapters/ctrader_open_api`: TLS Protobuf framing, messages generated from
+      the pinned `.proto` files, application and account authentication, heartbeat, bounded
+      reconnect with generation fencing, a request limiter below the documented limits, and
+      sanitized fixtures faithful to demo responses.
+- [ ] Market data through `market_runtime`: a provider descriptor (hosted-broker connection kind,
+      intervals from trendbar periods, depth capability as verified, no trade tape), a per-account
+      symbol catalog (symbols differ by broker), on-demand trendbar history, and spot quotes driving
+      the forming candle. Fixed-point prices with the documented scale; required fields validated.
+- [ ] **PF11** Provider-neutral live venue in `trading_runtime` beside the simulated venue: submit,
+      modify and cancel with idempotent client order IDs, execution events, reconcile after every
+      reconnect, positions and balances, all through the M3.2 checks. Rithmic PF1 reuses it.
+- [ ] cTrader venue on PF11, including server-side stop loss and take profit where cTrader
+      supports them; simulated, demo and live accounts visually distinct.
+- [ ] Accounts panel lists cTrader from the descriptor; authorize, select account, disconnect.
+- [ ] Demo qualification on both brokers: DOM, chart trading, brackets, flatten, kill switch,
+      restart and reconnect with no duplicate or lost orders.
+- [ ] Live qualification on a small maintainer account.
+- [ ] Release rules: no forex marketing to Indian residents; no US users (cTrader has no US
+      brokers); attribution as Spotware requires.
+- [ ] Broad gate green; pushed.
+
+**Acceptance:** a user authorizes a cTrader account from the Accounts panel, charts it, and trades
+a demo account from the DOM and chart with M3.2 checks enforced; reconnects and restarts never
+duplicate or lose orders; the client secret is handled exactly as D7 records and never appears in
+source, logs or fixtures.
 
 ---
 
@@ -391,7 +476,8 @@ and release time; missing keys or outages show "unavailable", never invented val
 | PF7 | Local store for user-owned records | T1 | Delivered |
 | PF8 | Session recording store | T6 | Absent |
 | PF9 | Local simulated venue | T1 | Delivered |
-| PF10 | Additional trading providers (see [Broker coverage](#9-broker-coverage)) | T8 | Absent |
+| PF10 | cTrader Open API, the first additional trading provider (see [Broker coverage](#9-broker-coverage)) | T9 | Absent |
+| PF11 | Provider-neutral live venue in `trading_runtime` | T9 | Absent |
 
 **PF1 — Rithmic order routing.** Submit, modify and cancel market, limit, stop and stop-limit
 orders; server-side brackets, OCO and trailing stops where Rithmic supports them; status, fill and
@@ -429,10 +515,15 @@ only; never a history cache for live charts. Gate: D2 and the licensing checklis
 **PF9 — Local simulated venue.** Same contracts as PF1–PF3, driven by live or replayed data. Touch
 fills now, queue-aware fills later (M4.5). Simulated accounts are always visually distinct.
 
-**PF10 — Additional trading providers.** Broker, exchange or futures-commission-merchant (FCM) routes
-behind the same provider-neutral market and trading contracts, chosen per D5 from the candidates in
-[Broker coverage](#9-broker-coverage). tastytrade market data already runs through the provider
-registry; CQG and dxFeed remain candidates for futures data.
+**PF10 — cTrader Open API.** The first additional trading provider per D5: market data and trading
+for every cTrader broker behind the same provider-neutral market and trading contracts. Later
+routes from [Broker coverage](#9-broker-coverage) follow the same pattern; CQG and dxFeed remain
+candidates for futures data.
+
+**PF11 — Live venue.** The provider-neutral boundary in `trading_runtime` through which a live
+broker receives orders and reports executions, positions and balances, beside PF9. Idempotent
+client order IDs, generation fencing, reconcile after reconnect, and the M3.2 checks on every
+command. cTrader is its first consumer; Rithmic PF1 reuses it unchanged.
 
 ---
 
@@ -444,8 +535,9 @@ registry; CQG and dxFeed remain candidates for futures data.
 | D2 | Session recording versus the ban on market-history persistence | PF8, M4, M6.4 | **Open.** Recommendation: allow an explicit opt-in, user-owned recording store that never feeds the history cache; amend `AGENTS.md` and `tools/naming_check` in the same change |
 | D3 | Local storage engine for user-owned records | PF7 | **Decided:** SQLite through the pinned bundled `rusqlite`; do not add another store |
 | D4 | Order-level data leaving the Rithmic adapter | PF4, M1.6 | **Open.** Recommendation: a bounded canonical view in `domain/market_data`, keeping provider identity, local order and sequence evidence separate |
-| D5 | First additional trading provider | PF10 | **Open.** Recommendation: defer until Rithmic trading is qualified; choose by user demand. Conflicts with `plan/go-to-market-strategy.md`, whose 90-day plan ships cTrader and starts Hyperliquid builder-code revenue before Rithmic is qualified; the maintainer must pick one order and record it here |
+| D5 | First additional trading provider | PF10 | **Decided 2026-10-05:** cTrader Open API (T9), built in parallel with Rithmic onboarding instead of waiting for it, because Rithmic onboarding is slow and cTrader reaches many brokers through one application |
 | D6 | Calendar distribution without a backend | M5.1 | **Decided:** fetch official BLS, BEA, Federal Reserve and EIA schedules directly through `context_runtime` |
+| D7 | Handling of the cTrader client secret, which every desktop connection must send | T9 | **Open.** Ask Spotware during application review. Never in source, builds, logs or fixtures; relaying market data through AWS is ruled out by operating constraint 1. Record the chosen handling and its rotation path here |
 
 ---
 
@@ -526,14 +618,15 @@ live in `plan/go-to-market-strategy.md`. Never advertise a route before the brok
 | tastytrade | tastytrade customers: futures and equities | Present, Level 1 | Absent | `read` scope approved; `trade` scope only after traction |
 | Hyperliquid | Crypto perps and spot; US users blocked | Present, public | Absent | Builder code (100 USDC) and agent-wallet approval |
 | Crypto exchanges | OKX, Bybit, KuCoin, Binance, Kraken, Coinbase, Bitget, Gate, Deribit, Delta Exchange India, CoinDCX | Absent; public WebSocket, no login | Absent | Broker program per exchange; Indian legal check on rebates; geo-blocking |
-| cTrader Open API | IC Markets, Pepperstone, FP Markets, FxPro, BlackBull and other cTrader brokers; no US brokers | Absent | Absent | Spotware app review |
+| cTrader Open API ([T9](#t9--ctrader-forex-and-cfd)) | IC Markets, Pepperstone, FP Markets, FxPro, BlackBull and other cTrader brokers; no US brokers | Absent; quotes and bars, depth (verify), no trade tape | Absent | Spotware app review; D7 |
 | Other forex/CFD | TradeLocker, DXtrade, Match-Trader, OANDA, IBKR TWS, Capital.com, IG | Absent | Absent | Per route |
 | Excluded | MT4/MT5 brokers, Topstep, NinjaTrader/Tradovate | — | — | Not pursued |
 
 ### Completing a route
 
 Every route reuses T2 unchanged, so close [Next work](#2-next-work) first: prop-firm and broker
-pilots depend on rule profiles, unlock and templates working. The order between routes is D5.
+pilots depend on rule profiles, unlock and templates working. Per D5, cTrader (T9) proceeds now in
+parallel with Rithmic (T5) and builds the shared live venue (PF11) that Rithmic then reuses.
 
 **Rithmic (T5)**
 
@@ -572,8 +665,9 @@ pilots depend on rule profiles, unlock and templates working. The order between 
 
 **cTrader and other forex/CFD**
 
-1. Register the cTrader Open API app early; Spotware's review gates production use.
-2. Adapter, descriptor, vault-held tokens and a `trading_runtime` venue, as for crypto.
+1. cTrader: follow the onboarding and engineering checklists in
+   [T9](#t9--ctrader-forex-and-cfd).
+2. Other routes: adapter, descriptor, vault-held tokens and a PF11 venue, as for crypto.
 3. No forex marketing to Indian residents; US users only through CFTC-registered firms.
 
 ---

@@ -33,7 +33,7 @@ Measure everything on the same machine and publish the method:
 | 1 | **Futures prop firms** | Lost ProjectX; need branded platforms; decide fast; buy B2B | Rithmic conformance |
 | 2 | **Small and mid futures brokers / IBs** | List many third-party platforms; some openly invite new ones | Rithmic conformance |
 | 3 | **Crypto exchange broker programs** | Pay revenue share on routed volume; some need no company | Indian legal check on rebates |
-| 4 | **cTrader brokers and prop firms (forex/CFD)** | cTrader Open API is free, uses OAuth and works with any cTrader broker | Build the integration |
+| 4 | **cTrader brokers and prop firms (forex/CFD)** | cTrader Open API is free, uses OAuth and works with any cTrader broker | Spotware app approval, then the integration (`plan/trading_roadmap.md` T9) |
 | 5 | **Large brokers (Schwab, IBKR Web API, TradeStation)** | Big brands, but need a US entity, traction and due diligence | Revenue and a US entity |
 
 ### What not to do
@@ -263,8 +263,8 @@ Day 0 email or DM, then a follow-up on day 3, day 7 and day 14 with new value ea
 | Weeks | Actions |
 |---|---|
 | 1–2 | Build the sales kit (benchmarks, video, one-pagers, security page, white-label theming). Register a cTrader Open API app. Apply to Hyperliquid, Bybit and Kraken. Get Indian legal and CA advice. Confirm Rithmic dev-kit terms and costs. |
-| 3–6 | Run Rithmic conformance. Send the first outreach wave to 15 prop firms and 3 brokers. Launch the founder lifetime offer. Post once in each community (Show HN, r/algotrading, r/FuturesTrading, NexusFi). |
-| 7–12 | Run 2 pilots. Get listed on rithmic.com/platforms and by Discount Trading or AMP. Ship the cTrader integration. Send the second outreach wave to cTrader brokers and the remaining prop firms. Reapply to TradeStation with traction. |
+| 3–6 | Run Rithmic conformance when Rithmic onboarding allows. Without waiting for Rithmic, build cTrader market data and the shared live venue on cTrader demo accounts (`plan/trading_roadmap.md` T9). Send the first outreach wave to 15 prop firms and 3 brokers. Launch the founder lifetime offer. Post once in each community (Show HN, r/algotrading, r/FuturesTrading, NexusFi). |
+| 7–12 | Run 2 pilots. Get listed on rithmic.com/platforms and by Discount Trading or AMP. Ship cTrader trading after demo qualification on two brokers. Send the second outreach wave to cTrader brokers and the remaining prop firms. Reapply to TradeStation with traction. |
 
 ### Targets by day 90
 
@@ -280,7 +280,7 @@ Day 0 email or DM, then a follow-up on day 3, day 7 and day 14 with new value ea
 
 | Risk | Mitigation |
 |---|---|
-| Fail or delay Rithmic conformance | Build a test suite first that simulates disconnects, partial fills, rejections and rate limits |
+| Fail or delay Rithmic conformance | Build a test suite first that simulates disconnects, partial fills, rejections and rate limits. Build cTrader in parallel so a Rithmic delay does not stall live trading |
 | A bug that sends a wrong order | Order confirmations, size limits, kill switch, paper testing for every broker, terms of service that cover execution errors |
 | Solo-founder bus factor | Escrow, documentation, signed and reproducible builds |
 | Legal exposure (crypto rebates, US broker payments, data licensing) | Indian and US legal checks before signing or taking any revenue share |
