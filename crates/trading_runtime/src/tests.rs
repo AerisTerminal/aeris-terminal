@@ -806,6 +806,15 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         scaled.completed_trade_pnl.is_empty(),
         "a partial exit must not report final trade P&L"
     );
+    assert_eq!(
+        scaled.fill_realized_pnl.get(&scaled.fills[0].id),
+        Some(&scaled.positions[0].realized_pnl),
+        "a partial exit reports the P&L it realized"
+    );
+    assert!(
+        !scaled.fill_realized_pnl.contains_key(&scaled.fills[1].id),
+        "an entry realizes nothing"
+    );
     let stop = scaled
         .orders
         .iter()
@@ -825,6 +834,13 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     assert_eq!(
         complete.completed_trade_pnl.get(&complete.fills[0].id),
         Some(&complete.positions[0].realized_pnl)
+    );
+    let exits = complete.fill_realized_pnl.values().collect::<Vec<_>>();
+    assert_eq!(exits.len(), 2, "both exits report their realized P&L");
+    assert_eq!(
+        exits[0].checked_add(*exits[1]).expect("exit sum"),
+        complete.positions[0].realized_pnl,
+        "the exits add up to the trade's final P&L"
     );
     assert_eq!(
         complete.managed_brackets[0].status,
@@ -1451,6 +1467,8 @@ fn replace_risk_policy_mid_trade(service: &TradingService) {
         .expect("changing risk policy mid-trade does not reset trade P&L");
 }
 
+/// One entry and one full exit: the exit carries both the trade's final P&L and the P&L it
+/// realized, and the entry carries neither.
 fn assert_completed_trade_pnl(snapshot: &TradingSnapshot, expected: FixedPoint) {
     assert_eq!(snapshot.completed_trade_pnl.len(), 1);
     assert_eq!(
@@ -1461,6 +1479,11 @@ fn assert_completed_trade_pnl(snapshot: &TradingSnapshot, expected: FixedPoint) 
         !snapshot
             .completed_trade_pnl
             .contains_key(&snapshot.fills[1].id)
+    );
+    assert_eq!(
+        snapshot.fill_realized_pnl,
+        BTreeMap::from([(snapshot.fills[0].id.clone(), expected)]),
+        "only the exit realizes P&L"
     );
 }
 
@@ -1552,6 +1575,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     );
     assert_eq!(restored.fills.len(), 2);
     assert_eq!(restored.completed_trade_pnl, snapshot.completed_trade_pnl);
+    assert_eq!(restored.fill_realized_pnl, snapshot.fill_realized_pnl);
     assert_eq!(restored.positions, snapshot.positions);
     assert!(
         fs::read_to_string(directory.0.join("export/executions.csv"))

@@ -254,6 +254,8 @@ pub struct TradingSnapshot {
     pub fills: Vec<Fill>,
     /// Final realized P&L keyed by the fill that closed each trade cycle.
     pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
+    /// Realized P&L of each fill that reduced or closed a position, partial exits included.
+    pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
     pub positions: Vec<Position>,
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
@@ -407,6 +409,7 @@ struct FillPolicyUpdate {
     trade_cycle: RiskTradeCycleState,
     discipline_state: DisciplineState,
     completed_trade_pnl: Option<FixedPoint>,
+    fill_realized_pnl: Option<FixedPoint>,
     trade_pnl_cycle: Option<FixedPoint>,
 }
 
@@ -1227,6 +1230,7 @@ impl Coordinator {
             .filter(|fill| &fill.account_id == account_id)
         {
             self.state.completed_trade_pnl.remove(&fill.id);
+            self.state.fill_realized_pnl.remove(&fill.id);
         }
         self.state
             .fills
@@ -2884,11 +2888,14 @@ impl Coordinator {
         }
         let discipline_state =
             self.next_discipline_state(fill, risk_completed_pnl.zip(completed_quantity))?;
+        let reduces_position =
+            previous_quantity != 0 && fill.side.sign() != previous_quantity.signum();
         Ok(FillPolicyUpdate {
             rule_state,
             trade_cycle,
             discipline_state,
             completed_trade_pnl: completed_pnl,
+            fill_realized_pnl: reduces_position.then_some(realized_change),
             trade_pnl_cycle,
         })
     }
@@ -3033,6 +3040,9 @@ impl Coordinator {
         self.state.fills.push_back(fill.clone());
         if let Some(pnl) = update.policy_update.completed_trade_pnl {
             self.state.completed_trade_pnl.insert(fill.id.clone(), pnl);
+        }
+        if let Some(pnl) = update.policy_update.fill_realized_pnl {
+            self.state.fill_realized_pnl.insert(fill.id.clone(), pnl);
         }
         let trade_key = (fill.account_id.clone(), fill.instrument_id.clone());
         if let Some(cycle) = update.policy_update.trade_pnl_cycle {
@@ -3865,6 +3875,19 @@ impl Coordinator {
                         .map(|pnl| (fill.id.clone(), *pnl))
                 })
                 .collect(),
+            fill_realized_pnl: self
+                .state
+                .fills
+                .iter()
+                .rev()
+                .take(MAXIMUM_SNAPSHOT_ITEMS)
+                .filter_map(|fill| {
+                    self.state
+                        .fill_realized_pnl
+                        .get(&fill.id)
+                        .map(|pnl| (fill.id.clone(), *pnl))
+                })
+                .collect(),
             positions: self.state.positions.values().cloned().collect(),
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
@@ -4113,6 +4136,7 @@ impl Coordinator {
         while self.state.fills.len() > self.retention.maximum_fills {
             if let Some(fill) = self.state.fills.pop_front() {
                 self.state.completed_trade_pnl.remove(&fill.id);
+                self.state.fill_realized_pnl.remove(&fill.id);
             }
         }
         while self.state.orders.len() > self.retention.maximum_orders {
@@ -4139,6 +4163,7 @@ fn fill_policy_persistence(update: &FillPolicyUpdate) -> FillPolicyPersistence<'
         trade_cycle: &update.trade_cycle,
         discipline_state: &update.discipline_state,
         completed_trade_pnl: update.completed_trade_pnl,
+        fill_realized_pnl: update.fill_realized_pnl,
         trade_pnl_cycle: update.trade_pnl_cycle,
     }
 }

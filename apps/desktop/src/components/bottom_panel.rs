@@ -19,13 +19,13 @@ const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
 /// Header controls stay inside the panel header with room around their hover fill.
 const TRADE_HISTORY_HEADER_CONTROL_HEIGHT: f32 = 22.0;
 const TRADE_HISTORY_ROW_HEIGHT: f32 = 28.0;
-const TRADE_HISTORY_TIME_WIDTH: f32 = 125.0;
-const TRADE_HISTORY_ACCOUNT_WIDTH: f32 = 120.0;
-const TRADE_HISTORY_SYMBOL_WIDTH: f32 = 95.0;
-const TRADE_HISTORY_SIDE_WIDTH: f32 = 50.0;
-const TRADE_HISTORY_QUANTITY_WIDTH: f32 = 90.0;
-const TRADE_HISTORY_PRICE_WIDTH: f32 = 110.0;
-const TRADE_HISTORY_PNL_WIDTH: f32 = 120.0;
+const TRADE_HISTORY_TIME_WIDTH: f32 = 115.0;
+const TRADE_HISTORY_ACCOUNT_WIDTH: f32 = 100.0;
+const TRADE_HISTORY_SYMBOL_WIDTH: f32 = 80.0;
+const TRADE_HISTORY_SIDE_WIDTH: f32 = 40.0;
+const TRADE_HISTORY_QUANTITY_WIDTH: f32 = 70.0;
+const TRADE_HISTORY_PRICE_WIDTH: f32 = 95.0;
+const TRADE_HISTORY_PNL_WIDTH: f32 = 105.0;
 const TRADE_HISTORY_CELL_GAP: f32 = 8.0;
 const TRADE_HISTORY_ACCOUNT_MENU_WIDTH: f32 = 220.0;
 const TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT: f32 = 180.0;
@@ -56,6 +56,7 @@ pub(super) struct TradeHistory {
     /// Newest first, exactly as the owner's bounded snapshot orders them.
     fills: Arc<[aeris_trading::Fill]>,
     completed_trade_pnl: Arc<BTreeMap<aeris_trading::FillId, aeris_trading::FixedPoint>>,
+    fill_realized_pnl: Arc<BTreeMap<aeris_trading::FillId, aeris_trading::FixedPoint>>,
     accounts: Arc<[aeris_trading::TradingAccount]>,
     symbols: Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
     /// Indices into `fills` that pass the current account filter.
@@ -124,6 +125,7 @@ impl BottomPanelState {
         self.history.revision = Some(snapshot.revision);
         self.history.fills = snapshot.fills.clone().into();
         self.history.completed_trade_pnl = Arc::new(snapshot.completed_trade_pnl.clone());
+        self.history.fill_realized_pnl = Arc::new(snapshot.fill_realized_pnl.clone());
         self.history.accounts = snapshot.accounts.clone().into();
         self.history.symbols = Arc::new(
             snapshot
@@ -574,7 +576,12 @@ fn trade_history_column_header(show_account: bool, theme: &AerisTheme) -> impl I
         .child(
             trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
                 .text_right()
-                .child("Final P&L"),
+                .child("Realized P&L"),
+        )
+        .child(
+            trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
+                .text_right()
+                .child("Trade P&L"),
         )
 }
 
@@ -649,22 +656,9 @@ fn trade_history_row(
         aeris_trading::OrderSide::Buy => ("Buy", colors.text_positive),
         aeris_trading::OrderSide::Sell => ("Sell", colors.text_negative),
     };
-    let final_pnl = history.completed_trade_pnl.get(&fill.id).copied();
-    let pnl_color = final_pnl.map_or(colors.text_secondary, |pnl| match pnl.units().cmp(&0) {
-        std::cmp::Ordering::Less => colors.text_negative,
-        std::cmp::Ordering::Equal => colors.text_secondary,
-        std::cmp::Ordering::Greater => colors.text_positive,
-    });
-    let pnl_text = final_pnl.map_or_else(
-        || "—".to_string(),
-        |pnl| {
-            format!(
-                "{} {}",
-                history.account_currency(fill.account_id.as_str()),
-                market_price_text(pnl.units(), u32::from(pnl.scale()))
-            )
-        },
-    );
+    let currency = history.account_currency(fill.account_id.as_str());
+    let realized_pnl = history.fill_realized_pnl.get(&fill.id).copied();
+    let trade_pnl = history.completed_trade_pnl.get(&fill.id).copied();
     trade_history_row_frame()
         .id(("trade_history_row", index))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
@@ -701,12 +695,38 @@ fn trade_history_row(
                     u32::from(fill.price.scale()),
                 )),
         )
-        .child(
-            trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
-                .text_right()
-                .text_color(gpui_color(pnl_color))
-                .child(pnl_text),
-        )
+        .child(trade_history_pnl_cell(realized_pnl, currency, theme))
+        .child(trade_history_pnl_cell(trade_pnl, currency, theme))
+}
+
+/// A signed P&L amount colored by its sign; fills that realized nothing show a dash.
+fn trade_history_pnl_cell(
+    pnl: Option<aeris_trading::FixedPoint>,
+    currency: &str,
+    theme: &AerisTheme,
+) -> Div {
+    let colors = theme.colors;
+    let color = pnl.map_or(colors.text_secondary, |pnl| match pnl.units().cmp(&0) {
+        std::cmp::Ordering::Less => colors.text_negative,
+        std::cmp::Ordering::Equal => colors.text_secondary,
+        std::cmp::Ordering::Greater => colors.text_positive,
+    });
+    trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
+        .text_right()
+        .text_color(gpui_color(color))
+        .child(trade_history_pnl_text(pnl, currency))
+}
+
+fn trade_history_pnl_text(pnl: Option<aeris_trading::FixedPoint>, currency: &str) -> String {
+    pnl.map_or_else(
+        || "—".to_string(),
+        |pnl| {
+            format!(
+                "{currency} {}",
+                market_price_text(pnl.units(), u32::from(pnl.scale()))
+            )
+        },
+    )
 }
 
 /// Rows span the full panel width; a virtualized list otherwise sizes rows to their content.
@@ -787,6 +807,15 @@ mod tests {
     }
 
     #[test]
+    fn closing_fills_show_signed_pnl_and_other_fills_a_dash() {
+        let loss = aeris_trading::FixedPoint::try_new(-252_500, 2).expect("loss");
+        let gain = aeris_trading::FixedPoint::try_new(735_000, 2).expect("gain");
+        assert_eq!(trade_history_pnl_text(Some(loss), "USD"), "USD -2525.00");
+        assert_eq!(trade_history_pnl_text(Some(gain), "USD"), "USD 7350.00");
+        assert_eq!(trade_history_pnl_text(None, "USD"), "—");
+    }
+
+    #[test]
     fn all_trade_history_columns_fit_a_compact_window() {
         let columns = [
             TRADE_HISTORY_TIME_WIDTH,
@@ -796,11 +825,15 @@ mod tests {
             TRADE_HISTORY_QUANTITY_WIDTH,
             TRADE_HISTORY_PRICE_WIDTH,
             TRADE_HISTORY_PNL_WIDTH,
+            TRADE_HISTORY_PNL_WIDTH,
         ];
         let width = columns.iter().sum::<f32>()
             + TRADE_HISTORY_CELL_GAP
                 * f32::from(u8::try_from(columns.len() - 1).expect("column count fits"))
             + 16.0;
-        assert!(width <= 800.0 - 12.0, "Final P&L must remain visible");
+        assert!(
+            width <= 800.0 - 12.0,
+            "both P&L columns must remain visible"
+        );
     }
 }

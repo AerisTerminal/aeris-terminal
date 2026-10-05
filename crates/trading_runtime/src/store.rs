@@ -25,7 +25,7 @@ use std::{
     path::Path,
 };
 
-pub(super) const SCHEMA_VERSION: u32 = 16;
+pub(super) const SCHEMA_VERSION: u32 = 17;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -176,6 +176,8 @@ const MIGRATION_V16: &str = "ALTER TABLE fills ADD COLUMN completed_trade_pnl_un
      realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
      PRIMARY KEY(account_id, instrument_id)
  ) STRICT;";
+const MIGRATION_V17: &str = "ALTER TABLE fills ADD COLUMN realized_pnl_units INTEGER;
+ ALTER TABLE fills ADD COLUMN realized_pnl_scale INTEGER;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -186,6 +188,7 @@ pub(super) struct StoredState {
     pub order_events: VecDeque<OrderEvent>,
     pub fills: VecDeque<Fill>,
     pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
+    pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
     pub trade_pnl_cycles: BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
@@ -286,6 +289,7 @@ pub(super) struct FillPolicyPersistence<'a> {
     pub trade_cycle: &'a RiskTradeCycleState,
     pub discipline_state: &'a DisciplineState,
     pub completed_trade_pnl: Option<FixedPoint>,
+    pub fill_realized_pnl: Option<FixedPoint>,
     pub trade_pnl_cycle: Option<FixedPoint>,
 }
 
@@ -400,7 +404,11 @@ impl TradingStore {
             version = 15;
         }
         if version == 15 {
-            self.apply_migration(SCHEMA_VERSION, MIGRATION_V16)?;
+            self.apply_migration(16, MIGRATION_V16)?;
+            version = 16;
+        }
+        if version == 16 {
+            self.apply_migration(SCHEMA_VERSION, MIGRATION_V17)?;
         }
         Ok(())
     }
@@ -531,6 +539,7 @@ impl TradingStore {
         let order_events = self.load_events()?;
         let fills = self.load_fills()?;
         let completed_trade_pnl = self.load_completed_trade_pnl()?;
+        let fill_realized_pnl = self.load_fill_realized_pnl()?;
         let trade_pnl_cycles = self.load_trade_pnl_cycles()?;
         let positions = self.load_positions()?;
         let risk_profiles = self.load_risk_profiles()?;
@@ -552,6 +561,7 @@ impl TradingStore {
             order_events,
             fills,
             completed_trade_pnl,
+            fill_realized_pnl,
             trade_pnl_cycles,
             positions,
             risk_profiles,
@@ -1559,8 +1569,9 @@ impl TradingStore {
             .execute(
                 "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
                     price_scale, quantity_units, quantity_scale, execution_unix_nanos,
-                    provenance_json, completed_trade_pnl_units, completed_trade_pnl_scale)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    provenance_json, completed_trade_pnl_units, completed_trade_pnl_scale,
+                    realized_pnl_units, realized_pnl_scale)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     fill.id.as_str(),
                     fill.order_id.as_str(),
@@ -1575,6 +1586,8 @@ impl TradingStore {
                     encode_provenance(&fill.provenance),
                     policy.completed_trade_pnl.map(FixedPoint::units),
                     policy.completed_trade_pnl.map(FixedPoint::scale),
+                    policy.fill_realized_pnl.map(FixedPoint::units),
+                    policy.fill_realized_pnl.map(FixedPoint::scale),
                 ],
             )
             .map_err(database_error)?;
@@ -2070,15 +2083,25 @@ impl TradingStore {
     }
 
     fn load_completed_trade_pnl(&self) -> Result<BTreeMap<FillId, FixedPoint>, String> {
+        self.load_fill_amounts(
+            "SELECT id, completed_trade_pnl_units, completed_trade_pnl_scale
+             FROM fills WHERE completed_trade_pnl_units IS NOT NULL
+             ORDER BY execution_unix_nanos",
+        )
+    }
+
+    fn load_fill_realized_pnl(&self) -> Result<BTreeMap<FillId, FixedPoint>, String> {
+        self.load_fill_amounts(
+            "SELECT id, realized_pnl_units, realized_pnl_scale
+             FROM fills WHERE realized_pnl_units IS NOT NULL
+             ORDER BY execution_unix_nanos",
+        )
+    }
+
+    /// Loads one optional fixed-point amount per fill from a `(id, units, scale)` query.
+    fn load_fill_amounts(&self, query: &str) -> Result<BTreeMap<FillId, FixedPoint>, String> {
         let mut output = BTreeMap::new();
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT id, completed_trade_pnl_units, completed_trade_pnl_scale
-                 FROM fills WHERE completed_trade_pnl_units IS NOT NULL
-                 ORDER BY execution_unix_nanos",
-            )
-            .map_err(database_error)?;
+        let mut statement = self.connection.prepare(query).map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -2892,6 +2915,13 @@ mod tests {
                 .expect("historical fill has no recorded outcome")
                 .is_empty(),
             "migration must not invent final P&L for old executions"
+        );
+        assert!(
+            store
+                .load_fill_realized_pnl()
+                .expect("historical fill has no recorded realized P&L")
+                .is_empty(),
+            "migration must not invent realized P&L for old executions"
         );
     }
 }
