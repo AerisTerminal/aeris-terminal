@@ -2110,6 +2110,7 @@ impl Coordinator<'_> {
                     provider,
                     generation,
                     &instrument.instrument_id,
+                    "the provider requested trade recovery",
                 );
             }
         }
@@ -2181,14 +2182,12 @@ impl Coordinator<'_> {
             .get_mut(&(provider.to_string(), instrument.instrument_id.clone()))
         {
             for trade in trades {
-                if book
-                    .replace_indexed_trade(&trade.trade_id, Some(trade), true)
-                    .is_err()
-                {
+                if let Err(error) = book.replace_indexed_trade(&trade.trade_id, Some(trade), true) {
                     self.request_indexed_trade_recovery(
                         provider,
                         generation,
                         &instrument.instrument_id,
+                        &error,
                     );
                     return;
                 }
@@ -2273,23 +2272,21 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let mut failed = false;
-        if let Some(book) = self
+        let applied = self
             .order_books
             .get_mut(&(provider.to_string(), instrument.instrument_id.clone()))
-        {
-            for change in changes {
-                if book
-                    .replace_indexed_trade(&change.index, change.trade.as_ref(), false)
-                    .is_err()
-                {
-                    failed = true;
-                    break;
-                }
-            }
-        }
-        if failed {
-            self.request_indexed_trade_recovery(provider, generation, &instrument.instrument_id);
+            .map_or(Ok(()), |book| {
+                changes.iter().try_for_each(|change| {
+                    book.replace_indexed_trade(&change.index, change.trade.as_ref(), false)
+                })
+            });
+        if let Err(error) = applied {
+            self.request_indexed_trade_recovery(
+                provider,
+                generation,
+                &instrument.instrument_id,
+                &error,
+            );
             return;
         }
         let Ok(provider_generation) = id(generation).map(ProviderGeneration) else {
@@ -2332,7 +2329,12 @@ impl Coordinator<'_> {
                     "Indexed trade aggregation requires covering history",
                 );
             }
-            self.request_indexed_trade_recovery(provider, generation, &instrument.instrument_id);
+            self.request_indexed_trade_recovery(
+                provider,
+                generation,
+                &instrument.instrument_id,
+                "a trade-built candle series rejected an indexed trade",
+            );
             return;
         }
         for change in changes {
@@ -2392,7 +2394,11 @@ impl Coordinator<'_> {
         provider: &str,
         generation: u64,
         instrument_id: &str,
+        reason: &str,
     ) {
+        diagnostic!(
+            "Aeris live trade tape reset for {instrument_id} generation={generation}: {reason}"
+        );
         if let Some(book) = self
             .order_books
             .get_mut(&(provider.to_string(), instrument_id.to_string()))

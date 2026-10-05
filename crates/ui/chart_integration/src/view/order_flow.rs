@@ -112,7 +112,9 @@ impl AerisChartView {
     /// tape without a gap, only its new suffix is sent, so the chart keeps bars
     /// whose trades the runtime has since evicted. After a gap or a reconnect the
     /// window's prints newer than the chart's newest print are appended, keeping the
-    /// history; only a rewrite of the same session's window installs a covering image.
+    /// history. A rewrite of the same session's window (a correction, a cancellation,
+    /// a backfill or a restarted tape) replaces only the span the window covers, so bars
+    /// older than the window are kept.
     ///
     /// Once drawn, the presentation keeps following the tape while no order-flow view is
     /// shown, so switching back to a footprint finds its history.
@@ -182,25 +184,30 @@ impl AerisChartView {
         let start = trades.partition_point(|trade| {
             prior_last.is_some_and(|last| trade.ingestion_ordinal <= last)
         });
-        let mut converted = trades[start..]
+        let converted = trades[start..]
             .iter()
             .filter(|trade| resume_after.is_none_or(|after| trade.timestamp_micros > after))
             .map(order_flow_trade)
             .collect::<Result<Vec<_>, _>>()?;
-        if !append {
-            converted.sort_by_key(|trade| trade.timestamp_micros);
-        }
         let newest = converted.iter().map(|trade| trade.timestamp_micros).max();
         let presentation = state.presentation;
-        self.engine
-            .update_order_flow_presentation(presentation, converted, append)
-            .map_err(|error| error.to_string())?;
+        if append {
+            self.engine
+                .update_order_flow_presentation(presentation, converted, true)
+                .map(|_| ())
+        } else {
+            self.engine
+                .replace_order_flow_window(presentation, converted)
+        }
+        .map_err(|error| error.to_string())?;
         if let Some(state) = &mut self.order_flow_state {
             state.last_ingestion_ordinal = last.max(prior_last);
+            // A covering window replaces every print from its oldest one, so its newest print
+            // is the chart's newest; an empty window changed nothing.
             state.last_timestamp_micros = if append {
                 newest.max(state.last_timestamp_micros)
             } else {
-                newest
+                newest.or(state.last_timestamp_micros)
             };
         }
         // The engine re-lays out on its own series revision; forcing layout on every

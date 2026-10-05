@@ -238,6 +238,59 @@ fn footprint_rewrites_its_window_and_keeps_history_across_a_reconnect() {
 }
 
 #[test]
+fn a_restarted_tape_in_the_same_session_keeps_older_footprint_bars() {
+    let mut chart = AerisChartView::empty();
+    chart.set_chart_type(ChartType::Footprint);
+    let aggregation = OrderFlowAggregation::TimeMicros(60_000_000);
+    let history = (1..=3)
+        .map(|ordinal| order_flow_trade(ordinal, i64::try_from(ordinal).unwrap() * 60_000_000, 2.0))
+        .collect::<Vec<_>>();
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &history)
+        .unwrap();
+
+    // The runtime cleared its window without a new provider session: its ordinals restart and
+    // it holds only the prints since the reset, so the host invalidates the applied prefix.
+    let restarted = [
+        order_flow_trade(1, 181_000_000, 4.0),
+        order_flow_trade(2, 241_000_000, 1.0),
+    ];
+    chart.invalidate_order_flow_prefix();
+    chart
+        .apply_order_flow_trades("instrument:test", 7, aggregation, 0.25, &restarted)
+        .unwrap();
+    let footprint = chart.footprint_series_id().expect("footprint");
+    let starts = chart
+        .engine
+        .footprint_bars(footprint)
+        .expect("footprint bars")
+        .iter()
+        .map(|bar| bar.start_timestamp_micros / 60_000_000)
+        .collect::<Vec<_>>();
+    assert_eq!(starts, [1, 2, 3, 4]);
+    assert!((footprint_total_volume(&chart) - 11.0).abs() < f64::EPSILON);
+    assert_eq!(
+        chart.order_flow_resume_ordinal("instrument:test", 7, aggregation, 0.25),
+        Some(2)
+    );
+
+    // The restarted window keeps streaming as a suffix onto the same bars.
+    chart
+        .apply_order_flow_trades(
+            "instrument:test",
+            7,
+            aggregation,
+            0.25,
+            &[
+                order_flow_trade(2, 241_000_000, 1.0),
+                order_flow_trade(3, 242_000_000, 3.0),
+            ],
+        )
+        .unwrap();
+    assert!((footprint_total_volume(&chart) - 14.0).abs() < f64::EPSILON);
+}
+
+#[test]
 fn order_flow_settings_and_chart_type_changes_keep_footprint_history() {
     let mut chart = AerisChartView::empty();
     chart.set_chart_type(ChartType::Footprint);

@@ -2239,6 +2239,10 @@ impl Worker {
             batch.1.clear();
         }
         if batch.1.len() >= MAXIMUM_TICK_HISTORY {
+            diagnostic!(
+                "Tastytrade trade batch exceeded {MAXIMUM_TICK_HISTORY} pending events instrument={}",
+                instrument.instrument_id
+            );
             batch.1.clear();
             batch.0 = false;
             return self.publish(RealtimeEvent::TradeRecovery(self.epoch(), instrument));
