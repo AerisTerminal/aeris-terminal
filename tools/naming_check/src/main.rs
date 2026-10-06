@@ -424,6 +424,21 @@ mod tests {
         }
     }
 
+    /// With default features disabled, `gpui_platform` only enables the macOS text system through
+    /// `font-kit`; without it GPUI installs a no-op text system and macOS renders no text at all.
+    #[test]
+    fn gpui_platform_keeps_the_macos_text_system() {
+        let root_manifest = manifest("Cargo.toml");
+        let gpui_platform = root_manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("gpui_platform = "))
+            .expect("workspace declares gpui_platform");
+        assert!(
+            gpui_platform.contains("\"font-kit\""),
+            "gpui_platform must enable `font-kit` or macOS renders no text: {gpui_platform}"
+        );
+    }
+
     /// Chart interaction is Aeris Charts behavior. Terminal binds GPUI listeners through the
     /// `aeris_charts_render_gpui::input` adapter and the engine's `input_*` controller; it never
     /// routes gestures, arbitrates hover, picks cursors, or composes chart features from engine
