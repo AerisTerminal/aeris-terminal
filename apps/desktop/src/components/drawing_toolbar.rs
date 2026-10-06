@@ -717,25 +717,11 @@ const DRAWING_TOOL_MENU_ICON: f32 = 24.0;
 const DRAWING_TOOL_MENU_ROW_REMS: f32 = 2.0;
 const DRAWING_TOOL_MENU_TITLE_REMS: f32 = 1.75;
 const DRAWING_TOOL_BUTTON_SIZE: f32 = 32.0;
-const DRAWING_TOOL_GROUP_ARROW_GAP: f32 = 1.0;
-const DRAWING_TOOL_GROUP_ARROW_WIDTH: f32 = 10.0;
+const DRAWING_TOOL_GROUP_ARROW_HEIGHT: f32 = 12.0;
 const DRAWING_TOOL_GROUP_ARROW_ICON: f32 = 10.0;
-/// Every sidebar row reserves the arrow column, so tool and action icons share one left edge
-/// whether or not the row opens a flyout. The row fills the sidebar inside its right border.
-const DRAWING_TOOLBAR_ROW_WIDTH: f32 =
-    DRAWING_TOOL_BUTTON_SIZE + DRAWING_TOOL_GROUP_ARROW_GAP + DRAWING_TOOL_GROUP_ARROW_WIDTH;
-
-fn drawing_toolbar_row() -> Div {
-    div()
-        .relative()
-        .w(px(DRAWING_TOOLBAR_ROW_WIDTH))
-        .flex()
-        .items_center()
-        .gap(px(DRAWING_TOOL_GROUP_ARROW_GAP))
-}
 
 /// One sidebar slot: the group's shown tool arms on click, and groups with more than one tool
-/// open their flyout from a separate arrow target beside the button.
+/// open their flyout from a separate arrow strip under the button.
 fn drawing_tool_slot(
     terminal: &Entity<TerminalApp>,
     slot: DrawingToolSlot,
@@ -767,7 +753,12 @@ fn drawing_tool_slot(
     );
     let bounds_terminal = terminal.clone();
     let index = slot.group;
-    drawing_toolbar_row()
+    div()
+        .relative()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
         .child(button)
         .when(group.has_menu(), |container| {
             container.child(drawing_tool_group_arrow(terminal, slot, theme))
@@ -802,8 +793,8 @@ fn drawing_tool_group_arrow(
     div()
         .id(group.menu_id)
         .flex_none()
-        .w(px(DRAWING_TOOL_GROUP_ARROW_WIDTH))
-        .h(px(DRAWING_TOOL_BUTTON_SIZE))
+        .w(px(DRAWING_TOOL_BUTTON_SIZE))
+        .h(px(DRAWING_TOOL_GROUP_ARROW_HEIGHT))
         .flex()
         .items_center()
         .justify_center()
@@ -1097,7 +1088,7 @@ fn drawing_action_control(
     let button = button_activation(button, spec.enabled, move |_, cx| {
         app.update(cx, spec.action);
     });
-    drawing_toolbar_row().child(chrome_tooltip(spec.id, spec.tooltip, button, theme))
+    chrome_tooltip(spec.id, spec.tooltip, button, theme)
 }
 
 pub(super) fn drawing_toolbar_expander(
