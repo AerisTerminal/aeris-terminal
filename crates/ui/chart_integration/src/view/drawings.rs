@@ -1,7 +1,12 @@
 //! Drawings. Tool arming, placement, editing, locks, and history are Aeris Charts state; this
 //! module exposes them to the shell's toolbar and menus.
 
-use super::{AerisChartView, ChartDrawingKind, DrawingId, DrawingsLockSummary};
+use super::{
+    AerisChartView, ChartDrawingKind, ChartDrawingStamp, DrawingId, DrawingsLockSummary,
+    price_format_min_move,
+};
+use aeris_charts_engine::{ProfileDrawingOptions, ProfileSource};
+use num_traits::ToPrimitive;
 
 impl AerisChartView {
     /// Returns the drawing tool currently armed on the chart surface, `None` for the cursor.
@@ -10,16 +15,65 @@ impl AerisChartView {
         self.engine.active_drawing_tool()
     }
 
-    /// Arms a drawing tool (or the cursor with `None`), replacing any unfinished gesture.
+    /// Arms a drawing tool (or the cursor with `None`), replacing any unfinished gesture. The
+    /// icon-stamp tool arms with the first built-in stamp.
     pub fn set_drawing_tool(&mut self, tool: Option<ChartDrawingKind>) {
+        let template =
+            tool.and_then(|kind| self.drawing_tool_template(kind, ChartDrawingStamp::ALL[0]));
+        self.arm_drawing_tool(tool, template.as_deref());
+    }
+
+    /// Arms the icon-stamp tool with one built-in stamp.
+    pub fn set_drawing_stamp(&mut self, stamp: ChartDrawingStamp) {
+        let kind = ChartDrawingKind::IconStamp;
+        let template = self.drawing_tool_template(kind, stamp);
+        self.arm_drawing_tool(Some(kind), template.as_deref());
+    }
+
+    fn arm_drawing_tool(&mut self, tool: Option<ChartDrawingKind>, template: Option<&str>) {
         self.engine.input_cancel();
         let _ = self.finish_text_edit();
-        let armed = self.engine.set_drawing_tool(tool, None, None);
-        debug_assert!(
-            armed,
-            "every built-in drawing tool has a valid default template"
-        );
+        let armed = self.engine.set_drawing_tool(tool, template, None);
+        debug_assert!(armed, "every built-in drawing tool has a valid template");
         self.invalidate_series_frame();
+    }
+
+    /// The host data a tool's template needs beyond the engine defaults: the series a
+    /// data-bound profile reads and its price bin, or the stamp an icon stamp places.
+    fn drawing_tool_template(
+        &self,
+        kind: ChartDrawingKind,
+        stamp: ChartDrawingStamp,
+    ) -> Option<String> {
+        let patch = match kind {
+            ChartDrawingKind::FixedRangeVolumeProfile
+            | ChartDrawingKind::AnchoredVolumeProfile
+            | ChartDrawingKind::AnchoredVwap => {
+                let profile = ProfileDrawingOptions {
+                    source: ProfileSource::Candles {
+                        price_series: 0,
+                        volume_series: self.volume_series,
+                    },
+                    tick_size: self.price_tick_size(),
+                    ..ProfileDrawingOptions::default()
+                };
+                serde_json::json!({ "profile": profile })
+            }
+            ChartDrawingKind::IconStamp => serde_json::json!({ "icon_name": stamp.icon_name() }),
+            _ => return None,
+        };
+        Some(patch.to_string())
+    }
+
+    /// The instrument's minimum price increment in chart price units, or the smallest displayed
+    /// step when the provider publishes none.
+    fn price_tick_size(&self) -> f64 {
+        self.instrument_price_increment
+            .filter(|&increment| increment > 0)
+            .and_then(|increment| increment.to_f64())
+            .map(|increment| increment / self.price_divisor)
+            .filter(|tick| tick.is_finite() && *tick > 0.0)
+            .unwrap_or_else(|| price_format_min_move(self.instrument_price_precision))
     }
 
     /// Cancels creation or movement and returns to the cursor tool.

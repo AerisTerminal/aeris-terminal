@@ -151,6 +151,7 @@ impl TerminalApp {
             active,
             theme: AerisTheme::dark(),
             drawing_toolbar: DrawingToolbarVisibility::Expanded,
+            drawing_tool_menu: DrawingToolMenu::default(),
             window_active: true,
             frame_poll_gate: frame_poll_gate::FramePollGate::default(),
             market_frame_wake,
@@ -671,9 +672,11 @@ impl TerminalApp {
 
     pub(super) fn select_drawing_tool_on_active_workspace(
         &mut self,
-        tool: Option<ChartDrawingKind>,
+        tool: DrawingToolChoice,
         cx: &mut Context<Self>,
     ) {
+        self.drawing_tool_menu.record(tool);
+        cx.notify();
         let panes: Vec<_> = self.workspaces[self.active]
             .panes
             .iter()
@@ -1569,6 +1572,30 @@ impl TerminalApp {
         ))
     }
 
+    pub(super) fn drawing_tool_menu_overlay(
+        &self,
+        terminal: &Entity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        if !self.drawing_tool_menu.is_open() {
+            return None;
+        }
+        let active_tool = self
+            .active_surface()
+            .read(cx)
+            .drawing_toolbar_state(cx)
+            .active_tool;
+        drawing_tool_menu_layer(
+            terminal,
+            &self.drawing_tool_menu,
+            active_tool,
+            window.viewport_size(),
+            window.rem_size(),
+            &self.theme,
+        )
+    }
+
     pub(super) fn finish_chart_context_menu(
         &mut self,
         mut menu: ChartContextMenu,
@@ -2340,7 +2367,8 @@ impl TerminalApp {
             (
                 product,
                 source.interval,
-                source.drawing_toolbar_state(cx).active_tool,
+                self.drawing_tool_menu
+                    .armed_choice(source.drawing_toolbar_state(cx).active_tool),
                 source.side_panels,
                 source.side_panel_width,
                 source.side_panel_split_basis_points,
@@ -2566,7 +2594,19 @@ impl TerminalApp {
 
     pub(super) fn toggle_drawing_toolbar(&mut self, cx: &mut Context<Self>) {
         self.drawing_toolbar.toggle();
+        self.drawing_tool_menu.close();
         cx.notify();
+    }
+
+    pub(super) fn toggle_drawing_tool_menu(&mut self, group: usize, cx: &mut Context<Self>) {
+        self.drawing_tool_menu.toggle(group);
+        cx.notify();
+    }
+
+    pub(super) fn close_drawing_tool_menu(&mut self, cx: &mut Context<Self>) {
+        if self.drawing_tool_menu.close() {
+            cx.notify();
+        }
     }
 
     fn retire_workspaces<C: gpui::AppContext>(&mut self, cx: &mut C) {
@@ -2648,6 +2688,11 @@ impl TerminalApp {
         if event.keystroke.key.eq_ignore_ascii_case("escape") && self.platform_menu_anchor.is_some()
         {
             self.close_platform_menu(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.drawing_tool_menu.is_open() {
+            self.close_drawing_tool_menu(cx);
             cx.stop_propagation();
             return;
         }

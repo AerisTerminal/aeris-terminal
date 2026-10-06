@@ -2028,8 +2028,11 @@ fn aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators
     assert_eq!(volume, vec![chart.volume_series]);
     assert!(series_entry(&chart, chart.volume_series).visible);
     assert_eq!(
-        chart.engine.indicator_info(vwap[0]).map(|info| info.kind),
-        Some("vwap")
+        chart
+            .engine
+            .indicator_info(vwap[0])
+            .map(|info| info.kind.into_owned()),
+        Some("vwap".to_owned())
     );
 }
 
@@ -3023,8 +3026,11 @@ fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
         .expect("volume-weighted average");
     assert_eq!(vwap.len(), 1);
     assert_eq!(
-        chart.engine.indicator_info(vwap[0]).map(|info| info.kind),
-        Some("vwap")
+        chart
+            .engine
+            .indicator_info(vwap[0])
+            .map(|info| info.kind.into_owned()),
+        Some("vwap".to_owned())
     );
     let (_, vwap_columns) = chart
         .engine
@@ -3660,6 +3666,75 @@ fn anchored_drawing_tools_commit_real_aeris_charts_drawings_and_return_to_cursor
         chart.is_editing_text(),
         "a placed text drawing opens its editor"
     );
+}
+
+#[test]
+fn every_aeris_charts_drawing_tool_arms_from_the_host_toolbar() {
+    let mut chart = interactive_chart();
+    let kinds: Vec<_> = (0..=u8::MAX).filter_map(DrawingKind::from_u8).collect();
+    assert!(
+        kinds.len() >= 85,
+        "the engine catalog shrank to {}",
+        kinds.len()
+    );
+    for kind in kinds {
+        chart.set_drawing_tool(Some(kind));
+        assert_eq!(chart.drawing_tool(), Some(kind), "{kind:?} must arm");
+    }
+    chart.set_drawing_tool(None);
+    assert_eq!(chart.drawing_tool(), None);
+}
+
+#[test]
+fn data_bound_profile_tools_read_the_product_price_and_volume_series() {
+    let mut chart = interactive_chart();
+    for (kind, anchors) in [
+        (DrawingKind::FixedRangeVolumeProfile, 2),
+        (DrawingKind::AnchoredVolumeProfile, 1),
+        (DrawingKind::AnchoredVwap, 1),
+    ] {
+        chart.set_drawing_tool(Some(kind));
+        for &x in [220.0, 360.0].iter().take(anchors) {
+            click(&mut chart, x, 200.0);
+        }
+        let id = chart
+            .selected_drawing_id()
+            .expect("profile drawing commits");
+        let profile = chart
+            .engine
+            .drawing(id)
+            .and_then(|drawing| drawing.profile.clone())
+            .expect("profile drawings bind a data source");
+        assert_eq!(
+            profile.source,
+            aeris_charts_engine::ProfileSource::Candles {
+                price_series: 0,
+                volume_series: chart.volume_series,
+            }
+        );
+        assert!(profile.tick_size > 0.0 && profile.tick_size.is_finite());
+    }
+}
+
+#[test]
+fn icon_stamps_place_the_chosen_registered_stamp() {
+    let mut chart = interactive_chart();
+    let mut x = 200.0;
+    for stamp in ChartDrawingStamp::ALL {
+        chart.set_drawing_stamp(stamp);
+        assert_eq!(chart.drawing_tool(), Some(DrawingKind::IconStamp));
+        click(&mut chart, x, 220.0);
+        x += 32.0;
+        let id = chart.selected_drawing_id().expect("stamp commits");
+        assert_eq!(
+            chart
+                .engine
+                .drawing(id)
+                .and_then(|drawing| drawing.icon_name.as_deref()),
+            Some(stamp.icon_name())
+        );
+    }
+    assert_eq!(chart.drawing_count(), ChartDrawingStamp::ALL.len());
 }
 
 #[test]

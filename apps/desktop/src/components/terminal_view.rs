@@ -629,6 +629,7 @@ impl Render for TerminalApp {
             cx,
         );
         let platform_menu = self.platform_menu_overlay(&terminal, window.viewport_size());
+        let drawing_tool_menu = self.drawing_tool_menu_overlay(&terminal, window, cx);
         let command_palette = self.rendered_command_palette(&terminal, cx);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
@@ -639,7 +640,7 @@ impl Render for TerminalApp {
             &terminal,
             &self.workspaces[self.active],
             &active,
-            self.drawing_toolbar.is_collapsed(),
+            (!self.drawing_toolbar.is_collapsed()).then_some(&self.drawing_tool_menu),
             watchlist,
             &self.theme,
             cx,
@@ -700,6 +701,7 @@ impl Render for TerminalApp {
             .children(account_dialog)
             .children(context_menu)
             .children(settings_menu)
+            .children(drawing_tool_menu)
             .children(platform_menu)
             .children(command_palette)
     }

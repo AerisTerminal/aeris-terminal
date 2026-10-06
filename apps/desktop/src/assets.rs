@@ -1,7 +1,9 @@
+use aeris_chart_integration::ChartDrawingStamp;
 use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
 const DRAWING_ASSET_PREFIX: &str = "aeris/icons/drawing/";
+const STAMP_ASSET_PREFIX: &str = "aeris/icons/stamp/";
 const UI_ASSET_PREFIX: &str = "aeris/icons/ui/";
 const SERIES_ASSET_PREFIX: &str = "aeris/icons/series/";
 const BRAND_ASSET_PREFIX: &str = "aeris/brand/";
@@ -141,58 +143,139 @@ impl UiIcon {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DrawingIcon {
-    TrendLine,
-    HorizontalLine,
-    VerticalLine,
-    Ray,
-    Rectangle,
-    Path,
-    Cursor,
-    Brush,
-    Text,
+/// Declares the drawing-toolbar glyphs once: the enum, its inventory, its asset path, and the
+/// embedded bytes all come from the same `Variant => "file.svg"` list.
+macro_rules! drawing_icons {
+    ($($variant:ident => $file:literal,)+) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum DrawingIcon {
+            $($variant,)+
+        }
+
+        impl DrawingIcon {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            #[must_use]
+            pub fn path(self) -> SharedString {
+                match self {
+                    $(Self::$variant => concat!("aeris/icons/drawing/", $file),)+
+                }
+                .into()
+            }
+        }
+
+        fn drawing_asset(path: &str) -> Option<&'static [u8]> {
+            Some(match path.strip_prefix(DRAWING_ASSET_PREFIX)? {
+                $($file => include_bytes!(concat!("../assets/icons/drawing/", $file)),)+
+                _ => return None,
+            })
+        }
+    };
 }
 
-impl DrawingIcon {
-    pub const ALL: [Self; 9] = [
-        Self::TrendLine,
-        Self::HorizontalLine,
-        Self::VerticalLine,
-        Self::Ray,
-        Self::Rectangle,
-        Self::Path,
-        Self::Cursor,
-        Self::Brush,
-        Self::Text,
-    ];
-    #[cfg(test)]
-    pub const GEOMETRIC: [Self; 6] = [
-        Self::TrendLine,
-        Self::HorizontalLine,
-        Self::VerticalLine,
-        Self::Ray,
-        Self::Rectangle,
-        Self::Path,
-    ];
+drawing_icons! {
+    Cursor => "cursor.svg",
+    GroupArrow => "group-arrow.svg",
+    TrendLine => "trend-line.svg",
+    Ray => "ray.svg",
+    InfoLine => "info-line.svg",
+    ExtendedLine => "extended-line.svg",
+    TrendAngle => "trend-angle.svg",
+    HorizontalLine => "horizontal-line.svg",
+    HorizontalRay => "horizontal-ray.svg",
+    VerticalLine => "vertical-line.svg",
+    CrossLine => "cross-line.svg",
+    ArrowLine => "arrow-line.svg",
+    ParallelChannel => "parallel-channel.svg",
+    RegressionTrend => "regression-trend.svg",
+    FlatTopChannel => "flat-top-channel.svg",
+    FlatBottomChannel => "flat-bottom-channel.svg",
+    DisjointChannel => "disjoint-channel.svg",
+    AndrewsPitchfork => "andrews-pitchfork.svg",
+    SchiffPitchfork => "schiff-pitchfork.svg",
+    ModifiedSchiffPitchfork => "modified-schiff-pitchfork.svg",
+    InsidePitchfork => "inside-pitchfork.svg",
+    Pitchfan => "pitchfan.svg",
+    FibonacciRetracement => "fibonacci.svg",
+    FibonacciExtension => "fib-extension.svg",
+    FibonacciChannel => "fib-channel.svg",
+    FibonacciTimeZones => "fib-time-zones.svg",
+    FibonacciTrendTime => "fib-trend-time.svg",
+    FibonacciSpeedFan => "fib-speed-fan.svg",
+    FibonacciSpeedArcs => "fib-speed-arcs.svg",
+    FibonacciCircles => "fib-circles.svg",
+    FibonacciSpiral => "fib-spiral.svg",
+    FibonacciWedge => "fib-wedge.svg",
+    GannBox => "gann-box.svg",
+    GannSquareFixed => "gann-square-fixed.svg",
+    GannSquare => "gann-square.svg",
+    GannFan => "gann-fan.svg",
+    PatternXabcd => "pattern-xabcd.svg",
+    PatternCypher => "pattern-cypher.svg",
+    PatternHeadShoulders => "pattern-head-shoulders.svg",
+    PatternAbcd => "pattern-abcd.svg",
+    PatternTriangle => "pattern-triangle.svg",
+    PatternThreeDrives => "pattern-three-drives.svg",
+    ElliottImpulse => "elliott-impulse.svg",
+    ElliottCorrection => "elliott-correction.svg",
+    ElliottTriangle => "elliott-triangle.svg",
+    ElliottDoubleCombination => "elliott-double-combo.svg",
+    ElliottTripleCombination => "elliott-triple-combo.svg",
+    CyclicLines => "cyclic-lines.svg",
+    TimeCycles => "time-cycles.svg",
+    SineLine => "sine-line.svg",
+    LongPosition => "long-position.svg",
+    ShortPosition => "short-position.svg",
+    Forecast => "forecast.svg",
+    BarsPattern => "bars-pattern.svg",
+    Projection => "projection.svg",
+    AnchoredVwap => "anchored-vwap.svg",
+    FixedRangeVolumeProfile => "fixed-range-volume-profile.svg",
+    AnchoredVolumeProfile => "anchored-volume-profile.svg",
+    PriceRange => "price-range.svg",
+    DateRange => "date-range.svg",
+    DatePriceRange => "ruler.svg",
+    Brush => "brush.svg",
+    Highlighter => "highlighter.svg",
+    Rectangle => "rectangle.svg",
+    RotatedRectangle => "rotated-rectangle.svg",
+    Path => "path.svg",
+    Circle => "circle.svg",
+    Ellipse => "ellipse.svg",
+    Polyline => "polyline.svg",
+    Triangle => "triangle.svg",
+    Arc => "arc.svg",
+    Curve => "curve.svg",
+    DoubleCurve => "double-curve.svg",
+    Text => "text.svg",
+    AnchoredText => "anchored-text.svg",
+    Note => "note.svg",
+    PriceNote => "price-note.svg",
+    Callout => "callout.svg",
+    Comment => "comment.svg",
+    PriceLabel => "price-label.svg",
+    Signpost => "signpost.svg",
+    FlagMark => "flag-mark.svg",
+    ArrowMarkerUp => "arrow-marker-up.svg",
+    ArrowMarkerDown => "arrow-marker-down.svg",
+    ArrowMarkerLeft => "arrow-marker-left.svg",
+    ArrowMarkerRight => "arrow-marker-right.svg",
+}
 
-    #[must_use]
-    pub fn path(self) -> SharedString {
-        match self {
-            Self::TrendLine => concat!("aeris/icons/drawing/", "trend-line.svg"),
-            Self::HorizontalLine => {
-                concat!("aeris/icons/drawing/", "horizontal-line.svg")
-            }
-            Self::VerticalLine => concat!("aeris/icons/drawing/", "vertical-line.svg"),
-            Self::Ray => concat!("aeris/icons/drawing/", "horizontal-ray.svg"),
-            Self::Rectangle => concat!("aeris/icons/drawing/", "rectangle.svg"),
-            Self::Path => concat!("aeris/icons/drawing/", "path.svg"),
-            Self::Cursor => concat!("aeris/icons/drawing/", "cursor.svg"),
-            Self::Brush => concat!("aeris/icons/drawing/", "brush.svg"),
-            Self::Text => concat!("aeris/icons/drawing/", "text.svg"),
-        }
-        .into()
-    }
+/// Toolbar glyph of a built-in chart stamp; the artwork is the one the chart rasterizes.
+#[must_use]
+pub fn stamp_icon_path(stamp: ChartDrawingStamp) -> SharedString {
+    format!("{STAMP_ASSET_PREFIX}{}.svg", stamp.key()).into()
+}
+
+fn stamp_asset(path: &str) -> Option<&'static [u8]> {
+    let key = path
+        .strip_prefix(STAMP_ASSET_PREFIX)?
+        .strip_suffix(".svg")?;
+    ChartDrawingStamp::ALL
+        .into_iter()
+        .find(|stamp| stamp.key() == key)
+        .map(ChartDrawingStamp::svg)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -393,6 +476,7 @@ pub struct AerisAssets;
 impl AssetSource for AerisAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         Ok(drawing_asset(path)
+            .or_else(|| stamp_asset(path))
             .or_else(|| ui_asset(path))
             .or_else(|| series_asset(path))
             .or_else(|| brand_asset(path))
@@ -403,8 +487,10 @@ impl AssetSource for AerisAssets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(DrawingIcon::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .map(DrawingIcon::path)
+            .chain(ChartDrawingStamp::ALL.into_iter().map(stamp_icon_path))
             .chain(UiIcon::ALL.into_iter().map(UiIcon::path))
             .chain(SeriesIcon::ALL.into_iter().map(SeriesIcon::path))
             .chain(BrandAsset::ALL.into_iter().map(BrandAsset::path))
@@ -414,21 +500,6 @@ impl AssetSource for AerisAssets {
             .filter(|asset| path.is_empty() || asset.starts_with(path))
             .collect())
     }
-}
-
-fn drawing_asset(path: &str) -> Option<&'static [u8]> {
-    Some(match path.strip_prefix(DRAWING_ASSET_PREFIX)? {
-        "trend-line.svg" => include_bytes!("../assets/icons/drawing/trend-line.svg"),
-        "horizontal-line.svg" => include_bytes!("../assets/icons/drawing/horizontal-line.svg"),
-        "vertical-line.svg" => include_bytes!("../assets/icons/drawing/vertical-line.svg"),
-        "horizontal-ray.svg" => include_bytes!("../assets/icons/drawing/horizontal-ray.svg"),
-        "rectangle.svg" => include_bytes!("../assets/icons/drawing/rectangle.svg"),
-        "path.svg" => include_bytes!("../assets/icons/drawing/path.svg"),
-        "cursor.svg" => include_bytes!("../assets/icons/drawing/cursor.svg"),
-        "brush.svg" => include_bytes!("../assets/icons/drawing/brush.svg"),
-        "text.svg" => include_bytes!("../assets/icons/drawing/text.svg"),
-        _ => return None,
-    })
 }
 
 fn ui_asset(path: &str) -> Option<&'static [u8]> {
@@ -569,8 +640,12 @@ mod tests {
         let assets = AerisAssets;
         let mut paths = HashSet::new();
 
-        for icon in DrawingIcon::ALL {
-            let path = icon.path();
+        let stamps = ChartDrawingStamp::ALL.into_iter().map(stamp_icon_path);
+        for path in DrawingIcon::ALL
+            .iter()
+            .map(|icon| icon.path())
+            .chain(stamps)
+        {
             assert!(paths.insert(path.clone()), "duplicate asset path: {path}");
             let bytes = assets
                 .load(path.as_ref())
@@ -581,10 +656,20 @@ mod tests {
     }
 
     #[test]
-    fn drawing_icons_are_theme_neutral_svg() {
+    fn drawing_tool_icons_share_one_theme_neutral_canvas() {
         let assets = AerisAssets;
+        // The cursor and text glyphs are drawn on their own canvases and the flyout arrow is a
+        // 12 px mark; every other tool glyph shares the 28 px line-art canvas.
+        let own_canvas = [
+            DrawingIcon::Cursor,
+            DrawingIcon::Text,
+            DrawingIcon::GroupArrow,
+        ];
 
-        for icon in DrawingIcon::GEOMETRIC {
+        for icon in DrawingIcon::ALL
+            .iter()
+            .filter(|icon| !own_canvas.contains(icon))
+        {
             let path = icon.path();
             let bytes = assets
                 .load(path.as_ref())
@@ -609,8 +694,9 @@ mod tests {
     fn monochrome_icons_paint_only_current_color() {
         let assets = AerisAssets;
         let paths = DrawingIcon::ALL
-            .into_iter()
-            .map(DrawingIcon::path)
+            .iter()
+            .map(|icon| icon.path())
+            .chain(ChartDrawingStamp::ALL.into_iter().map(stamp_icon_path))
             .chain(UiIcon::ALL.into_iter().map(UiIcon::path));
 
         for path in paths {
@@ -634,9 +720,24 @@ mod tests {
             "aeris/icons/drawing/horizontal-line.svg"
         );
         assert_eq!(
-            DrawingIcon::Ray.path().as_ref(),
+            DrawingIcon::HorizontalRay.path().as_ref(),
             "aeris/icons/drawing/horizontal-ray.svg"
         );
+        assert_eq!(
+            DrawingIcon::Ray.path().as_ref(),
+            "aeris/icons/drawing/ray.svg"
+        );
+    }
+
+    #[test]
+    fn stamp_icons_serve_the_artwork_the_chart_rasterizes() {
+        for stamp in ChartDrawingStamp::ALL {
+            let bytes = AerisAssets
+                .load(stamp_icon_path(stamp).as_ref())
+                .expect("asset lookup")
+                .expect("embedded stamp icon");
+            assert_eq!(bytes.as_ref(), stamp.svg());
+        }
     }
 
     #[test]
@@ -669,6 +770,7 @@ mod tests {
         assert_eq!(
             assets.list("").expect("all assets").len(),
             DrawingIcon::ALL.len()
+                + ChartDrawingStamp::ALL.len()
                 + UiIcon::ALL.len()
                 + SeriesIcon::ALL.len()
                 + BrandAsset::ALL.len()
@@ -680,7 +782,10 @@ mod tests {
             assets
                 .list("aeris/icons/drawing/trend")
                 .expect("filtered assets"),
-            vec![DrawingIcon::TrendLine.path()]
+            vec![
+                DrawingIcon::TrendLine.path(),
+                DrawingIcon::TrendAngle.path()
+            ]
         );
         assert_eq!(
             assets.list("hugeicons/").expect("removed namespace"),

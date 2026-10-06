@@ -319,11 +319,12 @@ pub(super) fn workspace_market_area(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     active_surface: &Entity<WorkspaceSurface>,
-    drawing_toolbar_collapsed: bool,
+    expanded_drawing_toolbar: Option<&DrawingToolMenu>,
     watchlist: WatchlistPanelState,
     theme: &AerisTheme,
     cx: &mut Context<TerminalApp>,
 ) -> impl IntoElement + use<> {
+    let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
     refresh_trading_pnl(
         active_surface.clone(),
         workspace
@@ -408,11 +409,12 @@ pub(super) fn workspace_market_area(
                 theme,
             ))
         })
-        .when(!drawing_toolbar_collapsed, |market| {
+        .when_some(expanded_drawing_toolbar, |market, menu| {
             market.child(drawing_toolbar(
                 terminal.clone(),
                 active_surface,
                 drawing_state,
+                menu,
                 &drawing_scroll,
                 theme,
             ))

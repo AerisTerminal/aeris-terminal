@@ -4948,14 +4948,14 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn select_drawing_tool(
-        &mut self,
-        tool: Option<ChartDrawingKind>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn select_drawing_tool(&mut self, tool: DrawingToolChoice, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                chart.set_drawing_tool(tool);
+                match tool {
+                    DrawingToolChoice::Cursor => chart.set_drawing_tool(None),
+                    DrawingToolChoice::Kind(kind) => chart.set_drawing_tool(Some(kind)),
+                    DrawingToolChoice::Stamp(stamp) => chart.set_drawing_stamp(stamp),
+                }
                 chart_cx.notify();
             });
             cx.notify();

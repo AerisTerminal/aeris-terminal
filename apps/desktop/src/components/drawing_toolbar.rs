@@ -1,4 +1,6 @@
 use super::*;
+use ChartDrawingKind as Kind;
+use assets::DrawingIcon as Glyph;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct DrawingToolbarState {
@@ -46,121 +48,625 @@ impl DrawingToolbarState {
     }
 }
 
+/// One toolbar command: the cursor, an Aeris Charts drawing tool, or the icon-stamp tool armed
+/// with one built-in stamp.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DrawingToolChoice {
+    Cursor,
+    Kind(ChartDrawingKind),
+    Stamp(ChartDrawingStamp),
+}
+
 #[derive(Clone, Copy)]
-enum DrawingToolIcon {
-    Huge(HugeIcon),
+enum DrawingToolGlyph {
     Asset(assets::DrawingIcon),
+    Stamp(ChartDrawingStamp),
 }
 
 #[derive(Clone, Copy)]
-struct DrawingToolSpec {
-    id: &'static str,
+struct DrawingToolEntry {
+    choice: DrawingToolChoice,
     label: &'static str,
-    tool: Option<ChartDrawingKind>,
-    icon: DrawingToolIcon,
-    icon_size: f32,
+    glyph: DrawingToolGlyph,
 }
 
-const DRAWING_TOOLS: [DrawingToolSpec; 9] = [
-    DrawingToolSpec {
-        id: "drawing_cursor",
+impl DrawingToolEntry {
+    const fn tool(kind: ChartDrawingKind, label: &'static str, icon: assets::DrawingIcon) -> Self {
+        Self {
+            choice: DrawingToolChoice::Kind(kind),
+            label,
+            glyph: DrawingToolGlyph::Asset(icon),
+        }
+    }
+
+    const fn stamp(stamp: ChartDrawingStamp) -> Self {
+        Self {
+            choice: DrawingToolChoice::Stamp(stamp),
+            label: stamp.label(),
+            glyph: DrawingToolGlyph::Stamp(stamp),
+        }
+    }
+
+    /// Stamps carry their chart color; tool glyphs follow the control's text color.
+    fn icon(self, theme: &AerisTheme) -> Icon {
+        match self.glyph {
+            DrawingToolGlyph::Asset(icon) => Icon::new(icon.path()),
+            DrawingToolGlyph::Stamp(stamp) => {
+                Icon::new(assets::stamp_icon_path(stamp)).color(gpui_color(stamp.color(theme)))
+            }
+        }
+    }
+
+    /// Toolbar glyph size: the cursor, brush, and text glyphs and the solid stamps read heavier
+    /// than the thin line art, so they render smaller.
+    const fn toolbar_icon_size(self) -> f32 {
+        match self.choice {
+            DrawingToolChoice::Cursor
+            | DrawingToolChoice::Kind(ChartDrawingKind::Brush | ChartDrawingKind::Text) => 24.0,
+            DrawingToolChoice::Stamp(_) => 22.0,
+            DrawingToolChoice::Kind(_) => 28.0,
+        }
+    }
+}
+
+struct DrawingToolSection {
+    title: &'static str,
+    tools: &'static [DrawingToolEntry],
+}
+
+struct DrawingToolGroup {
+    id: &'static str,
+    menu_id: &'static str,
+    label: &'static str,
+    sections: &'static [DrawingToolSection],
+}
+
+impl DrawingToolGroup {
+    fn entries(&self) -> impl Iterator<Item = &'static DrawingToolEntry> + use<> {
+        let sections: &'static [DrawingToolSection] = self.sections;
+        sections.iter().flat_map(|section| section.tools.iter())
+    }
+
+    fn first(&self) -> DrawingToolEntry {
+        self.sections[0].tools[0]
+    }
+
+    fn has_menu(&self) -> bool {
+        self.entries().nth(1).is_some()
+    }
+
+    fn entry(&self, choice: DrawingToolChoice) -> Option<DrawingToolEntry> {
+        self.entries().find(|entry| entry.choice == choice).copied()
+    }
+}
+
+const DRAWING_TOOL_GROUP_COUNT: usize = 8;
+
+/// The sidebar groups, top to bottom. Every Aeris Charts drawing kind appears exactly once; the
+/// icon-stamp kind appears once per built-in stamp.
+static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
+    DrawingToolGroup {
+        id: "drawing_group_cursor",
+        menu_id: "drawing_group_cursor_menu",
         label: "Cursor",
-        tool: None,
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Cursor),
-        icon_size: 24.0,
+        sections: &[DrawingToolSection {
+            title: "Cursor",
+            tools: &[DrawingToolEntry {
+                choice: DrawingToolChoice::Cursor,
+                label: "Cursor",
+                glyph: DrawingToolGlyph::Asset(Glyph::Cursor),
+            }],
+        }],
     },
-    DrawingToolSpec {
-        id: "drawing_trend_line",
-        label: "Trend line",
-        tool: Some(ChartDrawingKind::TrendLine),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::TrendLine),
-        icon_size: 28.0,
+    DrawingToolGroup {
+        id: "drawing_group_lines",
+        menu_id: "drawing_group_lines_menu",
+        label: "Lines, channels, and pitchforks",
+        sections: &[
+            DrawingToolSection {
+                title: "Lines",
+                tools: &[
+                    DrawingToolEntry::tool(Kind::TrendLine, "Trend line", Glyph::TrendLine),
+                    DrawingToolEntry::tool(Kind::Ray, "Ray", Glyph::Ray),
+                    DrawingToolEntry::tool(Kind::InfoLine, "Info line", Glyph::InfoLine),
+                    DrawingToolEntry::tool(
+                        Kind::ExtendedLine,
+                        "Extended line",
+                        Glyph::ExtendedLine,
+                    ),
+                    DrawingToolEntry::tool(Kind::TrendAngle, "Trend angle", Glyph::TrendAngle),
+                    DrawingToolEntry::tool(
+                        Kind::HorizontalLine,
+                        "Horizontal line",
+                        Glyph::HorizontalLine,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::HorizontalRay,
+                        "Horizontal ray",
+                        Glyph::HorizontalRay,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::VerticalLine,
+                        "Vertical line",
+                        Glyph::VerticalLine,
+                    ),
+                    DrawingToolEntry::tool(Kind::CrossLine, "Cross line", Glyph::CrossLine),
+                    DrawingToolEntry::tool(Kind::ArrowLine, "Arrow", Glyph::ArrowLine),
+                ],
+            },
+            DrawingToolSection {
+                title: "Channels",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::ParallelChannel,
+                        "Parallel channel",
+                        Glyph::ParallelChannel,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::RegressionTrend,
+                        "Regression trend",
+                        Glyph::RegressionTrend,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FlatTopChannel,
+                        "Flat top channel",
+                        Glyph::FlatTopChannel,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FlatBottomChannel,
+                        "Flat bottom channel",
+                        Glyph::FlatBottomChannel,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::DisjointChannel,
+                        "Disjoint channel",
+                        Glyph::DisjointChannel,
+                    ),
+                ],
+            },
+            DrawingToolSection {
+                title: "Pitchforks",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::AndrewsPitchfork,
+                        "Pitchfork",
+                        Glyph::AndrewsPitchfork,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::SchiffPitchfork,
+                        "Schiff pitchfork",
+                        Glyph::SchiffPitchfork,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ModifiedSchiffPitchfork,
+                        "Modified Schiff pitchfork",
+                        Glyph::ModifiedSchiffPitchfork,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::InsidePitchfork,
+                        "Inside pitchfork",
+                        Glyph::InsidePitchfork,
+                    ),
+                    DrawingToolEntry::tool(Kind::Pitchfan, "Pitchfan", Glyph::Pitchfan),
+                ],
+            },
+        ],
     },
-    DrawingToolSpec {
-        id: "drawing_horizontal_line",
-        label: "Horizontal line",
-        tool: Some(ChartDrawingKind::HorizontalLine),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::HorizontalLine),
-        icon_size: 28.0,
+    DrawingToolGroup {
+        id: "drawing_group_fibonacci",
+        menu_id: "drawing_group_fibonacci_menu",
+        label: "Fibonacci and Gann",
+        sections: &[
+            DrawingToolSection {
+                title: "Fibonacci",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciRetracement,
+                        "Fib retracement",
+                        Glyph::FibonacciRetracement,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciExtension,
+                        "Trend-based fib extension",
+                        Glyph::FibonacciExtension,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciChannel,
+                        "Fib channel",
+                        Glyph::FibonacciChannel,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciTimeZones,
+                        "Fib time zone",
+                        Glyph::FibonacciTimeZones,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciTrendTime,
+                        "Trend-based fib time",
+                        Glyph::FibonacciTrendTime,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciSpeedFan,
+                        "Fib speed resistance fan",
+                        Glyph::FibonacciSpeedFan,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciSpeedArcs,
+                        "Fib speed resistance arcs",
+                        Glyph::FibonacciSpeedArcs,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciCircles,
+                        "Fib circles",
+                        Glyph::FibonacciCircles,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciSpiral,
+                        "Fib spiral",
+                        Glyph::FibonacciSpiral,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FibonacciWedge,
+                        "Fib wedge",
+                        Glyph::FibonacciWedge,
+                    ),
+                ],
+            },
+            DrawingToolSection {
+                title: "Gann",
+                tools: &[
+                    DrawingToolEntry::tool(Kind::GannBox, "Gann box", Glyph::GannBox),
+                    DrawingToolEntry::tool(
+                        Kind::GannSquareFixed,
+                        "Gann square fixed",
+                        Glyph::GannSquareFixed,
+                    ),
+                    DrawingToolEntry::tool(Kind::GannSquare, "Gann square", Glyph::GannSquare),
+                    DrawingToolEntry::tool(Kind::GannFan, "Gann fan", Glyph::GannFan),
+                ],
+            },
+        ],
     },
-    DrawingToolSpec {
-        id: "drawing_vertical_line",
-        label: "Vertical line",
-        tool: Some(ChartDrawingKind::VerticalLine),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::VerticalLine),
-        icon_size: 28.0,
+    DrawingToolGroup {
+        id: "drawing_group_patterns",
+        menu_id: "drawing_group_patterns_menu",
+        label: "Patterns",
+        sections: &[
+            DrawingToolSection {
+                title: "Chart patterns",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::PatternXabcd,
+                        "XABCD pattern",
+                        Glyph::PatternXabcd,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::PatternCypher,
+                        "Cypher pattern",
+                        Glyph::PatternCypher,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::PatternHeadShoulders,
+                        "Head and shoulders",
+                        Glyph::PatternHeadShoulders,
+                    ),
+                    DrawingToolEntry::tool(Kind::PatternAbcd, "ABCD pattern", Glyph::PatternAbcd),
+                    DrawingToolEntry::tool(
+                        Kind::PatternTriangle,
+                        "Triangle pattern",
+                        Glyph::PatternTriangle,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::PatternThreeDrives,
+                        "Three drives pattern",
+                        Glyph::PatternThreeDrives,
+                    ),
+                ],
+            },
+            DrawingToolSection {
+                title: "Elliott waves",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::ElliottImpulse,
+                        "Elliott impulse wave (12345)",
+                        Glyph::ElliottImpulse,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ElliottCorrection,
+                        "Elliott correction wave (ABC)",
+                        Glyph::ElliottCorrection,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ElliottTriangle,
+                        "Elliott triangle wave (ABCDE)",
+                        Glyph::ElliottTriangle,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ElliottDoubleCombination,
+                        "Elliott double combo wave (WXY)",
+                        Glyph::ElliottDoubleCombination,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ElliottTripleCombination,
+                        "Elliott triple combo wave (WXYXZ)",
+                        Glyph::ElliottTripleCombination,
+                    ),
+                ],
+            },
+            DrawingToolSection {
+                title: "Cycles",
+                tools: &[
+                    DrawingToolEntry::tool(Kind::CyclicLines, "Cyclic lines", Glyph::CyclicLines),
+                    DrawingToolEntry::tool(Kind::TimeCycles, "Time cycles", Glyph::TimeCycles),
+                    DrawingToolEntry::tool(Kind::SineLine, "Sine line", Glyph::SineLine),
+                ],
+            },
+        ],
     },
-    DrawingToolSpec {
-        id: "drawing_ray",
-        label: "Ray",
-        tool: Some(ChartDrawingKind::HorizontalRay),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Ray),
-        icon_size: 28.0,
+    DrawingToolGroup {
+        id: "drawing_group_forecasting",
+        menu_id: "drawing_group_forecasting_menu",
+        label: "Forecasting and measurement",
+        sections: &[
+            DrawingToolSection {
+                title: "Forecasting",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::LongPosition,
+                        "Long position",
+                        Glyph::LongPosition,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ShortPosition,
+                        "Short position",
+                        Glyph::ShortPosition,
+                    ),
+                    DrawingToolEntry::tool(Kind::Forecast, "Forecast", Glyph::Forecast),
+                    DrawingToolEntry::tool(Kind::BarsPattern, "Bars pattern", Glyph::BarsPattern),
+                    DrawingToolEntry::tool(Kind::Projection, "Projection", Glyph::Projection),
+                ],
+            },
+            DrawingToolSection {
+                title: "Volume-based",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::AnchoredVwap,
+                        "Anchored VWAP",
+                        Glyph::AnchoredVwap,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::FixedRangeVolumeProfile,
+                        "Fixed range volume profile",
+                        Glyph::FixedRangeVolumeProfile,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::AnchoredVolumeProfile,
+                        "Anchored volume profile",
+                        Glyph::AnchoredVolumeProfile,
+                    ),
+                ],
+            },
+            DrawingToolSection {
+                title: "Measurers",
+                tools: &[
+                    DrawingToolEntry::tool(Kind::PriceRange, "Price range", Glyph::PriceRange),
+                    DrawingToolEntry::tool(Kind::DateRange, "Date range", Glyph::DateRange),
+                    DrawingToolEntry::tool(
+                        Kind::DatePriceRange,
+                        "Date and price range",
+                        Glyph::DatePriceRange,
+                    ),
+                ],
+            },
+        ],
     },
-    DrawingToolSpec {
-        id: "drawing_rectangle",
-        label: "Rectangle",
-        tool: Some(ChartDrawingKind::Rectangle),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Rectangle),
-        icon_size: 28.0,
+    DrawingToolGroup {
+        id: "drawing_group_shapes",
+        menu_id: "drawing_group_shapes_menu",
+        label: "Brushes and shapes",
+        sections: &[
+            DrawingToolSection {
+                title: "Brushes",
+                tools: &[
+                    DrawingToolEntry::tool(Kind::Brush, "Brush", Glyph::Brush),
+                    DrawingToolEntry::tool(Kind::Highlighter, "Highlighter", Glyph::Highlighter),
+                ],
+            },
+            DrawingToolSection {
+                title: "Shapes",
+                tools: &[
+                    DrawingToolEntry::tool(Kind::Rectangle, "Rectangle", Glyph::Rectangle),
+                    DrawingToolEntry::tool(
+                        Kind::RotatedRectangle,
+                        "Rotated rectangle",
+                        Glyph::RotatedRectangle,
+                    ),
+                    DrawingToolEntry::tool(Kind::Path, "Path", Glyph::Path),
+                    DrawingToolEntry::tool(Kind::Circle, "Circle", Glyph::Circle),
+                    DrawingToolEntry::tool(Kind::Ellipse, "Ellipse", Glyph::Ellipse),
+                    DrawingToolEntry::tool(Kind::Polyline, "Polyline", Glyph::Polyline),
+                    DrawingToolEntry::tool(Kind::Triangle, "Triangle", Glyph::Triangle),
+                    DrawingToolEntry::tool(Kind::Arc, "Arc", Glyph::Arc),
+                    DrawingToolEntry::tool(Kind::Curve, "Curve", Glyph::Curve),
+                    DrawingToolEntry::tool(Kind::DoubleCurve, "Double curve", Glyph::DoubleCurve),
+                ],
+            },
+        ],
     },
-    DrawingToolSpec {
-        id: "drawing_path",
-        label: "Path",
-        tool: Some(ChartDrawingKind::Path),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Path),
-        icon_size: 28.0,
+    DrawingToolGroup {
+        id: "drawing_group_text",
+        menu_id: "drawing_group_text_menu",
+        label: "Text and notes",
+        sections: &[DrawingToolSection {
+            title: "Text and notes",
+            tools: &[
+                DrawingToolEntry::tool(Kind::Text, "Text", Glyph::Text),
+                DrawingToolEntry::tool(Kind::AnchoredText, "Anchored text", Glyph::AnchoredText),
+                DrawingToolEntry::tool(Kind::Note, "Note", Glyph::Note),
+                DrawingToolEntry::tool(Kind::PriceNote, "Price note", Glyph::PriceNote),
+                DrawingToolEntry::tool(Kind::Callout, "Callout", Glyph::Callout),
+                DrawingToolEntry::tool(Kind::Comment, "Comment", Glyph::Comment),
+                DrawingToolEntry::tool(Kind::PriceLabel, "Price label", Glyph::PriceLabel),
+                DrawingToolEntry::tool(Kind::Signpost, "Signpost", Glyph::Signpost),
+                DrawingToolEntry::tool(Kind::FlagMark, "Flag mark", Glyph::FlagMark),
+            ],
+        }],
     },
-    DrawingToolSpec {
-        id: "drawing_brush",
-        label: "Brush",
-        tool: Some(ChartDrawingKind::Brush),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Brush),
-        icon_size: 24.0,
-    },
-    DrawingToolSpec {
-        id: "drawing_text",
-        label: "Text",
-        tool: Some(ChartDrawingKind::Text),
-        icon: DrawingToolIcon::Asset(assets::DrawingIcon::Text),
-        icon_size: 24.0,
+    DrawingToolGroup {
+        id: "drawing_group_markers",
+        menu_id: "drawing_group_markers_menu",
+        label: "Arrows and stamps",
+        sections: &[
+            DrawingToolSection {
+                title: "Stamps",
+                tools: &[
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Check),
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Cross),
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Star),
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Alert),
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Info),
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Question),
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Bolt),
+                    DrawingToolEntry::stamp(ChartDrawingStamp::Target),
+                ],
+            },
+            DrawingToolSection {
+                title: "Arrows",
+                tools: &[
+                    DrawingToolEntry::tool(
+                        Kind::ArrowMarkerUp,
+                        "Arrow mark up",
+                        Glyph::ArrowMarkerUp,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ArrowMarkerDown,
+                        "Arrow mark down",
+                        Glyph::ArrowMarkerDown,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ArrowMarkerLeft,
+                        "Arrow mark left",
+                        Glyph::ArrowMarkerLeft,
+                    ),
+                    DrawingToolEntry::tool(
+                        Kind::ArrowMarkerRight,
+                        "Arrow mark right",
+                        Glyph::ArrowMarkerRight,
+                    ),
+                ],
+            },
+        ],
     },
 ];
+
+fn drawing_tool_group_of(choice: DrawingToolChoice) -> Option<usize> {
+    DRAWING_TOOL_GROUPS
+        .iter()
+        .position(|group| group.entry(choice).is_some())
+}
+
+/// Sidebar presentation memory: the tool each group slot shows (its most recently chosen one)
+/// and the open group flyout. The armed tool itself is always read back from Aeris Charts.
+pub(super) struct DrawingToolMenu {
+    recent: [DrawingToolChoice; DRAWING_TOOL_GROUP_COUNT],
+    open: Option<usize>,
+    slot_bounds: [Option<Bounds<Pixels>>; DRAWING_TOOL_GROUP_COUNT],
+}
+
+impl Default for DrawingToolMenu {
+    fn default() -> Self {
+        Self {
+            recent: std::array::from_fn(|group| DRAWING_TOOL_GROUPS[group].first().choice),
+            open: None,
+            slot_bounds: [None; DRAWING_TOOL_GROUP_COUNT],
+        }
+    }
+}
+
+impl DrawingToolMenu {
+    /// Makes `choice` its group's slot tool and closes the flyout.
+    pub(super) fn record(&mut self, choice: DrawingToolChoice) {
+        if let Some(group) = drawing_tool_group_of(choice) {
+            self.recent[group] = choice;
+        }
+        self.open = None;
+    }
+
+    pub(super) fn toggle(&mut self, group: usize) {
+        self.open = (self.open != Some(group)).then_some(group);
+    }
+
+    /// Closes the flyout, returning whether one was open.
+    pub(super) fn close(&mut self) -> bool {
+        self.open.take().is_some()
+    }
+
+    pub(super) const fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Records where a slot was laid out, returning whether its open flyout must follow it.
+    fn track_slot(&mut self, group: usize, bounds: Bounds<Pixels>) -> bool {
+        let moved = self.slot_bounds[group] != Some(bounds);
+        self.slot_bounds[group] = Some(bounds);
+        moved && self.open == Some(group)
+    }
+
+    /// The toolbar command matching the tool Aeris Charts has armed. The engine reports the
+    /// icon-stamp kind without its stamp, which the toolbar chose most recently.
+    pub(super) fn armed_choice(&self, active: Option<ChartDrawingKind>) -> DrawingToolChoice {
+        match active {
+            None => DrawingToolChoice::Cursor,
+            Some(ChartDrawingKind::IconStamp) => self
+                .recent
+                .iter()
+                .copied()
+                .find(|choice| matches!(choice, DrawingToolChoice::Stamp(_)))
+                .unwrap_or(DrawingToolChoice::Stamp(ChartDrawingStamp::ALL[0])),
+            Some(kind) => DrawingToolChoice::Kind(kind),
+        }
+    }
+
+    /// The tool a slot shows: the armed tool when it belongs to the group, otherwise the group's
+    /// most recent choice.
+    fn shown(&self, group: usize, armed: DrawingToolChoice) -> DrawingToolEntry {
+        let tools = &DRAWING_TOOL_GROUPS[group];
+        tools
+            .entry(armed)
+            .or_else(|| tools.entry(self.recent[group]))
+            .unwrap_or_else(|| tools.first())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DrawingToolSlot {
+    group: usize,
+    entry: DrawingToolEntry,
+    selected: bool,
+    menu_open: bool,
+    enabled: bool,
+}
 
 pub(super) fn drawing_toolbar(
     terminal: Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
+    menu: &DrawingToolMenu,
     scroll: &ScrollHandle,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let tool_terminal = terminal.clone();
-    let tools = DRAWING_TOOLS.into_iter().map(move |spec| {
-        let terminal = tool_terminal.clone();
-        let enabled = state.availability == DrawingToolbarAvailability::Available;
-        let button = drawing_toolbar_action(
-            drawing_toolbar_button(
-                spec.id,
-                spec.icon,
-                spec.label,
-                spec.icon_size,
-                theme,
-                state.active_tool == spec.tool,
-            ),
+    let armed = menu.armed_choice(state.active_tool);
+    let enabled = state.availability == DrawingToolbarAvailability::Available;
+    let tools = (0..DRAWING_TOOL_GROUP_COUNT)
+        .map(|group| DrawingToolSlot {
+            group,
+            entry: menu.shown(group, armed),
+            selected: DRAWING_TOOL_GROUPS[group].entry(armed).is_some(),
+            menu_open: menu.open == Some(group),
             enabled,
-        );
-        chrome_tooltip(
-            spec.id,
-            spec.label,
-            button_activation(button, enabled, move |_, cx| {
-                terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.select_drawing_tool_on_active_workspace(spec.tool, terminal_cx);
-                });
-            }),
-            theme,
-        )
-    });
+        })
+        .map(|slot| drawing_tool_slot(&terminal, slot, theme));
     div()
         .absolute()
         .top_0()
@@ -203,6 +709,257 @@ pub(super) fn drawing_toolbar(
             state.time_axis_height,
             theme,
         ))
+}
+
+const DRAWING_TOOL_MENU_WIDTH: f32 = 264.0;
+const DRAWING_TOOL_MENU_GAP: f32 = 4.0;
+const DRAWING_TOOL_MENU_ICON: f32 = 24.0;
+const DRAWING_TOOL_MENU_ROW_REMS: f32 = 2.0;
+const DRAWING_TOOL_MENU_TITLE_REMS: f32 = 1.75;
+const DRAWING_TOOL_BUTTON_SIZE: f32 = 32.0;
+const DRAWING_TOOL_GROUP_ARROW_GAP: f32 = 1.0;
+const DRAWING_TOOL_GROUP_ARROW_WIDTH: f32 = 10.0;
+const DRAWING_TOOL_GROUP_ARROW_ICON: f32 = 10.0;
+/// Every sidebar row reserves the arrow column, so tool and action icons share one left edge
+/// whether or not the row opens a flyout. The row fills the sidebar inside its right border.
+const DRAWING_TOOLBAR_ROW_WIDTH: f32 =
+    DRAWING_TOOL_BUTTON_SIZE + DRAWING_TOOL_GROUP_ARROW_GAP + DRAWING_TOOL_GROUP_ARROW_WIDTH;
+
+fn drawing_toolbar_row() -> Div {
+    div()
+        .relative()
+        .w(px(DRAWING_TOOLBAR_ROW_WIDTH))
+        .flex()
+        .items_center()
+        .gap(px(DRAWING_TOOL_GROUP_ARROW_GAP))
+}
+
+/// One sidebar slot: the group's shown tool arms on click, and groups with more than one tool
+/// open their flyout from a separate arrow target beside the button.
+fn drawing_tool_slot(
+    terminal: &Entity<TerminalApp>,
+    slot: DrawingToolSlot,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let group = &DRAWING_TOOL_GROUPS[slot.group];
+    let entry = slot.entry;
+    let arm = terminal.clone();
+    let button = drawing_toolbar_action(
+        drawing_toolbar_button(
+            group.id,
+            entry.icon(theme),
+            entry.label,
+            entry.toolbar_icon_size(),
+            theme,
+            slot.selected,
+        ),
+        slot.enabled,
+    );
+    let button = chrome_tooltip(
+        group.id,
+        entry.label,
+        button_activation(button, slot.enabled, move |_, cx| {
+            arm.update(cx, |terminal, terminal_cx| {
+                terminal.select_drawing_tool_on_active_workspace(entry.choice, terminal_cx);
+            });
+        }),
+        theme,
+    );
+    let bounds_terminal = terminal.clone();
+    let index = slot.group;
+    drawing_toolbar_row()
+        .child(button)
+        .when(group.has_menu(), |container| {
+            container.child(drawing_tool_group_arrow(terminal, slot, theme))
+        })
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    bounds_terminal.update(cx, |terminal, terminal_cx| {
+                        if terminal.drawing_tool_menu.track_slot(index, bounds) {
+                            terminal_cx.notify();
+                        }
+                    });
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+fn drawing_tool_group_arrow(
+    terminal: &Entity<TerminalApp>,
+    slot: DrawingToolSlot,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let group = &DRAWING_TOOL_GROUPS[slot.group];
+    let spec = TooltipSpec::new(group.label, theme).show_delay(TOOLTIP_OPEN_DELAY);
+    let toggle = terminal.clone();
+    let index = slot.group;
+    div()
+        .id(group.menu_id)
+        .flex_none()
+        .w(px(DRAWING_TOOL_GROUP_ARROW_WIDTH))
+        .h(px(DRAWING_TOOL_BUTTON_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(f32::from(
+            chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
+        )))
+        .role(Role::Button)
+        .aria_label(group.label)
+        .text_color(gpui_color(if slot.menu_open {
+            colors.icon_active
+        } else {
+            colors.text_muted
+        }))
+        .when(slot.menu_open, |arrow| {
+            arrow.bg(gpui_color(colors.active_bg.over(colors.surface)))
+        })
+        .when(slot.enabled, |arrow| {
+            arrow
+                .cursor_pointer()
+                .hover(move |arrow| {
+                    arrow
+                        .bg(gpui_color(colors.hover_bg.over(colors.surface)))
+                        .text_color(gpui_color(colors.text_primary))
+                })
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    toggle.update(cx, |terminal, terminal_cx| {
+                        terminal.toggle_drawing_tool_menu(index, terminal_cx);
+                    });
+                    cx.stop_propagation();
+                })
+        })
+        .when(!slot.enabled, Styled::cursor_not_allowed)
+        .tooltip(spec.builder())
+        .tooltip_show_delay(spec.delay())
+        .child(Icon::new(Glyph::GroupArrow.path()).with_size(px(DRAWING_TOOL_GROUP_ARROW_ICON)))
+}
+
+/// The open group's flyout, anchored beside its sidebar slot. Rows and titles have fixed rem
+/// heights, so the panel clamps into the window without measuring a frame first.
+pub(super) fn drawing_tool_menu_layer(
+    terminal: &Entity<TerminalApp>,
+    menu: &DrawingToolMenu,
+    active_tool: Option<ChartDrawingKind>,
+    viewport: gpui::Size<Pixels>,
+    rem_size: Pixels,
+    theme: &AerisTheme,
+) -> Option<AnyElement> {
+    let index = menu.open?;
+    let trigger = menu.slot_bounds[index]?;
+    let group = &DRAWING_TOOL_GROUPS[index];
+    let armed = menu.armed_choice(active_tool);
+    let panel_size = size(
+        px(DRAWING_TOOL_MENU_WIDTH),
+        drawing_tool_menu_height(group, rem_size, theme.dimensions.border_width),
+    );
+    let origin = drawing_tool_menu_origin(trigger, panel_size, viewport);
+    let mut panel = flat_compact_menu_panel(
+        ("drawing_tool_menu", index),
+        origin,
+        panel_size.width,
+        theme,
+    )
+    .max_h((viewport.height - px(2.0 * OVERLAY_EDGE_MARGIN)).max(px(0.0)))
+    .overflow_y_scroll();
+    let mut row = 0_usize;
+    for (section_index, section) in group.sections.iter().enumerate() {
+        if section_index > 0 {
+            panel = panel.child(menu_separator(theme));
+        }
+        panel = panel.child(drawing_tool_menu_title(section.title, theme));
+        let last_section = section_index + 1 == group.sections.len();
+        for (tool_index, entry) in section.tools.iter().copied().enumerate() {
+            let select = terminal.clone();
+            let last = last_section && tool_index + 1 == section.tools.len();
+            panel = panel.child(
+                MenuRow::compact(("drawing_tool_menu_row", row), entry.label, theme)
+                    .leading(entry.icon(theme).with_size(px(DRAWING_TOOL_MENU_ICON)))
+                    .highlighted(entry.choice == armed)
+                    .flush_in_panel(false, last)
+                    .on_click(move |_, _, cx| {
+                        select.update(cx, |terminal, terminal_cx| {
+                            terminal
+                                .select_drawing_tool_on_active_workspace(entry.choice, terminal_cx);
+                        });
+                    }),
+            );
+            row += 1;
+        }
+    }
+    let dismiss = terminal.clone();
+    Some(
+        div()
+            .id("drawing_tool_menu_scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .occlude()
+            .on_any_mouse_down(move |_, _, cx| {
+                dismiss.update(cx, |terminal, terminal_cx| {
+                    terminal.close_drawing_tool_menu(terminal_cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(animate_popup_from_origin(
+                panel,
+                ("drawing_tool_menu_enter", index),
+                PopupAnimationOrigin::from_trigger(
+                    trigger.center(),
+                    Bounds::new(origin, panel_size),
+                ),
+            ))
+            .into_any_element(),
+    )
+}
+
+fn drawing_tool_menu_title(title: &'static str, theme: &AerisTheme) -> impl IntoElement {
+    div()
+        .h(gpui::rems(DRAWING_TOOL_MENU_TITLE_REMS))
+        .flex()
+        .items_center()
+        .px(gpui::rems(0.75))
+        .text_xs()
+        .text_color(gpui_color(theme.colors.text_muted))
+        .child(title)
+}
+
+fn drawing_tool_menu_height(
+    group: &DrawingToolGroup,
+    rem_size: Pixels,
+    border_width: f32,
+) -> Pixels {
+    let rem = f32::from(rem_size);
+    let sections = group.sections.len();
+    let rows = group.entries().count();
+    let count = |value: usize| f32::from(u16::try_from(value).unwrap_or(u16::MAX));
+    px(count(rows) * DRAWING_TOOL_MENU_ROW_REMS * rem
+        + count(sections) * DRAWING_TOOL_MENU_TITLE_REMS * rem
+        + count(sections.saturating_sub(1))
+        + 2.0 * border_width)
+}
+
+/// Opens to the right of the slot, top-aligned with it, sliding up when the window is too short.
+fn drawing_tool_menu_origin(
+    trigger: Bounds<Pixels>,
+    panel: gpui::Size<Pixels>,
+    viewport: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    let margin = px(OVERLAY_EDGE_MARGIN);
+    let max_x = (viewport.width - panel.width - margin).max(margin);
+    let max_y = (viewport.height - panel.height - margin).max(margin);
+    point(
+        (trigger.right() + px(DRAWING_TOOL_MENU_GAP)).min(max_x),
+        trigger.top().min(max_y).max(margin),
+    )
 }
 
 fn drawing_toolbar_actions(
@@ -330,7 +1087,7 @@ fn drawing_action_control(
 ) -> impl IntoElement + use<> {
     let button = drawing_toolbar_button(
         spec.id,
-        DrawingToolIcon::Huge(spec.icon),
+        header_icon(spec.icon),
         spec.tooltip,
         spec.icon_size,
         theme,
@@ -340,7 +1097,7 @@ fn drawing_action_control(
     let button = button_activation(button, spec.enabled, move |_, cx| {
         app.update(cx, spec.action);
     });
-    chrome_tooltip(spec.id, spec.tooltip, button, theme)
+    drawing_toolbar_row().child(chrome_tooltip(spec.id, spec.tooltip, button, theme))
 }
 
 pub(super) fn drawing_toolbar_expander(
@@ -400,22 +1157,19 @@ fn drawing_toolbar_toggle_hit(
 
 fn drawing_toolbar_button(
     id: &'static str,
-    icon: DrawingToolIcon,
-    _tooltip: &'static str,
+    icon: Icon,
+    label: &'static str,
     icon_size: f32,
     theme: &AerisTheme,
     selected: bool,
 ) -> Button {
-    let icon = match icon {
-        DrawingToolIcon::Huge(icon) => header_icon(icon),
-        DrawingToolIcon::Asset(icon) => Icon::default().path(icon.path()),
-    };
     let button = Button::new(id)
         .icon(icon)
+        .aria_label(label)
         .compact()
         .with_size(px(icon_size / 0.75))
-        .w(px(32.0))
-        .h(px(32.0))
+        .w(px(DRAWING_TOOL_BUTTON_SIZE))
+        .h(px(DRAWING_TOOL_BUTTON_SIZE))
         .rounded(px(f32::from(
             chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
         )));
@@ -432,6 +1186,137 @@ fn drawing_toolbar_action(button: Button, enabled: bool) -> Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_aeris_charts_drawing_tool_has_exactly_one_sidebar_entry() {
+        let kinds: Vec<_> = (0..=u8::MAX)
+            .filter_map(ChartDrawingKind::from_u8)
+            .collect();
+        assert!(
+            kinds.len() >= 85,
+            "Aeris Charts exposes {} tools",
+            kinds.len()
+        );
+        let choices: Vec<_> = DRAWING_TOOL_GROUPS
+            .iter()
+            .flat_map(DrawingToolGroup::entries)
+            .map(|entry| entry.choice)
+            .collect();
+        for kind in kinds {
+            let expected = if kind == ChartDrawingKind::IconStamp {
+                ChartDrawingStamp::ALL.len()
+            } else {
+                1
+            };
+            let listed = choices
+                .iter()
+                .filter(|choice| match choice {
+                    DrawingToolChoice::Kind(listed) => *listed == kind,
+                    DrawingToolChoice::Stamp(_) => kind == ChartDrawingKind::IconStamp,
+                    DrawingToolChoice::Cursor => false,
+                })
+                .count();
+            assert_eq!(listed, expected, "{kind:?} is listed {listed} times");
+        }
+        for stamp in ChartDrawingStamp::ALL {
+            assert_eq!(
+                choices
+                    .iter()
+                    .filter(|choice| **choice == DrawingToolChoice::Stamp(stamp))
+                    .count(),
+                1,
+                "{stamp:?}"
+            );
+        }
+        assert_eq!(
+            choices
+                .iter()
+                .filter(|choice| **choice == DrawingToolChoice::Cursor)
+                .count(),
+            1
+        );
+        assert!(
+            choices.iter().all(|choice| !matches!(
+                choice,
+                DrawingToolChoice::Kind(ChartDrawingKind::IconStamp)
+            )),
+            "the icon-stamp tool is listed by stamp"
+        );
+    }
+
+    #[test]
+    fn slots_show_the_armed_tool_and_otherwise_their_last_choice() {
+        let mut menu = DrawingToolMenu::default();
+        let lines = drawing_tool_group_of(DrawingToolChoice::Kind(ChartDrawingKind::TrendLine))
+            .expect("lines group");
+        let fibonacci = drawing_tool_group_of(DrawingToolChoice::Kind(
+            ChartDrawingKind::FibonacciRetracement,
+        ))
+        .expect("fibonacci group");
+        assert_eq!(
+            menu.shown(lines, DrawingToolChoice::Cursor).choice,
+            DrawingToolChoice::Kind(ChartDrawingKind::TrendLine)
+        );
+
+        menu.record(DrawingToolChoice::Kind(ChartDrawingKind::Pitchfan));
+        let armed = menu.armed_choice(Some(ChartDrawingKind::FibonacciWedge));
+        assert_eq!(
+            menu.shown(lines, armed).choice,
+            DrawingToolChoice::Kind(ChartDrawingKind::Pitchfan)
+        );
+        assert_eq!(
+            menu.shown(fibonacci, armed).choice,
+            DrawingToolChoice::Kind(ChartDrawingKind::FibonacciWedge)
+        );
+    }
+
+    #[test]
+    fn the_armed_icon_stamp_reads_back_as_the_last_chosen_stamp() {
+        let mut menu = DrawingToolMenu::default();
+        assert_eq!(
+            menu.armed_choice(Some(ChartDrawingKind::IconStamp)),
+            DrawingToolChoice::Stamp(ChartDrawingStamp::ALL[0])
+        );
+        menu.record(DrawingToolChoice::Stamp(ChartDrawingStamp::Bolt));
+        assert_eq!(
+            menu.armed_choice(Some(ChartDrawingKind::IconStamp)),
+            DrawingToolChoice::Stamp(ChartDrawingStamp::Bolt)
+        );
+        assert_eq!(menu.armed_choice(None), DrawingToolChoice::Cursor);
+    }
+
+    #[test]
+    fn choosing_a_tool_closes_the_open_flyout() {
+        let mut menu = DrawingToolMenu::default();
+        menu.toggle(2);
+        assert!(menu.is_open());
+        menu.toggle(2);
+        assert!(!menu.is_open());
+        menu.toggle(3);
+        menu.record(DrawingToolChoice::Kind(ChartDrawingKind::GannFan));
+        assert!(!menu.is_open());
+    }
+
+    #[test]
+    fn flyouts_open_beside_their_slot_and_stay_inside_the_window() {
+        let viewport = size(px(1200.0), px(700.0));
+        let slot = Bounds::new(point(px(0.0), px(120.0)), size(px(44.0), px(32.0)));
+        let short = size(px(DRAWING_TOOL_MENU_WIDTH), px(200.0));
+        assert_eq!(
+            drawing_tool_menu_origin(slot, short, viewport),
+            point(px(44.0 + DRAWING_TOOL_MENU_GAP), px(120.0))
+        );
+        let tall = size(px(DRAWING_TOOL_MENU_WIDTH), px(650.0));
+        assert_eq!(
+            drawing_tool_menu_origin(slot, tall, viewport).y,
+            px(700.0 - 650.0 - OVERLAY_EDGE_MARGIN)
+        );
+        let lines = &DRAWING_TOOL_GROUPS[1];
+        let height = drawing_tool_menu_height(lines, px(16.0), 1.0);
+        let rows = 20.0 * 32.0;
+        let titles = 3.0 * 28.0;
+        assert_eq!(height, px(rows + titles + 2.0 + 2.0));
+    }
 
     #[test]
     fn drawing_toggle_spans_the_engine_axis_and_host_bottom_inset() {

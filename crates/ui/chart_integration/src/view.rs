@@ -872,6 +872,7 @@ impl AerisChartView {
     pub fn empty_with_theme(theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
+        register_drawing_stamps(&mut engine, theme);
         apply_platform_chrome_contract(&mut engine, true);
         apply_platform_interaction(&mut engine);
         let volume_series = install_volume_series(&mut engine);
@@ -965,6 +966,7 @@ impl AerisChartView {
     pub fn with_replay_and_theme(replay: &ReplaySnapshot, theme: ChartTheme) -> Self {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
+        register_drawing_stamps(&mut engine, theme);
         apply_platform_chrome_contract(&mut engine, replay_time_visible(replay));
         apply_platform_interaction(&mut engine);
         apply_replay_time_scale_defaults(&mut engine, replay);
@@ -1328,6 +1330,10 @@ impl AerisChartView {
     /// parsing.
     pub fn set_theme(&mut self, theme: ChartTheme) {
         let time_visible = self.engine.time_visible;
+        if self.theme != theme {
+            // Re-registering issues fresh raster keys, so it happens only on a real change.
+            register_drawing_stamps(&mut self.engine, theme);
+        }
         self.theme = theme;
         self.engine.set_theme(theme);
         apply_platform_chrome_contract(&mut self.engine, time_visible);
@@ -2873,6 +2879,9 @@ impl Render for AerisChartView {
 #[cfg(test)]
 mod tests;
 
+mod drawing_stamps;
+pub use drawing_stamps::ChartDrawingStamp;
+use drawing_stamps::register_drawing_stamps;
 mod drawings;
 mod export;
 mod indicators;

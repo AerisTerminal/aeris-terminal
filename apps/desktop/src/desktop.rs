@@ -81,11 +81,11 @@ use aeris_chart_integration::{
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
-    ChartDrawingKind, ChartExecutionId, ChartExecutionKind, ChartExecutionMarkerShape,
-    ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow, ChartIndicator,
-    ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind, ChartOrderRole,
-    ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide, ChartSettingsRequest,
-    ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartDrawingKind, ChartDrawingStamp, ChartExecutionId, ChartExecutionKind,
+    ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow,
+    ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind,
+    ChartOrderRole, ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide,
+    ChartSettingsRequest, ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
     ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
     ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
     ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
@@ -168,7 +168,10 @@ use chrome_menu::{
 };
 use command_palette::command_palette_layer;
 use context_panel::{ContextPanelHeightDrag, ContextPanelState, context_panel};
-use drawing_toolbar::{DrawingToolbarState, drawing_toolbar, drawing_toolbar_expander};
+use drawing_toolbar::{
+    DrawingToolChoice, DrawingToolMenu, DrawingToolbarState, drawing_tool_menu_layer,
+    drawing_toolbar, drawing_toolbar_expander,
+};
 use frameless_title_bar::{
     FramelessTitleBar, TitleBarPlacement, frameless_reveal_zone, frameless_title_bar_row,
     title_bar_placement,
@@ -4274,6 +4277,7 @@ struct TerminalApp {
     active: usize,
     theme: AerisTheme,
     drawing_toolbar: DrawingToolbarVisibility,
+    drawing_tool_menu: DrawingToolMenu,
     window_active: bool,
     frame_poll_gate: frame_poll_gate::FramePollGate,
     market_frame_wake: UiWake,
