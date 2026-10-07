@@ -152,6 +152,7 @@ impl TerminalApp {
             theme: AerisTheme::dark(),
             drawing_toolbar: DrawingToolbarVisibility::Expanded,
             drawing_tool_menu: DrawingToolMenu::default(),
+            drawing_favorites_grab: None,
             window_active: true,
             frame_poll_gate: frame_poll_gate::FramePollGate::default(),
             market_frame_wake,
@@ -1572,6 +1573,27 @@ impl TerminalApp {
         ))
     }
 
+    /// The floating favorites toolbar; `chart_top` is where the workspace content begins.
+    pub(super) fn drawing_favorites_overlay(
+        &self,
+        terminal: &Entity<Self>,
+        chart_top: f32,
+        window: &Window,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        drawing_favorites_toolbar_layer(
+            terminal,
+            &DrawingFavoritesToolbar {
+                favorites: self.chart_chrome.drawing_favorites,
+                menu: &self.drawing_tool_menu,
+                state: self.active_surface().read(cx).drawing_toolbar_state(cx),
+                default_origin: drawing_favorites_default_origin(chart_top),
+                viewport: window.viewport_size(),
+            },
+            &self.theme,
+        )
+    }
+
     pub(super) fn drawing_tool_menu_overlay(
         &self,
         terminal: &Entity<Self>,
@@ -1589,6 +1611,7 @@ impl TerminalApp {
         drawing_tool_menu_layer(
             terminal,
             &self.drawing_tool_menu,
+            &self.chart_chrome.drawing_favorites,
             active_tool,
             window.viewport_size(),
             window.rem_size(),
@@ -1889,7 +1912,7 @@ impl TerminalApp {
 
     /// Queues the durable chrome preferences off the UI thread. Chart type and symbol search
     /// categories change inside a workspace, so they are taken from the active one first.
-    fn save_chart_chrome_preferences(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_chart_chrome_preferences(&mut self, cx: &mut Context<Self>) {
         let active = self.active_surface();
         let active = active.read(cx);
         self.chart_chrome.chart_type = active.chart_type(cx);

@@ -891,13 +891,13 @@ pub(super) struct ChartSettingsPlacement {
     grab: gpui::Point<Pixels>,
 }
 
-/// Cursor of the settings title bar, kept for the whole move because GPUI shows the drag
+/// Cursor of a floating panel's move handle, kept for the whole move because GPUI shows the drag
 /// source's cursor while a drag is active. GPUI's Windows backend maps the open/closed hand
 /// styles to the arrow (Windows has no grab cursor), so Windows uses its hand cursor instead.
 #[cfg(target_os = "windows")]
-const CHART_SETTINGS_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
+pub(super) const FLOATING_PANEL_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
 #[cfg(not(target_os = "windows"))]
-const CHART_SETTINGS_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::OpenHand;
+pub(super) const FLOATING_PANEL_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::OpenHand;
 
 /// Drag payload for moving the chart settings panel by its title bar.
 #[derive(Clone)]
@@ -937,7 +937,7 @@ pub(super) fn chart_settings_menu_layer(
 ) -> AnyElement {
     let scale = chart_settings_scale(viewport);
     let panel_size = chart_settings_panel_size(viewport);
-    let origin = clamp_chart_settings_origin(
+    let origin = clamp_floating_panel_origin(
         placement.unwrap_or_else(|| chart_settings_centered_origin(viewport, panel_size)),
         viewport,
         panel_size,
@@ -1072,7 +1072,7 @@ fn chart_settings_title_bar(
         .justify_between()
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border_secondary))
-        .cursor(CHART_SETTINGS_MOVE_CURSOR)
+        .cursor(FLOATING_PANEL_MOVE_CURSOR)
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
             grab_terminal.update(cx, |terminal, _| {
                 terminal.begin_chart_settings_move(event.position, origin);
@@ -1227,7 +1227,8 @@ fn chart_settings_scale(viewport: gpui::Size<Pixels>) -> MenuScale {
 }
 
 /// Keeps a dragged settings panel fully inside the window, even after the window shrinks.
-fn clamp_chart_settings_origin(
+/// Keeps a dragged floating panel inside the window, inset by the overlay edge margin.
+pub(super) fn clamp_floating_panel_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
     panel_size: gpui::Size<Pixels>,
@@ -2425,16 +2426,16 @@ mod tests {
         let viewport = size(px(1_400.0), px(1_000.0));
         let panel_size = chart_settings_panel_size(viewport);
         assert_eq!(
-            clamp_chart_settings_origin(point(px(120.0), px(90.0)), viewport, panel_size),
+            clamp_floating_panel_origin(point(px(120.0), px(90.0)), viewport, panel_size),
             point(px(120.0), px(90.0)),
             "a drag inside the window is kept exactly"
         );
         assert_eq!(
-            clamp_chart_settings_origin(point(px(-500.0), px(-500.0)), viewport, panel_size),
+            clamp_floating_panel_origin(point(px(-500.0), px(-500.0)), viewport, panel_size),
             point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
         );
         assert_eq!(
-            clamp_chart_settings_origin(point(px(5_000.0), px(5_000.0)), viewport, panel_size),
+            clamp_floating_panel_origin(point(px(5_000.0), px(5_000.0)), viewport, panel_size),
             point(
                 viewport.width - panel_size.width - px(OVERLAY_EDGE_MARGIN),
                 viewport.height - panel_size.height - px(OVERLAY_EDGE_MARGIN)

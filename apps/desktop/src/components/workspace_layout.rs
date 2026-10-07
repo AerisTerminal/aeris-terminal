@@ -319,7 +319,7 @@ pub(super) fn workspace_market_area(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     active_surface: &Entity<WorkspaceSurface>,
-    expanded_drawing_toolbar: Option<&DrawingToolMenu>,
+    expanded_drawing_toolbar: Option<DrawingSidebar<'_>>,
     watchlist: WatchlistPanelState,
     theme: &AerisTheme,
     cx: &mut Context<TerminalApp>,
@@ -409,12 +409,12 @@ pub(super) fn workspace_market_area(
                 theme,
             ))
         })
-        .when_some(expanded_drawing_toolbar, |market, menu| {
+        .when_some(expanded_drawing_toolbar, |market, sidebar| {
             market.child(drawing_toolbar(
                 terminal.clone(),
                 active_surface,
                 drawing_state,
-                menu,
+                sidebar,
                 &drawing_scroll,
                 theme,
             ))

@@ -1,4 +1,4 @@
-use aeris_chart_integration::ChartType;
+use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
 use aeris_contracts::InstrumentSearchCategories;
 use aeris_design_system::RadiusToken;
 use std::{
@@ -253,7 +253,7 @@ impl SymbolSearchCategory {
 }
 
 /// Durable shell chrome that follows the user across charts and workspaces.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChartChromePreferences {
     pub indicator_name_labels_visible: bool,
     pub indicator_value_labels_visible: bool,
@@ -262,6 +262,110 @@ pub struct ChartChromePreferences {
     /// Instrument categories the symbol menu searches; at least one is always included.
     pub symbol_search_categories: InstrumentSearchCategories,
     pub window_frame: WindowFrame,
+    pub drawing_favorites: DrawingFavorites,
+}
+
+const STAMP_FAVORITE_PREFIX: &str = "stamp:";
+
+/// The drawing tools the user starred and the floating toolbar that offers them.
+///
+/// Tools are a fixed bitset (engine wire id for kinds, catalog position for built-in stamps) so
+/// the preferences stay `Copy`; on disk they are the engine's stable kind names and stamp keys,
+/// and unknown names are skipped so a newer file never fails to load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawingFavorites {
+    kinds: [u64; 4],
+    stamps: u16,
+    pub toolbar_visible: bool,
+    /// Window-relative logical origin the toolbar was dragged to; `None` is the default spot.
+    pub toolbar_origin: Option<(f32, f32)>,
+}
+
+impl Default for DrawingFavorites {
+    fn default() -> Self {
+        Self {
+            kinds: [0; 4],
+            stamps: 0,
+            toolbar_visible: true,
+            toolbar_origin: None,
+        }
+    }
+}
+
+impl DrawingFavorites {
+    fn kind_slot(kind: ChartDrawingKind) -> (usize, u64) {
+        let id = kind.to_u8();
+        (usize::from(id / 64), 1 << (id % 64))
+    }
+
+    fn stamp_bit(stamp: ChartDrawingStamp) -> u16 {
+        ChartDrawingStamp::ALL
+            .iter()
+            .position(|candidate| *candidate == stamp)
+            .map_or(0, |index| 1 << index)
+    }
+
+    #[must_use]
+    pub fn contains_kind(&self, kind: ChartDrawingKind) -> bool {
+        let (word, bit) = Self::kind_slot(kind);
+        self.kinds[word] & bit != 0
+    }
+
+    #[must_use]
+    pub fn contains_stamp(&self, stamp: ChartDrawingStamp) -> bool {
+        self.stamps & Self::stamp_bit(stamp) != 0
+    }
+
+    pub fn toggle_kind(&mut self, kind: ChartDrawingKind) {
+        let (word, bit) = Self::kind_slot(kind);
+        self.kinds[word] ^= bit;
+    }
+
+    pub fn toggle_stamp(&mut self, stamp: ChartDrawingStamp) {
+        self.stamps ^= Self::stamp_bit(stamp);
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.stamps == 0 && self.kinds.iter().all(|word| *word == 0)
+    }
+
+    fn parse_tools(&mut self, value: &str) {
+        for name in value.split(',').map(str::trim) {
+            if let Some(key) = name.strip_prefix(STAMP_FAVORITE_PREFIX) {
+                if let Some(stamp) = ChartDrawingStamp::ALL
+                    .into_iter()
+                    .find(|stamp| stamp.key() == key)
+                    && !self.contains_stamp(stamp)
+                {
+                    self.toggle_stamp(stamp);
+                }
+            } else if let Some(kind) = ChartDrawingKind::from_name(name)
+                && !self.contains_kind(kind)
+            {
+                self.toggle_kind(kind);
+            }
+        }
+    }
+
+    fn encode_tools(&self) -> String {
+        let kinds = (0..=u8::MAX)
+            .filter_map(ChartDrawingKind::from_u8)
+            .filter(|kind| self.contains_kind(*kind))
+            .map(|kind| kind.name().to_string());
+        let stamps = ChartDrawingStamp::ALL
+            .into_iter()
+            .filter(|stamp| self.contains_stamp(*stamp))
+            .map(|stamp| format!("{STAMP_FAVORITE_PREFIX}{}", stamp.key()));
+        kinds.chain(stamps).collect::<Vec<_>>().join(",")
+    }
+}
+
+fn parse_toolbar_origin(value: &str) -> Option<(f32, f32)> {
+    let (x, y) = value.split_once(',')?;
+    let x = x.trim().parse::<f32>().ok()?;
+    let y = y.trim().parse::<f32>().ok()?;
+    (x.is_finite() && y.is_finite()).then_some((x, y))
 }
 
 /// How the workspace title bar frames the window.
@@ -307,6 +411,7 @@ impl Default for ChartChromePreferences {
             chart_type: ChartType::Candles,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_favorites: DrawingFavorites::default(),
         }
     }
 }
@@ -427,6 +532,12 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             && let Some(window_frame) = WindowFrame::from_identifier(value)
         {
             preferences.window_frame = window_frame;
+        } else if let Some(value) = line.strip_prefix("drawing_favorites=") {
+            preferences.drawing_favorites.parse_tools(value);
+        } else if let Some(value) = line.strip_prefix("drawing_favorites_toolbar=") {
+            preferences.drawing_favorites.toolbar_visible = parse_chrome_flag(value);
+        } else if let Some(value) = line.strip_prefix("drawing_favorites_origin=") {
+            preferences.drawing_favorites.toolbar_origin = parse_toolbar_origin(value);
         }
     }
     // A search that excludes every category would never return anything.
@@ -440,8 +551,13 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
 
 #[must_use]
 pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> String {
+    let favorites = preferences.drawing_favorites;
+    let origin = favorites
+        .toolbar_origin
+        .map(|(x, y)| format!("drawing_favorites_origin={x},{y}\n"))
+        .unwrap_or_default();
     format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\n",
+        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\n{origin}",
         u8::from(preferences.indicator_name_labels_visible),
         u8::from(preferences.indicator_value_labels_visible),
         u8::from(preferences.indicator_price_lines_visible),
@@ -449,6 +565,8 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
         u8::from(preferences.symbol_search_categories.futures),
         u8::from(preferences.symbol_search_categories.equities),
         preferences.window_frame.identifier(),
+        favorites.encode_tools(),
+        u8::from(favorites.toolbar_visible),
     )
 }
 
@@ -674,14 +792,15 @@ fn sync_chart_chrome_directory(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartChromePreferences, ChartChromeSaveState, INDICATOR_SPECS, IndicatorKind,
-        IndicatorLocation, IndicatorParameters, InstrumentSearchCategories, WindowFrame,
-        chart_chrome_backup_path, chart_chrome_staging_path, encode_chart_chrome_preferences,
-        filter_indicator_specs, load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
+        ChartChromePreferences, ChartChromeSaveState, DrawingFavorites, INDICATOR_SPECS,
+        IndicatorKind, IndicatorLocation, IndicatorParameters, InstrumentSearchCategories,
+        WindowFrame, chart_chrome_backup_path, chart_chrome_staging_path,
+        encode_chart_chrome_preferences, filter_indicator_specs,
+        load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
         wait_for_chart_chrome_generation,
     };
-    use aeris_chart_integration::ChartType;
+    use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -699,6 +818,44 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(chart_chrome_staging_path(path));
         let _ = std::fs::remove_file(chart_chrome_backup_path(path));
+    }
+
+    fn starred_trend_line_and_star() -> DrawingFavorites {
+        let mut favorites = DrawingFavorites::default();
+        favorites.toggle_kind(ChartDrawingKind::TrendLine);
+        favorites.toggle_stamp(ChartDrawingStamp::Star);
+        favorites
+    }
+
+    #[test]
+    fn drawing_favorites_toggle_and_survive_unknown_or_duplicate_names() {
+        let mut favorites = DrawingFavorites::default();
+        assert!(favorites.is_empty());
+        assert!(favorites.toolbar_visible, "a first star shows the toolbar");
+        for kind in (0..=u8::MAX).filter_map(ChartDrawingKind::from_u8) {
+            favorites.toggle_kind(kind);
+            assert!(favorites.contains_kind(kind), "{}", kind.name());
+            favorites.toggle_kind(kind);
+            assert!(!favorites.contains_kind(kind), "{}", kind.name());
+        }
+        for stamp in ChartDrawingStamp::ALL {
+            favorites.toggle_stamp(stamp);
+            assert!(favorites.contains_stamp(stamp));
+        }
+        assert!(!favorites.is_empty());
+
+        let parsed = parse_chart_chrome_preferences(
+            "drawing_favorites=stamp:star, trend_line,future_tool,trend_line,stamp:unknown\n\
+             drawing_favorites_origin=NaN,4\n",
+        )
+        .drawing_favorites;
+        assert_eq!(parsed, starred_trend_line_and_star());
+        assert_eq!(
+            parse_chart_chrome_preferences("drawing_favorites_origin=-12.5, 300\n")
+                .drawing_favorites
+                .toolbar_origin,
+            Some((-12.5, 300.0))
+        );
     }
 
     #[test]
@@ -816,10 +973,15 @@ mod tests {
                 equities: false,
             },
             window_frame: WindowFrame::Frameless,
+            drawing_favorites: DrawingFavorites {
+                toolbar_visible: false,
+                toolbar_origin: Some((120.5, 80.0)),
+                ..starred_trend_line_and_star()
+            },
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ndrawing_favorites_origin=120.5,80\n"
         );
         assert_eq!(defaults.window_frame, WindowFrame::Framed);
         assert_eq!(
@@ -866,6 +1028,7 @@ mod tests {
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_favorites: DrawingFavorites::default(),
         };
         let pending = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -874,6 +1037,7 @@ mod tests {
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_favorites: DrawingFavorites::default(),
         };
         save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
 
@@ -899,6 +1063,7 @@ mod tests {
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_favorites: DrawingFavorites::default(),
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -907,6 +1072,7 @@ mod tests {
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_favorites: DrawingFavorites::default(),
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let (_, inflight) = {
@@ -956,6 +1122,7 @@ mod tests {
             chart_type: ChartType::Line,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_favorites: DrawingFavorites::default(),
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -964,6 +1131,7 @@ mod tests {
             chart_type: ChartType::Bars,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
+            drawing_favorites: DrawingFavorites::default(),
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let failed_generation = {

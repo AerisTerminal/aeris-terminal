@@ -139,8 +139,9 @@ use assets::UiIcon as HugeIcon;
 use big_trades_dialog::big_trades_dialog_layer;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
-    ChartSettingsTemplateView, ChartSettingsView, chart_context_menu_layer,
-    chart_settings_menu_layer, overlay_height, price_axis_menu_layer,
+    ChartSettingsTemplateView, ChartSettingsView, FLOATING_PANEL_MOVE_CURSOR,
+    chart_context_menu_layer, chart_settings_menu_layer, clamp_floating_panel_origin,
+    overlay_height, price_axis_menu_layer,
 };
 #[cfg(test)]
 use chart_context_menus::{
@@ -169,8 +170,9 @@ use chrome_menu::{
 use command_palette::command_palette_layer;
 use context_panel::{ContextPanelHeightDrag, ContextPanelState, context_panel};
 use drawing_toolbar::{
-    DrawingToolChoice, DrawingToolMenu, DrawingToolbarState, drawing_tool_menu_layer,
-    drawing_toolbar, drawing_toolbar_expander,
+    DrawingFavoritesToolbar, DrawingSidebar, DrawingToolChoice, DrawingToolMenu,
+    DrawingToolbarState, drawing_favorites_default_origin, drawing_favorites_toolbar_layer,
+    drawing_tool_menu_layer, drawing_toolbar, drawing_toolbar_expander,
 };
 use frameless_title_bar::{
     FramelessTitleBar, TitleBarPlacement, frameless_reveal_zone, frameless_title_bar_row,
@@ -4278,6 +4280,8 @@ struct TerminalApp {
     theme: AerisTheme,
     drawing_toolbar: DrawingToolbarVisibility,
     drawing_tool_menu: DrawingToolMenu,
+    /// Pointer offset from the favorites toolbar origin while its grip is dragged.
+    drawing_favorites_grab: Option<gpui::Point<Pixels>>,
     window_active: bool,
     frame_poll_gate: frame_poll_gate::FramePollGate,
     market_frame_wake: UiWake,

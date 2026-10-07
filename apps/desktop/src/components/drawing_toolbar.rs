@@ -638,6 +638,114 @@ impl DrawingToolMenu {
     }
 }
 
+impl DrawingToolChoice {
+    /// The cursor is always on the sidebar, so only drawing tools and stamps can be starred.
+    fn is_favorite(self, favorites: &chart_chrome::DrawingFavorites) -> bool {
+        match self {
+            Self::Cursor => false,
+            Self::Kind(kind) => favorites.contains_kind(kind),
+            Self::Stamp(stamp) => favorites.contains_stamp(stamp),
+        }
+    }
+}
+
+/// Starred tools in sidebar order, so the floating toolbar reads like the groups it came from.
+fn favorite_entries(
+    favorites: &chart_chrome::DrawingFavorites,
+) -> impl Iterator<Item = DrawingToolEntry> + '_ {
+    DRAWING_TOOL_GROUPS
+        .iter()
+        .flat_map(DrawingToolGroup::entries)
+        .copied()
+        .filter(|entry| entry.choice.is_favorite(favorites))
+}
+
+/// Drag payload for moving the favorites toolbar by its grip.
+#[derive(Clone)]
+struct DrawingFavoritesMoveDrag;
+
+impl Render for DrawingFavoritesMoveDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
+impl TerminalApp {
+    pub(super) fn toggle_drawing_favorite(
+        &mut self,
+        choice: DrawingToolChoice,
+        cx: &mut Context<Self>,
+    ) {
+        let favorites = &mut self.chart_chrome.drawing_favorites;
+        let first = favorites.is_empty();
+        match choice {
+            DrawingToolChoice::Cursor => return,
+            DrawingToolChoice::Kind(kind) => favorites.toggle_kind(kind),
+            DrawingToolChoice::Stamp(stamp) => favorites.toggle_stamp(stamp),
+        }
+        if first {
+            favorites.toolbar_visible = true;
+        }
+        self.commit_drawing_favorites(cx);
+    }
+
+    pub(super) fn toggle_drawing_favorites_toolbar(&mut self, cx: &mut Context<Self>) {
+        let favorites = &mut self.chart_chrome.drawing_favorites;
+        favorites.toolbar_visible = !favorites.toolbar_visible;
+        self.commit_drawing_favorites(cx);
+    }
+
+    fn begin_drawing_favorites_move(
+        &mut self,
+        pointer: gpui::Point<Pixels>,
+        origin: gpui::Point<Pixels>,
+    ) {
+        self.drawing_favorites_grab = Some(pointer - origin);
+    }
+
+    /// Follows the pointer in memory only; the position is saved once when the drag ends.
+    fn move_drawing_favorites(
+        &mut self,
+        pointer: gpui::Point<Pixels>,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(grab) = self.drawing_favorites_grab else {
+            return;
+        };
+        let favorites = &mut self.chart_chrome.drawing_favorites;
+        let count = favorite_entries(favorites).count();
+        let toolbar = drawing_favorites_toolbar_size(count, self.theme.dimensions.border_width);
+        let origin = clamp_floating_panel_origin(pointer - grab, viewport, toolbar);
+        let origin = Some((f32::from(origin.x), f32::from(origin.y)));
+        if favorites.toolbar_origin != origin {
+            favorites.toolbar_origin = origin;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn end_drawing_favorites_move(&mut self, cx: &mut Context<Self>) {
+        if self.drawing_favorites_grab.take().is_some() {
+            self.commit_drawing_favorites(cx);
+        }
+    }
+
+    /// Every surface saves its own copy of the chrome preferences, so each one must hold the
+    /// current favorites before any of them writes the shared file.
+    fn commit_drawing_favorites(&mut self, cx: &mut Context<Self>) {
+        let favorites = self.chart_chrome.drawing_favorites;
+        for workspace in &self.workspaces {
+            for pane in &workspace.panes {
+                pane.surface.update(cx, |surface, _| {
+                    surface.chart_chrome.drawing_favorites = favorites;
+                });
+            }
+        }
+        self.save_chart_chrome_preferences(cx);
+        cx.notify();
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DrawingToolSlot {
     group: usize,
@@ -647,14 +755,22 @@ struct DrawingToolSlot {
     enabled: bool,
 }
 
+/// What the expanded sidebar shows besides the active chart's drawing state.
+#[derive(Clone, Copy)]
+pub(super) struct DrawingSidebar<'a> {
+    pub(super) menu: &'a DrawingToolMenu,
+    pub(super) favorites: chart_chrome::DrawingFavorites,
+}
+
 pub(super) fn drawing_toolbar(
     terminal: Entity<TerminalApp>,
     app: &Entity<WorkspaceSurface>,
     state: DrawingToolbarState,
-    menu: &DrawingToolMenu,
+    sidebar: DrawingSidebar<'_>,
     scroll: &ScrollHandle,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
+    let menu = sidebar.menu;
     let colors = theme.colors;
     let armed = menu.armed_choice(state.active_tool);
     let enabled = state.availability == DrawingToolbarAvailability::Available;
@@ -697,6 +813,11 @@ pub(super) fn drawing_toolbar(
                         .min_h(px(0.0))
                         .map(|body| tracked_overflow_y_scrollbar(body, scroll))
                         .children(tools)
+                        .child(drawing_favorites_toggle(
+                            &terminal,
+                            sidebar.favorites,
+                            theme,
+                        ))
                         .child(drawing_toolbar_actions(app, state, theme)),
                 )
                 .child(ThinScrollbar::new(
@@ -837,6 +958,7 @@ fn drawing_tool_group_arrow(
 pub(super) fn drawing_tool_menu_layer(
     terminal: &Entity<TerminalApp>,
     menu: &DrawingToolMenu,
+    favorites: &chart_chrome::DrawingFavorites,
     active_tool: Option<ChartDrawingKind>,
     viewport: gpui::Size<Pixels>,
     rem_size: Pixels,
@@ -872,6 +994,13 @@ pub(super) fn drawing_tool_menu_layer(
             panel = panel.child(
                 MenuRow::compact(("drawing_tool_menu_row", row), entry.label, theme)
                     .leading(entry.icon(theme).with_size(px(DRAWING_TOOL_MENU_ICON)))
+                    .trailing(drawing_favorite_star(
+                        terminal,
+                        row,
+                        entry.choice,
+                        entry.choice.is_favorite(favorites),
+                        theme,
+                    ))
                     .highlighted(entry.choice == armed)
                     .flush_in_panel(false, last)
                     .on_click(move |_, _, cx| {
@@ -912,6 +1041,231 @@ pub(super) fn drawing_tool_menu_layer(
     )
 }
 
+const DRAWING_FAVORITES_PADDING: f32 = 4.0;
+const DRAWING_FAVORITES_GAP: f32 = 2.0;
+const DRAWING_FAVORITES_GRIP_WIDTH: f32 = 14.0;
+const DRAWING_FAVORITES_GRIP_DOT: f32 = 3.0;
+/// Where the favorites toolbar opens until it is first dragged: just inside the chart's top-left.
+const DRAWING_FAVORITES_DEFAULT_INSET: f32 = 12.0;
+
+/// Fixed geometry, so moves clamp the toolbar into the window without measuring a frame.
+fn drawing_favorites_toolbar_size(count: usize, border_width: f32) -> gpui::Size<Pixels> {
+    let count = f32::from(u16::try_from(count).unwrap_or(u16::MAX));
+    let edge = 2.0 * (DRAWING_FAVORITES_PADDING + border_width);
+    size(
+        px(edge
+            + DRAWING_FAVORITES_GRIP_WIDTH
+            + count * (DRAWING_FAVORITES_GAP + DRAWING_TOOL_BUTTON_SIZE)),
+        px(edge + DRAWING_TOOL_BUTTON_SIZE),
+    )
+}
+
+/// The default spot beside the drawing sidebar and below the chart header.
+pub(super) fn drawing_favorites_default_origin(chart_top: f32) -> gpui::Point<Pixels> {
+    point(
+        px(chart_chrome::CHART_CHROME_HEIGHT + DRAWING_FAVORITES_DEFAULT_INSET),
+        px(chart_top + DRAWING_FAVORITES_DEFAULT_INSET),
+    )
+}
+
+/// Inputs for the floating favorites toolbar, read from the terminal before it renders.
+pub(super) struct DrawingFavoritesToolbar<'a> {
+    pub(super) favorites: chart_chrome::DrawingFavorites,
+    pub(super) menu: &'a DrawingToolMenu,
+    /// The active workspace's chart, whose armed tool the toolbar highlights.
+    pub(super) state: DrawingToolbarState,
+    pub(super) default_origin: gpui::Point<Pixels>,
+    pub(super) viewport: gpui::Size<Pixels>,
+}
+
+/// The floating toolbar of starred tools. It sits above the workspace anywhere in the window,
+/// moves by its grip, and arms a tool on the active workspace like the sidebar does.
+pub(super) fn drawing_favorites_toolbar_layer(
+    terminal: &Entity<TerminalApp>,
+    toolbar: &DrawingFavoritesToolbar<'_>,
+    theme: &AerisTheme,
+) -> Option<AnyElement> {
+    let favorites = &toolbar.favorites;
+    if !favorites.toolbar_visible {
+        return None;
+    }
+    let entries: Vec<_> = favorite_entries(favorites).collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let armed = toolbar.menu.armed_choice(toolbar.state.active_tool);
+    let enabled = toolbar.state.availability == DrawingToolbarAvailability::Available;
+    let colors = theme.colors;
+    let panel_size = drawing_favorites_toolbar_size(entries.len(), theme.dimensions.border_width);
+    let stored = favorites
+        .toolbar_origin
+        .map_or(toolbar.default_origin, |(x, y)| point(px(x), px(y)));
+    let origin = clamp_floating_panel_origin(stored, toolbar.viewport, panel_size);
+    let buttons = entries.into_iter().enumerate().map(|(index, entry)| {
+        let arm = terminal.clone();
+        let button = drawing_toolbar_action(
+            drawing_toolbar_button(
+                ("drawing_favorite", index),
+                entry.icon(theme),
+                entry.label,
+                entry.toolbar_icon_size(),
+                theme,
+                entry.choice == armed,
+            ),
+            enabled,
+        );
+        let button = button_activation(button, enabled, move |_, cx| {
+            arm.update(cx, |terminal, terminal_cx| {
+                terminal.select_drawing_tool_on_active_workspace(entry.choice, terminal_cx);
+            });
+        });
+        let tooltip = TooltipSpec::new(entry.label, theme).show_delay(TOOLTIP_OPEN_DELAY);
+        with_tooltip(("drawing_favorite_tooltip", index), button, &tooltip).into_any_element()
+    });
+    let move_terminal = terminal.clone();
+    Some(
+        div()
+            .id("drawing_favorites_toolbar")
+            .absolute()
+            .left(origin.x)
+            .top(origin.y)
+            .w(panel_size.width)
+            .h(panel_size.height)
+            .flex()
+            .items_center()
+            .gap(px(DRAWING_FAVORITES_GAP))
+            .px(px(DRAWING_FAVORITES_PADDING))
+            .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
+            .border_1()
+            .border_color(gpui_color(colors.border_secondary))
+            .bg(gpui_color(colors.surface))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_drag_move::<DrawingFavoritesMoveDrag>(move |event, window, cx| {
+                let viewport = window.viewport_size();
+                move_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.move_drawing_favorites(event.event.position, viewport, terminal_cx);
+                });
+            })
+            .child(drawing_favorites_grip(terminal, origin, theme))
+            .children(buttons)
+            .into_any_element(),
+    )
+}
+
+fn drawing_favorites_grip(
+    terminal: &Entity<TerminalApp>,
+    origin: gpui::Point<Pixels>,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let dot = || {
+        div()
+            .size(px(DRAWING_FAVORITES_GRIP_DOT))
+            .rounded_full()
+            .bg(gpui_color(theme.colors.text_muted))
+    };
+    let column = || {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(DRAWING_FAVORITES_GRIP_DOT))
+            .child(dot())
+            .child(dot())
+            .child(dot())
+    };
+    let spec = TooltipSpec::new("Move favorites toolbar", theme).show_delay(TOOLTIP_OPEN_DELAY);
+    let grab = terminal.clone();
+    div()
+        .id("drawing_favorites_grip")
+        .flex_none()
+        .w(px(DRAWING_FAVORITES_GRIP_WIDTH))
+        .h(px(DRAWING_TOOL_BUTTON_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(DRAWING_FAVORITES_GRIP_DOT))
+        .cursor(FLOATING_PANEL_MOVE_CURSOR)
+        .role(Role::Button)
+        .aria_label("Move favorites toolbar")
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            grab.update(cx, |terminal, _| {
+                terminal.begin_drawing_favorites_move(event.position, origin);
+            });
+        })
+        .on_drag(DrawingFavoritesMoveDrag, |drag, _, _, cx| {
+            cx.new(|_| drag.clone())
+        })
+        .tooltip(spec.builder())
+        .tooltip_show_delay(spec.delay())
+        .child(column())
+        .child(column())
+}
+
+const DRAWING_FAVORITE_STAR_SIZE: f32 = 24.0;
+const DRAWING_FAVORITE_STAR_ICON: f32 = 16.0;
+
+/// The row's own star target. It handles the press itself so starring a tool neither arms it
+/// nor closes the flyout.
+fn drawing_favorite_star(
+    terminal: &Entity<TerminalApp>,
+    row: usize,
+    choice: DrawingToolChoice,
+    favorite: bool,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let colors = theme.colors;
+    let label = if favorite {
+        "Remove from favorites"
+    } else {
+        "Add to favorites"
+    };
+    let spec = TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY);
+    let toggle = terminal.clone();
+    div()
+        .id(("drawing_favorite_star", row))
+        .flex_none()
+        .size(px(DRAWING_FAVORITE_STAR_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(f32::from(
+            chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
+        )))
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(label)
+        .text_color(gpui_color(if favorite {
+            colors.warning
+        } else {
+            colors.text_muted
+        }))
+        .hover(move |star| {
+            star.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                .text_color(gpui_color(if favorite {
+                    colors.warning
+                } else {
+                    colors.text_primary
+                }))
+        })
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            toggle.update(cx, |terminal, terminal_cx| {
+                terminal.toggle_drawing_favorite(choice, terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .tooltip(spec.builder())
+        .tooltip_show_delay(spec.delay())
+        .child(
+            Icon::new(if favorite {
+                HugeIcon::StarFilled.path()
+            } else {
+                HugeIcon::Star.path()
+            })
+            .with_size(px(DRAWING_FAVORITE_STAR_ICON)),
+        )
+}
+
 fn drawing_tool_menu_title(title: &'static str, theme: &AerisTheme) -> impl IntoElement {
     div()
         .h(gpui::rems(DRAWING_TOOL_MENU_TITLE_REMS))
@@ -950,6 +1304,47 @@ fn drawing_tool_menu_origin(
     point(
         (trigger.right() + px(DRAWING_TOOL_MENU_GAP)).min(max_x),
         trigger.top().min(max_y).max(margin),
+    )
+}
+
+/// Shows or hides the floating favorites toolbar; it has nothing to show until a tool is starred.
+fn drawing_favorites_toggle(
+    terminal: &Entity<TerminalApp>,
+    favorites: chart_chrome::DrawingFavorites,
+    theme: &AerisTheme,
+) -> impl IntoElement + use<> {
+    let enabled = !favorites.is_empty();
+    let shown = enabled && favorites.toolbar_visible;
+    let label = if !enabled {
+        "Star a drawing tool to add it to favorites"
+    } else if shown {
+        "Hide favorites toolbar"
+    } else {
+        "Show favorites toolbar"
+    };
+    let toggle = terminal.clone();
+    let button = drawing_toolbar_action(
+        drawing_toolbar_button(
+            "drawing_favorites_toggle",
+            header_icon(if shown {
+                HugeIcon::StarFilled
+            } else {
+                HugeIcon::Star
+            }),
+            label,
+            20.0,
+            theme,
+            shown,
+        ),
+        enabled,
+    );
+    chrome_tooltip(
+        "drawing_favorites_toggle",
+        label,
+        button_activation(button, enabled, move |_, cx| {
+            toggle.update(cx, TerminalApp::toggle_drawing_favorites_toolbar);
+        }),
+        theme,
     )
 }
 
@@ -1147,7 +1542,7 @@ fn drawing_toolbar_toggle_hit(
 }
 
 fn drawing_toolbar_button(
-    id: &'static str,
+    id: impl Into<gpui::ElementId>,
     icon: Icon,
     label: &'static str,
     icon_size: f32,
@@ -1274,6 +1669,40 @@ mod tests {
             DrawingToolChoice::Stamp(ChartDrawingStamp::Bolt)
         );
         assert_eq!(menu.armed_choice(None), DrawingToolChoice::Cursor);
+    }
+
+    #[test]
+    fn favorites_toolbar_lists_starred_tools_in_sidebar_order() {
+        let mut favorites = chart_chrome::DrawingFavorites::default();
+        favorites.toggle_stamp(ChartDrawingStamp::Star);
+        favorites.toggle_kind(ChartDrawingKind::FibonacciRetracement);
+        favorites.toggle_kind(ChartDrawingKind::TrendLine);
+        assert!(!DrawingToolChoice::Cursor.is_favorite(&favorites));
+        assert_eq!(
+            favorite_entries(&favorites)
+                .map(|entry| entry.choice)
+                .collect::<Vec<_>>(),
+            [
+                DrawingToolChoice::Kind(ChartDrawingKind::TrendLine),
+                DrawingToolChoice::Kind(ChartDrawingKind::FibonacciRetracement),
+                DrawingToolChoice::Stamp(ChartDrawingStamp::Star),
+            ]
+        );
+    }
+
+    #[test]
+    fn favorites_toolbar_grows_one_button_per_starred_tool() {
+        let one = drawing_favorites_toolbar_size(1, 1.0);
+        let three = drawing_favorites_toolbar_size(3, 1.0);
+        assert_eq!(
+            one.height,
+            px(2.0 * (DRAWING_FAVORITES_PADDING + 1.0) + 32.0)
+        );
+        assert_eq!(
+            three.width - one.width,
+            px(2.0 * (DRAWING_FAVORITES_GAP + DRAWING_TOOL_BUTTON_SIZE))
+        );
+        assert_eq!(three.height, one.height);
     }
 
     #[test]

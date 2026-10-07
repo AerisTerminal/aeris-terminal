@@ -584,6 +584,27 @@ impl TerminalApp {
         )
     }
 
+    fn rendered_market_area(
+        &self,
+        terminal: &Entity<Self>,
+        active: &Entity<WorkspaceSurface>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let watchlist = self.watchlist_panel_state(cx);
+        workspace_market_area(
+            terminal,
+            &self.workspaces[self.active],
+            active,
+            (!self.drawing_toolbar.is_collapsed()).then_some(DrawingSidebar {
+                menu: &self.drawing_tool_menu,
+                favorites: self.chart_chrome.drawing_favorites,
+            }),
+            watchlist,
+            &self.theme,
+            cx,
+        )
+    }
+
     fn rendered_header(
         &self,
         _terminal: &Entity<Self>,
@@ -630,21 +651,18 @@ impl Render for TerminalApp {
         );
         let platform_menu = self.platform_menu_overlay(&terminal, window.viewport_size());
         let drawing_tool_menu = self.drawing_tool_menu_overlay(&terminal, window, cx);
+        let drawing_favorites = self.drawing_favorites_overlay(
+            &terminal,
+            title_bar_row_height + chart_chrome::CHART_CHROME_HEIGHT,
+            window,
+            cx,
+        );
         let command_palette = self.rendered_command_palette(&terminal, cx);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
         let header = self.rendered_header(&terminal, &active, cx);
         let bottom_panel = self.rendered_bottom_panel(&terminal, &active, cx);
-        let watchlist = self.watchlist_panel_state(cx);
-        let market = workspace_market_area(
-            &terminal,
-            &self.workspaces[self.active],
-            &active,
-            (!self.drawing_toolbar.is_collapsed()).then_some(&self.drawing_tool_menu),
-            watchlist,
-            &self.theme,
-            cx,
-        );
+        let market = self.rendered_market_area(&terminal, &active, cx);
         let fullscreen_hint = fullscreen_hint_layer(&self.fullscreen_hint, &self.theme);
         let fullscreen_focus = self.chrome_focus.clone();
         div()
@@ -660,6 +678,7 @@ impl Render for TerminalApp {
                     terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
                     terminal.end_workspace_drag(window, cx);
                     terminal.end_watchlist_drag(cx);
+                    terminal.end_drawing_favorites_move(cx);
                 }),
             )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
@@ -695,6 +714,7 @@ impl Render for TerminalApp {
                     .child(market),
             )
             .child(bottom_panel)
+            .children(drawing_favorites)
             .children(fullscreen_hint)
             .children(overlay)
             .children(frameless_reveal_zone)
