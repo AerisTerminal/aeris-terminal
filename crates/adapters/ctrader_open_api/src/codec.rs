@@ -161,6 +161,24 @@ fn require_fields(bytes: &[u8], required: &[(u32, &'static str)]) -> Result<(), 
     Ok(())
 }
 
+/// Nested proto2 messages have the same prost default-materialization hazard, so every
+/// occurrence of a message-typed field must carry its own required wire fields.
+///
+/// # Errors
+/// Returns a missing-field or malformed-wire error.
+pub(crate) fn require_nested_fields(
+    payload: &[u8],
+    field: u32,
+    required: &[(u32, &'static str)],
+) -> Result<(), CodecError> {
+    visit_fields(payload, |tag, data| {
+        if tag == field {
+            require_fields(data.ok_or(CodecError::InvalidWireField)?, required)?;
+        }
+        Ok(())
+    })
+}
+
 /// Decode the expected wire type, then validate fields that the schema leaves optional
 /// but that the adapter requires for correct behavior.
 ///
@@ -210,17 +228,10 @@ pub fn decode_account_list(
         2150,
         &[(2, "accessToken")],
         |list: &ProtoOaGetAccountListByAccessTokenRes| {
-            visit_fields(
+            require_nested_fields(
                 message.payload.as_deref().unwrap_or_default(),
-                |field, data| {
-                    if field == 4 {
-                        require_fields(
-                            data.ok_or(CodecError::InvalidWireField)?,
-                            &[(1, "ctidTraderAccountId")],
-                        )?;
-                    }
-                    Ok(())
-                },
+                4,
+                &[(1, "ctidTraderAccountId")],
             )?;
             if list
                 .ctid_trader_account

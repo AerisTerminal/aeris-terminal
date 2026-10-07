@@ -5,9 +5,10 @@ use crate::{
     codec::{self, CodecError},
     generated::{
         ProtoErrorRes, ProtoOaAccountAuthReq, ProtoOaApplicationAuthReq, ProtoOaErrorRes,
-        ProtoOaGetAccountListByAccessTokenReq, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
+        ProtoOaGetAccountListByAccessTokenReq,
     },
     host::CtraderHost,
+    market::{LightSymbol, MarketRequest, decode_symbol_list},
     transport::{Bucket, Transport, TransportError},
 };
 use prost::Message;
@@ -359,36 +360,32 @@ impl CtraderSession {
     /// # Errors
     /// Rejects an unknown account, missing wire fields, and oversized catalogs.
     pub fn symbol_names(&mut self, account: &CtraderAccount) -> Result<Vec<String>, SessionFault> {
+        Ok(self
+            .symbol_catalog(account)?
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect())
+    }
+
+    /// Load the bounded lightweight symbol catalog with ids and descriptions.
+    ///
+    /// # Errors
+    /// Rejects an unknown account, missing wire fields, and oversized catalogs.
+    pub fn symbol_catalog(
+        &mut self,
+        account: &CtraderAccount,
+    ) -> Result<Vec<LightSymbol>, SessionFault> {
         self.authorize_account(account, || Err(SessionFault::NeedsReconnect))?;
-        let ctid = i64::try_from(account.ctid).map_err(|_| SessionFault::Protocol)?;
+        let request =
+            MarketRequest::symbols_list(account.ctid).map_err(|_| SessionFault::Protocol)?;
         let response = self.request(
-            2114,
-            ProtoOaSymbolsListReq {
-                payload_type: None,
-                ctid_trader_account_id: ctid,
-                include_archived_symbols: Some(false),
-            }
-            .encode_to_vec(),
-            2115,
-            Bucket::General,
+            request.payload_type,
+            request.payload,
+            request.response_type,
+            request.bucket,
             REQUEST_TIMEOUT,
         )?;
-        let list: ProtoOaSymbolsListRes =
-            codec::decode_typed(&response, 2115, &[(2, "ctidTraderAccountId")], |_| Ok(()))?;
-        if list.ctid_trader_account_id != ctid
-            || list.symbol.len() > 65_536
-            || list
-                .symbol
-                .iter()
-                .any(|symbol| symbol.symbol_id <= 0 || symbol.symbol_name.is_none())
-        {
-            return Err(SessionFault::Protocol);
-        }
-        Ok(list
-            .symbol
-            .into_iter()
-            .filter_map(|symbol| symbol.symbol_name)
-            .collect())
+        decode_symbol_list(&response, account.ctid).map_err(|_| SessionFault::Protocol)
     }
 
     /// # Errors

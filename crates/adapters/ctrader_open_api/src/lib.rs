@@ -11,6 +11,7 @@ pub mod accounts;
 pub mod codec;
 pub mod host;
 pub mod hosted;
+pub mod market;
 pub mod session;
 pub mod transport;
 
