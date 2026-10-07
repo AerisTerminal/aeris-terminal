@@ -2,6 +2,8 @@
 
 #[path = "components/accounts_panel.rs"]
 mod accounts_panel;
+#[path = "components/app_navigation.rs"]
+mod app_navigation;
 #[path = "assets.rs"]
 mod assets;
 #[path = "components/big_trades_dialog.rs"]
@@ -36,6 +38,10 @@ mod fullscreen_hint;
 mod indicator_menu;
 #[path = "desktop/local_state.rs"]
 mod local_state;
+#[path = "desktop/market_screener.rs"]
+mod market_screener;
+#[path = "components/market_screener_view.rs"]
+mod market_screener_view;
 #[path = "components/modal_dialog.rs"]
 mod modal_dialog;
 #[path = "native_ui/mod.rs"]
@@ -3283,7 +3289,9 @@ fn provider_catalog_event_provider(event: &ProviderCatalogEvent) -> &str {
         | ProviderCatalogEvent::SearchPreview(result) => &result.provider,
         ProviderCatalogEvent::SelectionInstalled { instrument, .. }
         | ProviderCatalogEvent::StartupInstrumentResolved(instrument) => &instrument.provider,
-        ProviderCatalogEvent::CommandRejected { rejection, .. } => &rejection.provider,
+        ProviderCatalogEvent::CommandRejected { rejection, .. }
+        | ProviderCatalogEvent::ScreenRejected(rejection) => &rejection.provider,
+        ProviderCatalogEvent::ScreenCompleted(screen) => &screen.provider,
     }
 }
 
@@ -4313,6 +4321,7 @@ struct TerminalApp {
     chart_settings_persistence_dirty: bool,
     /// Avatar click point the open platform menu is anchored under.
     platform_menu_anchor: Option<gpui::Point<Pixels>>,
+    pages: app_navigation::AppPages,
     frameless_title_bar: FramelessTitleBar,
     fullscreen_hint: FullscreenHint,
     bottom_panel: bottom_panel::BottomPanelState,

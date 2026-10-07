@@ -1,11 +1,12 @@
 //! Runtime.
 
 use super::{
-    ChartState, EVENT_WAIT, EndpointRecord, FeedConnectionState, MarketRuntimeEvent, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
+    ChartState, EVENT_WAIT, EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent,
+    MarketService, MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
     apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
-    handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint, mpsc,
-    process_command, set_resource_class, shared_market_runtime, thread,
+    handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
+    initialize_market_screen_endpoint, mpsc, process_command, set_resource_class,
+    shared_market_runtime, thread,
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_observability::diagnostic;
@@ -142,7 +143,7 @@ fn publish_session_statuses(
     let mut now = None;
     for record in endpoints
         .iter_mut()
-        .filter(|record| record.endpoint.active && !record.catalog_only)
+        .filter(|record| record.endpoint.active && record.role.demands_series())
     {
         if !tick_due
             && !session_status_stale(
@@ -234,10 +235,20 @@ fn initialize_record(
     client_id: u64,
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
-    if record.catalog_only {
-        initialize_catalog_endpoint(market, client_id, record.workspace_id, &mut record.endpoint)
-    } else {
-        initialize_endpoint(market, client_id, record)
+    match record.role {
+        EndpointRole::Market => initialize_endpoint(market, client_id, record),
+        EndpointRole::RithmicCatalog => initialize_catalog_endpoint(
+            market,
+            client_id,
+            record.workspace_id,
+            &mut record.endpoint,
+        ),
+        EndpointRole::MarketScreen => initialize_market_screen_endpoint(
+            market,
+            client_id,
+            record.workspace_id,
+            &record.endpoint,
+        ),
     }
 }
 
@@ -290,7 +301,9 @@ fn apply_received_event(
             {
                 aeris_desktop::trading::report_practice_registration_error(error);
             }
-            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event {
+            if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
+                && record.role != EndpointRole::MarketScreen
+            {
                 let status = market.market_session_status(instrument, super::now_unix_nanos());
                 endpoint
                     .messages
@@ -305,6 +318,10 @@ fn apply_received_event(
         None => event,
     };
     let Some(event) = event else { return Ok(()) };
+    // A screen consumer owns no series, so any other event is not addressed to its presentation.
+    if record.role == EndpointRole::MarketScreen {
+        return Ok(());
+    }
     if let MarketRuntimeEvent::ProviderState(state) = &event
         && state.provider != record.product.provider
     {

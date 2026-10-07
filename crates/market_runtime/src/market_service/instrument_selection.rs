@@ -2,8 +2,9 @@ use super::{
     ClientId, ConsumerId, Coordinator, InstallProviderInstrument, MAXIMUM_CATALOG_FIELD_BYTES,
     MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64, ProviderCatalogCommand, ProviderCatalogEvent,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderGeneration, ProviderHealth,
-    Reply, RithmicCatalogControl, SearchProviderInstruments, SelectProviderInstrument, SyncSender,
-    TrySendError, authorize_consumer,
+    ProviderMarketScreen, Reply, RithmicCatalogControl, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument, SyncSender, TrySendError,
+    authorize_consumer,
 };
 use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::{MarketProviderInstrumentSelection, MarketRuntimeEvent};
@@ -23,6 +24,19 @@ pub(super) fn validate_provider_search(search: &SearchProviderInstruments) -> Re
         || (!search.query.trim().is_empty() && !valid_catalog_field(&search.query))
     {
         return Err("provider instrument search is invalid".to_string());
+    }
+    Ok(())
+}
+
+pub(super) fn validate_provider_screen(screen: &ScreenProviderMarkets) -> Result<(), String> {
+    id(screen.consumer_id)?;
+    id(screen.screen_generation)?;
+    if !valid_catalog_field(&screen.provider)
+        || screen.maximum_results == 0
+        || usize::try_from(screen.maximum_results).unwrap_or(usize::MAX)
+            > MAXIMUM_CATALOG_INSTRUMENTS
+    {
+        return Err("provider market screen is invalid".to_string());
     }
     Ok(())
 }
@@ -164,6 +178,30 @@ impl Coordinator<'_> {
         let _ = reply.send(result);
     }
 
+    pub(super) fn handle_provider_screen(
+        &mut self,
+        client_id: ClientId,
+        screen: ScreenProviderMarkets,
+        reply: &Reply<()>,
+    ) {
+        let raw_consumer_id = screen.consumer_id;
+        let provider = screen.provider.clone();
+        let generation = screen.screen_generation;
+        let result = self
+            .authorize_catalog_consumer(client_id, raw_consumer_id)
+            .and_then(|()| {
+                self.providers
+                    .dispatch_catalog(&provider, ProviderCatalogCommand::Screen(screen))
+            });
+        if result.is_ok()
+            && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
+        {
+            self.catalog_screens
+                .insert((consumer_id, provider), generation);
+        }
+        let _ = reply.send(result);
+    }
+
     pub(super) fn authorize_catalog_consumer(
         &self,
         client_id: ClientId,
@@ -260,6 +298,54 @@ impl Coordinator<'_> {
             ProviderCatalogEvent::RefreshFailed(detail) => {
                 self.degrade_provider_catalog_health(provider, &detail);
             }
+            ProviderCatalogEvent::ScreenCompleted(screen) => self.handle_catalog_screen(screen),
+            ProviderCatalogEvent::ScreenRejected(rejection) => {
+                self.handle_catalog_screen_rejection(rejection);
+            }
+        }
+    }
+
+    /// Takes the pending screen generation for the consumer/provider pair when it
+    /// matches exactly; superseded or unrequested screens are dropped.
+    fn take_pending_screen(
+        &mut self,
+        consumer_id: u64,
+        provider: &str,
+        generation: u64,
+    ) -> Option<ConsumerId> {
+        let consumer_id = id(consumer_id).map(ConsumerId).ok()?;
+        let key = (consumer_id, provider.to_string());
+        if self.catalog_screens.get(&key).copied() != Some(generation) {
+            return None;
+        }
+        self.catalog_screens.remove(&key);
+        Some(consumer_id)
+    }
+
+    pub(super) fn handle_catalog_screen(&mut self, screen: ProviderMarketScreen) {
+        let Some(consumer_id) = self.take_pending_screen(
+            screen.consumer_id,
+            &screen.provider,
+            screen.screen_generation,
+        ) else {
+            return;
+        };
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.catalog_screen = Some(MarketRuntimeEvent::ProviderMarketScreen(screen));
+        }
+    }
+
+    pub(super) fn handle_catalog_screen_rejection(&mut self, rejection: ProviderCatalogRejected) {
+        let Some(consumer_id) = self.take_pending_screen(
+            rejection.consumer_id,
+            &rejection.provider,
+            rejection.command_generation,
+        ) else {
+            return;
+        };
+        if let Some(events) = self.events.get_mut(&consumer_id) {
+            events.catalog_screen =
+                Some(MarketRuntimeEvent::ProviderMarketScreenRejected(rejection));
         }
     }
 
@@ -410,6 +496,21 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn reject_overflowed_catalog(&mut self, provider: &str) {
+        let screens = self
+            .catalog_screens
+            .iter()
+            .filter(|((_, candidate), _)| candidate == provider)
+            .map(|((consumer, _), generation)| (consumer.0.get(), *generation))
+            .collect::<Vec<_>>();
+        for (consumer_id, command_generation) in screens {
+            self.handle_catalog_screen_rejection(ProviderCatalogRejected {
+                consumer_id,
+                provider: provider.to_string(),
+                provider_generation: None,
+                command_generation,
+                reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+            });
+        }
         for selection in [false, true] {
             let pending = if selection {
                 &self.catalog_selections

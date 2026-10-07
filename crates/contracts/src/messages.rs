@@ -812,6 +812,54 @@ pub struct ProviderInstrumentSearchResult {
     pub instruments: Vec<ProviderInstrumentSummary>,
 }
 
+/// Requests one bounded market-statistics screen across a provider's listed instruments.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScreenProviderMarkets {
+    pub consumer_id: u64,
+    pub screen_generation: u64,
+    pub provider: String,
+    pub maximum_results: u32,
+}
+
+/// Provider-reported statistics for one listed instrument. Each value carries an explicit
+/// fixed-point scale; an absent value was not reported by the provider and is never
+/// fabricated.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderMarketStatistics {
+    /// Selection identity and presentation metadata, identical to a search result.
+    pub instrument: ProviderInstrumentSummary,
+    /// Decimal scale for `mark_price` and `previous_day_price`.
+    pub price_scale: u32,
+    /// Provider mark price.
+    pub mark_price: Option<i64>,
+    /// Provider reference price from one day earlier, the base for day change.
+    pub previous_day_price: Option<i64>,
+    /// Decimal scale for `day_notional_volume` and `open_interest_notional`.
+    pub notional_scale: u32,
+    /// Quote-currency volume traded over the provider's trailing day.
+    pub day_notional_volume: Option<i64>,
+    /// Open interest valued at the mark price, in quote currency.
+    pub open_interest_notional: Option<i64>,
+    /// Decimal scale for `funding_rate`.
+    pub funding_rate_scale: u32,
+    /// Current funding rate per `funding_interval_seconds`, as a fraction (not percent).
+    pub funding_rate: Option<i64>,
+    /// Interval the funding rate applies to; absent when `funding_rate` is absent.
+    pub funding_interval_seconds: Option<u32>,
+}
+
+/// Completed bounded provider market screen, ordered by day notional volume descending.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderMarketScreen {
+    pub consumer_id: u64,
+    pub provider: String,
+    pub provider_generation: u64,
+    pub screen_generation: u64,
+    /// Wall-clock time the provider statistics were fetched.
+    pub captured_at_unix_millis: i64,
+    pub markets: Vec<ProviderMarketStatistics>,
+}
+
 /// Coarse catalog-command failure safe for presentation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(i32)]

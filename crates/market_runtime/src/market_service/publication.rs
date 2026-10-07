@@ -239,6 +239,7 @@ impl ConsumerEvents {
             .or_else(|| self.delta_divergence.take())
             .or_else(|| self.catalog_selection.take())
             .or_else(|| self.catalog_search.take())
+            .or_else(|| self.catalog_screen.take())
     }
 
     /// Queues one covering snapshot, discarding everything it already covers.

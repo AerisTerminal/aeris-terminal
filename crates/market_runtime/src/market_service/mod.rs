@@ -23,8 +23,9 @@ use crate::{
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderCatalogRejected,
     ProviderCatalogRejectionReason, ProviderCatalogSymbol, ProviderConnectionState,
-    ProviderInstrumentSearchResult, ProviderPresentationDescriptor, ProviderState,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState,
+    ProviderInstrumentSearchResult, ProviderMarketScreen, ProviderPresentationDescriptor,
+    ProviderState, ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
+    SeriesLoadState,
 };
 use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
 use aeris_market_data::{
@@ -209,6 +210,7 @@ enum Command {
     RemoveStudy(ClientId, StudyInstanceId, Reply<Vec<StudyInstanceId>>),
     SearchProviderInstruments(ClientId, SearchProviderInstruments, Reply<()>),
     SelectProviderInstrument(ClientId, SelectProviderInstrument, Reply<()>),
+    ScreenProviderMarkets(ClientId, ScreenProviderMarkets, Reply<()>),
     InstallProviderInstrument(InstallProviderInstrument, Reply<()>),
     ReplacePriceAlerts(
         ClientId,
@@ -642,6 +644,7 @@ struct ConsumerEvents {
     price_alerts: VecDeque<MarketRuntimeEvent>,
     catalog_search: Option<MarketRuntimeEvent>,
     catalog_selection: Option<MarketRuntimeEvent>,
+    catalog_screen: Option<MarketRuntimeEvent>,
 }
 
 struct ProviderOrderBook {
@@ -1042,6 +1045,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     ready_label_suffix: " spot",
     depth_available: true,
     search_categories_available: false,
+    market_screen_available: false,
     connection_kind: aeris_contracts::ProviderConnectionKind::Credentials,
 };
 
@@ -1096,6 +1100,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     ready_label_suffix: "",
     depth_available: true,
     search_categories_available: false,
+    market_screen_available: true,
     connection_kind: aeris_contracts::ProviderConnectionKind::Public,
 };
 
@@ -1453,6 +1458,7 @@ enum ProviderCatalogDispatch<'a> {
 enum ProviderCatalogCommand {
     Search(SearchProviderInstruments),
     Select(SelectProviderInstrument),
+    Screen(ScreenProviderMarkets),
 }
 
 enum ProviderRuntimeEvent {
@@ -1499,6 +1505,8 @@ enum ProviderCatalogEvent {
         rejection: ProviderCatalogRejected,
         selection: bool,
     },
+    ScreenCompleted(ProviderMarketScreen),
+    ScreenRejected(ProviderCatalogRejected),
     RefreshFailed(String),
 }
 
@@ -1546,6 +1554,8 @@ impl From<HyperliquidCatalogEvent> for ProviderCatalogEvent {
                 rejection,
                 selection,
             },
+            HyperliquidCatalogEvent::ScreenCompleted(screen) => Self::ScreenCompleted(screen),
+            HyperliquidCatalogEvent::ScreenRejected(rejection) => Self::ScreenRejected(rejection),
             HyperliquidCatalogEvent::RefreshFailed { detail } => Self::RefreshFailed(detail),
         }
     }
@@ -1690,7 +1700,7 @@ use publication::{
 mod instrument_selection;
 use instrument_selection::{
     id, try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
-    validate_provider_search, validate_provider_selection,
+    validate_provider_screen, validate_provider_search, validate_provider_selection,
 };
 
 mod history;

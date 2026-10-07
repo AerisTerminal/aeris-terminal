@@ -5,6 +5,7 @@
 
 mod hyperliquid_display_depth;
 mod hyperliquid_history;
+mod hyperliquid_market_screen;
 mod hyperliquid_realtime;
 pub mod market_service;
 mod order_flow_alerts;
@@ -265,6 +266,8 @@ pub enum MarketRuntimeEvent {
     ProviderInstrumentSearchPreview(aeris_contracts::ProviderInstrumentSearchResult),
     ProviderInstrumentSelection(MarketProviderInstrumentSelection),
     ProviderCatalogRejected(aeris_contracts::ProviderCatalogRejected),
+    ProviderMarketScreen(aeris_contracts::ProviderMarketScreen),
+    ProviderMarketScreenRejected(aeris_contracts::ProviderCatalogRejected),
     Fault(aeris_contracts::Fault),
 }
 

@@ -24,8 +24,8 @@ use std::{
 
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
-    SearchProviderInstruments, SelectProviderInstrument,
+    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderMarketScreen,
+    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_hyperliquid_market_adapter::{
     HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig, HyperliquidLiveCandle,
@@ -35,6 +35,7 @@ use aeris_hyperliquid_market_adapter::{
 use aeris_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
+use crate::hyperliquid_market_screen::{RetainedMarketStatistics, instrument_summary};
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 
 /// Public account and entitlement identity for credential-free market data.
@@ -101,10 +102,13 @@ pub(crate) enum HyperliquidRealtimeControl {
 pub(crate) enum HyperliquidCatalogControl {
     Search(SearchProviderInstruments),
     Select(SelectProviderInstrument),
+    Screen(ScreenProviderMarkets),
 }
 
 pub(crate) enum HyperliquidCatalogEvent {
     SearchCompleted(ProviderInstrumentSearchResult),
+    ScreenCompleted(ProviderMarketScreen),
+    ScreenRejected(ProviderCatalogRejected),
     SelectionResolved {
         consumer_id: u64,
         command_generation: u64,
@@ -216,6 +220,7 @@ struct CatalogState {
     fetched_at: Option<Instant>,
     epoch: u64,
     selection_generation: u64,
+    statistics: RetainedMarketStatistics,
 }
 
 impl CatalogState {
@@ -246,7 +251,57 @@ fn handle_catalog_control(
         HyperliquidCatalogControl::Select(selection) => {
             handle_catalog_select(selection, catalog, events, ws_generation, stop, http_config)
         }
+        HyperliquidCatalogControl::Screen(screen) => {
+            handle_catalog_screen(&screen, catalog, events, stop, http_config)
+        }
     }
+}
+
+/// Answers one market screen from the retained catalog and recent statistics.
+/// Returns true when the worker must exit.
+fn handle_catalog_screen(
+    screen: &ScreenProviderMarkets,
+    catalog: &mut CatalogState,
+    events: &CatalogPublisher<HyperliquidCatalogEvent>,
+    stop: &Arc<AtomicBool>,
+    http_config: HyperliquidHttpConfig,
+) -> bool {
+    let refreshed = if ensure_catalog(catalog, http_config) {
+        catalog.statistics.refresh(http_config, Instant::now())
+    } else {
+        Err("hyperliquid catalog is unavailable".to_string())
+    };
+    if let Err(error) = &refreshed {
+        diagnostic!("Aeris Hyperliquid market screen is unavailable: {error}");
+    }
+    if stop.load(Ordering::Acquire) {
+        return true;
+    }
+    let maximum_results = usize::try_from(screen.maximum_results).unwrap_or(usize::MAX);
+    let answered = refreshed.ok().and_then(|()| {
+        let current = catalog.present()?;
+        catalog.statistics.screen(current, maximum_results)
+    });
+    let event = match answered {
+        Some((captured_at_unix_millis, markets)) => {
+            HyperliquidCatalogEvent::ScreenCompleted(ProviderMarketScreen {
+                consumer_id: screen.consumer_id,
+                provider: "hyperliquid".to_string(),
+                provider_generation: catalog.epoch.max(1),
+                screen_generation: screen.screen_generation,
+                captured_at_unix_millis,
+                markets,
+            })
+        }
+        None => HyperliquidCatalogEvent::ScreenRejected(ProviderCatalogRejected {
+            consumer_id: screen.consumer_id,
+            provider: "hyperliquid".to_string(),
+            provider_generation: None,
+            command_generation: screen.screen_generation,
+            reason: ProviderCatalogRejectionReason::DispatchUnavailable,
+        }),
+    };
+    publish_catalog(events, event, stop)
 }
 
 /// Fetches the catalog when missing so a cold start still answers.
@@ -327,26 +382,8 @@ fn handle_catalog_search(
             &search.query,
             usize::try_from(search.maximum_results).unwrap_or(16).max(1),
         )
-        .into_iter()
-        .map(|instrument| ProviderInstrumentSummary {
-            symbol: instrument.wire_coin.clone(),
-            display_symbol: instrument.display.clone(),
-            exchange: instrument.venue.clone(),
-            name: None,
-            product_code: None,
-            instrument_type: Some(match &instrument.kind {
-                aeris_hyperliquid_market_adapter::HyperliquidMarketKind::CorePerp => {
-                    "perpetual".to_string()
-                }
-                aeris_hyperliquid_market_adapter::HyperliquidMarketKind::Spot { .. } => {
-                    "spot".to_string()
-                }
-                aeris_hyperliquid_market_adapter::HyperliquidMarketKind::BuilderPerp { dex } => {
-                    format!("builder-perpetual:{dex}")
-                }
-            }),
-            expiration_date: None,
-        })
+        .iter()
+        .map(instrument_summary)
         .collect();
     let _ = publish_catalog(
         events,

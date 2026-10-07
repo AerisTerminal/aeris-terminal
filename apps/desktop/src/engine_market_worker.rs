@@ -94,11 +94,28 @@ enum StartupResolution {
     Selecting(InstallProviderInstrument),
 }
 
+/// What a runtime consumer endpoint is for, which decides whether it ever demands a series.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndpointRole {
+    /// Chart or market-summary demand for one instrument.
+    Market,
+    /// Rithmic instrument search before any chart demand exists.
+    RithmicCatalog,
+    /// Listed-market statistics screens and their selections; never demands a series.
+    MarketScreen,
+}
+
+impl EndpointRole {
+    const fn demands_series(self) -> bool {
+        matches!(self, Self::Market)
+    }
+}
+
 struct EndpointRecord {
     workspace_id: u64,
     product: InstallProviderInstrument,
     interval: ChartInterval,
-    catalog_only: bool,
+    role: EndpointRole,
     startup_resolution: Option<StartupResolution>,
     /// Instrument and calendar revision of the last session status sent to the chart.
     session_status_sent: Option<(String, u64)>,
@@ -161,12 +178,50 @@ impl WorkspaceMarketFactory {
             .map(|endpoint| endpoint.worker)
     }
 
+    /// Starts a consumer that only screens `provider`'s listed markets and resolves the
+    /// screener's selections. It owns no series demand, so it costs no provider stream.
+    pub fn create_market_screen_worker(
+        &self,
+        workspace_id: u64,
+        provider: &str,
+    ) -> Result<MarketDataWorker, String> {
+        let placeholder = InstallProviderInstrument {
+            provider: provider.to_string(),
+            ..Default::default()
+        };
+        self.add_endpoint(
+            workspace_id,
+            placeholder,
+            ChartInterval::Day1,
+            ConsumerResourceClass::Foreground,
+            EndpointRole::MarketScreen,
+        )
+        .map(|endpoint| endpoint.worker)
+    }
+
     fn create_endpoint(
         &self,
         workspace_id: u64,
         product: InstallProviderInstrument,
         interval: ChartInterval,
         resource_class: ConsumerResourceClass,
+    ) -> Result<WorkspaceMarketPane, String> {
+        self.add_endpoint(
+            workspace_id,
+            product,
+            interval,
+            resource_class,
+            EndpointRole::Market,
+        )
+    }
+
+    fn add_endpoint(
+        &self,
+        workspace_id: u64,
+        product: InstallProviderInstrument,
+        interval: ChartInterval,
+        resource_class: ConsumerResourceClass,
+        role: EndpointRole,
     ) -> Result<WorkspaceMarketPane, String> {
         let pane_id = allocate_pane_id(&self.next_pane_id)?;
         let consumer_id = allocate_consumer_id(&self.next_consumer_id)?;
@@ -180,6 +235,7 @@ impl WorkspaceMarketFactory {
             INITIAL_GENERATION,
         );
         endpoint.endpoint.resource_class = resource_class;
+        endpoint.role = role;
         self.additions
             .try_send(endpoint)
             .map_err(|error| match error {
@@ -255,7 +311,7 @@ pub(super) fn start_rithmic_catalog() -> Result<(MarketWorkerStartup, MarketData
         0,
     );
     pane.startup = MarketWorkerStartup::Rithmic;
-    endpoint.catalog_only = true;
+    endpoint.role = EndpointRole::RithmicCatalog;
     spawn_group(client_id, vec![endpoint], None)?;
     Ok((pane.startup, pane.worker))
 }
@@ -535,7 +591,7 @@ fn worker_endpoint(
         workspace_id,
         product,
         interval,
-        catalog_only: false,
+        role: EndpointRole::Market,
         startup_resolution: None,
         session_status_sent: None,
         endpoint: WorkerEndpoint {
@@ -728,7 +784,7 @@ mod selection_commands;
 use selection_commands::retain_depth_visibility;
 use selection_commands::{
     handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
-    process_command, set_resource_class,
+    initialize_market_screen_endpoint, process_command, set_resource_class,
 };
 
 #[path = "engine_market_worker/publications.rs"]
@@ -935,10 +991,10 @@ mod tests {
             0,
         );
         pane.startup = MarketWorkerStartup::Rithmic;
-        record.catalog_only = true;
+        record.role = EndpointRole::RithmicCatalog;
 
         assert!(matches!(pane.startup, MarketWorkerStartup::Rithmic));
-        assert!(record.catalog_only);
+        assert!(!record.role.demands_series());
         assert_eq!(record.endpoint.active_generation, 0);
 
         let selected = default_product("ES");

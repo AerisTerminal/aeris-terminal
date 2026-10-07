@@ -10,11 +10,12 @@ use super::{
     ProviderRealtimeChannels, ProviderRealtimeDispatch, ProviderRuntimeEvent,
     ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec,
     REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl,
-    RithmicRealtimeControl, SearchProviderInstruments, SelectProviderInstrument,
-    StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
-    Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc, spawn_coordinator,
-    spawn_history_worker, thread, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
-    validate_provider_instrument, validate_provider_search, validate_provider_selection,
+    RithmicRealtimeControl, ScreenProviderMarkets, SearchProviderInstruments,
+    SelectProviderInstrument, StartedProviderRuntime, StreamRequirements, StudyInstanceId,
+    SyncSender, TrySendError, Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc,
+    spawn_coordinator, spawn_history_worker, thread, try_send_hyperliquid_catalog,
+    try_send_rithmic_catalog, validate_provider_instrument, validate_provider_screen,
+    validate_provider_search, validate_provider_selection,
 };
 use crate::MarketRuntimeEvent;
 use crate::hyperliquid_display_depth::{
@@ -829,6 +830,22 @@ impl ProviderDispatch<'_> {
                     Err(format!("{provider_id} catalog worker is unavailable"))
                 }
             },
+            ProviderCatalogCommand::Screen(screen) => match &record.catalog {
+                ProviderCatalogDispatch::Hyperliquid { controls, .. } => {
+                    try_send_hyperliquid_catalog(
+                        controls,
+                        HyperliquidCatalogControl::Screen(screen),
+                        provider_id,
+                    )
+                }
+                ProviderCatalogDispatch::Tastytrade { .. }
+                | ProviderCatalogDispatch::Rithmic { .. } => {
+                    Err(format!("{provider_id} does not provide a market screen"))
+                }
+                ProviderCatalogDispatch::Disabled => {
+                    Err(format!("{provider_id} catalog worker is unavailable"))
+                }
+            },
         }
     }
 
@@ -1516,6 +1533,28 @@ impl MarketService {
             prepare(&self.runtime.broker_api, consumer, generation)?;
         }
         Ok(())
+    }
+
+    /// Schedules one bounded listed-market statistics screen for an owned consumer. The
+    /// result arrives as `MarketRuntimeEvent::ProviderMarketScreen`, fenced to the latest
+    /// screen generation of that consumer and provider.
+    ///
+    /// # Errors
+    /// Returns an error for invalid identity, a provider without a market screen, ownership,
+    /// or coordinator failure.
+    pub fn screen_provider_markets(
+        &self,
+        client_id: u64,
+        screen: ScreenProviderMarkets,
+    ) -> Result<(), String> {
+        validate_provider_screen(&screen)?;
+        self.request(|reply| {
+            Ok(Command::ScreenProviderMarkets(
+                ClientId(id(client_id)?),
+                screen,
+                reply,
+            ))
+        })
     }
 
     /// Schedules one exact provider-instrument selection for an owned consumer.

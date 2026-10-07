@@ -198,15 +198,10 @@ fn watchlist_asset_cell(row: &WatchlistRow, theme: &AerisTheme) -> Div {
     } else {
         colors.text_primary
     };
-    let logo = match aeris_market_runtime::built_in_provider_presentations()
+    let logo = aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == row.instrument.provider)
-        .map(|descriptor| descriptor.logo_key)
-    {
-        Some("hyperliquid") => Some(super::assets::ExchangeLogo::Hyperliquid),
-        Some("rithmic") => Some(super::assets::ExchangeLogo::Rithmic),
-        _ => None,
-    };
+        .and_then(|descriptor| super::assets::ExchangeLogo::for_logo_key(descriptor.logo_key));
     div()
         .min_w_0()
         .flex_1()

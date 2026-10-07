@@ -19,6 +19,8 @@ pub enum ProviderCatalogSymbol {
 }
 
 /// Stable provider metadata for catalog and chart presentation.
+// Each flag is an independent, static provider capability, not encoded state.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProviderPresentationDescriptor {
     pub id: &'static str,
@@ -34,5 +36,7 @@ pub struct ProviderPresentationDescriptor {
     pub depth_available: bool,
     /// Whether search honours `InstrumentSearchCategories` (it serves more than one category).
     pub search_categories_available: bool,
+    /// Whether the provider answers `ScreenProviderMarkets` with listed-market statistics.
+    pub market_screen_available: bool,
     pub connection_kind: ProviderConnectionKind,
 }

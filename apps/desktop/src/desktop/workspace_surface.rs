@@ -4576,6 +4576,10 @@ impl WorkspaceSurface {
             ProviderCatalogEvent::CommandRejected { rejection, command } => {
                 self.apply_catalog_rejection(&rejection, command, cx);
             }
+            // Chart surfaces never request market screens; the screener owns its own consumer.
+            ProviderCatalogEvent::ScreenCompleted(_) | ProviderCatalogEvent::ScreenRejected(_) => {
+                return;
+            }
         }
         cx.notify();
     }

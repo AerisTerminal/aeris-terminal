@@ -1,3 +1,4 @@
+use super::app_navigation::app_navigation_button;
 use super::platform_menu::account_avatar_button;
 use super::*;
 use aeris_contracts::{MarketSessionPhase, MarketSessionStatus};
@@ -181,6 +182,7 @@ pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) enabled: bool,
     pub(super) error: Option<&'a str>,
     pub(super) workspace_drag: Option<WorkspaceDragState>,
+    pub(super) app_view: super::market_screener::AppView,
     pub(super) theme: AerisTheme,
 }
 
@@ -266,7 +268,8 @@ pub(super) fn workspace_title_bar(
         .pl_4()
         .pr_2()
         .gap_2()
-        .child(account_avatar_button(terminal, &account, &theme));
+        .child(account_avatar_button(terminal, &account, &theme))
+        .child(app_navigation_button(terminal, state.app_view, &theme));
     div()
         .w_full()
         .h(px(WORKSPACE_TITLE_BAR_HEIGHT))

@@ -93,6 +93,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             ready_label_suffix: "",
             depth_available: false,
             search_categories_available: false,
+            market_screen_available: false,
             connection_kind: aeris_contracts::ProviderConnectionKind::Public,
         };
     let fourth = ProviderDescriptor {

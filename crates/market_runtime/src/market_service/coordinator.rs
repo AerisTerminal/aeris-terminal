@@ -109,6 +109,7 @@ fn run_coordinator(
         startup_catalog_searches: BTreeMap::new(),
         catalog_selections: BTreeMap::new(),
         startup_catalog_selections: BTreeMap::new(),
+        catalog_screens: BTreeMap::new(),
         sessions,
     };
     let demand_flushers = coordinator
@@ -356,6 +357,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) startup_catalog_searches: BTreeMap<(ConsumerId, String), u64>,
     pub(super) catalog_selections: BTreeMap<(ConsumerId, String), u64>,
     pub(super) startup_catalog_selections: BTreeMap<(ConsumerId, String), u64>,
+    pub(super) catalog_screens: BTreeMap<(ConsumerId, String), u64>,
     /// One bounded lifecycle and control slot per registered provider.
     pub(super) sessions: BTreeMap<&'static str, ProviderSessionSlot>,
 }
@@ -390,6 +392,8 @@ impl Coordinator<'_> {
             self.catalog_selections
                 .retain(|(candidate, _), _| *candidate != consumer_id);
             self.startup_catalog_selections
+                .retain(|(candidate, _), _| *candidate != consumer_id);
+            self.catalog_screens
                 .retain(|(candidate, _), _| *candidate != consumer_id);
             self.remove_waiter(consumer_id);
         }
@@ -579,6 +583,9 @@ impl Coordinator<'_> {
             }
             Command::SelectProviderInstrument(client_id, selection, reply) => {
                 self.handle_provider_selection(client_id, selection, &reply);
+            }
+            Command::ScreenProviderMarkets(client_id, screen, reply) => {
+                self.handle_provider_screen(client_id, screen, &reply);
             }
             Command::InstallProviderInstrument(instrument, reply) => {
                 let _ = reply.send(self.install_provider_instrument(&instrument));
@@ -775,6 +782,8 @@ impl Coordinator<'_> {
         self.catalog_selections
             .retain(|(candidate, _), _| *candidate != consumer_id);
         self.startup_catalog_selections
+            .retain(|(candidate, _), _| *candidate != consumer_id);
+        self.catalog_screens
             .retain(|(candidate, _), _| *candidate != consumer_id);
         self.price_alerts.remove_consumer(consumer_id);
         self.remove_waiter(consumer_id);
@@ -1313,7 +1322,7 @@ mod tests {
     use crate::{
         hyperliquid_realtime::HyperliquidRealtimeEvent, rithmic_realtime::RithmicRealtimeEvent,
     };
-    use aeris_contracts::ProviderInstrumentSearchResult;
+    use aeris_contracts::{ProviderInstrumentSearchResult, ProviderMarketScreen};
     use aeris_market_data::{
         AggressorSide, BarPeriod, DepthLevel, DepthSnapshot, EventMetadata, MarketBar, MarketTrade,
         OrderBookState, QualifiedTimestamp, TopOfBookQuote,
@@ -1528,6 +1537,7 @@ mod tests {
             startup_catalog_searches: BTreeMap::new(),
             catalog_selections: BTreeMap::new(),
             startup_catalog_selections: BTreeMap::new(),
+            catalog_screens: BTreeMap::new(),
             sessions: super::super::BUILT_IN_PROVIDER_DESCRIPTORS
                 .iter()
                 .map(|descriptor| (descriptor.id, ProviderSessionSlot::default()))
@@ -4631,6 +4641,94 @@ mod tests {
                 if result.search_generation == 8
         ));
         assert!(!coordinator.catalog_searches.contains_key(&key));
+    }
+
+    fn market_screen(consumer: ConsumerId, screen_generation: u64) -> ProviderMarketScreen {
+        ProviderMarketScreen {
+            consumer_id: consumer.0.get(),
+            provider: "hyperliquid".to_string(),
+            provider_generation: 1,
+            screen_generation,
+            captured_at_unix_millis: 1_700_000_000_000,
+            markets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn market_screen_callbacks_are_fenced_to_the_latest_generation() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        let key = (consumer, "hyperliquid".to_string());
+        coordinator.catalog_screens.insert(key.clone(), 4);
+
+        coordinator.handle_catalog_screen(market_screen(consumer, 3));
+        assert!(
+            coordinator
+                .events
+                .get(&consumer)
+                .expect("consumer outbox")
+                .catalog_screen
+                .is_none(),
+            "a superseded screen never reaches presentation"
+        );
+        assert_eq!(coordinator.catalog_screens.get(&key), Some(&4));
+
+        coordinator.handle_catalog_screen(market_screen(consumer, 4));
+        assert!(matches!(
+            coordinator
+                .events
+                .get(&consumer)
+                .expect("consumer outbox")
+                .catalog_screen,
+            Some(MarketRuntimeEvent::ProviderMarketScreen(ref screen))
+                if screen.screen_generation == 4
+        ));
+        assert!(!coordinator.catalog_screens.contains_key(&key));
+
+        coordinator.handle_catalog_screen(market_screen(consumer, 4));
+        assert!(
+            coordinator
+                .events
+                .get_mut(&consumer)
+                .expect("consumer outbox")
+                .catalog_screen
+                .take()
+                .is_some_and(|event| matches!(
+                    event,
+                    MarketRuntimeEvent::ProviderMarketScreen(ref screen)
+                        if screen.screen_generation == 4
+                )),
+            "a duplicate completion leaves the delivered screen untouched"
+        );
+    }
+
+    #[test]
+    fn overflowed_catalog_rejects_pending_market_screens() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        let key = (consumer, "hyperliquid".to_string());
+        coordinator.catalog_screens.insert(key.clone(), 9);
+
+        coordinator.reject_overflowed_catalog("hyperliquid");
+
+        assert!(!coordinator.catalog_screens.contains_key(&key));
+        assert!(matches!(
+            coordinator
+                .events
+                .get(&consumer)
+                .expect("consumer outbox")
+                .catalog_screen,
+            Some(MarketRuntimeEvent::ProviderMarketScreenRejected(ref rejection))
+                if rejection.command_generation == 9
+        ));
     }
 
     #[test]

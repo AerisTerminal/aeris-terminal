@@ -508,6 +508,7 @@ impl TerminalApp {
                 enabled: self.workspace_factory.is_some(),
                 error: self.workspace_error.as_deref(),
                 workspace_drag: self.workspace_drag,
+                app_view: self.pages.view,
                 theme: self.theme,
             },
             window,
@@ -627,6 +628,88 @@ impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_terminal_frame(window, cx);
         let terminal = cx.entity();
+        let page = match self.pages.view {
+            market_screener::AppView::Terminal => {
+                self.rendered_terminal_page(&terminal, window, cx)
+            }
+            market_screener::AppView::Screener => {
+                self.rendered_screener_page(&terminal, window, cx)
+            }
+        };
+        let fullscreen_focus = self.chrome_focus.clone();
+        page.track_focus(&self.chrome_focus)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|terminal, _, window, cx| {
+                    terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
+                    terminal.end_workspace_drag(window, cx);
+                    terminal.end_watchlist_drag(cx);
+                    terminal.end_drawing_favorites_move(cx);
+                }),
+            )
+            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+            .on_action(|_: &ZoomWindow, window, _| {
+                WindowCommand::MaximizeOrRestore.execute(window);
+            })
+            .map(|root| workspace_action_handlers(root, cx))
+            .on_action(move |_: &ToggleFullscreen, window, cx| {
+                window.toggle_fullscreen();
+                fullscreen_focus.focus(window, cx);
+            })
+            .on_action(cx.listener(Self::close_window))
+            .on_action(cx.listener(Self::trading_buy_market))
+            .on_action(cx.listener(Self::trading_sell_market))
+            .on_action(cx.listener(Self::trading_cancel_all))
+            .on_action(cx.listener(Self::trading_flatten_account))
+            .on_action(cx.listener(Self::trading_kill_switch))
+            .on_action(cx.listener(Self::open_command_palette))
+            .on_action(cx.listener(Self::connect_tastytrade))
+            .on_action(cx.listener(Self::disconnect_tastytrade))
+            .on_action(cx.listener(Self::refresh_tastytrade_connection))
+    }
+}
+
+impl TerminalApp {
+    /// The window root every page shares: surface colors and platform typography.
+    fn page_root(&self) -> Div {
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(gpui_color(self.theme.colors.surface))
+            .text_color(gpui_color(self.theme.colors.text_primary))
+            .font_family(aeris_design_system::platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
+    }
+
+    /// The screener under the title bar. Only shell-level overlays apply on this page.
+    fn rendered_screener_page(&self, terminal: &Entity<Self>, window: &Window, cx: &App) -> Div {
+        let placement = title_bar_placement(window.is_fullscreen(), self.chart_chrome.window_frame);
+        let (title_bar, frameless_reveal_zone) =
+            self.rendered_title_bars(terminal, window, placement, Instant::now(), cx);
+        self.page_root()
+            .children(title_bar)
+            .child(market_screener_view::market_screener_page(
+                terminal,
+                &self.pages.screener,
+                &self.theme,
+            ))
+            .children(fullscreen_hint_layer(&self.fullscreen_hint, &self.theme))
+            .children(frameless_reveal_zone)
+            .children(self.platform_menu_overlay(terminal, window.viewport_size()))
+            .children(self.app_navigation_overlay(terminal, window.viewport_size()))
+            .children(self.rendered_command_palette(terminal, cx))
+    }
+
+    fn rendered_terminal_page(
+        &self,
+        terminal: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let terminal = terminal.clone();
         let pane_count = self.workspaces[self.active].panes.len();
         let active = self.active_surface();
         let workspace = active.read(cx);
@@ -664,46 +747,8 @@ impl Render for TerminalApp {
         let bottom_panel = self.rendered_bottom_panel(&terminal, &active, cx);
         let market = self.rendered_market_area(&terminal, &active, cx);
         let fullscreen_hint = fullscreen_hint_layer(&self.fullscreen_hint, &self.theme);
-        let fullscreen_focus = self.chrome_focus.clone();
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .track_focus(&self.chrome_focus)
-            .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|terminal, _, window, cx| {
-                    terminal.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);
-                    terminal.end_workspace_drag(window, cx);
-                    terminal.end_watchlist_drag(cx);
-                    terminal.end_drawing_favorites_move(cx);
-                }),
-            )
-            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
-            .on_action(|_: &ZoomWindow, window, _| {
-                WindowCommand::MaximizeOrRestore.execute(window);
-            })
-            .map(|root| workspace_action_handlers(root, cx))
-            .on_action(move |_: &ToggleFullscreen, window, cx| {
-                window.toggle_fullscreen();
-                fullscreen_focus.focus(window, cx);
-            })
-            .on_action(cx.listener(Self::close_window))
-            .on_action(cx.listener(Self::trading_buy_market))
-            .on_action(cx.listener(Self::trading_sell_market))
-            .on_action(cx.listener(Self::trading_cancel_all))
-            .on_action(cx.listener(Self::trading_flatten_account))
-            .on_action(cx.listener(Self::trading_kill_switch))
-            .on_action(cx.listener(Self::open_command_palette))
-            .on_action(cx.listener(Self::connect_tastytrade))
-            .on_action(cx.listener(Self::disconnect_tastytrade))
-            .on_action(cx.listener(Self::refresh_tastytrade_connection))
-            .bg(gpui_color(self.theme.colors.surface))
-            .text_color(gpui_color(self.theme.colors.text_primary))
-            .font_family(aeris_design_system::platform_font_family())
-            .font_weight(platform_font_weight(TypographyRole::Normal))
+        let app_navigation = self.app_navigation_overlay(&terminal, window.viewport_size());
+        self.page_root()
             .children(title_bar)
             .child(header)
             .child(
@@ -723,13 +768,15 @@ impl Render for TerminalApp {
             .children(settings_menu)
             .children(drawing_tool_menu)
             .children(platform_menu)
+            .children(app_navigation)
             .children(command_palette)
     }
 }
 
 impl TerminalApp {
     fn trading_hotkeys_enabled(&self, window: &Window) -> bool {
-        self.chrome_focus.is_focused(window)
+        self.pages.view == market_screener::AppView::Terminal
+            && self.chrome_focus.is_focused(window)
     }
 
     fn trading_order_frame(&self, cx: &App) -> Option<aeris_market_data::OrderBookFrame> {

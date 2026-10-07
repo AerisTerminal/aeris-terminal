@@ -353,6 +353,16 @@ pub enum ExchangeLogo {
 impl ExchangeLogo {
     pub const ALL: [Self; 3] = [Self::Rithmic, Self::Hyperliquid, Self::Binance];
 
+    /// The logo a provider presentation descriptor names through its `logo_key`.
+    #[must_use]
+    pub fn for_logo_key(logo_key: &str) -> Option<Self> {
+        match logo_key {
+            "rithmic" => Some(Self::Rithmic),
+            "hyperliquid" => Some(Self::Hyperliquid),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn path(self) -> SharedString {
         let name = match self {
@@ -968,5 +978,18 @@ mod tests {
             assert!(image.size(0).width.0 > 0);
             assert!(image.size(0).height.0 > 0);
         }
+    }
+
+    #[test]
+    fn provider_logo_keys_resolve_to_exchange_logos() {
+        let logo_for = |provider: &str| {
+            aeris_market_runtime::built_in_provider_presentations()
+                .iter()
+                .find(|descriptor| descriptor.id == provider)
+                .and_then(|descriptor| ExchangeLogo::for_logo_key(descriptor.logo_key))
+        };
+        assert_eq!(logo_for("hyperliquid"), Some(ExchangeLogo::Hyperliquid));
+        assert_eq!(logo_for("rithmic"), Some(ExchangeLogo::Rithmic));
+        assert_eq!(ExchangeLogo::for_logo_key("unknown"), None);
     }
 }

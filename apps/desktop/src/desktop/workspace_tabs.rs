@@ -183,6 +183,7 @@ impl TerminalApp {
             chart_settings_templates: init.chart_settings_templates,
             chart_settings_persistence_dirty: false,
             platform_menu_anchor: None,
+            pages: app_navigation::AppPages::default(),
             frameless_title_bar: FramelessTitleBar::default(),
             fullscreen_hint: FullscreenHint::default(),
             bottom_panel: bottom_panel::BottomPanelState::default(),
@@ -1315,6 +1316,7 @@ impl TerminalApp {
     /// Menus and drags that start in the frameless title bar keep it on screen until they end.
     fn frameless_title_bar_pinned(&self) -> bool {
         self.platform_menu_anchor.is_some()
+            || self.app_navigation_open()
             || self.workspace_drag.is_some()
             || self.window_move_pending
     }
@@ -2003,6 +2005,9 @@ impl TerminalApp {
     }
 
     fn select_workspace(&mut self, next: usize, cx: &mut Context<Self>) {
+        if next < self.workspaces.len() {
+            self.show_terminal_view(cx);
+        }
         let Some((previous, next)) = workspace_switch(self.active, next, self.workspaces.len())
         else {
             return;
@@ -2220,6 +2225,7 @@ impl TerminalApp {
         let active_id = self.workspaces[self.active].id;
         if ids.len() == 1 && ids[0] == tab_id {
             self.retire_market_summaries(cx);
+            self.retire_market_screener(cx);
             self.retire_workspaces(cx);
             window.remove_window();
             return;
@@ -2328,6 +2334,7 @@ impl TerminalApp {
             cx.notify();
         })
         .detach();
+        self.show_terminal_view(cx);
         self.set_workspace_resource_class(self.active, ConsumerResourceClass::Background, cx);
         self.workspaces.push(WorkspaceTab {
             id: workspace_id,
@@ -2665,6 +2672,7 @@ impl TerminalApp {
                 .await_workspace_persistence(persistence.shutdown_wait());
         }
         self.retire_market_summaries(cx);
+        self.retire_market_screener(cx);
         self.retire_workspaces(cx);
         true
     }
@@ -2714,6 +2722,11 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.app_navigation_open() {
+            self.close_app_navigation(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key.eq_ignore_ascii_case("escape") && self.drawing_tool_menu.is_open() {
             self.close_drawing_tool_menu(cx);
             cx.stop_propagation();
@@ -2742,7 +2755,10 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
-        if self.chart_context_menu.is_some() || self.chart_settings_menu.is_some() {
+        if self.chart_context_menu.is_some()
+            || self.chart_settings_menu.is_some()
+            || self.pages.view != market_screener::AppView::Terminal
+        {
             return;
         }
         let handled = self.active_surface().update(cx, |workspace, workspace_cx| {
@@ -2831,6 +2847,7 @@ impl TerminalApp {
                 if summaries_changed {
                     cx.notify();
                 }
+                terminal.poll_market_screener(window, cx);
                 for workspace in &terminal.workspaces {
                     for pane in &workspace.panes {
                         let surface = pane.surface.clone();

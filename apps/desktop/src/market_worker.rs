@@ -12,7 +12,8 @@ use aeris_application::{
 };
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejected, ProviderCatalogRejectionReason,
-    ProviderInstrumentSearchResult, SearchProviderInstruments, SelectProviderInstrument,
+    ProviderInstrumentSearchResult, ProviderMarketScreen, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_market_data::ChartInterval;
 use aeris_market_data::OrderBookFrame;
@@ -161,6 +162,8 @@ pub enum ProviderCatalogEvent {
         rejection: ProviderCatalogRejected,
         command: ProviderCatalogCommand,
     },
+    ScreenCompleted(ProviderMarketScreen),
+    ScreenRejected(ProviderCatalogRejected),
 }
 
 #[must_use]
@@ -195,6 +198,12 @@ pub fn classify_provider_catalog_event(
             }),
             None,
         ),
+        MarketRuntimeEvent::ProviderMarketScreen(screen) => {
+            (Some(ProviderCatalogEvent::ScreenCompleted(screen)), None)
+        }
+        MarketRuntimeEvent::ProviderMarketScreenRejected(rejection) => {
+            (Some(ProviderCatalogEvent::ScreenRejected(rejection)), None)
+        }
         event => (None, Some(event)),
     }
 }
@@ -707,6 +716,7 @@ pub enum MarketWorkerCommand {
     },
     ProviderSearch(SearchProviderInstruments),
     ProviderSelect(SelectProviderInstrument),
+    ProviderScreen(ScreenProviderMarkets),
     EngineSelect(Box<EngineSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
     DepthVisible(bool),
@@ -1379,6 +1389,7 @@ impl MarketDataWorker {
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
+                    | MarketWorkerCommand::ProviderScreen(_)
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
@@ -1392,6 +1403,7 @@ impl MarketDataWorker {
                     MarketWorkerCommand::Shutdown
                     | MarketWorkerCommand::ProviderSearch(_)
                     | MarketWorkerCommand::ProviderSelect(_)
+                    | MarketWorkerCommand::ProviderScreen(_)
                     | MarketWorkerCommand::EngineSelect(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
@@ -1419,6 +1431,22 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::ProviderSearch(search))
+            .map_err(|_| ProviderCommandUnavailable)
+    }
+
+    /// Enqueues one listed-market statistics screen without blocking.
+    ///
+    /// # Errors
+    /// Returns an error when the command mailbox is full or disconnected.
+    pub fn try_screen_provider(
+        &self,
+        screen: ScreenProviderMarkets,
+    ) -> Result<(), ProviderCommandUnavailable> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(ProviderCommandUnavailable);
+        };
+        commands
+            .try_send(MarketWorkerCommand::ProviderScreen(screen))
             .map_err(|_| ProviderCommandUnavailable)
     }
 

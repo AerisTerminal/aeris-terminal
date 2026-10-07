@@ -45,6 +45,7 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         ready_label_suffix: "",
         depth_available: false,
         search_categories_available: true,
+        market_screen_available: false,
         connection_kind: aeris_contracts::ProviderConnectionKind::HostedBroker,
     };
 pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescriptor {

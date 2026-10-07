@@ -45,6 +45,15 @@ pub(super) fn initialize_catalog_endpoint(
         .map_err(|error| error.to_string())
 }
 
+pub(super) fn initialize_market_screen_endpoint(
+    market: &MarketService,
+    client_id: u64,
+    workspace_id: u64,
+    endpoint: &WorkerEndpoint,
+) -> Result<(), String> {
+    market.register_consumer(client_id, workspace_id, endpoint.consumer_id)
+}
+
 pub(super) fn initialize_endpoint(
     market: &MarketService,
     client_id: u64,
@@ -345,6 +354,10 @@ pub(super) fn process_command(
         MarketWorkerCommand::ProviderSelect(mut request) => {
             request.consumer_id = endpoint.consumer_id;
             market.select_provider_instrument(client_id, request)
+        }
+        MarketWorkerCommand::ProviderScreen(mut request) => {
+            request.consumer_id = endpoint.consumer_id;
+            market.screen_provider_markets(client_id, request)
         }
         MarketWorkerCommand::EngineSelect(request) => process_engine_select(
             market,

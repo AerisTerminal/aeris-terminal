@@ -12,16 +12,13 @@ pub(super) fn provider_exchange_mark(
     well: bool,
     colors: &aeris_design_system::ThemeColors,
 ) -> AnyElement {
-    match super::provider_presentation(provider).map(|descriptor| descriptor.logo_key) {
-        Some("rithmic") => {
-            exchange_mark(assets::ExchangeLogo::Rithmic, size, well, colors).into_any_element()
-        }
-        Some("hyperliquid") => {
-            exchange_mark(assets::ExchangeLogo::Hyperliquid, size, well, colors).into_any_element()
-        }
+    match super::provider_presentation(provider)
+        .and_then(|descriptor| assets::ExchangeLogo::for_logo_key(descriptor.logo_key))
+    {
+        Some(logo) => exchange_mark(logo, size, well, colors).into_any_element(),
         // No square logo exists for this provider; a generic glyph sits in the same tile and
         // is inset like the logos' own artwork so every mark reads at one size.
-        _ => mark_tile(size, well, colors)
+        None => mark_tile(size, well, colors)
             .child(header_icon(HugeIcon::Chart).with_size(size * 0.6))
             .into_any_element(),
     }

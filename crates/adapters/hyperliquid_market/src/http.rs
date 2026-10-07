@@ -5,6 +5,7 @@
 //! cancellation. Only the catalog bundle fans out, over a fixed number of
 //! scoped threads, because its independent metadata calls dominate startup.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use std::time::Duration;
 use crate::candles::{HyperliquidCandlePage, decode_candle_page, hyperliquid_interval_for_period};
 use crate::endpoints::HYPERLIQUID_INFO_URL;
 use crate::meta::{HyperliquidCatalog, RawMetaBundle, decode_catalog};
+use crate::statistics::{HyperliquidMarketStatistics, decode_market_statistics};
 use aeris_market_data::BarPeriod;
 
 /// Bounds for one info request.
@@ -239,10 +241,55 @@ fn combined_meta(response: &serde_json::Value) -> Result<serde_json::Value, Stri
         .ok_or_else(|| "hyperliquid metadata and contexts are malformed".to_string())
 }
 
+/// Fetches current screening statistics for every core perpetual and spot pair, keyed by
+/// exact wire coin. Two independent requests, so a screen refresh stays far cheaper than a
+/// catalog bundle; builder perps are not covered because each DEX needs its own request.
+///
+/// # Errors
+///
+/// Returns an error when either request fails or its contexts are malformed.
+pub fn fetch_market_statistics(
+    config: HyperliquidHttpConfig,
+) -> Result<BTreeMap<String, HyperliquidMarketStatistics>, String> {
+    let responses = fetch_info_concurrently(
+        &[
+            serde_json::json!({"type": "metaAndAssetCtxs"}),
+            serde_json::json!({"type": "spotMetaAndAssetCtxs"}),
+        ],
+        config,
+    )?;
+    let mut statistics = BTreeMap::new();
+    for response in &responses {
+        for (wire_coin, context) in asset_context_entries(response)? {
+            if !wire_coin.is_empty() {
+                statistics.insert(wire_coin.to_string(), decode_market_statistics(context));
+            }
+        }
+    }
+    Ok(statistics)
+}
+
 fn apply_asset_contexts(
     catalog: &mut HyperliquidCatalog,
     response: &serde_json::Value,
 ) -> Result<(), String> {
+    for (wire_coin, context) in asset_context_entries(response)? {
+        if let Some(mark_price) = context.get("markPx").and_then(serde_json::Value::as_str) {
+            catalog.set_reference_price(wire_coin, mark_price);
+        }
+        if let Some(volume) = context.get("dayNtlVlm").and_then(serde_json::Value::as_str) {
+            catalog.set_day_notional_volume(wire_coin, volume);
+        }
+    }
+    Ok(())
+}
+
+/// Pairs each asset context of a `[meta, contexts]` response with its wire coin: the
+/// context's own `coin` when every context carries one, otherwise the universe name at the
+/// same position.
+fn asset_context_entries(
+    response: &serde_json::Value,
+) -> Result<Vec<(&str, &serde_json::Value)>, String> {
     let parts = response
         .as_array()
         .filter(|parts| parts.len() == 2)
@@ -261,37 +308,23 @@ fn apply_asset_contexts(
             .is_some()
     });
     if contexts_carry_identity {
-        for context in contexts {
-            apply_asset_context(catalog, context, None);
-        }
-        return Ok(());
+        return Ok(contexts
+            .iter()
+            .map(|context| (wire_coin_text(context.get("coin")), context))
+            .collect());
     }
     if universe.len() != contexts.len() {
         return Err("hyperliquid metadata and contexts are inconsistent".to_string());
     }
-    for (market, context) in universe.iter().zip(contexts) {
-        apply_asset_context(catalog, context, market.get("name"));
-    }
-    Ok(())
+    Ok(universe
+        .iter()
+        .zip(contexts)
+        .map(|(market, context)| (wire_coin_text(market.get("name")), context))
+        .collect())
 }
 
-fn apply_asset_context(
-    catalog: &mut HyperliquidCatalog,
-    context: &serde_json::Value,
-    fallback_coin: Option<&serde_json::Value>,
-) {
-    let wire_coin = context
-        .get("coin")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| fallback_coin.and_then(serde_json::Value::as_str))
-        .unwrap_or("");
-    if let Some(mark_price) = context.get("markPx").and_then(serde_json::Value::as_str) {
-        catalog.set_reference_price(wire_coin, mark_price);
-    }
-    let Some(volume) = context.get("dayNtlVlm").and_then(serde_json::Value::as_str) else {
-        return;
-    };
-    catalog.set_day_notional_volume(wire_coin, volume);
+fn wire_coin_text(value: Option<&serde_json::Value>) -> &str {
+    value.and_then(serde_json::Value::as_str).unwrap_or("")
 }
 
 /// One bounded candle-window request.
@@ -447,6 +480,34 @@ mod tests {
             None,
             "a context without a mark price leaves the increment unknown"
         );
+    }
+
+    #[test]
+    fn asset_context_entries_pair_contexts_with_their_wire_coin() {
+        // Core shape: identity comes from the universe position.
+        let core = json!([
+            {"universe": [{"name": "BTC"}, {"name": "ETH"}]},
+            [{"markPx": "1.0"}, {"markPx": "2.0"}],
+        ]);
+        let entries = asset_context_entries(&core).expect("core entries");
+        assert_eq!(
+            entries.iter().map(|(coin, _)| *coin).collect::<Vec<_>>(),
+            ["BTC", "ETH"]
+        );
+        // Spot shape: every context names its own coin, regardless of universe order.
+        let spot = json!([
+            {"universe": [{"name": "PURR/USDC"}, {"name": "@1"}]},
+            [{"coin": "@1", "markPx": "3.0"}, {"coin": "PURR/USDC", "markPx": "4.0"}],
+        ]);
+        let entries = asset_context_entries(&spot).expect("spot entries");
+        assert_eq!(entries[0].0, "@1");
+        assert_eq!(entries[1].1["markPx"], "4.0");
+        // Misaligned contexts without identity fail closed.
+        let misaligned = json!([
+            {"universe": [{"name": "BTC"}, {"name": "ETH"}]},
+            [{"markPx": "1.0"}],
+        ]);
+        assert!(asset_context_entries(&misaligned).is_err());
     }
 
     #[test]

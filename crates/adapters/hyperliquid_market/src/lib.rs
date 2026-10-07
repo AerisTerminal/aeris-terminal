@@ -20,6 +20,7 @@ mod endpoints;
 mod http;
 mod identity;
 mod meta;
+mod statistics;
 mod trades;
 mod ws;
 
@@ -39,13 +40,17 @@ pub use decimal::{
 pub use endpoints::{HYPERLIQUID_INFO_URL, HYPERLIQUID_WS_URL};
 pub use http::{
     CandleSnapshotRequest, HyperliquidHttpClient, HyperliquidHttpConfig, fetch_candle_snapshot,
-    fetch_meta_bundle, post_info,
+    fetch_market_statistics, fetch_meta_bundle, post_info,
 };
 pub use identity::{
     HyperliquidInstrument, HyperliquidMarketKind, instrument_id_for, legacy_display_label,
     wire_coin_for,
 };
 pub use meta::{HyperliquidCatalog, RawMetaBundle, decode_catalog};
+pub use statistics::{
+    FUNDING_INTERVAL_SECONDS, HyperliquidMarketStatistics, STATISTICS_NOTIONAL_SCALE,
+    decode_market_statistics,
+};
 pub use trades::{HyperliquidTradeBatch, TradeDedup, decode_trades_batch};
 pub use ws::{
     WsClientEvent, build_aggregated_l2_subscription, build_bbo_subscription,
