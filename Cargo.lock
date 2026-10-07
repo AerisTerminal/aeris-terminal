@@ -251,9 +251,16 @@ dependencies = [
 name = "aeris_ctrader_open_api_adapter"
 version = "0.2.3"
 dependencies = [
+ "aeris_platform_runtime",
+ "getrandom 0.4.3",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "rcgen",
+ "rustls",
+ "socket2",
+ "webpki-roots 1.0.9",
+ "zeroize",
 ]
 
 [[package]]

@@ -46,6 +46,7 @@ keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 notify-rust = "=4.18.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 rustls = "=0.23.45"
+socket2 = "=0.6.5"
 serde_json = "=1.0.151"
 semver = "=1.0.28"
 same-file = "=1.0.6"

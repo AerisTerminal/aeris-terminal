@@ -7,5 +7,11 @@ mod generated {
 
 pub use generated::ProtoMessage;
 
+pub mod accounts;
 pub mod codec;
 pub mod host;
+pub mod session;
+pub mod transport;
+
+#[cfg(test)]
+mod session_tests;
