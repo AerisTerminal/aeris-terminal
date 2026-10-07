@@ -270,6 +270,8 @@ pub struct TradingAccount {
     pub id: TradingAccountId,
     pub display_name: String,
     pub environment: AccountEnvironment,
+    pub venue_id: String,
+    pub broker_ref: Option<String>,
     pub currency: String,
     pub currency_scale: u8,
     /// User-selected opening equity for a locally simulated account. Provider
@@ -284,6 +286,25 @@ impl TradingAccount {
     /// Returns a validation error for blank/oversized fields or an invalid scale.
     pub fn validate(&self) -> Result<(), TradingValidationError> {
         validate_field("display_name", &self.display_name)?;
+        validate_field("venue_id", &self.venue_id)?;
+        if let Some(reference) = &self.broker_ref {
+            validate_field("broker_ref", reference)?;
+        }
+        if !matches!(
+            (
+                self.venue_id.as_str(),
+                self.environment,
+                self.broker_ref.as_ref()
+            ),
+            ("aeris-sim", AccountEnvironment::Simulated, None)
+                | (
+                    "ctrader",
+                    AccountEnvironment::Demo | AccountEnvironment::Live,
+                    Some(_)
+                )
+        ) {
+            return Err(TradingValidationError::InvalidAccountRoute);
+        }
         validate_field("currency", &self.currency)?;
         if self.currency_scale > MAXIMUM_DECIMAL_SCALE {
             return Err(TradingValidationError::ScaleOutOfRange(self.currency_scale));
@@ -661,6 +682,7 @@ pub enum TradingValidationError {
     FieldTooLong(&'static str),
     InexactRescale,
     InvalidOrderPrices,
+    InvalidAccountRoute,
     InvalidStartingEquity,
     InvalidFilledQuantity,
     InvalidTimestamp,
@@ -683,6 +705,8 @@ impl fmt::Display for TradingValidationError {
                 formatter.write_str("fixed-point rescale would require rounding")
             }
             Self::InvalidOrderPrices => formatter.write_str("prices do not match the order type"),
+            Self::InvalidAccountRoute => formatter
+                .write_str("trading account venue, environment and broker reference do not match"),
             Self::InvalidStartingEquity => formatter
                 .write_str("starting equity must be positive and use the account currency scale"),
             Self::InvalidFilledQuantity => {
@@ -808,6 +832,8 @@ mod tests {
             id: TradingAccountId::try_new("paper-1").expect("id"),
             display_name: "Practice".to_string(),
             environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
             currency: "USD".to_string(),
             currency_scale: 2,
             starting_equity: None,
@@ -824,6 +850,8 @@ mod tests {
             id: TradingAccountId::try_new("broker").expect("id"),
             display_name: "Demo account".to_string(),
             environment: AccountEnvironment::Demo,
+            venue_id: "ctrader".to_string(),
+            broker_ref: Some("fixture".to_string()),
             currency: "USD".to_string(),
             currency_scale: 2,
             starting_equity: None,

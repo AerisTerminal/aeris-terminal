@@ -156,6 +156,8 @@ fn start_golden_service(directory: &TestDirectory) -> TradingService {
             id: account.clone(),
             display_name: "SIM • Test".to_string(),
             environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
             currency: "USD".to_string(),
             currency_scale: 2,
             starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),

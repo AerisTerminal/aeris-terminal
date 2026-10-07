@@ -721,7 +721,12 @@ pub fn flatten_simulated_account_for(
             record_feedback(
                 service
                     .flatten_account(account_id, observation)
-                    .map(|fills| format!("Flattened practice account · {} fill(s)", fills.len())),
+                    .map(|outcome| {
+                        format!(
+                            "Flattened practice account · {} fill(s)",
+                            outcome.fills.len()
+                        )
+                    }),
             );
         })
         .detach();
@@ -748,7 +753,12 @@ pub fn reverse_simulated_position(
             record_feedback(
                 service
                     .reverse_position(account_id, observation)
-                    .map(|fills| format!("Reversed practice position · {} fill(s)", fills.len())),
+                    .map(|outcome| {
+                        format!(
+                            "Reversed practice position · {} fill(s)",
+                            outcome.fills.len()
+                        )
+                    }),
             );
         })
         .detach();
@@ -766,11 +776,12 @@ pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx:
     };
     cx.background_executor()
         .spawn(async move {
-            record_feedback(
-                service.flatten_all(observation).map(|fills| {
-                    format!("Flattened all practice accounts · {} fill(s)", fills.len())
-                }),
-            );
+            record_feedback(service.flatten_all(observation).map(|outcome| {
+                format!(
+                    "Flattened all practice accounts · {} fill(s)",
+                    outcome.fills.len()
+                )
+            }));
         })
         .detach();
 }

@@ -523,56 +523,7 @@ impl TradingStore {
     pub(super) fn load_state(&mut self) -> Result<StoredState, String> {
         let revision = self.metadata("revision")?;
         let next_sequence = self.metadata("next_sequence")?;
-        let mut accounts = BTreeMap::new();
-        {
-            let mut statement = self
-                .connection
-                .prepare(
-                    "SELECT id, display_name, environment, currency, currency_scale,
-                        starting_equity_units, starting_equity_scale FROM accounts ORDER BY id",
-                )
-                .map_err(database_error)?;
-            let rows = statement
-                .query_map([], |row| {
-                    let environment: String = row.get(2)?;
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        environment,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, u8>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, Option<u8>>(6)?,
-                    ))
-                })
-                .map_err(database_error)?;
-            for row in rows {
-                let (
-                    id,
-                    display_name,
-                    environment,
-                    currency,
-                    currency_scale,
-                    starting_equity_units,
-                    starting_equity_scale,
-                ) = row.map_err(database_error)?;
-                let id = TradingAccountId::try_new(id).map_err(|error| error.to_string())?;
-                let account = TradingAccount {
-                    id: id.clone(),
-                    display_name,
-                    environment: parse_environment(&environment)?,
-                    currency,
-                    currency_scale,
-                    starting_equity: starting_equity_units
-                        .zip(starting_equity_scale)
-                        .map(|(units, scale)| FixedPoint::try_new(units, scale))
-                        .transpose()
-                        .map_err(|error| error.to_string())?,
-                };
-                account.validate().map_err(|error| error.to_string())?;
-                accounts.insert(id, account);
-            }
-        }
+        let accounts = self.load_accounts()?;
         let instruments = self.load_instruments()?;
         let orders = self.load_orders()?;
         let order_events = self.load_events()?;
@@ -618,6 +569,67 @@ impl TradingStore {
         })
     }
 
+    fn load_accounts(&self) -> Result<BTreeMap<TradingAccountId, TradingAccount>, String> {
+        let mut accounts = BTreeMap::new();
+        {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT id, display_name, environment, currency, currency_scale,
+                        starting_equity_units, starting_equity_scale, venue_id, broker_ref
+                     FROM accounts ORDER BY id",
+                )
+                .map_err(database_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    let environment: String = row.get(2)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        environment,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, u8>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<u8>>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                })
+                .map_err(database_error)?;
+            for row in rows {
+                let (
+                    id,
+                    display_name,
+                    environment,
+                    currency,
+                    currency_scale,
+                    starting_equity_units,
+                    starting_equity_scale,
+                    venue_id,
+                    broker_ref,
+                ) = row.map_err(database_error)?;
+                let id = TradingAccountId::try_new(id).map_err(|error| error.to_string())?;
+                let account = TradingAccount {
+                    id: id.clone(),
+                    display_name,
+                    environment: parse_environment(&environment)?,
+                    venue_id,
+                    broker_ref,
+                    currency,
+                    currency_scale,
+                    starting_equity: starting_equity_units
+                        .zip(starting_equity_scale)
+                        .map(|(units, scale)| FixedPoint::try_new(units, scale))
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
+                };
+                account.validate().map_err(|error| error.to_string())?;
+                accounts.insert(id, account);
+            }
+        }
+        Ok(accounts)
+    }
+
     fn metadata(&self, key: &str) -> Result<u64, String> {
         self.connection
             .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
@@ -643,13 +655,14 @@ impl TradingStore {
         self.connection
             .execute(
                 "INSERT INTO accounts(id, display_name, environment, currency, currency_scale,
-                    starting_equity_units, starting_equity_scale)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    starting_equity_units, starting_equity_scale, venue_id, broker_ref)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,
                     environment=excluded.environment, currency=excluded.currency,
                     currency_scale=excluded.currency_scale,
                     starting_equity_units=excluded.starting_equity_units,
-                    starting_equity_scale=excluded.starting_equity_scale",
+                    starting_equity_scale=excluded.starting_equity_scale,
+                    venue_id=excluded.venue_id, broker_ref=excluded.broker_ref",
                 params![
                     account.id.as_str(),
                     account.display_name,
@@ -658,6 +671,8 @@ impl TradingStore {
                     account.currency_scale,
                     account.starting_equity.map(FixedPoint::units),
                     account.starting_equity.map(FixedPoint::scale),
+                    account.venue_id,
+                    account.broker_ref,
                 ],
             )
             .map_err(database_error)?;

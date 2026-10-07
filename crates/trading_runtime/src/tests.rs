@@ -54,6 +54,8 @@ fn start_service(directory: &TestDirectory) -> TradingService {
                 id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
                 display_name: "SIM • Test".to_string(),
                 environment: AccountEnvironment::Simulated,
+                venue_id: "aeris-sim".to_string(),
+                broker_ref: None,
                 currency: "USD".to_string(),
                 currency_scale: 2,
                 starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
@@ -62,6 +64,8 @@ fn start_service(directory: &TestDirectory) -> TradingService {
     }
     service
 }
+
+mod foundation;
 
 fn instrument() -> TradingInstrument {
     TradingInstrument {
@@ -1759,7 +1763,8 @@ fn flatten_closes_positions_and_survives_a_restart() {
             observation(10_100, 10_125, 3, 3_000),
         )
         .expect("flatten succeeds");
-    assert_eq!(fills.len(), 1);
+    assert_eq!(fills.fills.len(), 1);
+    assert_eq!(fills.pending_close_requests.len(), 0);
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
     assert_eq!(snapshot.fills.len(), 2);
@@ -1878,6 +1883,8 @@ fn global_flatten_closes_every_registered_account() {
             id: secondary.clone(),
             display_name: "Secondary SIM".to_string(),
             environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
             currency: "USD".to_string(),
             currency_scale: 2,
             starting_equity: None,
@@ -1902,6 +1909,7 @@ fn global_flatten_closes_every_registered_account() {
         service
             .flatten_all(observation(10_100, 10_125, 4, 3_000))
             .expect("global flatten succeeds")
+            .fills
             .len(),
         2
     );
@@ -1937,7 +1945,8 @@ fn reverse_closes_and_reopens_the_exact_opposite_position() {
             observation(10_100, 10_125, 3, 3_000),
         )
         .expect("position reverses");
-    assert_eq!(fills.len(), 2);
+    assert_eq!(fills.fills.len(), 2);
+    assert_eq!(fills.pending_close_requests.len(), 0);
     let position = service.snapshot().expect("snapshot").positions[0].clone();
     assert_eq!(position.net_quantity.units(), -1);
     service
@@ -1977,6 +1986,8 @@ fn trade_copier_is_durable_bounded_and_checks_each_target_independently() {
                 id: TradingAccountId::try_new(id).expect("account id"),
                 display_name: format!("SIM {id}"),
                 environment: AccountEnvironment::Simulated,
+                venue_id: "aeris-sim".to_string(),
+                broker_ref: None,
                 currency: "USD".to_string(),
                 currency_scale: 2,
                 starting_equity: None,

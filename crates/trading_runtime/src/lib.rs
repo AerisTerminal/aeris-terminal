@@ -57,7 +57,40 @@ const MAXIMUM_OPEN_ORDERS: usize = 4_096;
 const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
 const MAXIMUM_COPY_DISPATCHES: usize = 128;
 const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
+const LIVE_TRADING_DISABLED: &str = "cTrader live accounts are data-only; trading is disabled";
+const DEMO_VENUE_UNAVAILABLE: &str = "cTrader demo venue is not connected";
 type Reply<T> = SyncSender<Result<T, String>>;
+
+/// The owner derives the venue from the registered account, never from order provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VenueRoute {
+    Simulated,
+    CtraderDemo,
+}
+
+impl VenueRoute {
+    /// Rejects live accounts before a trading command can reach any venue.
+    ///
+    /// # Errors
+    /// Returns an error for invalid account routing or a data-only live account.
+    pub fn from_account(account: &TradingAccount) -> Result<Self, String> {
+        account.validate().map_err(|error| error.to_string())?;
+        match (account.venue_id.as_str(), account.environment) {
+            ("aeris-sim", AccountEnvironment::Simulated) => Ok(Self::Simulated),
+            ("ctrader", AccountEnvironment::Demo) => Ok(Self::CtraderDemo),
+            ("ctrader", AccountEnvironment::Live) => Err(LIVE_TRADING_DISABLED.into()),
+            _ => Err("trading account route is invalid".into()),
+        }
+    }
+}
+
+/// Simulated closes fill immediately; broker closes are asynchronous requests.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FlattenOutcome {
+    pub fills: Vec<Fill>,
+    /// Broker position IDs whose close requests have been submitted but not yet filled.
+    pub pending_close_requests: Vec<String>,
+}
 
 fn respond<T>(reply: &Reply<T>, result: Result<T, String>) {
     // A retired caller cannot affect the authoritative owner.
@@ -345,6 +378,14 @@ enum Command {
     Modify(ModifyOrder, Reply<Order>),
     Cancel(ClientOrderId, Reply<Order>),
     CancelAll(Option<TradingAccountId>, Reply<Vec<Order>>),
+    CloseBrokerPosition(TradingAccountId, String, Reply<()>),
+    AmendBrokerPositionSltp(
+        TradingAccountId,
+        String,
+        Option<FixedPoint>,
+        Option<FixedPoint>,
+        Reply<()>,
+    ),
     RegisterRiskProfile(RiskProfile, Reply<()>),
     RegisterSessionPlan(SessionPlan, Reply<()>),
     RegisterTradeCopier(TradeCopierConfig, Reply<()>),
@@ -355,14 +396,14 @@ enum Command {
     Flatten(
         TradingAccountId,
         SimulatedMarketObservation,
-        Reply<Vec<Fill>>,
+        Reply<FlattenOutcome>,
     ),
     Reverse(
         TradingAccountId,
         SimulatedMarketObservation,
-        Reply<Vec<Fill>>,
+        Reply<FlattenOutcome>,
     ),
-    FlattenAll(SimulatedMarketObservation, Reply<Vec<Fill>>),
+    FlattenAll(SimulatedMarketObservation, Reply<FlattenOutcome>),
     ApplyEconomicEventRisk(
         EconomicEventRiskTrigger,
         Option<SimulatedMarketObservation>,
@@ -603,6 +644,40 @@ impl TradingService {
         self.request(|reply| Command::CancelAll(account_id, reply))
     }
 
+    /// Requests an asynchronous close of a broker position. No simulation is fabricated.
+    ///
+    /// # Errors
+    /// Returns an error for non-broker or live accounts, an empty position ID, or an unattached demo venue.
+    pub fn close_broker_position(
+        &self,
+        account_id: TradingAccountId,
+        broker_position_id: String,
+    ) -> Result<(), String> {
+        self.request(|reply| Command::CloseBrokerPosition(account_id, broker_position_id, reply))
+    }
+
+    /// Requests broker-native stop-loss and take-profit changes.
+    ///
+    /// # Errors
+    /// Returns an error for non-broker or live accounts, empty inputs, or an unattached demo venue.
+    pub fn amend_broker_position_sltp(
+        &self,
+        account_id: TradingAccountId,
+        broker_position_id: String,
+        stop_loss: Option<FixedPoint>,
+        take_profit: Option<FixedPoint>,
+    ) -> Result<(), String> {
+        self.request(|reply| {
+            Command::AmendBrokerPositionSltp(
+                account_id,
+                broker_position_id,
+                stop_loss,
+                take_profit,
+                reply,
+            )
+        })
+    }
+
     /// Installs a versioned deterministic pre-trade rule profile.
     ///
     /// # Errors
@@ -682,7 +757,7 @@ impl TradingService {
         &self,
         account_id: TradingAccountId,
         observation: SimulatedMarketObservation,
-    ) -> Result<Vec<Fill>, String> {
+    ) -> Result<FlattenOutcome, String> {
         self.request(|reply| Command::Flatten(account_id, observation, reply))
     }
 
@@ -695,7 +770,7 @@ impl TradingService {
         &self,
         account_id: TradingAccountId,
         observation: SimulatedMarketObservation,
-    ) -> Result<Vec<Fill>, String> {
+    ) -> Result<FlattenOutcome, String> {
         self.request(|reply| Command::Reverse(account_id, observation, reply))
     }
 
@@ -707,7 +782,7 @@ impl TradingService {
     pub fn flatten_all(
         &self,
         observation: SimulatedMarketObservation,
-    ) -> Result<Vec<Fill>, String> {
+    ) -> Result<FlattenOutcome, String> {
         self.request(|reply| Command::FlattenAll(observation, reply))
     }
 
@@ -975,53 +1050,40 @@ impl Coordinator {
                     respond(&reply, self.register_account(account));
                 }
                 Command::CreatePracticeAccount(account, reply) => {
-                    let _ = reply.send(self.create_practice_account(&account));
+                    respond(&reply, self.create_practice_account(&account));
                 }
                 Command::DeletePracticeAccount(account_id, reply) => {
-                    let _ = reply.send(self.delete_practice_account(&account_id));
+                    respond(&reply, self.delete_practice_account(&account_id));
                 }
                 Command::RegisterInstrument(instrument, reply) => {
-                    let _ = reply.send(self.register_instrument(instrument));
+                    respond(&reply, self.register_instrument(instrument));
                 }
                 Command::InstallPracticeMarketSession(session, reply) => {
                     respond(&reply, self.install_practice_market_session(session));
                 }
-                Command::Place(order, reply) => {
-                    let _ = reply.send(self.place_order(&order));
-                }
-                Command::PlaceBracket(bracket, reply) => {
-                    let _ = reply.send(self.place_bracket(&bracket));
-                }
-                Command::PlaceInlineBracket(bracket, reply) => {
-                    let _ = reply
-                        .send(self.place_bracket_with_template(&bracket.entry, bracket.template));
-                }
-                Command::PlaceProtective(order, reply) => {
-                    let _ = reply.send(self.place_protective_order(order));
-                }
-                Command::EvaluateRisk(order, reply) => {
-                    let _ = reply.send(self.evaluate_order_risk(&order));
-                }
-                Command::Modify(order, reply) => {
-                    let _ = reply.send(self.modify_order(order));
-                }
-                Command::Cancel(client_order_id, reply) => {
-                    let _ = reply.send(self.cancel_order(&client_order_id));
-                }
-                Command::CancelAll(account_id, reply) => {
-                    let _ = reply.send(self.cancel_all(account_id.as_ref()));
+                Command::Place(..)
+                | Command::PlaceBracket(..)
+                | Command::PlaceInlineBracket(..)
+                | Command::PlaceProtective(..)
+                | Command::EvaluateRisk(..)
+                | Command::Modify(..)
+                | Command::Cancel(..)
+                | Command::CancelAll(..)
+                | Command::CloseBrokerPosition(..)
+                | Command::AmendBrokerPositionSltp(..) => {
+                    self.dispatch_order_command(command);
                 }
                 Command::RegisterRiskProfile(profile, reply) => {
-                    let _ = reply.send(self.register_risk_profile(profile));
+                    respond(&reply, self.register_risk_profile(profile));
                 }
                 Command::RegisterSessionPlan(plan, reply) => {
-                    let _ = reply.send(self.register_session_plan(plan));
+                    respond(&reply, self.register_session_plan(plan));
                 }
                 Command::RegisterTradeCopier(config, reply) => {
-                    let _ = reply.send(self.register_trade_copier(config));
+                    respond(&reply, self.register_trade_copier(config));
                 }
                 Command::RegisterStrategyTemplate(template, reply) => {
-                    let _ = reply.send(self.register_strategy_template(template));
+                    respond(&reply, self.register_strategy_template(template));
                 }
                 Command::LockAccount(account_id, reason, locked_at, reply) => {
                     let _ = reply.send(self.lock_account(account_id, reason, locked_at));
@@ -1070,6 +1132,49 @@ impl Coordinator {
         }
     }
 
+    fn dispatch_order_command(&mut self, command: Command) {
+        match command {
+            Command::Place(order, reply) => respond(&reply, self.place_order(&order)),
+            Command::PlaceBracket(bracket, reply) => respond(&reply, self.place_bracket(&bracket)),
+            Command::PlaceInlineBracket(bracket, reply) => respond(
+                &reply,
+                self.place_bracket_with_template(&bracket.entry, bracket.template),
+            ),
+            Command::PlaceProtective(order, reply) => {
+                respond(&reply, self.place_protective_order(order));
+            }
+            Command::EvaluateRisk(order, reply) => {
+                respond(&reply, self.evaluate_order_risk(&order));
+            }
+            Command::Modify(order, reply) => respond(&reply, self.modify_order(order)),
+            Command::Cancel(client_order_id, reply) => {
+                respond(&reply, self.cancel_order(&client_order_id));
+            }
+            Command::CancelAll(account_id, reply) => {
+                respond(&reply, self.cancel_all(account_id.as_ref()));
+            }
+            Command::CloseBrokerPosition(account_id, position_id, reply) => respond(
+                &reply,
+                self.broker_position_route(&account_id, &position_id, None),
+            ),
+            Command::AmendBrokerPositionSltp(
+                account_id,
+                position_id,
+                stop_loss,
+                take_profit,
+                reply,
+            ) => respond(
+                &reply,
+                self.broker_position_route(
+                    &account_id,
+                    &position_id,
+                    Some((stop_loss, take_profit)),
+                ),
+            ),
+            _ => {}
+        }
+    }
+
     fn status(&self) -> TradingServiceStatus {
         TradingServiceStatus {
             schema_version: SCHEMA_VERSION,
@@ -1091,6 +1196,49 @@ impl Coordinator {
         self.store.put_account(&account)?;
         self.state.accounts.insert(account.id.clone(), account);
         self.bump_revision()
+    }
+
+    fn route(&self, account_id: &TradingAccountId) -> Result<VenueRoute, String> {
+        VenueRoute::from_account(
+            self.state
+                .accounts
+                .get(account_id)
+                .ok_or_else(|| "trading account is not registered".to_string())?,
+        )
+    }
+
+    fn broker_position_route(
+        &self,
+        account_id: &TradingAccountId,
+        position_id: &str,
+        prices: Option<(Option<FixedPoint>, Option<FixedPoint>)>,
+    ) -> Result<(), String> {
+        match self.route(account_id)? {
+            VenueRoute::Simulated => Err("broker position requires a cTrader account".into()),
+            VenueRoute::CtraderDemo if position_id.trim().is_empty() => {
+                Err("broker position identifier must not be empty".into())
+            }
+            VenueRoute::CtraderDemo
+                if prices.is_some_and(|(stop, take)| stop.is_none() && take.is_none()) =>
+            {
+                Err("stop-loss or take-profit is required".into())
+            }
+            VenueRoute::CtraderDemo => Err(DEMO_VENUE_UNAVAILABLE.into()),
+        }
+    }
+
+    fn preflight_accounts(&self, account_id: Option<&TradingAccountId>) -> Result<(), String> {
+        for account in self
+            .state
+            .accounts
+            .values()
+            .filter(|account| account_id.is_none_or(|id| &account.id == id))
+        {
+            if self.route(&account.id)? == VenueRoute::CtraderDemo {
+                return Err(DEMO_VENUE_UNAVAILABLE.into());
+            }
+        }
+        Ok(())
     }
 
     fn create_practice_account(
@@ -1121,6 +1269,8 @@ impl Coordinator {
                 .map_err(|error| error.to_string())?,
             display_name: format!("SIM • {name}"),
             environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
             currency: "USD".to_string(),
             currency_scale: 2,
             starting_equity: Some(starting_equity),
@@ -1298,6 +1448,13 @@ impl Coordinator {
     }
 
     fn register_risk_profile(&mut self, profile: RiskProfile) -> Result<(), String> {
+        if profile
+            .economic_event_rule
+            .is_some_and(|rule| rule.action == EconomicEventRiskAction::Flatten)
+            && self.route(&profile.account_id)? != VenueRoute::Simulated
+        {
+            return Err("economic-event flatten is unavailable for broker accounts".into());
+        }
         profile.validate()?;
         if !self.state.accounts.contains_key(&profile.account_id) {
             return Err("risk profile account is not registered".to_string());
@@ -1360,6 +1517,14 @@ impl Coordinator {
     }
 
     fn register_trade_copier(&mut self, config: TradeCopierConfig) -> Result<(), String> {
+        if self.route(&config.source_account_id)? != VenueRoute::Simulated {
+            return Err("trade copier is unavailable for broker accounts".into());
+        }
+        for target in &config.targets {
+            if self.route(&target.account_id)? != VenueRoute::Simulated {
+                return Err("trade copier is unavailable for broker accounts".into());
+            }
+        }
         config.validate()?;
         if self
             .state
@@ -1467,6 +1632,7 @@ impl Coordinator {
         if accounts.is_empty() {
             return Err("kill switch account is not registered".to_string());
         }
+        self.preflight_accounts(account_id)?;
         let cancelled = self.cancel_all(account_id)?;
         for account in &accounts {
             self.lock_account(account.clone(), reason.to_string(), locked_at_unix_nanos)?;
@@ -1490,6 +1656,10 @@ impl Coordinator {
             .find(|order| order.client_order_id == *client_order_id)
             .cloned()
             .ok_or_else(|| "order client identifier is not registered".to_string())?;
+        match self.route(&order.account_id)? {
+            VenueRoute::Simulated => {}
+            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+        }
         if !order.status.is_open() {
             return Ok(order);
         }
@@ -1561,7 +1731,7 @@ impl Coordinator {
         Ok(())
     }
 
-    fn modify_order(&mut self, command: ModifyOrder) -> Result<Order, String> {
+    fn modify_order(&mut self, mut command: ModifyOrder) -> Result<Order, String> {
         let order = self
             .state
             .orders
@@ -1569,6 +1739,16 @@ impl Coordinator {
             .find(|order| order.client_order_id == command.client_order_id)
             .cloned()
             .ok_or_else(|| "order client identifier is not registered".to_string())?;
+        let account = self
+            .state
+            .accounts
+            .get(&order.account_id)
+            .ok_or_else(|| "trading account is not registered".to_string())?;
+        match VenueRoute::from_account(account)? {
+            VenueRoute::Simulated => {}
+            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+        }
+        command.provenance.venue_id.clone_from(&account.venue_id);
         if !matches!(
             order.status,
             OrderStatus::Working | OrderStatus::PartiallyFilled
@@ -1626,6 +1806,7 @@ impl Coordinator {
     }
 
     fn cancel_all(&mut self, account_id: Option<&TradingAccountId>) -> Result<Vec<Order>, String> {
+        self.preflight_accounts(account_id)?;
         let client_order_ids = self
             .state
             .orders
@@ -1645,6 +1826,15 @@ impl Coordinator {
     }
 
     fn place_order(&mut self, command: &PlaceOrder) -> Result<Order, String> {
+        match self.route(&command.account_id)? {
+            VenueRoute::Simulated => {}
+            VenueRoute::CtraderDemo => {
+                if command.client_order_id.as_str().len() > 50 {
+                    return Err("cTrader ClientOrderId must be at most 50 characters".into());
+                }
+                return Err(DEMO_VENUE_UNAVAILABLE.into());
+            }
+        }
         if let Some(existing) = self
             .state
             .orders
@@ -1659,6 +1849,13 @@ impl Coordinator {
             .get(&command.account_id)
             .filter(|config| config.enabled)
             .cloned();
+        if let Some(config) = &copier {
+            for target in config.targets.iter().filter(|target| target.enabled) {
+                if self.route(&target.account_id)? != VenueRoute::Simulated {
+                    return Err("trade copier is unavailable for broker accounts".into());
+                }
+            }
+        }
         let source = self.place_single_order(command.clone())?;
         if let Some(copier) = copier {
             for target in copier.targets.into_iter().filter(|target| target.enabled) {
@@ -1707,6 +1904,15 @@ impl Coordinator {
         entry_command: &PlaceOrder,
         template: BracketStrategyTemplate,
     ) -> Result<ManagedBracket, String> {
+        if self.route(&entry_command.account_id)? != VenueRoute::Simulated {
+            if template.trailing_stop.is_some() {
+                return Err("managed trailing stops are unavailable for broker accounts".into());
+            }
+            if template.break_even.is_some() {
+                return Err("managed break-even stops are unavailable for broker accounts".into());
+            }
+            return Err("managed brackets are unavailable for broker accounts".into());
+        }
         template.validate()?;
         let bracket_id = entry_command.client_order_id.as_str().to_string();
         if let Some(existing) = self.state.managed_brackets.get(&bracket_id) {
@@ -1854,6 +2060,9 @@ impl Coordinator {
     }
 
     fn place_protective_order(&mut self, command: PlaceProtectiveOrder) -> Result<Order, String> {
+        if self.route(&command.order.account_id)? != VenueRoute::Simulated {
+            return Err("managed protective orders are unavailable for broker accounts".into());
+        }
         if let Some(existing) = self
             .state
             .orders
@@ -1931,7 +2140,7 @@ impl Coordinator {
 
     fn prepare_single_order(
         &mut self,
-        command: PlaceOrder,
+        mut command: PlaceOrder,
         enforce_risk: bool,
         sequence: u64,
         additional_open_orders: usize,
@@ -1941,9 +2150,11 @@ impl Coordinator {
             .accounts
             .get(&command.account_id)
             .ok_or_else(|| "trading account is not registered".to_string())?;
-        if account.environment != AccountEnvironment::Simulated {
-            return Err("T1 routes orders only to the simulated venue".to_string());
+        match VenueRoute::from_account(account)? {
+            VenueRoute::Simulated => {}
+            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
         }
+        command.provenance.venue_id.clone_from(&account.venue_id);
         let account_currency = account.currency.clone();
         let risk_warnings = if enforce_risk {
             self.evaluate_order_risk(&command)?.warnings
@@ -3536,9 +3747,13 @@ impl Coordinator {
         &mut self,
         account_id: &TradingAccountId,
         observation: &SimulatedMarketObservation,
-    ) -> Result<Vec<Fill>, String> {
+    ) -> Result<FlattenOutcome, String> {
         if !self.state.accounts.contains_key(account_id) {
             return Err("flatten account is not registered".to_string());
+        }
+        match self.route(account_id)? {
+            VenueRoute::Simulated => {}
+            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
         }
         let mut fills = self.observe_market(observation)?;
         self.cancel_all(Some(account_id))?;
@@ -3546,14 +3761,21 @@ impl Coordinator {
         self.store.enforce_retention()?;
         self.enforce_memory_retention();
         self.bump_revision()?;
-        Ok(fills)
+        Ok(FlattenOutcome {
+            fills,
+            pending_close_requests: Vec::new(),
+        })
     }
 
     fn reverse_position(
         &mut self,
         account_id: &TradingAccountId,
         observation: &SimulatedMarketObservation,
-    ) -> Result<Vec<Fill>, String> {
+    ) -> Result<FlattenOutcome, String> {
+        match self.route(account_id)? {
+            VenueRoute::Simulated => {}
+            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+        }
         let key = (account_id.clone(), observation.instrument_id.clone());
         let position = self
             .state
@@ -3573,7 +3795,7 @@ impl Coordinator {
             position.net_quantity.scale(),
         )
         .map_err(|error| error.to_string())?;
-        let mut fills = self.flatten_account(account_id, observation)?;
+        let mut outcome = self.flatten_account(account_id, observation)?;
         let client_order_id =
             ClientOrderId::try_new(format!("sim-reverse-{}", self.state.next_sequence))
                 .map_err(|error| error.to_string())?;
@@ -3591,8 +3813,8 @@ impl Coordinator {
             provenance: observation.provenance.clone(),
         };
         self.place_order(&order)?;
-        fills.extend(self.observe_market(observation)?);
-        Ok(fills)
+        outcome.fills.extend(self.observe_market(observation)?);
+        Ok(outcome)
     }
 
     fn apply_economic_event_risk(
@@ -3614,6 +3836,13 @@ impl Coordinator {
                     .map(|rule| (profile.clone(), rule))
             })
             .collect::<Vec<_>>();
+        for (profile, rule) in &profiles {
+            if rule.action == EconomicEventRiskAction::Flatten
+                && self.route(&profile.account_id)? != VenueRoute::Simulated
+            {
+                return Err("economic-event flatten is unavailable for broker accounts".into());
+            }
+        }
         let mut outcome = EconomicEventRiskOutcome::default();
         for (profile, rule) in profiles {
             if event.importance < rule.minimum_importance {
@@ -3668,9 +3897,10 @@ impl Coordinator {
                                 .to_string(),
                         );
                     }
-                    outcome
-                        .fills
-                        .extend(self.flatten_account(&profile.account_id, observation)?);
+                    outcome.fills.extend(
+                        self.flatten_account(&profile.account_id, observation)?
+                            .fills,
+                    );
                     outcome.flattened_accounts += 1;
                 }
             }
@@ -3688,10 +3918,11 @@ impl Coordinator {
     fn flatten_all(
         &mut self,
         observation: &SimulatedMarketObservation,
-    ) -> Result<Vec<Fill>, String> {
+    ) -> Result<FlattenOutcome, String> {
         if self.state.accounts.is_empty() {
             return Err("flatten requires at least one registered account".to_string());
         }
+        self.preflight_accounts(None)?;
         let mut fills = self.observe_market(observation)?;
         self.cancel_all(None)?;
         let accounts = self.state.accounts.keys().cloned().collect::<Vec<_>>();
@@ -3701,7 +3932,10 @@ impl Coordinator {
         self.store.enforce_retention()?;
         self.enforce_memory_retention();
         self.bump_revision()?;
-        Ok(fills)
+        Ok(FlattenOutcome {
+            fills,
+            pending_close_requests: Vec::new(),
+        })
     }
 
     fn flatten_positions(

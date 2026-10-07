@@ -2786,14 +2786,29 @@ fn working_orders_are_drawn_on_the_row_side_their_click_created() {
     }
 }
 
+fn simulated_chart_fixture(
+    account: aeris_trading::TradingAccountId,
+) -> aeris_trading::TradingAccount {
+    aeris_trading::TradingAccount {
+        id: account,
+        display_name: "SIM • Chart fixture".to_string(),
+        environment: aeris_trading::AccountEnvironment::Simulated,
+        venue_id: "aeris-sim".to_string(),
+        broker_ref: None,
+        currency: "USD".to_string(),
+        currency_scale: 2,
+        starting_equity: Some(aeris_trading::FixedPoint::try_new(5_000_000, 2).expect("equity")),
+    }
+}
+
 #[test]
 fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
     use aeris_instruments::{
         ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
     };
     use aeris_trading::{
-        AccountEnvironment, ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce,
-        TradingAccount, TradingAccountId, TradingProvenance,
+        ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingAccountId,
+        TradingProvenance,
     };
     use aeris_trading_runtime::{
         PlaceOrder, TradingInstrument, TradingRetention, TradingService, TradingServiceConfig,
@@ -2837,14 +2852,7 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
         .expect("register instrument");
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     service
-        .register_account(TradingAccount {
-            id: account.clone(),
-            display_name: "SIM • Chart fixture".to_string(),
-            environment: AccountEnvironment::Simulated,
-            currency: "USD".to_string(),
-            currency_scale: 2,
-            starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
-        })
+        .register_account(simulated_chart_fixture(account.clone()))
         .expect("register account");
     let limit = |id: &str| PlaceOrder {
         client_order_id: ClientOrderId::try_new(id).expect("client id"),
