@@ -4,6 +4,8 @@ use aeris_instruments::{
 };
 use std::{fs, path::PathBuf};
 
+mod characterization;
+
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {

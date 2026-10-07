@@ -1,0 +1,22 @@
+bracket placed revision=4 orders=[sim-order-1:working] events=[sim-event-1] fills=[] pnl=0@2/0@2/5000000@2
+entry touched revision=6 orders=[sim-order-1:filled,sim-order-3:working,sim-order-4:working] events=[sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-2] pnl=0@2/-1250@2/4998750@2
+stop touched revision=8 orders=[sim-order-1:filled,sim-order-3:filled,sim-order-4:cancelled] events=[sim-event-6,sim-event-5,sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-5,sim-fill-2] pnl=-12500@2/0@2/4987500@2
+
+revision=8
+order sim-order-1 stop-entry buy market day 1@0 1@0 - - filled 1000 aeris-sim:fixture:1:1:1000
+order sim-order-3 bracket-stop-7b4343c53b7101fc sell stop gtc 1@0 1@0 - 9800@2 filled 2000 aeris-sim:fixture:1:2:2000
+order sim-order-4 bracket-target-59a79a05dfc0002d sell limit gtc 1@0 0@0 10200@2 - cancelled 2000 aeris-sim:fixture:1:2:2000
+event sim-event-6 sim-order-4 6 cancelled 2000 Some("cancelled by local command") aeris-sim:fixture:1:2:2000
+event sim-event-5 sim-order-3 5 filled 3000 Some("touch fill") aeris-sim:fixture:1:3:3000
+event sim-event-4 sim-order-4 4 accepted 2000 Some("LOCAL-MANAGED scale-out target 1") aeris-sim:fixture:1:2:2000
+event sim-event-3 sim-order-3 3 accepted 2000 Some("LOCAL-MANAGED protective stop") aeris-sim:fixture:1:2:2000
+event sim-event-2 sim-order-1 2 filled 2000 Some("touch fill") aeris-sim:fixture:1:2:2000
+event sim-event-1 sim-order-1 1 accepted 1000 Some("accepted by local simulated venue") aeris-sim:fixture:1:1:1000
+fill sim-fill-5 sim-order-3 aeris-sim-1 instrument:fixture:CME:ESZ6 sell 9750@2 1@0 3000 aeris-sim:fixture:1:3:3000
+fill sim-fill-2 sim-order-1 aeris-sim-1 instrument:fixture:CME:ESZ6 buy 10000@2 1@0 2000 aeris-sim:fixture:1:2:2000
+position aeris-sim-1 instrument:fixture:CME:ESZ6 0@0 - -12500@2 0@2 3000
+pnl aeris-sim-1 USD -12500@2 0@2 4987500@2
+fill_pnl sim-fill-5 -12500@2
+trade_pnl sim-fill-5 -12500@2
+managed_brackets=[ManagedBracket { bracket_id: "stop-entry", template: BracketStrategyTemplate { template_id: "stop-golden", revision: 1, name: "Stop touch fixture", stop_offset_ticks: 8, targets: [BracketTarget { offset_ticks: 8, quantity_percent: 100 }], trailing_stop: None, break_even: None, enabled: true }, entry_client_order_id: ClientOrderId("stop-entry"), stop_client_order_id: Some(ClientOrderId("bracket-stop-7b4343c53b7101fc")), target_client_order_ids: [ClientOrderId("bracket-target-59a79a05dfc0002d")], status: Completed, entry_price: Some(FixedPoint { units: 10000, scale: 2 }) }]
+risk_locks=[]
