@@ -5,7 +5,7 @@ use crate::{
     codec::{self, CodecError},
     generated::{
         ProtoErrorRes, ProtoOaAccountAuthReq, ProtoOaApplicationAuthReq, ProtoOaErrorRes,
-        ProtoOaGetAccountListByAccessTokenReq,
+        ProtoOaGetAccountListByAccessTokenReq, ProtoOaSymbolsListReq, ProtoOaSymbolsListRes,
     },
     host::CtraderHost,
     transport::{Bucket, Transport, TransportError},
@@ -29,6 +29,7 @@ pub struct AppCredentials {
 }
 impl Drop for AppCredentials {
     fn drop(&mut self) {
+        self.client_id.zeroize();
         self.client_secret.zeroize();
     }
 }
@@ -351,6 +352,43 @@ impl CtraderSession {
     #[must_use]
     pub fn host(&self) -> CtraderHost {
         self.host
+    }
+
+    /// Load the bounded lightweight symbol catalog for an authorized account.
+    ///
+    /// # Errors
+    /// Rejects an unknown account, missing wire fields, and oversized catalogs.
+    pub fn symbol_names(&mut self, account: &CtraderAccount) -> Result<Vec<String>, SessionFault> {
+        self.authorize_account(account, || Err(SessionFault::NeedsReconnect))?;
+        let ctid = i64::try_from(account.ctid).map_err(|_| SessionFault::Protocol)?;
+        let response = self.request(
+            2114,
+            ProtoOaSymbolsListReq {
+                payload_type: None,
+                ctid_trader_account_id: ctid,
+                include_archived_symbols: Some(false),
+            }
+            .encode_to_vec(),
+            2115,
+            Bucket::General,
+            REQUEST_TIMEOUT,
+        )?;
+        let list: ProtoOaSymbolsListRes =
+            codec::decode_typed(&response, 2115, &[(2, "ctidTraderAccountId")], |_| Ok(()))?;
+        if list.ctid_trader_account_id != ctid
+            || list.symbol.len() > 65_536
+            || list
+                .symbol
+                .iter()
+                .any(|symbol| symbol.symbol_id <= 0 || symbol.symbol_name.is_none())
+        {
+            return Err(SessionFault::Protocol);
+        }
+        Ok(list
+            .symbol
+            .into_iter()
+            .filter_map(|symbol| symbol.symbol_name)
+            .collect())
     }
 
     /// # Errors

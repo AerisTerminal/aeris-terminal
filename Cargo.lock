@@ -258,6 +258,8 @@ dependencies = [
  "protoc-bin-vendored",
  "rcgen",
  "rustls",
+ "serde",
+ "serde_json",
  "socket2",
  "webpki-roots 1.0.9",
  "zeroize",
@@ -335,6 +337,7 @@ name = "aeris_market_runtime"
 version = "0.2.3"
 dependencies = [
  "aeris_contracts",
+ "aeris_ctrader_open_api_adapter",
  "aeris_hyperliquid_market_adapter",
  "aeris_market_data",
  "aeris_market_engine",

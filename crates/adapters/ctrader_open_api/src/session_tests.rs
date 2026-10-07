@@ -5,7 +5,7 @@ use crate::{
     generated::{
         ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent, ProtoOaAccountsTokenInvalidatedEvent,
         ProtoOaApplicationAuthRes, ProtoOaCtidTraderAccount, ProtoOaErrorRes,
-        ProtoOaGetAccountListByAccessTokenRes,
+        ProtoOaGetAccountListByAccessTokenRes, ProtoOaLightSymbol, ProtoOaSymbolsListRes,
     },
     host::CtraderHost,
     session::{AccessToken, AppCredentials, CtraderSession, SessionFault},
@@ -165,6 +165,55 @@ fn auth_sequence_authorizes_account_only_when_used() {
         session.authorize_account(&live, || panic!("unexpected refresh")),
         Err(SessionFault::Protocol)
     );
+    session.close();
+    server.join().unwrap();
+}
+
+#[test]
+fn symbol_inventory_requires_account_auth_and_preserves_names() {
+    let (listener, address, roots, config) = listener();
+    let server = thread::spawn(move || {
+        let mut socket = accept(&listener, config);
+        authorize(&mut socket);
+        let account = codec::read_frame(&mut socket).unwrap();
+        assert_eq!(account.payload_type, 2102);
+        reply(
+            &mut socket,
+            &account,
+            2103,
+            ProtoOaAccountAuthRes {
+                payload_type: None,
+                ctid_trader_account_id: 7,
+            }
+            .encode_to_vec(),
+        );
+        let request = codec::read_frame(&mut socket).unwrap();
+        assert_eq!(request.payload_type, 2114);
+        reply(
+            &mut socket,
+            &request,
+            2115,
+            ProtoOaSymbolsListRes {
+                payload_type: None,
+                ctid_trader_account_id: 7,
+                symbol: vec![ProtoOaLightSymbol {
+                    symbol_id: 1,
+                    symbol_name: Some("EURUSD".into()),
+                    enabled: Some(true),
+                    base_asset_id: None,
+                    quote_asset_id: None,
+                    symbol_category_id: None,
+                    description: None,
+                    sorting_number: None,
+                }],
+                archived_symbol: Vec::new(),
+            }
+            .encode_to_vec(),
+        );
+    });
+    let mut session = session(client(address, roots, Arc::new(AtomicBool::new(false))));
+    let account = session.accounts()[0].clone();
+    assert_eq!(session.symbol_names(&account).unwrap(), ["EURUSD"]);
     session.close();
     server.join().unwrap();
 }

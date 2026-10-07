@@ -14,6 +14,7 @@ socket2.workspace = true
 webpki-roots.workspace = true
 getrandom.workspace = true
 zeroize.workspace = true
+serde.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true
@@ -21,6 +22,7 @@ protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

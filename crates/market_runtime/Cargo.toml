@@ -16,6 +16,7 @@ aeris_provider_history = { path = "../provider_history" }
 aeris_rithmic_protocol_adapter = { path = "../adapters/rithmic_protocol" }
 aeris_hyperliquid_market_adapter = { path = "../adapters/hyperliquid_market" }
 aeris_tastytrade_market_adapter = { path = "../adapters/tastytrade_market" }
+aeris_ctrader_open_api_adapter = { path = "../adapters/ctrader_open_api" }
 chrono.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
