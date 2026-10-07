@@ -1,0 +1,11 @@
+//! cTrader Open API wire framing and endpoint selection.
+
+#[allow(dead_code, clippy::all, clippy::pedantic)]
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/ctrader.protobuf.rs"));
+}
+
+pub use generated::ProtoMessage;
+
+pub mod codec;
+pub mod host;

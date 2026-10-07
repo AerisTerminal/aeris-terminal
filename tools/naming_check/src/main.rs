@@ -303,6 +303,7 @@ mod tests {
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
             "crates/adapters/tastytrade_market/Cargo.toml",
+            "crates/adapters/ctrader_open_api/Cargo.toml",
         ] {
             assert_excludes(relative, &ui);
         }
@@ -312,6 +313,7 @@ mod tests {
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
                 "aeris_tastytrade_market_adapter",
+                "aeris_ctrader_open_api_adapter",
             ],
         );
     }
@@ -506,6 +508,7 @@ mod tests {
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
                 "aeris_tastytrade_market_adapter",
+                "aeris_ctrader_open_api_adapter",
                 "aeris_charts_engine",
                 "aeris_charts_render",
                 "aeris_charts_render_gpui",
@@ -535,6 +538,7 @@ mod tests {
                     "aeris_rithmic_protocol_adapter",
                     "aeris_hyperliquid_market_adapter",
                     "aeris_tastytrade_market_adapter",
+                    "aeris_ctrader_open_api_adapter",
                     "aeris_local_history",
                     "aeris_local_storage",
                     "aeris_market_engine",
@@ -652,6 +656,7 @@ mod tests {
                 "aeris_rithmic_protocol_adapter",
                 "aeris_hyperliquid_market_adapter",
                 "aeris_tastytrade_market_adapter",
+                "aeris_ctrader_open_api_adapter",
                 "aeris_provider_history",
                 "aeris_local_storage",
                 "aeris_local_history",
@@ -957,7 +962,10 @@ mod tests {
 
     #[test]
     fn dead_code_suppressions_remain_at_external_decode_boundaries() {
-        let allowed = BTreeSet::from(["crates/adapters/rithmic_protocol/src/lib.rs"]);
+        let allowed = BTreeSet::from([
+            "crates/adapters/rithmic_protocol/src/lib.rs",
+            "crates/adapters/ctrader_open_api/src/lib.rs",
+        ]);
 
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path)
@@ -1169,6 +1177,7 @@ mod tests {
             "crates/adapters/rithmic_protocol/Cargo.toml",
             "crates/adapters/hyperliquid_market/Cargo.toml",
             "crates/adapters/tastytrade_market/Cargo.toml",
+            "crates/adapters/ctrader_open_api/Cargo.toml",
         ] {
             let dependencies = production_dependencies(relative);
             for forbidden in [
@@ -1309,6 +1318,7 @@ mod tests {
                     "hyperliquid_market_adapter::",
                     "rithmic_protocol_adapter::",
                     "tastytrade_market_adapter::",
+                    "ctrader_open_api_adapter::",
                 ] {
                     assert!(
                         !production.contains(boundary),

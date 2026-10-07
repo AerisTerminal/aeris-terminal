@@ -4,6 +4,7 @@ members = [
     "crates/adapters/rithmic_protocol",
     "crates/adapters/hyperliquid_market",
     "crates/adapters/tastytrade_market",
+    "crates/adapters/ctrader_open_api",
     "crates/application",
     "crates/account_runtime",
     "crates/market_engine",

@@ -1,0 +1,5 @@
+Spotware Open API protocol messages
+https://github.com/spotware/openapi-proto-messages
+Commit: 3fd8bddfbe0cfc2ecfda079623dc4e498af11e66
+Files: OpenApiCommonMessages.proto, OpenApiCommonModelMessages.proto, OpenApiMessages.proto, OpenApiModelMessages.proto, LICENSE
+License: MIT (see LICENSE)

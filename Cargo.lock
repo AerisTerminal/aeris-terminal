@@ -248,6 +248,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aeris_ctrader_open_api_adapter"
+version = "0.2.3"
+dependencies = [
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+]
+
+[[package]]
 name = "aeris_design_system"
 version = "0.2.3"
 
