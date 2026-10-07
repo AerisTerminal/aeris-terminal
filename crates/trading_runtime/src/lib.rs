@@ -12,8 +12,8 @@ mod strategy;
 
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::{
-    AccountEnvironment, AccountPnl, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
-    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
+    AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order,
+    OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
     TimeInForce, TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
 };
 pub use copier::{MAXIMUM_COPIER_TARGETS, TradeCopierConfig, TradeCopierTarget, TradeCopyDispatch};
@@ -257,6 +257,7 @@ pub struct TradingSnapshot {
     /// Realized P&L of each fill that reduced or closed a position, partial exits included.
     pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
     pub positions: Vec<Position>,
+    pub broker_positions: Vec<BrokerPosition>,
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
     pub risk_profiles: Vec<RiskProfile>,
@@ -3836,6 +3837,7 @@ impl Coordinator {
             || self.state.instruments.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.orders.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.positions.len() > MAXIMUM_SNAPSHOT_ITEMS
+            || self.state.broker_positions.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.protective_orders.len() > MAXIMUM_SNAPSHOT_ITEMS
         {
             return Err("trading snapshot item limit exceeded".to_string());
@@ -3889,6 +3891,7 @@ impl Coordinator {
                 })
                 .collect(),
             positions: self.state.positions.values().cloned().collect(),
+            broker_positions: self.state.broker_positions.values().cloned().collect(),
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
             risk_profiles: self.state.risk_profiles.values().cloned().collect(),

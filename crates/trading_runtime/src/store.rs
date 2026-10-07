@@ -11,9 +11,9 @@ use aeris_instruments::{
     SessionHours,
 };
 use aeris_trading::{
-    AccountEnvironment, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce,
-    TradingAccount, TradingAccountId, TradingProvenance,
+    AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
+    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
+    TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
 };
 use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ use std::{
     path::Path,
 };
 
-pub(super) const SCHEMA_VERSION: u32 = 17;
+pub(super) const SCHEMA_VERSION: u32 = 18;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -178,6 +178,40 @@ const MIGRATION_V16: &str = "ALTER TABLE fills ADD COLUMN completed_trade_pnl_un
  ) STRICT;";
 const MIGRATION_V17: &str = "ALTER TABLE fills ADD COLUMN realized_pnl_units INTEGER;
  ALTER TABLE fills ADD COLUMN realized_pnl_scale INTEGER;";
+const MIGRATION_V18: &str =
+    "ALTER TABLE accounts ADD COLUMN venue_id TEXT NOT NULL DEFAULT 'aeris-sim';
+ ALTER TABLE accounts ADD COLUMN broker_ref TEXT;
+ ALTER TABLE accounts ADD COLUMN broker_account_type TEXT;
+ ALTER TABLE accounts ADD COLUMN connection_state TEXT;
+ CREATE TABLE broker_orders (
+     order_id TEXT PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+     broker_order_id TEXT UNIQUE, client_order_id TEXT NOT NULL,
+     session_generation INTEGER NOT NULL, updated_unix_nanos INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE broker_deals (
+     broker_deal_id TEXT PRIMARY KEY, fill_id TEXT NOT NULL UNIQUE
+         REFERENCES fills(id) ON DELETE CASCADE,
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     broker_position_id TEXT, executed_unix_millis INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE broker_positions (
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     broker_position_id TEXT NOT NULL, instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     side TEXT NOT NULL, quantity_units INTEGER NOT NULL, quantity_scale INTEGER NOT NULL,
+     entry_units INTEGER NOT NULL, entry_scale INTEGER NOT NULL,
+     stop_units INTEGER, stop_scale INTEGER, take_units INTEGER, take_scale INTEGER,
+     swap_units INTEGER NOT NULL, swap_scale INTEGER NOT NULL,
+     commission_units INTEGER NOT NULL, commission_scale INTEGER NOT NULL,
+     gross_unrealized_units INTEGER NOT NULL, gross_unrealized_scale INTEGER NOT NULL,
+     net_unrealized_units INTEGER NOT NULL, net_unrealized_scale INTEGER NOT NULL,
+     opened_unix_nanos INTEGER NOT NULL,
+     PRIMARY KEY(account_id, broker_position_id)
+ ) STRICT;
+ CREATE TABLE broker_account_state (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+     balance_units INTEGER NOT NULL, balance_scale INTEGER NOT NULL,
+     last_deal_unix_millis INTEGER, session_generation INTEGER NOT NULL
+ ) STRICT;";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -191,6 +225,7 @@ pub(super) struct StoredState {
     pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
     pub trade_pnl_cycles: BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
+    pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
     pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
     pub risk_rule_states: BTreeMap<TradingAccountId, RiskRuleState>,
@@ -408,7 +443,11 @@ impl TradingStore {
             version = 16;
         }
         if version == 16 {
-            self.apply_migration(SCHEMA_VERSION, MIGRATION_V17)?;
+            self.apply_migration(17, MIGRATION_V17)?;
+            version = 17;
+        }
+        if version == 17 {
+            self.apply_migration(SCHEMA_VERSION, MIGRATION_V18)?;
         }
         Ok(())
     }
@@ -542,6 +581,7 @@ impl TradingStore {
         let fill_realized_pnl = self.load_fill_realized_pnl()?;
         let trade_pnl_cycles = self.load_trade_pnl_cycles()?;
         let positions = self.load_positions()?;
+        let broker_positions = self.load_broker_positions()?;
         let risk_profiles = self.load_risk_profiles()?;
         let risk_locks = self.load_risk_locks()?;
         let risk_rule_states = self.load_risk_rule_states()?;
@@ -564,6 +604,7 @@ impl TradingStore {
             fill_realized_pnl,
             trade_pnl_cycles,
             positions,
+            broker_positions,
             risk_profiles,
             risk_locks,
             risk_rule_states,
@@ -2155,6 +2196,55 @@ impl TradingStore {
         Ok(output)
     }
 
+    fn load_broker_positions(
+        &self,
+    ) -> Result<BTreeMap<(TradingAccountId, String), BrokerPosition>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, broker_position_id, instrument_id, side,
+                quantity_units, quantity_scale, entry_units, entry_scale,
+                stop_units, stop_scale, take_units, take_scale,
+                swap_units, swap_scale, commission_units, commission_scale,
+                gross_unrealized_units, gross_unrealized_scale,
+                net_unrealized_units, net_unrealized_scale, opened_unix_nanos
+             FROM broker_positions ORDER BY account_id, broker_position_id",
+            )
+            .map_err(database_error)?;
+        let mut rows = statement.query([]).map_err(database_error)?;
+        let mut positions = BTreeMap::new();
+        while let Some(row) = rows.next().map_err(database_error)? {
+            let string = |column| row.get::<_, String>(column).map_err(database_error);
+            let integer = |column| row.get::<_, i64>(column).map_err(database_error);
+            let scale = |column| row.get::<_, u8>(column).map_err(database_error);
+            let optional_integer =
+                |column| row.get::<_, Option<i64>>(column).map_err(database_error);
+            let optional_scale = |column| row.get::<_, Option<u8>>(column).map_err(database_error);
+            let account_id =
+                TradingAccountId::try_new(string(0)?).map_err(|error| error.to_string())?;
+            let broker_position_id = string(1)?;
+            let position = BrokerPosition {
+                account_id: account_id.clone(),
+                broker_position_id: broker_position_id.clone(),
+                instrument_id: InstrumentId::try_new(string(2)?)
+                    .map_err(|error| error.to_string())?,
+                side: parse_side(&string(3)?)?,
+                quantity: fixed(integer(4)?, scale(5)?)?,
+                entry_price: fixed(integer(6)?, scale(7)?)?,
+                stop_loss: optional_fixed(optional_integer(8)?, optional_scale(9)?)?,
+                take_profit: optional_fixed(optional_integer(10)?, optional_scale(11)?)?,
+                swap: fixed(integer(12)?, scale(13)?)?,
+                commission: fixed(integer(14)?, scale(15)?)?,
+                gross_unrealized: fixed(integer(16)?, scale(17)?)?,
+                net_unrealized: fixed(integer(18)?, scale(19)?)?,
+                opened_unix_nanos: integer(20)?,
+            };
+            position.validate().map_err(|error| error.to_string())?;
+            positions.insert((account_id, broker_position_id), position);
+        }
+        Ok(positions)
+    }
+
     fn load_positions(
         &self,
     ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), Position>, String> {
@@ -2696,6 +2786,7 @@ fn split_optional(value: Option<FixedPoint>) -> (Option<i64>, Option<u8>) {
 fn parse_environment(value: &str) -> Result<AccountEnvironment, String> {
     match value {
         "simulated" => Ok(AccountEnvironment::Simulated),
+        "demo" => Ok(AccountEnvironment::Demo),
         "live" => Ok(AccountEnvironment::Live),
         _ => Err("stored account environment is invalid".to_string()),
     }
@@ -2923,5 +3014,182 @@ mod tests {
                 .is_empty(),
             "migration must not invent realized P&L for old executions"
         );
+    }
+
+    #[test]
+    fn migration_v18_preserves_v17_rows_and_adds_empty_broker_tables() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        connection
+            .execute_batch(INITIAL_SCHEMA)
+            .expect("base schema");
+        for migration in [
+            MIGRATION_V2,
+            MIGRATION_V3,
+            MIGRATION_V4,
+            MIGRATION_V5,
+            MIGRATION_V6,
+            MIGRATION_V7,
+            MIGRATION_V8,
+            MIGRATION_V9,
+            MIGRATION_V10,
+            MIGRATION_V11,
+            MIGRATION_V12,
+            MIGRATION_V13,
+            MIGRATION_V14,
+            MIGRATION_V15,
+            MIGRATION_V16,
+            MIGRATION_V17,
+        ] {
+            connection.execute_batch(migration).expect("v17 migration");
+        }
+        connection
+            .pragma_update(None, "user_version", 17_u32)
+            .expect("version");
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                    VALUES ('sim','SIM account','simulated','USD',2);
+                 INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+                    VALUES ('symbol',2,0,'{}');
+                 INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,
+                    order_type,time_in_force,quantity_units,quantity_scale,filled_units,
+                    filled_scale,limit_units,limit_scale,status,submitted_unix_nanos,provenance_json)
+                    VALUES ('order','client','sim','symbol','buy','limit','day',1,0,0,0,
+                    100,2,'working',1,'{}');
+                 INSERT INTO order_events(id,order_id,sequence,kind,event_unix_nanos,provenance_json)
+                    VALUES ('event','order',1,'accepted',1,'{}');
+                 INSERT INTO fills(id,order_id,account_id,instrument_id,side,price_units,
+                    price_scale,quantity_units,quantity_scale,execution_unix_nanos,provenance_json)
+                    VALUES ('fill','order','sim','symbol','buy',100,2,1,0,1,'{}');
+                 INSERT INTO positions(account_id,instrument_id,net_units,net_scale,
+                    realized_units,realized_scale,unrealized_units,unrealized_scale,last_fill_unix_nanos)
+                    VALUES ('sim','symbol',1,0,0,2,0,2,1);
+                 INSERT INTO user_records(kind,id,revision,updated_unix_nanos,json)
+                    VALUES ('note','record',1,1,'{}');",
+            )
+            .expect("v17 rows");
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        store.migrate().expect("v18 migration");
+        let version: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 18);
+        let (venue, broker_ref): (String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT venue_id, broker_ref FROM accounts WHERE id = 'sim'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("legacy account");
+        assert_eq!(venue, "aeris-sim");
+        assert_eq!(broker_ref, None);
+        for (table, count) in [
+            ("accounts", 1),
+            ("orders", 1),
+            ("order_events", 1),
+            ("fills", 1),
+            ("positions", 1),
+            ("user_records", 1),
+            ("broker_orders", 0),
+            ("broker_deals", 0),
+            ("broker_positions", 0),
+            ("broker_account_state", 0),
+        ] {
+            let actual: i64 = store
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("table retained");
+            assert_eq!(actual, count, "{table}");
+        }
+        store
+            .connection
+            .pragma_update(None, "user_version", 19_u32)
+            .expect("newer version");
+        assert!(
+            store
+                .migrate()
+                .expect_err("newer schema rejected")
+                .contains("newer")
+        );
+    }
+
+    #[test]
+    fn broker_history_cascades_with_retired_orders_and_account() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys");
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        store.migrate().expect("current schema");
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,
+                venue_id,broker_ref) VALUES ('broker','Demo','demo','USD',2,'ctrader','ref');
+             INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+                VALUES ('symbol',2,0,'{}');
+             INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                time_in_force,quantity_units,quantity_scale,filled_units,filled_scale,
+                limit_units,limit_scale,status,submitted_unix_nanos,provenance_json)
+                VALUES ('order','client','broker','symbol','buy','limit','day',
+                1,0,1,0,100,2,'filled',1,'{}');
+             INSERT INTO fills(id,order_id,account_id,instrument_id,side,price_units,
+                price_scale,quantity_units,quantity_scale,execution_unix_nanos,provenance_json)
+                VALUES ('fill','order','broker','symbol','buy',100,2,1,0,1,'{}');
+             INSERT INTO broker_orders(order_id,client_order_id,session_generation,
+                updated_unix_nanos) VALUES ('order','client',1,1);
+             INSERT INTO broker_deals(broker_deal_id,fill_id,account_id,
+                executed_unix_millis) VALUES ('deal','fill','broker',1);
+             INSERT INTO broker_account_state(account_id,balance_units,balance_scale,
+                session_generation) VALUES ('broker',100,2,1);
+             INSERT INTO broker_positions(account_id,broker_position_id,instrument_id,
+                side,quantity_units,quantity_scale,entry_units,entry_scale,
+                swap_units,swap_scale,commission_units,commission_scale,
+                gross_unrealized_units,gross_unrealized_scale,
+                net_unrealized_units,net_unrealized_scale,opened_unix_nanos)
+                VALUES ('broker','position','symbol','buy',1,0,100,2,0,2,0,2,0,2,0,2,1);",
+            )
+            .expect("broker history");
+        assert_eq!(store.load_broker_positions().expect("positions").len(), 1);
+        store
+            .connection
+            .execute("DELETE FROM fills WHERE id='fill'", [])
+            .expect("retire fill");
+        store
+            .connection
+            .execute("DELETE FROM orders WHERE id='order'", [])
+            .expect("retire order");
+        for table in ["broker_orders", "broker_deals"] {
+            let count: i64 = store
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("dependent history");
+            assert_eq!(count, 0, "{table} must cascade with retained history");
+        }
+        store
+            .connection
+            .execute("DELETE FROM accounts WHERE id='broker'", [])
+            .expect("retire account");
+        for table in ["broker_positions", "broker_account_state"] {
+            let count: i64 = store
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("account-dependent rows");
+            assert_eq!(count, 0, "{table} must cascade with account");
+        }
     }
 }
