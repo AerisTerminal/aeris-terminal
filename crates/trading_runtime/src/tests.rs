@@ -6,10 +6,10 @@ use std::{fs, path::PathBuf};
 
 mod characterization;
 
-struct TestDirectory(PathBuf);
+pub(crate) struct TestDirectory(PathBuf);
 
 impl TestDirectory {
-    fn new(label: &str) -> Self {
+    pub(crate) fn new(label: &str) -> Self {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock follows epoch")
@@ -29,7 +29,7 @@ impl Drop for TestDirectory {
     }
 }
 
-fn config(directory: &TestDirectory) -> TradingServiceConfig {
+pub(crate) fn config(directory: &TestDirectory) -> TradingServiceConfig {
     TradingServiceConfig {
         database_path: directory.0.join("trading.sqlite3"),
         retention: TradingRetention {
@@ -41,7 +41,7 @@ fn config(directory: &TestDirectory) -> TradingServiceConfig {
     }
 }
 
-fn start_service(directory: &TestDirectory) -> TradingService {
+pub(crate) fn start_service(directory: &TestDirectory) -> TradingService {
     let service = TradingService::start(config(directory)).expect("service starts");
     if service
         .snapshot()
@@ -67,7 +67,7 @@ fn start_service(directory: &TestDirectory) -> TradingService {
 
 mod foundation;
 
-fn instrument() -> TradingInstrument {
+pub(crate) fn instrument() -> TradingInstrument {
     TradingInstrument {
         instrument_id: InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument"),
         price_scale: 2,
@@ -128,7 +128,7 @@ fn high_precision_crypto_instrument() -> TradingInstrument {
     }
 }
 
-fn provenance(sequence: u64, time: i64) -> TradingProvenance {
+pub(crate) fn provenance(sequence: u64, time: i64) -> TradingProvenance {
     TradingProvenance {
         venue_id: "aeris-sim".to_string(),
         provider_id: "fixture".to_string(),
@@ -138,7 +138,12 @@ fn provenance(sequence: u64, time: i64) -> TradingProvenance {
     }
 }
 
-fn market_order(client_id: &str, side: OrderSide, sequence: u64, time: i64) -> PlaceOrder {
+pub(crate) fn market_order(
+    client_id: &str,
+    side: OrderSide,
+    sequence: u64,
+    time: i64,
+) -> PlaceOrder {
     PlaceOrder {
         client_order_id: ClientOrderId::try_new(client_id).expect("client id"),
         account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),

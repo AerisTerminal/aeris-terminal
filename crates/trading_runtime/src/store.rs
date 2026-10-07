@@ -1548,6 +1548,89 @@ impl TradingStore {
         transaction.commit().map_err(database_error)
     }
 
+    /// Reverts a locally prepared place if the writer has no queue capacity. No pending
+    /// order or event survives an explicitly rejected submission.
+    pub(super) fn reject_unsent_broker_order(
+        &mut self,
+        order: &Order,
+        previous_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "DELETE FROM order_events WHERE order_id = ?1",
+                [order.id.as_str()],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute("DELETE FROM orders WHERE id = ?1", [order.id.as_str()])
+            .map_err(database_error)?;
+        update_next_sequence(&transaction, previous_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn transition_broker_order(
+        &mut self,
+        order: &Order,
+        event: &OrderEvent,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "UPDATE orders SET status = ?1, time_in_force = ?2, limit_units = ?3,
+             limit_scale = ?4, stop_units = ?5, stop_scale = ?6, provenance_json = ?7
+             WHERE id = ?8",
+                params![
+                    order.status.as_str(),
+                    order.time_in_force.as_str(),
+                    order.limit_price.map(FixedPoint::units),
+                    order.limit_price.map(FixedPoint::scale),
+                    order.stop_price.map(FixedPoint::units),
+                    order.stop_price.map(FixedPoint::scale),
+                    encode_provenance(&order.provenance),
+                    order.id.as_str(),
+                ],
+            )
+            .map_err(database_error)?;
+        insert_event_row(&transaction, event)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn reject_unsent_broker_transition(
+        &mut self,
+        previous: &Order,
+        event: &OrderEvent,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "DELETE FROM order_events WHERE id = ?1",
+                [event.id.as_str()],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "UPDATE orders SET status = ?1, time_in_force = ?2, limit_units = ?3,
+             limit_scale = ?4, stop_units = ?5, stop_scale = ?6, provenance_json = ?7
+             WHERE id = ?8",
+                params![
+                    previous.status.as_str(),
+                    previous.time_in_force.as_str(),
+                    previous.limit_price.map(FixedPoint::units),
+                    previous.limit_price.map(FixedPoint::scale),
+                    previous.stop_price.map(FixedPoint::units),
+                    previous.stop_price.map(FixedPoint::scale),
+                    encode_provenance(&previous.provenance),
+                    previous.id.as_str(),
+                ],
+            )
+            .map_err(database_error)?;
+        update_next_sequence(&transaction, event.sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
     pub(super) fn insert_order_and_managed_bracket(
         &mut self,
         order: &Order,

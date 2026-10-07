@@ -9,6 +9,7 @@ mod plan;
 mod risk;
 mod store;
 mod strategy;
+pub mod venue;
 
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::{
@@ -35,7 +36,7 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
@@ -48,6 +49,7 @@ pub use strategy::{
     MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES, ManagedBracket, ManagedBracketStatus,
     ProtectiveOrder, ProtectiveOrderRole, TrailingStopRule,
 };
+use venue::{VenueInbox, VenueRequest};
 
 const COMMAND_CAPACITY: usize = 256;
 /// Distinct instruments whose latest BBO can wait for the trading owner at once.
@@ -329,7 +331,7 @@ pub struct PositionPnl {
 }
 
 /// Runtime and store health visible to diagnostics/readiness.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TradingServiceStatus {
     pub schema_version: u32,
     pub revision: u64,
@@ -337,6 +339,8 @@ pub struct TradingServiceStatus {
     pub working_order_count: usize,
     pub position_count: usize,
     pub retention: TradingRetention,
+    /// Last broker-event persistence or validation failure, if any.
+    pub venue_error: Option<String>,
 }
 
 /// Cloneable command handle for the one in-process trading owner.
@@ -347,9 +351,10 @@ pub struct TradingService {
 }
 
 struct TradingRuntime {
-    stopping: AtomicBool,
+    stopping: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     observations: Arc<Mutex<PendingObservations>>,
+    venue_inbox: Arc<VenueInbox>,
 }
 
 /// Latest-value mailbox for published market observations.
@@ -414,6 +419,10 @@ enum Command {
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
+    AttachVenue(u64, Reply<Receiver<VenueRequest>>),
+    DrainVenueEvents,
+    #[cfg(test)]
+    BlockOwnerForTest(SyncSender<()>, Arc<std::sync::Barrier>),
     Shutdown,
 }
 
@@ -423,9 +432,15 @@ struct Coordinator {
     retention: TradingRetention,
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
     market_observation_error: Option<String>,
+    venue_error: Option<String>,
     observations: Arc<Mutex<PendingObservations>>,
     observation_cursors: BTreeMap<InstrumentId, ObservationCursor>,
     practice_market_session: Option<Arc<PracticeMarketSession>>,
+    venue_outbound: Option<SyncSender<VenueRequest>>,
+    venue_inbox: Weak<VenueInbox>,
+    venue_generation: u64,
+    venue_ingestion: u64,
+    pending_modifications: BTreeMap<ClientOrderId, ModifyOrder>,
 }
 
 /// Latest canonical BBO applied per registered instrument. Market panes can
@@ -469,6 +484,9 @@ impl TradingService {
         let database_path = config.database_path;
         let observations = Arc::new(Mutex::new(PendingObservations::default()));
         let coordinator_observations = Arc::clone(&observations);
+        let stopping = Arc::new(AtomicBool::new(false));
+        let venue_inbox = VenueInbox::new(commands.clone(), Arc::clone(&stopping));
+        let coordinator_venue_inbox = Arc::downgrade(&venue_inbox);
         let worker = thread::Builder::new()
             .name("aeris-trading-owner".to_string())
             .spawn(move || {
@@ -481,9 +499,15 @@ impl TradingService {
                             retention,
                             copy_dispatches: std::collections::VecDeque::new(),
                             market_observation_error: None,
+                            venue_error: None,
                             observations: coordinator_observations,
                             observation_cursors: BTreeMap::new(),
                             practice_market_session: None,
+                            venue_outbound: None,
+                            venue_inbox: coordinator_venue_inbox,
+                            venue_generation: 0,
+                            venue_ingestion: 0,
+                            pending_modifications: BTreeMap::new(),
                         };
                         coordinator.repair_loaded_position_projections()?;
                         Ok(coordinator)
@@ -506,9 +530,10 @@ impl TradingService {
         Ok(Self {
             commands,
             runtime: Arc::new(TradingRuntime {
-                stopping: AtomicBool::new(false),
+                stopping,
                 worker: Mutex::new(Some(worker)),
                 observations,
+                venue_inbox,
             }),
         })
     }
@@ -582,6 +607,21 @@ impl TradingService {
     /// Returns an error when validation, routing, capacity, or persistence fails.
     pub fn place_order(&self, order: PlaceOrder) -> Result<Order, String> {
         self.request(|reply| Command::Place(order, reply))
+    }
+
+    /// Attaches a bounded demo-venue writer for a new session generation.
+    /// The receiver belongs to that generation's venue worker and has exactly 64 slots.
+    ///
+    /// # Errors
+    /// Rejects zero or non-increasing generations or an unavailable trading owner.
+    pub fn attach_demo_venue(&self, generation: u64) -> Result<Receiver<VenueRequest>, String> {
+        self.request(|reply| Command::AttachVenue(generation, reply))
+    }
+
+    /// Returns the shared bounded event inbox for the broker reader.
+    #[must_use]
+    pub fn demo_venue_inbox(&self) -> Arc<VenueInbox> {
+        Arc::clone(&self.runtime.venue_inbox)
     }
 
     /// Submits one entry whose stop and scale-out targets activate after its fill.
@@ -893,6 +933,7 @@ impl TradingService {
         if self.runtime.stopping.swap(true, Ordering::AcqRel) {
             return Err("trading owner shutdown is already in progress".to_string());
         }
+        self.runtime.venue_inbox.wake_stopped();
         match self.commands.try_send(Command::Shutdown) {
             Ok(()) | Err(TrySendError::Disconnected(_)) => {}
             Err(TrySendError::Full(_)) => {
@@ -950,6 +991,7 @@ impl TradingService {
 impl Drop for TradingRuntime {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+        self.venue_inbox.wake_stopped();
     }
 }
 
@@ -1127,7 +1169,27 @@ impl Coordinator {
                 Command::Export(directory, reply) => {
                     let _ = reply.send(self.store.export(&directory));
                 }
+                Command::AttachVenue(generation, reply) => {
+                    respond(&reply, self.attach_venue(generation));
+                }
+                Command::DrainVenueEvents => self.drain_venue_events(),
+                #[cfg(test)]
+                Command::BlockOwnerForTest(ready, barrier) => {
+                    let _ = ready.send(());
+                    barrier.wait();
+                }
                 Command::Shutdown => break,
+            }
+        }
+    }
+
+    fn drain_venue_events(&mut self) {
+        if let Some(inbox) = self.venue_inbox.upgrade() {
+            for event in inbox.drain() {
+                self.venue_error = self
+                    .apply_venue_event(&event)
+                    .err()
+                    .or(self.venue_error.take());
             }
         }
     }
@@ -1188,6 +1250,7 @@ impl Coordinator {
                 .count(),
             position_count: self.state.positions.len(),
             retention: self.retention,
+            venue_error: self.venue_error.clone(),
         }
     }
 
@@ -1205,6 +1268,18 @@ impl Coordinator {
                 .get(account_id)
                 .ok_or_else(|| "trading account is not registered".to_string())?,
         )
+    }
+
+    fn attach_venue(&mut self, generation: u64) -> Result<Receiver<VenueRequest>, String> {
+        if generation == 0 || generation <= self.venue_generation {
+            return Err("cTrader venue generation must advance".into());
+        }
+        let (outbound, receiver) = mpsc::sync_channel(venue::OUTBOUND_CAPACITY);
+        self.venue_outbound = Some(outbound);
+        self.venue_generation = generation;
+        self.venue_ingestion = 0;
+        self.pending_modifications.clear();
+        Ok(receiver)
     }
 
     fn broker_position_route(
@@ -1658,7 +1733,7 @@ impl Coordinator {
             .ok_or_else(|| "order client identifier is not registered".to_string())?;
         match self.route(&order.account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+            VenueRoute::CtraderDemo => return self.cancel_broker_order(order),
         }
         if !order.status.is_open() {
             return Ok(order);
@@ -1746,7 +1821,7 @@ impl Coordinator {
             .ok_or_else(|| "trading account is not registered".to_string())?;
         match VenueRoute::from_account(account)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+            VenueRoute::CtraderDemo => return self.modify_broker_order(order, command),
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
         if !matches!(
@@ -1832,7 +1907,15 @@ impl Coordinator {
                 if command.client_order_id.as_str().len() > 50 {
                     return Err("cTrader ClientOrderId must be at most 50 characters".into());
                 }
-                return Err(DEMO_VENUE_UNAVAILABLE.into());
+                if let Some(existing) = self
+                    .state
+                    .orders
+                    .values()
+                    .find(|order| order.client_order_id == command.client_order_id)
+                {
+                    return Ok(existing.clone());
+                }
+                return self.place_broker_order(command);
             }
         }
         if let Some(existing) = self
