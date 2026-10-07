@@ -350,6 +350,7 @@ dependencies = [
  "display-info",
  "ed25519-dalek",
  "embed-resource",
+ "getrandom 0.4.3",
  "keyring",
  "notify-rust",
  "rustls",
@@ -367,6 +368,7 @@ dependencies = [
  "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
@@ -414,12 +416,10 @@ dependencies = [
  "aeris_market_data",
  "aeris_observability",
  "aeris_platform_runtime",
- "base64 0.23.1",
  "chrono",
  "getrandom 0.4.3",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tungstenite",
  "ureq",
  "zeroize",

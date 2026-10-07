@@ -5,16 +5,16 @@
 //! provider sessions; UI surfaces never receive credentials.
 
 use std::{
-    fmt,
     io::Read as _,
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aeris_platform_runtime::CancellableHttpClient;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sha2::{Digest as _, Sha256};
+use aeris_platform_runtime::{
+    CancellableHttpClient,
+    hosted_broker::{HostedBrokerClient, HostedBrokerConnection},
+};
+use serde::{Deserialize, de::DeserializeOwned};
 use zeroize::{Zeroize as _, Zeroizing};
 
 mod catalog;
@@ -80,88 +80,8 @@ pub enum MarketCollection {
     Equity,
 }
 
-/// Broker authorization service; separate from Aeris account authentication.
-pub const TASTYTRADE_BROKER_ORIGIN: &str = "https://app.aeristerminal.com";
 const TASTYTRADE_API_ORIGIN: &str = "https://api.tastyworks.com";
 const MAXIMUM_RESPONSE_BYTES: usize = 512 * 1024;
-
-/// Desktop-held proof of ownership of a hosted broker connection.
-#[derive(Serialize, Deserialize)]
-pub struct ConnectionCapability {
-    connection_id: String,
-    proof: String,
-}
-
-impl fmt::Debug for ConnectionCapability {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ConnectionCapability([redacted])")
-    }
-}
-
-impl Drop for ConnectionCapability {
-    fn drop(&mut self) {
-        self.proof.zeroize();
-    }
-}
-
-impl ConnectionCapability {
-    /// Encodes a capability for protected native-vault storage only.
-    ///
-    /// # Errors
-    /// Returns a redacted error if serialization fails.
-    pub fn vault_bytes(&self) -> Result<Zeroizing<Vec<u8>>, String> {
-        serde_json::to_vec(self)
-            .map(Zeroizing::new)
-            .map_err(|_| "Broker connection could not be encoded".to_string())
-    }
-
-    /// Restores a capability read from the protected native vault.
-    ///
-    /// # Errors
-    /// Rejects malformed or oversized credentials.
-    pub fn from_vault(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() > 1024 {
-            return Err("Saved broker connection is oversized".to_string());
-        }
-        let result: Self = serde_json::from_slice(bytes)
-            .map_err(|_| "Saved broker connection is invalid".to_string())?;
-        if !valid_opaque(&result.connection_id) || !valid_opaque(&result.proof) {
-            return Err("Saved broker connection is invalid".to_string());
-        }
-        Ok(result)
-    }
-}
-
-fn valid_opaque(value: &str) -> bool {
-    value.len() == 43
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
-/// Hosted authorization phase; contains no provider credentials.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum AuthorizationPhase {
-    Pending,
-    Exchanging,
-    Ready,
-    Failed,
-}
-
-/// Sanitized status returned by the hosted connection owner.
-#[derive(Clone, Debug, Deserialize)]
-pub struct AuthorizationStatus {
-    pub phase: AuthorizationPhase,
-    pub expires_at: u64,
-}
-
-/// One new connection and the provider URL to open in the system browser.
-pub struct PendingAuthorization {
-    pub capability: ConnectionCapability,
-    pub authorization_url: String,
-    pub expires_at: u64,
-}
 
 /// Ephemeral streaming credentials; never publish them to the UI or logs.
 #[derive(Deserialize)]
@@ -179,12 +99,24 @@ impl Drop for QuoteToken {
 }
 
 /// Exclusive cancellable REST transport driven by a market-runtime worker.
-#[derive(Default)]
 pub struct TastytradeBrokerClient {
     http: CancellableHttpClient,
+    hosted: HostedBrokerClient,
     access: Option<AccessToken>,
     #[cfg(test)]
     test_origin: Option<String>,
+}
+
+impl Default for TastytradeBrokerClient {
+    fn default() -> Self {
+        Self {
+            http: CancellableHttpClient::default(),
+            hosted: HostedBrokerClient::new("tastytrade"),
+            access: None,
+            #[cfg(test)]
+            test_origin: None,
+        }
+    }
 }
 
 struct AccessToken {
@@ -193,6 +125,11 @@ struct AccessToken {
 }
 
 impl TastytradeBrokerClient {
+    #[must_use]
+    pub fn hosted(&mut self) -> &mut HostedBrokerClient {
+        &mut self.hosted
+    }
+
     /// Invalidates credentials after a capability changes or is disconnected.
     pub fn clear_access_token(&mut self) {
         self.access = None;
@@ -200,7 +137,7 @@ impl TastytradeBrokerClient {
 
     fn access_token(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
     ) -> Result<Zeroizing<String>, String> {
         let now = SystemTime::now()
@@ -217,7 +154,7 @@ impl TastytradeBrokerClient {
                 access_token: String,
                 expires_at: u64,
             }
-            let response: Response = self.post("access_token", capability, stop)?;
+            let response: Response = self.hosted.post("access_token", capability, stop)?;
             if response.access_token.is_empty()
                 || response.access_token.len() > 16_384
                 || response.expires_at <= now + 60
@@ -237,7 +174,7 @@ impl TastytradeBrokerClient {
 
     fn get<T: DeserializeOwned>(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         path: &str,
         query: &[(&str, &str)],
         stop: &Arc<AtomicBool>,
@@ -324,91 +261,13 @@ impl TastytradeBrokerClient {
                 .map_err(|_| "Tastytrade API response is malformed".into());
         }
     }
-    /// Creates a desktop-bound authorization transaction.
-    ///
-    /// # Errors
-    /// Returns a redacted error for random-source, configuration or network failure.
-    pub fn begin(&mut self, stop: &Arc<AtomicBool>) -> Result<PendingAuthorization, String> {
-        #[derive(Deserialize)]
-        struct Started {
-            connection_id: String,
-            authorization_url: String,
-            expires_at: u64,
-        }
-        let mut random = Zeroizing::new([0_u8; 32]);
-        getrandom::fill(random.as_mut())
-            .map_err(|_| "System random source unavailable".to_string())?;
-        let proof = Zeroizing::new(URL_SAFE_NO_PAD.encode(random.as_ref()));
-        let digest = Sha256::digest(proof.as_bytes());
-        let challenge: String = digest
-            .iter()
-            .flat_map(|byte| {
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                [
-                    char::from(HEX[usize::from(byte >> 4)]),
-                    char::from(HEX[usize::from(byte & 15)]),
-                ]
-            })
-            .collect();
-        let result: Started = self.post(
-            "start",
-            &serde_json::json!({"proof_challenge": challenge}),
-            stop,
-        )?;
-        if !valid_opaque(&result.connection_id)
-            || !valid_authorization_url(&result.authorization_url)
-        {
-            return Err("Broker service returned an invalid authorization".to_string());
-        }
-        Ok(PendingAuthorization {
-            capability: ConnectionCapability {
-                connection_id: result.connection_id,
-                proof: proof.to_string(),
-            },
-            authorization_url: result.authorization_url,
-            expires_at: result.expires_at,
-        })
-    }
-
-    /// Returns the phase of an existing desktop-owned connection.
-    ///
-    /// # Errors
-    /// Returns a redacted error when the capability expired or the service is unavailable.
-    pub fn status(
-        &mut self,
-        capability: &ConnectionCapability,
-        stop: &Arc<AtomicBool>,
-    ) -> Result<AuthorizationStatus, String> {
-        self.post("status", capability, stop)
-    }
-
-    /// Deletes the hosted connection. Does not claim to revoke the provider grant.
-    ///
-    /// # Errors
-    /// Returns a redacted error for service or network failure.
-    pub fn disconnect(
-        &mut self,
-        capability: &ConnectionCapability,
-        stop: &Arc<AtomicBool>,
-    ) -> Result<(), String> {
-        #[derive(Deserialize)]
-        struct Disconnected {
-            disconnected: bool,
-        }
-        let result: Disconnected = self.post("disconnect", capability, stop)?;
-        if !result.disconnected {
-            return Err("Broker connection was not disconnected".to_string());
-        }
-        Ok(())
-    }
-
     /// Obtains a separate `DXLink` token using the hosted OAuth session.
     ///
     /// # Errors
     /// Returns a redacted error for invalid streaming fields or missing entitlement.
     pub fn quote_token(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
     ) -> Result<QuoteToken, String> {
         #[derive(Deserialize)]
@@ -455,7 +314,7 @@ impl TastytradeBrokerClient {
     /// Rejects malformed pages or a catalog beyond the configured bound.
     pub fn active_futures(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
     ) -> Result<Vec<FutureInstrument>, String> {
         let mut instruments = Vec::new();
@@ -486,7 +345,7 @@ impl TastytradeBrokerClient {
     /// Rejects missing collections, malformed times, or an oversized response.
     pub fn current_futures_sessions(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
     ) -> Result<[MarketSession; 2], String> {
         let response: serde_json::Value = self.get(
@@ -503,7 +362,7 @@ impl TastytradeBrokerClient {
     /// Rejects a missing collection, malformed times, or an oversized response.
     pub fn current_equity_session(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
     ) -> Result<MarketSession, String> {
         let response: serde_json::Value = self.get(
@@ -520,7 +379,7 @@ impl TastytradeBrokerClient {
     /// Rejects malformed identities, overload, expired authorization and provider errors.
     pub fn search(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         query: &str,
         stop: &Arc<AtomicBool>,
     ) -> Result<Vec<SearchInstrument>, String> {
@@ -572,7 +431,7 @@ impl TastytradeBrokerClient {
     /// Rejects missing required metadata or a response for another instrument.
     pub fn instrument(
         &mut self,
-        capability: &ConnectionCapability,
+        capability: &HostedBrokerConnection,
         instrument: &SearchInstrument,
         stop: &Arc<AtomicBool>,
     ) -> Result<ResolvedInstrument, String> {
@@ -596,53 +455,6 @@ impl TastytradeBrokerClient {
             stop,
         )?;
         ResolvedInstrument::from_response(&response, instrument)
-    }
-
-    fn post<T: DeserializeOwned>(
-        &mut self,
-        route: &str,
-        payload: &impl Serialize,
-        stop: &Arc<AtomicBool>,
-    ) -> Result<T, String> {
-        #[cfg(test)]
-        let origin = self
-            .test_origin
-            .as_deref()
-            .unwrap_or(TASTYTRADE_BROKER_ORIGIN)
-            .to_owned();
-        #[cfg(not(test))]
-        let origin = TASTYTRADE_BROKER_ORIGIN;
-        self.http.set_cancellation(stop);
-        let raw = Zeroizing::new(
-            serde_json::to_string(payload)
-                .map_err(|_| "Broker request could not be encoded".to_string())?,
-        );
-        let mut response = self
-            .http
-            .agent()
-            .post(format!("{origin}/oauth/tastytrade/{route}"))
-            .config()
-            .timeout_global(Some(Duration::from_secs(30)))
-            .max_redirects(0)
-            .build()
-            .header("Content-Type", "application/json")
-            .header(
-                "User-Agent",
-                concat!("aeris-terminal/", env!("CARGO_PKG_VERSION")),
-            )
-            .send(raw.as_bytes())
-            .map_err(|error| request_error(&error))?;
-        let mut bytes = Zeroizing::new(Vec::new());
-        response
-            .body_mut()
-            .as_reader()
-            .take(MAXIMUM_RESPONSE_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "Broker response could not be read".to_string())?;
-        if bytes.len() > MAXIMUM_RESPONSE_BYTES {
-            return Err("Broker response exceeded its size limit".to_string());
-        }
-        serde_json::from_slice(&bytes).map_err(|_| "Broker response is malformed".to_string())
     }
 }
 
@@ -827,30 +639,6 @@ fn percent_encode_path_segment(value: &str) -> String {
     encoded
 }
 
-fn request_error(error: &ureq::Error) -> String {
-    match error {
-        ureq::Error::StatusCode(503) => {
-            "Tastytrade application credentials must be configured on AWS first".to_string()
-        }
-        ureq::Error::StatusCode(401) => "Tastytrade connection expired; connect again".to_string(),
-        ureq::Error::StatusCode(409 | 429) => {
-            "Tastytrade connection service is busy; retry later".to_string()
-        }
-        ureq::Error::Timeout(_) => "Tastytrade connection request timed out".to_string(),
-        ureq::Error::StatusCode(status) => {
-            format!("Tastytrade connection request failed (HTTP {status})")
-        }
-        _ => "Tastytrade connection service could not be reached".to_string(),
-    }
-}
-
-fn valid_authorization_url(url: &str) -> bool {
-    url.len() <= 2048
-        && url.starts_with("https://my.tastytrade.com/auth.html?")
-        && !url.bytes().any(|byte| byte.is_ascii_control())
-        && !url.contains('#')
-}
-
 fn valid_streamer_url(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("wss://") else {
         return false;
@@ -924,11 +712,26 @@ mod tests {
         (origin, server)
     }
 
-    fn fixture_capability() -> ConnectionCapability {
-        ConnectionCapability {
-            connection_id: "a".repeat(43),
-            proof: "p".repeat(43),
-        }
+    fn fixture_capability() -> HostedBrokerConnection {
+        let value = format!(
+            r#"{{"connection_id":"{}","proof":"{}"}}"#,
+            "a".repeat(43),
+            "p".repeat(43)
+        );
+        HostedBrokerConnection::from_vault(value.as_bytes()).expect("valid fixture")
+    }
+
+    fn fixture_client(origin: &str, access: AccessToken) -> TastytradeBrokerClient {
+        let mut client = TastytradeBrokerClient {
+            access: Some(access),
+            test_origin: Some(origin.to_string()),
+            ..Default::default()
+        };
+        client
+            .hosted
+            .set_loopback_origin(origin)
+            .expect("loopback fixture");
+        client
     }
 
     fn fixture_access(expires_at: u64) -> AccessToken {
@@ -962,11 +765,7 @@ mod tests {
                 r#"{"data":{"items":[]}}"#.into(),
             ),
         ]);
-        let mut client = TastytradeBrokerClient {
-            access: Some(fixture_access(future_expiry())),
-            test_origin: Some(origin),
-            ..Default::default()
-        };
+        let mut client = fixture_client(&origin, fixture_access(future_expiry()));
         let result = client.search(
             &fixture_capability(),
             "ES",
@@ -993,11 +792,7 @@ mod tests {
                 r#"{"data":{"items":[]}}"#.into(),
             ),
         ]);
-        let mut client = TastytradeBrokerClient {
-            access: Some(fixture_access(future_expiry())),
-            test_origin: Some(origin),
-            ..Default::default()
-        };
+        let mut client = fixture_client(&origin, fixture_access(future_expiry()));
         assert!(
             client
                 .search(
@@ -1022,11 +817,7 @@ mod tests {
             ("/oauth/tastytrade/access_token", 200, renewed),
             ("/instruments/search", 401, "{}".into()),
         ]);
-        let mut client = TastytradeBrokerClient {
-            access: Some(fixture_access(future_expiry())),
-            test_origin: Some(origin),
-            ..Default::default()
-        };
+        let mut client = fixture_client(&origin, fixture_access(future_expiry()));
         let error = client
             .search(
                 &fixture_capability(),
@@ -1053,11 +844,7 @@ mod tests {
                 r#"{"data":{"items":[]}}"#.into(),
             ),
         ]);
-        let mut client = TastytradeBrokerClient {
-            access: Some(fixture_access(future_expiry() - 3_550)),
-            test_origin: Some(origin),
-            ..Default::default()
-        };
+        let mut client = fixture_client(&origin, fixture_access(future_expiry() - 3_550));
         assert!(
             client
                 .search(
@@ -1076,11 +863,7 @@ mod tests {
             .map(|_| ("/instruments/search", 429, "{}".to_string()))
             .collect();
         let (origin, server) = fake_api(responses);
-        let mut client = TastytradeBrokerClient {
-            access: Some(fixture_access(future_expiry())),
-            test_origin: Some(origin),
-            ..Default::default()
-        };
+        let mut client = fixture_client(&origin, fixture_access(future_expiry()));
         let error = client
             .search(
                 &fixture_capability(),
@@ -1299,27 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_capability_roundtrip_validates_and_redacts_proof() {
-        let capability = ConnectionCapability {
-            connection_id: "a".repeat(43),
-            proof: "p".repeat(43),
-        };
-        let bytes = capability.vault_bytes().expect("encode");
-        let restored = ConnectionCapability::from_vault(&bytes).expect("restore");
-        assert_eq!(restored.proof, capability.proof);
-        assert!(!format!("{restored:?}").contains(&capability.proof));
-        assert!(ConnectionCapability::from_vault(br#"{"connection_id":"a","proof":"p"}"#).is_err());
-        assert!(ConnectionCapability::from_vault(&vec![b'a'; 1025]).is_err());
-    }
-
-    #[test]
     fn provider_urls_cannot_redirect_credentials_to_another_origin() {
-        assert!(valid_authorization_url(
-            "https://my.tastytrade.com/auth.html?state=x"
-        ));
-        assert!(!valid_authorization_url(
-            "https://my.tastytrade.com.attacker.example/auth.html?state=x"
-        ));
         assert!(valid_streamer_url(
             "wss://tasty-openapi-ws.dxfeed.com/realtime"
         ));

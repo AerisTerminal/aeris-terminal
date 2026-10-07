@@ -19,10 +19,11 @@ use aeris_contracts::{
 };
 use aeris_market_data::{DepthLevel, EventMetadata, QualifiedTimestamp};
 use aeris_observability::diagnostic;
+use aeris_platform_runtime::hosted_broker::HostedBrokerConnection;
 use aeris_tastytrade_market_adapter::{
-    ConnectionCapability, DATA_SCALE, DxlinkSession, FeedEvent, FutureInstrument, MarketCollection,
-    MarketSession, QuoteToken, ResolvedInstrument, SearchInstrument, Subscription,
-    SubscriptionChangeBudget, SubscriptionChangeError, TastytradeBrokerClient, TradePrint,
+    DATA_SCALE, DxlinkSession, FeedEvent, FutureInstrument, MarketCollection, MarketSession,
+    QuoteToken, ResolvedInstrument, SearchInstrument, Subscription, SubscriptionChangeBudget,
+    SubscriptionChangeError, TastytradeBrokerClient, TradePrint,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -183,7 +184,7 @@ pub(super) struct BrokerApi {
 #[derive(Default)]
 struct BrokerApiState {
     client: TastytradeBrokerClient,
-    capability: Option<ConnectionCapability>,
+    capability: Option<HostedBrokerConnection>,
     futures: Option<(Instant, Vec<FutureInstrument>)>,
     searches: BTreeMap<String, (Instant, Vec<SearchInstrument>)>,
     search_order: VecDeque<String>,
@@ -244,7 +245,10 @@ impl BrokerApi {
     fn call<T>(
         &self,
         stop: &Arc<AtomicBool>,
-        operation: impl FnOnce(&mut TastytradeBrokerClient, &ConnectionCapability) -> Result<T, String>,
+        operation: impl FnOnce(
+            &mut TastytradeBrokerClient,
+            &HostedBrokerConnection,
+        ) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut state = self
             .state

@@ -8,6 +8,7 @@ mod capability;
 mod credential_vault;
 mod display_timing;
 mod dns;
+pub mod hosted_broker;
 mod http_client;
 mod io_cancellation;
 mod lifecycle;

@@ -10,6 +10,7 @@ publish.workspace = true
 aeris_observability = { path = "../observability" }
 base64.workspace = true
 ed25519-dalek.workspace = true
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true
@@ -20,6 +21,7 @@ sysinfo.workspace = true
 tungstenite.workspace = true
 ureq.workspace = true
 webpki-roots.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client.workspace = true

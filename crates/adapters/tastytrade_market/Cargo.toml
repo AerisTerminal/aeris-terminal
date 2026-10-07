@@ -10,12 +10,10 @@ publish.workspace = true
 aeris_platform_runtime = { path = "../../platform_runtime" }
 aeris_market_data = { path = "../../domain/market_data" }
 aeris_observability = { path = "../../observability" }
-base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
-sha2.workspace = true
 ureq.workspace = true
 zeroize.workspace = true
 

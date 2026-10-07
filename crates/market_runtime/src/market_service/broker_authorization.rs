@@ -1,8 +1,11 @@
 //! Runtime-owned broker authorization, separate from Aeris account sign-in.
 
 use super::{Command, MarketService, Reply, tastytrade::BrokerApi};
-use aeris_platform_runtime::{CredentialVault, NativeCredentialVault, open_system_browser};
-use aeris_tastytrade_market_adapter::{AuthorizationPhase, ConnectionCapability};
+use aeris_platform_runtime::{
+    CredentialVault, NativeCredentialVault,
+    hosted_broker::{AuthorizationPhase, HostedBrokerConnection},
+    open_system_browser,
+};
 use std::{
     sync::{
         Arc,
@@ -167,17 +170,17 @@ fn run(
     }
 }
 
-pub(super) fn load_connection() -> Result<ConnectionCapability, String> {
+pub(super) fn load_connection() -> Result<HostedBrokerConnection, String> {
     let vault = NativeCredentialVault::new(VAULT_SERVICE)
         .map_err(|_| "Protected broker credential storage is unavailable".to_string())?;
     load(&vault)?.ok_or_else(|| "Connect tastytrade to access market data".to_string())
 }
 
-fn load(vault: &NativeCredentialVault) -> Result<Option<ConnectionCapability>, String> {
+fn load(vault: &NativeCredentialVault) -> Result<Option<HostedBrokerConnection>, String> {
     vault
         .load(VAULT_KEY)
         .map_err(|_| "Protected broker connection could not be loaded".to_string())?
-        .map(|bytes| ConnectionCapability::from_vault(&Zeroizing::new(bytes)))
+        .map(|bytes| HostedBrokerConnection::from_vault(&Zeroizing::new(bytes)))
         .transpose()
 }
 
@@ -187,21 +190,23 @@ fn connect(
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     if let Some(capability) = load(vault)? {
-        let status = api.with_client(stop, |client| client.status(&capability, stop))?;
+        let status = api.with_client(stop, |client| client.hosted().status(&capability, stop))?;
         if status.phase == AuthorizationPhase::Ready {
             return verify_entitlement(api, &capability, stop);
         }
         // A prior pending transaction cannot be resumed safely without its browser
         // URL. Delete it before creating another transaction.
-        api.with_client(stop, |client| client.disconnect(&capability, stop))?;
+        api.with_client(stop, |client| client.hosted().disconnect(&capability, stop))?;
         delete_local(vault)?;
     }
-    let pending = api.with_client(stop, |client| client.begin(stop))?;
+    let pending = api.with_client(stop, |client| client.hosted().begin(stop))?;
     if vault
         .store(VAULT_KEY, &pending.capability.vault_bytes()?)
         .is_err()
     {
-        api.with_client(stop, |client| client.disconnect(&pending.capability, stop))?;
+        api.with_client(stop, |client| {
+            client.hosted().disconnect(&pending.capability, stop)
+        })?;
         return Err("Broker connection could not be saved in protected storage".to_string());
     }
     if open_system_browser(&pending.authorization_url).is_err() {
@@ -217,7 +222,9 @@ fn connect(
             return Err("Tastytrade login expired; disconnect and connect again".to_string());
         }
         match api
-            .with_client(stop, |client| client.status(&pending.capability, stop))?
+            .with_client(stop, |client| {
+                client.hosted().status(&pending.capability, stop)
+            })?
             .phase
         {
             AuthorizationPhase::Pending | AuthorizationPhase::Exchanging => {}
@@ -233,7 +240,7 @@ fn connect(
 
 fn verify_entitlement(
     api: &BrokerApi,
-    capability: &ConnectionCapability,
+    capability: &HostedBrokerConnection,
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     let _token = api.with_client(stop, |client| client.quote_token(capability, stop))?;
@@ -251,7 +258,7 @@ fn disconnect(
     if let Some(capability) = load(vault)? {
         // Keep the local proof until server deletion succeeds, including after an
         // uncertain response, so deletion can be retried without orphaning tokens.
-        api.with_client(stop, |client| client.disconnect(&capability, stop))?;
+        api.with_client(stop, |client| client.hosted().disconnect(&capability, stop))?;
         delete_local(vault)?;
     }
     Ok("Tastytrade connection removed. You can revoke Aeris access in tastytrade's authorized applications.".to_string())
