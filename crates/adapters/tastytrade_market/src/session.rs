@@ -805,6 +805,15 @@ fn decode_row(channel: u64, kind: &str, row: &Row<'_>) -> Result<FeedEvent, Stri
                 let time_nanos = time
                     .checked_mul(1_000_000)
                     .ok_or("DXLink candle timestamp overflow")?;
+                // dxFeed aggregated candles (observed on CME weekly futures candles) can
+                // report a close or open outside the traded high/low. Those prices are
+                // still provider-authoritative, so the range is widened to contain them;
+                // an inverted high/low remains invalid and is rejected downstream.
+                let (high, low) = if low <= high {
+                    (high.max(open).max(close), low.min(open).min(close))
+                } else {
+                    (high, low)
+                };
                 Some(MarketBar {
                     source_sequence: 1,
                     exchange_timestamp_seconds: time_nanos.div_euclid(1_000_000_000),
@@ -1128,5 +1137,35 @@ mod tests {
         assert_eq!(*count, 83);
         assert_eq!(bar.close, 500_050_000_000);
         assert!(decode_data(&raw.replace(",83]]}", "]]}"), 3, &fields).is_err());
+    }
+
+    #[test]
+    fn aggregated_candle_range_contains_its_open_and_close() {
+        let fields = BTreeMap::from([(
+            "Candle".into(),
+            CANDLE.iter().map(|field| (*field).into()).collect(),
+        )]);
+        let bar_of = |raw: &str| {
+            let events = decode_data(raw, 3, &fields).expect("candle wire");
+            let FeedEvent::Candle { bar: Some(bar), .. } = &events[0] else {
+                panic!("candle")
+            };
+            *bar
+        };
+        // Shape observed for a completed /ESM27 weekly candle: close above the reported high.
+        let raw = r#"{"type":"FEED_DATA","channel":3,"data":["Candle",["Candle","/ESM27:XCME{=w}",0,7690369153735065600,1790553600000,1,7913.75,7936.0,7879.75,7938.5,1700.0,412]]}"#;
+        let bar = bar_of(raw);
+        assert_eq!(bar.open, 791_375_000_000);
+        assert_eq!(bar.close, 793_850_000_000);
+        assert_eq!(bar.high, 793_850_000_000);
+        assert_eq!(bar.low, 787_975_000_000);
+        assert!(bar.validate().is_ok());
+
+        let below = bar_of(&raw.replace("7913.75,7936.0", "7870.0,7936.0"));
+        assert_eq!(below.low, 787_000_000_000);
+        assert!(below.validate().is_ok());
+
+        let inverted = bar_of(&raw.replace("7936.0,7879.75", "7870.0,7936.0"));
+        assert!(inverted.validate().is_err());
     }
 }

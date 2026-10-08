@@ -1335,7 +1335,17 @@ impl HistoryTask {
                 if flags & REMOVE_EVENT != 0 {
                     self.candles.remove(&index);
                 } else if let Some(bar) = bar {
-                    bar.validate().map_err(|e| e.to_string())?;
+                    bar.validate().map_err(|error| {
+                        format!(
+                            "{error} for {symbol} candle {index} at {} ms (open {}, high {}, low {}, close {}, volume {})",
+                            bar.exchange_timestamp_unix_nanos / 1_000_000,
+                            bar.open,
+                            bar.high,
+                            bar.low,
+                            bar.close,
+                            bar.volume
+                        )
+                    })?;
                     if self.request.range.is_some_and(|range| {
                         bar.exchange_timestamp_unix_nanos >= range.end_unix_nanos
                     }) {
