@@ -428,7 +428,7 @@ enum Command {
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
-    AttachVenue(u64, Reply<Receiver<VenueRequest>>),
+    AttachVenue(Reply<(u64, Receiver<VenueRequest>)>),
     DrainVenueEvents,
     #[cfg(test)]
     BlockOwnerForTest(SyncSender<()>, Arc<std::sync::Barrier>),
@@ -614,13 +614,14 @@ impl TradingService {
         self.request(|reply| Command::Place(order, reply))
     }
 
-    /// Attaches a bounded demo-venue writer for a new session generation.
-    /// The receiver belongs to that generation's venue worker and has exactly 64 slots.
+    /// Attaches a bounded demo-venue writer under the next session generation, which the
+    /// owner assigns and persists. The relay stamps every event with that generation, and
+    /// the receiver (64 slots) belongs to it alone; any earlier generation is retired.
     ///
     /// # Errors
-    /// Rejects zero or non-increasing generations or an unavailable trading owner.
-    pub fn attach_demo_venue(&self, generation: u64) -> Result<Receiver<VenueRequest>, String> {
-        self.request(|reply| Command::AttachVenue(generation, reply))
+    /// Returns an error when the owner is unavailable or the generation cannot be stored.
+    pub fn attach_demo_venue(&self) -> Result<(u64, Receiver<VenueRequest>), String> {
+        self.request(Command::AttachVenue)
     }
 
     /// Returns the shared bounded event inbox for the broker reader.
@@ -1174,9 +1175,7 @@ impl Coordinator {
                 Command::Export(directory, reply) => {
                     let _ = reply.send(self.store.export(&directory));
                 }
-                Command::AttachVenue(generation, reply) => {
-                    respond(&reply, self.attach_venue(generation));
-                }
+                Command::AttachVenue(reply) => respond(&reply, self.attach_venue()),
                 Command::DrainVenueEvents => self.drain_venue_events(),
                 #[cfg(test)]
                 Command::BlockOwnerForTest(ready, barrier) => {
@@ -1279,29 +1278,32 @@ impl Coordinator {
         )
     }
 
-    fn attach_venue(&mut self, generation: u64) -> Result<Receiver<VenueRequest>, String> {
-        if generation == 0 || generation <= self.state.venue_generation {
-            return Err("cTrader venue generation must advance".into());
-        }
+    fn attach_venue(&mut self) -> Result<(u64, Receiver<VenueRequest>), String> {
+        let generation = self
+            .state
+            .venue_generation
+            .checked_add(1)
+            .ok_or("cTrader venue generation is exhausted")?;
         self.store.set_venue_generation(generation)?;
         let (outbound, receiver) = mpsc::sync_channel(venue::OUTBOUND_CAPACITY);
         // Every attach starts with a reconcile of each demo broker account, so state left
         // by a restart or a dropped session is settled against the broker first.
-        for broker_account in self
+        let reconciles = self
             .state
             .accounts
             .values()
             .filter(|account| account.environment == AccountEnvironment::Demo)
-            .filter_map(|account| account.broker_ref.clone())
-        {
+            .filter_map(|account| self.reconcile_request(account))
+            .collect::<Vec<_>>();
+        for request in reconciles {
             outbound
-                .try_send(VenueRequest::Reconcile { broker_account })
+                .try_send(request)
                 .map_err(|_| "cTrader venue reconcile requests exceed the outbound queue")?;
         }
         self.venue_outbound = Some(outbound);
         self.state.venue_generation = generation;
         self.venue_ingestion = 0;
-        Ok(receiver)
+        Ok((generation, receiver))
     }
 
     fn require_broker_route(&self, account_id: &TradingAccountId) -> Result<(), String> {

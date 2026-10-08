@@ -79,9 +79,10 @@ impl DemoAccount {
         &self.0
     }
 
-    /// An observed demo account for encoder tests, which have no session.
-    #[cfg(test)]
-    pub(crate) fn observed_for_tests(ctid: u64) -> Self {
+    /// An observed demo account for tests, which have no session.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn observed_for_tests(ctid: u64) -> Self {
         Self(CtraderAccount {
             ctid,
             is_live: false,

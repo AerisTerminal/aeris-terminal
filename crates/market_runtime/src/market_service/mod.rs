@@ -135,7 +135,7 @@ pub struct MarketServiceStatus {
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
     broker_api: Arc<tastytrade::BrokerApi>,
-    ctrader_counters: Arc<ctrader::StreamCounters>,
+    ctrader: ctrader::CtraderShared,
     provider_presentations: Vec<ProviderPresentationDescriptor>,
     provider_search_preparers: BTreeMap<&'static str, ProviderSearchPreparer>,
     broker_authorization: broker_authorization::BrokerAuthorization,
@@ -991,7 +991,7 @@ enum LiveModel {
 /// Shared provider-owned state that runtime starters attach to.
 struct ProviderStartContext {
     tastytrade: Arc<tastytrade::BrokerApi>,
-    ctrader: Arc<ctrader::StreamCounters>,
+    ctrader: ctrader::CtraderShared,
 }
 
 type ProviderRuntimeStarter = fn(
@@ -1731,7 +1731,9 @@ mod broker_authorization;
 mod ctrader;
 mod runtime;
 mod tastytrade;
-pub use ctrader::CtraderStreamStatistics;
+pub use ctrader::{
+    CtraderStreamStatistics, VenueEventSink as CtraderVenueEventSink, VenueLink as CtraderVenueLink,
+};
 use runtime::join_runtime_workers;
 
 mod coordinator;

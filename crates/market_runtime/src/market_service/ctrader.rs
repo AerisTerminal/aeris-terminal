@@ -23,6 +23,7 @@ use super::{
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
 };
+use aeris_ctrader_open_api_adapter::accounts::DemoAccount;
 use aeris_ctrader_open_api_adapter::{
     ProtoMessage,
     accounts::CtraderAccount,
@@ -38,7 +39,12 @@ use aeris_ctrader_open_api_adapter::{
 };
 use aeris_observability::diagnostic;
 use aeris_platform_runtime::hosted_broker::HostedBrokerConnection;
+
+#[path = "ctrader_venue.rs"]
+mod venue;
 use std::sync::atomic::AtomicU64 as Counter;
+use venue::VenueRelay;
+pub use venue::{VenueEventSink, VenueLink, VenueSlot};
 
 pub(super) const ENTITLEMENT: &str = "ctrader-authorized";
 const PROVIDER: &str = "ctrader";
@@ -127,6 +133,14 @@ const MAXIMUM_HISTORY_SPAN_MS: i64 = 20 * 365 * 86_400_000;
 
 /// Locked or crossed provider books observed since the runtime started. They
 /// are withheld from canonical state, so these counts are the only record.
+/// What the market service shares with the cTrader supervisor: stream statistics it
+/// reads, and the slot through which it attaches the trading venue.
+#[derive(Clone, Default)]
+pub(super) struct CtraderShared {
+    pub(super) counters: Arc<StreamCounters>,
+    pub(super) venue: Arc<VenueSlot>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CtraderStreamStatistics {
     pub crossed_spots: u64,
@@ -407,6 +421,9 @@ trait CtraderMarketLink: Send {
     fn request(&mut self, request: MarketRequest) -> Result<ProtoMessage, SessionFault>;
     fn next_event(&mut self, timeout: Duration) -> Result<Option<ProtoMessage>, SessionFault>;
     fn close(&mut self);
+    /// The trading guard for an account observed on this demo session; trading encoders
+    /// accept nothing else.
+    fn demo_account(&self, ctid: u64) -> Result<DemoAccount, SessionFault>;
 }
 type LinkOpener = Box<
     dyn FnMut(CtraderHost, &Arc<AtomicBool>) -> Result<Box<dyn CtraderMarketLink>, HostFault>
@@ -486,6 +503,15 @@ impl CtraderMarketLink for HostedLink {
     }
     fn close(&mut self) {
         self.session.close();
+    }
+    fn demo_account(&self, ctid: u64) -> Result<DemoAccount, SessionFault> {
+        let account = self
+            .session
+            .accounts()
+            .iter()
+            .find(|account| account.ctid == ctid)
+            .ok_or(SessionFault::Protocol)?;
+        DemoAccount::from_session(&self.session, account).map_err(|_| SessionFault::Protocol)
     }
 }
 
@@ -1011,6 +1037,7 @@ struct WorkerPorts {
     stop: Arc<AtomicBool>,
     wake: ProviderCoordinatorWake,
     counters: Arc<StreamCounters>,
+    venue: Arc<VenueSlot>,
 }
 struct WorkerConfig {
     opener: LinkOpener,
@@ -1061,6 +1088,8 @@ struct Worker {
     catalog_job: Option<CatalogJob>,
     searches: BTreeMap<u64, (u64, Vec<CatalogEntry>)>,
     selection_generation: u64,
+    /// The trading relay for the attached venue generation, if any.
+    venue: Option<VenueRelay>,
 }
 impl Worker {
     fn new(ports: WorkerPorts, config: WorkerConfig) -> Self {
@@ -1085,6 +1114,7 @@ impl Worker {
             catalog_job: None,
             searches: BTreeMap::new(),
             selection_generation: 0,
+            venue: None,
         }
     }
     fn epoch(&self) -> u64 {
@@ -1110,11 +1140,12 @@ impl Worker {
     fn run(mut self) {
         while !self.ports.stop.load(Ordering::Acquire) {
             self.controls();
+            self.take_venue();
             self.flush_completions();
             self.catalog();
             if self.epoch_state.paused {
                 self.reject_history(DISCONNECTED_DETAIL);
-            } else if let Err(error) = self.step() {
+            } else if let Err(error) = self.venue_step().and_then(|()| self.step()) {
                 self.recover(error);
             }
             self.close_idle_hosts();
@@ -1162,6 +1193,8 @@ impl Worker {
                 }
                 RealtimeControl::Stop => self.stop_demand(),
                 RealtimeControl::AuthorizationChanged(ready) => {
+                    self.mark_venue_resync();
+                    self.retry_venue_now();
                     self.close_hosts();
                     self.cancel_history("cTrader disconnected");
                     if let Some(job) = self.catalog_job.take() {
@@ -1427,6 +1460,9 @@ impl Worker {
                     Ok(None) => break,
                     Err(fault) => return Err(HostFault::from(classify(&fault))),
                 };
+                if self.venue_event(live, &frame) {
+                    continue;
+                }
                 match frame.payload_type {
                     SPOT_EVENT => self.accept_spot(live, &frame)?,
                     DEPTH_EVENT => self.accept_depth(live, &frame)?,
@@ -1927,8 +1963,13 @@ impl Worker {
     fn close_idle_hosts(&mut self) {
         let idle_stop = self.config.idle_stop;
         let busy = self.history.as_ref().map(|task| task.route.live);
+        // An attached trading venue keeps the demo session open for its events.
+        let trading = self.venue_holds_demo();
         self.hosts.retain(|live, host| {
-            let keep = !host.idle() || busy == Some(*live) || host.last_use.elapsed() < idle_stop;
+            let keep = !host.idle()
+                || busy == Some(*live)
+                || (trading && !*live)
+                || host.last_use.elapsed() < idle_stop;
             if !keep {
                 host.link.close();
                 diagnostic!(
@@ -1959,6 +2000,7 @@ impl Worker {
             wait,
         } = fault;
         diagnostic!("Aeris cTrader market recovery: {error}");
+        self.mark_venue_resync();
         self.close_hosts();
         self.cancel_history(&error);
         self.candle_symbols.clear();
@@ -1999,7 +2041,7 @@ pub(super) fn start_record(
     completions: &SyncSender<Command>,
     wake: ProviderCoordinatorWake,
     activity: &Arc<Mutex<BTreeSet<String>>>,
-    counters: &Arc<StreamCounters>,
+    shared: &CtraderShared,
 ) -> Result<ProviderRuntimeRecord, String> {
     let access = Arc::new(Mutex::new(HostedAccess::default()));
     let opener: LinkOpener = Box::new(move |host, stop| {
@@ -2015,7 +2057,7 @@ pub(super) fn start_record(
         completions,
         wake,
         activity,
-        counters,
+        shared,
         WorkerConfig {
             opener,
             idle_stop: IDLE_STOP,
@@ -2029,7 +2071,7 @@ fn spawn_record(
     completions: &SyncSender<Command>,
     wake: ProviderCoordinatorWake,
     activity: &Arc<Mutex<BTreeSet<String>>>,
-    counters: &Arc<StreamCounters>,
+    shared: &CtraderShared,
     config: WorkerConfig,
 ) -> Result<ProviderRuntimeRecord, String> {
     let cancellation = Arc::new(AtomicBool::new(false));
@@ -2050,7 +2092,8 @@ fn spawn_record(
         generation,
         stop: Arc::clone(&cancellation),
         wake,
-        counters: Arc::clone(counters),
+        counters: Arc::clone(&shared.counters),
+        venue: Arc::clone(&shared.venue),
     };
     let worker_activity = Arc::clone(activity);
     let worker = thread::Builder::new()

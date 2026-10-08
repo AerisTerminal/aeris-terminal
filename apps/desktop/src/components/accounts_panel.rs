@@ -44,15 +44,92 @@ pub(super) fn accounts_panel_content(
         )
         .child(section_label("Trading accounts", theme))
         .child(practice_accounts(app_state, app, theme))
+        .children(broker_accounts(app_state, app, theme))
         .child(
             div()
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
                 .child(
-                    "tastytrade and cTrader provide market data only. Orders are placed on Aeris \
-                     practice accounts with simulated funds.",
+                    "tastytrade provides market data only. Practice accounts trade simulated \
+                     funds; cTrader demo accounts trade on the broker's demo server.",
                 ),
         )
+}
+
+/// Every trading account carries its environment, so simulated, demo and live accounts
+/// are never confused where an order is placed.
+pub(super) fn environment_badge(
+    environment: aeris_trading::AccountEnvironment,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let (label, background, text) = match environment {
+        aeris_trading::AccountEnvironment::Simulated => {
+            ("Simulated", colors.surface_secondary, colors.text_muted)
+        }
+        aeris_trading::AccountEnvironment::Demo => ("Demo", colors.indigo_subtle, colors.indigo),
+        aeris_trading::AccountEnvironment::Live => (
+            "Live · data only",
+            colors.warning_subtle,
+            colors.text_warning,
+        ),
+    };
+    div()
+        .flex_none()
+        .h(px(20.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+        .bg(gpui_color(background))
+        .text_xs()
+        .text_color(gpui_color(text))
+        .child(label)
+        .into_any_element()
+}
+
+/// Broker accounts registered by the trading owner. They are never deleted here, and a
+/// live account cannot be chosen for orders.
+fn broker_accounts(
+    app_state: &WorkspaceSurface,
+    app: &Entity<WorkspaceSurface>,
+    theme: &AerisTheme,
+) -> Option<impl IntoElement> {
+    let trading = &app_state.trading_pnl;
+    let selected = trading.order_entry.selected_account_id.as_ref();
+    let mut rows = trading
+        .accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| account.environment != aeris_trading::AccountEnvironment::Simulated)
+        .peekable();
+    rows.peek()?;
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(section_label("Broker accounts", theme));
+    for (index, account) in rows {
+        let detail = match account.environment {
+            aeris_trading::AccountEnvironment::Live => {
+                "cTrader live · trading is disabled".to_string()
+            }
+            _ => format!("cTrader demo · {}", account.currency),
+        };
+        let selectable = account.environment == aeris_trading::AccountEnvironment::Demo;
+        list = list.child(account_row(
+            app,
+            AccountRow {
+                index,
+                account,
+                detail,
+                selected: selected == Some(&account.id),
+                selectable,
+            },
+            theme,
+        ));
+    }
+    Some(list)
 }
 
 fn tastytrade_attribution(theme: &AerisTheme) -> impl IntoElement {
@@ -269,7 +346,13 @@ fn practice_accounts(
     let trading = &app_state.trading_pnl;
     let selected = trading.order_entry.selected_account_id.as_ref();
     let mut list = div().flex().flex_col().gap_1();
-    if trading.accounts.is_empty() {
+    let practice = trading
+        .accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| account.environment == aeris_trading::AccountEnvironment::Simulated)
+        .collect::<Vec<_>>();
+    if practice.is_empty() {
         list = list.child(
             div()
                 .text_xs()
@@ -277,12 +360,25 @@ fn practice_accounts(
                 .child("No practice accounts yet. Create one to trade with simulated funds."),
         );
     }
-    for (index, account) in trading.accounts.iter().enumerate() {
-        list = list.child(practice_account_row(
+    for (index, account) in practice {
+        let detail = account.starting_equity.map_or_else(
+            || "Practice account".to_string(),
+            |equity| {
+                format!(
+                    "Practice · started with {}",
+                    super::order_ticket::format_money(&account.currency, equity)
+                )
+            },
+        );
+        list = list.child(account_row(
             app,
-            index,
-            account,
-            selected == Some(&account.id),
+            AccountRow {
+                index,
+                account,
+                detail,
+                selected: selected == Some(&account.id),
+                selectable: true,
+            },
             theme,
         ));
     }
@@ -301,27 +397,33 @@ fn practice_accounts(
     )
 }
 
-fn practice_account_row(
-    app: &Entity<WorkspaceSurface>,
+struct AccountRow<'a> {
     index: usize,
-    account: &aeris_trading::TradingAccount,
+    account: &'a aeris_trading::TradingAccount,
+    detail: String,
     selected: bool,
+    /// Whether orders may be placed on it; live broker accounts are data-only.
+    selectable: bool,
+}
+
+fn account_row(
+    app: &Entity<WorkspaceSurface>,
+    row: AccountRow<'_>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
+    let AccountRow {
+        index,
+        account,
+        detail,
+        selected,
+        selectable,
+    } = row;
     let colors = theme.colors;
     let select = app.clone();
     let account_id = account.id.clone();
-    let detail = account.starting_equity.map_or_else(
-        || "Practice account".to_string(),
-        |equity| {
-            format!(
-                "Practice · started with {}",
-                super::order_ticket::format_money(&account.currency, equity)
-            )
-        },
-    );
+    let simulated = account.environment == aeris_trading::AccountEnvironment::Simulated;
     div()
-        .id(("accounts_practice_row", index))
+        .id(("accounts_trading_row", index))
         .h(px(ROW_HEIGHT))
         .px_2()
         .flex()
@@ -339,16 +441,19 @@ fn practice_account_row(
         } else {
             colors.surface
         }))
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label(format!("Trade on {}", account.display_name))
-        .hover(move |row| row.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-        .on_click(move |_, _, cx| {
-            select.update(cx, |surface, surface_cx| {
-                surface.trading_pnl.order_entry.selected_account_id = Some(account_id.clone());
-                surface.trading_pnl.current = None;
-                surface_cx.notify();
-            });
+        .when(selectable, |row| {
+            row.cursor_pointer()
+                .role(Role::Button)
+                .aria_label(format!("Trade on {}", account.display_name))
+                .hover(move |row| row.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                .on_click(move |_, _, cx| {
+                    select.update(cx, |surface, surface_cx| {
+                        surface.trading_pnl.order_entry.selected_account_id =
+                            Some(account_id.clone());
+                        surface.trading_pnl.current = None;
+                        surface_cx.notify();
+                    });
+                })
         })
         .child(
             div()
@@ -386,7 +491,11 @@ fn practice_account_row(
                         .child(detail),
                 ),
         )
-        .child(delete_account_button(app, index, account, theme))
+        .child(environment_badge(account.environment, theme))
+        // Only practice accounts can be deleted; broker accounts belong to the broker.
+        .when(simulated, |row| {
+            row.child(delete_account_button(app, index, account, theme))
+        })
 }
 
 fn delete_account_button(

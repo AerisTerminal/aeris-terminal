@@ -88,9 +88,12 @@ pub enum VenueRequest {
         stop_loss: Option<FixedPoint>,
         take_profit: Option<FixedPoint>,
     },
-    /// Report every open order and position of the account as one snapshot.
+    /// Report every open order and position of the account as one snapshot, preceded by
+    /// the deals executed since `deals_since_unix_nanos` so fills missed while disconnected
+    /// are applied before the snapshot settles open orders.
     Reconcile {
         broker_account: String,
+        deals_since_unix_nanos: Option<i64>,
     },
 }
 
@@ -104,7 +107,7 @@ impl VenueRequest {
             Self::Cancel { broker_account, .. }
             | Self::ClosePosition { broker_account, .. }
             | Self::AmendPositionProtection { broker_account, .. }
-            | Self::Reconcile { broker_account } => broker_account,
+            | Self::Reconcile { broker_account, .. } => broker_account,
         }
     }
 
@@ -153,9 +156,27 @@ impl VenueRequest {
                 validate_field("broker_position_id", broker_position_id)?;
                 prices(*stop_loss, *take_profit)
             }
-            Self::Reconcile { .. } => Ok(()),
+            Self::Reconcile {
+                deals_since_unix_nanos,
+                ..
+            } => {
+                if deals_since_unix_nanos.is_some_and(|since| since <= 0) {
+                    return Err(TradingValidationError::InvalidTimestamp);
+                }
+                Ok(())
+            }
         }
     }
+}
+
+/// A broker account the relay's connection can trade, as the broker describes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedAccount {
+    pub environment: crate::AccountEnvironment,
+    pub display_name: String,
+    /// The deposit currency, in which the broker reports balances and realized P&L.
+    pub currency: String,
+    pub currency_scale: u8,
 }
 
 const fn positive(quantity: FixedPoint) -> Result<(), TradingValidationError> {
@@ -284,6 +305,8 @@ pub struct VenueSnapshot {
 /// One change reported by a broker venue.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VenueUpdate {
+    /// The connection can reach this account; the owner registers it.
+    AccountObserved(ObservedAccount),
     Order {
         order: BrokerOrder,
         state: BrokerOrderState,
@@ -373,8 +396,17 @@ mod tests {
         }
         let reconcile = VenueRequest::Reconcile {
             broker_account: "1001".into(),
+            deals_since_unix_nanos: Some(1),
         };
         assert_eq!(reconcile.broker_account(), "1001");
         assert!(reconcile.validate().is_ok());
+        assert!(
+            VenueRequest::Reconcile {
+                broker_account: "1001".into(),
+                deals_since_unix_nanos: Some(0),
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

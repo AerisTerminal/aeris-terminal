@@ -20,6 +20,11 @@ serde.workspace = true
 prost-build.workspace = true
 protoc-bin-vendored.workspace = true
 
+[features]
+# Lets downstream tests build a demo account without a live session. Production builds
+# never enable it, so a demo account still comes only from an observed demo session.
+test-support = []
+
 [dev-dependencies]
 rcgen.workspace = true
 serde_json.workspace = true

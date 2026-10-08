@@ -106,9 +106,11 @@ fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement +
         .selected_account_id
         .as_ref()
         .and_then(|id| state.accounts.iter().find(|account| &account.id == id));
-    let label = selected.map_or("Choose a practice account", |account| {
+    let label = selected.map_or("Choose a trading account", |account| {
         account.display_name.as_str()
     });
+    let badge = selected
+        .map(|account| super::accounts_panel::environment_badge(account.environment, state.theme));
     let open = state.app.clone();
     // Accounts are created, chosen and deleted in the header Accounts panel; the ticket
     // only shows which one it trades on.
@@ -134,8 +136,16 @@ fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement +
                 surface.open_chrome_overlay(ChromeOverlay::Accounts, window, surface_cx);
             });
         })
-        .child(div().min_w_0().truncate().child(label.to_string()))
-        .child(header_icon(HugeIcon::ChevronDown))
+        .child(div().min_w_0().flex_1().truncate().child(label.to_string()))
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .children(badge)
+                .child(header_icon(HugeIcon::ChevronDown)),
+        )
 }
 
 fn account_summary(

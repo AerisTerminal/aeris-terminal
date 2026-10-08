@@ -7,11 +7,12 @@ use crate::{
     store::BrokerFillRecord,
 };
 use aeris_trading::{
-    BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce, TradingAccountId,
+    AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
+    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
+    TradingAccount, TradingAccountId,
     venue::{
-        BrokerFill, BrokerOrder, BrokerOrderState, RealizedClose, VenueAmendment, VenueOrder,
-        VenuePosition, VenueSnapshot,
+        BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount, RealizedClose, VenueAmendment,
+        VenueOrder, VenuePosition, VenueSnapshot,
     },
 };
 use std::{collections::BTreeSet, sync::mpsc::TrySendError};
@@ -38,6 +39,83 @@ impl Coordinator {
                     && account.broker_ref.as_deref() == Some(broker_account)
             })
             .map(|account| account.id.clone())
+    }
+
+    /// A reconcile for one broker account. Deals are replayed from the earlier of its
+    /// oldest open order and its latest recorded deal, so anything that executed while the
+    /// owner was not listening is applied before the snapshot settles open orders.
+    pub(crate) fn reconcile_request(&self, account: &TradingAccount) -> Option<VenueRequest> {
+        let broker_account = account.broker_ref.clone()?;
+        let oldest_open = self
+            .state
+            .orders
+            .values()
+            .filter(|order| order.account_id == account.id && order.status.is_open())
+            .map(|order| order.submitted_unix_nanos)
+            .min();
+        let latest_deal = self
+            .state
+            .fills
+            .iter()
+            .filter(|fill| fill.account_id == account.id)
+            .map(|fill| fill.execution_unix_nanos)
+            .max();
+        let deals_since_unix_nanos = match (oldest_open, latest_deal) {
+            (Some(open), Some(deal)) => Some(open.min(deal)),
+            (open, deal) => open.or(deal),
+        };
+        Some(VenueRequest::Reconcile {
+            broker_account,
+            deals_since_unix_nanos,
+        })
+    }
+
+    /// Registers a broker account the relay can reach, under a stable id derived from the
+    /// broker account. A known account keeps its id and money scale; only its name follows
+    /// the broker. A newly registered demo account is reconciled at once.
+    fn register_observed_account(
+        &mut self,
+        broker_account: &str,
+        observed: &ObservedAccount,
+    ) -> Result<(), String> {
+        if let Some(account_id) = self.venue_account(broker_account) {
+            let mut known = self
+                .state
+                .accounts
+                .get(&account_id)
+                .cloned()
+                .ok_or("trading account is not registered")?;
+            if known.environment != observed.environment {
+                return Err("a broker account changed environment".into());
+            }
+            if known.display_name == observed.display_name {
+                return Ok(());
+            }
+            known.display_name.clone_from(&observed.display_name);
+            return self.register_account(known);
+        }
+        let account = TradingAccount {
+            id: TradingAccountId::try_new(format!(
+                "ctrader-{}-{broker_account}",
+                observed.environment.as_str()
+            ))
+            .map_err(|error| error.to_string())?,
+            display_name: observed.display_name.clone(),
+            environment: observed.environment,
+            venue_id: "ctrader".into(),
+            broker_ref: Some(broker_account.to_string()),
+            currency: observed.currency.clone(),
+            currency_scale: observed.currency_scale,
+            starting_equity: None,
+        };
+        let reconcile = (account.environment == AccountEnvironment::Demo)
+            .then(|| self.reconcile_request(&account))
+            .flatten();
+        self.register_account(account)?;
+        match reconcile {
+            Some(request) if self.venue_outbound.is_some() => self.send_venue_request(request),
+            _ => Ok(()),
+        }
     }
 
     fn broker_order_id(&self, order_id: &OrderId) -> Option<String> {
@@ -414,10 +492,14 @@ impl Coordinator {
             .venue_ingestion
             .checked_add(1)
             .ok_or("venue ingestion sequence exhausted")?;
+        if let VenueUpdate::AccountObserved(observed) = &event.update {
+            return self.register_observed_account(&event.broker_account, observed);
+        }
         let Some(account_id) = self.venue_account(&event.broker_account) else {
             return Ok(());
         };
         match &event.update {
+            VenueUpdate::AccountObserved(_) => Ok(()),
             VenueUpdate::Order {
                 order,
                 state,

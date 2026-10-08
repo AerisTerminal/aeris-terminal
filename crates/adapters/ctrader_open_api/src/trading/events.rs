@@ -9,6 +9,8 @@ use crate::{
     },
     market::{MarketDecodeError, PriceScale},
 };
+use prost::Message as _;
+use std::collections::BTreeSet;
 
 /// Bound on each list of positions, orders or deals one response may report.
 pub const MAXIMUM_STATE_ITEMS: usize = 4096;
@@ -165,6 +167,7 @@ pub struct PositionState {
     pub take_profit: Option<i64>,
     pub swap: Money,
     pub commission: Option<Money>,
+    pub opened_unix_ms: Option<i64>,
     pub updated_unix_ms: Option<i64>,
 }
 
@@ -472,6 +475,11 @@ fn position(
             .commission
             .map(|units| money(units, position.money_digits))
             .transpose()?,
+        opened_unix_ms: position
+            .trade_data
+            .open_timestamp
+            .map(|value| timestamp(value, "openTimestamp"))
+            .transpose()?,
         updated_unix_ms: position
             .utc_last_update_timestamp
             .map(|value| timestamp(value, "utcLastUpdateTimestamp"))
@@ -566,6 +574,82 @@ pub fn decode_execution_event(
             .transpose()?,
         server_event: event.is_server_event == Some(true),
     })
+}
+
+/// The trading account an unsolicited trading event belongs to, read before it is
+/// decoded for that account. Other payload types name none.
+#[must_use]
+pub fn event_account(frame: &ProtoMessage) -> Option<u64> {
+    let bytes = payload(frame);
+    let account = match frame.payload_type {
+        2126 => ProtoOaExecutionEvent::decode(bytes)
+            .ok()
+            .map(|event| event.ctid_trader_account_id),
+        2132 => ProtoOaOrderErrorEvent::decode(bytes)
+            .ok()
+            .map(|event| event.ctid_trader_account_id),
+        2123 => ProtoOaTraderUpdatedEvent::decode(bytes)
+            .ok()
+            .map(|event| event.ctid_trader_account_id),
+        2107 => crate::generated::ProtoOaTrailingSlChangedEvent::decode(bytes)
+            .ok()
+            .map(|event| event.ctid_trader_account_id),
+        _ => None,
+    }?;
+    u64::try_from(account).ok().filter(|ctid| *ctid > 0)
+}
+
+/// The symbol ids a trading frame names, so a caller can load their price scales before
+/// decoding it. Payload types that name no symbol return none.
+///
+/// # Errors
+/// Rejects a malformed frame.
+pub fn referenced_symbols(frame: &ProtoMessage) -> Result<BTreeSet<u64>, MarketDecodeError> {
+    fn decode<M: prost::Message + Default>(bytes: &[u8]) -> Result<M, MarketDecodeError> {
+        M::decode(bytes).map_err(|error| codec::CodecError::MalformedProtobuf(error).into())
+    }
+    let bytes = payload(frame);
+    let ids: Vec<i64> = match frame.payload_type {
+        2126 => {
+            let event: ProtoOaExecutionEvent = decode(bytes)?;
+            event
+                .order
+                .map(|order| order.trade_data.symbol_id)
+                .into_iter()
+                .chain(event.position.map(|position| position.trade_data.symbol_id))
+                .chain(event.deal.map(|deal| deal.symbol_id))
+                .collect()
+        }
+        2125 => {
+            let response: ProtoOaReconcileRes = decode(bytes)?;
+            response
+                .position
+                .iter()
+                .map(|position| position.trade_data.symbol_id)
+                .chain(
+                    response
+                        .order
+                        .iter()
+                        .map(|order| order.trade_data.symbol_id),
+                )
+                .collect()
+        }
+        2182 => {
+            let response: crate::generated::ProtoOaOrderDetailsRes = decode(bytes)?;
+            std::iter::once(response.order.trade_data.symbol_id)
+                .chain(response.deal.iter().map(|deal| deal.symbol_id))
+                .collect()
+        }
+        2134 | 2180 => {
+            let response: crate::generated::ProtoOaDealListRes = decode(bytes)?;
+            response.deal.iter().map(|deal| deal.symbol_id).collect()
+        }
+        _ => Vec::new(),
+    };
+    Ok(ids
+        .into_iter()
+        .filter_map(|id| u64::try_from(id).ok().filter(|id| *id > 0))
+        .collect())
 }
 
 /// Decode a `ProtoOAOrderErrorEvent` (2132) for one account.

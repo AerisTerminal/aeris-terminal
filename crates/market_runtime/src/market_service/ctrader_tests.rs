@@ -59,6 +59,12 @@ fn field_string(out: &mut Vec<u8>, field: u32, value: &str) {
     field_bytes(out, field, value.as_bytes());
 }
 
+/// Proto2 `double` encodes as a little-endian fixed64.
+fn field_double(out: &mut Vec<u8>, field: u32, value: f64) {
+    put_varint(out, u64::from((field << 3) | 1));
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
 fn frame(payload_type: u32, payload: Vec<u8>) -> ProtoMessage {
     ProtoMessage {
         payload_type,
@@ -228,6 +234,129 @@ fn symbol_by_id_frame(ctid: u64, symbols: &[(u64, i32)]) -> ProtoMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Trading frames shaped like the demo captures (see the adapter's trading fixtures).
+// ---------------------------------------------------------------------------
+
+fn trade_data(symbol: u64, volume: u64, side: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    field_int(&mut body, 1, symbol.cast_signed());
+    field_varint(&mut body, 2, volume);
+    field_varint(&mut body, 3, side);
+    field_int(&mut body, 4, 1_791_467_000_000);
+    body
+}
+
+/// A `ProtoOAOrder`: `kind` 2 is limit, `status` 1 accepted and 2 filled.
+fn order_body(order_id: u64, client: &str, kind: u64, status: u64, executed: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    field_int(&mut body, 1, order_id.cast_signed());
+    field_bytes(&mut body, 2, &trade_data(DEMO_SYMBOL, 100_000, 1));
+    field_varint(&mut body, 3, kind);
+    field_varint(&mut body, 4, status);
+    field_varint(&mut body, 8, executed);
+    if kind == 2 {
+        field_double(&mut body, 13, 1.0825);
+    }
+    field_string(&mut body, 17, client);
+    field_int(&mut body, 19, 77);
+    body
+}
+
+fn position_body(status: u64, price: f64) -> Vec<u8> {
+    let mut body = Vec::new();
+    field_int(&mut body, 1, 77);
+    field_bytes(&mut body, 2, &trade_data(DEMO_SYMBOL, 100_000, 1));
+    field_varint(&mut body, 3, status);
+    field_int(&mut body, 4, 0);
+    field_double(&mut body, 5, price);
+    field_int(&mut body, 9, -5);
+    field_varint(&mut body, 15, 2);
+    body
+}
+
+fn deal_body(deal_id: u64, order_id: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    field_int(&mut body, 1, deal_id.cast_signed());
+    field_int(&mut body, 2, order_id.cast_signed());
+    field_int(&mut body, 3, 77);
+    field_int(&mut body, 4, 100_000);
+    field_int(&mut body, 5, 100_000);
+    field_int(&mut body, 6, DEMO_SYMBOL.cast_signed());
+    field_int(&mut body, 7, 1_791_467_000_000);
+    field_int(&mut body, 8, 1_791_467_000_100);
+    field_double(&mut body, 10, 1.0825);
+    field_varint(&mut body, 11, 1);
+    field_varint(&mut body, 12, 2);
+    field_int(&mut body, 14, -5);
+    field_varint(&mut body, 17, 2);
+    body
+}
+
+/// A `ProtoOAExecutionEvent`; `execution` 2 is accepted and 3 filled.
+fn execution_frame(
+    execution: u64,
+    order: Option<Vec<u8>>,
+    position: Option<Vec<u8>>,
+    deal: Option<Vec<u8>>,
+) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, DEMO_CTID.cast_signed());
+    field_varint(&mut payload, 3, execution);
+    if let Some(position) = position {
+        field_bytes(&mut payload, 4, &position);
+    }
+    if let Some(order) = order {
+        field_bytes(&mut payload, 5, &order);
+    }
+    if let Some(deal) = deal {
+        field_bytes(&mut payload, 6, &deal);
+    }
+    field_varint(&mut payload, 10, 0);
+    frame(2126, payload)
+}
+
+fn trader_frame() -> ProtoMessage {
+    let mut trader = Vec::new();
+    field_int(&mut trader, 1, DEMO_CTID.cast_signed());
+    field_int(&mut trader, 2, 1_000_000);
+    field_int(&mut trader, 8, QUOTE_ASSET.cast_signed());
+    field_varint(&mut trader, 20, 2);
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, DEMO_CTID.cast_signed());
+    field_bytes(&mut payload, 3, &trader);
+    frame(2122, payload)
+}
+
+fn reconcile_frame(orders: &[Vec<u8>], positions: &[Vec<u8>]) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, DEMO_CTID.cast_signed());
+    for position in positions {
+        field_bytes(&mut payload, 3, position);
+    }
+    for order in orders {
+        field_bytes(&mut payload, 4, order);
+    }
+    frame(2125, payload)
+}
+
+fn deal_list_frame(deals: &[Vec<u8>]) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, DEMO_CTID.cast_signed());
+    for deal in deals {
+        field_bytes(&mut payload, 3, deal);
+    }
+    field_varint(&mut payload, 4, 0);
+    frame(2134, payload)
+}
+
+fn order_error_frame(code: &str) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_string(&mut payload, 2, code);
+    field_int(&mut payload, 5, DEMO_CTID.cast_signed());
+    frame(2132, payload)
+}
+
+// ---------------------------------------------------------------------------
 // Minimal request payload decoding for the scripted request log.
 // ---------------------------------------------------------------------------
 
@@ -332,6 +461,12 @@ enum Logged {
         to_ms: i64,
         count: Option<u32>,
     },
+    /// A trading request, answered from `Script::trading` in order.
+    Trading {
+        live: bool,
+        payload_type: u32,
+        ctid: u64,
+    },
 }
 
 /// `(symbol id, display name, description)` rows of a scripted catalog.
@@ -355,6 +490,8 @@ struct Script {
     page_limit: Option<usize>,
     symbols: BTreeMap<(bool, u64), ScriptedSymbols>,
     digits: BTreeMap<(bool, u64, u64), i32>,
+    /// Answers to trading requests, in request order.
+    trading: VecDeque<ProtoMessage>,
 }
 
 struct TrendbarQuery {
@@ -448,6 +585,9 @@ impl Script {
                 to_ms,
                 count,
             }),
+            Logged::Trading { payload_type, .. } => {
+                panic!("trading request {payload_type} is answered from the queue")
+            }
         }
     }
 }
@@ -547,6 +687,15 @@ impl CtraderMarketLink for ScriptLink {
                     .first()
                     .map(|count| u32::try_from(*count).expect("count")),
             },
+            trading @ (2106 | 2108 | 2109 | 2110 | 2111 | 2121 | 2124 | 2133 | 2179 | 2181) => {
+                let logged = Logged::Trading {
+                    live: self.live,
+                    payload_type: trading,
+                    ctid: scalar(&request.payload, 2),
+                };
+                script.requests.push(logged);
+                return script.trading.pop_front().ok_or(SessionFault::Timeout);
+            }
             other => panic!("unexpected cTrader request type {other}"),
         };
         script.requests.push(logged.clone());
@@ -577,6 +726,14 @@ impl CtraderMarketLink for ScriptLink {
     fn close(&mut self) {
         self.script.lock().unwrap().closed += 1;
     }
+
+    fn demo_account(&self, ctid: u64) -> Result<DemoAccount, SessionFault> {
+        self.accounts
+            .iter()
+            .any(|account| account.ctid == ctid && !account.is_live && !self.live)
+            .then(|| DemoAccount::observed_for_tests(ctid))
+            .ok_or(SessionFault::Protocol)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +750,7 @@ struct Harness {
     completions: Receiver<Command>,
     generation: Arc<AtomicU64>,
     counters: Arc<StreamCounters>,
+    venue: Arc<VenueSlot>,
     script: Arc<Mutex<Script>>,
 }
 
@@ -605,6 +763,7 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
     let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
     let generation = Arc::new(AtomicU64::new(1));
     let counters = Arc::new(StreamCounters::default());
+    let venue = Arc::new(VenueSlot::default());
     let opener: LinkOpener = {
         let script = Arc::clone(&script);
         Box::new(move |host, _stop| {
@@ -636,6 +795,7 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
             stop: Arc::new(AtomicBool::new(false)),
             wake: ProviderCoordinatorWake::for_tests(),
             counters: Arc::clone(&counters),
+            venue: Arc::clone(&venue),
         },
         WorkerConfig {
             opener,
@@ -653,6 +813,7 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
         completions: completions_rx,
         generation,
         counters,
+        venue,
         script,
     }
 }
@@ -661,11 +822,12 @@ impl Harness {
     /// One turn of the worker's run loop.
     fn drive(&mut self) {
         self.worker.controls();
+        self.worker.take_venue();
         self.worker.flush_completions();
         self.worker.catalog();
         if self.worker.epoch_state.paused {
             self.worker.reject_history(DISCONNECTED_DETAIL);
-        } else if let Err(error) = self.worker.step() {
+        } else if let Err(error) = self.worker.venue_step().and_then(|()| self.worker.step()) {
             self.worker.recover(error);
         }
         self.worker.close_idle_hosts();
@@ -2213,4 +2375,324 @@ fn logged_instrument_ids_mask_the_trading_account() {
     );
     let error = parse_instrument_id("ctrader:live:2002:x").expect_err("invalid");
     assert!(!error.contains("2002"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// Trading relay (D8): the venue contract over the shared demo session.
+// ---------------------------------------------------------------------------
+
+mod venue_relay {
+    use super::*;
+    use aeris_trading::{
+        AccountEnvironment, FixedPoint, OrderSide, OrderType, TimeInForce,
+        venue::{
+            BrokerOrderKind, BrokerOrderState, ObservedAccount, VenueEvent, VenueOrder,
+            VenueRequest, VenueUpdate,
+        },
+    };
+
+    const GENERATION: u64 = 7;
+
+    struct Venue {
+        requests: SyncSender<VenueRequest>,
+        events: Arc<Mutex<Vec<VenueEvent>>>,
+    }
+
+    impl Venue {
+        fn updates(&self) -> Vec<VenueUpdate> {
+            let events = std::mem::take(&mut *self.events.lock().unwrap());
+            for event in &events {
+                assert_eq!(event.session_generation, GENERATION);
+                assert_eq!(event.broker_account, DEMO_CTID.to_string());
+            }
+            events.into_iter().map(|event| event.update).collect()
+        }
+    }
+
+    fn point(units: i64, scale: u8) -> FixedPoint {
+        FixedPoint::try_new(units, scale).expect("fixed point")
+    }
+
+    fn trading_script() -> Arc<Mutex<Script>> {
+        let script = scripted();
+        {
+            let mut guard = script.lock().unwrap();
+            guard.digits.insert((false, DEMO_CTID, DEMO_SYMBOL), 5);
+            guard.trading.push_back(trader_frame());
+        }
+        script
+    }
+
+    /// Attaches a venue and drives the turn that announces the demo account.
+    fn attached(script: Arc<Mutex<Script>>) -> (Harness, Venue) {
+        let mut harness = harness(script, Duration::ZERO);
+        let (requests, receiver) = mpsc::sync_channel(64);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        harness.venue.put(VenueLink {
+            generation: GENERATION,
+            requests: receiver,
+            events: Box::new(move |event| {
+                sink.lock().unwrap().push(event);
+                Ok(())
+            }),
+        });
+        harness.drive();
+        let venue = Venue { requests, events };
+        (harness, venue)
+    }
+
+    fn limit_order(client: &str, instrument: &str) -> VenueOrder {
+        VenueOrder {
+            client_order_id: aeris_trading::ClientOrderId::try_new(client).expect("client id"),
+            broker_account: DEMO_CTID.to_string(),
+            instrument_id: aeris_instruments::InstrumentId::try_new(instrument).expect("id"),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GoodTillCancelled,
+            quantity: point(100_000, 2),
+            limit_price: Some(point(108_250, 5)),
+            stop_price: None,
+            stop_loss: None,
+            take_profit: None,
+            broker_position_id: None,
+        }
+    }
+
+    fn trading_requests(harness: &Harness) -> Vec<u32> {
+        harness
+            .requests()
+            .iter()
+            .filter_map(|request| match request {
+                Logged::Trading {
+                    live: false,
+                    payload_type,
+                    ctid: DEMO_CTID,
+                } => Some(*payload_type),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn demo_accounts_are_announced_with_their_currency_and_balance() {
+        let (harness, venue) = attached(trading_script());
+        assert_eq!(
+            venue.updates(),
+            [
+                VenueUpdate::AccountObserved(ObservedAccount {
+                    environment: AccountEnvironment::Demo,
+                    display_name: format!("cTrader Demo · cTrader {DEMO_CTID}"),
+                    currency: "USD".into(),
+                    currency_scale: 2,
+                }),
+                VenueUpdate::Balance {
+                    balance: point(1_000_000, 2)
+                },
+            ]
+        );
+        assert_eq!(trading_requests(&harness), [2121]);
+        assert!(
+            harness.worker.hosts.contains_key(&false),
+            "an attached venue keeps the demo session open"
+        );
+    }
+
+    #[test]
+    fn orders_are_relayed_and_their_answers_and_later_events_translated() {
+        let (mut harness, venue) = attached(trading_script());
+        venue.updates();
+        harness
+            .script
+            .lock()
+            .unwrap()
+            .trading
+            .push_back(execution_frame(
+                2,
+                Some(order_body(9, "client-1", 2, 1, 0)),
+                Some(position_body(3, 0.0)),
+                None,
+            ));
+        venue
+            .requests
+            .send(VenueRequest::Place(limit_order(
+                "client-1",
+                "ctrader:demo:1001:1",
+            )))
+            .expect("queued");
+        harness.drive();
+        let updates = venue.updates();
+        let [VenueUpdate::Order { order, state, .. }] = updates.as_slice() else {
+            panic!("one order report, got {updates:?}");
+        };
+        assert_eq!(*state, BrokerOrderState::Accepted);
+        assert_eq!(order.broker_order_id, "9");
+        assert_eq!(order.client_order_id.as_deref(), Some("client-1"));
+        assert_eq!(order.kind, BrokerOrderKind::Limit);
+        assert_eq!(order.limit_price, Some(point(108_250, 5)));
+        assert_eq!(order.quantity, point(100_000, 2));
+        assert_eq!(trading_requests(&harness), [2121, 2106]);
+
+        // The fill arrives later as an unsolicited event on the demo session.
+        harness.script.lock().unwrap().events.push_back((
+            false,
+            execution_frame(
+                3,
+                Some(order_body(9, "client-1", 2, 2, 100_000)),
+                Some(position_body(1, 1.0825)),
+                Some(deal_body(501, 9)),
+            ),
+        ));
+        harness.drive();
+        let updates = venue.updates();
+        assert!(
+            matches!(
+                updates.as_slice(),
+                [
+                    VenueUpdate::Order { state: BrokerOrderState::Filled, .. },
+                    VenueUpdate::Fill(fill),
+                    VenueUpdate::Position(position),
+                ] if fill.broker_deal_id == "501"
+                    && fill.price == point(108_250, 5)
+                    && fill.quantity == point(100_000, 2)
+                    && position.entry_price == Some(point(108_250, 5))
+            ),
+            "{updates:?}"
+        );
+    }
+
+    #[test]
+    fn live_instruments_and_broker_refusals_come_back_as_refused() {
+        let (mut harness, venue) = attached(trading_script());
+        venue.updates();
+        venue
+            .requests
+            .send(VenueRequest::Place(limit_order(
+                "client-live",
+                "ctrader:live:2002:41",
+            )))
+            .expect("queued");
+        harness
+            .script
+            .lock()
+            .unwrap()
+            .trading
+            .push_back(order_error_frame("TRADING_BAD_VOLUME"));
+        venue
+            .requests
+            .send(VenueRequest::Place(limit_order(
+                "client-bad",
+                "ctrader:demo:1001:1",
+            )))
+            .expect("queued");
+        harness.drive();
+        let updates = venue.updates();
+        assert!(
+            matches!(
+                updates.as_slice(),
+                [
+                    VenueUpdate::Refused { client_order_id: live, reason: live_reason },
+                    VenueUpdate::Refused { client_order_id: bad, reason: bad_reason },
+                ] if live.as_str() == "client-live"
+                    && live_reason.contains("data-only")
+                    && bad.as_str() == "client-bad"
+                    && bad_reason == "TRADING_BAD_VOLUME"
+            ),
+            "{updates:?}"
+        );
+        assert_eq!(
+            trading_requests(&harness),
+            [2121, 2106],
+            "a live instrument never reaches the wire"
+        );
+    }
+
+    #[test]
+    fn reconcile_replays_deals_before_the_snapshot() {
+        let (mut harness, venue) = attached(trading_script());
+        venue.updates();
+        {
+            let mut script = harness.script.lock().unwrap();
+            script
+                .trading
+                .push_back(deal_list_frame(&[deal_body(501, 9)]));
+            script.trading.push_back(reconcile_frame(
+                &[order_body(10, "client-open", 2, 1, 0)],
+                &[position_body(1, 1.0825)],
+            ));
+        }
+        venue
+            .requests
+            .send(VenueRequest::Reconcile {
+                broker_account: DEMO_CTID.to_string(),
+                deals_since_unix_nanos: Some(1_791_466_000_000_000_000),
+            })
+            .expect("queued");
+        harness.drive();
+        let updates = venue.updates();
+        assert!(
+            matches!(
+                updates.as_slice(),
+                [VenueUpdate::Fill(fill), VenueUpdate::Snapshot(snapshot)]
+                    if fill.broker_deal_id == "501"
+                        && snapshot.orders.len() == 1
+                        && snapshot.orders[0].broker_order_id == "10"
+                        && snapshot.positions.len() == 1
+            ),
+            "{updates:?}"
+        );
+        assert_eq!(trading_requests(&harness), [2121, 2133, 2124]);
+    }
+
+    #[test]
+    fn an_unopenable_demo_session_refuses_trading_without_disturbing_market_recovery() {
+        let script = trading_script();
+        script.lock().unwrap().open_fault = Some(SessionFault::NeedsReconnect);
+        let (mut harness, venue) = attached(script);
+        assert_eq!(venue.updates(), []);
+        assert_eq!(harness.worker.failures, 0, "market recovery is not charged");
+        venue
+            .requests
+            .send(VenueRequest::Place(limit_order(
+                "client-wait",
+                "ctrader:demo:1001:1",
+            )))
+            .expect("queued");
+        harness.drive();
+        let updates = venue.updates();
+        assert!(
+            matches!(
+                updates.as_slice(),
+                [VenueUpdate::Refused { client_order_id, .. }]
+                    if client_order_id.as_str() == "client-wait"
+            ),
+            "{updates:?}"
+        );
+        assert_eq!(
+            harness.opens().len(),
+            1,
+            "the backoff holds the next attempt"
+        );
+        assert_eq!(harness.worker.failures, 0);
+    }
+
+    #[test]
+    fn a_dropped_session_is_reconciled_with_its_missed_deals_on_reconnect() {
+        let (mut harness, venue) = attached(trading_script());
+        venue.updates();
+        harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
+        harness.drive();
+        {
+            let mut script = harness.script.lock().unwrap();
+            script.trading.push_back(deal_list_frame(&[]));
+            script.trading.push_back(reconcile_frame(&[], &[]));
+        }
+        harness.worker.retry_at = Instant::now();
+        harness.drive();
+        assert!(matches!(
+            venue.updates().as_slice(),
+            [VenueUpdate::Snapshot(snapshot)] if snapshot.orders.is_empty()
+        ));
+        assert_eq!(trading_requests(&harness), [2121, 2133, 2124]);
+    }
 }

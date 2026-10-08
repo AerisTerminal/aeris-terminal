@@ -22,7 +22,7 @@ pub use events::{
     AccountType, AveragePrice, ClosedVolume, Deal, DealStatus, ExecutionEvent, ExecutionType,
     MAXIMUM_STATE_ITEMS, Money, OrderErrorEvent, OrderKind, OrderState, OrderStatus, PositionState,
     PositionStatus, Reconciliation, TraderAccount, decode_execution_event,
-    decode_order_error_event, decode_reconcile, decode_trader,
+    decode_order_error_event, decode_reconcile, decode_trader, event_account, referenced_symbols,
 };
 pub use requests::{
     MAXIMUM_CLIENT_ORDER_ID_BYTES, NewOrder, OrderAmendment, OrderPrice, OrderType, Protection,

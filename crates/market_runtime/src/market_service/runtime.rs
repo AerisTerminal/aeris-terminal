@@ -1121,7 +1121,13 @@ impl MarketService {
     /// Locked or crossed cTrader books withheld from canonical state since startup.
     #[must_use]
     pub fn ctrader_stream_statistics(&self) -> super::CtraderStreamStatistics {
-        self.runtime.ctrader_counters.snapshot()
+        self.runtime.ctrader.counters.snapshot()
+    }
+
+    /// Attaches the trading owner's venue generation to the cTrader supervisor, which
+    /// relays it over the shared demo session (D8). A newer attachment retires an older one.
+    pub fn attach_ctrader_venue(&self, link: super::CtraderVenueLink) {
+        self.runtime.ctrader.venue.put(link);
     }
 
     /// Returns the runtime-owned dated session projection for one installed instrument.
@@ -1236,10 +1242,9 @@ impl MarketService {
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let broker_api = Arc::new(super::tastytrade::BrokerApi::default());
-        let ctrader_counters = Arc::new(super::ctrader::StreamCounters::default());
         let start_context = super::ProviderStartContext {
             tastytrade: Arc::clone(&broker_api),
-            ctrader: Arc::clone(&ctrader_counters),
+            ctrader: super::ctrader::CtraderShared::default(),
         };
         let provider_registry = ProviderRuntimeRegistry::start(
             providers,
@@ -1279,7 +1284,7 @@ impl MarketService {
     ) -> Result<Self, String> {
         let super::ProviderStartContext {
             tastytrade: broker_api,
-            ctrader: ctrader_counters,
+            ctrader,
         } = context;
         let (broker_authorization, worker) =
             match super::broker_authorization::BrokerAuthorization::start(
@@ -1299,7 +1304,7 @@ impl MarketService {
             runtime: Arc::new(MarketRuntime {
                 shutdown,
                 broker_api,
-                ctrader_counters,
+                ctrader,
                 provider_presentations,
                 provider_search_preparers,
                 broker_authorization,
@@ -1955,7 +1960,7 @@ mod tests {
             Vec::new(),
             super::super::ProviderStartContext {
                 tastytrade: Arc::new(super::super::tastytrade::BrokerApi::default()),
-                ctrader: Arc::new(super::super::ctrader::StreamCounters::default()),
+                ctrader: super::super::ctrader::CtraderShared::default(),
             },
             BTreeMap::new(),
             vec![*super::super::RITHMIC_DESCRIPTOR.presentation],

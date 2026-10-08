@@ -279,5 +279,6 @@ pub use aeris_market_engine::{
     SeriesSnapshot as CanonicalMarketSeriesSnapshot, SeriesTailOperation, StreamRequirements,
 };
 pub use market_service::{
-    CtraderStreamStatistics, MarketService, MarketServiceStatus, built_in_provider_presentations,
+    CtraderStreamStatistics, CtraderVenueEventSink, CtraderVenueLink, MarketService,
+    MarketServiceStatus, built_in_provider_presentations,
 };

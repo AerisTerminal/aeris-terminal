@@ -22,7 +22,7 @@ Last examined: 2026-10-08.
 | Desktop market data (pick cTrader, chart, DOM) | `apps/desktop` | **Built and tested**; manual desktop check pending |
 | Adapter trading messages | `crates/adapters/ctrader_open_api` | **Built**, schema-tested; demo capture pending |
 | Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Built**; T-1 to T-6 fixed; brackets and live-risk inputs open |
-| Session owner joining the adapter and `trading_runtime` | to decide (D8) | **Not started** |
+| Session owner joining the adapter and `trading_runtime` | `market_runtime` relay (D8) | **Built**, verified on demo |
 | Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Not started** |
 | Demo and live qualification | maintainer | **Not started** |
 
@@ -402,26 +402,39 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
 
 ### Phase 5: venue worker and account registration
 
-- [ ] Implement D8: the cTrader supervisor attaches the demo venue
-  (`TradingService::attach_demo_venue`) for each session generation. It sends outbound requests
-  through the rate limiter and pushes decoded events into `demo_venue_inbox()`.
-- [ ] **Register accounts:** after authorization, map each observed account to a `TradingAccount`:
-  - `venue_id = "ctrader"`;
-  - `broker_ref` = the ctid;
-  - the environment from `is_live`;
-  - currency and money scale from `ProtoOATraderRes`.
-
-  Mark accounts that are no longer observed as disconnected instead of deleting them.
-- [ ] **Register instruments:** register traded symbols as `TradingInstrument`s with exact price and
-  volume scales, tick size (M-7), and lot, minimum and step volume.
-- [ ] **Bounds:** the outbound queue, the inbox and reconcile work stay bounded, and an overload
-  forces a reconnect and reconcile rather than silent loss.
+- [x] **D8 relay** (`market_service/ctrader_venue.rs`): the desktop attaches
+  `TradingService::attach_demo_venue()` (the owner assigns and persists the generation) to
+  `MarketService::attach_ctrader_venue`. The cTrader supervisor relays requests over the demo
+  session's rate-limited request path and pushes translated events into the owner's inbox. It
+  keeps the demo session open while a venue is attached, routes unsolicited execution events for
+  served accounts, and after a session drop reconciles each served account with deals replayed
+  from just before the drop. When the demo session cannot be opened (for example, cTrader is not
+  connected) trading waits on its own backoff and refuses queued requests with the reason, without
+  charging market-data recovery. Verified on demo with
+  `cargo run -p aeris_market_runtime --example ctrader_venue_probe`: announce, reconcile snapshot,
+  far limit accepted at 0.80000, cancel confirmed.
+- [x] **Register accounts:** the relay announces each demo account (`AccountObserved`: name, deposit
+  currency from `ProtoOATraderRes` and the asset list, money scale) and its balance; the owner
+  registers it as `ctrader-demo-{ctid}` with `venue_id = "ctrader"` and `broker_ref` = the ctid,
+  and reconciles a new account at once. Live accounts are not announced (data-only).
+- [ ] **Unobserved accounts:** mark accounts no longer observed as disconnected instead of keeping
+  them silently (the `connection_state` column exists but is unused).
+- [x] **Register instruments:** charting a cTrader symbol already registers its `TradingInstrument`
+  from the install (price scale = digits, quantity scale 2, tick from M-7, step volume and quote
+  currency from Phase 2).
+- [x] **Bounds:** requests per relay turn (16), the outbound queue (64), the blocking inbox (1024,
+  reattach after a 20 s stall), the spec cache (1024) and one deal page per reconcile. A deal
+  replay longer than one page is logged; paging it is still to do.
+- [ ] **Day orders:** the desktop sends `Day` for pending orders, which cTrader does not offer; the
+  relay refuses them with a clear reason. Decide in Phase 6 between good-till-cancelled and
+  good-till-date at the 17:00 New York rollover.
 
 ### Phase 6: desktop trading
 
-- [ ] **Accounts panel:** list broker accounts separately from practice accounts, with Simulated,
-  Demo and Live badges in token colours. Broker accounts get no delete button, and the text is
-  neutral instead of "Practice …".
+- [x] **Accounts panel:** broker accounts are listed under "Broker accounts", apart from practice
+  accounts, with Simulated, Demo and Live badges in token colours (`indigo` for demo, `warning`
+  for live). They get no delete button, live accounts cannot be selected, and the order ticket
+  shows the selected account's badge. Visual check pending.
 - [ ] **Account selection:** the selected account feeds the DOM, chart trading and the order ticket.
   Simulated, demo and live accounts are always visually distinct.
 - [ ] **Order entry:** DOM and chart market, limit and stop orders; modify by drag; cancel; brackets

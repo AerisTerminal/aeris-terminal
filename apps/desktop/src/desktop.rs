@@ -3627,6 +3627,23 @@ struct LifecycleServiceReadiness {
 #[serde(transparent)]
 struct ServiceReady(bool);
 
+/// Carries the trading owner's broker venue over the market runtime's shared cTrader
+/// session (D8). The desktop only hands the bounded channel ends across; neither runtime
+/// depends on the other, and the trading owner keeps every order, fill and position.
+fn attach_ctrader_venue(
+    trading: &aeris_trading_runtime::TradingService,
+    market: &aeris_market_runtime::MarketService,
+) -> Result<(), String> {
+    let (generation, requests) = trading.attach_demo_venue()?;
+    let inbox = trading.demo_venue_inbox();
+    market.attach_ctrader_venue(aeris_market_runtime::CtraderVenueLink {
+        generation,
+        requests,
+        events: Box::new(move |event| inbox.push(event)),
+    });
+    Ok(())
+}
+
 fn start_trading_service() -> Result<aeris_trading_runtime::TradingService, String> {
     let database_path = aeris_platform_runtime::native_data_root()
         .map_err(|error| format!("trading data root is unavailable: {error}"))?
@@ -4910,6 +4927,11 @@ pub(super) fn run() {
             exit_after_account_refresh_quiesce(1);
         }
     };
+    // cTrader demo trading is optional: without it the desktop still runs, and broker
+    // orders report the venue as unavailable.
+    if let Err(error) = attach_ctrader_venue(&trading, &market) {
+        diagnostic!("Aeris cTrader trading venue could not be attached: {error}");
+    }
     if let Err(error) = trading.install_practice_market_session(Arc::new(
         move |provider_id: &str,
               instrument_id: &str,

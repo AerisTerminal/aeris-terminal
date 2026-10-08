@@ -36,11 +36,14 @@ fn setup(label: &str) -> (TestDirectory, TradingService, mpsc::Receiver<VenueReq
     service
         .register_instrument(instrument())
         .expect("instrument");
-    let receiver = service.attach_demo_venue(1).expect("attach");
-    // Every attach first reconciles each demo broker account.
+    let (generation, receiver) = service.attach_demo_venue().expect("attach");
+    assert_eq!(generation, 1);
+    // Every attach first reconciles each demo broker account; with nothing recorded yet
+    // there are no deals to replay.
     assert!(matches!(
         receiver.try_recv(),
-        Ok(VenueRequest::Reconcile { broker_account }) if broker_account == BROKER_ACCOUNT
+        Ok(VenueRequest::Reconcile { broker_account, deals_since_unix_nanos: None })
+            if broker_account == BROKER_ACCOUNT
     ));
     (directory, service, receiver)
 }
@@ -232,7 +235,8 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
         panic!("a place request");
     };
     assert_eq!(sent.broker_account, BROKER_ACCOUNT);
-    let _retired = service.attach_demo_venue(2).expect("reconnect");
+    let (generation, _retired) = service.attach_demo_venue().expect("reconnect");
+    assert_eq!(generation, 2);
     let inbox = service.demo_venue_inbox();
     inbox
         .push(venue(
@@ -267,11 +271,14 @@ fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 
     let restarted = start_service(&directory);
-    assert!(
-        restarted.attach_demo_venue(2).is_err(),
-        "a restart must not reuse a generation"
-    );
-    let _receiver = restarted.attach_demo_venue(3).expect("advance");
+    let (generation, receiver) = restarted.attach_demo_venue().expect("advance");
+    assert_eq!(generation, 3, "a restart never reuses a generation");
+    // The open order makes the reconcile replay deals from its submission.
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(VenueRequest::Reconcile { deals_since_unix_nanos: Some(since), .. })
+            if since == order.submitted_unix_nanos
+    ));
     // The broker id binding survives too, so a cancel needs no new acknowledgement.
     restarted
         .cancel_order(order.client_order_id.clone())
@@ -720,7 +727,7 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
             "{account:?} locked"
         );
     }
-    let _receiver = service.attach_demo_venue(1).expect("attach");
+    let _venue = service.attach_demo_venue().expect("attach");
     assert!(
         service
             .place_order(request("after-kill"))
@@ -772,4 +779,56 @@ fn the_simulator_never_fills_a_broker_order() {
         OrderStatus::Working
     );
     assert_eq!(service.snapshot().expect("snapshot").fills, []);
+}
+
+#[test]
+fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
+    let (_directory, service, receiver) = setup("venue-observed");
+    let observed = |name: &str| {
+        VenueUpdate::AccountObserved(aeris_trading::venue::ObservedAccount {
+            environment: AccountEnvironment::Demo,
+            display_name: name.into(),
+            currency: "EUR".into(),
+            currency_scale: 2,
+        })
+    };
+    let inbox = service.demo_venue_inbox();
+    inbox
+        .push(VenueEvent {
+            broker_account: "2002".into(),
+            ..venue(1, observed("cTrader Demo · Example 2002"))
+        })
+        .expect("observed");
+    let accounts = service.snapshot().expect("snapshot").accounts;
+    let registered = accounts
+        .iter()
+        .find(|account| account.broker_ref.as_deref() == Some("2002"))
+        .expect("registered");
+    assert_eq!(registered.id.as_str(), "ctrader-demo-2002");
+    assert_eq!(
+        (registered.environment, registered.currency.as_str()),
+        (AccountEnvironment::Demo, "EUR")
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(VenueRequest::Reconcile { broker_account, .. }) if broker_account == "2002"
+    ));
+    // Seeing it again keeps the id and only follows the broker's name.
+    inbox
+        .push(VenueEvent {
+            broker_account: "2002".into(),
+            ..venue(1, observed("renamed"))
+        })
+        .expect("observed again");
+    let accounts = service.snapshot().expect("snapshot").accounts;
+    let matching: Vec<_> = accounts
+        .iter()
+        .filter(|account| account.broker_ref.as_deref() == Some("2002"))
+        .collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].display_name, "renamed");
+    assert!(
+        receiver.try_recv().is_err(),
+        "a known account is not reconciled again"
+    );
 }
