@@ -13,7 +13,6 @@ prost.workspace = true
 rustls.workspace = true
 socket2.workspace = true
 webpki-roots.workspace = true
-getrandom.workspace = true
 zeroize.workspace = true
 serde.workspace = true
 

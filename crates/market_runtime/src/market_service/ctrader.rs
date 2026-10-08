@@ -106,6 +106,7 @@ const EVENTS_PER_HOST_TURN: usize = 128;
 const IDLE_STOP: Duration = Duration::from_secs(30);
 const RECONCILE_RETRY: Duration = Duration::from_secs(5);
 const MAXIMUM_FAILURES: u8 = 5;
+const HEALTHY_SESSION: Duration = Duration::from_mins(1);
 const MAXIMUM_HISTORY_PAGES: usize = 8;
 const MAXIMUM_SYMBOLS_PER_REQUEST: usize = 64;
 const MAXIMUM_CATALOG_ACCOUNTS: usize = 16;
@@ -232,9 +233,26 @@ const fn host_for(live: bool) -> CtraderHost {
     }
 }
 
+/// The id with its trading-account segment masked, for diagnostics. Routing
+/// still uses the full id; only what reaches logs changes.
+pub(super) fn redacted_instrument_id(instrument_id: &str) -> Option<String> {
+    let mut parts = instrument_id.splitn(4, ':');
+    let (Some(PROVIDER), Some(environment), Some(account), Some(symbol)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let suffix = account
+        .char_indices()
+        .rev()
+        .nth(1)
+        .map_or("", |(index, _)| &account[index..]);
+    Some(format!("{PROVIDER}:{environment}:#**{suffix}:{symbol}"))
+}
+
 /// Parses `ctrader:{demo|live}:{ctid}:{symbolId}`.
 fn parse_instrument_id(instrument_id: &str) -> Result<Route, String> {
-    let invalid = || format!("cTrader instrument id is invalid: {instrument_id}");
+    let invalid = || "cTrader instrument id is invalid".to_string();
     let number = |value: &str| {
         (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
             .then(|| value.parse::<u64>().ok())
@@ -263,14 +281,12 @@ fn parse_instrument_id(instrument_id: &str) -> Result<Route, String> {
     })
 }
 
-/// Observed demo D1 bars are anchored at 21:00 UTC; the chart's fixed one-day
-/// interval and the canonical session day both map to that provider day.
+/// D1 bars open at 17:00 New York, so consecutive opens are 23, 24 or 25
+/// hours apart. They map only to the canonical session day; a fixed 24-hour
+/// period would mislabel every bar that crosses a daylight-saving change.
 fn trendbar_period(period: BarPeriod) -> Result<TrendbarPeriod, String> {
-    match period {
-        BarPeriod::Time { seconds: 86_400 } => Some(TrendbarPeriod::D1),
-        other => TrendbarPeriod::for_canonical(other),
-    }
-    .ok_or_else(|| "cTrader history is unavailable for this interval".to_string())
+    TrendbarPeriod::for_canonical(period)
+        .ok_or_else(|| "cTrader history is unavailable for this interval".to_string())
 }
 fn supported_period(period: BarPeriod) -> Result<(), String> {
     trendbar_period(period).map(|_| ())
@@ -293,9 +309,11 @@ const fn period_label(period: TrendbarPeriod) -> &'static str {
         TrendbarPeriod::MN1 => "mn1",
     }
 }
-/// Upper bound of one bar's length, used only to tell whether the newest
-/// history bar may still be open. A month is bounded by 31 days.
-const fn nominal_duration_ms(period: TrendbarPeriod) -> i64 {
+/// Upper bound of one bar's length, used only to size history windows and to
+/// tell whether the newest history bar may still be open. D1, W1 and MN1 open
+/// at 17:00 New York, so each can gain the hour lost at a daylight-saving
+/// change; a month is bounded by 31 days.
+const fn maximum_duration_ms(period: TrendbarPeriod) -> i64 {
     let minutes = match period {
         TrendbarPeriod::M1 => 1,
         TrendbarPeriod::M2 => 2,
@@ -308,9 +326,9 @@ const fn nominal_duration_ms(period: TrendbarPeriod) -> i64 {
         TrendbarPeriod::H1 => 60,
         TrendbarPeriod::H4 => 240,
         TrendbarPeriod::H12 => 720,
-        TrendbarPeriod::D1 => 1_440,
-        TrendbarPeriod::W1 => 10_080,
-        TrendbarPeriod::MN1 => 44_640,
+        TrendbarPeriod::D1 => 1_440 + 60,
+        TrendbarPeriod::W1 => 10_080 + 60,
+        TrendbarPeriod::MN1 => 44_640 + 60,
     };
     minutes * 60_000
 }
@@ -321,17 +339,42 @@ fn candle_symbol(provider_symbol: &str, period: TrendbarPeriod) -> String {
     format!("{provider_symbol}{{={}}}", period_label(period))
 }
 
+/// A failure that retires every host session and the current generation.
+/// `wait` is a server-directed delay (connection limit or maintenance) that
+/// replaces the local backoff and does not count toward the retry limit.
+struct HostFault {
+    detail: String,
+    wait: Option<Duration>,
+}
+impl From<String> for HostFault {
+    fn from(detail: String) -> Self {
+        Self { detail, wait: None }
+    }
+}
+impl From<Failure> for HostFault {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Request(detail) => Self::from(detail),
+            Failure::Host(fault) => fault,
+        }
+    }
+}
+
 /// A request-scoped failure leaves the host session usable; a host failure
 /// retires every host session and the current provider generation.
 enum Failure {
     Request(String),
-    Host(String),
+    Host(HostFault),
 }
 impl Failure {
     fn detail(&self) -> &str {
         match self {
-            Self::Request(detail) | Self::Host(detail) => detail,
+            Self::Request(detail) => detail,
+            Self::Host(fault) => &fault.detail,
         }
+    }
+    fn host(detail: impl Into<String>) -> Self {
+        Self::Host(HostFault::from(detail.into()))
     }
 }
 fn classify(fault: &SessionFault) -> Failure {
@@ -339,7 +382,13 @@ fn classify(fault: &SessionFault) -> Failure {
         SessionFault::RateLimited { .. } | SessionFault::Timeout | SessionFault::Protocol => {
             Failure::Request(fault.to_string())
         }
-        _ => Failure::Host(fault.to_string()),
+        SessionFault::ConnectionLimit { wait, .. } | SessionFault::Maintenance { wait } => {
+            Failure::Host(HostFault {
+                detail: fault.to_string(),
+                wait: Some(*wait),
+            })
+        }
+        _ => Failure::host(fault.to_string()),
     }
 }
 fn request_error(error: &MarketDecodeError) -> Failure {
@@ -356,7 +405,8 @@ trait CtraderMarketLink: Send {
     fn close(&mut self);
 }
 type LinkOpener = Box<
-    dyn FnMut(CtraderHost, &Arc<AtomicBool>) -> Result<Box<dyn CtraderMarketLink>, String> + Send,
+    dyn FnMut(CtraderHost, &Arc<AtomicBool>) -> Result<Box<dyn CtraderMarketLink>, HostFault>
+        + Send,
 >;
 
 #[derive(Default)]
@@ -381,15 +431,15 @@ fn open_hosted(
     access: &Mutex<HostedAccess>,
     host: CtraderHost,
     stop: &Arc<AtomicBool>,
-) -> Result<CtraderSession, String> {
+) -> Result<CtraderSession, HostFault> {
     let mut guard = access
         .lock()
-        .map_err(|_| "cTrader hosted access failed".to_string())?;
+        .map_err(|_| HostFault::from("cTrader hosted access failed".to_string()))?;
     let HostedAccess { client, connection } = &mut *guard;
     *connection = load_stored_connection()?;
     let connection = connection
         .as_ref()
-        .ok_or_else(|| DISCONNECTED_DETAIL.to_string())?;
+        .ok_or_else(|| HostFault::from(DISCONNECTED_DETAIL.to_string()))?;
     let mut retried = false;
     loop {
         let token = client.access_token(connection, stop, false)?;
@@ -397,7 +447,7 @@ fn open_hosted(
         match CtraderSession::open(host, credentials, token, Arc::clone(stop)) {
             Err(SessionFault::ClientAuthFailure) if !retried => client.clear_credentials(),
             Err(SessionFault::NeedsReconnect) if !retried => client.clear_access_token(),
-            result => return result.map_err(|fault| fault.to_string()),
+            result => return result.map_err(|fault| HostFault::from(classify(&fault))),
         }
         retried = true;
     }
@@ -508,7 +558,7 @@ impl HostSession {
         let expected = request.response_type;
         let frame = self.request(request)?;
         decode_subscription_ack(&frame, expected, ctid).map_err(|error| {
-            Failure::Host(format!("cTrader subscription acknowledgement: {error}"))
+            Failure::host(format!("cTrader subscription acknowledgement: {error}"))
         })
     }
     /// Removals run before additions, and spots before depth and live
@@ -727,7 +777,7 @@ impl HistoryTask {
             .ok()
             .and_then(|digits| PriceScale::new(digits).ok())
             .ok_or("cTrader instrument price scale is invalid")?;
-        let duration = nominal_duration_ms(period);
+        let duration = maximum_duration_ms(period);
         let wanted = i64::try_from(request.maximum_bars)
             .unwrap_or(i64::MAX)
             .saturating_add(2);
@@ -875,7 +925,7 @@ impl HistoryTask {
     fn snapshot(self) -> Result<HistorySnapshot, String> {
         let now = now_nanos()?;
         let mut bars: Vec<_> = self.bars.into_values().collect();
-        let duration_nanos = nominal_duration_ms(self.period).saturating_mul(1_000_000);
+        let duration_nanos = maximum_duration_ms(self.period).saturating_mul(1_000_000);
         let forming = (self.request.range.is_none()
             && bars.last().is_some_and(|bar| {
                 bar.exchange_timestamp_unix_nanos
@@ -960,6 +1010,20 @@ struct WorkerPorts {
 struct WorkerConfig {
     opener: LinkOpener,
     idle_stop: Duration,
+    /// An epoch that stays connected this long clears the retry count.
+    healthy_after: Duration,
+}
+
+/// One search in progress. Symbol lists load one account per worker turn, so
+/// live events keep flowing between catalog round trips, and a failing
+/// account or host is skipped instead of failing the whole search.
+struct CatalogJob {
+    search: SearchProviderInstruments,
+    pending: VecDeque<CtraderAccount>,
+    loaded: Vec<CtraderAccount>,
+    failed_hosts: BTreeSet<bool>,
+    host_fault: Option<HostFault>,
+    first_failure: Option<String>,
 }
 /// Lifecycle of the current provider epoch.
 #[derive(Default)]
@@ -980,12 +1044,15 @@ struct Worker {
     candle_symbols: BTreeMap<(bool, u64, u64, i32), BTreeSet<String>>,
     epoch_state: EpochState,
     failures: u8,
+    healthy_since: Option<Instant>,
     retry_at: Instant,
     reconcile_at: Instant,
     history: Option<HistoryTask>,
     completions: VecDeque<Command>,
     ordinal: u64,
+    account_list: Option<(Instant, Vec<CtraderAccount>)>,
     catalogs: BTreeMap<(bool, u64), (Instant, Vec<LightSymbol>)>,
+    catalog_job: Option<CatalogJob>,
     searches: BTreeMap<u64, (u64, Vec<CatalogEntry>)>,
     selection_generation: u64,
 }
@@ -1000,12 +1067,15 @@ impl Worker {
             candle_symbols: BTreeMap::new(),
             epoch_state: EpochState::default(),
             failures: 0,
+            healthy_since: None,
             retry_at: Instant::now(),
             reconcile_at: Instant::now(),
             history: None,
             completions: VecDeque::new(),
             ordinal: 0,
+            account_list: None,
             catalogs: BTreeMap::new(),
+            catalog_job: None,
             searches: BTreeMap::new(),
             selection_generation: 0,
         }
@@ -1051,7 +1121,7 @@ impl Worker {
         self.close_hosts();
         self.flush_completions();
     }
-    fn step(&mut self) -> Result<(), String> {
+    fn step(&mut self) -> Result<(), HostFault> {
         if Instant::now() < self.retry_at {
             return Ok(());
         }
@@ -1062,10 +1132,18 @@ impl Worker {
                 diagnostic!("Aeris cTrader subscription change deferred: {error}");
                 self.reconcile_at = Instant::now() + RECONCILE_RETRY;
             }
-            Err(Failure::Host(error)) => return Err(error),
+            Err(Failure::Host(fault)) => return Err(fault),
         }
         self.history_step()?;
-        self.poll_events()
+        self.poll_events()?;
+        if self
+            .healthy_since
+            .is_some_and(|since| since.elapsed() >= self.config.healthy_after)
+        {
+            self.failures = 0;
+            self.healthy_since = None;
+        }
+        Ok(())
     }
     fn controls(&mut self) {
         while let Ok(control) = self.ports.controls.try_recv() {
@@ -1079,6 +1157,15 @@ impl Worker {
                 RealtimeControl::AuthorizationChanged(ready) => {
                     self.close_hosts();
                     self.cancel_history("cTrader disconnected");
+                    if let Some(job) = self.catalog_job.take() {
+                        self.reject_catalog(
+                            job.search.consumer_id,
+                            job.search.search_generation,
+                            false,
+                            Failure::Request(DISCONNECTED_DETAIL.into()),
+                        );
+                    }
+                    self.account_list = None;
                     self.catalogs.clear();
                     self.searches.clear();
                     self.candle_symbols.clear();
@@ -1095,6 +1182,11 @@ impl Worker {
         self.demand = Demand::default();
         self.candle_symbols.clear();
         self.cancel_history("cTrader live demand stopped");
+        // At shutdown the transports are already cancelled; unsubscribing
+        // would only fail and misreport the session as broken.
+        if self.ports.stop.load(Ordering::Acquire) {
+            self.close_hosts();
+        }
         let hosts: Vec<_> = self.hosts.keys().copied().collect();
         for live in hosts {
             let Some(host) = self.hosts.get_mut(&live) else {
@@ -1118,7 +1210,7 @@ impl Worker {
     }
     /// The first epoch uses the initial generation. Every later epoch, after a
     /// stop, fault or authorization change, takes a new one.
-    fn open_epoch(&mut self) -> Result<(), String> {
+    fn open_epoch(&mut self) -> Result<(), HostFault> {
         if self.epoch_state.open || !self.demanded() {
             return Ok(());
         }
@@ -1127,7 +1219,9 @@ impl Worker {
                 .generation
                 .fetch_add(1, Ordering::AcqRel)
                 .checked_add(1)
-                .ok_or("cTrader session generation overflowed")?
+                .ok_or_else(|| {
+                    HostFault::from("cTrader session generation overflowed".to_string())
+                })?
         } else {
             self.epoch()
         };
@@ -1160,13 +1254,13 @@ impl Worker {
             }
         }
         for live in hosts {
-            self.ensure_host(live).map_err(|failure| match failure {
-                Failure::Request(detail) | Failure::Host(detail) => detail,
-            })?;
+            self.ensure_host(live).map_err(HostFault::from)?;
         }
         self.demand_dirty = true;
         self.reconcile_at = Instant::now();
-        self.publish(RealtimeEvent::Connected(generation))
+        self.publish(RealtimeEvent::Connected(generation))?;
+        self.healthy_since = Some(Instant::now());
+        Ok(())
     }
     fn ensure_host(&mut self, live: bool) -> Result<&mut HostSession, Failure> {
         if !self.hosts.contains_key(&live) {
@@ -1177,7 +1271,7 @@ impl Worker {
         }
         self.hosts
             .get_mut(&live)
-            .ok_or_else(|| Failure::Host("cTrader host session is unavailable".into()))
+            .ok_or_else(|| Failure::host("cTrader host session is unavailable"))
     }
     fn desired(&mut self) -> BTreeMap<bool, HostDemand> {
         let generation = self.epoch();
@@ -1214,7 +1308,7 @@ impl Worker {
             if !host.spots.contains_key(&key) && host.spots.len() >= MAXIMUM_STREAM_SYMBOLS {
                 diagnostic!(
                     "Aeris cTrader demand rejected: {} exceeds the {MAXIMUM_STREAM_SYMBOLS}-symbol stream bound",
-                    instrument.instrument_id
+                    super::LoggedInstrument(&instrument.instrument_id)
                 );
                 return None;
             }
@@ -1264,7 +1358,7 @@ impl Worker {
         self.demand_dirty = false;
         Ok(())
     }
-    fn history_step(&mut self) -> Result<(), String> {
+    fn history_step(&mut self) -> Result<(), HostFault> {
         if self.history.is_none() {
             if !self.completions.is_empty() {
                 return Ok(());
@@ -1302,14 +1396,14 @@ impl Worker {
             }
             Ok(false) => self.history = Some(task),
             Err(Failure::Request(error)) => self.queue_completion(task.request, Err(error)),
-            Err(Failure::Host(error)) => {
-                self.queue_completion(task.request, Err(error.clone()));
-                return Err(error);
+            Err(Failure::Host(fault)) => {
+                self.queue_completion(task.request, Err(fault.detail.clone()));
+                return Err(fault);
             }
         }
         Ok(())
     }
-    fn poll_events(&mut self) -> Result<(), String> {
+    fn poll_events(&mut self) -> Result<(), HostFault> {
         let hosts: Vec<_> = self.hosts.keys().copied().collect();
         for live in hosts {
             for _ in 0..EVENTS_PER_HOST_TURN {
@@ -1319,7 +1413,7 @@ impl Worker {
                 let frame = match host.link.next_event(EVENT_POLL) {
                     Ok(Some(frame)) => frame,
                     Ok(None) => break,
-                    Err(fault) => return Err(fault.to_string()),
+                    Err(fault) => return Err(HostFault::from(classify(&fault))),
                 };
                 match frame.payload_type {
                     SPOT_EVENT => self.accept_spot(live, &frame)?,
@@ -1388,7 +1482,7 @@ impl Worker {
         }
         Ok(())
     }
-    fn accept_depth(&mut self, live: bool, frame: &ProtoMessage) -> Result<(), String> {
+    fn accept_depth(&mut self, live: bool, frame: &ProtoMessage) -> Result<(), HostFault> {
         if !self.epoch_state.open {
             return Ok(());
         }
@@ -1414,7 +1508,7 @@ impl Worker {
                     resubscribe = Some(*ctid);
                     break;
                 }
-                Err(error) => return Err(format!("cTrader depth event rejected: {error}")),
+                Err(error) => return Err(format!("cTrader depth event rejected: {error}").into()),
             }
         }
         if let Some(ctid) = resubscribe {
@@ -1426,12 +1520,12 @@ impl Worker {
                     self.reconcile_at = Instant::now() + RECONCILE_RETRY;
                     Ok(())
                 }
-                Err(Failure::Host(error)) => Err(error),
+                Err(Failure::Host(fault)) => Err(fault),
             };
         }
         match accepted {
             Some(DepthUpdate::Snapshot(snapshot)) => {
-                self.publish(RealtimeEvent::Depth(self.epoch(), snapshot))
+                Ok(self.publish(RealtimeEvent::Depth(self.epoch(), snapshot))?)
             }
             Some(DepthUpdate::Crossed) => {
                 self.ports
@@ -1444,56 +1538,169 @@ impl Worker {
         }
     }
     fn catalog(&mut self) {
+        if self.catalog_job.is_some() {
+            self.advance_search();
+            return;
+        }
         let Ok(control) = self.ports.catalog.try_recv() else {
             return;
         };
-        let (consumer, command, selection) = match &control {
-            CatalogControl::Search(search) => (search.consumer_id, search.search_generation, false),
+        match control {
+            CatalogControl::Search(search) => {
+                let accounts = if self.epoch_state.paused {
+                    Err(Failure::Request(DISCONNECTED_DETAIL.into()))
+                } else {
+                    self.accounts()
+                };
+                match accounts {
+                    Ok(accounts) => {
+                        self.catalog_job = Some(CatalogJob {
+                            search,
+                            pending: accounts
+                                .into_iter()
+                                .take(MAXIMUM_CATALOG_ACCOUNTS)
+                                .collect(),
+                            loaded: Vec::new(),
+                            failed_hosts: BTreeSet::new(),
+                            host_fault: None,
+                            first_failure: None,
+                        });
+                        self.advance_search();
+                    }
+                    Err(failure) => self.reject_catalog(
+                        search.consumer_id,
+                        search.search_generation,
+                        false,
+                        failure,
+                    ),
+                }
+            }
             CatalogControl::Select(select) => {
-                (select.consumer_id, select.selection_generation, true)
+                let result = if self.epoch_state.paused {
+                    Err(Failure::Request(DISCONNECTED_DETAIL.into()))
+                } else {
+                    self.select(&select)
+                };
+                match result {
+                    Ok(event) => self.send_catalog(event),
+                    Err(failure) => self.reject_catalog(
+                        select.consumer_id,
+                        select.selection_generation,
+                        true,
+                        failure,
+                    ),
+                }
             }
-        };
-        let result = if self.epoch_state.paused {
-            Err(Failure::Request(DISCONNECTED_DETAIL.into()))
-        } else {
-            match control {
-                CatalogControl::Search(search) => self.search(&search),
-                CatalogControl::Select(select) => self.select(&select),
-            }
-        };
-        let event = result.unwrap_or_else(|failure| {
-            diagnostic!("Aeris cTrader catalog request failed: {}", failure.detail());
-            if let Failure::Host(error) = failure {
-                self.recover(error);
-            }
-            CatalogEvent::Rejected {
-                rejection: ProviderCatalogRejected {
-                    consumer_id: consumer,
-                    provider: PROVIDER.into(),
-                    provider_generation: Some(self.epoch()),
-                    command_generation: command,
-                    reason: ProviderCatalogRejectionReason::SearchRejected,
-                },
-                selection,
-            }
-        });
+        }
+    }
+    fn send_catalog(&self, event: CatalogEvent) {
         if self.ports.catalog_events.send(event).is_err() {
             diagnostic!("Aeris cTrader catalog publication was dropped");
         }
     }
+    fn reject_catalog(&mut self, consumer: u64, command: u64, selection: bool, failure: Failure) {
+        diagnostic!("Aeris cTrader catalog request failed: {}", failure.detail());
+        if let Failure::Host(fault) = failure {
+            self.recover(fault);
+        }
+        self.send_catalog(CatalogEvent::Rejected {
+            rejection: ProviderCatalogRejected {
+                consumer_id: consumer,
+                provider: PROVIDER.into(),
+                provider_generation: Some(self.epoch()),
+                command_generation: command,
+                reason: ProviderCatalogRejectionReason::SearchRejected,
+            },
+            selection,
+        });
+    }
+    /// Loads cached catalogs without a round trip and at most one uncached
+    /// account per call, then publishes once every account was attempted.
+    fn advance_search(&mut self) {
+        let Some(mut job) = self.catalog_job.take() else {
+            return;
+        };
+        while let Some(account) = job.pending.pop_front() {
+            if job.failed_hosts.contains(&account.is_live) {
+                continue;
+            }
+            let fetched = !self.catalog_fresh(&account);
+            match self.symbols(&account) {
+                Ok(_) => job.loaded.push(account),
+                Err(Failure::Request(detail)) => {
+                    diagnostic!("Aeris cTrader catalog skipped one account: {detail}");
+                    job.first_failure.get_or_insert(detail);
+                }
+                Err(Failure::Host(fault)) => {
+                    diagnostic!(
+                        "Aeris cTrader catalog skipped {}: {}",
+                        venue(account.is_live),
+                        fault.detail
+                    );
+                    job.failed_hosts.insert(account.is_live);
+                    job.first_failure
+                        .get_or_insert_with(|| fault.detail.clone());
+                    job.host_fault.get_or_insert(fault);
+                }
+            }
+            if fetched && !job.pending.is_empty() {
+                self.catalog_job = Some(job);
+                return;
+            }
+        }
+        let CatalogJob {
+            search,
+            loaded,
+            host_fault,
+            first_failure,
+            ..
+        } = job;
+        if let (true, Some(detail)) = (loaded.is_empty(), first_failure) {
+            let failure = host_fault.map_or(Failure::Request(detail), Failure::Host);
+            self.reject_catalog(search.consumer_id, search.search_generation, false, failure);
+        } else {
+            let event = self.search_results(&search, &loaded);
+            self.send_catalog(event);
+            if let Some(fault) = host_fault {
+                self.recover(fault);
+            }
+        }
+    }
+    /// The token's account list is the same on both hosts. It is cached so a
+    /// search does not reopen a host, and a demo session opened only to list
+    /// accounts closes at once when every account is live.
     fn accounts(&mut self) -> Result<Vec<CtraderAccount>, Failure> {
         if let Some(host) = self.hosts.values().next() {
-            return Ok(host.link.accounts().to_vec());
+            let accounts = host.link.accounts().to_vec();
+            self.account_list = Some((Instant::now(), accounts.clone()));
+            return Ok(accounts);
         }
-        Ok(self.ensure_host(false)?.link.accounts().to_vec())
+        if let Some((loaded_at, accounts)) = &self.account_list
+            && loaded_at.elapsed() < CATALOG_TTL
+        {
+            return Ok(accounts.clone());
+        }
+        let accounts = self.ensure_host(false)?.link.accounts().to_vec();
+        if accounts.iter().all(|account| account.is_live)
+            && let Some(mut host) = self.hosts.remove(&false)
+        {
+            host.link.close();
+            diagnostic!(
+                "Aeris cTrader {} market session closed; no demo accounts",
+                venue(false)
+            );
+        }
+        self.account_list = Some((Instant::now(), accounts.clone()));
+        Ok(accounts)
+    }
+    fn catalog_fresh(&self, account: &CtraderAccount) -> bool {
+        self.catalogs
+            .get(&(account.is_live, account.ctid))
+            .is_some_and(|(loaded_at, _)| loaded_at.elapsed() < CATALOG_TTL)
     }
     fn symbols(&mut self, account: &CtraderAccount) -> Result<&[LightSymbol], Failure> {
         let key = (account.is_live, account.ctid);
-        let fresh = self
-            .catalogs
-            .get(&key)
-            .is_some_and(|(loaded_at, _)| loaded_at.elapsed() < CATALOG_TTL);
-        if !fresh {
+        if !self.catalog_fresh(account) {
             let host = self.ensure_host(account.is_live)?;
             host.authorize(account.ctid)?;
             let frame = host.request(
@@ -1508,15 +1715,18 @@ impl Worker {
             .map(|(_, symbols)| symbols.as_slice())
             .ok_or_else(|| Failure::Request("cTrader symbol catalog is unavailable".into()))
     }
-    fn search(&mut self, search: &SearchProviderInstruments) -> Result<CatalogEvent, Failure> {
+    fn search_results(
+        &mut self,
+        search: &SearchProviderInstruments,
+        accounts: &[CtraderAccount],
+    ) -> CatalogEvent {
         let query = search.query.trim().to_ascii_uppercase();
         let mut matches = Vec::new();
-        for account in self.accounts()?.into_iter().take(MAXIMUM_CATALOG_ACCOUNTS) {
-            for symbol in self
-                .symbols(&account)?
-                .iter()
-                .filter(|symbol| symbol.enabled)
-            {
+        for account in accounts {
+            let Some((_, symbols)) = self.catalogs.get(&(account.is_live, account.ctid)) else {
+                continue;
+            };
+            for symbol in symbols.iter().filter(|symbol| symbol.enabled) {
                 let entry = CatalogEntry {
                     route: Route {
                         live: account.is_live,
@@ -1550,13 +1760,13 @@ impl Worker {
         }
         self.searches
             .insert(search.consumer_id, (search.search_generation, entries));
-        Ok(CatalogEvent::Search(ProviderInstrumentSearchResult {
+        CatalogEvent::Search(ProviderInstrumentSearchResult {
             consumer_id: search.consumer_id,
             provider: PROVIDER.into(),
             provider_generation: self.epoch(),
             search_generation: search.search_generation,
             instruments,
-        }))
+        })
     }
     fn select(&mut self, selection: &SelectProviderInstrument) -> Result<CatalogEvent, Failure> {
         if selection.entitlement_id != ENTITLEMENT {
@@ -1606,8 +1816,7 @@ impl Worker {
                 price_scale: u32::from(spec.price_scale.digits()),
                 quantity_scale: DEPTH_QUANTITY_SCALE,
                 entitlement_id: ENTITLEMENT.into(),
-                // The smallest representable step at the symbol's digits.
-                price_increment: Some(1),
+                price_increment: Some(spec.tick_units()),
                 contract_metadata: None,
             },
         })
@@ -1690,16 +1899,27 @@ impl Worker {
         self.candle_symbols.clear();
         let _ = self.publish(RealtimeEvent::Disconnected(self.epoch()));
     }
-    fn recover(&mut self, error: String) {
+    /// The only reconnect policy for cTrader sessions: exponential local
+    /// backoff with a retry limit, or exactly the server-directed wait.
+    fn recover(&mut self, fault: HostFault) {
+        let HostFault {
+            detail: error,
+            wait,
+        } = fault;
         diagnostic!("Aeris cTrader market recovery: {error}");
         self.close_hosts();
         self.cancel_history(&error);
         self.candle_symbols.clear();
         self.demand_dirty = true;
-        self.failures = self.failures.saturating_add(1);
-        self.epoch_state.paused = self.failures >= MAXIMUM_FAILURES;
-        self.retry_at =
-            Instant::now() + Duration::from_secs(3u64.saturating_mul(1u64 << self.failures.min(4)));
+        self.healthy_since = None;
+        let delay = if let Some(wait) = wait {
+            wait
+        } else {
+            self.failures = self.failures.saturating_add(1);
+            self.epoch_state.paused = self.failures >= MAXIMUM_FAILURES;
+            Duration::from_secs(3u64.saturating_mul(1u64 << self.failures.min(4)))
+        };
+        self.retry_at = Instant::now() + delay;
         if !self.epoch_state.open {
             return;
         }
@@ -1747,6 +1967,7 @@ pub(super) fn start_record(
         WorkerConfig {
             opener,
             idle_stop: IDLE_STOP,
+            healthy_after: HEALTHY_SESSION,
         },
     )
 }

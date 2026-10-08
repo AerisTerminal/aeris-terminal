@@ -170,29 +170,6 @@ pub fn hosted_fault(status: u16) -> SessionFault {
     }
 }
 
-/// Jitter is between 0 and 1 second, with a 1–60 second total bound.
-#[derive(Debug, Default)]
-pub struct ReconnectBackoff {
-    failures: u32,
-}
-impl ReconnectBackoff {
-    pub fn next_delay(&mut self) -> Duration {
-        let ceiling = (1_u64 << self.failures.min(6)).min(60);
-        self.failures = self.failures.saturating_add(1);
-        let mut random = [0_u8; 8];
-        if getrandom::fill(&mut random).is_err() {
-            return Duration::from_secs(ceiling);
-        }
-        let nanos = u64::from_le_bytes(random) % 1_000_000_000;
-        Duration::from_secs(ceiling)
-            .saturating_add(Duration::from_nanos(nanos))
-            .min(Duration::from_secs(60))
-    }
-    pub fn healthy(&mut self) {
-        self.failures = 0;
-    }
-}
-
 struct Pending {
     expected: u32,
     deadline: Instant,
@@ -303,31 +280,6 @@ impl CtraderSession {
             }
             result => result,
         }
-    }
-    /// Re-establish the connection after EOF, timeout, or `ClientDisconnect`.
-    /// The caller owns the backoff across attempts; a successful healthy
-    /// session explicitly resets it with `ReconnectBackoff::healthy`.
-    ///
-    /// # Errors
-    /// Returns cancellation, connection, or authentication faults.
-    pub fn reconnect(
-        &mut self,
-        credentials: &AppCredentials,
-        backoff: &mut ReconnectBackoff,
-        stop: Arc<AtomicBool>,
-    ) -> Result<(), SessionFault> {
-        self.transport.close();
-        let deadline = Instant::now() + backoff.next_delay();
-        while Instant::now() < deadline {
-            if stop.load(std::sync::atomic::Ordering::Acquire) {
-                return Err(SessionFault::Cancelled);
-            }
-            std::thread::sleep(
-                Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())),
-            );
-        }
-        let transport = Transport::connect(self.host, stop)?;
-        self.reconnect_with_transport(credentials, transport)
     }
     /// Swap the entire connection only after authentication succeeds. A new
     /// generation prevents retired-session events from being treated as current.
@@ -744,18 +696,5 @@ mod tests {
         );
         let disconnected = SessionFault::AccountDisconnect(987_654);
         assert!(!format!("{disconnected:?} {disconnected}").contains("987654"));
-    }
-    #[test]
-    fn backoff_exponential_capped_jittered_and_resets() {
-        let mut backoff = ReconnectBackoff::default();
-        let mut saw_jitter = false;
-        for min in [1, 2, 4, 8, 16, 32, 60, 60] {
-            let wait = backoff.next_delay();
-            saw_jitter |= wait.subsec_nanos() != 0;
-            assert!(wait >= Duration::from_secs(min) && wait <= Duration::from_secs(60));
-        }
-        assert!(saw_jitter);
-        backoff.healthy();
-        assert!(backoff.next_delay() < Duration::from_secs(2));
     }
 }

@@ -253,7 +253,6 @@ version = "0.2.3"
 dependencies = [
  "aeris_market_data",
  "aeris_platform_runtime",
- "getrandom 0.4.3",
  "prost",
  "prost-build",
  "protoc-bin-vendored",

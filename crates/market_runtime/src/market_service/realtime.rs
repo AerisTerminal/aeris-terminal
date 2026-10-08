@@ -2312,7 +2312,7 @@ impl Coordinator<'_> {
                         if live.history_state != LiveHistoryState::AwaitingHistory {
                             diagnostic!(
                                 "Aeris market indexed trade rejected for {}: {error}",
-                                series.instrument_id
+                                super::LoggedInstrument(&series.instrument_id)
                             );
                         }
                         Some(series.clone())
@@ -2397,7 +2397,8 @@ impl Coordinator<'_> {
         reason: &str,
     ) {
         diagnostic!(
-            "Aeris live trade tape reset for {instrument_id} generation={generation}: {reason}"
+            "Aeris live trade tape reset for {} generation={generation}: {reason}",
+            super::LoggedInstrument(instrument_id)
         );
         if let Some(book) = self
             .order_books
@@ -2534,7 +2535,7 @@ impl Coordinator<'_> {
                         Err(error) => {
                             diagnostic!(
                                 "Aeris market provider candle rejected for {}: {error}",
-                                series.instrument_id
+                                super::LoggedInstrument(&series.instrument_id)
                             );
                             Some(series.clone())
                         }
@@ -2915,7 +2916,7 @@ impl Coordinator<'_> {
         }
         diagnostic!(
             "Aeris market series recovery started for {}: {detail}",
-            series.instrument_id
+            super::LoggedInstrument(&series.instrument_id)
         );
         self.cancel_inflight_history_for_live_recovery(series, generation);
         if let Some(live) = self.series_live.candle_mut(series) {
@@ -3176,7 +3177,7 @@ impl Coordinator<'_> {
         }
         diagnostic!(
             "Aeris market series recovery started for {}: {detail}",
-            series.instrument_id
+            super::LoggedInstrument(&series.instrument_id)
         );
         if let Some(live) = self.series_live.trade_mut(series) {
             live.history_state = LiveHistoryState::AwaitingHistory;

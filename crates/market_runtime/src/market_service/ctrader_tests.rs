@@ -330,6 +330,10 @@ struct Script {
     requests: Vec<Logged>,
     events: VecDeque<(bool, ProtoMessage)>,
     fault: Option<SessionFault>,
+    /// Returned by the next host open instead of a session.
+    open_fault: Option<SessionFault>,
+    /// Accounts whose symbol list request fails.
+    failing_lists: BTreeSet<u64>,
     /// Ascending bar open minutes per `(symbol, period)`.
     series: BTreeMap<(u64, i32), Vec<i64>>,
     page_limit: Option<usize>,
@@ -525,6 +529,11 @@ impl CtraderMarketLink for ScriptLink {
             other => panic!("unexpected cTrader request type {other}"),
         };
         script.requests.push(logged.clone());
+        if let Logged::SymbolsList { ctid, .. } = logged
+            && script.failing_lists.contains(&ctid)
+        {
+            return Err(SessionFault::Protocol);
+        }
         Ok(script.respond(self.live, &logged))
     }
 
@@ -579,7 +588,14 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
         let script = Arc::clone(&script);
         Box::new(move |host, _stop| {
             let live = matches!(host, CtraderHost::Live);
-            script.lock().unwrap().opens.push(live);
+            let open_fault = {
+                let mut guard = script.lock().unwrap();
+                guard.opens.push(live);
+                guard.open_fault.take()
+            };
+            if let Some(fault) = open_fault {
+                return Err(HostFault::from(classify(&fault)));
+            }
             Ok(ScriptLink::open(&script, live))
         })
     };
@@ -600,7 +616,11 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
             wake: ProviderCoordinatorWake::for_tests(),
             counters: Arc::clone(&counters),
         },
-        WorkerConfig { opener, idle_stop },
+        WorkerConfig {
+            opener,
+            idle_stop,
+            healthy_after: Duration::from_hours(1),
+        },
     );
     Harness {
         worker,
@@ -739,7 +759,7 @@ fn script_series(
     back: i64,
     count: usize,
 ) {
-    let step_minutes = nominal_duration_ms(period) / 60_000;
+    let step_minutes = maximum_duration_ms(period) / 60_000;
     let now_minute = now_nanos().expect("clock").div_euclid(60_000_000_000);
     let last = now_minute - back * step_minutes;
     let count = i64::try_from(count).expect("fixture bar count");
@@ -938,8 +958,12 @@ fn ctrader_periods_map_to_trendbar_periods_and_labels() {
         TrendbarPeriod::M1
     );
     assert_eq!(
-        trendbar_period(BarPeriod::time(86_400).expect("1d time")).expect("d1"),
+        trendbar_period(BarPeriod::Session { days: 1 }).expect("d1"),
         TrendbarPeriod::D1
+    );
+    assert!(
+        supported_period(BarPeriod::time(86_400).expect("1d time")).is_err(),
+        "D1 opens at 17:00 New York, so it is a session day, not 24 fixed hours"
     );
     assert_eq!(
         candle_interval(BarPeriod::Session { days: 1 }).as_deref(),
@@ -1547,8 +1571,15 @@ fn drive_search(
         .catalog_controls
         .try_send(search(7, generation, query))
         .expect("catalog control queue accepts");
-    harness.drive();
-    let mut events = harness.take_catalog();
+    let mut events = Vec::new();
+    // One uncached account catalog loads per worker turn.
+    for _ in 0..=MAXIMUM_CATALOG_ACCOUNTS {
+        harness.drive();
+        events.extend(harness.take_catalog());
+        if !events.is_empty() {
+            break;
+        }
+    }
     assert_eq!(events.len(), 1, "search answers once");
     let CatalogEvent::Search(result) = events.remove(0) else {
         panic!("search answers once");
@@ -1670,13 +1701,7 @@ fn live_account_history_is_served_by_the_live_host() {
     script_series(&script, LIVE_SYMBOL, TrendbarPeriod::M1, 1, 4);
     let mut harness = harness(Arc::clone(&script), Duration::ZERO);
     // A search opens both hosts and caches the catalogs.
-    harness
-        .catalog_controls
-        .try_send(search(7, 1, "EUR"))
-        .expect("catalog control queue accepts");
-    harness.drive();
-    harness.take_catalog();
-    harness.requests();
+    drive_search(&mut harness, 1, "EUR");
     let before = harness.requests().len();
 
     let mut gold = instrument(true, LIVE_CTID, LIVE_SYMBOL);
@@ -1901,4 +1926,248 @@ fn spot_subscriptions_beyond_the_stream_bound_are_rejected_not_fatal() {
         .map(RealtimeEvent::generation)
         .collect();
     assert_eq!(generations, [1, 1], "the session stays up");
+}
+
+// ---------------------------------------------------------------------------
+// Daily bars are session days, not fixed 24-hour buckets.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn daily_history_keeps_provider_opens_across_a_daylight_saving_change() {
+    // 17:00 New York is 21:00 UTC before 2025-11-02 and 22:00 UTC after.
+    let opens = [29_364_300, 29_365_740, 29_368_680, 29_370_120];
+    let script = scripted();
+    script
+        .lock()
+        .unwrap()
+        .series
+        .insert((DEMO_SYMBOL, TrendbarPeriod::D1.wire()), opens.to_vec());
+    let instrument = instrument(false, DEMO_CTID, DEMO_SYMBOL);
+    let series = BarSeriesKey {
+        period: BarPeriod::Session { days: 1 },
+        ..series(false, DEMO_CTID, DEMO_SYMBOL, 60)
+    };
+    let range = HistoryRange {
+        start_unix_nanos: (opens[0] - 60) * 60_000_000_000,
+        end_unix_nanos: (opens[3] + 60) * 60_000_000_000,
+    };
+    let (snapshot, _) = run_history(
+        &script,
+        history_request(&series, &instrument, 1, 10, Some(range)),
+    );
+    let minutes: Vec<i64> = snapshot
+        .bars
+        .iter()
+        .map(|bar| bar.exchange_timestamp_unix_nanos / 60_000_000_000)
+        .collect();
+    assert_eq!(minutes, opens);
+}
+
+// ---------------------------------------------------------------------------
+// Recovery: one reconnect policy, server-directed waits, retry limit.
+// ---------------------------------------------------------------------------
+
+fn demo_series_demand() -> Demand {
+    let mut demand = Demand::default();
+    demand.series.push((
+        series(false, DEMO_CTID, DEMO_SYMBOL, 60),
+        instrument(false, DEMO_CTID, DEMO_SYMBOL),
+    ));
+    demand
+}
+
+fn retry_after(harness: &Harness) -> Duration {
+    harness
+        .worker
+        .retry_at
+        .saturating_duration_since(Instant::now())
+}
+
+#[test]
+fn server_directed_waits_replace_the_backoff_and_do_not_count_as_failures() {
+    let mut harness = harness(scripted(), Duration::ZERO);
+    harness.demand(demo_series_demand());
+    harness.take_events();
+
+    harness.script.lock().unwrap().fault = Some(SessionFault::Maintenance {
+        wait: Duration::from_secs(120),
+    });
+    harness.drive();
+    assert_eq!(harness.worker.failures, 0);
+    let wait = retry_after(&harness);
+    assert!(
+        wait > Duration::from_secs(110) && wait <= Duration::from_secs(120),
+        "{wait:?}"
+    );
+    assert!(
+        harness
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, RealtimeEvent::Recovering(1, _)))
+    );
+
+    // A connection-limit refusal while opening the host waits the same way.
+    harness.worker.retry_at = Instant::now();
+    harness.script.lock().unwrap().open_fault = Some(SessionFault::ConnectionLimit {
+        message: "cTrader connection limit reached",
+        wait: Duration::from_secs(300),
+    });
+    harness.drive();
+    assert_eq!(harness.worker.failures, 0);
+    assert!(harness.worker.hosts.is_empty());
+    assert!(retry_after(&harness) > Duration::from_secs(290));
+    assert!(!harness.worker.epoch_state.paused);
+}
+
+#[test]
+fn local_failures_back_off_exponentially_and_pause_at_the_retry_limit() {
+    let mut harness = harness(scripted(), Duration::ZERO);
+    harness.demand(demo_series_demand());
+    let mut waits = Vec::new();
+    for _ in 0..MAXIMUM_FAILURES {
+        harness.worker.retry_at = Instant::now();
+        harness.drive();
+        harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
+        harness.drive();
+        waits.push(retry_after(&harness).as_secs_f64().ceil());
+    }
+    assert_eq!(waits, [6.0, 12.0, 24.0, 48.0, 48.0]);
+    assert!(harness.worker.epoch_state.paused);
+    assert!(
+        harness
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, RealtimeEvent::Failed(..))),
+        "the retry limit publishes a terminal failure"
+    );
+}
+
+#[test]
+fn a_healthy_session_clears_the_retry_count() {
+    let mut harness = harness(scripted(), Duration::ZERO);
+    harness.worker.config.healthy_after = Duration::ZERO;
+    harness.demand(demo_series_demand());
+    harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
+    harness.drive();
+    assert_eq!(harness.worker.failures, 1);
+
+    harness.worker.retry_at = Instant::now();
+    harness.drive();
+    assert!(harness.worker.epoch_state.open);
+    assert_eq!(harness.worker.failures, 0);
+}
+
+#[test]
+fn shutdown_closes_hosts_without_unsubscribing() {
+    let mut harness = harness(scripted(), Duration::ZERO);
+    harness.demand(demo_series_demand());
+    harness.worker.ports.stop.store(true, Ordering::Release);
+    harness
+        .controls
+        .try_send(RealtimeControl::Stop)
+        .expect("control queue accepts");
+    harness.drive();
+    assert!(harness.worker.hosts.is_empty());
+    assert_eq!(harness.script.lock().unwrap().closed, 1);
+    assert!(
+        !harness.requests().iter().any(|request| matches!(
+            request,
+            Logged::Spots {
+                subscribe: false,
+                ..
+            } | Logged::Trendbar {
+                subscribe: false,
+                ..
+            }
+        )),
+        "a cancelled transport is not asked to unsubscribe"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Catalog: per-account isolation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_failing_account_catalog_is_skipped_and_the_rest_are_published() {
+    let script = catalog_script();
+    script.lock().unwrap().failing_lists.insert(DEMO_CTID);
+    let mut harness = harness(script, Duration::ZERO);
+    let result = drive_search(&mut harness, 1, "EUR");
+    assert_eq!(listed(&result), [("live:2002:1", "EURUSD", "cTrader Live")]);
+    assert!(
+        !harness.worker.epoch_state.paused,
+        "a request-scoped catalog failure is not a session failure"
+    );
+}
+
+#[test]
+fn a_search_with_no_loadable_account_is_rejected() {
+    let script = catalog_script();
+    {
+        let mut guard = script.lock().unwrap();
+        guard.failing_lists.insert(DEMO_CTID);
+        guard.failing_lists.insert(LIVE_CTID);
+    }
+    let mut harness = harness(script, Duration::ZERO);
+    harness
+        .catalog_controls
+        .try_send(search(7, 1, "EUR"))
+        .expect("catalog control queue accepts");
+    let mut events = Vec::new();
+    for _ in 0..=MAXIMUM_CATALOG_ACCOUNTS {
+        harness.drive();
+        events.extend(harness.take_catalog());
+    }
+    assert!(
+        matches!(
+            events.as_slice(),
+            [CatalogEvent::Rejected {
+                selection: false,
+                ..
+            }]
+        ),
+        "nothing loaded rejects once"
+    );
+}
+
+#[test]
+fn account_list_is_cached_so_searches_do_not_reopen_hosts() {
+    let mut harness = harness(catalog_script(), Duration::ZERO);
+    drive_search(&mut harness, 1, "EUR");
+    // Idle hosts close; the next search reuses the cached account list and
+    // catalogs without opening any session.
+    harness.drive();
+    assert!(harness.worker.hosts.is_empty());
+    let opens = harness.opens().len();
+    let result = drive_search(&mut harness, 2, "XAU");
+    assert_eq!(
+        listed(&result),
+        [("live:2002:41", "XAUUSD", "cTrader Live")]
+    );
+    assert_eq!(harness.opens().len(), opens);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics never carry a full trading-account number.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn logged_instrument_ids_mask_the_trading_account() {
+    use super::super::LoggedInstrument;
+    assert_eq!(
+        LoggedInstrument("ctrader:live:2002:41").to_string(),
+        "ctrader:live:#**02:41"
+    );
+    assert_eq!(
+        LoggedInstrument("ctrader:demo:7:1").to_string(),
+        "ctrader:demo:#**:1",
+        "an account too short to mask keeps no digits"
+    );
+    assert_eq!(
+        LoggedInstrument("rithmic:CME:MNQU6").to_string(),
+        "rithmic:CME:MNQU6"
+    );
+    let error = parse_instrument_id("ctrader:live:2002:x").expect_err("invalid");
+    assert!(!error.contains("2002"), "{error}");
 }

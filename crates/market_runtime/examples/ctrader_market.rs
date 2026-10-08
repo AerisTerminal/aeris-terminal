@@ -39,6 +39,10 @@ const GENERATION_D1: u64 = 2;
 const GENERATION_M1: u64 = 3;
 const MINUTE_SECONDS: u32 = 60;
 
+fn minute() -> Result<BarPeriod, String> {
+    BarPeriod::time(MINUTE_SECONDS).map_err(|error| error.to_string())
+}
+
 #[derive(Clone, Copy, Default)]
 struct HistoryEvidence {
     bars: usize,
@@ -49,25 +53,33 @@ struct HistoryEvidence {
 }
 
 impl HistoryEvidence {
-    fn record(&mut self, bars: &[MarketBar], interval_nanos: i64, started: Instant) {
+    fn record(&mut self, bars: &[MarketBar], period: BarPeriod, started: Instant) {
         self.bars = bars.len();
         let mut gaps = 0;
-        self.contiguous = bars_are_contiguous(bars, interval_nanos, &mut gaps);
+        self.contiguous = bars_are_contiguous(bars, period, &mut gaps);
         self.session_gaps = gaps;
         self.loaded = true;
         self.elapsed_ms = started.elapsed().as_millis();
     }
 }
 
-/// Bars must be strictly ascending on the fixed interval grid; holes aligned
-/// to the grid are venue session gaps, not corruption.
-fn bars_are_contiguous(bars: &[MarketBar], interval_nanos: i64, session_gaps: &mut usize) -> bool {
+const HOUR_NANOS: i64 = 3_600 * 1_000_000_000;
+
+/// Time bars must be strictly ascending on the fixed interval grid; holes
+/// aligned to the grid are venue session gaps, not corruption. Session days
+/// open at 17:00 New York, so consecutive opens are 23 to 25 hours apart and
+/// anything longer is a weekend or holiday.
+fn bars_are_contiguous(bars: &[MarketBar], period: BarPeriod, session_gaps: &mut usize) -> bool {
     for pair in bars.windows(2) {
         let delta = pair[1].exchange_timestamp_unix_nanos - pair[0].exchange_timestamp_unix_nanos;
-        if delta <= 0 || delta % interval_nanos != 0 {
+        let (aligned, next) = match period.duration_nanos() {
+            Some(interval) => (delta > 0 && delta % interval == 0, interval),
+            None => (delta >= 23 * HOUR_NANOS, 25 * HOUR_NANOS),
+        };
+        if !aligned {
             return false;
         }
-        if delta > interval_nanos {
+        if delta > next {
             *session_gaps += 1;
         }
     }
@@ -99,14 +111,14 @@ fn demand(
     market: &MarketService,
     instrument: &aeris_contracts::InstallProviderInstrument,
     generation: u64,
-    seconds: u32,
+    period: BarPeriod,
     streams: StreamRequirements,
 ) -> Result<(), String> {
     let series = BarSeriesKey {
         provider_id: instrument.provider.clone(),
         instrument_id: instrument.instrument_id.clone(),
         entitlement_id: instrument.entitlement_id.clone(),
-        period: BarPeriod::time(seconds).map_err(|error| error.to_string())?,
+        period,
         definition_version: 1,
     };
     market.set_demand(CLIENT, CONSUMER, generation, &series, streams)
@@ -268,7 +280,7 @@ impl<'a> Driver<'a> {
             self.market,
             &selected,
             GENERATION_H1,
-            3_600,
+            BarPeriod::time(3_600).map_err(|error| error.to_string())?,
             StreamRequirements::BARS,
         )?;
         self.instrument = Some(selected);
@@ -282,11 +294,7 @@ impl<'a> Driver<'a> {
         publication: &aeris_market_engine::ConsumerPublication,
     ) -> Result<(), String> {
         let snapshot = &publication.snapshot;
-        let interval = snapshot
-            .series
-            .period
-            .duration_nanos()
-            .ok_or("cTrader time periods must have a fixed duration")?;
+        let interval = snapshot.series.period;
         let installed = self
             .instrument
             .as_ref()
@@ -301,7 +309,7 @@ impl<'a> Driver<'a> {
                     self.market,
                     installed,
                     GENERATION_D1,
-                    86_400,
+                    BarPeriod::Session { days: 1 },
                     StreamRequirements::BARS,
                 )?;
                 self.stage = Stage::HistoryD1;
@@ -316,7 +324,7 @@ impl<'a> Driver<'a> {
                     self.market,
                     installed,
                     GENERATION_M1,
-                    MINUTE_SECONDS,
+                    minute()?,
                     StreamRequirements::BARS
                         .with(MarketStream::Quotes)
                         .with(MarketStream::Depth),
@@ -348,10 +356,7 @@ impl<'a> Driver<'a> {
         &mut self,
         update: &aeris_market_engine::ConsumerSeriesUpdate,
     ) -> Result<(), String> {
-        if self.stage == Stage::Live
-            && update.series.period
-                == BarPeriod::time(MINUTE_SECONDS).map_err(|error| error.to_string())?
-        {
+        if self.stage == Stage::Live && update.series.period == minute()? {
             self.evidence.live.candle_seen = true;
         }
         Ok(())

@@ -1714,6 +1714,19 @@ impl ProviderRuntimeEvent {
     }
 }
 
+/// An instrument id as written to diagnostics. Ids that embed a broker
+/// account are masked; every other id prints unchanged.
+pub(super) struct LoggedInstrument<'a>(pub &'a str);
+
+impl std::fmt::Display for LoggedInstrument<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match ctrader::redacted_instrument_id(self.0) {
+            Some(redacted) => formatter.write_str(&redacted),
+            None => formatter.write_str(self.0),
+        }
+    }
+}
+
 mod broker_authorization;
 mod ctrader;
 mod runtime;

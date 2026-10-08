@@ -31,6 +31,27 @@ pub struct SymbolSpec {
     pub max_volume: Option<i64>,
 }
 
+impl SymbolSpec {
+    /// The minimum price change in canonical units at `price_scale`. cTrader
+    /// moves prices by one point of `digits` (cAlgo `TickSize = 10^-digits`),
+    /// but the wire carries only five decimals, so symbols with more digits
+    /// step by `10^(digits - 5)` units. `pipPosition` only names the pip.
+    #[must_use]
+    pub fn tick_units(&self) -> i64 {
+        10_i64.pow(u32::from(
+            self.price_scale
+                .digits()
+                .saturating_sub(super::WIRE_PRICE_DIGITS),
+        ))
+    }
+
+    /// One pip in canonical units at `price_scale`.
+    #[must_use]
+    pub fn pip_units(&self) -> i64 {
+        10_i64.pow(u32::from(self.price_scale.digits() - self.pip_position))
+    }
+}
+
 fn positive_id(symbol_id: i64) -> Result<u64, MarketDecodeError> {
     u64::try_from(symbol_id)
         .ok()
@@ -259,6 +280,23 @@ mod tests {
         assert_eq!(specs[2].price_scale.digits(), 2);
         assert_eq!(specs[2].lot_size, 10_000);
         assert_eq!(specs[2].min_volume, 100);
+    }
+
+    #[test]
+    fn symbol_ticks_follow_digits_and_the_five_decimal_wire() {
+        let specs = decode_symbol_by_id(&frame(2117, &by_id()), CTID).expect("details");
+        // EURUSD 1.08543: one tick is 0.00001, one pip ten ticks.
+        assert_eq!((specs[0].tick_units(), specs[0].pip_units()), (1, 10));
+        // USDJPY 158.023: one tick is 0.001, one pip ten ticks.
+        assert_eq!((specs[1].tick_units(), specs[1].pip_units()), (1, 10));
+        // XAUUSD 2345.67: the pip equals the tick.
+        assert_eq!((specs[2].tick_units(), specs[2].pip_units()), (1, 1));
+        let mut fine = by_id();
+        fine.symbol[0].digits = 7;
+        fine.symbol[0].pip_position = 4;
+        let fine = decode_symbol_by_id(&frame(2117, &fine), CTID).expect("seven digits");
+        // The wire cannot carry the sixth and seventh decimals.
+        assert_eq!((fine[0].tick_units(), fine[0].pip_units()), (100, 1_000));
     }
 
     #[test]

@@ -508,7 +508,7 @@ impl Coordinator<'_> {
         if let Err(error) = self.enqueue_history_recovery(series, generation) {
             diagnostic!(
                 "Aeris market history enqueue failed for {}: {error}",
-                series.instrument_id
+                super::LoggedInstrument(&series.instrument_id)
             );
             self.schedule_history_retry(series, generation, None, error);
             self.broadcast_series_resolution_for(
@@ -533,7 +533,7 @@ impl Coordinator<'_> {
                     entry.insert((Instant::now() + HISTORY_RETRY_DELAY, 0, range));
                     diagnostic!(
                         "Aeris market history queue full for {}; bounded retry scheduled",
-                        series.instrument_id
+                        super::LoggedInstrument(&series.instrument_id)
                     );
                     self.broadcast_series_resolution_for(
                         series,
@@ -630,7 +630,7 @@ impl Coordinator<'_> {
         diagnostic!(
             "Aeris engine {} history attempt {attempts} failed for {}: {error}",
             series.provider_id,
-            series.instrument_id
+            super::LoggedInstrument(&series.instrument_id)
         );
         if attempts > MAXIMUM_HISTORY_RETRIES {
             if range.is_some() {
@@ -955,7 +955,7 @@ impl Coordinator<'_> {
                 if range.is_none() {
                     diagnostic!(
                         "Aeris market covering history requested for {} generation={}",
-                        series.instrument_id,
+                        super::LoggedInstrument(&series.instrument_id),
                         generation.0.get()
                     );
                 }
@@ -1091,7 +1091,7 @@ impl Coordinator<'_> {
                 if range.is_none() {
                     diagnostic!(
                         "Aeris market covering history completed for {} generation={} bars={}",
-                        series.instrument_id,
+                        super::LoggedInstrument(&series.instrument_id),
                         generation.0.get(),
                         snapshot.bars.len()
                     );
@@ -1206,7 +1206,7 @@ impl Coordinator<'_> {
         if range.is_none() && replacing_existing {
             diagnostic!(
                 "Aeris market series recovery finished for {} generation={}",
-                series.instrument_id,
+                super::LoggedInstrument(&series.instrument_id),
                 generation.0.get()
             );
         }
@@ -1267,7 +1267,7 @@ impl Coordinator<'_> {
         };
         diagnostic!(
             "Aeris market covering history for {} generation={} is empty; {}",
-            series.instrument_id,
+            super::LoggedInstrument(&series.instrument_id),
             generation.0.get(),
             if recorded == EmptyCurrentHistory::Final {
                 "no further requests this session"
@@ -1356,7 +1356,7 @@ impl Coordinator<'_> {
             );
             diagnostic!(
                 "Aeris market live trade arrived for {} generation={}; requesting covering history",
-                series.instrument_id,
+                super::LoggedInstrument(&series.instrument_id),
                 generation.0.get()
             );
             self.request_series_history_recovery(&series, generation);
@@ -1414,7 +1414,7 @@ impl Coordinator<'_> {
         {
             diagnostic!(
                 "Aeris market deferred history enqueue failed for {}: {error}",
-                series.instrument_id
+                super::LoggedInstrument(&series.instrument_id)
             );
             self.schedule_history_retry(series, generation, range, error);
             if range.is_none() {
