@@ -2,7 +2,7 @@ use super::{MarketDecodeError, PriceScale, check_account};
 use crate::{
     ProtoMessage,
     codec::{self, require_nested_fields},
-    generated::{ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes},
+    generated::{ProtoOaAssetListRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes},
 };
 
 /// Observed demo catalogs hold under a thousand symbols per account.
@@ -16,6 +16,15 @@ pub struct LightSymbol {
     pub name: String,
     pub description: Option<String>,
     pub enabled: bool,
+    /// Prices, and so profit and loss, are in this asset.
+    pub quote_asset_id: Option<u64>,
+}
+
+/// One account asset (`ProtoOAAsset`): a currency or other priced unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Asset {
+    pub asset_id: u64,
+    pub name: String,
 }
 
 /// Full trading specification (`ProtoOASymbol`). Volumes are in cents
@@ -102,6 +111,41 @@ pub fn decode_symbol_list(
                     .map(|text| bounded_text(text, "description"))
                     .transpose()?,
                 enabled: symbol.enabled.unwrap_or(true),
+                quote_asset_id: symbol.quote_asset_id.map(positive_asset_id).transpose()?,
+            })
+        })
+        .collect()
+}
+
+fn positive_asset_id(asset_id: i64) -> Result<u64, MarketDecodeError> {
+    u64::try_from(asset_id)
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or(MarketDecodeError::InvalidField("assetId"))
+}
+
+/// Decode a `ProtoOAAssetListRes` (2113) for one account.
+///
+/// # Errors
+/// Rejects another account, missing ids or names, and oversized lists.
+pub fn decode_asset_list(frame: &ProtoMessage, ctid: u64) -> Result<Vec<Asset>, MarketDecodeError> {
+    let list: ProtoOaAssetListRes =
+        codec::decode_typed(frame, 2113, &[(2, "ctidTraderAccountId")], |_| Ok(()))?;
+    require_nested_fields(
+        frame.payload.as_deref().unwrap_or_default(),
+        3,
+        &[(1, "assetId"), (2, "name")],
+    )?;
+    check_account(ctid, list.ctid_trader_account_id)?;
+    if list.asset.len() > MAXIMUM_CATALOG_SYMBOLS {
+        return Err(MarketDecodeError::LimitExceeded("asset list"));
+    }
+    list.asset
+        .into_iter()
+        .map(|asset| {
+            Ok(Asset {
+                asset_id: positive_asset_id(asset.asset_id)?,
+                name: bounded_text(asset.name, "name")?,
             })
         })
         .collect()
@@ -242,6 +286,52 @@ mod tests {
         assert_eq!(symbols[0].name, "EURUSD");
         assert_eq!(symbols[0].description.as_deref(), Some("Euro vs US Dollar"));
         assert!(symbols[0].enabled);
+        assert_eq!(symbols[0].quote_asset_id, Some(11));
+    }
+
+    #[test]
+    fn asset_list_decodes_names_and_rejects_bad_entries() {
+        use crate::generated::ProtoOaAsset;
+        let asset = |asset_id, name: &str| ProtoOaAsset {
+            asset_id,
+            name: name.into(),
+            display_name: None,
+            digits: Some(2),
+        };
+        let list = ProtoOaAssetListRes {
+            payload_type: None,
+            ctid_trader_account_id: CTID_WIRE,
+            asset: vec![asset(4, "EUR"), asset(11, "USD")],
+        };
+        let assets = decode_asset_list(&frame(2113, &list), CTID).expect("assets");
+        assert_eq!(
+            assets,
+            [
+                Asset {
+                    asset_id: 4,
+                    name: "EUR".into()
+                },
+                Asset {
+                    asset_id: 11,
+                    name: "USD".into()
+                }
+            ]
+        );
+        assert!(matches!(
+            decode_asset_list(&frame(2113, &list), CTID + 1),
+            Err(MarketDecodeError::AccountMismatch)
+        ));
+        let payload = list.encode_to_vec();
+        for inner in [1, 2] {
+            assert!(
+                decode_asset_list(&bytes_frame(2113, strip_nested(&payload, 3, inner)), CTID)
+                    .is_err(),
+                "field {inner} must be required"
+            );
+        }
+        let mut bad = list;
+        bad.asset[0].name = " ".into();
+        assert!(decode_asset_list(&frame(2113, &bad), CTID).is_err());
     }
 
     #[test]

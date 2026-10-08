@@ -99,8 +99,9 @@ pub(super) struct InstrumentSelectorState {
     pub(super) menu: InstrumentSelectorMenu,
     pub(super) scroll: ScrollHandle,
     pub(super) target: SymbolSelectionTarget,
-    /// The runtime reported no stored tastytrade connection; the menu points to Accounts.
-    pub(super) tastytrade_disconnected: bool,
+    /// The runtime reported no stored connection for the menu's hosted-broker provider;
+    /// the menu points to Accounts.
+    pub(super) hosted_broker_disconnected: bool,
     /// The provider and category dropdown opened from the search-field logo.
     pub(super) provider_menu_open: bool,
     pub(super) markets_flyout_open: bool,
@@ -148,13 +149,16 @@ pub(super) fn instrument_dialog_content(
             |input| instrument_search_header(input, theme, app, state).into_any_element(),
         ))
         .when(
-            show_hosted_broker_connect_prompt(state.menu_provider, state.tastytrade_disconnected),
+            show_hosted_broker_connect_prompt(
+                state.menu_provider,
+                state.hosted_broker_disconnected,
+            ),
             |menu| {
                 let accounts = app.clone();
                 let provider_name = terminal_provider_display(state.menu_provider).to_string();
                 menu.child(
                     div().px_3().py_1().child(
-                        Button::new("symbol_menu_connect_tastytrade")
+                        Button::new("symbol_menu_connect_hosted_broker")
                             .label(format!("Connect {provider_name} in Accounts"))
                             .theme(theme)
                             .on_click(move |_, window, cx| {
@@ -470,6 +474,10 @@ mod tests {
             TerminalProvider::Tastytrade,
             false,
         ));
+        assert!(show_hosted_broker_connect_prompt(
+            TerminalProvider::Ctrader,
+            true,
+        ));
         assert!(!show_hosted_broker_connect_prompt(
             TerminalProvider::Rithmic,
             true,
@@ -489,12 +497,20 @@ mod tests {
                 "{provider:?} listed twice"
             );
         }
-        for provider in [
-            TerminalProvider::Tastytrade,
-            TerminalProvider::Rithmic,
-            TerminalProvider::Hyperliquid,
-        ] {
+        for provider in TerminalProvider::ALL {
             assert!(providers.contains(&provider), "{provider:?} missing");
         }
+    }
+
+    #[test]
+    fn only_the_menu_providers_broker_reports_disconnected() {
+        let mut connections = HostedBrokerConnections::default();
+        connections.ctrader.connected = Some(false);
+        connections.tastytrade.connected = Some(true);
+        assert!(connections.disconnected(TerminalProvider::Ctrader));
+        assert!(!connections.disconnected(TerminalProvider::Tastytrade));
+        assert!(!connections.disconnected(TerminalProvider::Hyperliquid));
+        // An unchecked connection is not reported as disconnected.
+        assert!(!HostedBrokerConnections::default().disconnected(TerminalProvider::Ctrader));
     }
 }

@@ -14,6 +14,7 @@ const LIVE_CTID: u64 = 2002;
 const DEMO_SYMBOL: u64 = 1;
 const LIVE_SYMBOL: u64 = 41;
 const M1: i32 = 1;
+const QUOTE_ASSET: u64 = 11;
 
 // ---------------------------------------------------------------------------
 // Minimal protobuf wire encoding for scripted responses.
@@ -189,12 +190,23 @@ fn symbols_list_frame(ctid: u64, symbols: &[(u64, String, Option<String>)]) -> P
         field_int(&mut body, 1, (*symbol).cast_signed());
         field_string(&mut body, 2, name);
         field_varint(&mut body, 3, 1);
+        field_varint(&mut body, 5, QUOTE_ASSET);
         if let Some(description) = description {
             field_string(&mut body, 7, description);
         }
         field_bytes(&mut payload, 3, &body);
     }
     frame(2115, payload)
+}
+
+fn asset_list_frame(ctid: u64) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, ctid.cast_signed());
+    let mut asset = Vec::new();
+    field_varint(&mut asset, 1, QUOTE_ASSET);
+    field_string(&mut asset, 2, "USD");
+    field_bytes(&mut payload, 3, &asset);
+    frame(2113, payload)
 }
 
 fn symbol_by_id_frame(ctid: u64, symbols: &[(u64, i32)]) -> ProtoMessage {
@@ -307,6 +319,10 @@ enum Logged {
         ctid: u64,
         symbols: Vec<u64>,
     },
+    Assets {
+        live: bool,
+        ctid: u64,
+    },
     History {
         live: bool,
         ctid: u64,
@@ -415,6 +431,7 @@ impl Script {
                     })
                     .collect::<Vec<_>>(),
             ),
+            Logged::Assets { ctid, .. } => asset_list_frame(ctid),
             Logged::History {
                 ctid,
                 symbol,
@@ -507,6 +524,10 @@ impl CtraderMarketLink for ScriptLink {
                 symbol: scalar(&request.payload, 4),
             },
             2114 => Logged::SymbolsList {
+                live: self.live,
+                ctid: scalar(&request.payload, 2),
+            },
+            2112 => Logged::Assets {
                 live: self.live,
                 ctid: scalar(&request.payload, 2),
             },
@@ -852,6 +873,7 @@ fn ctrader_descriptor_registers_candle_only_broker_capability() {
     assert!(!descriptor.presentation.trades_available);
     assert!(descriptor.presentation.depth_available);
     assert!(!descriptor.presentation.market_screen_available);
+    assert!(descriptor.presentation.catalog_refresh_on_startup);
     assert_eq!(
         descriptor.presentation.selection_entitlement_id,
         ENTITLEMENT
@@ -1673,6 +1695,27 @@ fn search_and_select_cover_demo_and_live_catalogs() {
     let instrument = drive_select(&mut harness, select(2, 2, "live:2002:41", ENTITLEMENT));
     assert_eq!(instrument.instrument_id, "ctrader:live:2002:41");
     assert_eq!(instrument.price_scale, 2);
+    // Contract terms come from the symbol and the account's asset list.
+    let terms = instrument
+        .contract_metadata
+        .as_deref()
+        .expect("contract terms");
+    assert_eq!(terms.currency.as_deref(), Some("USD"));
+    assert_eq!(
+        (terms.point_value, terms.point_value_scale),
+        (Some(1), Some(0))
+    );
+    assert_eq!(terms.order_quantity_increment, Some(100));
+    assert!(
+        harness.requests().iter().any(|request| matches!(
+            request,
+            Logged::Assets {
+                live: true,
+                ctid: LIVE_CTID
+            }
+        )),
+        "the live account's assets resolve the quote currency"
+    );
 
     // A stale search generation or foreign entitlement rejects, not panics.
     for (search_generation, entitlement) in [(999, ENTITLEMENT), (2, "other-entitlement")] {

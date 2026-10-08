@@ -146,8 +146,7 @@ pub(super) fn apply_pushed_event(
             &snapshot,
             consumer_id,
             active_generation,
-            instrument.price_increment,
-            Some(instrument.display_symbol.as_str()),
+            instrument,
             messages,
         ),
         MarketRuntimeEvent::SeriesUpdate(update) => {
@@ -267,8 +266,7 @@ fn apply_realtime_snapshot(
     snapshot: &MarketSeriesSnapshot,
     consumer_id: u64,
     active_generation: u64,
-    price_increment: Option<i64>,
-    display_symbol: Option<&str>,
+    instrument: &InstallProviderInstrument,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     if snapshot.consumer_id.0.get() != consumer_id {
@@ -281,7 +279,7 @@ fn apply_realtime_snapshot(
     )? {
         return Ok(());
     }
-    let replay = replay_runtime_snapshot(snapshot, price_increment, display_symbol)?;
+    let replay = replay_runtime_snapshot(snapshot, Some(instrument))?;
     let provider = snapshot.snapshot.series.provider_id.as_str();
     send_publication(messages, ReplayStreamUpdate::Snapshot(replay), provider)
 }
@@ -488,11 +486,7 @@ pub(super) fn complete_pending_recovery(
                 && snapshot.generation.0.get() == endpoint.active_generation
                 && snapshot.snapshot.provider_generation.0.get() >= product.session_generation =>
         {
-            let replay = replay_runtime_snapshot(
-                snapshot,
-                product.price_increment,
-                Some(product.display_symbol.as_str()),
-            )?;
+            let replay = replay_runtime_snapshot(snapshot, Some(product))?;
             let generation = runtime_generation_from_snapshot(snapshot, &replay)?;
             endpoint.pending_recovery = None;
             let (subscription_id, worker_label) = worker_identity(product.provider.as_str());

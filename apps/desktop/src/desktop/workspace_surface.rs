@@ -1812,14 +1812,17 @@ impl WorkspaceSurface {
 
     fn sync_chart_type_menu_selection(&mut self, cx: &App) {
         let selected = self.chart_type(cx);
-        self.chrome_selection = ChartType::ALL
+        self.chrome_selection = super::provider_chart_types(self.provider)
             .iter()
             .position(|chart_type| *chart_type == selected)
             .unwrap_or(0);
     }
 
     fn apply_highlighted_chart_type(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(chart_type) = ChartType::ALL.get(self.chrome_selection).copied() {
+        if let Some(chart_type) = super::provider_chart_types(self.provider)
+            .get(self.chrome_selection)
+            .copied()
+        {
             self.set_chart_type(chart_type, cx);
             self.close_chrome_overlay(window, cx);
         }
@@ -2297,9 +2300,9 @@ impl WorkspaceSurface {
             self.symbol_selection_target = SymbolSelectionTarget::Chart;
         }
         if matches!(overlay, ChromeOverlay::Instrument | ChromeOverlay::Accounts) {
-            // Both surfaces present the broker connection; the runtime check reads the
+            // Both surfaces present the broker connections; the runtime check reads the
             // local credential vault in the background and never blocks this frame.
-            window.dispatch_action(Box::new(RefreshTastytradeConnection), cx);
+            window.dispatch_action(Box::new(RefreshBrokerConnections), cx);
         }
         self.chrome_overlay_trigger_position = trigger_position;
         self.chrome_overlay_generation = self.chrome_overlay_generation.saturating_add(1);
@@ -2528,7 +2531,9 @@ impl WorkspaceSurface {
                     )
                     .len(),
                     Some(ChromeOverlay::Timeframe) => self.timeframe_menu_keyboard_count(),
-                    Some(ChromeOverlay::ChartType) => ChartType::ALL.len(),
+                    Some(ChromeOverlay::ChartType) => {
+                        super::provider_chart_types(self.provider).len()
+                    }
                     Some(ChromeOverlay::QuickTimeframe) => self.quick_timeframe_matches(cx).len(),
                     Some(ChromeOverlay::TimeZone) => self.time_zone_matches(cx).len(),
                     // The Accounts panel is a form, not a keyboard-navigated list.
@@ -2737,6 +2742,7 @@ impl WorkspaceSurface {
         }
         self.apply_surface_time_zone(&chart, cx);
         self.apply_market_session_to_chart(&chart, cx);
+        self.apply_provider_trade_prints(&chart, cx);
         replace_chart_price_alert_lines(
             Some(&chart),
             &self.price_alerts,
@@ -2759,6 +2765,31 @@ impl WorkspaceSurface {
         }
         self.synchronize_runtime_studies(cx);
         self.rithmic_switch = RithmicSwitchState::Initializing;
+    }
+
+    /// A provider without trade prints has nothing to draw a footprint or tape study from,
+    /// so a restored or retained chart shows candles and no tape panes instead of blank ones.
+    fn apply_provider_trade_prints(&self, chart: &Entity<AerisChartView>, cx: &mut Context<Self>) {
+        if super::provider_trades_available(self.provider) {
+            return;
+        }
+        chart.update(cx, |chart, _| {
+            if chart.chart_type() == ChartType::Footprint {
+                chart.set_chart_type(ChartType::Candles);
+            }
+            let settings = chart.order_flow_settings();
+            let without_tape = OrderFlowSettings {
+                show_cumulative_delta: false,
+                show_delta_histogram: false,
+                big_trades: None,
+                ..settings
+            };
+            if without_tape != settings
+                && let Err(error) = chart.set_order_flow_settings(without_tape)
+            {
+                diagnostic!("Aeris tape studies could not be removed: {error}");
+            }
+        });
     }
 
     pub(super) fn apply_publication(
@@ -3677,8 +3708,10 @@ impl WorkspaceSurface {
             self.interval = interval;
         }
         if let Some(product) = self.rithmic_pending_product.take() {
-            let provider = terminal_provider_from_id(&product.provider);
-            if provider != self.provider {
+            // Selections only come from providers the menu lists.
+            if let Some(provider) = known_terminal_provider(&product.provider)
+                && provider != self.provider
+            {
                 self.provider = provider;
                 self.symbol_message = initial_symbol_message(provider);
             }
@@ -4054,6 +4087,9 @@ impl WorkspaceSurface {
         study: OrderFlowMenuStudy,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !super::provider_trades_available(self.provider) {
+            return false;
+        }
         let Some(mut settings) = self.chart_order_flow_settings(cx) else {
             return false;
         };
@@ -4312,6 +4348,15 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn set_chart_type(&mut self, chart_type: ChartType, cx: &mut Context<Self>) {
+        if !super::provider_chart_types(self.provider).contains(&chart_type) {
+            self.indicator_message = Some(format!(
+                "{} charts need trade prints, which {} does not publish.",
+                chart_type.label(),
+                super::terminal_provider_display(self.provider)
+            ));
+            cx.notify();
+            return;
+        }
         self.chart_chrome.chart_type = chart_type;
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {

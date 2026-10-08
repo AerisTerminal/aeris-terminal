@@ -2,10 +2,10 @@ use super::{MarketDecodeError, TrendbarPeriod, account_id, check_account};
 use crate::{
     ProtoMessage, codec,
     generated::{
-        ProtoOaGetTickDataReq, ProtoOaGetTrendbarsReq, ProtoOaSubscribeDepthQuotesReq,
-        ProtoOaSubscribeLiveTrendbarReq, ProtoOaSubscribeSpotsReq, ProtoOaSymbolByIdReq,
-        ProtoOaSymbolsListReq, ProtoOaUnsubscribeDepthQuotesReq, ProtoOaUnsubscribeLiveTrendbarReq,
-        ProtoOaUnsubscribeSpotsReq,
+        ProtoOaAssetListReq, ProtoOaGetTickDataReq, ProtoOaGetTrendbarsReq,
+        ProtoOaSubscribeDepthQuotesReq, ProtoOaSubscribeLiveTrendbarReq, ProtoOaSubscribeSpotsReq,
+        ProtoOaSymbolByIdReq, ProtoOaSymbolsListReq, ProtoOaUnsubscribeDepthQuotesReq,
+        ProtoOaUnsubscribeLiveTrendbarReq, ProtoOaUnsubscribeSpotsReq,
     },
     transport::Bucket,
 };
@@ -72,6 +72,19 @@ impl MarketRequest {
                 payload_type: None,
                 ctid_trader_account_id: account_id(ctid)?,
                 include_archived_symbols: Some(false),
+            },
+        ))
+    }
+
+    /// # Errors
+    /// Rejects an account id outside the wire range.
+    pub fn asset_list(ctid: u64) -> Result<Self, MarketDecodeError> {
+        Ok(Self::general(
+            2112,
+            2113,
+            &ProtoOaAssetListReq {
+                payload_type: None,
+                ctid_trader_account_id: account_id(ctid)?,
             },
         ))
     }
@@ -300,6 +313,17 @@ mod tests {
         assert_eq!(
             (ticks.payload_type, ticks.bucket),
             (2145, Bucket::Historical)
+        );
+        let assets = MarketRequest::asset_list(CTID).expect("assets");
+        assert_eq!(
+            (assets.payload_type, assets.response_type, assets.bucket),
+            (2112, 2113, Bucket::General)
+        );
+        assert_eq!(
+            ProtoOaAssetListReq::decode(assets.payload.as_slice())
+                .expect("decode")
+                .ctid_trader_account_id,
+            CTID_WIRE
         );
         assert!(MarketRequest::subscribe_spots(CTID, &[]).is_err());
         assert!(MarketRequest::subscribe_depth(CTID, &[0]).is_err());

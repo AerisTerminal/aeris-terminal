@@ -531,7 +531,9 @@ actions!(
         OpenCommandPalette,
         ConnectTastytrade,
         DisconnectTastytrade,
-        RefreshTastytradeConnection,
+        ConnectCtrader,
+        DisconnectCtrader,
+        RefreshBrokerConnections,
     ]
 );
 
@@ -627,6 +629,21 @@ fn provider_presentation(
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == terminal_provider_id(provider))
+}
+
+/// Whether the provider streams trade prints. Footprint charts, tape studies and
+/// time and sales are drawn from them, so a provider without a trade tape offers none.
+fn provider_trades_available(provider: TerminalProvider) -> bool {
+    provider_presentation(provider).is_none_or(|descriptor| descriptor.trades_available)
+}
+
+/// The chart types a provider can draw; a footprint needs trade prints.
+fn provider_chart_types(provider: TerminalProvider) -> Vec<ChartType> {
+    let trades = provider_trades_available(provider);
+    ChartType::ALL
+        .into_iter()
+        .filter(|chart_type| trades || *chart_type != ChartType::Footprint)
+        .collect()
 }
 
 fn provider_intervals(provider: TerminalProvider) -> &'static [ChartInterval] {
@@ -1024,20 +1041,80 @@ struct PracticeAccountDialogState {
     equity: Entity<InputState>,
 }
 
-/// Presentation mirror of the runtime-owned tastytrade connection for the Accounts panel.
-/// The market runtime owns the connection and its credentials; this holds only the last
-/// result the desktop observed.
+/// A broker whose connection is authorized through the hosted broker service.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostedBroker {
+    Tastytrade,
+    Ctrader,
+}
+
+impl HostedBroker {
+    const ALL: [Self; 2] = [Self::Tastytrade, Self::Ctrader];
+
+    const fn provider(self) -> TerminalProvider {
+        match self {
+            Self::Tastytrade => TerminalProvider::Tastytrade,
+            Self::Ctrader => TerminalProvider::Ctrader,
+        }
+    }
+
+    fn for_provider(provider: TerminalProvider) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|broker| broker.provider() == provider)
+    }
+
+    const fn id(self) -> &'static str {
+        terminal_provider_id(self.provider())
+    }
+
+    fn display_name(self) -> &'static str {
+        terminal_provider_display(self.provider())
+    }
+}
+
+/// Presentation mirror of one runtime-owned hosted-broker connection for the Accounts
+/// panel. The market runtime owns the connection and its credentials; this holds only the
+/// last result the desktop observed.
 #[derive(Clone, Default)]
-struct TastytradeConnectionView {
+struct HostedBrokerConnectionView {
     /// `None` until the runtime has been asked; refreshed whenever the Accounts panel opens.
     connected: Option<bool>,
-    operation: Option<TastytradeConnectionOperation>,
+    operation: Option<HostedBrokerOperation>,
     message: Option<String>,
     failed: bool,
 }
 
+#[derive(Clone, Default)]
+struct HostedBrokerConnections {
+    tastytrade: HostedBrokerConnectionView,
+    ctrader: HostedBrokerConnectionView,
+}
+
+impl HostedBrokerConnections {
+    const fn get(&self, broker: HostedBroker) -> &HostedBrokerConnectionView {
+        match broker {
+            HostedBroker::Tastytrade => &self.tastytrade,
+            HostedBroker::Ctrader => &self.ctrader,
+        }
+    }
+
+    const fn get_mut(&mut self, broker: HostedBroker) -> &mut HostedBrokerConnectionView {
+        match broker {
+            HostedBroker::Tastytrade => &mut self.tastytrade,
+            HostedBroker::Ctrader => &mut self.ctrader,
+        }
+    }
+
+    /// Whether the runtime reported no stored connection for a hosted-broker provider.
+    fn disconnected(&self, provider: TerminalProvider) -> bool {
+        HostedBroker::for_provider(provider)
+            .is_some_and(|broker| self.get(broker).connected == Some(false))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TastytradeConnectionOperation {
+enum HostedBrokerOperation {
     Checking,
     Connecting,
     Disconnecting,
@@ -1323,15 +1400,30 @@ struct WorkspaceScrollHandles {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalProvider {
     Tastytrade,
+    Ctrader,
     Rithmic,
     Hyperliquid,
 }
+
+impl TerminalProvider {
+    const ALL: [Self; 4] = [
+        Self::Tastytrade,
+        Self::Ctrader,
+        Self::Rithmic,
+        Self::Hyperliquid,
+    ];
+}
+
+/// The always-available public provider, presented when a stored chart names
+/// a provider this build does not expose.
+const FALLBACK_TERMINAL_PROVIDER: TerminalProvider = TerminalProvider::Hyperliquid;
 
 const fn terminal_provider_id(provider: TerminalProvider) -> &'static str {
     match provider {
         TerminalProvider::Rithmic => "rithmic",
         TerminalProvider::Hyperliquid => "hyperliquid",
         TerminalProvider::Tastytrade => "tastytrade",
+        TerminalProvider::Ctrader => "ctrader",
     }
 }
 
@@ -1364,17 +1456,9 @@ fn provider_ready_message(
 
 /// Exact mapping; `None` for runtime providers the desktop does not expose yet.
 fn known_terminal_provider(provider: &str) -> Option<TerminalProvider> {
-    [
-        TerminalProvider::Tastytrade,
-        TerminalProvider::Rithmic,
-        TerminalProvider::Hyperliquid,
-    ]
-    .into_iter()
-    .find(|candidate| terminal_provider_id(*candidate) == provider)
-}
-
-fn terminal_provider_from_id(provider: &str) -> TerminalProvider {
-    known_terminal_provider(provider).unwrap_or(TerminalProvider::Rithmic)
+    TerminalProvider::ALL
+        .into_iter()
+        .find(|candidate| terminal_provider_id(*candidate) == provider)
 }
 
 /// Where a Rithmic symbol or timeframe change is in its handover.
@@ -3193,7 +3277,24 @@ fn terminal_startup_state(
             }
         }
         MarketWorkerStartup::Loading(startup) => {
-            let provider = terminal_provider_from_id(startup.product.provider.as_str());
+            let Some(provider) = known_terminal_provider(startup.product.provider.as_str()) else {
+                let message = format!(
+                    "{} charts are not available in this version. Choose another market.",
+                    startup.product.provider
+                );
+                return TerminalStartupState {
+                    chart: None,
+                    chart_state: ChartState::Error,
+                    chart_state_message: message.clone(),
+                    replay_label: message.clone(),
+                    worker_label: startup.worker_label,
+                    subscription_id: startup.subscription_id,
+                    connection_state: None,
+                    connection_message: Some(message),
+                    provider: FALLBACK_TERMINAL_PROVIDER,
+                    product: None,
+                };
+            };
             TerminalStartupState {
                 chart: None,
                 chart_state: ChartState::Loading,
@@ -4342,7 +4443,7 @@ struct TerminalApp {
     command_palette_selection: usize,
     command_palette_message: Option<String>,
     broker_connection_task: Option<gpui::Task<()>>,
-    tastytrade_connection: TastytradeConnectionView,
+    broker_connections: HostedBrokerConnections,
     linked_sync_revisions: BTreeMap<String, u64>,
     event_risk_dispatches: BTreeMap<String, i64>,
     next_event_risk_check: Instant,

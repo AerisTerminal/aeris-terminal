@@ -12,23 +12,28 @@ use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
 pub(crate) fn replay_runtime_snapshot(
     publication: &MarketSeriesSnapshot,
-    price_increment: Option<i64>,
-    display_symbol: Option<&str>,
+    installed: Option<&InstallProviderInstrument>,
 ) -> Result<ReplaySnapshot, String> {
     let snapshot = publication.snapshot.as_ref();
     let series = &snapshot.series;
-    let (venue, symbol, asset_class, trading_currency) = snapshot_instrument(series)?;
+    let (venue, symbol, asset_class, provider_currency) = snapshot_instrument(series)?;
+    // Provider-reported contract terms are more precise than the id's default.
+    let trading_currency = installed
+        .and_then(|product| product.contract_metadata.as_deref())
+        .and_then(|terms| terms.currency.clone())
+        .filter(|currency| !currency.trim().is_empty())
+        .unwrap_or(provider_currency);
     let instrument = InstrumentRevision {
         instrument_id: InstrumentId::try_new(series.instrument_id.clone())
             .map_err(|error| error.to_string())?,
         revision: u64::from(series.definition_version),
         asset_class,
-        symbol: display_symbol.unwrap_or(&symbol).to_string(),
+        symbol: installed.map_or(symbol, |product| product.display_symbol.clone()),
         venue_id: venue,
         trading_currency,
         precision: InstrumentPrecision::try_new(snapshot.price_scale, snapshot.quantity_scale)
             .map_err(|error| error.to_string())?,
-        price_increment,
+        price_increment: installed.and_then(|product| product.price_increment),
         lifecycle: InstrumentLifecycle::Active,
         contract: None,
     };
@@ -232,6 +237,30 @@ pub(super) fn snapshot_instrument(
         };
         return Ok(("tastytrade".into(), symbol.into(), class, "USD".into()));
     }
+    if series.provider_id == "ctrader" {
+        let mut parts = series.instrument_id.split(':');
+        let venue = match (parts.next(), parts.next()) {
+            (Some("ctrader"), Some("demo")) => "cTrader Demo",
+            (Some("ctrader"), Some("live")) => "cTrader Live",
+            _ => return Err("cTrader chart identity is invalid".into()),
+        };
+        let (Some(account), Some(symbol), None) = (parts.next(), parts.next(), parts.next()) else {
+            return Err("cTrader chart identity is invalid".into());
+        };
+        if [account, symbol]
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err("cTrader chart identity is invalid".into());
+        }
+        // The id names no currency; the installed instrument's contract terms supply it.
+        return Ok((
+            venue.into(),
+            symbol.into(),
+            AssetClass::ForeignExchange,
+            String::new(),
+        ));
+    }
     let path = series
         .instrument_id
         .strip_prefix("hyperliquid:")
@@ -287,7 +316,7 @@ pub(crate) fn series_key(
     // versa, so a mismatch fails here instead of misrouting demand.
     if !matches!(
         product.provider.as_str(),
-        "rithmic" | "hyperliquid" | "tastytrade"
+        "rithmic" | "hyperliquid" | "tastytrade" | "ctrader"
     ) || product.venue_id.trim().is_empty()
         || product.price_scale > 18
         || product.quantity_scale > 18
@@ -304,11 +333,17 @@ pub(crate) fn series_key(
     } else if product.provider == "tastytrade" && product.entitlement_id != "tastytrade-authorized"
     {
         return Err("Tastytrade installed instrument identity is invalid".into());
-    } else if product.provider == "hyperliquid" && product.entitlement_id != "hyperliquid-public" {
-        return Err("Hyperliquid installed instrument identity is invalid".to_string());
+    } else if product.provider == "hyperliquid" && product.entitlement_id != "hyperliquid-public"
+        || product.provider == "ctrader" && product.entitlement_id != "ctrader-authorized"
+    {
+        return Err(format!(
+            "{} installed instrument identity is invalid",
+            provider_display_name(product.provider.as_str())
+        ));
     }
     if product.provider == "rithmic" && !product.instrument_id.starts_with("instrument:rithmic:")
         || product.provider == "hyperliquid" && !product.instrument_id.starts_with("hyperliquid:")
+        || product.provider == "ctrader" && !product.instrument_id.starts_with("ctrader:")
     {
         return Err(format!(
             "{} installed instrument identity is invalid",
@@ -326,6 +361,9 @@ pub(crate) fn series_key(
         ChartInterval::Hour4 => BarPeriod::time(14_400),
         ChartInterval::Hour8 => BarPeriod::time(28_800),
         ChartInterval::Hour12 => BarPeriod::time(43_200),
+        // cTrader daily bars open at 17:00 New York, so they are session
+        // days of 23 to 25 hours rather than fixed 24-hour buckets.
+        ChartInterval::Day1 if product.provider == "ctrader" => BarPeriod::session(1),
         ChartInterval::Day1 => BarPeriod::time(86_400),
         ChartInterval::Week1 => BarPeriod::week(1),
         ChartInterval::Month1 => BarPeriod::month(1),

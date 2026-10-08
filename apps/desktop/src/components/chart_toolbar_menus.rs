@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
-    connection: &TastytradeConnectionView,
+    connection: &HostedBrokerConnections,
     theme: &AerisTheme,
     chrome_height: f32,
     viewport: gpui::Size<Pixels>,
@@ -209,7 +209,7 @@ pub(super) fn chrome_overlay_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     overlay: ChromeOverlay,
-    connection: &TastytradeConnectionView,
+    connection: &HostedBrokerConnections,
     extent: super::chrome_menu::ChromeMenuExtent,
     theme: &AerisTheme,
     cx: &App,
@@ -236,7 +236,7 @@ pub(super) fn chrome_overlay_content(
                 },
                 scroll: app_state.scrolls.instrument.clone(),
                 target: app_state.symbol_selection_target,
-                tastytrade_disconnected: connection.connected == Some(false),
+                hosted_broker_disconnected: connection.disconnected(app_state.symbol_provider),
                 provider_menu_open: app_state.menu_state.symbol_provider_menu.is_open(),
                 markets_flyout_open: app_state
                     .menu_state
@@ -285,6 +285,7 @@ pub(super) fn chrome_overlay_content(
         .into_any_element(),
         ChromeOverlay::ChartType => chart_type_overlay_content(
             app,
+            &super::provider_chart_types(app_state.provider),
             app_state.chart_type(cx),
             app_state.chrome_selection,
             theme,
@@ -638,6 +639,7 @@ pub(super) fn timeframe_menu_surface(
 
 pub(super) fn chart_type_overlay_content(
     app: &Entity<WorkspaceSurface>,
+    chart_types: &[ChartType],
     selected: ChartType,
     keyboard_selection: usize,
     theme: &AerisTheme,
@@ -648,8 +650,8 @@ pub(super) fn chart_type_overlay_content(
         .flex()
         .flex_col()
         .text_color(gpui_color(colors.text_primary));
-    let last = ChartType::ALL.len().saturating_sub(1);
-    for (index, chart_type) in ChartType::ALL.into_iter().enumerate() {
+    let last = chart_types.len().saturating_sub(1);
+    for (index, chart_type) in chart_types.iter().copied().enumerate() {
         panel = panel.child(chart_type_overlay_row(
             app,
             chart_type,

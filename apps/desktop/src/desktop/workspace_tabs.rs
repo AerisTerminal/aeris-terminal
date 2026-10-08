@@ -193,7 +193,7 @@ impl TerminalApp {
             command_palette_selection: 0,
             command_palette_message: None,
             broker_connection_task: None,
-            tastytrade_connection: TastytradeConnectionView::default(),
+            broker_connections: HostedBrokerConnections::default(),
             linked_sync_revisions: BTreeMap::new(),
             event_risk_dispatches: BTreeMap::new(),
             next_event_risk_check: Instant::now(),

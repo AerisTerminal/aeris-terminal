@@ -1257,6 +1257,24 @@ mod tests {
             "market runtime lost untruncated back-scroll retention regression"
         );
     }
+
+    #[test]
+    fn every_runtime_provider_is_mapped_by_the_desktop_or_explicitly_hidden() {
+        // A provider id the desktop does not map must never fall back to another
+        // provider's presentation; the desktop test enumerates the runtime registry.
+        let desktop_tests = manifest("apps/desktop/src/desktop/tests.rs");
+        assert!(
+            desktop_tests
+                .contains("fn every_built_in_provider_maps_to_a_desktop_provider_or_is_hidden")
+                && desktop_tests.contains("HIDDEN_RUNTIME_PROVIDERS"),
+            "desktop lost the runtime provider mapping regression"
+        );
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        assert!(
+            !desktop.contains("fn terminal_provider_from_id"),
+            "unknown provider ids must not fall back to a default desktop provider"
+        );
+    }
     #[test]
     fn in_process_market_contracts_remain_explicit_and_provider_neutral() {
         let demand = manifest("crates/market_engine/src/demand.rs");

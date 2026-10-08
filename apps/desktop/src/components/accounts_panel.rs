@@ -13,7 +13,7 @@ const CONTROL_HEIGHT: f32 = 32.0;
 pub(super) fn accounts_panel_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
-    connection: &TastytradeConnectionView,
+    connections: &HostedBrokerConnections,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
@@ -25,8 +25,17 @@ pub(super) fn accounts_panel_content(
         .gap_3()
         .p_3()
         .child(section_label("Data connections", theme))
-        .child(tastytrade_card(connection, theme))
+        .child(broker_card(
+            HostedBroker::Tastytrade,
+            connections.get(HostedBroker::Tastytrade),
+            theme,
+        ))
         .child(tastytrade_attribution(theme))
+        .child(broker_card(
+            HostedBroker::Ctrader,
+            connections.get(HostedBroker::Ctrader),
+            theme,
+        ))
         .child(public_feed_card(theme))
         .child(
             div()
@@ -40,8 +49,8 @@ pub(super) fn accounts_panel_content(
                 .text_xs()
                 .text_color(gpui_color(colors.text_muted))
                 .child(
-                    "tastytrade provides market data only. Orders are placed on Aeris practice \
-                     accounts with simulated funds.",
+                    "tastytrade and cTrader provide market data only. Orders are placed on Aeris \
+                     practice accounts with simulated funds.",
                 ),
         )
 }
@@ -130,58 +139,82 @@ fn provider_heading(
         )
 }
 
-fn tastytrade_card(connection: &TastytradeConnectionView, theme: &AerisTheme) -> impl IntoElement {
+/// What a hosted broker's card says about its market data, connected and not.
+const fn broker_data_detail(broker: HostedBroker, connected: bool) -> &'static str {
+    match (broker, connected) {
+        (HostedBroker::Tastytrade, true) => "Connected · Level 1 market data",
+        (HostedBroker::Tastytrade, false) => "Level 1 quotes, trades and candles",
+        (HostedBroker::Ctrader, true) => "Connected · quotes, depth and candles",
+        (HostedBroker::Ctrader, false) => "Forex and CFD quotes, depth and candles",
+    }
+}
+
+fn broker_card(
+    broker: HostedBroker,
+    connection: &HostedBrokerConnectionView,
+    theme: &AerisTheme,
+) -> impl IntoElement {
     let connected = connection.connected == Some(true);
     // A background check of a known state refreshes silently; only real changes show progress.
     let busy = match connection.operation {
-        Some(
-            TastytradeConnectionOperation::Connecting
-            | TastytradeConnectionOperation::Disconnecting,
-        ) => true,
-        Some(TastytradeConnectionOperation::Checking) => connection.connected.is_none(),
+        Some(HostedBrokerOperation::Connecting | HostedBrokerOperation::Disconnecting) => true,
+        Some(HostedBrokerOperation::Checking) => connection.connected.is_none(),
         None => false,
     };
+    let name = broker.display_name();
     let detail = match connection.operation {
-        Some(TastytradeConnectionOperation::Connecting) => {
-            "Complete the tastytrade login in your browser…"
+        Some(HostedBrokerOperation::Connecting) => {
+            format!("Complete the {name} login in your browser…")
         }
-        Some(TastytradeConnectionOperation::Disconnecting) => "Disconnecting…",
-        Some(TastytradeConnectionOperation::Checking) if connection.connected.is_none() => {
-            "Checking connection…"
+        Some(HostedBrokerOperation::Disconnecting) => "Disconnecting…".to_string(),
+        Some(HostedBrokerOperation::Checking) if connection.connected.is_none() => {
+            "Checking connection…".to_string()
         }
-        _ if connected => "Connected · Level 1 market data",
-        _ => "Level 1 quotes, trades and candles",
+        _ => broker_data_detail(broker, connected).to_string(),
+    };
+    let (card_id, connect_id, disconnect_id) = match broker {
+        HostedBroker::Tastytrade => (
+            "accounts_tastytrade",
+            "accounts_tastytrade_connect",
+            "accounts_tastytrade_disconnect",
+        ),
+        HostedBroker::Ctrader => (
+            "accounts_ctrader",
+            "accounts_ctrader_connect",
+            "accounts_ctrader_disconnect",
+        ),
     };
     let action = if connected {
-        Button::new("accounts_tastytrade_disconnect")
+        Button::new(disconnect_id)
             .variant(theme, ButtonVariant::Secondary)
             .label("Disconnect")
-            .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(DisconnectTastytrade), cx);
+            .on_click(move |_, window, cx| match broker {
+                HostedBroker::Tastytrade => {
+                    window.dispatch_action(Box::new(DisconnectTastytrade), cx);
+                }
+                HostedBroker::Ctrader => window.dispatch_action(Box::new(DisconnectCtrader), cx),
             })
     } else {
-        Button::new("accounts_tastytrade_connect")
+        Button::new(connect_id)
             .variant(theme, ButtonVariant::Filled)
             .label("Connect")
-            .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(ConnectTastytrade), cx);
+            .on_click(move |_, window, cx| match broker {
+                HostedBroker::Tastytrade => {
+                    window.dispatch_action(Box::new(ConnectTastytrade), cx);
+                }
+                HostedBroker::Ctrader => window.dispatch_action(Box::new(ConnectCtrader), cx),
             })
     }
     .with_size(px(CONTROL_HEIGHT))
     .loading(busy)
     .disabled(busy);
-    card("accounts_tastytrade", theme)
+    card(card_id, theme)
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(provider_heading(
-                    "tastytrade",
-                    detail.to_string(),
-                    connected,
-                    theme,
-                ))
+                .child(provider_heading(name, detail, connected, theme))
                 .child(div().flex_none().child(action)),
         )
         .children(connection.message.as_ref().map(|message| {

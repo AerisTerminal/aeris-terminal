@@ -20,7 +20,9 @@ use super::{
     SearchProviderInstruments, SelectProviderInstrument, SyncSender, TopOfBookQuote, TrySendError,
     VecDeque, mpsc, thread,
 };
-use aeris_contracts::{ProviderInstrumentSearchResult, ProviderInstrumentSummary};
+use aeris_contracts::{
+    ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+};
 use aeris_ctrader_open_api_adapter::{
     ProtoMessage,
     accounts::CtraderAccount,
@@ -29,8 +31,8 @@ use aeris_ctrader_open_api_adapter::{
     market::{
         DepthUpdate, EventStamp, LightSymbol, MAXIMUM_STREAM_SYMBOLS, MAXIMUM_TRENDBARS_PER_PAGE,
         MarketDecodeError, MarketRequest, MarketStreams, PriceScale, SymbolStream, TrendbarPage,
-        TrendbarPeriod, decode_subscription_ack, decode_symbol_by_id, decode_symbol_list,
-        decode_trendbar_page,
+        TrendbarPeriod, decode_asset_list, decode_subscription_ack, decode_symbol_by_id,
+        decode_symbol_list, decode_trendbar_page,
     },
     session::{AccessToken, CtraderSession, SessionFault},
 };
@@ -52,7 +54,9 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         logo_key: PROVIDER,
         catalog_symbol: aeris_contracts::ProviderCatalogSymbol::ProviderSymbol,
         selection_entitlement_id: ENTITLEMENT,
-        catalog_refresh_on_startup: false,
+        // Restored charts re-read the symbol spec, so tick size, digits and
+        // quote currency always come from the account's current catalog.
+        catalog_refresh_on_startup: true,
         ready_label_suffix: "",
         depth_available: true,
         search_categories_available: false,
@@ -960,6 +964,7 @@ struct CatalogEntry {
     route: Route,
     name: String,
     description: Option<String>,
+    quote_asset_id: Option<u64>,
 }
 impl CatalogEntry {
     fn summary(&self) -> ProviderInstrumentSummary {
@@ -1052,6 +1057,7 @@ struct Worker {
     ordinal: u64,
     account_list: Option<(Instant, Vec<CtraderAccount>)>,
     catalogs: BTreeMap<(bool, u64), (Instant, Vec<LightSymbol>)>,
+    assets: BTreeMap<(bool, u64), (Instant, BTreeMap<u64, String>)>,
     catalog_job: Option<CatalogJob>,
     searches: BTreeMap<u64, (u64, Vec<CatalogEntry>)>,
     selection_generation: u64,
@@ -1075,6 +1081,7 @@ impl Worker {
             ordinal: 0,
             account_list: None,
             catalogs: BTreeMap::new(),
+            assets: BTreeMap::new(),
             catalog_job: None,
             searches: BTreeMap::new(),
             selection_generation: 0,
@@ -1167,6 +1174,7 @@ impl Worker {
                     }
                     self.account_list = None;
                     self.catalogs.clear();
+                    self.assets.clear();
                     self.searches.clear();
                     self.candle_symbols.clear();
                     self.epoch_state.open = false;
@@ -1193,10 +1201,14 @@ impl Worker {
                 continue;
             };
             if let Err(failure) = host.apply(&HostDemand::default()) {
-                diagnostic!(
-                    "Aeris cTrader unsubscribe failed; closing the session: {}",
-                    failure.detail()
-                );
+                // A shutdown that begins mid-unsubscribe cancels the transport; the
+                // session was not broken.
+                if !self.ports.stop.load(Ordering::Acquire) {
+                    diagnostic!(
+                        "Aeris cTrader unsubscribe failed; closing the session: {}",
+                        failure.detail()
+                    );
+                }
                 if let Some(mut host) = self.hosts.remove(&live) {
                     host.link.close();
                 }
@@ -1735,6 +1747,7 @@ impl Worker {
                     },
                     name: symbol.name.clone(),
                     description: symbol.description.clone(),
+                    quote_asset_id: symbol.quote_asset_id,
                 };
                 if let Some(rank) = search_rank(&entry, &query) {
                     matches.push((rank, entry));
@@ -1798,6 +1811,10 @@ impl Worker {
             .into_iter()
             .find(|spec| spec.symbol_id == route.symbol_id)
             .ok_or_else(|| Failure::Request("cTrader symbol details are missing".into()))?;
+        let quote_asset = entry
+            .quote_asset_id
+            .ok_or_else(|| Failure::Request("cTrader symbol quote asset is missing".into()))?;
+        let currency = self.asset_name(route, quote_asset)?;
         self.selection_generation = self
             .selection_generation
             .checked_add(1)
@@ -1817,9 +1834,44 @@ impl Worker {
                 quantity_scale: DEPTH_QUANTITY_SCALE,
                 entitlement_id: ENTITLEMENT.into(),
                 price_increment: Some(spec.tick_units()),
-                contract_metadata: None,
+                // Quantities are in cents of the base unit and prices are in
+                // the quote asset, so one unit moving one price unit is one
+                // unit of quote currency.
+                contract_metadata: Some(Box::new(ProviderContractMetadata {
+                    point_value: Some(1),
+                    point_value_scale: Some(0),
+                    currency: Some(currency),
+                    order_quantity_increment: Some(spec.step_volume),
+                    ..ProviderContractMetadata::default()
+                })),
             },
         })
+    }
+    /// The account's asset names are cached like its symbol list.
+    fn asset_name(&mut self, route: Route, asset_id: u64) -> Result<String, Failure> {
+        let key = (route.live, route.ctid);
+        let fresh = self
+            .assets
+            .get(&key)
+            .is_some_and(|(loaded_at, _)| loaded_at.elapsed() < CATALOG_TTL);
+        if !fresh {
+            let host = self.ensure_host(route.live)?;
+            host.authorize(route.ctid)?;
+            let frame = host.request(
+                MarketRequest::asset_list(route.ctid).map_err(|error| request_error(&error))?,
+            )?;
+            let assets = decode_asset_list(&frame, route.ctid)
+                .map_err(|error| request_error(&error))?
+                .into_iter()
+                .map(|asset| (asset.asset_id, asset.name))
+                .collect();
+            self.assets.insert(key, (Instant::now(), assets));
+        }
+        self.assets
+            .get(&key)
+            .and_then(|(_, assets)| assets.get(&asset_id))
+            .cloned()
+            .ok_or_else(|| Failure::Request("cTrader quote asset is unknown".into()))
     }
     fn queue_completion(
         &mut self,

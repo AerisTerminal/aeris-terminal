@@ -273,6 +273,12 @@ impl Transport {
             .recv_timeout(timeout)
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout => TransportError::ReadTimeout,
+                // The reader exits when cancelled or closed; that is not a dropped socket.
+                mpsc::RecvTimeoutError::Disconnected
+                    if self.stop.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) =>
+                {
+                    TransportError::Cancelled
+                }
                 mpsc::RecvTimeoutError::Disconnected => TransportError::Closed,
             })?
     }

@@ -387,6 +387,8 @@ pub(super) fn workspace_market_area(
                 book: order_book_frame.as_ref(),
                 filter: surface.time_sales.filter,
                 scroll: &surface.scrolls.time_sales,
+                trades_unavailable_from: (!super::provider_trades_available(surface.provider))
+                    .then(|| super::terminal_provider_display(surface.provider)),
             },
             watchlist,
             theme,

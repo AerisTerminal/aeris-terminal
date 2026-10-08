@@ -77,16 +77,53 @@ pub(super) struct TimeSalesPanelState<'a> {
     pub(super) book: Option<&'a aeris_market_data::OrderBookFrame>,
     pub(super) filter: super::TimeSalesFilter,
     pub(super) scroll: &'a ScrollHandle,
+    /// The provider's name when it publishes no trade prints, so the panel says so
+    /// instead of waiting on an empty tape.
+    pub(super) trades_unavailable_from: Option<&'static str>,
 }
 
 /// Docked width of the Time & Sales panel, including its leading border: a time column,
 /// a flexible price column and the eight-decimal size column.
 pub(super) const TIME_SALES_PANEL_WIDTH: f32 = 260.0;
 
+/// The panel for a provider that publishes no trade prints: it says so instead of
+/// offering filters over a tape that never arrives.
+fn trades_unavailable_panel(
+    app: Entity<WorkspaceSurface>,
+    provider: &str,
+    theme: &AerisTheme,
+) -> Stateful<Div> {
+    div()
+        .id("time_sales_panel")
+        .size_full()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .bg(gpui_color(theme.colors.surface))
+        .child(side_panel_header(
+            SidePanel::TimeSales,
+            app,
+            std::iter::empty::<AnyElement>(),
+            theme,
+        ))
+        .child(super::chrome_menu::chrome_menu_empty(
+            "No trade prints",
+            format!("{provider} publishes quotes and depth, not individual trades."),
+            &theme.colors,
+        ))
+}
+
 pub(super) fn time_sales_panel(
     state: TimeSalesPanelState<'_>,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
+    match state.trades_unavailable_from {
+        Some(provider) => trades_unavailable_panel(state.app, provider, theme),
+        None => trade_tape_panel(state, theme),
+    }
+}
+
+fn trade_tape_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> Stateful<Div> {
     let TimeSalesPanelState {
         app,
         tape,
@@ -96,6 +133,7 @@ pub(super) fn time_sales_panel(
         book,
         filter,
         scroll,
+        trades_unavailable_from: _,
     } = state;
     let (history_header, rows) = tape.map_or_else(
         || (None, Vec::new()),
@@ -107,24 +145,12 @@ pub(super) fn time_sales_panel(
             )
         },
     );
-    let side_filter_app = app.clone();
-    let volume_filter_app = app.clone();
-    let range_app = app.clone();
-    let reset_app = app.clone();
     let symbol = div()
         .pr_1()
         .text_color(gpui_color(theme.colors.text_muted))
         .child(product.map_or_else(String::new, |product| product.display_symbol.clone()))
         .into_any_element();
-    let size_label = if filter.minimum_quantity == 0.0 {
-        "Any size".to_string()
-    } else {
-        format!(">= {}", filter.minimum_quantity)
-    };
-    let range_label = filter.price_range_ticks.map_or_else(
-        || "All prices".to_string(),
-        |ticks| format!("±{ticks} ticks"),
-    );
+    let filters = time_sales_filters(&app, filter, theme);
 
     div()
         .id("time_sales_panel")
@@ -140,45 +166,7 @@ pub(super) fn time_sales_panel(
             theme,
         ))
         .children(history_header)
-        .child(
-            div()
-                .p_1()
-                .flex()
-                .gap_1()
-                .child(time_sales_filter_button(
-                    "time_sales_side",
-                    filter.side.label(),
-                    move |cx| {
-                        side_filter_app.update(cx, WorkspaceSurface::cycle_time_sales_side_filter);
-                    },
-                    theme,
-                ))
-                .child(time_sales_filter_button(
-                    "time_sales_size",
-                    size_label,
-                    move |cx| {
-                        volume_filter_app
-                            .update(cx, WorkspaceSurface::cycle_time_sales_size_filter);
-                    },
-                    theme,
-                ))
-                .child(time_sales_filter_button(
-                    "time_sales_range",
-                    range_label,
-                    move |cx| {
-                        range_app.update(cx, WorkspaceSurface::cycle_time_sales_price_filter);
-                    },
-                    theme,
-                ))
-                .child(time_sales_filter_button(
-                    "time_sales_reset",
-                    "Reset",
-                    move |cx| {
-                        reset_app.update(cx, WorkspaceSurface::reset_time_sales_filter);
-                    },
-                    theme,
-                )),
-        )
+        .child(filters)
         .child(
             div()
                 .id("time_sales_rows")
@@ -188,6 +176,62 @@ pub(super) fn time_sales_panel(
                 .track_scroll(scroll)
                 .children(rows),
         )
+}
+
+fn time_sales_filters(
+    app: &Entity<WorkspaceSurface>,
+    filter: super::TimeSalesFilter,
+    theme: &AerisTheme,
+) -> Div {
+    let side_filter_app = app.clone();
+    let volume_filter_app = app.clone();
+    let range_app = app.clone();
+    let reset_app = app.clone();
+    let size_label = if filter.minimum_quantity == 0.0 {
+        "Any size".to_string()
+    } else {
+        format!(">= {}", filter.minimum_quantity)
+    };
+    let range_label = filter.price_range_ticks.map_or_else(
+        || "All prices".to_string(),
+        |ticks| format!("±{ticks} ticks"),
+    );
+    div()
+        .p_1()
+        .flex()
+        .gap_1()
+        .child(time_sales_filter_button(
+            "time_sales_side",
+            filter.side.label(),
+            move |cx| {
+                side_filter_app.update(cx, WorkspaceSurface::cycle_time_sales_side_filter);
+            },
+            theme,
+        ))
+        .child(time_sales_filter_button(
+            "time_sales_size",
+            size_label,
+            move |cx| {
+                volume_filter_app.update(cx, WorkspaceSurface::cycle_time_sales_size_filter);
+            },
+            theme,
+        ))
+        .child(time_sales_filter_button(
+            "time_sales_range",
+            range_label,
+            move |cx| {
+                range_app.update(cx, WorkspaceSurface::cycle_time_sales_price_filter);
+            },
+            theme,
+        ))
+        .child(time_sales_filter_button(
+            "time_sales_reset",
+            "Reset",
+            move |cx| {
+                reset_app.update(cx, WorkspaceSurface::reset_time_sales_filter);
+            },
+            theme,
+        ))
 }
 
 fn time_sales_rows(

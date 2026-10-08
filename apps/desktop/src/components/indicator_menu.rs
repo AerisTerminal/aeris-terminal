@@ -146,6 +146,9 @@ fn order_flow_menu_studies(
     cx: &App,
 ) -> Vec<OrderFlowMenuStudy> {
     let surface = app.read(cx);
+    if !super::provider_trades_available(surface.provider) {
+        return Vec::new();
+    }
     let Some(settings) = surface.chart_order_flow_settings(cx) else {
         return Vec::new();
     };

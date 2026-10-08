@@ -444,6 +444,23 @@ mod timeframe_input {
         MarketWorkerSender,
         &mut VisualTestContext,
     ) {
+        let product = local_state::default_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default instrument");
+        harness_with(cx, product)
+    }
+
+    /// A surface restoring `product`, as a workspace reopened at startup does.
+    fn harness_with(
+        cx: &mut TestAppContext,
+        product: InstallProviderInstrument,
+    ) -> (
+        Entity<WorkspaceSurface>,
+        mpsc::Receiver<MarketWorkerCommand>,
+        MarketWorkerSender,
+        &mut VisualTestContext,
+    ) {
         let (commands, requests) = mpsc::sync_channel(8);
         let (publications, messages) = market_worker_channel(NonZeroUsize::MIN);
         let (_, shutdown) = mpsc::sync_channel(1);
@@ -456,10 +473,6 @@ mod timeframe_input {
         );
         let (view, cx) = cx.add_window_view(move |window, cx| {
             gpui_base::init(cx);
-            let product = local_state::default_workspace().watchlist_entries[0]
-                .instrument
-                .clone()
-                .expect("default instrument");
             let surface = workspace_surface_entity(
                 MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
                     product,
@@ -481,6 +494,71 @@ mod timeframe_input {
         });
         let surface = cx.read(|cx| view.read(cx).0.clone());
         (surface, requests, publications, cx)
+    }
+
+    fn ctrader_product() -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: "ctrader".to_string(),
+            session_generation: 1,
+            selection_generation: 1,
+            instrument_id: "ctrader:demo:1001:1".to_string(),
+            provider_symbol: "EURUSD".to_string(),
+            display_symbol: "EURUSD".to_string(),
+            venue_id: "ctrader".to_string(),
+            price_scale: 5,
+            quantity_scale: 2,
+            entitlement_id: "ctrader-authorized".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[gpui::test]
+    fn restored_ctrader_chart_loads_without_trade_print_features(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness_with(cx, ctrader_product());
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(surface.provider, TerminalProvider::Ctrader);
+            assert_eq!(surface.chart_state, ChartState::Loading);
+            assert_eq!(
+                surface.connection_message.as_deref(),
+                Some("Connecting to cTrader hosted markets")
+            );
+            assert!(
+                !super::super::provider_chart_types(surface.provider)
+                    .contains(&ChartType::Footprint)
+            );
+        });
+        // A footprint request (palette, menu or template) is refused, not drawn blank.
+        surface.update(cx, |surface, cx| {
+            surface.set_chart_type(ChartType::Footprint, cx);
+            assert_ne!(surface.chart_chrome.chart_type, ChartType::Footprint);
+            assert!(
+                surface
+                    .indicator_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("cTrader does not publish"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn restored_chart_from_an_unavailable_provider_fails_explicitly(cx: &mut TestAppContext) {
+        let product = InstallProviderInstrument {
+            provider: "retired".to_string(),
+            ..ctrader_product()
+        };
+        let (surface, _requests, _publications, cx) = harness_with(cx, product);
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            // Never silently presented as another provider's market.
+            assert_eq!(surface.chart_state, ChartState::Error);
+            assert!(
+                surface
+                    .chart_state_message
+                    .contains("retired charts are not available")
+            );
+            assert!(surface.product.is_none());
+        });
     }
 
     #[gpui::test]
@@ -2915,6 +2993,28 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// Runtime providers the desktop intentionally does not offer. Empty today; a new built-in
+/// provider must be added to `TerminalProvider` or listed here, never left to a fallback.
+const HIDDEN_RUNTIME_PROVIDERS: &[&str] = &[];
+
+#[test]
+fn every_built_in_provider_maps_to_a_desktop_provider_or_is_hidden() {
+    for descriptor in aeris_market_runtime::built_in_provider_presentations() {
+        assert!(
+            super::known_terminal_provider(descriptor.id).is_some()
+                || HIDDEN_RUNTIME_PROVIDERS.contains(&descriptor.id),
+            "runtime provider {} has no desktop provider",
+            descriptor.id
+        );
+    }
+    for provider in super::TerminalProvider::ALL {
+        assert!(
+            super::provider_presentation(provider).is_some(),
+            "{provider:?} has no runtime descriptor"
+        );
+    }
+}
+
 #[test]
 fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
     assert_eq!(
@@ -2949,6 +3049,33 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         super::provider_connection_message(super::TerminalProvider::Hyperliquid),
         "Connecting to Hyperliquid public markets"
     );
+    assert_eq!(
+        super::terminal_provider_display(super::TerminalProvider::Ctrader),
+        "cTrader"
+    );
+    assert_eq!(
+        super::provider_connection_message(super::TerminalProvider::Ctrader),
+        "Connecting to cTrader hosted markets"
+    );
+    // Every provider id round-trips; an id the build does not expose maps to none.
+    for provider in super::TerminalProvider::ALL {
+        assert_eq!(
+            super::known_terminal_provider(super::terminal_provider_id(provider)),
+            Some(provider)
+        );
+    }
+    assert_eq!(super::known_terminal_provider("binance"), None);
+    // Only providers that stream trade prints offer a footprint.
+    assert!(!super::provider_trades_available(
+        super::TerminalProvider::Ctrader
+    ));
+    for provider in [
+        super::TerminalProvider::Rithmic,
+        super::TerminalProvider::Hyperliquid,
+        super::TerminalProvider::Tastytrade,
+    ] {
+        assert!(super::provider_chart_types(provider).contains(&super::ChartType::Footprint));
+    }
     assert!(
         !super::provider_intervals(super::TerminalProvider::Rithmic)
             .contains(&ChartInterval::Tick100)

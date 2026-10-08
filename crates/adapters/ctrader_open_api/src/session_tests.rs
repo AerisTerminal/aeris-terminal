@@ -419,6 +419,30 @@ fn cancellation_unblocks_both_named_workers_before_read_deadline() {
 }
 
 #[test]
+fn cancellation_during_a_request_reports_cancelled_not_a_broken_session() {
+    let (listener, address, roots, config) = listener();
+    let server = thread::spawn(move || {
+        let mut socket = accept(&listener, config);
+        authorize(&mut socket);
+        // Hold the request unanswered until the client cancels.
+        let _ = codec::read_frame(&mut socket);
+        let _ = codec::read_frame(&mut socket);
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut session = session(client(address, roots, Arc::clone(&stop)));
+    let cancellation = Arc::clone(&stop);
+    let canceller = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(150));
+        cancellation.store(true, Ordering::Release);
+    });
+    let result = session.request(2104, vec![], 2105, Bucket::General, Duration::from_secs(5));
+    assert_eq!(result, Err(SessionFault::Cancelled));
+    canceller.join().unwrap();
+    session.close();
+    server.join().unwrap();
+}
+
+#[test]
 fn cancellation_during_connect_has_a_two_second_bound() {
     let (listener, address, roots, _) = listener();
     let (accepted, ready) = std::sync::mpsc::sync_channel(1);

@@ -18,20 +18,17 @@ Last examined: 2026-10-08.
 | AWS broker for cTrader OAuth and app credentials | `aeris-website` `infra/backend/broker_oauth/` | **Deployed**, working |
 | Maintainer cTrader authorization | AWS connection table and native vault | **Done**: one connection `ready` |
 | Protocol adapter: TLS, framing, auth, heartbeat, limiter | `crates/adapters/ctrader_open_api` | **Done**, live-verified on demo |
-| Market data in `market_runtime` | `market_service/ctrader.rs` | **Mostly done**; defects in section 4 |
-| Desktop market data (pick cTrader, chart, DOM) | `apps/desktop` | **Not started** |
+| Market data in `market_runtime` | `market_service/ctrader.rs` | **Done**; M-1 to M-9 fixed, second broker not yet run |
+| Desktop market data (pick cTrader, chart, DOM) | `apps/desktop` | **Built and tested**; manual desktop check pending |
 | Adapter trading messages | `crates/adapters/ctrader_open_api` | **Not started** |
 | Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Skeleton only**; safety defects in section 4 |
 | Session owner joining the adapter and `trading_runtime` | to decide (D8) | **Not started** |
 | Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Not started** |
 | Demo and live qualification | maintainer | **Not started** |
 
-In short: market data works from cTrader to `market_runtime` but cannot be seen in the app. Trading
-has a routing and safety skeleton but cannot send an order.
-
-As of the last examination, the market-data runtime code is not yet committed. That covers
-`market_service/ctrader.rs`, `ctrader_tests.rs`, `examples/ctrader_market.rs` and the `QuoteLevel`
-changes. The first step of Phase 1 is to commit it.
+In short: market data works from cTrader through `market_runtime` into the desktop (Accounts,
+symbol menu, chart, DOM), pending a manual check in the running app. Trading has a routing and
+safety skeleton but cannot send an order.
 
 ## 2. Verified evidence
 
@@ -50,14 +47,16 @@ Recorded 2026-10-08 against the maintainer's cTrader demo account. Account ids a
 
   | Check | Result |
   | --- | --- |
-  | History | 1600 bars each for M1, H1 and D1 |
+  | History | 1600 bars each for M1, H1 and D1, all contiguous |
   | Live forming candle | Seen |
   | Bid/ask quote | Seen, bid below ask |
   | Depth | Both sides |
-  | Crossed updates withheld | 3 spot, 1 depth |
-  | Total time | About 8.8 s |
+  | Crossed updates withheld | 0–5 spot, 0–2 depth per run |
+  | Total time | About 8.5–9.4 s |
 
-  The run **exits 1** because D1 fails its contiguity check (section 4, M-1).
+  Rerun on the same demo broker after the M-1 to M-9 fixes: the run **exits 0**, D1 is contiguous
+  across 325 session gaps, and shutdown no longer logs a failed unsubscribe. A second broker has
+  not been run yet.
 - **Workspace gates** were green on the examined tree: `cargo fmt`, `cargo clippy --workspace
   --all-targets --all-features -D warnings` and `cargo test --workspace --all-features`.
 
@@ -179,12 +178,18 @@ Evidence files are written to `.cache/evidence/`, which Git ignores.
 
 ## 4. Known defects in existing code
 
-Fix these before the code paths they affect are reachable. None can be reached from the shipped
-desktop today, because no cTrader account is registered and no venue is attached.
+Fix these before the code paths they affect are reachable. The trading defects cannot be reached
+from the shipped desktop today, because no cTrader account is registered and no venue is attached.
 
 ### Market data
 
-- [ ] **M-1 D1 bar time.**
+All fixed in `7bf8f1c0` with regression tests in `ctrader_tests.rs`. The desktop maps chart `1D`
+to `BarPeriod::Session{days:1}` for cTrader (M-1). M-5 needed a second fix: the transport's
+`receive` reported `Closed` (shown as `Reconnect`) when a shutdown cancelled an in-flight
+unsubscribe; it now reports `Cancelled`, covered by
+`cancellation_during_a_request_reports_cancelled_not_a_broken_session`.
+
+- [x] **M-1 D1 bar time.**
   - **Cause:** cTrader daily bars open at 17:00 New York time, which is 21:00 UTC in summer and
     22:00 UTC in winter. The runtime maps chart `1D` (`Time{86400}`) to D1 with a manual override in
     `trendbar_period`, so bars that are 23 h or 25 h apart are labelled as a fixed 24 h period. The
@@ -193,25 +198,25 @@ desktop today, because no cTrader account is registered and no venue is attached
   - **Fix:** model cTrader D1 as `BarPeriod::Session{days:1}` end to end, or have the check accept the
     17:00 New York open. Add a fixture test that crosses a daylight-saving change, and make the
     `ctrader_market` check pass.
-- [ ] **M-2 Account id in logs.** cTrader instrument ids embed the trading account id, and generic
+- [x] **M-2 Account id in logs.** cTrader instrument ids embed the trading account id, and generic
   `diagnostic!` lines in `market_service/history.rs`, `realtime.rs` and `ctrader.rs` print the raw id
   to stderr, as do the `parse_instrument_id` error messages. Redact the id in those lines without
   changing the id format, which routing depends on.
-- [ ] **M-3 Permanent pause after transient faults.** The recovery `failures` counter resets only on
+- [x] **M-3 Permanent pause after transient faults.** The recovery `failures` counter resets only on
   an authorization change. Five transient faults across the whole process lifetime pause cTrader until
   the user reconnects. Reset the counter after a healthy session.
-- [ ] **M-4 Wait hints ignored.** `ConnectionLimit` (300 s) and `Maintenance` carry server waits, but
+- [x] **M-4 Wait hints ignored.** `ConnectionLimit` (300 s) and `Maintenance` carry server waits, but
   the runtime treats them as generic host failures. Honor them.
-- [ ] **M-5 Misleading shutdown log.** Shutdown logs "unsubscribe failed; closing the session:
+- [x] **M-5 Misleading shutdown log.** Shutdown logs "unsubscribe failed; closing the session:
   Reconnect". Skip the unsubscribe when stopping, or report it as cancelled.
-- [ ] **M-6 One account fails the whole search.** A single failing account aborts the search across
+- [x] **M-6 One account fails the whole search.** A single failing account aborts the search across
   all accounts. The catalog also opens the demo host even when every account is live. Isolate
   failures per account.
-- [ ] **M-7 Price step is a placeholder.** `price_increment: Some(1)` is the smallest representable
+- [x] **M-7 Price step is a placeholder.** `price_increment: Some(1)` is the smallest representable
   step, not the symbol's tick. Derive the tick from `pipPosition` and `digits` before trading uses it.
-- [ ] **M-8 Unused adapter backoff.** `ReconnectBackoff` in the adapter is used only by tests, because
+- [x] **M-8 Unused adapter backoff.** `ReconnectBackoff` in the adapter is used only by tests, because
   the runtime has its own policy. Delete it or use it; there should be one policy.
-- [ ] **M-9 Long catalog fetches stall events.** Symbol-list fetches run on the same thread that polls
+- [x] **M-9 Long catalog fetches stall events.** Symbol-list fetches run on the same thread that polls
   events, so live updates stall while a large catalog loads. Bound or interleave the fetches.
 
 ### Trading
@@ -234,11 +239,10 @@ desktop today, because no cTrader account is registered and no venue is attached
 
 ### Desktop
 
-- [ ] **D-1 Duplicate Rithmic row.** Registering the cTrader descriptor makes the symbol menu show a
-  second "Rithmic" row, because unknown provider ids fall back to Rithmic. A fix is in the working
-  tree, still uncommitted: `known_terminal_provider` in `desktop.rs` gives the menu an exact
-  mapping, and a test in `symbol_menu.rs` checks that each provider is listed once. Commit it
-  together with the market-data work.
+- [x] **D-1 Duplicate Rithmic row.** Unknown provider ids no longer fall back to Rithmic:
+  `known_terminal_provider` is the exact mapping, `terminal_provider_from_id` is removed, and a
+  restored chart from an unmapped provider fails with an explicit message. Tests in
+  `symbol_menu.rs` and `desktop/tests.rs` cover it.
 
 ## 5. Decisions
 
@@ -269,35 +273,39 @@ gates (section 7) at the end of each phase.
 
 ### Phase 1: close out market data
 
-- [ ] Fix M-1 through M-9.
-- [ ] Add a regression test for each fix.
+- [x] Fix M-1 through M-9.
+- [x] Add a regression test for each fix.
 - [ ] Make `ctrader_market` exit 0, rerun it on two brokers, and record the evidence summary here.
-- [ ] Commit the market-data batch.
+  Exits 0 on the maintainer's demo broker (section 2); a second broker needs a second demo
+  account authorized by the maintainer.
+- [x] Commit the market-data batch.
 
 ### Phase 2: cTrader in the desktop (data)
 
-- [ ] **Provider enum:** add `TerminalProvider::Ctrader` in `apps/desktop/src/desktop.rs`, and update
-  `terminal_provider_id` and `known_terminal_provider`. Make restoring an unknown provider explicit
-  instead of falling back to Rithmic.
-- [ ] **Generalize the hosted-broker wiring** from tastytrade to one provider-parameterized path:
-  - connect, disconnect and refresh actions;
-  - the connection view and operation state (a per-provider map);
-  - `run_tastytrade_operation` in `components/terminal_view.rs`;
-  - the symbol-menu connect prompt and the refresh when overlays open.
-- [ ] **Accounts panel:** add a cTrader card with connect, disconnect and status, modelled on
-  `tastytrade_card`.
-- [ ] **Market worker:** accept the `ctrader` provider, entitlement and `ctrader:` series prefix in
-  `engine_market_worker/replay_conversion.rs`, plus a `ctrader:` branch in `snapshot_instrument`
-  (FX/CFD asset class, quote currency).
-- [ ] **Startup:** decide `catalog_refresh_on_startup` for restored charts.
-- [ ] **Chart and DOM:** show depth on the DOM ladder with an empty size column for BBO-only quotes.
-  Hide trade-tape panels (footprint, CVD, time and sales, big trades) for cTrader from
-  `trades_available`.
-- [ ] **Logo:** add a cTrader logo asset if Spotware attribution rules allow it.
-- [ ] **Architecture check:** add a `tools/naming_check` rule that every built-in provider descriptor
-  maps to a desktop provider, or is explicitly hidden.
-- [ ] **Desktop tests:** cover the provider enum, the menu, the connect flow and restoring a cTrader
-  chart.
+- [x] **Provider enum:** `TerminalProvider::Ctrader` with `TerminalProvider::ALL`. Restoring a chart
+  from a provider the build does not expose shows an explicit error instead of another provider.
+- [x] **Generalize the hosted-broker wiring:** `HostedBroker`, `HostedBrokerConnections` and one
+  `run_broker_operation` path serve tastytrade and cTrader (connect, disconnect, refresh on
+  overlay open, and the symbol-menu connect prompt for the menu's provider).
+- [x] **Accounts panel:** one `broker_card` renders the tastytrade and cTrader cards.
+- [x] **Market worker:** `series_key` accepts `ctrader` with entitlement `ctrader-authorized` and
+  the `ctrader:` prefix. `snapshot_instrument` parses `ctrader:{demo|live}:{ctid}:{symbolId}` as
+  foreign exchange; the quote currency comes from the installed instrument's contract terms
+  (`ProtoOAAssetListReq`, cached per account like the symbol list).
+- [x] **Startup:** `catalog_refresh_on_startup: true`, so restored charts re-read digits, tick and
+  quote currency from the account's current catalog.
+- [x] **Chart and DOM:** depth reaches the DOM through the shared `QuoteLevel` path. Providers
+  without `trades_available` get no Footprint chart type or tape studies (CVD, delta, big trades)
+  in menus, `set_chart_type` refuses Footprint with a message, a restored or retained chart is
+  shown as candles without tape panes, and time and sales says the provider publishes no trades.
+- [ ] **Logo:** the generic provider mark is shown, as for tastytrade, until Spotware's attribution
+  rules are confirmed (Phase 10).
+- [x] **Architecture check:** `every_built_in_provider_maps_to_a_desktop_provider_or_is_hidden` in
+  `desktop/tests.rs` enumerates the runtime registry (`HIDDEN_RUNTIME_PROVIDERS` is empty), and
+  `tools/naming_check` requires that test and forbids a fallback provider mapping.
+- [x] **Desktop tests:** provider mapping and labels, the menu listing and connect prompt, broker
+  operation results, worker series keys and identity parsing, and restoring a cTrader chart and an
+  unknown-provider chart through the real surface constructor.
 - [ ] **Manual check:** in the running desktop, connect from Accounts, search EURUSD, chart M1, H1 and
   D1, watch live updates, switch symbols and timeframes without a reconnect, restart and restore.
 
