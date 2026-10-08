@@ -950,10 +950,13 @@ fn metadata(
 fn canonical_quote_level(
     level: QuoteLevel,
     instrument: &RithmicProviderInstrument,
-) -> Result<DepthLevel, (ProviderInvalidationReason, RetryDisposition)> {
-    Ok(DepthLevel {
+) -> Result<aeris_market_data::QuoteLevel, (ProviderInvalidationReason, RetryDisposition)> {
+    Ok(aeris_market_data::QuoteLevel {
         price: fixed_price(level.price, instrument.descriptor.price_scale)?,
-        quantity: fixed_quantity(level.size, instrument.descriptor.quantity_scale)?,
+        quantity: Some(fixed_quantity(
+            level.size,
+            instrument.descriptor.quantity_scale,
+        )?),
         order_count: level.orders,
     })
 }

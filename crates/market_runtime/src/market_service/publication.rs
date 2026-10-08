@@ -157,8 +157,8 @@ pub(super) fn order_book_snapshot(
         // authoritative best price in the complete L2 snapshot. Expose that
         // top level as BBO metadata without fabricating any additional depth.
         // A quote from another provider session cannot override this image.
-        publication.best_bid = publication.bids.first().copied();
-        publication.best_ask = publication.asks.first().copied();
+        publication.best_bid = publication.bids.first().copied().map(Into::into);
+        publication.best_ask = publication.asks.first().copied().map(Into::into);
         publication.bbo_source_watermark = publication.source_watermark;
     }
     MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
@@ -237,9 +237,33 @@ impl ConsumerEvents {
                     .map(MarketRuntimeEvent::TradeTapeSnapshot)
             })
             .or_else(|| self.delta_divergence.take())
+            .or_else(|| self.startup_catalog_selection.take())
+            .or_else(|| self.startup_catalog_search.take())
             .or_else(|| self.catalog_selection.take())
             .or_else(|| self.catalog_search.take())
             .or_else(|| self.catalog_screen.take())
+    }
+
+    pub(super) fn catalog_search_slot(
+        &mut self,
+        generation: u64,
+    ) -> &mut Option<MarketRuntimeEvent> {
+        if generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
+            &mut self.startup_catalog_search
+        } else {
+            &mut self.catalog_search
+        }
+    }
+
+    pub(super) fn catalog_selection_slot(
+        &mut self,
+        generation: u64,
+    ) -> &mut Option<MarketRuntimeEvent> {
+        if generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
+            &mut self.startup_catalog_selection
+        } else {
+            &mut self.catalog_selection
+        }
     }
 
     /// Queues one covering snapshot, discarding everything it already covers.
@@ -995,14 +1019,14 @@ mod tests {
                     received_unix_nanos: 1,
                 },
             },
-            bid: Some(aeris_market_data::DepthLevel {
+            bid: Some(aeris_market_data::QuoteLevel {
                 price: 10_000,
-                quantity: 2,
+                quantity: Some(2),
                 order_count: None,
             }),
-            ask: Some(aeris_market_data::DepthLevel {
+            ask: Some(aeris_market_data::QuoteLevel {
                 price: 10_001,
-                quantity: 3,
+                quantity: Some(3),
                 order_count: None,
             }),
         });

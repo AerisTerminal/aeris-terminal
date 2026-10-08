@@ -278,4 +278,6 @@ pub use aeris_market_engine::{
     ProviderGeneration as MarketProviderGeneration,
     SeriesSnapshot as CanonicalMarketSeriesSnapshot, SeriesTailOperation, StreamRequirements,
 };
-pub use market_service::{MarketService, MarketServiceStatus, built_in_provider_presentations};
+pub use market_service::{
+    CtraderStreamStatistics, MarketService, MarketServiceStatus, built_in_provider_presentations,
+};

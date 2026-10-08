@@ -135,6 +135,7 @@ pub struct MarketServiceStatus {
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
     broker_api: Arc<tastytrade::BrokerApi>,
+    ctrader_counters: Arc<ctrader::StreamCounters>,
     provider_presentations: Vec<ProviderPresentationDescriptor>,
     provider_search_preparers: BTreeMap<&'static str, ProviderSearchPreparer>,
     broker_authorization: broker_authorization::BrokerAuthorization,
@@ -172,7 +173,7 @@ enum Command {
     /// the top of the next coordinator iteration.
     ProviderWake,
     Status(Reply<MarketServiceStatus>),
-    BrokerAuthorizationChanged(bool, Reply<()>),
+    BrokerAuthorizationChanged(&'static str, bool, Reply<()>),
     AvailableStreams(String, StreamRequirements, Reply<StreamRequirements>),
     Attach(ClientId, Reply<()>),
     Detach(ClientId, Reply<()>),
@@ -273,7 +274,10 @@ impl ProviderCoordinatorWake {
     #[cfg(test)]
     pub(crate) fn for_tests() -> Self {
         let (commands, _receiver) = mpsc::sync_channel(1);
-        Self::new(commands, ["rithmic", "hyperliquid", "tastytrade"])
+        Self::new(
+            commands,
+            ["rithmic", "hyperliquid", "tastytrade", "ctrader"],
+        )
     }
 
     pub(crate) fn report_overflow(&self, provider: &str, generation: u64) {
@@ -498,6 +502,27 @@ impl ProviderDemand {
         wire
     }
 
+    fn ctrader_wire(&self) -> ctrader::Demand {
+        let mut wire = ctrader::Demand {
+            series: self
+                .candle_series
+                .iter()
+                .map(|(series, _, instrument)| (series.clone(), instrument.clone()))
+                .collect(),
+            ..ctrader::Demand::default()
+        };
+        for requested in &self.instruments {
+            let depth = requested.streams.contains(MarketStream::Depth) || requested.display_depth;
+            let quotes = depth
+                || requested.streams.contains(MarketStream::Quotes)
+                || requested.streams.contains(MarketStream::Bars);
+            if quotes {
+                wire.instruments.push((requested.instrument.clone(), depth));
+            }
+        }
+        wire
+    }
+
     fn hyperliquid_wire(&self) -> HyperliquidDemand {
         let mut candles = BTreeSet::new();
         let mut trades = BTreeSet::new();
@@ -644,6 +669,10 @@ struct ConsumerEvents {
     price_alerts: VecDeque<MarketRuntimeEvent>,
     catalog_search: Option<MarketRuntimeEvent>,
     catalog_selection: Option<MarketRuntimeEvent>,
+    /// Startup re-resolution runs beside interactive picker commands on the same
+    /// consumer; a shared slot let a picker result silently replace it.
+    startup_catalog_search: Option<MarketRuntimeEvent>,
+    startup_catalog_selection: Option<MarketRuntimeEvent>,
     catalog_screen: Option<MarketRuntimeEvent>,
 }
 
@@ -803,6 +832,8 @@ struct ProviderDescriptor {
     recovery_policy: ProviderRecoveryPolicy,
     idle_stop_policy: IdleStopPolicy,
     alert_demand_update: AlertDemandUpdate,
+    /// Coordinator-facing detail published when broker authorization is revoked.
+    authorization_revoked_detail: &'static str,
     start: ProviderRuntimeStarter,
     flush_demand: for<'a> fn(&mut Coordinator<'a>),
     prepare_search: Option<ProviderSearchPreparer>,
@@ -957,13 +988,19 @@ enum LiveModel {
     ProviderCandles,
 }
 
+/// Shared provider-owned state that runtime starters attach to.
+struct ProviderStartContext {
+    tastytrade: Arc<tastytrade::BrokerApi>,
+    ctrader: Arc<ctrader::StreamCounters>,
+}
+
 type ProviderRuntimeStarter = fn(
     ProviderRuntimeSpec,
     &SyncSender<Command>,
     ProviderCoordinatorWake,
     &MarketEngine,
     &Arc<Mutex<BTreeSet<String>>>,
-    &Arc<tastytrade::BrokerApi>,
+    &ProviderStartContext,
 ) -> Result<ProviderRuntimeRecord, String>;
 
 type ProviderSearchPreparer = fn(&tastytrade::BrokerApi, u64, u64) -> Result<(), String>;
@@ -1046,6 +1083,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     depth_available: true,
     search_categories_available: false,
     market_screen_available: false,
+    trades_available: true,
     connection_kind: aeris_contracts::ProviderConnectionKind::Credentials,
 };
 
@@ -1068,6 +1106,7 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     recovery_policy: ProviderRecoveryPolicy::CoordinatorReissuesDemand,
     idle_stop_policy: IdleStopPolicy::Coordinator,
     alert_demand_update: AlertDemandUpdate::Immediate,
+    authorization_revoked_detail: "Rithmic disconnected",
     start: ProviderRuntimeRegistry::start_rithmic_runtime,
     flush_demand: flush_rithmic_provider_demand,
     prepare_search: None,
@@ -1101,6 +1140,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     depth_available: true,
     search_categories_available: false,
     market_screen_available: true,
+    trades_available: true,
     connection_kind: aeris_contracts::ProviderConnectionKind::Public,
 };
 
@@ -1116,6 +1156,7 @@ const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
     idle_stop_policy: IdleStopPolicy::Coordinator,
     alert_demand_update: AlertDemandUpdate::MarkDirty,
+    authorization_revoked_detail: "Hyperliquid disconnected",
     start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
     flush_demand: flush_hyperliquid_provider_demand,
     prepare_search: None,
@@ -1143,6 +1184,7 @@ const BUILT_IN_PROVIDER_DESCRIPTORS: &[ProviderDescriptor] = &[
     RITHMIC_DESCRIPTOR,
     HYPERLIQUID_DESCRIPTOR,
     tastytrade::DESCRIPTOR,
+    ctrader::DESCRIPTOR,
 ];
 
 /// Built-in provider presentation metadata for provider-neutral desktop UI.
@@ -1217,6 +1259,14 @@ impl ProviderRuntimeSpec {
             realtime: ProviderRealtimeSpec { enabled },
         }
     }
+
+    fn ctrader() -> Self {
+        Self {
+            descriptor: ctrader::DESCRIPTOR,
+            history: None,
+            realtime: ProviderRealtimeSpec { enabled: true },
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1282,6 +1332,10 @@ enum ProviderRealtimeChannelSet {
         controls: SyncSender<tastytrade::RealtimeControl>,
         events: Receiver<tastytrade::RealtimeEvent>,
     },
+    Ctrader {
+        controls: SyncSender<ctrader::RealtimeControl>,
+        events: Receiver<ctrader::RealtimeEvent>,
+    },
     Rithmic {
         controls: SyncSender<RithmicRealtimeControl>,
         events: Receiver<RithmicRealtimeEvent>,
@@ -1303,6 +1357,10 @@ enum ProviderCatalogChannelSet {
     Tastytrade {
         controls: SyncSender<tastytrade::CatalogControl>,
         events: Receiver<tastytrade::CatalogEvent>,
+    },
+    Ctrader {
+        controls: SyncSender<ctrader::CatalogControl>,
+        events: Receiver<ctrader::CatalogEvent>,
     },
     Rithmic {
         controls: SyncSender<RithmicCatalogControl>,
@@ -1399,6 +1457,10 @@ enum ProviderRealtimeDispatch<'a> {
         controls: &'a SyncSender<tastytrade::RealtimeControl>,
         events: &'a Receiver<tastytrade::RealtimeEvent>,
     },
+    Ctrader {
+        controls: &'a SyncSender<ctrader::RealtimeControl>,
+        events: &'a Receiver<ctrader::RealtimeEvent>,
+    },
     Rithmic {
         controls: &'a SyncSender<RithmicRealtimeControl>,
         events: &'a Receiver<RithmicRealtimeEvent>,
@@ -1416,14 +1478,14 @@ impl<'a> ProviderRealtimeDispatch<'a> {
     fn rithmic_controls(&self) -> Option<&'a SyncSender<RithmicRealtimeControl>> {
         match self {
             Self::Rithmic { controls, .. } => Some(controls),
-            Self::Tastytrade { .. } | Self::Hyperliquid { .. } | Self::Disabled => None,
+            _ => None,
         }
     }
 
     fn hyperliquid_controls(&self) -> Option<&'a SyncSender<HyperliquidRealtimeControl>> {
         match self {
             Self::Hyperliquid { controls, .. } => Some(controls),
-            Self::Tastytrade { .. } | Self::Rithmic { .. } | Self::Disabled => None,
+            _ => None,
         }
     }
 
@@ -1434,7 +1496,7 @@ impl<'a> ProviderRealtimeDispatch<'a> {
             Self::Hyperliquid {
                 display_controls, ..
             } => Some(display_controls),
-            Self::Tastytrade { .. } | Self::Rithmic { .. } | Self::Disabled => None,
+            _ => None,
         }
     }
 }
@@ -1443,6 +1505,10 @@ enum ProviderCatalogDispatch<'a> {
     Tastytrade {
         controls: &'a SyncSender<tastytrade::CatalogControl>,
         events: &'a Receiver<tastytrade::CatalogEvent>,
+    },
+    Ctrader {
+        controls: &'a SyncSender<ctrader::CatalogControl>,
+        events: &'a Receiver<ctrader::CatalogEvent>,
     },
     Rithmic {
         controls: &'a SyncSender<RithmicCatalogControl>,
@@ -1587,6 +1653,30 @@ impl From<tastytrade::CatalogEvent> for ProviderCatalogEvent {
     }
 }
 
+impl From<ctrader::CatalogEvent> for ProviderCatalogEvent {
+    fn from(event: ctrader::CatalogEvent) -> Self {
+        match event {
+            ctrader::CatalogEvent::Search(result) => Self::SearchCompleted(result),
+            ctrader::CatalogEvent::Selection {
+                consumer_id,
+                command_generation,
+                instrument,
+            } => Self::SelectionResolved {
+                consumer_id,
+                command_generation,
+                instrument,
+            },
+            ctrader::CatalogEvent::Rejected {
+                rejection,
+                selection,
+            } => Self::Rejected {
+                rejection,
+                selection,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ProviderEventMetadata {
     provider: &'static str,
@@ -1625,8 +1715,10 @@ impl ProviderRuntimeEvent {
 }
 
 mod broker_authorization;
+mod ctrader;
 mod runtime;
 mod tastytrade;
+pub use ctrader::CtraderStreamStatistics;
 use runtime::join_runtime_workers;
 
 mod coordinator;

@@ -22,7 +22,7 @@ pub use price::{PriceScale, WIRE_PRICE_DIGITS};
 pub use requests::{MarketRequest, QuoteSide, decode_subscription_ack};
 pub use streams::{
     DepthUpdate, MAXIMUM_DEPTH_LEVELS, MAXIMUM_DEPTH_QUOTES, MAXIMUM_STREAM_SYMBOLS, MarketStreams,
-    SPOT_QUANTITY_UNAVAILABLE, SpotUpdate, SymbolStream,
+    SpotUpdate, SymbolStream,
 };
 pub use ticks::{
     HistoricalTick, MAXIMUM_TICK_PAGES, MAXIMUM_TICKS_PER_PAGE, TickHistoryPaginator, TickPage,

@@ -2541,19 +2541,41 @@ impl Coordinator<'_> {
                     },
                 )
                 .collect::<Vec<_>>(),
-            super::LiveModel::ProviderCandles => self
-                .series_live
-                .candle_iter_mut()
-                .filter(|(series, live)| {
-                    series.provider_id == provider
-                        && live.generation == generation
-                        && (!descriptor.candle_requires_connected || live.connected)
-                        && format!("{}{{={}}}", live.wire_coin, live.interval) == symbol
-                })
-                .filter_map(|(series, live)| {
-                    live.accept_bar(candle.bar).is_err().then(|| series.clone())
-                })
-                .collect::<Vec<_>>(),
+            super::LiveModel::ProviderCandles => {
+                let mut matched = Vec::new();
+                let failed = self
+                    .series_live
+                    .candle_iter_mut()
+                    .filter(|(series, live)| {
+                        series.provider_id == provider
+                            && live.generation == generation
+                            && (!descriptor.candle_requires_connected || live.connected)
+                            && format!("{}{{={}}}", live.wire_coin, live.interval) == symbol
+                    })
+                    .filter_map(|(series, live)| {
+                        matched.push((series.instrument_id.clone(), series.entitlement_id.clone()));
+                        live.accept_bar(candle.bar).is_err().then(|| series.clone())
+                    })
+                    .collect::<Vec<_>>();
+                // Without a trade stream the first live candle is the only
+                // evidence that a series answered empty now has data.
+                if !descriptor
+                    .capabilities
+                    .streams
+                    .contains(MarketStream::Trades)
+                {
+                    for (instrument_id, entitlement_id) in matched {
+                        self.request_current_history_after_live_trade(
+                            provider,
+                            generation,
+                            &instrument_id,
+                            &entitlement_id,
+                            candle.bar.exchange_timestamp_unix_nanos,
+                        );
+                    }
+                }
+                failed
+            }
         };
         for series in failed {
             match descriptor.live_model {
@@ -4098,14 +4120,14 @@ mod tests {
     fn ladder_quote(session_generation: u64, source_sequence: u64) -> TopOfBookQuote {
         TopOfBookQuote {
             metadata: ladder_metadata(session_generation, source_sequence),
-            bid: Some(DepthLevel {
+            bid: Some(aeris_market_data::QuoteLevel {
                 price: 20_000,
-                quantity: 2,
+                quantity: Some(2),
                 order_count: None,
             }),
-            ask: Some(DepthLevel {
+            ask: Some(aeris_market_data::QuoteLevel {
                 price: 20_025,
-                quantity: 3,
+                quantity: Some(3),
                 order_count: None,
             }),
         }

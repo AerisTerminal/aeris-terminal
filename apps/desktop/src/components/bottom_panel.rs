@@ -1,9 +1,10 @@
 //! Bottom trade-history panel. Its header stays docked at the window bottom while collapsed
 //! and rides the top edge of the panel while open; the open panel resizes from that edge.
 //!
-//! The trading owner stays authoritative for fills. This module keeps one shared presentation
-//! copy of its bounded, newest-first fill projection, replaced only when the owner's snapshot
-//! revision changes, plus the viewer's open, height and account-filter choices.
+//! The trading owner stays authoritative for fills and the round trips grouped from them. This
+//! module keeps one shared presentation copy of its bounded, newest-first round-trip projection,
+//! replaced only when the owner's snapshot revision changes, plus the viewer's open, height and
+//! account-filter choices.
 
 use super::side_panel_dock::SIDE_PANEL_HEADER_HEIGHT;
 use super::*;
@@ -19,13 +20,13 @@ const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
 /// Header controls stay inside the panel header with room around their hover fill.
 const TRADE_HISTORY_HEADER_CONTROL_HEIGHT: f32 = 22.0;
 const TRADE_HISTORY_ROW_HEIGHT: f32 = 28.0;
-const TRADE_HISTORY_TIME_WIDTH: f32 = 115.0;
-const TRADE_HISTORY_ACCOUNT_WIDTH: f32 = 100.0;
-const TRADE_HISTORY_SYMBOL_WIDTH: f32 = 80.0;
+const TRADE_HISTORY_TIME_WIDTH: f32 = 112.0;
+const TRADE_HISTORY_ACCOUNT_WIDTH: f32 = 85.0;
+const TRADE_HISTORY_SYMBOL_WIDTH: f32 = 65.0;
 const TRADE_HISTORY_SIDE_WIDTH: f32 = 40.0;
-const TRADE_HISTORY_QUANTITY_WIDTH: f32 = 70.0;
-const TRADE_HISTORY_PRICE_WIDTH: f32 = 95.0;
-const TRADE_HISTORY_PNL_WIDTH: f32 = 105.0;
+const TRADE_HISTORY_QUANTITY_WIDTH: f32 = 50.0;
+const TRADE_HISTORY_PRICE_WIDTH: f32 = 72.0;
+const TRADE_HISTORY_PNL_WIDTH: f32 = 95.0;
 const TRADE_HISTORY_CELL_GAP: f32 = 8.0;
 const TRADE_HISTORY_ACCOUNT_MENU_WIDTH: f32 = 220.0;
 const TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT: f32 = 180.0;
@@ -49,17 +50,15 @@ pub(super) enum TradeHistoryAccountFilter {
     Account(String),
 }
 
-/// Shared presentation copy of the trading owner's executed fills.
+/// Shared presentation copy of the trading owner's executed round trips.
 #[derive(Clone, Default)]
 pub(super) struct TradeHistory {
     revision: Option<u64>,
-    /// Newest first, exactly as the owner's bounded snapshot orders them.
-    fills: Arc<[aeris_trading::Fill]>,
-    completed_trade_pnl: Arc<BTreeMap<aeris_trading::FillId, aeris_trading::FixedPoint>>,
-    fill_realized_pnl: Arc<BTreeMap<aeris_trading::FillId, aeris_trading::FixedPoint>>,
+    /// Newest activity first, exactly as the owner's bounded snapshot orders them.
+    round_trips: Arc<[aeris_trading_runtime::TradeRoundTrip]>,
     accounts: Arc<[aeris_trading::TradingAccount]>,
     symbols: Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
-    /// Indices into `fills` that pass the current account filter.
+    /// Indices into `round_trips` that pass the current account filter.
     rows: Arc<[usize]>,
 }
 
@@ -123,9 +122,7 @@ impl BottomPanelState {
             return false;
         }
         self.history.revision = Some(snapshot.revision);
-        self.history.fills = snapshot.fills.clone().into();
-        self.history.completed_trade_pnl = Arc::new(snapshot.completed_trade_pnl.clone());
-        self.history.fill_realized_pnl = Arc::new(snapshot.fill_realized_pnl.clone());
+        self.history.round_trips = snapshot.round_trips.clone().into();
         self.history.accounts = snapshot.accounts.clone().into();
         self.history.symbols = Arc::new(
             snapshot
@@ -171,7 +168,7 @@ impl BottomPanelState {
         {
             self.filter = TradeHistoryAccountFilter::All;
         }
-        self.history.rows = trade_history_rows(&self.history.fills, &self.filter).into();
+        self.history.rows = trade_history_rows(&self.history.round_trips, &self.filter).into();
     }
 
     fn shows_account_column(&self) -> bool {
@@ -189,16 +186,16 @@ impl BottomPanelState {
 }
 
 fn trade_history_rows(
-    fills: &[aeris_trading::Fill],
+    round_trips: &[aeris_trading_runtime::TradeRoundTrip],
     filter: &TradeHistoryAccountFilter,
 ) -> Vec<usize> {
-    fills
+    round_trips
         .iter()
         .enumerate()
-        .filter(|(_, fill)| match filter {
+        .filter(|(_, trip)| match filter {
             TradeHistoryAccountFilter::All => true,
             TradeHistoryAccountFilter::Account(account_key) => {
-                fill.account_id.as_str() == account_key
+                trip.account_id.as_str() == account_key
             }
         })
         .map(|(index, _)| index)
@@ -557,7 +554,8 @@ fn trade_history_column_header(show_account: bool, theme: &AerisTheme) -> impl I
         .border_b(px(theme.dimensions.border_width))
         .border_color(gpui_color(colors.border_subtle))
         .text_color(gpui_color(colors.text_secondary))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Time"))
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Opened"))
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Closed"))
         .when(show_account, |row| {
             row.child(trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH).child("Account"))
         })
@@ -566,22 +564,22 @@ fn trade_history_column_header(show_account: bool, theme: &AerisTheme) -> impl I
         .child(
             trade_history_cell(TRADE_HISTORY_QUANTITY_WIDTH)
                 .text_right()
-                .child("Quantity"),
+                .child("Qty"),
         )
         .child(
             trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
                 .text_right()
-                .child("Price"),
+                .child("Entry"),
+        )
+        .child(
+            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
+                .text_right()
+                .child("Exit"),
         )
         .child(
             trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
                 .text_right()
-                .child("Realized P&L"),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
-                .text_right()
-                .child("Trade P&L"),
+                .child("P&L"),
         )
 }
 
@@ -592,7 +590,7 @@ fn trade_history_list(
 ) -> AnyElement {
     let colors = theme.colors;
     if state.history.rows.is_empty() {
-        let message = if state.history.fills.is_empty() {
+        let message = if state.history.round_trips.is_empty() {
             "No executed trades yet"
         } else {
             "No executed trades for this account"
@@ -618,10 +616,10 @@ fn trade_history_list(
             let chart = chart.as_ref().map(|chart| chart.read(cx));
             range
                 .filter_map(|index| {
-                    let fill = history.fills.get(*history.rows.get(index)?)?;
+                    let trip = history.round_trips.get(*history.rows.get(index)?)?;
                     Some(trade_history_row(
                         index,
-                        fill,
+                        trip,
                         &history,
                         chart,
                         show_account,
@@ -640,39 +638,53 @@ fn trade_history_list(
 
 fn trade_history_row(
     index: usize,
-    fill: &aeris_trading::Fill,
+    trip: &aeris_trading_runtime::TradeRoundTrip,
     history: &TradeHistory,
     chart: Option<&AerisChartView>,
     show_account: bool,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
     let colors = theme.colors;
-    let utc_seconds = fill.execution_unix_nanos.div_euclid(1_000_000_000);
-    let time = chart.map_or_else(
-        || "—".to_string(),
-        |chart| chart.time_zone_date_time_label_at(utc_seconds),
-    );
-    let (side, side_color) = match fill.side {
-        aeris_trading::OrderSide::Buy => ("Buy", colors.text_positive),
-        aeris_trading::OrderSide::Sell => ("Sell", colors.text_negative),
+    let opened = trip
+        .entry
+        .map(|entry| trade_history_time(chart, entry.first_unix_nanos));
+    let closed = if trip.closed {
+        trip.exit
+            .map(|exit| trade_history_time(chart, exit.last_unix_nanos))
+    } else {
+        Some("Open".to_string())
     };
-    let currency = history.account_currency(fill.account_id.as_str());
-    let realized_pnl = history.fill_realized_pnl.get(&fill.id).copied();
-    let trade_pnl = history.completed_trade_pnl.get(&fill.id).copied();
+    let (side, side_color) = match trip.side {
+        aeris_trading::OrderSide::Buy => ("Long", colors.text_positive),
+        aeris_trading::OrderSide::Sell => ("Short", colors.text_negative),
+    };
+    // A trade that opened before the retained history still reports the size it closed.
+    let quantity = trip
+        .entry
+        .or(trip.exit)
+        .map(|leg| trade_history_decimal(leg.quantity));
+    let entry_price = trip
+        .entry
+        .map(|leg| trade_history_decimal(leg.average_price));
+    let exit_price = trip
+        .exit
+        .map(|leg| trade_history_decimal(leg.average_price));
+    let currency = history.account_currency(trip.account_id.as_str());
     trade_history_row_frame()
         .id(("trade_history_row", index))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
         .text_color(gpui_color(colors.text_default))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(time))
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(trade_history_text(opened)))
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(trade_history_text(closed)))
         .when(show_account, |row| {
             row.child(
                 trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH)
-                    .child(history.account_name(fill.account_id.as_str())),
+                    .child(history.account_name(trip.account_id.as_str())),
             )
         })
         .child(
             trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH)
-                .child(history.symbol(&fill.instrument_id)),
+                .child(history.symbol(&trip.instrument_id)),
         )
         .child(
             trade_history_cell(TRADE_HISTORY_SIDE_WIDTH)
@@ -682,24 +694,37 @@ fn trade_history_row(
         .child(
             trade_history_cell(TRADE_HISTORY_QUANTITY_WIDTH)
                 .text_right()
-                .child(market_price_text(
-                    fill.quantity.units(),
-                    u32::from(fill.quantity.scale()),
-                )),
+                .child(trade_history_text(quantity)),
         )
         .child(
             trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
                 .text_right()
-                .child(market_price_text(
-                    fill.price.units(),
-                    u32::from(fill.price.scale()),
-                )),
+                .child(trade_history_text(entry_price)),
         )
-        .child(trade_history_pnl_cell(realized_pnl, currency, theme))
-        .child(trade_history_pnl_cell(trade_pnl, currency, theme))
+        .child(
+            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
+                .text_right()
+                .child(trade_history_text(exit_price)),
+        )
+        .child(trade_history_pnl_cell(trip.final_pnl, currency, theme))
 }
 
-/// A signed P&L amount colored by its sign; fills that realized nothing show a dash.
+fn trade_history_time(chart: Option<&AerisChartView>, unix_nanos: i64) -> String {
+    chart.map_or_else(
+        || "—".to_string(),
+        |chart| chart.time_zone_date_time_label_at(unix_nanos.div_euclid(1_000_000_000)),
+    )
+}
+
+fn trade_history_decimal(value: aeris_trading::FixedPoint) -> String {
+    market_price_text(value.units(), u32::from(value.scale()))
+}
+
+fn trade_history_text(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "—".to_string())
+}
+
+/// A signed P&L amount colored by its sign; a trade without a final result shows a dash.
 fn trade_history_pnl_cell(
     pnl: Option<aeris_trading::FixedPoint>,
     currency: &str,
@@ -751,42 +776,40 @@ fn trade_history_cell(width: f32) -> Div {
 mod tests {
     use super::*;
 
-    fn fill(id: &str, account: &str) -> aeris_trading::Fill {
-        aeris_trading::Fill {
-            id: aeris_trading::FillId::try_new(id).expect("fill id"),
-            order_id: aeris_trading::OrderId::try_new(format!("order-{id}")).expect("order id"),
+    fn round_trip(account: &str) -> aeris_trading_runtime::TradeRoundTrip {
+        let leg = aeris_trading_runtime::TradeLeg {
+            first_unix_nanos: 1_790_704_166_986_188_900,
+            last_unix_nanos: 1_790_704_166_986_188_900,
+            average_price: aeris_trading::FixedPoint::try_new(8_309_000_000_000, 8).expect("price"),
+            quantity: aeris_trading::FixedPoint::try_new(100_000_000, 8).expect("quantity"),
+        };
+        aeris_trading_runtime::TradeRoundTrip {
             account_id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
             instrument_id: aeris_instruments::InstrumentId::try_new("hyperliquid:perp:BTC")
                 .expect("instrument"),
             side: aeris_trading::OrderSide::Buy,
-            price: aeris_trading::FixedPoint::try_new(8_309_000_000_000, 8).expect("price"),
-            quantity: aeris_trading::FixedPoint::try_new(100_000_000, 8).expect("quantity"),
-            execution_unix_nanos: 1_790_704_166_986_188_900,
-            provenance: aeris_trading::TradingProvenance {
-                venue_id: "aeris-sim".to_string(),
-                provider_id: "hyperliquid".to_string(),
-                session_generation: 1,
-                source_sequence: 1,
-                observed_unix_nanos: 1_790_704_166_986_188_900,
-            },
+            entry: Some(leg),
+            exit: Some(leg),
+            closed: true,
+            final_pnl: Some(aeris_trading::FixedPoint::try_new(0, 2).expect("pnl")),
         }
     }
 
     #[test]
     fn account_filter_keeps_newest_first_order_and_selects_one_account() {
-        let fills = [fill("3", "b"), fill("2", "a"), fill("1", "b")];
+        let trips = [round_trip("b"), round_trip("a"), round_trip("b")];
         assert_eq!(
-            trade_history_rows(&fills, &TradeHistoryAccountFilter::All),
+            trade_history_rows(&trips, &TradeHistoryAccountFilter::All),
             vec![0, 1, 2]
         );
         let only_b = TradeHistoryAccountFilter::Account("b".to_string());
-        assert_eq!(trade_history_rows(&fills, &only_b), vec![0, 2]);
+        assert_eq!(trade_history_rows(&trips, &only_b), vec![0, 2]);
     }
 
     #[test]
     fn filter_for_a_deleted_account_falls_back_to_all_accounts() {
         let mut state = BottomPanelState::default();
-        state.history.fills = vec![fill("1", "a"), fill("2", "b")].into();
+        state.history.round_trips = vec![round_trip("a"), round_trip("b")].into();
         state.history.accounts = Arc::from(Vec::new());
         state.set_filter(TradeHistoryAccountFilter::Account("a".to_string()));
         assert_eq!(state.filter, TradeHistoryAccountFilter::All);
@@ -807,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_fills_show_signed_pnl_and_other_fills_a_dash() {
+    fn final_pnl_shows_its_sign_and_an_unknown_result_a_dash() {
         let loss = aeris_trading::FixedPoint::try_new(-252_500, 2).expect("loss");
         let gain = aeris_trading::FixedPoint::try_new(735_000, 2).expect("gain");
         assert_eq!(trade_history_pnl_text(Some(loss), "USD"), "USD -2525.00");
@@ -819,21 +842,19 @@ mod tests {
     fn all_trade_history_columns_fit_a_compact_window() {
         let columns = [
             TRADE_HISTORY_TIME_WIDTH,
+            TRADE_HISTORY_TIME_WIDTH,
             TRADE_HISTORY_ACCOUNT_WIDTH,
             TRADE_HISTORY_SYMBOL_WIDTH,
             TRADE_HISTORY_SIDE_WIDTH,
             TRADE_HISTORY_QUANTITY_WIDTH,
             TRADE_HISTORY_PRICE_WIDTH,
-            TRADE_HISTORY_PNL_WIDTH,
+            TRADE_HISTORY_PRICE_WIDTH,
             TRADE_HISTORY_PNL_WIDTH,
         ];
         let width = columns.iter().sum::<f32>()
             + TRADE_HISTORY_CELL_GAP
                 * f32::from(u8::try_from(columns.len() - 1).expect("column count fits"))
             + 16.0;
-        assert!(
-            width <= 800.0 - 12.0,
-            "both P&L columns must remain visible"
-        );
+        assert!(width <= 800.0 - 12.0, "the P&L column must remain visible");
     }
 }

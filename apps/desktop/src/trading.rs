@@ -1060,7 +1060,7 @@ mod tests {
     fn order_book_frame() -> aeris_market_data::OrderBookFrame {
         let level = |price| aeris_market_data::OrderBookColumnLevel {
             price,
-            quantity: 1,
+            quantity: Some(1),
             order_count: Some(1),
             price_text: price.to_string(),
             quantity_text: "1".to_string(),

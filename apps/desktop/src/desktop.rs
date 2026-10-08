@@ -1362,14 +1362,19 @@ fn provider_ready_message(
     format!("{symbol} · {display_name}{suffix}")
 }
 
+/// Exact mapping; `None` for runtime providers the desktop does not expose yet.
+fn known_terminal_provider(provider: &str) -> Option<TerminalProvider> {
+    [
+        TerminalProvider::Tastytrade,
+        TerminalProvider::Rithmic,
+        TerminalProvider::Hyperliquid,
+    ]
+    .into_iter()
+    .find(|candidate| terminal_provider_id(*candidate) == provider)
+}
+
 fn terminal_provider_from_id(provider: &str) -> TerminalProvider {
-    if provider == "tastytrade" {
-        TerminalProvider::Tastytrade
-    } else if provider == terminal_provider_id(TerminalProvider::Hyperliquid) {
-        TerminalProvider::Hyperliquid
-    } else {
-        TerminalProvider::Rithmic
-    }
+    known_terminal_provider(provider).unwrap_or(TerminalProvider::Rithmic)
 }
 
 /// Where a Rithmic symbol or timeframe change is in its handover.
@@ -3059,7 +3064,14 @@ fn chart_status_detail<'a>(
     chart_message: &'a str,
     connection_message: Option<&'a str>,
 ) -> &'a str {
-    if chart_state != ChartState::Ready && connection_state != FeedConnectionState::Streaming {
+    // A chart error names its own cause; connection progress text would hide why the chart
+    // failed. A stopped connection is the exception: that error is the connection's.
+    let chart_failed =
+        chart_state == ChartState::Error && connection_state != FeedConnectionState::Stopped;
+    if !chart_failed
+        && chart_state != ChartState::Ready
+        && connection_state != FeedConnectionState::Streaming
+    {
         connection_message.unwrap_or(chart_message)
     } else {
         chart_message
@@ -3119,7 +3131,6 @@ impl HeaderControls {
     const MARKET_PANELS: u8 = 4;
     const INDICATOR: u8 = 8;
     const CHART_TYPE: u8 = 16;
-    const CHART_CAPTURE: u8 = 32;
 
     const fn enabled(self, control: u8) -> bool {
         self.0 & control != 0
@@ -3138,7 +3149,7 @@ impl HeaderControls {
 
     const fn with_chart_controls(mut self, chart_ready: bool) -> Self {
         if chart_ready {
-            self.0 |= Self::INDICATOR | Self::CHART_TYPE | Self::CHART_CAPTURE;
+            self.0 |= Self::INDICATOR | Self::CHART_TYPE;
         }
         self
     }

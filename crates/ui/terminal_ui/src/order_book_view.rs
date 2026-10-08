@@ -1049,7 +1049,7 @@ fn grouped_level_at_price(
             continue;
         }
         found = true;
-        quantity = quantity.saturating_add(level.quantity);
+        quantity = quantity.saturating_add(level.quantity?);
         order_count = match (order_count, level.order_count) {
             (Some(total), Some(count)) => Some(total.saturating_add(count)),
             _ => None,
@@ -1057,7 +1057,7 @@ fn grouped_level_at_price(
     }
     found.then(|| OrderBookColumnLevel {
         price,
-        quantity,
+        quantity: Some(quantity),
         order_count,
         price_text: grouped_fixed_point_text(price, frame.price_scale),
         quantity_text: compact_quantity_text(quantity, frame.quantity_scale),
@@ -1193,12 +1193,10 @@ fn price_grid_visible_max_quantity(
     range
         .filter_map(|index| match price_grid_item(layout, index)? {
             PriceGridItem::Ask(price) => {
-                grouped_level_at_price(frame, BookColumnSide::Ask, price, layout.tick)
-                    .map(|level| level.quantity)
+                grouped_level_at_price(frame, BookColumnSide::Ask, price, layout.tick)?.quantity
             }
             PriceGridItem::Bid(price) => {
-                grouped_level_at_price(frame, BookColumnSide::Bid, price, layout.tick)
-                    .map(|level| level.quantity)
+                grouped_level_at_price(frame, BookColumnSide::Bid, price, layout.tick)?.quantity
             }
             PriceGridItem::Spread => None,
         })
@@ -1336,7 +1334,7 @@ fn ladder_visible_max_quantity(
             LadderItemIndex::Bid(row_index) => frame.rows.get(row_index)?.bid.as_ref(),
             LadderItemIndex::Spread => None,
         })
-        .map(|level| level.quantity)
+        .filter_map(|level| level.quantity)
         .max()
         .unwrap_or(0)
 }
@@ -2005,9 +2003,11 @@ fn quantity_cell(
     align_right: bool,
     maximum_quantity: i64,
 ) -> impl IntoElement + use<> {
-    let width = level.map_or(0.0, |level| {
-        visible_quantity_width(level.quantity, maximum_quantity)
-    });
+    let width = level
+        .and_then(|level| level.quantity)
+        .map_or(0.0, |quantity| {
+            visible_quantity_width(quantity, maximum_quantity)
+        });
     let bar = div()
         .absolute()
         .top_0()
@@ -2751,12 +2751,12 @@ mod tests {
         );
         assert_eq!(
             grouped_level_at_price(&frame, BookColumnSide::Ask, 77_120, grid.tick)
-                .map(|level| level.quantity),
+                .and_then(|level| level.quantity),
             Some(7)
         );
         assert_eq!(
             grouped_level_at_price(&frame, BookColumnSide::Bid, 77_110, grid.tick)
-                .map(|level| level.quantity),
+                .and_then(|level| level.quantity),
             Some(5)
         );
         assert_eq!(
@@ -2864,7 +2864,7 @@ mod tests {
     fn grid_level(price: i64, quantity: i64) -> OrderBookColumnLevel {
         OrderBookColumnLevel {
             price,
-            quantity,
+            quantity: Some(quantity),
             order_count: Some(1),
             price_text: grouped_fixed_point_text(price, 2),
             quantity_text: quantity.to_string(),
@@ -2940,7 +2940,8 @@ mod tests {
             Some(PriceGridItem::Ask(20_100))
         );
         assert_eq!(
-            real_level_at_price(&frame, BookColumnSide::Ask, 20_100).map(|level| level.quantity),
+            real_level_at_price(&frame, BookColumnSide::Ask, 20_100)
+                .and_then(|level| level.quantity),
             Some(7)
         );
         assert_eq!(
@@ -3048,7 +3049,7 @@ mod tests {
         assert_eq!(grid.tick, 25);
         assert_eq!(
             grouped_level_at_price(&frame, BookColumnSide::Bid, 19_925, grid.tick)
-                .map(|level| level.quantity),
+                .and_then(|level| level.quantity),
             Some(3)
         );
     }
@@ -3056,13 +3057,15 @@ mod tests {
     #[test]
     fn sparse_real_level_lookup_handles_descending_bids_and_ascending_asks() {
         let mut frame = price_grid_frame();
-        frame.rows[1].ask.as_mut().expect("ask").quantity = 99;
+        frame.rows[1].ask.as_mut().expect("ask").quantity = Some(99);
         assert_eq!(
-            real_level_at_price(&frame, BookColumnSide::Bid, 19_950).map(|level| level.quantity),
+            real_level_at_price(&frame, BookColumnSide::Bid, 19_950)
+                .and_then(|level| level.quantity),
             Some(3)
         );
         assert_eq!(
-            real_level_at_price(&frame, BookColumnSide::Ask, 20_150).map(|level| level.quantity),
+            real_level_at_price(&frame, BookColumnSide::Ask, 20_150)
+                .and_then(|level| level.quantity),
             Some(99)
         );
         assert!(real_level_at_price(&frame, BookColumnSide::Bid, 19_975).is_none());

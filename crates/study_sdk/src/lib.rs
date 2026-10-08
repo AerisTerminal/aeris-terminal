@@ -4,7 +4,9 @@
 //! Runtime. Technical-analysis math delegates to the exact pinned Aeris Charts pure
 //! indicator crate so built-ins and SDK studies do not fork formula behavior.
 
-pub use aeris_market_data::{AggressorSide, BarPeriod, BarSeriesKey, DepthLevel, OrderBookState};
+pub use aeris_market_data::{
+    AggressorSide, BarPeriod, BarSeriesKey, DepthLevel, OrderBookState, QuoteLevel,
+};
 pub use aeris_market_runtime::{
     MarketStream, StreamRequirements,
     study::{

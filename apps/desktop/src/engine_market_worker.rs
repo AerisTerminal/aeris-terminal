@@ -2352,14 +2352,14 @@ mod tests {
                         quantity: 22_517_771,
                         order_count: None,
                     }],
-                    best_bid: Some(DepthLevel {
+                    best_bid: Some(aeris_market_data::QuoteLevel {
                         price: 7_798_670,
-                        quantity: 653_408,
+                        quantity: Some(653_408),
                         order_count: Some(3),
                     }),
-                    best_ask: Some(DepthLevel {
+                    best_ask: Some(aeris_market_data::QuoteLevel {
                         price: 7_798_671,
-                        quantity: 22_517_771,
+                        quantity: Some(22_517_771),
                         order_count: Some(4),
                     }),
                     bbo_source_watermark: 2,

@@ -529,11 +529,6 @@ pub(super) fn header_controls(
             state.drawing_history,
             &state.theme,
         ))
-        .child(capture_chart_control(
-            app.clone(),
-            state.controls.enabled(HeaderControls::CHART_CAPTURE),
-            &state.theme,
-        ))
         .children(side_panel_toggles)
         .child(context_toggle)
         .child(link_toggle);
@@ -942,31 +937,6 @@ fn drawing_history_control(
     let step = control.step();
     let button = button_activation(button, enabled, move |_, cx| {
         app.update(cx, step);
-    });
-    chrome_button_style(button, theme, false, enabled)
-}
-
-/// Captures the chart, with its legend, to the clipboard. Saving to a file lives in the chart's
-/// context menu.
-fn capture_chart_control(
-    app: Entity<WorkspaceSurface>,
-    enabled: bool,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    const LABEL: &str = "Capture chart";
-    let button = Button::new("capture_chart")
-        .icon(header_icon(HugeIcon::Camera))
-        .aria_label(LABEL)
-        .tooltip(TooltipSpec::new(LABEL, theme).show_delay(TOOLTIP_OPEN_DELAY))
-        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-        .w(px(chart_chrome::CHART_CONTROL_SIZE))
-        .disabled(!enabled)
-        .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed);
-    let button = button_activation(button, enabled, move |_, cx| {
-        if let Some(copied) = app.update(cx, WorkspaceSurface::copy_chart_capture) {
-            copied.detach();
-        }
     });
     chrome_button_style(button, theme, false, enabled)
 }

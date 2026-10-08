@@ -8,7 +8,8 @@
 
 use crate::RetainedMarketTrade;
 use aeris_market_data::{
-    AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, TopOfBookQuote,
+    AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, QuoteLevel,
+    TopOfBookQuote,
 };
 use aeris_market_engine::{
     ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, MarketStream, SeriesSnapshot,
@@ -227,13 +228,13 @@ impl<'a> StudyQuoteView<'a> {
 
     /// Returns the current bid, if the provider has not explicitly cleared it.
     #[must_use]
-    pub const fn bid(self) -> Option<DepthLevel> {
+    pub const fn bid(self) -> Option<QuoteLevel> {
         self.quote.bid
     }
 
     /// Returns the current ask, if the provider has not explicitly cleared it.
     #[must_use]
-    pub const fn ask(self) -> Option<DepthLevel> {
+    pub const fn ask(self) -> Option<QuoteLevel> {
         self.quote.ask
     }
 

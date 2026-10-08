@@ -7,7 +7,7 @@
 //! valid sequence.
 
 use aeris_market_data::{
-    DepthLevel, DepthSnapshot, EventMetadata, QualifiedTimestamp, TopOfBookQuote,
+    DepthLevel, DepthSnapshot, EventMetadata, QualifiedTimestamp, QuoteLevel, TopOfBookQuote,
 };
 use serde::Deserialize;
 
@@ -186,8 +186,8 @@ pub fn decode_bbo_quote(
                 received_unix_nanos,
             },
         },
-        bid: decode_bbo_side(envelope.bbo.0.as_ref())?,
-        ask: decode_bbo_side(envelope.bbo.1.as_ref())?,
+        bid: decode_bbo_side(envelope.bbo.0.as_ref())?.map(QuoteLevel::from),
+        ask: decode_bbo_side(envelope.bbo.1.as_ref())?.map(QuoteLevel::from),
     };
     quote.validate().map_err(|error| error.to_string())?;
     Ok(quote)

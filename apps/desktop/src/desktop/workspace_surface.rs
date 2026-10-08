@@ -2970,6 +2970,15 @@ impl WorkspaceSurface {
         if matches!(state, ChartState::Stale | ChartState::Recovering) {
             self.mark_market_stream_invalid(&message, cx);
         }
+        if state == ChartState::Error
+            && (self.chart_state != ChartState::Error || self.chart_state_message != message)
+        {
+            let symbol = self
+                .product
+                .as_ref()
+                .map_or("no market", |product| product.instrument_id.as_str());
+            diagnostic!("Aeris chart unavailable for {symbol}: {message}");
+        }
         self.chart_state = state;
         self.chart_state_message = message;
         cx.notify();

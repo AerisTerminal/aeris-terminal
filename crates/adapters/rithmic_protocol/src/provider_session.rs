@@ -2715,14 +2715,14 @@ mod tests {
                 }),
                 MarketEvent::Quote(TopOfBookQuote {
                     metadata: metadata(2),
-                    bid: Some(DepthLevel {
+                    bid: Some(aeris_market_data::QuoteLevel {
                         price: 510_000,
-                        quantity: 2,
+                        quantity: Some(2),
                         order_count: Some(1),
                     }),
-                    ask: Some(DepthLevel {
+                    ask: Some(aeris_market_data::QuoteLevel {
                         price: 510_025,
-                        quantity: 3,
+                        quantity: Some(3),
                         order_count: Some(1),
                     }),
                 }),
@@ -3006,14 +3006,14 @@ mod tests {
         assert!(matches!(
             quote,
             MarketEvent::Quote(TopOfBookQuote {
-                bid: Some(DepthLevel {
+                bid: Some(aeris_market_data::QuoteLevel {
                     price: 510_025,
-                    quantity: 200,
+                    quantity: Some(200),
                     order_count: Some(1),
                 }),
-                ask: Some(DepthLevel {
+                ask: Some(aeris_market_data::QuoteLevel {
                     price: 510_050,
-                    quantity: 400,
+                    quantity: Some(400),
                     order_count: Some(2),
                 }),
                 ..

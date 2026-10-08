@@ -9,6 +9,7 @@ use super::{
     WorkerEndpoint, cancel_pending_recovery, chart_streams, provider_display_name, retire_endpoint,
     send_recovery, series_key,
 };
+use aeris_observability::diagnostic;
 
 pub(super) fn fence_recovery_command(
     endpoint: &WorkerEndpoint,
@@ -198,6 +199,11 @@ pub(super) fn handle_startup_catalog_event(
                     && rejection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
             {
                 record.startup_resolution = None;
+                diagnostic!(
+                    "Aeris startup catalog refresh for {} was rejected: {:?}",
+                    requested.display_symbol,
+                    rejection.reason
+                );
                 return Err("Provider startup catalog refresh was rejected".to_string());
             }
             _ => return Ok(false),
@@ -239,6 +245,11 @@ pub(super) fn handle_startup_catalog_event(
                 && rejection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
         {
             record.startup_resolution = None;
+            diagnostic!(
+                "Aeris startup selection for {} was rejected: {:?}",
+                requested.display_symbol,
+                rejection.reason
+            );
             Err("Provider startup selection was rejected".to_string())
         }
         _ => Ok(false),

@@ -38,5 +38,7 @@ pub struct ProviderPresentationDescriptor {
     pub search_categories_available: bool,
     /// Whether the provider answers `ScreenProviderMarkets` with listed-market statistics.
     pub market_screen_available: bool,
+    /// Whether the provider streams individual trade prints (time and sales).
+    pub trades_available: bool,
     pub connection_kind: ProviderConnectionKind,
 }

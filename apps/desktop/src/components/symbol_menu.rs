@@ -193,6 +193,14 @@ pub(super) fn instrument_dialog_content(
 
 const SYMBOL_PROVIDER_MENU_WIDTH: f32 = 200.0;
 
+fn symbol_menu_providers() -> Vec<TerminalProvider> {
+    aeris_market_runtime::built_in_provider_presentations()
+        .iter()
+        .filter_map(|descriptor| known_terminal_provider(descriptor.id))
+        .filter(|provider| super::provider_presentation(*provider).is_some())
+        .collect()
+}
+
 /// Provider dropdown anchored under the search-field logo. Clicking a provider switches the
 /// listing and closes it. A provider that serves several instrument categories opens its
 /// category flyout when its own row is hovered, exactly like a timeframe group row.
@@ -202,11 +210,7 @@ fn symbol_provider_menu(
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let providers: Vec<TerminalProvider> = aeris_market_runtime::built_in_provider_presentations()
-        .iter()
-        .map(|descriptor| terminal_provider_from_id(descriptor.id))
-        .filter(|provider| super::provider_presentation(*provider).is_some())
-        .collect();
+    let providers = symbol_menu_providers();
     let has_categories = |provider: TerminalProvider| {
         super::provider_presentation(provider)
             .is_some_and(|descriptor| descriptor.search_categories_available)
@@ -474,5 +478,23 @@ mod tests {
             TerminalProvider::Hyperliquid,
             true,
         ));
+    }
+
+    #[test]
+    fn provider_menu_lists_each_desktop_provider_once() {
+        let providers = symbol_menu_providers();
+        for (index, provider) in providers.iter().enumerate() {
+            assert!(
+                !providers[index + 1..].contains(provider),
+                "{provider:?} listed twice"
+            );
+        }
+        for provider in [
+            TerminalProvider::Tastytrade,
+            TerminalProvider::Rithmic,
+            TerminalProvider::Hyperliquid,
+        ] {
+            assert!(providers.contains(&provider), "{provider:?} missing");
+        }
     }
 }

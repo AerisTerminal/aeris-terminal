@@ -118,8 +118,39 @@ impl MarketTrade {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TopOfBookQuote {
     pub metadata: EventMetadata,
-    pub bid: Option<DepthLevel>,
-    pub ask: Option<DepthLevel>,
+    pub bid: Option<QuoteLevel>,
+    pub ask: Option<QuoteLevel>,
+}
+
+/// One best bid or offer. `quantity` is `None` when the provider publishes
+/// the price without a size; it is never a placeholder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuoteLevel {
+    pub price: i64,
+    pub quantity: Option<i64>,
+    pub order_count: Option<u32>,
+}
+
+impl QuoteLevel {
+    fn validate(self) -> Result<(), MarketDataValidationError> {
+        if self.price <= 0 {
+            return Err(MarketDataValidationError::InvalidPrice);
+        }
+        if self.quantity.is_some_and(|quantity| quantity <= 0) {
+            return Err(MarketDataValidationError::InvalidQuantity);
+        }
+        Ok(())
+    }
+}
+
+impl From<DepthLevel> for QuoteLevel {
+    fn from(level: DepthLevel) -> Self {
+        Self {
+            price: level.price,
+            quantity: Some(level.quantity),
+            order_count: level.order_count,
+        }
+    }
 }
 
 impl TopOfBookQuote {
@@ -131,10 +162,10 @@ impl TopOfBookQuote {
     pub fn validate(&self) -> Result<(), MarketDataValidationError> {
         self.metadata.validate()?;
         if let Some(bid) = self.bid {
-            bid.validate(false)?;
+            bid.validate()?;
         }
         if let Some(ask) = self.ask {
-            ask.validate(false)?;
+            ask.validate()?;
         }
         if self
             .bid
@@ -528,18 +559,26 @@ mod tests {
         assert_eq!(trade.validate(), Ok(()));
         let mut quote = TopOfBookQuote {
             metadata: metadata(2),
-            bid: Some(DepthLevel {
+            bid: Some(QuoteLevel {
                 price: 9_999,
-                quantity: 10,
+                quantity: Some(10),
                 order_count: Some(2),
             }),
-            ask: Some(DepthLevel {
+            ask: Some(QuoteLevel {
                 price: 10_001,
-                quantity: 12,
+                quantity: Some(12),
                 order_count: Some(3),
             }),
         };
         assert_eq!(quote.validate(), Ok(()));
+        quote.bid.as_mut().expect("bid exists").quantity = None;
+        assert_eq!(quote.validate(), Ok(()));
+        quote.bid.as_mut().expect("bid exists").quantity = Some(0);
+        assert_eq!(
+            quote.validate(),
+            Err(MarketDataValidationError::InvalidQuantity)
+        );
+        quote.bid.as_mut().expect("bid exists").quantity = Some(10);
         quote.ask.as_mut().expect("ask exists").price = 9_999;
         assert_eq!(
             quote.validate(),

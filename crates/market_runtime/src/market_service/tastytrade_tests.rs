@@ -718,7 +718,7 @@ fn futures_search_uses_the_primed_catalog_before_remote_equity_search() {
         )
         .unwrap();
     let mut futures = vec![future];
-    let mut searches = BTreeMap::new();
+    let mut searches = CatalogSearches::new();
     let search = SearchProviderInstruments {
         consumer_id: 7,
         search_generation: 2,
@@ -740,8 +740,8 @@ fn futures_search_uses_the_primed_catalog_before_remote_equity_search() {
         panic!("expected local futures search result");
     };
     assert_eq!(result.instruments[0].symbol, "/ESZ6");
-    assert_eq!(searches[&7].0, 2);
-    assert_eq!(searches[&7].1[0].symbol, "/ESZ6");
+    assert_eq!(searches[&(7, false)].0, 2);
+    assert_eq!(searches[&(7, false)].1[0].symbol, "/ESZ6");
     assert_eq!(
         ResolvedInstrument::from_future(&futures[0])
             .unwrap()
@@ -756,6 +756,62 @@ fn futures_search_uses_the_primed_catalog_before_remote_equity_search() {
         calendar_revision,
         "statuses computed from a cleared calendar must be recomputed"
     );
+}
+#[test]
+fn a_picker_search_cannot_retire_the_pending_startup_selection() {
+    let api = BrokerApi::default();
+    let future: FutureInstrument = serde_json::from_str(
+            r#"{"symbol":"/ESZ6","streamer-symbol":"/ESZ26:XCME","exchange":"CME","product-code":"ES","expiration-date":"2026-12-18","active":true,"active-month":true,"notional-multiplier":"50.0","tick-size":"0.25"}"#,
+        )
+        .unwrap();
+    let mut futures = vec![future];
+    let mut searches = CatalogSearches::new();
+    let stop = Arc::new(AtomicBool::new(false));
+    let generation = Arc::new(AtomicU64::new(1));
+    for (search_generation, query) in [(STARTUP_CATALOG_COMMAND_GENERATION, "ESZ6"), (4, "")] {
+        let search = SearchProviderInstruments {
+            consumer_id: 7,
+            search_generation,
+            provider: "tastytrade".into(),
+            query: query.into(),
+            maximum_results: 10,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
+        };
+        search_catalog(
+            &search,
+            &mut futures,
+            &mut searches,
+            &api,
+            &stop,
+            &generation,
+        )
+        .unwrap();
+    }
+    let selection = SelectProviderInstrument {
+        consumer_id: 7,
+        selection_generation: STARTUP_CATALOG_COMMAND_GENERATION,
+        search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
+        provider: "tastytrade".into(),
+        symbol: "/ESZ6".into(),
+        exchange: "CME".into(),
+        entitlement_id: ENTITLEMENT.into(),
+    };
+    let selected = resolve_selection(
+        &selection,
+        &futures,
+        &searches,
+        &api,
+        &stop,
+        &generation,
+        &mut 0,
+    )
+    .unwrap();
+    assert!(matches!(
+        selected,
+        CatalogEvent::Selection { command_generation, instrument, .. }
+            if command_generation == STARTUP_CATALOG_COMMAND_GENERATION
+                && instrument.provider_symbol == "/ESZ26:XCME"
+    ));
 }
 #[test]
 fn equity_search_worker_debounces_to_the_latest_consumer_query() {
@@ -972,10 +1028,87 @@ fn trade_updates_quote_prices_without_refreshing_quote_sizes() {
     let ask = updated.ask.unwrap();
     assert_eq!(bid.price, 500_025_000_000);
     assert_eq!(ask.price, 500_125_000_000);
-    assert_eq!(bid.quantity, 2_000_000_000);
-    assert_eq!(ask.quantity, 3_000_000_000);
+    assert_eq!(bid.quantity, Some(2_000_000_000));
+    assert_eq!(ask.quantity, Some(3_000_000_000));
     assert_eq!(
         updated.metadata.timestamps.provider_unix_nanos,
         quote_metadata.timestamps.provider_unix_nanos
     );
+}
+
+fn live_worker(event_capacity: usize) -> (Worker, Receiver<RealtimeEvent>) {
+    let (_, controls) = mpsc::sync_channel(1);
+    let (events, output) = mpsc::sync_channel(event_capacity);
+    let (_, history) = mpsc::sync_channel(1);
+    let (completions, _) = mpsc::sync_channel(1);
+    let (token_requests, _) = mpsc::sync_channel(1);
+    let (_, token_replies) = mpsc::sync_channel(1);
+    let wake = ProviderCoordinatorWake::new(completions.clone(), ["tastytrade"]);
+    let worker = Worker::new(WorkerPorts {
+        api: Arc::new(BrokerApi::default()),
+        controls,
+        events,
+        history,
+        completions,
+        generation: Arc::new(AtomicU64::new(1)),
+        stop: Arc::new(AtomicBool::new(false)),
+        wake,
+        token_requests,
+        token_replies,
+    });
+    (worker, output)
+}
+
+#[test]
+fn locked_or_crossed_quotes_are_withheld_without_failing_the_session() {
+    let (mut worker, output) = live_worker(4);
+    let instrument = instrument();
+    let symbol = instrument.provider_symbol.clone();
+    worker.demand.instruments.push(instrument);
+    let quote = |bid: i64, ask: i64| FeedEvent::Quote {
+        channel: 1,
+        symbol: symbol.clone(),
+        bid: Some((bid, 1_000_000_000)),
+        ask: Some((ask, 1_000_000_000)),
+        time_nanos: Some(1_790_800_000_000_000_000),
+    };
+
+    worker
+        .accept(quote(500_100_000_000, 500_000_000_000))
+        .expect("a crossed quote is not a transport failure");
+    worker
+        .accept(quote(500_000_000_000, 500_000_000_000))
+        .expect("a locked quote is not a transport failure");
+    assert!(output.try_recv().is_err());
+    assert!(worker.quotes.is_empty());
+
+    worker
+        .accept(quote(500_000_000_000, 500_100_000_000))
+        .expect("a valid quote publishes after withheld quotes");
+    let RealtimeEvent::Quote(1, published) = output.try_recv().unwrap() else {
+        panic!("a valid quote should publish");
+    };
+    assert_eq!(published.bid.unwrap().price, 500_000_000_000);
+    assert_eq!(published.ask.unwrap().price, 500_100_000_000);
+}
+
+#[test]
+fn repeated_transport_failures_keep_recovering_with_capped_backoff() {
+    let (mut worker, output) = live_worker(16);
+    for attempt in 1..=8 {
+        let before = Instant::now();
+        worker.recover(format!("DXLink heartbeat expired ({attempt})"));
+        assert!(
+            !worker.paused,
+            "transport failure {attempt} parked the session"
+        );
+        assert!(matches!(
+            output.try_recv().unwrap(),
+            RealtimeEvent::Recovering(1, _)
+        ));
+        assert!(worker.retry_at <= before + Duration::from_secs(48) + Duration::from_secs(1));
+    }
+    assert_eq!(recovery_delay(1), Duration::from_secs(6));
+    assert_eq!(recovery_delay(4), Duration::from_secs(48));
+    assert_eq!(recovery_delay(u8::MAX), Duration::from_secs(48));
 }

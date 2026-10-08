@@ -18,7 +18,7 @@ pub use chart_interval::{
 pub use contracts::{
     AggressorSide, BarPeriod, BarSeriesKey, BarUpdate, BookSide, DepthDelta, DepthLevel,
     DepthSnapshot, EventMetadata, MAXIMUM_MARKET_DATA_FIELD_BYTES, MarketEvent, MarketTrade,
-    QualifiedTimestamp, TopOfBookQuote,
+    QualifiedTimestamp, QuoteLevel, TopOfBookQuote,
 };
 pub use order_book::{
     AggressorTradeVolumes, OrderBook, OrderBookApplyOutcome, OrderBookColumnLevel, OrderBookFrame,

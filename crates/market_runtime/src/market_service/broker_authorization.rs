@@ -140,8 +140,14 @@ impl MarketService {
             Operation::Connect,
             &self.runtime.shutdown,
         )?;
+        self.request(|reply| {
+            Ok(Command::BrokerAuthorizationChanged(
+                provider.slug(),
+                true,
+                reply,
+            ))
+        })?;
         if provider == BrokerProvider::Tastytrade {
-            self.request(|reply| Ok(Command::BrokerAuthorizationChanged(true, reply)))?;
             Ok("Tastytrade connected. Select an asset from the symbol menu.".into())
         } else {
             Ok(result)
@@ -169,9 +175,13 @@ impl MarketService {
     /// Rejects unsupported providers, overload, or failed protected deletion.
     pub fn disconnect_provider(&self, provider: &str) -> Result<String, String> {
         let provider = BrokerProvider::parse(provider)?;
-        if provider == BrokerProvider::Tastytrade {
-            self.request(|reply| Ok(Command::BrokerAuthorizationChanged(false, reply)))?;
-        }
+        self.request(|reply| {
+            Ok(Command::BrokerAuthorizationChanged(
+                provider.slug(),
+                false,
+                reply,
+            ))
+        })?;
         self.runtime.broker_authorization.request(
             provider,
             Operation::Disconnect,

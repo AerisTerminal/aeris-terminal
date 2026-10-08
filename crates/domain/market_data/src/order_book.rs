@@ -1,4 +1,6 @@
-use crate::{BookSide, DepthDelta, DepthLevel, DepthSnapshot, MarketDataValidationError};
+use crate::{
+    BookSide, DepthDelta, DepthLevel, DepthSnapshot, MarketDataValidationError, QuoteLevel,
+};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 /// Recent real aggressor-side traded quantity accumulated at one price.
@@ -48,8 +50,8 @@ pub struct OrderBookPublication {
     /// Latest independently observed provider BBO. These fields never replace
     /// aggregate/MBO depth; they are published alongside it so the UI can show
     /// top-of-book even while a covering depth image is still pending.
-    pub best_bid: Option<DepthLevel>,
-    pub best_ask: Option<DepthLevel>,
+    pub best_bid: Option<QuoteLevel>,
+    pub best_ask: Option<QuoteLevel>,
     pub bbo_source_watermark: u64,
     pub bids: Vec<DepthLevel>,
     pub asks: Vec<DepthLevel>,
@@ -64,7 +66,9 @@ pub struct OrderBookPublication {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderBookColumnLevel {
     pub price: i64,
-    pub quantity: i64,
+    /// `None` for a best bid or offer published without a size; its
+    /// `quantity_text` is then empty. Depth levels always carry a quantity.
+    pub quantity: Option<i64>,
     pub order_count: Option<u32>,
     pub price_text: String,
     pub quantity_text: String,

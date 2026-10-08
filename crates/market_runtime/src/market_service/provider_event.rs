@@ -161,6 +161,36 @@ impl ProviderEvent {
         }
     }
 
+    pub(super) fn ctrader(event: super::ctrader::RealtimeEvent) -> Self {
+        use super::ctrader::RealtimeEvent as Wire;
+        let generation = event.generation();
+        let kind = match event {
+            Wire::Connecting(_) => ProviderEventKind::Connecting,
+            Wire::Connected(_) => ProviderEventKind::Connected,
+            Wire::Recovering(_, detail) => ProviderEventKind::Recovering {
+                detail: "cTrader feed requires recovery",
+                provider_detail: Some(detail),
+            },
+            Wire::Failed(_, detail) => ProviderEventKind::Failed(detail),
+            Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
+            Wire::Candle(_, symbol, bar) => ProviderEventKind::Candle {
+                symbol,
+                candle: ProviderCandle {
+                    bar,
+                    trade_count: None,
+                    trade_watermark: None,
+                },
+            },
+            Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
+            Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
+        };
+        Self {
+            provider: "ctrader",
+            generation,
+            kind,
+        }
+    }
+
     pub(super) fn tastytrade(event: super::tastytrade::RealtimeEvent) -> Self {
         use super::tastytrade::RealtimeEvent as Wire;
         let generation = event.generation();
@@ -172,7 +202,6 @@ impl ProviderEvent {
                 detail: "Tastytrade feed requires recovery",
                 provider_detail: Some(detail),
             },
-            Wire::Failed(_, detail) => ProviderEventKind::Failed(detail),
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
             Wire::Candle(_, symbol, bar, count, trade_watermark) => ProviderEventKind::Candle {
                 symbol,

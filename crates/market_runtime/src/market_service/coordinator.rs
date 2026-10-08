@@ -445,14 +445,9 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_service_command(&mut self, command: Command) {
         match command {
-            Command::BrokerAuthorizationChanged(ready, reply) => {
-                let Some(provider) = self.sessions.keys().copied().find(|provider| {
-                    self.providers
-                        .descriptor(provider)
-                        .is_some_and(|descriptor| {
-                            descriptor.connection_kind
-                                == super::ProviderConnectionKind::BrokerCapability
-                        })
+            Command::BrokerAuthorizationChanged(provider, ready, reply) => {
+                let Some(descriptor) = self.providers.descriptor(provider).filter(|descriptor| {
+                    descriptor.connection_kind == super::ProviderConnectionKind::BrokerCapability
                 }) else {
                     let _ = reply.send(Err("Broker market-data provider is unavailable".into()));
                     return;
@@ -470,7 +465,7 @@ impl Coordinator<'_> {
                     self.candle_provider_recovering(
                         provider,
                         generation.0.get(),
-                        "Tastytrade disconnected",
+                        descriptor.authorization_revoked_detail,
                     );
                     let _ = self.engine.end_provider_session(provider, generation);
                 }
@@ -480,7 +475,7 @@ impl Coordinator<'_> {
                     if ready {
                         None
                     } else {
-                        Some("Tastytrade disconnected")
+                        Some(descriptor.authorization_revoked_detail)
                     },
                 );
                 let _ = reply.send(Ok(()));
@@ -1624,11 +1619,19 @@ mod tests {
             super::super::tastytrade::RealtimeEvent::Connected(1),
         ));
         let (reply, result) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::BrokerAuthorizationChanged(false, reply));
+        coordinator.handle_command(Command::BrokerAuthorizationChanged(
+            "tastytrade",
+            false,
+            reply,
+        ));
         result.recv().unwrap().unwrap();
         assert!(coordinator.session("tastytrade").suspended);
         let (reply, result) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::BrokerAuthorizationChanged(true, reply));
+        coordinator.handle_command(Command::BrokerAuthorizationChanged(
+            "tastytrade",
+            true,
+            reply,
+        ));
         result.recv().unwrap().unwrap();
         coordinator.handle_provider_event(super::super::ProviderEvent::tastytrade(
             super::super::tastytrade::RealtimeEvent::Connected(1),
@@ -1809,14 +1812,14 @@ mod tests {
                     received_unix_nanos: 1,
                 },
             },
-            bid: Some(DepthLevel {
+            bid: Some(aeris_market_data::QuoteLevel {
                 price: 100,
-                quantity: 2,
+                quantity: Some(2),
                 order_count: None,
             }),
-            ask: Some(DepthLevel {
+            ask: Some(aeris_market_data::QuoteLevel {
                 price: 101,
-                quantity: 2,
+                quantity: Some(2),
                 order_count: None,
             }),
         };
@@ -2021,14 +2024,14 @@ mod tests {
                     received_unix_nanos: timestamp,
                 },
             },
-            bid: Some(DepthLevel {
+            bid: Some(aeris_market_data::QuoteLevel {
                 price,
-                quantity: 1,
+                quantity: Some(1),
                 order_count: None,
             }),
-            ask: Some(DepthLevel {
+            ask: Some(aeris_market_data::QuoteLevel {
                 price: price + 1,
-                quantity: 1,
+                quantity: Some(1),
                 order_count: None,
             }),
         }
@@ -4791,6 +4794,73 @@ mod tests {
             instruments: Vec::new(),
         });
         assert!(!coordinator.catalog_searches.contains_key(&key));
+
+        let events = coordinator
+            .events
+            .get_mut(&consumer)
+            .expect("consumer outbox");
+        let delivered = std::iter::from_fn(|| events.pop())
+            .filter_map(|event| match event {
+                MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
+                    Some(result.search_generation)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delivered,
+            [aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION, 1],
+            "a picker result must not replace the pending startup re-resolution"
+        );
+    }
+
+    #[test]
+    fn startup_and_user_catalog_selections_reach_the_consumer_independently() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .events
+            .insert(consumer, ConsumerEvents::default());
+        let key = (consumer, "rithmic".to_string());
+        coordinator.startup_catalog_selections.insert(
+            key.clone(),
+            aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
+        );
+        coordinator.catalog_selections.insert(key, 3);
+
+        coordinator.handle_catalog_selection(
+            consumer.0.get(),
+            aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
+            instrument(),
+        );
+        coordinator.handle_catalog_rejection(
+            aeris_contracts::ProviderCatalogRejected {
+                consumer_id: consumer.0.get(),
+                provider: "rithmic".into(),
+                provider_generation: None,
+                command_generation: 3,
+                reason: aeris_contracts::ProviderCatalogRejectionReason::InstrumentUnavailable,
+            },
+            true,
+        );
+
+        let events = coordinator
+            .events
+            .get_mut(&consumer)
+            .expect("consumer outbox");
+        let delivered = std::iter::from_fn(|| events.pop()).collect::<Vec<_>>();
+        assert!(delivered.iter().any(|event| matches!(
+            event,
+            MarketRuntimeEvent::ProviderInstrumentSelection(selection)
+                if selection.command_generation
+                    == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION
+        )));
+        assert!(delivered.iter().any(|event| matches!(
+            event,
+            MarketRuntimeEvent::ProviderCatalogRejected(rejection)
+                if rejection.command_generation == 3
+        )));
     }
 
     #[test]

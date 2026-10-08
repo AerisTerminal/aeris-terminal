@@ -813,16 +813,26 @@ pub(super) fn drawing_toolbar(
                         .min_h(px(0.0))
                         .map(|body| tracked_overflow_y_scrollbar(body, scroll))
                         .children(tools)
-                        .child(drawing_favorites_toggle(
-                            &terminal,
-                            sidebar.favorites,
-                            theme,
-                        ))
                         .child(drawing_toolbar_actions(app, state, theme)),
                 )
                 .child(ThinScrollbar::new(
                     scroll,
                     gpui_color(colors.text_secondary),
+                )),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w_full()
+                .flex()
+                .justify_center()
+                .py_1()
+                .border_t_1()
+                .border_color(gpui_color(colors.border))
+                .child(drawing_favorites_toggle(
+                    &terminal,
+                    sidebar.favorites,
+                    theme,
                 )),
         )
         .child(drawing_toolbar_collapse(
@@ -1041,7 +1051,9 @@ pub(super) fn drawing_tool_menu_layer(
     )
 }
 
-const DRAWING_FAVORITES_PADDING: f32 = 4.0;
+const DRAWING_FAVORITES_PADDING_X: f32 = 4.0;
+const DRAWING_FAVORITES_PADDING_Y: f32 = 2.0;
+const DRAWING_FAVORITES_BUTTON_SIZE: f32 = 28.0;
 const DRAWING_FAVORITES_GAP: f32 = 2.0;
 const DRAWING_FAVORITES_GRIP_WIDTH: f32 = 14.0;
 const DRAWING_FAVORITES_GRIP_DOT: f32 = 3.0;
@@ -1051,12 +1063,11 @@ const DRAWING_FAVORITES_DEFAULT_INSET: f32 = 12.0;
 /// Fixed geometry, so moves clamp the toolbar into the window without measuring a frame.
 fn drawing_favorites_toolbar_size(count: usize, border_width: f32) -> gpui::Size<Pixels> {
     let count = f32::from(u16::try_from(count).unwrap_or(u16::MAX));
-    let edge = 2.0 * (DRAWING_FAVORITES_PADDING + border_width);
     size(
-        px(edge
+        px(2.0 * (DRAWING_FAVORITES_PADDING_X + border_width)
             + DRAWING_FAVORITES_GRIP_WIDTH
-            + count * (DRAWING_FAVORITES_GAP + DRAWING_TOOL_BUTTON_SIZE)),
-        px(edge + DRAWING_TOOL_BUTTON_SIZE),
+            + count * (DRAWING_FAVORITES_GAP + DRAWING_FAVORITES_BUTTON_SIZE)),
+        px(2.0 * (DRAWING_FAVORITES_PADDING_Y + border_width) + DRAWING_FAVORITES_BUTTON_SIZE),
     )
 }
 
@@ -1103,6 +1114,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
     let origin = clamp_floating_panel_origin(stored, toolbar.viewport, panel_size);
     let buttons = entries.into_iter().enumerate().map(|(index, entry)| {
         let arm = terminal.clone();
+        let selected = entry.choice == armed;
         let button = drawing_toolbar_action(
             drawing_toolbar_button(
                 ("drawing_favorite", index),
@@ -1110,8 +1122,13 @@ pub(super) fn drawing_favorites_toolbar_layer(
                 entry.label,
                 entry.toolbar_icon_size(),
                 theme,
-                entry.choice == armed,
-            ),
+                selected,
+            )
+            .size(px(DRAWING_FAVORITES_BUTTON_SIZE))
+            .resting_fill(colors.surface_secondary)
+            .when(selected, |button| {
+                button.bg(gpui_color(colors.active_bg.over(colors.surface_secondary)))
+            }),
             enabled,
         );
         let button = button_activation(button, enabled, move |_, cx| {
@@ -1134,11 +1151,11 @@ pub(super) fn drawing_favorites_toolbar_layer(
             .flex()
             .items_center()
             .gap(px(DRAWING_FAVORITES_GAP))
-            .px(px(DRAWING_FAVORITES_PADDING))
-            .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
+            .px(px(DRAWING_FAVORITES_PADDING_X))
+            .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
             .border_1()
             .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface))
+            .bg(gpui_color(colors.surface_secondary))
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_drag_move::<DrawingFavoritesMoveDrag>(move |event, window, cx| {
@@ -1179,7 +1196,7 @@ fn drawing_favorites_grip(
         .id("drawing_favorites_grip")
         .flex_none()
         .w(px(DRAWING_FAVORITES_GRIP_WIDTH))
-        .h(px(DRAWING_TOOL_BUTTON_SIZE))
+        .h(px(DRAWING_FAVORITES_BUTTON_SIZE))
         .flex()
         .items_center()
         .justify_center()
@@ -1404,12 +1421,16 @@ fn drawing_toolbar_actions(
 }
 
 const DRAWING_TOOLBAR_TOGGLE_ICON: f32 = 14.0;
+/// The toggle's own icon plus 4 px above and below. Until a chart reports its time strip (no
+/// chart is attached during startup), this keeps the icon inside its row instead of drawing
+/// over the favorites button above it.
+const DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT: f32 = DRAWING_TOOLBAR_TOGGLE_ICON + 2.0 * 4.0;
 
 fn drawing_toolbar_toggle_height(time_axis_height: f32) -> f32 {
     // Aeris Charts reserves the complete time strip inside the chart. The desktop pane then
     // adds its bottom layout inset outside that canvas, so the adjacent control must span
     // both regions to match the visible X-axis row from top border to workspace edge.
-    time_axis_height + WORKSPACE_PANE_BOTTOM_INSET
+    time_axis_height.max(DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT) + WORKSPACE_PANE_BOTTOM_INSET
 }
 
 fn drawing_toolbar_collapse(
@@ -1696,11 +1717,11 @@ mod tests {
         let three = drawing_favorites_toolbar_size(3, 1.0);
         assert_eq!(
             one.height,
-            px(2.0 * (DRAWING_FAVORITES_PADDING + 1.0) + 32.0)
+            px(2.0 * (DRAWING_FAVORITES_PADDING_Y + 1.0) + DRAWING_FAVORITES_BUTTON_SIZE)
         );
         assert_eq!(
             three.width - one.width,
-            px(2.0 * (DRAWING_FAVORITES_GAP + DRAWING_TOOL_BUTTON_SIZE))
+            px(2.0 * (DRAWING_FAVORITES_GAP + DRAWING_FAVORITES_BUTTON_SIZE))
         );
         assert_eq!(three.height, one.height);
     }
@@ -1742,5 +1763,16 @@ mod tests {
     fn drawing_toggle_spans_the_engine_axis_and_host_bottom_inset() {
         let height = drawing_toolbar_toggle_height(22.0);
         assert!((height - 24.0).abs() < f32::EPSILON);
+        let taller_axis = drawing_toolbar_toggle_height(30.0);
+        assert!((taller_axis - 32.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn drawing_toggle_keeps_its_icon_inside_the_row_before_a_chart_reports_its_axis() {
+        let detached = drawing_toolbar_toggle_height(0.0);
+        assert!(detached >= DRAWING_TOOLBAR_TOGGLE_ICON + WORKSPACE_PANE_BOTTOM_INSET);
+        // The startup row already has the default axis height, so attaching the chart does not
+        // shift the sidebar.
+        assert!((detached - drawing_toolbar_toggle_height(22.0)).abs() < f32::EPSILON);
     }
 }

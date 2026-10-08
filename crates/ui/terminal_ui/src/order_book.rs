@@ -1,5 +1,7 @@
 use aeris_instruments::InstrumentPrecision;
-use aeris_market_data::{OrderBookColumnLevel, OrderBookFrame, OrderBookPublication, OrderBookRow};
+use aeris_market_data::{
+    OrderBookColumnLevel, OrderBookFrame, OrderBookPublication, OrderBookRow, QuoteLevel,
+};
 
 /// Identity and display precision for one selected depth stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,9 +39,14 @@ pub fn project_order_book(
         .bids
         .iter()
         .chain(&publication.asks)
-        .chain(publication.best_bid.iter())
-        .chain(publication.best_ask.iter())
         .map(|level| level.quantity)
+        .chain(
+            publication
+                .best_bid
+                .iter()
+                .chain(publication.best_ask.iter())
+                .filter_map(|level| level.quantity),
+        )
         .max()
         .unwrap_or(0);
     let row_count = publication.bids.len().max(publication.asks.len());
@@ -101,20 +108,25 @@ pub fn project_order_book(
 }
 
 fn project_level(
-    level: aeris_market_data::DepthLevel,
+    level: impl Into<QuoteLevel>,
     price_scale: u8,
     quantity_scale: u8,
     maximum_quantity: i64,
 ) -> OrderBookColumnLevel {
+    let level = level.into();
     OrderBookColumnLevel {
         price: level.price,
         quantity: level.quantity,
         order_count: level.order_count,
         price_text: grouped_fixed_point_text(level.price, price_scale),
-        quantity_text: compact_quantity_text(level.quantity, quantity_scale),
+        quantity_text: level.quantity.map_or_else(String::new, |quantity| {
+            compact_quantity_text(quantity, quantity_scale)
+        }),
         traded_volume: 0,
         traded_volume_text: String::new(),
-        relative_size_bps: relative_size_bps(level.quantity, maximum_quantity),
+        relative_size_bps: level
+            .quantity
+            .map_or(0, |quantity| relative_size_bps(quantity, maximum_quantity)),
     }
 }
 
@@ -227,14 +239,14 @@ mod tests {
             session_generation: 7,
             revision: 3,
             source_watermark: 10,
-            best_bid: Some(DepthLevel {
+            best_bid: Some(QuoteLevel {
                 price: 20_025,
-                quantity: 12,
+                quantity: Some(12),
                 order_count: Some(3),
             }),
-            best_ask: Some(DepthLevel {
+            best_ask: Some(QuoteLevel {
                 price: 20_050,
-                quantity: 3,
+                quantity: Some(3),
                 order_count: Some(1),
             }),
             bbo_source_watermark: 10,
@@ -314,15 +326,15 @@ mod tests {
     #[test]
     fn projection_preserves_independent_bbo_beside_canonical_depth() {
         let mut publication = publication("mnq");
-        publication.best_bid = Some(DepthLevel {
+        publication.best_bid = Some(QuoteLevel {
             price: 19_960,
-            quantity: 8,
+            quantity: Some(8),
             order_count: Some(1),
         });
-        publication.best_ask = Some(DepthLevel {
+        publication.best_ask = Some(QuoteLevel {
             price: 19_970,
-            quantity: 9,
-            order_count: Some(1),
+            quantity: None,
+            order_count: None,
         });
         publication.bbo_source_watermark = publication.source_watermark.saturating_add(1);
 
@@ -337,6 +349,10 @@ mod tests {
             frame.best_ask.as_ref().map(|level| level.price),
             Some(19_970)
         );
+        let unsized_ask = frame.best_ask.as_ref().expect("best ask projects");
+        assert_eq!(unsized_ask.quantity, None);
+        assert_eq!(unsized_ask.quantity_text, "");
+        assert_eq!(unsized_ask.relative_size_bps, 0);
         assert_eq!(
             frame.rows[0].bid.as_ref().map(|level| level.price),
             Some(20_025)

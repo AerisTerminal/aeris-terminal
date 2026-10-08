@@ -2022,12 +2022,10 @@ fn chart_controls_follow_retained_data_instead_of_transient_chart_state() {
     let retained_chart_controls = HeaderControls::from_state(true, false).with_chart_controls(true);
     assert!(retained_chart_controls.enabled(HeaderControls::INDICATOR));
     assert!(retained_chart_controls.enabled(HeaderControls::CHART_TYPE));
-    assert!(retained_chart_controls.enabled(HeaderControls::CHART_CAPTURE));
 
     let empty_chart_controls = HeaderControls::from_state(true, false).with_chart_controls(false);
     assert!(!empty_chart_controls.enabled(HeaderControls::INDICATOR));
     assert!(!empty_chart_controls.enabled(HeaderControls::CHART_TYPE));
-    assert!(!empty_chart_controls.enabled(HeaderControls::CHART_CAPTURE));
 }
 
 #[test]
@@ -2667,6 +2665,25 @@ fn chart_detail_prefers_connection_context_until_streaming() {
             Some("feed is streaming"),
         ),
         "history is covering a gap"
+    );
+    assert_eq!(
+        chart_status_detail(
+            ChartState::Error,
+            FeedConnectionState::Discovering,
+            "Provider startup catalog refresh was rejected",
+            Some("Connecting to market data"),
+        ),
+        "Provider startup catalog refresh was rejected",
+        "a chart error is not hidden behind connection progress"
+    );
+    assert_eq!(
+        chart_status_detail(
+            ChartState::Error,
+            FeedConnectionState::Stopped,
+            "Loading tastytrade history",
+            Some("tastytrade market worker stopped"),
+        ),
+        "tastytrade market worker stopped"
     );
 }
 

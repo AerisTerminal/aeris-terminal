@@ -419,7 +419,8 @@ impl Coordinator<'_> {
             return;
         }
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            events.catalog_search =
+            let generation = result.search_generation;
+            *events.catalog_search_slot(generation) =
                 Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(result));
         }
     }
@@ -446,7 +447,8 @@ impl Coordinator<'_> {
         }
         pending.remove(&key);
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            events.catalog_search =
+            let generation = result.search_generation;
+            *events.catalog_search_slot(generation) =
                 Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result));
         }
     }
@@ -491,7 +493,7 @@ impl Coordinator<'_> {
             }),
         };
         if let Some(events) = self.events.get_mut(&id) {
-            events.catalog_selection = Some(publication);
+            *events.catalog_selection_slot(command_generation) = Some(publication);
         }
     }
 
@@ -589,10 +591,11 @@ impl Coordinator<'_> {
         }
         pending.remove(&key);
         if let Some(events) = self.events.get_mut(&consumer_id) {
+            let generation = rejection.command_generation;
             let slot = if selection {
-                &mut events.catalog_selection
+                events.catalog_selection_slot(generation)
             } else {
-                &mut events.catalog_search
+                events.catalog_search_slot(generation)
             };
             *slot = Some(MarketRuntimeEvent::ProviderCatalogRejected(rejection));
         }

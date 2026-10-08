@@ -9,7 +9,7 @@ use crate::{
 };
 use aeris_market_data::{
     BookSide, DepthLevel, DepthSnapshot, EventMetadata, MarketDataValidationError,
-    QualifiedTimestamp, TopOfBookQuote,
+    QualifiedTimestamp, QuoteLevel, TopOfBookQuote,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -19,9 +19,6 @@ pub const MAXIMUM_STREAM_SYMBOLS: usize = 256;
 pub const MAXIMUM_DEPTH_QUOTES: usize = 1_024;
 /// Every level holds at least one quote, so a full book never needs truncation.
 pub const MAXIMUM_DEPTH_LEVELS: usize = MAXIMUM_DEPTH_QUOTES;
-/// Spot events carry prices only. Canonical quote levels require a positive
-/// quantity, so BBO sides use this unit marker; sizes come from depth events.
-pub const SPOT_QUANTITY_UNAVAILABLE: i64 = 1;
 
 /// Canonical identity and price scale for one subscribed symbol.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -202,12 +199,13 @@ impl MarketStreams {
                     .ok_or(MarketDecodeError::InvalidField("timestamp"))
             })
             .transpose()?;
+        // Spot events carry prices only; sizes come from depth events.
         let level = |price: Option<i64>| {
             price
                 .map(|price| {
-                    Ok::<_, MarketDecodeError>(DepthLevel {
+                    Ok::<_, MarketDecodeError>(QuoteLevel {
                         price: scale.from_wire(price)?,
-                        quantity: SPOT_QUANTITY_UNAVAILABLE,
+                        quantity: None,
                         order_count: None,
                     })
                 })
@@ -437,6 +435,8 @@ mod tests {
         let quote = first.quote.expect("quote");
         assert_eq!(quote.bid.map(|level| level.price), Some(111_945));
         assert_eq!(quote.ask.map(|level| level.price), Some(111_997));
+        assert_eq!(quote.bid.and_then(|level| level.quantity), None);
+        assert_eq!(quote.ask.and_then(|level| level.quantity), None);
         assert_eq!(quote.metadata.provider_id, "ctrader");
         assert_eq!(quote.metadata.session_generation, 3);
         assert_eq!(

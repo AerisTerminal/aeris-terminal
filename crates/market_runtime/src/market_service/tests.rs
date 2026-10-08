@@ -94,6 +94,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
             depth_available: false,
             search_categories_available: false,
             market_screen_available: false,
+            trades_available: false,
             connection_kind: aeris_contracts::ProviderConnectionKind::Public,
         };
     let fourth = ProviderDescriptor {
@@ -112,6 +113,7 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
         recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
         idle_stop_policy: IdleStopPolicy::WorkerManaged,
         alert_demand_update: AlertDemandUpdate::WorkerManaged,
+        authorization_revoked_detail: "Fourth provider disconnected",
         start: ProviderRuntimeRegistry::start_tastytrade_runtime,
         flush_demand: |_| {},
         prepare_search: None,
@@ -153,7 +155,10 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
 #[test]
 fn provider_wake_is_a_conflated_nonblocking_edge() {
     let (commands, receiver) = mpsc::sync_channel(1);
-    let wake = ProviderCoordinatorWake::new(commands, ["rithmic", "hyperliquid", "tastytrade"]);
+    let wake = ProviderCoordinatorWake::new(
+        commands,
+        ["rithmic", "hyperliquid", "tastytrade", "ctrader"],
+    );
     wake.notify();
     wake.notify();
     assert!(matches!(receiver.try_recv(), Ok(Command::ProviderWake)));

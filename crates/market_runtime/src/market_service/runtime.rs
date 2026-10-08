@@ -83,7 +83,7 @@ impl ProviderRuntimeRegistry {
         completions: &SyncSender<Command>,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        broker_api: &Arc<super::tastytrade::BrokerApi>,
+        context: &super::ProviderStartContext,
     ) -> Result<Self, String> {
         let wake = ProviderCoordinatorWake::new(
             completions.clone(),
@@ -109,7 +109,7 @@ impl ProviderRuntimeRegistry {
                 wake.clone(),
                 engine,
                 active_workers,
-                broker_api,
+                context,
             ) {
                 Ok(record) => record,
                 Err(error) => {
@@ -129,9 +129,9 @@ impl ProviderRuntimeRegistry {
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        broker_api: &Arc<super::tastytrade::BrokerApi>,
+        context: &super::ProviderStartContext,
     ) -> Result<ProviderRuntimeRecord, String> {
-        (spec.descriptor.start)(spec, completions, wake, engine, active_workers, broker_api)
+        (spec.descriptor.start)(spec, completions, wake, engine, active_workers, context)
     }
 
     fn start_history_runtime(
@@ -169,7 +169,7 @@ impl ProviderRuntimeRegistry {
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        _broker_api: &Arc<super::tastytrade::BrokerApi>,
+        _context: &super::ProviderStartContext,
     ) -> Result<ProviderRuntimeRecord, String> {
         let enabled = spec.realtime.enabled;
         let descriptor = spec.descriptor;
@@ -183,7 +183,7 @@ impl ProviderRuntimeRegistry {
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        _broker_api: &Arc<super::tastytrade::BrokerApi>,
+        _context: &super::ProviderStartContext,
     ) -> Result<ProviderRuntimeRecord, String> {
         let enabled = spec.realtime.enabled;
         let descriptor = spec.descriptor;
@@ -197,7 +197,7 @@ impl ProviderRuntimeRegistry {
         wake: ProviderCoordinatorWake,
         _engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        broker_api: &Arc<super::tastytrade::BrokerApi>,
+        context: &super::ProviderStartContext,
     ) -> Result<ProviderRuntimeRecord, String> {
         let ProviderRuntimeSpec {
             descriptor,
@@ -209,7 +209,40 @@ impl ProviderRuntimeRegistry {
         {
             return Err("Tastytrade history source must be runtime-owned".to_string());
         }
-        super::tastytrade::start_record(descriptor, completions, wake, active_workers, broker_api)
+        super::tastytrade::start_record(
+            descriptor,
+            completions,
+            wake,
+            active_workers,
+            &context.tastytrade,
+        )
+    }
+
+    pub(super) fn start_ctrader_runtime(
+        spec: ProviderRuntimeSpec,
+        completions: &SyncSender<Command>,
+        wake: ProviderCoordinatorWake,
+        _engine: &MarketEngine,
+        active_workers: &Arc<Mutex<BTreeSet<String>>>,
+        context: &super::ProviderStartContext,
+    ) -> Result<ProviderRuntimeRecord, String> {
+        let ProviderRuntimeSpec {
+            descriptor,
+            history,
+            ..
+        } = spec;
+        if descriptor.history_source != super::HistorySourceKind::ProviderSession
+            || history.is_some()
+        {
+            return Err("cTrader history source must be runtime-owned".to_string());
+        }
+        super::ctrader::start_record(
+            descriptor,
+            completions,
+            wake,
+            active_workers,
+            &context.ctrader,
+        )
     }
 
     fn start_rithmic_record(
@@ -497,6 +530,11 @@ impl ProviderRuntimeRegistry {
                     {
                         ProviderRealtimeDispatch::Tastytrade { controls, events }
                     }
+                    ProviderRealtimeChannelSet::Ctrader { controls, events }
+                        if record.realtime.enabled =>
+                    {
+                        ProviderRealtimeDispatch::Ctrader { controls, events }
+                    }
                     ProviderRealtimeChannelSet::Rithmic { controls, events }
                         if record.realtime.enabled =>
                     {
@@ -520,6 +558,11 @@ impl ProviderRuntimeRegistry {
                         if record.catalog.enabled =>
                     {
                         ProviderCatalogDispatch::Tastytrade { controls, events }
+                    }
+                    ProviderCatalogChannelSet::Ctrader { controls, events }
+                        if record.catalog.enabled =>
+                    {
+                        ProviderCatalogDispatch::Ctrader { controls, events }
                     }
                     ProviderCatalogChannelSet::Rithmic { controls, events }
                         if record.catalog.enabled =>
@@ -711,6 +754,11 @@ impl ProviderDispatch<'_> {
                             ProviderRuntimeEvent::Realtime(super::ProviderEvent::tastytrade(event))
                         })
                     }
+                    ProviderRealtimeDispatch::Ctrader { events, .. } => {
+                        events.try_recv().ok().map(|event| {
+                            ProviderRuntimeEvent::Realtime(super::ProviderEvent::ctrader(event))
+                        })
+                    }
                     ProviderRealtimeDispatch::Rithmic { events, .. } => {
                         events.try_recv().ok().map(|event| {
                             ProviderRuntimeEvent::Realtime(super::ProviderEvent::rithmic(event))
@@ -727,6 +775,10 @@ impl ProviderDispatch<'_> {
             ProviderEventLane::Catalog(provider_id) => {
                 match &self.records.get(provider_id)?.catalog {
                     ProviderCatalogDispatch::Tastytrade { events, .. } => events
+                        .try_recv()
+                        .ok()
+                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
+                    ProviderCatalogDispatch::Ctrader { events, .. } => events
                         .try_recv()
                         .ok()
                         .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
@@ -792,6 +844,11 @@ impl ProviderDispatch<'_> {
                     .map_err(|_| {
                         "Tastytrade catalog capacity is exhausted or unavailable".to_string()
                     }),
+                ProviderCatalogDispatch::Ctrader { controls, .. } => controls
+                    .try_send(super::ctrader::CatalogControl::Search(search))
+                    .map_err(|_| {
+                        "cTrader catalog capacity is exhausted or unavailable".to_string()
+                    }),
                 ProviderCatalogDispatch::Rithmic { controls, .. } => try_send_rithmic_catalog(
                     controls,
                     RithmicCatalogControl::Search(search),
@@ -813,6 +870,11 @@ impl ProviderDispatch<'_> {
                     .try_send(super::tastytrade::CatalogControl::Select(selection))
                     .map_err(|_| {
                         "Tastytrade catalog capacity is exhausted or unavailable".to_string()
+                    }),
+                ProviderCatalogDispatch::Ctrader { controls, .. } => controls
+                    .try_send(super::ctrader::CatalogControl::Select(selection))
+                    .map_err(|_| {
+                        "cTrader catalog capacity is exhausted or unavailable".to_string()
                     }),
                 ProviderCatalogDispatch::Rithmic { controls, .. } => try_send_rithmic_catalog(
                     controls,
@@ -839,6 +901,7 @@ impl ProviderDispatch<'_> {
                     )
                 }
                 ProviderCatalogDispatch::Tastytrade { .. }
+                | ProviderCatalogDispatch::Ctrader { .. }
                 | ProviderCatalogDispatch::Rithmic { .. } => {
                     Err(format!("{provider_id} does not provide a market screen"))
                 }
@@ -878,6 +941,17 @@ impl ProviderDispatch<'_> {
                             }
                         }
                     }
+                    ProviderRealtimeDispatch::Ctrader { controls, .. } => {
+                        match controls.try_send(super::ctrader::RealtimeControl::Subscribe(
+                            demand.ctrader_wire(),
+                        )) {
+                            Ok(()) => Ok(true),
+                            Err(TrySendError::Full(_)) => Ok(false),
+                            Err(TrySendError::Disconnected(_)) => {
+                                Err("cTrader live worker is unavailable".to_string())
+                            }
+                        }
+                    }
                     ProviderRealtimeDispatch::Disabled => Ok(false),
                 }
             }
@@ -892,19 +966,32 @@ impl ProviderDispatch<'_> {
                         "{provider_id} does not accept authorization control"
                     ));
                 }
-                let ProviderRealtimeDispatch::Tastytrade { controls, .. } = &record.realtime else {
-                    return Err(format!(
-                        "{provider_id} does not accept authorization control"
-                    ));
-                };
-                match controls.try_send(super::tastytrade::RealtimeControl::AuthorizationChanged(
-                    ready,
-                )) {
-                    Ok(()) => Ok(true),
-                    Err(TrySendError::Full(_)) => Ok(false),
-                    Err(TrySendError::Disconnected(_)) => {
-                        Err("Tastytrade live worker is unavailable".to_string())
+                match &record.realtime {
+                    ProviderRealtimeDispatch::Tastytrade { controls, .. } => {
+                        match controls.try_send(
+                            super::tastytrade::RealtimeControl::AuthorizationChanged(ready),
+                        ) {
+                            Ok(()) => Ok(true),
+                            Err(TrySendError::Full(_)) => Ok(false),
+                            Err(TrySendError::Disconnected(_)) => {
+                                Err("Tastytrade live worker is unavailable".to_string())
+                            }
+                        }
                     }
+                    ProviderRealtimeDispatch::Ctrader { controls, .. } => {
+                        match controls
+                            .try_send(super::ctrader::RealtimeControl::AuthorizationChanged(ready))
+                        {
+                            Ok(()) => Ok(true),
+                            Err(TrySendError::Full(_)) => Ok(false),
+                            Err(TrySendError::Disconnected(_)) => {
+                                Err("cTrader live worker is unavailable".to_string())
+                            }
+                        }
+                    }
+                    _ => Err(format!(
+                        "{provider_id} does not accept authorization control"
+                    )),
                 }
             }
         }
@@ -987,6 +1074,12 @@ impl ProviderDispatch<'_> {
                     Err(TrySendError::Full(_)) => Ok(false),
                 }
             }
+            ProviderRealtimeDispatch::Ctrader { controls, .. } => {
+                match controls.try_send(super::ctrader::RealtimeControl::Stop) {
+                    Ok(()) | Err(TrySendError::Disconnected(_)) => Ok(true),
+                    Err(TrySendError::Full(_)) => Ok(false),
+                }
+            }
             ProviderRealtimeDispatch::Rithmic { controls, .. } => {
                 match controls.try_send(RithmicRealtimeControl::Stop) {
                     Ok(()) => Ok(true),
@@ -1023,6 +1116,12 @@ impl MarketService {
     #[must_use]
     pub fn market_session_revision(&self) -> u64 {
         self.runtime.broker_api.calendar_revision()
+    }
+
+    /// Locked or crossed cTrader books withheld from canonical state since startup.
+    #[must_use]
+    pub fn ctrader_stream_statistics(&self) -> super::CtraderStreamStatistics {
+        self.runtime.ctrader_counters.snapshot()
     }
 
     /// Returns the runtime-owned dated session projection for one installed instrument.
@@ -1111,6 +1210,7 @@ impl MarketService {
             ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), true),
             ProviderRuntimeSpec::hyperliquid(Box::<LiveHyperliquidHistory>::default(), true),
             ProviderRuntimeSpec::tastytrade(),
+            ProviderRuntimeSpec::ctrader(),
         ])
     }
 
@@ -1136,12 +1236,17 @@ impl MarketService {
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let broker_api = Arc::new(super::tastytrade::BrokerApi::default());
+        let ctrader_counters = Arc::new(super::ctrader::StreamCounters::default());
+        let start_context = super::ProviderStartContext {
+            tastytrade: Arc::clone(&broker_api),
+            ctrader: Arc::clone(&ctrader_counters),
+        };
         let provider_registry = ProviderRuntimeRegistry::start(
             providers,
             &command_tx,
             &engine,
             &active_provider_workers,
-            &broker_api,
+            &start_context,
         )?;
         let workers = vec![spawn_coordinator(
             engine,
@@ -1157,7 +1262,7 @@ impl MarketService {
             shutdown,
             active_provider_workers,
             workers,
-            broker_api,
+            start_context,
             provider_search_preparers,
             provider_presentations,
         )
@@ -1168,10 +1273,14 @@ impl MarketService {
         shutdown: Arc<AtomicBool>,
         active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
         mut workers: Vec<thread::JoinHandle<()>>,
-        broker_api: Arc<super::tastytrade::BrokerApi>,
+        context: super::ProviderStartContext,
         provider_search_preparers: BTreeMap<&'static str, super::ProviderSearchPreparer>,
         provider_presentations: Vec<ProviderPresentationDescriptor>,
     ) -> Result<Self, String> {
+        let super::ProviderStartContext {
+            tastytrade: broker_api,
+            ctrader: ctrader_counters,
+        } = context;
         let (broker_authorization, worker) =
             match super::broker_authorization::BrokerAuthorization::start(
                 &shutdown,
@@ -1190,6 +1299,7 @@ impl MarketService {
             runtime: Arc::new(MarketRuntime {
                 shutdown,
                 broker_api,
+                ctrader_counters,
                 provider_presentations,
                 provider_search_preparers,
                 broker_authorization,
@@ -1843,7 +1953,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(BTreeSet::new())),
             Vec::new(),
-            Arc::new(super::super::tastytrade::BrokerApi::default()),
+            super::super::ProviderStartContext {
+                tastytrade: Arc::new(super::super::tastytrade::BrokerApi::default()),
+                ctrader: Arc::new(super::super::ctrader::StreamCounters::default()),
+            },
             BTreeMap::new(),
             vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
         )

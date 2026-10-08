@@ -17,7 +17,7 @@ use aeris_contracts::{
     MarketSessionPhase, MarketSessionSource, MarketSessionStatus, ProviderContractMetadata,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, STARTUP_CATALOG_COMMAND_GENERATION,
 };
-use aeris_market_data::{DepthLevel, EventMetadata, QualifiedTimestamp};
+use aeris_market_data::{EventMetadata, MarketDataValidationError, QualifiedTimestamp, QuoteLevel};
 use aeris_observability::diagnostic;
 use aeris_platform_runtime::hosted_broker::HostedBrokerConnection;
 use aeris_tastytrade_market_adapter::{
@@ -47,6 +47,7 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         depth_available: false,
         search_categories_available: true,
         market_screen_available: false,
+        trades_available: true,
         connection_kind: aeris_contracts::ProviderConnectionKind::HostedBroker,
     };
 pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescriptor {
@@ -67,6 +68,7 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
     recovery_policy: super::ProviderRecoveryPolicy::WorkerReconcilesDemand,
     idle_stop_policy: super::IdleStopPolicy::WorkerManaged,
     alert_demand_update: super::AlertDemandUpdate::WorkerManaged,
+    authorization_revoked_detail: "Tastytrade disconnected",
     start: super::ProviderRuntimeRegistry::start_tastytrade_runtime,
     flush_demand,
     prepare_search: Some(prepare_search),
@@ -118,6 +120,16 @@ pub(super) enum CatalogEvent {
     },
     RefreshFailed(String),
 }
+/// Retained search results by consumer and whether they answer the startup
+/// re-resolution. A picker search on the same consumer must not retire the
+/// startup results its pending startup selection resolves against.
+type CatalogSearches = BTreeMap<(u64, bool), (u64, Vec<SearchInstrument>)>;
+fn search_slot(consumer: u64, search_generation: u64) -> (u64, bool) {
+    (
+        consumer,
+        search_generation == STARTUP_CATALOG_COMMAND_GENERATION,
+    )
+}
 struct RemoteSearchRequest {
     search: SearchProviderInstruments,
     authorization_epoch: u64,
@@ -142,7 +154,6 @@ pub(super) enum RealtimeEvent {
     Connected(u64),
     Heartbeat(u64, u64),
     Recovering(u64, String),
-    Failed(u64, String),
     Disconnected(u64),
     Candle(u64, String, MarketBar, u64, u64),
     CandleRecovery(u64, String),
@@ -158,7 +169,6 @@ impl RealtimeEvent {
             | Self::Connected(g)
             | Self::Heartbeat(g, _)
             | Self::Recovering(g, _)
-            | Self::Failed(g, _)
             | Self::Disconnected(g)
             | Self::Candle(g, ..)
             | Self::CandleRecovery(g, ..)
@@ -697,7 +707,7 @@ pub(super) fn run_catalog(
         diagnostic!("Aeris tastytrade equity search worker could not start");
         return;
     };
-    let mut searches = BTreeMap::<u64, (u64, Vec<SearchInstrument>)>::new();
+    let mut searches = CatalogSearches::new();
     let mut futures = Vec::new();
     let mut authorization_epoch = api.authorization_epoch.load(Ordering::Acquire);
     let mut refresh_at = Instant::now();
@@ -810,7 +820,7 @@ fn refresh_catalog(
 }
 fn remote_search_event(
     reply: RemoteSearchReply,
-    searches: &mut BTreeMap<u64, (u64, Vec<SearchInstrument>)>,
+    searches: &mut CatalogSearches,
     generation: &AtomicU64,
     api: &BrokerApi,
 ) -> Option<CatalogEvent> {
@@ -818,7 +828,8 @@ fn remote_search_event(
         return None;
     }
     let search = &reply.request.search;
-    let (search_generation, items) = searches.get_mut(&search.consumer_id)?;
+    let (search_generation, items) =
+        searches.get_mut(&search_slot(search.consumer_id, search.search_generation))?;
     if *search_generation != search.search_generation {
         return None;
     }
@@ -874,7 +885,7 @@ fn remote_search_event(
 fn resolve_selection(
     selection: &SelectProviderInstrument,
     futures: &[FutureInstrument],
-    searches: &BTreeMap<u64, (u64, Vec<SearchInstrument>)>,
+    searches: &CatalogSearches,
     api: &BrokerApi,
     stop: &Arc<AtomicBool>,
     generation: &AtomicU64,
@@ -884,7 +895,10 @@ fn resolve_selection(
         return Err("Tastytrade entitlement changed".into());
     }
     let item = searches
-        .get(&selection.consumer_id)
+        .get(&search_slot(
+            selection.consumer_id,
+            selection.search_generation,
+        ))
         .filter(|(epoch, _)| *epoch == selection.search_generation)
         .and_then(|(_, items)| {
             items.iter().find(|item| {
@@ -950,13 +964,16 @@ fn run_remote_search(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
         };
+        let slot = |request: &RemoteSearchRequest| {
+            search_slot(request.search.consumer_id, request.search.search_generation)
+        };
         let mut pending = BTreeMap::new();
-        pending.insert(first.search.consumer_id, first);
+        pending.insert(slot(&first), first);
         let deadline = Instant::now() + Duration::from_millis(120);
         while let Ok(request) =
             requests.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
-            pending.insert(request.search.consumer_id, request);
+            pending.insert(slot(&request), request);
         }
         for (_, request) in pending {
             if stop.load(Ordering::Acquire) {
@@ -1041,7 +1058,7 @@ fn tastytrade_display_symbol(symbol: &str, instrument_type: &str) -> String {
 fn search_catalog(
     search: &SearchProviderInstruments,
     futures: &mut Vec<FutureInstrument>,
-    searches: &mut BTreeMap<u64, (u64, Vec<SearchInstrument>)>,
+    searches: &mut CatalogSearches,
     api: &BrokerApi,
     stop: &Arc<AtomicBool>,
     generation: &Arc<AtomicU64>,
@@ -1091,10 +1108,12 @@ fn search_catalog(
         .take(search.maximum_results.min(100) as usize)
         .map(instrument_summary)
         .collect();
-    if !searches.contains_key(&search.consumer_id) && searches.len() >= MAXIMUM_CONSUMERS {
+    let slot = search_slot(search.consumer_id, search.search_generation);
+    // Each consumer may hold one startup and one interactive result.
+    if !searches.contains_key(&slot) && searches.len() >= 2 * MAXIMUM_CONSUMERS {
         searches.pop_first();
     }
-    searches.insert(search.consumer_id, (search.search_generation, items));
+    searches.insert(slot, (search.search_generation, items));
     Ok(CatalogEvent::Search(ProviderInstrumentSearchResult {
         consumer_id: search.consumer_id,
         provider: "tastytrade".into(),
@@ -1596,10 +1615,13 @@ struct Worker {
     demand_dirty: bool,
     candle_from_ms: BTreeMap<String, i64>,
     failures: u8,
+    /// Set only while tastytrade authorization is withdrawn.
     paused: bool,
     trade_batches: BTreeMap<String, (bool, Vec<IndexedTradeMutation>)>,
     candle_batches: BTreeMap<String, (bool, Vec<(MarketBar, u64)>)>,
     quotes: BTreeMap<String, TopOfBookQuote>,
+    crossed_quotes_withheld: u64,
+    crossed_quotes_reported_at: Option<Instant>,
 }
 impl Worker {
     fn new(ports: WorkerPorts) -> Self {
@@ -1628,6 +1650,8 @@ impl Worker {
             trade_batches: BTreeMap::new(),
             candle_batches: BTreeMap::new(),
             quotes: BTreeMap::new(),
+            crossed_quotes_withheld: 0,
+            crossed_quotes_reported_at: None,
         }
     }
     fn epoch(&self) -> u64 {
@@ -2153,9 +2177,9 @@ impl Worker {
                 else {
                     return Ok(());
                 };
-                let level = |(price, quantity)| DepthLevel {
+                let level = |(price, quantity)| QuoteLevel {
                     price,
-                    quantity,
+                    quantity: Some(quantity),
                     order_count: None,
                 };
                 let mut quote_metadata = metadata(instrument, epoch, self.ordinal, None)?;
@@ -2166,7 +2190,15 @@ impl Worker {
                     bid: bid.map(level),
                     ask: ask.map(level),
                 };
-                quote.validate().map_err(|e| e.to_string())?;
+                match quote.validate() {
+                    Ok(()) => {}
+                    Err(MarketDataValidationError::InvalidQuote) => {
+                        let instrument_id = instrument.instrument_id.clone();
+                        self.withhold_crossed_quote(&instrument_id);
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
                 self.quotes.insert(symbol, quote.clone());
                 self.publish(RealtimeEvent::Quote(epoch, quote))?;
             }
@@ -2277,10 +2309,10 @@ impl Worker {
         };
         let mut quote = previous.clone();
         if let Some(price) = print.bid_price {
-            quote.bid = quote.bid.map(|level| DepthLevel { price, ..level });
+            quote.bid = quote.bid.map(|level| QuoteLevel { price, ..level });
         }
         if let Some(price) = print.ask_price {
-            quote.ask = quote.ask.map(|level| DepthLevel { price, ..level });
+            quote.ask = quote.ask.map(|level| QuoteLevel { price, ..level });
         }
         if quote == previous {
             return Ok(());
@@ -2396,26 +2428,38 @@ impl Worker {
         self.quotes.clear();
         self.cancel_histories(&error);
         self.failures = self.failures.saturating_add(1);
-        self.paused = self.failures >= 5;
-        self.retry_at =
-            Instant::now() + Duration::from_secs(3u64.saturating_mul(1u64 << self.failures.min(4)));
-        let detail = if self.paused {
-            format!("{error}. Automatic retry limit reached; connect tastytrade to retry.")
-        } else {
-            error
-        };
-        let event = if self.paused {
-            RealtimeEvent::Failed(self.epoch(), detail)
-        } else {
-            RealtimeEvent::Recovering(self.epoch(), detail)
-        };
-        if let Err(publish_error) = self.publish(event) {
+        // Transport failures never park the session: a parked worker leaves every
+        // demanded series waiting on history until the user reconnects. The capped
+        // backoff bounds provider traffic to one token request per retry interval;
+        // only an explicit authorization change pauses the worker.
+        self.retry_at = Instant::now() + recovery_delay(self.failures);
+        if let Err(publish_error) = self.publish(RealtimeEvent::Recovering(self.epoch(), error)) {
             diagnostic!("Aeris tastytrade provider state publication failed: {publish_error}");
-            if self.paused {
-                self.ports.wake.report_failure("tastytrade", self.epoch());
-            }
         }
     }
+    /// dxFeed updates each quote side independently, so a composite quote can be
+    /// briefly locked or crossed. It cannot form a canonical top of book, but it
+    /// is not a transport failure; the last valid quote stays until the next one.
+    fn withhold_crossed_quote(&mut self, instrument_id: &str) {
+        self.crossed_quotes_withheld = self.crossed_quotes_withheld.saturating_add(1);
+        let now = Instant::now();
+        if self
+            .crossed_quotes_reported_at
+            .is_some_and(|reported| now.duration_since(reported) < Duration::from_mins(1))
+        {
+            return;
+        }
+        diagnostic!(
+            "Aeris tastytrade withheld {} locked or crossed quotes; latest instrument={instrument_id}",
+            self.crossed_quotes_withheld
+        );
+        self.crossed_quotes_withheld = 0;
+        self.crossed_quotes_reported_at = Some(now);
+    }
+}
+
+fn recovery_delay(failures: u8) -> Duration {
+    Duration::from_secs(3u64.saturating_mul(1u64 << failures.min(4)))
 }
 
 pub(super) fn start_record(

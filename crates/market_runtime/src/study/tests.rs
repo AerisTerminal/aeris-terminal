@@ -801,22 +801,22 @@ fn live_microstructure_fixture() -> LiveMicrostructureFixture {
     }]);
     let quote_one = TopOfBookQuote {
         metadata: event_metadata(3, 90),
-        bid: Some(DepthLevel {
+        bid: Some(QuoteLevel {
             price: 100,
-            quantity: 2,
+            quantity: Some(2),
             order_count: None,
         }),
-        ask: Some(DepthLevel {
+        ask: Some(QuoteLevel {
             price: 110,
-            quantity: 2,
+            quantity: Some(2),
             order_count: None,
         }),
     };
     let quote_two = TopOfBookQuote {
         metadata: event_metadata(4, 90),
-        ask: Some(DepthLevel {
+        ask: Some(QuoteLevel {
             price: 130,
-            quantity: 2,
+            quantity: Some(2),
             order_count: None,
         }),
         ..quote_one.clone()

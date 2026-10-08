@@ -997,6 +997,7 @@ mod tests {
         let expected = BTreeSet::from([
             "crates/context_runtime/src/lib.rs::ContextCredentialStore".to_string(),
             "crates/context_runtime/src/lib.rs::ContextFetcher".to_string(),
+            "crates/market_runtime/src/market_service/ctrader.rs::CtraderMarketLink".to_string(),
             "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),

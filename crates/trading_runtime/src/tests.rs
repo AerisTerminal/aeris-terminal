@@ -1603,6 +1603,155 @@ fn simulated_execution_and_records_survive_restart_and_export() {
         .expect("restarted service stops");
 }
 
+/// Fills one market order at the observed touch: buys at `ask`, sells at `bid`.
+fn execute_market_order(
+    service: &TradingService,
+    step: u64,
+    side: OrderSide,
+    quantity: i64,
+    (bid, ask): (i64, i64),
+) {
+    let sequence = step * 2 + 1;
+    let time = i64::try_from(sequence).expect("time") * 1_000;
+    let mut order = market_order(&format!("round-trip-{step}"), side, sequence, time);
+    order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
+    service.place_order(order).expect("order accepted");
+    let fills = service
+        .observe_market(observation(bid, ask, sequence + 1, time + 500))
+        .expect("market observed");
+    assert_eq!(fills.len(), 1, "the market order fills");
+}
+
+fn price(units: i64) -> FixedPoint {
+    FixedPoint::try_new(units, 2).expect("price")
+}
+
+fn contracts(units: i64) -> FixedPoint {
+    FixedPoint::try_new(units, 0).expect("quantity")
+}
+
+#[test]
+fn entry_and_exit_fills_form_one_round_trip_with_its_final_pnl() {
+    let directory = TestDirectory::new("round-trip");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    execute_market_order(&service, 1, OrderSide::Buy, 1, (9_975, 10_000));
+    let open = service.snapshot().expect("open snapshot");
+    assert_eq!(open.round_trips.len(), 1);
+    assert!(!open.round_trips[0].closed);
+    assert_eq!(open.round_trips[0].final_pnl, None);
+    assert_eq!(open.round_trips[0].exit, None);
+
+    execute_market_order(&service, 2, OrderSide::Sell, 1, (10_100, 10_125));
+    let snapshot = service.snapshot().expect("closed snapshot");
+    assert_eq!(snapshot.fills.len(), 2);
+    let [trip] = snapshot.round_trips.as_slice() else {
+        panic!("one round trip, not one row per fill");
+    };
+    assert_eq!(trip.side, OrderSide::Buy);
+    assert!(trip.closed);
+    let entry = trip.entry.expect("entry");
+    let exit = trip.exit.expect("exit");
+    assert_eq!(
+        entry.first_unix_nanos,
+        snapshot.fills[1].execution_unix_nanos
+    );
+    assert_eq!(exit.last_unix_nanos, snapshot.fills[0].execution_unix_nanos);
+    assert_eq!(
+        (entry.average_price, entry.quantity),
+        (price(10_000), contracts(1))
+    );
+    assert_eq!(
+        (exit.average_price, exit.quantity),
+        (price(10_100), contracts(1))
+    );
+    assert_eq!(
+        trip.final_pnl,
+        Some(FixedPoint::try_new(5_000, 2).expect("pnl"))
+    );
+}
+
+#[test]
+fn scale_ins_partial_exits_and_reversals_group_by_position_cycle() {
+    let directory = TestDirectory::new("round-trip-reversal");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    execute_market_order(&service, 1, OrderSide::Buy, 1, (9_975, 10_000));
+    execute_market_order(&service, 2, OrderSide::Buy, 1, (10_075, 10_100));
+    // Closes the two-lot long and opens a one-lot short in the same fill.
+    execute_market_order(&service, 3, OrderSide::Sell, 3, (10_200, 10_225));
+    execute_market_order(&service, 4, OrderSide::Buy, 1, (10_075, 10_100));
+    let snapshot = service.snapshot().expect("snapshot");
+    let [short, long] = snapshot.round_trips.as_slice() else {
+        panic!("two round trips, got {:?}", snapshot.round_trips);
+    };
+
+    assert_eq!(long.side, OrderSide::Buy);
+    let long_entry = long.entry.expect("long entry");
+    let long_exit = long.exit.expect("long exit");
+    assert_eq!(
+        (long_entry.average_price, long_entry.quantity),
+        (price(10_050), contracts(2))
+    );
+    assert_eq!(
+        (long_exit.average_price, long_exit.quantity),
+        (price(10_200), contracts(2))
+    );
+    assert_eq!(
+        long.final_pnl,
+        Some(FixedPoint::try_new(15_000, 2).expect("long pnl"))
+    );
+
+    assert_eq!(short.side, OrderSide::Sell);
+    let short_entry = short.entry.expect("short entry");
+    let short_exit = short.exit.expect("short exit");
+    assert_eq!(
+        (short_entry.average_price, short_entry.quantity),
+        (price(10_200), contracts(1))
+    );
+    assert_eq!(
+        (short_exit.average_price, short_exit.quantity),
+        (price(10_100), contracts(1))
+    );
+    assert_eq!(
+        short.final_pnl,
+        Some(FixedPoint::try_new(5_000, 2).expect("short pnl"))
+    );
+    assert!(long.closed && short.closed);
+}
+
+#[test]
+fn a_trade_opened_before_retained_history_keeps_its_final_pnl_without_a_guessed_entry() {
+    let directory = TestDirectory::new("round-trip-retention");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    execute_market_order(&service, 1, OrderSide::Buy, 1, (9_975, 10_000));
+    for step in 0..4 {
+        execute_market_order(&service, 2 + step * 2, OrderSide::Buy, 1, (9_975, 10_000));
+        execute_market_order(&service, 3 + step * 2, OrderSide::Sell, 1, (9_975, 10_000));
+    }
+    execute_market_order(&service, 10, OrderSide::Sell, 1, (9_975, 10_000));
+    let snapshot = service.snapshot().expect("snapshot");
+    assert!(snapshot.fills.len() < 10, "the opening fill was retired");
+    let [trip] = snapshot.round_trips.as_slice() else {
+        panic!("one round trip, got {:?}", snapshot.round_trips);
+    };
+    assert_eq!(trip.side, OrderSide::Buy);
+    assert!(trip.closed);
+    assert_eq!(trip.entry, None, "a partial entry would misstate the trade");
+    assert_eq!(
+        trip.final_pnl,
+        Some(snapshot.positions[0].realized_pnl),
+        "the owner's final P&L survives retirement of the opening fill"
+    );
+}
+
 #[test]
 fn risk_profile_cancel_and_lock_state_are_authoritative_and_restart_safe() {
     let directory = TestDirectory::new("risk");

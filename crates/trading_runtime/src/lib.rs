@@ -7,6 +7,7 @@ mod copier;
 mod discipline;
 mod plan;
 mod risk;
+mod round_trip;
 mod store;
 mod strategy;
 pub mod venue;
@@ -32,6 +33,7 @@ pub use risk::{
     EconomicEventRiskRule, EconomicEventRiskTrigger, RiskEvaluation, RiskLock, RiskMeter,
     RiskProfile, RiskRuleState, TrailingDrawdownMode,
 };
+pub use round_trip::{TradeLeg, TradeRoundTrip};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -291,6 +293,8 @@ pub struct TradingSnapshot {
     pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
     /// Realized P&L of each fill that reduced or closed a position, partial exits included.
     pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
+    /// Trades grouped from `fills`, entry to exit, newest activity first.
+    pub round_trips: Vec<TradeRoundTrip>,
     pub positions: Vec<Position>,
     pub broker_positions: Vec<BrokerPosition>,
     pub position_pnl: Vec<PositionPnl>,
@@ -4207,6 +4211,12 @@ impl Coordinator {
                         .map(|pnl| (fill.id.clone(), *pnl))
                 })
                 .collect(),
+            round_trips: round_trip::project_round_trips(
+                self.state.fills.iter().rev().take(MAXIMUM_SNAPSHOT_ITEMS),
+                &self.state.positions,
+                &self.state.completed_trade_pnl,
+                &self.state.fill_realized_pnl,
+            )?,
             positions: self.state.positions.values().cloned().collect(),
             broker_positions: self.state.broker_positions.values().cloned().collect(),
             position_pnl: self.position_pnl()?,
