@@ -872,6 +872,8 @@ struct TradingPnlState {
     /// Broker positions, per broker position id; the broker sends no mark, so they carry
     /// no unrealized P&L here.
     broker_positions: Vec<aeris_trading::BrokerPosition>,
+    /// Broker accounts the attached venue can reach now.
+    connected_broker_accounts: std::collections::BTreeSet<aeris_trading::TradingAccountId>,
     risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
     risk_locks: Vec<aeris_trading_runtime::RiskLock>,
     feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
@@ -1041,6 +1043,7 @@ impl Default for TradingPnlState {
             orders: Vec::new(),
             positions: Vec::new(),
             broker_positions: Vec::new(),
+            connected_broker_accounts: std::collections::BTreeSet::new(),
             risk_profiles: Vec::new(),
             risk_locks: Vec::new(),
             feedback: None,

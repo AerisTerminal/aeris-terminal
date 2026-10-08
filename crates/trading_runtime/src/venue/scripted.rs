@@ -909,4 +909,21 @@ fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
         receiver.try_recv().is_err(),
         "a known account is not reconciled again"
     );
+
+    // Only announced accounts are reachable, and a new generation starts with none.
+    let connected = service
+        .snapshot()
+        .expect("snapshot")
+        .connected_broker_accounts;
+    assert!(connected.contains(&TradingAccountId::try_new("ctrader-demo-2002").expect("id")));
+    assert!(!connected.contains(&broker().id));
+    let _next = service.attach_demo_venue().expect("reattach");
+    assert_eq!(
+        service
+            .snapshot()
+            .expect("snapshot")
+            .connected_broker_accounts
+            .len(),
+        0
+    );
 }

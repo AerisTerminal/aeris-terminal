@@ -729,6 +729,7 @@ fn apply_trading_snapshot(
     state.trading_pnl.orders = snapshot.orders;
     state.trading_pnl.positions = snapshot.position_pnl;
     state.trading_pnl.broker_positions = snapshot.broker_positions;
+    state.trading_pnl.connected_broker_accounts = snapshot.connected_broker_accounts;
     state.trading_pnl.risk_profiles = snapshot.risk_profiles;
     state.trading_pnl.risk_locks = snapshot.risk_locks;
     state.trading_pnl.accounts = accounts;

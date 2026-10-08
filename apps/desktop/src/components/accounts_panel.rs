@@ -114,7 +114,10 @@ fn broker_accounts(
             aeris_trading::AccountEnvironment::Live => {
                 "cTrader live · trading is disabled".to_string()
             }
-            _ => format!("cTrader demo · {}", account.currency),
+            _ if trading.connected_broker_accounts.contains(&account.id) => {
+                format!("cTrader demo · {}", account.currency)
+            }
+            _ => "cTrader demo · not connected".to_string(),
         };
         let selectable = account.environment == aeris_trading::AccountEnvironment::Demo;
         list = list.child(account_row(

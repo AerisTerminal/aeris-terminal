@@ -418,8 +418,10 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
   currency from `ProtoOATraderRes` and the asset list, money scale) and its balance; the owner
   registers it as `ctrader-demo-{ctid}` with `venue_id = "ctrader"` and `broker_ref` = the ctid,
   and reconciles a new account at once. Live accounts are not announced (data-only).
-- [ ] **Unobserved accounts:** mark accounts no longer observed as disconnected instead of keeping
-  them silently (the `connection_state` column exists but is unused).
+- [x] **Unobserved accounts:** the owner tracks which broker accounts the current venue generation
+  announced (cleared on every attach, in memory because it is a per-session fact) and the snapshot
+  exposes it; the Accounts panel shows other demo accounts as "not connected". The unused
+  `connection_state` column stays unused.
 - [x] **Register instruments:** charting a cTrader symbol already registers its `TradingInstrument`
   from the install (price scale = digits, quantity scale 2, tick from M-7, step volume and quote
   currency from Phase 2).

@@ -35,7 +35,7 @@ pub use risk::{
 };
 pub use round_trip::{TradeLeg, TradeRoundTrip};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
@@ -322,6 +322,8 @@ pub struct TradingSnapshot {
     pub broker_positions: Vec<BrokerPosition>,
     /// The last balance each broker account reported, in its currency.
     pub broker_balances: BTreeMap<TradingAccountId, FixedPoint>,
+    /// Broker accounts the attached venue can reach now.
+    pub connected_broker_accounts: BTreeSet<TradingAccountId>,
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
     pub risk_profiles: Vec<RiskProfile>,
@@ -468,6 +470,9 @@ struct Coordinator {
     venue_outbound: Option<SyncSender<VenueRequest>>,
     venue_inbox: Weak<VenueInbox>,
     venue_ingestion: u64,
+    /// Broker accounts the current venue generation has announced; the rest are not
+    /// reachable now.
+    connected_broker_accounts: BTreeSet<TradingAccountId>,
 }
 
 /// Latest canonical BBO applied per registered instrument. Market panes can
@@ -533,6 +538,7 @@ impl TradingService {
                             venue_outbound: None,
                             venue_inbox: coordinator_venue_inbox,
                             venue_ingestion: 0,
+                            connected_broker_accounts: BTreeSet::new(),
                         };
                         coordinator.repair_loaded_position_projections()?;
                         Ok(coordinator)
@@ -1323,6 +1329,8 @@ impl Coordinator {
         self.venue_outbound = Some(outbound);
         self.state.venue_generation = generation;
         self.venue_ingestion = 0;
+        self.connected_broker_accounts.clear();
+        self.bump_revision()?;
         Ok((generation, receiver))
     }
 
@@ -4315,6 +4323,7 @@ impl Coordinator {
             positions: self.state.positions.values().cloned().collect(),
             broker_positions: self.state.broker_positions.values().cloned().collect(),
             broker_balances: self.state.broker_balances.clone(),
+            connected_broker_accounts: self.connected_broker_accounts.clone(),
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
             risk_profiles: self.state.risk_profiles.values().cloned().collect(),

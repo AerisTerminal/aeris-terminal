@@ -89,8 +89,13 @@ impl Coordinator {
             if known.environment != observed.environment {
                 return Err("a broker account changed environment".into());
             }
+            let newly_connected = self.connected_broker_accounts.insert(account_id);
             if known.display_name == observed.display_name {
-                return Ok(());
+                return if newly_connected {
+                    self.bump_revision()
+                } else {
+                    Ok(())
+                };
             }
             known.display_name.clone_from(&observed.display_name);
             return self.register_account(known);
@@ -112,6 +117,7 @@ impl Coordinator {
         let reconcile = (account.environment == AccountEnvironment::Demo)
             .then(|| self.reconcile_request(&account))
             .flatten();
+        self.connected_broker_accounts.insert(account.id.clone());
         self.register_account(account)?;
         match reconcile {
             Some(request) if self.venue_outbound.is_some() => self.send_venue_request(request),
