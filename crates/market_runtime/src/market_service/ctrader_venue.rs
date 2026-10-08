@@ -35,6 +35,8 @@ const FIRST_OPEN_RETRY: Duration = Duration::from_secs(5);
 const MAXIMUM_OPEN_RETRY: Duration = Duration::from_secs(300);
 /// Symbol specifications kept for trading; the cache restarts when it fills.
 const MAXIMUM_SPECS: usize = 1024;
+/// Deal-list requests one replay may make while splitting truncated windows.
+const MAXIMUM_REPLAY_REQUESTS: usize = 16;
 /// Deals are replayed from a little before the session dropped.
 const RESYNC_MARGIN_MILLIS: i64 = 60_000;
 /// Volumes travel in cents of a unit.
@@ -910,25 +912,8 @@ impl Worker {
         let mut updates = Vec::new();
         if let Some(since) = since_millis {
             let now = now_nanos().map_err(Failure::Request)? / 1_000_000;
-            let host = self.ensure_host(false)?;
-            let frame = host.request(trading(
-                TradingRequest::deal_list(ctid, since.max(0), now.max(since.max(0) + 1))
-                    .map_err(|error| request_error(&error))?,
-            ))?;
-            self.ensure_frame_specs(ctid, &frame)?;
-            let specs = self.venue_specs();
-            let translator = Translator {
-                ctid,
-                specs: &specs,
-            };
-            let page = decode_deal_page(&frame, ctid, &translator.scales())
-                .map_err(|error| request_error(&error))?;
-            if page.has_more {
-                diagnostic!(
-                    "Aeris cTrader deal replay exceeded one page; older deals were skipped"
-                );
-            }
-            updates.extend(translator.fills(&page.deals).map_err(Failure::Request)?);
+            let since = since.max(0);
+            updates.extend(self.replay_deals(ctid, since, now.max(since + 1))?);
         }
         let host = self.ensure_host(false)?;
         let frame = host.request(trading(
@@ -948,6 +933,51 @@ impl Worker {
                 .map_err(Failure::Request)?,
         ));
         Ok(updates)
+    }
+
+    /// Every filled deal in `[from_ms, to_ms)`. A window the broker reports as truncated
+    /// is split in halves until each part fits, within a fixed request budget; which part
+    /// of a truncated window the broker returns is not documented, so none is assumed.
+    fn replay_deals(
+        &mut self,
+        ctid: u64,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<VenueUpdate>, Failure> {
+        let mut windows = vec![(from_ms, to_ms)];
+        let mut fills = Vec::new();
+        let mut requests = 0;
+        while let Some((from, to)) = windows.pop() {
+            requests += 1;
+            let host = self.ensure_host(false)?;
+            let frame = host.request(trading(
+                TradingRequest::deal_list(ctid, from, to).map_err(|error| request_error(&error))?,
+            ))?;
+            self.ensure_frame_specs(ctid, &frame)?;
+            let specs = self.venue_specs();
+            let translator = Translator {
+                ctid,
+                specs: &specs,
+            };
+            let page = decode_deal_page(&frame, ctid, &translator.scales())
+                .map_err(|error| request_error(&error))?;
+            let middle = from + (to - from) / 2;
+            if page.has_more
+                && middle > from
+                && requests + windows.len() + 2 <= MAXIMUM_REPLAY_REQUESTS
+            {
+                windows.push((middle, to));
+                windows.push((from, middle));
+                continue;
+            }
+            if page.has_more {
+                diagnostic!(
+                    "Aeris cTrader deal replay hit its request budget; some deals were skipped"
+                );
+            }
+            fills.extend(translator.fills(&page.deals).map_err(Failure::Request)?);
+        }
+        Ok(fills)
     }
 
     fn venue_specs(&self) -> BTreeMap<(u64, u64), SymbolSpec> {

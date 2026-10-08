@@ -340,12 +340,16 @@ fn reconcile_frame(orders: &[Vec<u8>], positions: &[Vec<u8>]) -> ProtoMessage {
 }
 
 fn deal_list_frame(deals: &[Vec<u8>]) -> ProtoMessage {
+    deal_page_frame(deals, false)
+}
+
+fn deal_page_frame(deals: &[Vec<u8>], has_more: bool) -> ProtoMessage {
     let mut payload = Vec::new();
     field_int(&mut payload, 2, DEMO_CTID.cast_signed());
     for deal in deals {
         field_bytes(&mut payload, 3, deal);
     }
-    field_varint(&mut payload, 4, 0);
+    field_varint(&mut payload, 4, u64::from(has_more));
     frame(2134, payload)
 }
 
@@ -2674,6 +2678,47 @@ mod venue_relay {
             "the backoff holds the next attempt"
         );
         assert_eq!(harness.worker.failures, 0);
+    }
+
+    #[test]
+    fn a_truncated_deal_window_is_split_until_every_part_fits() {
+        let (mut harness, venue) = attached(trading_script());
+        venue.updates();
+        {
+            let mut script = harness.script.lock().unwrap();
+            script
+                .trading
+                .push_back(deal_page_frame(&[deal_body(501, 9)], true));
+            script
+                .trading
+                .push_back(deal_list_frame(&[deal_body(502, 9)]));
+            script
+                .trading
+                .push_back(deal_list_frame(&[deal_body(503, 9)]));
+            script.trading.push_back(reconcile_frame(&[], &[]));
+        }
+        venue
+            .requests
+            .send(VenueRequest::Reconcile {
+                broker_account: DEMO_CTID.to_string(),
+                deals_since_unix_nanos: Some(1_791_466_000_000_000_000),
+            })
+            .expect("queued");
+        harness.drive();
+        let deals: Vec<String> = venue
+            .updates()
+            .into_iter()
+            .filter_map(|update| match update {
+                VenueUpdate::Fill(fill) => Some(fill.broker_deal_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deals,
+            ["502", "503"],
+            "the truncated page is replaced by its halves"
+        );
+        assert_eq!(trading_requests(&harness), [2121, 2133, 2133, 2133, 2124]);
     }
 
     #[test]

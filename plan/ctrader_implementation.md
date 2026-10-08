@@ -424,8 +424,8 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
   from the install (price scale = digits, quantity scale 2, tick from M-7, step volume and quote
   currency from Phase 2).
 - [x] **Bounds:** requests per relay turn (16), the outbound queue (64), the blocking inbox (1024,
-  reattach after a 20 s stall), the spec cache (1024) and one deal page per reconcile. A deal
-  replay longer than one page is logged; paging it is still to do.
+  reattach after a 20 s stall), the spec cache (1024), and at most 16 deal-list requests per
+  replay: a window the broker reports as truncated is split in halves until each part fits.
 - [x] **Day orders:** decided 2026-10-08 by the maintainer: broker pending orders requested as
   `Day` rest good-till-cancelled, and market orders carry immediate-or-cancel; the owner stores the
   time in force the broker holds. The relay still refuses `Day` at the contract level.
