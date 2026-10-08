@@ -100,6 +100,34 @@ Architecture assertions in `tools/naming_check` are authoritative when they are 
 The licensed Rithmic Provider Kit remains outside Git. The canonical local copy is
 `C:\axiusflow-deps\provider-kit`; do not vendor or modify that permanent copy.
 
+## Operating constraints
+
+1. **Local-first, no server in the market-data path.** No Aeris server receives, stores, processes
+   or relays market data, and no feature may depend on one. The only Aeris server is the AWS broker
+   for hosted-broker OAuth and application credentials (tastytrade, cTrader); it never sees market
+   data, orders or account state.
+2. **Exchange data stays on the user's machine.** Broker data is processed only in the desktop
+   process. Aeris must not redistribute exchange data or its derivatives.
+3. **Public non-exchange data is fetched directly from its official source**, with the user's own
+   free API key where required.
+4. **User-owned data is stored locally.** Optional sync uses a folder the user controls.
+5. **Provider access is gated.** Features that need a gated provider (Rithmic) are designed now and
+   qualified after onboarding; anything buildable on public data or the simulated venue proceeds
+   first.
+
+### Data licensing checklist
+
+A release gate, not legal advice. Before a feature that stores, derives or transmits exchange data
+ships, confirm against current CME policies, the Rithmic agreement and any broker agreements:
+
+- Local storage of recorded trades and depth for the subscriber's personal replay and review.
+- Display of derived values (queue position, detections, footprint and profile statistics).
+- Alerts leaving the machine carry event descriptions, not exchange prices or quantities, unless
+  explicitly allowed.
+- Professional versus non-professional subscriber status.
+
+Record the reviewed policy versions in the feature's release notes.
+
 ## Aeris Charts
 
 Aeris Charts is a separate pinned Git dependency. Do not clone or vendor it into this repository.

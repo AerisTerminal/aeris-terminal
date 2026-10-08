@@ -33,7 +33,7 @@ Measure everything on the same machine and publish the method:
 | 1 | **Futures prop firms** | Lost ProjectX; need branded platforms; decide fast; buy B2B | Rithmic conformance |
 | 2 | **Small and mid futures brokers / IBs** | List many third-party platforms; some openly invite new ones | Rithmic conformance |
 | 3 | **Crypto exchange broker programs** | Pay revenue share on routed volume; some need no company | Indian legal check on rebates |
-| 4 | **cTrader brokers and prop firms (forex/CFD)** | cTrader Open API is free, uses OAuth and works with any cTrader broker | Spotware app approval, then the integration (`plan/trading_roadmap.md` T9) |
+| 4 | **cTrader brokers and prop firms (forex/CFD)** | cTrader Open API is free, uses OAuth and works with any cTrader broker | Spotware app approval, then the integration (`plan/longterm_plan/trading_platform.md` T9) |
 | 5 | **Large brokers (Schwab, IBKR Web API, TradeStation)** | Big brands, but need a US entity, traction and due diligence | Revenue and a US entity |
 
 ### What not to do
@@ -49,7 +49,7 @@ Measure everything on the same machine and publish the method:
 ## 3. Target list
 
 What Aeris can do on each route today, and the work left to make it trade, is tracked in
-`plan/trading_roadmap.md` §9 (Broker coverage). As of October 2026, market data works through
+`plan/longterm_plan/trading_platform.md` (Broker coverage). As of October 2026, market data works through
 Rithmic (Test system only), tastytrade (Level 1) and Hyperliquid. No live broker or exchange
 account can trade yet.
 
@@ -177,7 +177,7 @@ A new vendor has to start below these to win pilots. Test these numbers with 3�
 
 ### For traders (end-user pricing)
 
-The plans published at https://aeristerminal.com/pricing/ are defined in `plan/pricing_strategy.md`,
+The plans published at https://aeristerminal.com/pricing/ are defined in `plan/longterm_plan/pricing_strategy.md`,
 which is the authoritative source:
 
 | Plan | Price | Includes |
@@ -187,7 +187,7 @@ which is the authoritative source:
 | Prop | $69/mo or $49/mo yearly | Pro plus the multi-account copier and up to 20 live accounts |
 
 **Open decision:** this plan's founder lifetime licence ($499–799 for the first 300–500 buyers, used
-in §7 and §8) conflicts with `plan/pricing_strategy.md`, which skips lifetime licences at launch and
+in §7 and §8) conflicts with `plan/longterm_plan/pricing_strategy.md`, which skips lifetime licences at launch and
 offers 40% off a yearly plan instead. Settle it before launching a founder offer.
 
 **Reference points:** Quantower $70/mo, ATAS Pro €69.95/mo, Deepcharts $69/mo, Sierra Chart $36–56/mo. Lifetime licences elsewhere cost $990–1,999. Consider regional pricing in rupees for India.
@@ -282,7 +282,7 @@ Day 0 email or DM, then a follow-up on day 3, day 7 and day 14 with new value ea
 | Weeks | Actions |
 |---|---|
 | 1–2 | Build the sales kit (benchmarks, video, one-pagers, security page, white-label theming). Register a cTrader Open API app. Apply to Hyperliquid, Bybit and Kraken. Get Indian legal and CA advice. Confirm Rithmic dev-kit terms and costs. |
-| 3–6 | Run Rithmic conformance when Rithmic onboarding allows. Without waiting for Rithmic, build cTrader market data and the shared live venue on cTrader demo accounts (`plan/trading_roadmap.md` T9). Send the first outreach wave to 15 prop firms and 3 brokers. Launch the founder lifetime offer. Post once in each community (Show HN, r/algotrading, r/FuturesTrading, NexusFi). |
+| 3–6 | Run Rithmic conformance when Rithmic onboarding allows. Without waiting for Rithmic, build cTrader market data and the shared live venue on cTrader demo accounts (`plan/longterm_plan/trading_platform.md` T9). Send the first outreach wave to 15 prop firms and 3 brokers. Launch the founder lifetime offer. Post once in each community (Show HN, r/algotrading, r/FuturesTrading, NexusFi). |
 | 7–12 | Run 2 pilots. Get listed on rithmic.com/platforms and by Discount Trading or AMP. Ship cTrader trading after demo qualification on two brokers. Send the second outreach wave to cTrader brokers and the remaining prop firms. Reapply to TradeStation with traction. |
 
 ### Targets by day 90
