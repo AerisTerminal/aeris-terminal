@@ -7,7 +7,7 @@ tracks what is built and what is left.
 A step is checked only when it works through the real runtime and desktop path. A passing unit test
 alone does not check a step.
 
-Last examined: 2026-10-08.
+Last examined: 2026-10-09.
 
 ---
 
@@ -20,15 +20,18 @@ Last examined: 2026-10-08.
 | Protocol adapter: TLS, framing, auth, heartbeat, limiter | `crates/adapters/ctrader_open_api` | **Done**, live-verified on demo |
 | Market data in `market_runtime` | `market_service/ctrader.rs` | **Done**; M-1 to M-9 fixed, second broker not yet run |
 | Desktop market data (pick cTrader, chart, DOM) | `apps/desktop` | **Built and tested**; manual desktop check pending |
-| Adapter trading messages | `crates/adapters/ctrader_open_api` | **Built**, schema-tested; demo capture pending |
-| Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Built**; T-1 to T-6 fixed; brackets and live-risk inputs open |
+| Adapter trading messages | `crates/adapters/ctrader_open_api` | **Done**, qualified on demo |
+| Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Built**; T-1 to T-6 fixed; brackets server-side; unrealized P&L open |
 | Session owner joining the adapter and `trading_runtime` | `market_runtime` relay (D8) | **Built**, verified on demo |
-| Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Not started** |
+| Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Built**; manual check and a positions panel pending |
+| AWS broker hardening (Phase 9) | `aeris-website` | Uncommitted work in progress there, not by this plan's agent |
 | Demo and live qualification | maintainer | **Not started** |
 
 In short: market data works from cTrader through `market_runtime` into the desktop (Accounts,
-symbol menu, chart, DOM), pending a manual check in the running app. Trading has a routing and
-safety skeleton but cannot send an order.
+symbol menu, chart, DOM), pending a manual check in the running app. Demo trading runs end to end:
+the desktop attaches the trading owner's venue to the cTrader supervisor, which relays orders over
+the shared demo session; the relay is verified on demo, and the desktop trading path awaits the
+manual check and Phase 7 qualification.
 
 ## 2. Verified evidence
 
