@@ -172,9 +172,40 @@ pub fn hosted_fault(status: u16) -> SessionFault {
 
 struct Pending {
     expected: u32,
+    /// The trading account the request names, so account-scoped faults reach only it.
+    account: Option<i64>,
     deadline: Instant,
     bucket: Bucket,
     response: Option<Result<ProtoMessage, SessionFault>>,
+}
+
+/// Account-scoped Open API requests carry `ctidTraderAccountId` at field 2. Requests whose
+/// field 2 is something else (application auth, account list) decode to no account.
+#[derive(Clone, PartialEq, Message)]
+struct AccountScope {
+    #[prost(int64, optional, tag = "2")]
+    ctid_trader_account_id: Option<i64>,
+}
+
+fn request_account(payload: &[u8]) -> Option<i64> {
+    AccountScope::decode(payload)
+        .ok()
+        .and_then(|scope| scope.ctid_trader_account_id)
+}
+
+/// An order request is answered by an execution event, or by an order error event when
+/// the order is rejected; both name the request's `clientMsgId`.
+const EXECUTION_EVENT: u32 = 2126;
+const ORDER_ERROR_EVENT: u32 = 2132;
+
+const fn answers(expected: u32, payload_type: u32) -> bool {
+    payload_type == expected || (expected == EXECUTION_EVENT && payload_type == ORDER_ERROR_EVENT)
+}
+
+/// Execution and order error events keep arriving for an order after its request was
+/// answered (accepted, then filled), so they are events, never stale responses.
+const fn is_order_event(payload_type: u32) -> bool {
+    matches!(payload_type, EXECUTION_EVENT | ORDER_ERROR_EVENT)
 }
 
 pub struct CtraderSession {
@@ -449,6 +480,7 @@ impl CtraderSession {
         }
         self.next_id = self.next_id.wrapping_add(1);
         let id = format!("aeris-{}", self.next_id);
+        let account = request_account(&payload);
         self.transport.send(
             ProtoMessage {
                 payload_type: kind,
@@ -461,6 +493,7 @@ impl CtraderSession {
             id.clone(),
             Pending {
                 expected,
+                account,
                 deadline: Instant::now() + timeout,
                 bucket,
                 response: None,
@@ -502,9 +535,14 @@ impl CtraderSession {
                         codec::decode_typed(&frame, 2164, &[(2, "ctidTraderAccountId")], |_| {
                             Ok(())
                         })?;
-                    return Err(SessionFault::AccountDisconnect(
-                        event.ctid_trader_account_id,
-                    ));
+                    let ctid = event.ctid_trader_account_id;
+                    if self.pending.get(id).and_then(|entry| entry.account) == Some(ctid) {
+                        return Err(SessionFault::AccountDisconnect(ctid));
+                    }
+                    // Another account's disconnect is not this request's failure; the
+                    // event loop reauthorizes or backs off for that account.
+                    self.queue_event(frame)?;
+                    continue;
                 }
                 2142 => {
                     if frame
@@ -516,6 +554,16 @@ impl CtraderSession {
                     }
                     let error: ProtoOaErrorRes =
                         codec::decode_typed(&frame, 2142, &[(3, "errorCode")], |_| Ok(()))?;
+                    // An uncorrelated error that names another account is that account's
+                    // event, not this request's failure.
+                    if frame.client_msg_id.is_none()
+                        && error.ctid_trader_account_id.is_some()
+                        && error.ctid_trader_account_id
+                            != self.pending.get(id).and_then(|entry| entry.account)
+                    {
+                        self.queue_event(frame)?;
+                        continue;
+                    }
                     let target = frame.client_msg_id.as_deref().unwrap_or(id);
                     let bucket = self
                         .pending
@@ -552,25 +600,42 @@ impl CtraderSession {
                 }
                 _ => {}
             }
-            if let Some(key) = frame
-                .client_msg_id
-                .as_ref()
-                .filter(|key| self.pending.contains_key(*key))
-            {
-                let expected = self.pending[key].expected;
-                if frame.payload_type != expected {
-                    return Err(SessionFault::Protocol);
-                }
-                if let Some(entry) = self.pending.get_mut(key) {
-                    entry.response = Some(Ok(frame));
-                }
-            } else if frame.client_msg_id.is_none() {
-                if self.events.len() == MAX_EVENTS {
-                    return Err(SessionFault::Overflow);
-                }
-                self.events.push_back(frame);
-            }
+            self.deliver(frame)?;
         }
+    }
+    /// Store a response for its pending request, or queue an unsolicited frame. Late
+    /// responses to expired requests are dropped; order events never are.
+    fn deliver(&mut self, frame: ProtoMessage) -> Result<(), SessionFault> {
+        if let Some(key) = frame
+            .client_msg_id
+            .as_ref()
+            .filter(|key| self.pending.contains_key(*key))
+        {
+            let expected = self.pending[key].expected;
+            if !answers(expected, frame.payload_type) {
+                return Err(SessionFault::Protocol);
+            }
+            if let Some(entry) = self.pending.get_mut(key) {
+                if entry.response.is_some() {
+                    // A second order event for a request not yet collected.
+                    return self.queue_event(frame);
+                }
+                entry.response = Some(Ok(frame));
+            }
+            Ok(())
+        } else if frame.client_msg_id.is_none() || is_order_event(frame.payload_type) {
+            self.queue_event(frame)
+        } else {
+            Ok(())
+        }
+    }
+    /// Unsolicited frames wait for `next_event`; the queue is bounded, never dropped from.
+    fn queue_event(&mut self, frame: ProtoMessage) -> Result<(), SessionFault> {
+        if self.events.len() == MAX_EVENTS {
+            return Err(SessionFault::Overflow);
+        }
+        self.events.push_back(frame);
+        Ok(())
     }
     /// # Errors
     /// Returns an explicit overflow, timeout, transport, or provider fault.
@@ -590,19 +655,25 @@ impl CtraderSession {
     /// # Errors
     /// Returns a connection fault or invalidated token.
     pub fn next_event(&mut self, timeout: Duration) -> Result<Option<ProtoMessage>, SessionFault> {
-        if let Some(event) = self.events.pop_front() {
-            return Ok(Some(event));
-        }
-        match self.transport.receive(timeout) {
-            Ok(frame) if frame.payload_type == 2148 => Err(SessionFault::Reconnect),
-            Ok(frame) if frame.payload_type == 2147 => {
+        // Frames queued while a request was awaited are classified like fresh ones.
+        let frame = match self.events.pop_front() {
+            Some(frame) => frame,
+            None => match self.transport.receive(timeout) {
+                Ok(frame) => frame,
+                Err(TransportError::ReadTimeout) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            },
+        };
+        match frame.payload_type {
+            2148 => Err(SessionFault::Reconnect),
+            2147 => {
                 if self.refreshed {
                     Err(SessionFault::NeedsReconnect)
                 } else {
                     Err(SessionFault::TokenInvalidated)
                 }
             }
-            Ok(frame) if frame.payload_type == 2164 => {
+            2164 => {
                 let event: crate::generated::ProtoOaAccountDisconnectEvent =
                     codec::decode_typed(&frame, 2164, &[(2, "ctidTraderAccountId")], |_| Ok(()))?;
                 let ctid = u64::try_from(event.ctid_trader_account_id)
@@ -615,9 +686,7 @@ impl CtraderSession {
                     event.ctid_trader_account_id,
                 ))
             }
-            Ok(frame) => Ok(Some(frame)),
-            Err(TransportError::ReadTimeout) => Ok(None),
-            Err(error) => Err(error.into()),
+            _ => Ok(Some(frame)),
         }
     }
     /// Process an invalidation event by fetching one fresh token before

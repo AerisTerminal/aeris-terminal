@@ -13,7 +13,7 @@ mod ticks;
 mod trendbar;
 
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 
 pub use catalog::{
     Asset, LightSymbol, MAXIMUM_CATALOG_SYMBOLS, SymbolSpec, decode_asset_list,

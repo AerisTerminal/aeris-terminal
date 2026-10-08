@@ -20,7 +20,7 @@ Last examined: 2026-10-08.
 | Protocol adapter: TLS, framing, auth, heartbeat, limiter | `crates/adapters/ctrader_open_api` | **Done**, live-verified on demo |
 | Market data in `market_runtime` | `market_service/ctrader.rs` | **Done**; M-1 to M-9 fixed, second broker not yet run |
 | Desktop market data (pick cTrader, chart, DOM) | `apps/desktop` | **Built and tested**; manual desktop check pending |
-| Adapter trading messages | `crates/adapters/ctrader_open_api` | **Not started** |
+| Adapter trading messages | `crates/adapters/ctrader_open_api` | **Built**, schema-tested; demo capture pending |
 | Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Skeleton only**; safety defects in section 4 |
 | Session owner joining the adapter and `trading_runtime` | to decide (D8) | **Not started** |
 | Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Not started** |
@@ -313,31 +313,37 @@ gates (section 7) at the end of each phase.
 
 Check every field against the pinned `.proto` files and a demo response before code depends on it.
 
-- [ ] **Order requests:**
-  - `ProtoOANewOrderReq` (2106): market, limit and stop orders; volume in 0.01 units; `clientOrderId`
-    up to 50 characters; relative and absolute SL/TP.
-  - `ProtoOAAmendOrderReq` (2109)
-  - `ProtoOACancelOrderReq` (2108)
-  - `ProtoOAClosePositionReq` (2111)
-  - `ProtoOAAmendPositionSLTPReq` (2110)
-- [ ] **Events:** `ProtoOAExecutionEvent` (2126), `ProtoOAOrderErrorEvent` (2132) and
-  `ProtoOATrailingSLChangedEvent` (2107).
-- [ ] **State recovery:**
-  - `ProtoOAReconcileReq/Res` (2124/2125)
-  - `ProtoOAOrderListReq` (2175) and `ProtoOADealListReq` (2133)
-  - `ProtoOAOrderDetailsReq` (2181) and `ProtoOADealListByPositionIdReq` (2179)
-- [ ] **Account:** `ProtoOATraderReq/Res` (2121/2122) and `ProtoOATraderUpdatedEvent` (2123) for
-  balance and account type. `ProtoOAMarginChangedEvent` (2141) is optional for the first release.
-- [ ] **Reference data:** `ProtoOAAssetListReq` (2112) for deposit and quote currency conversion.
-- [ ] **Session changes for trading:**
-  - One request can produce several responses (order accepted, then filled, under one
-    `clientMsgId`).
-  - Unsolicited execution events must be routed by account instead of being dropped.
-  - Do not charge an unsolicited `ProtoOAErrorRes` or account-disconnect event to an unrelated
-    in-flight request.
-- [ ] **Safety:** encoders accept only a `DemoAccount` until the live gate is lifted (Phase 8).
-- [ ] **Fixtures:** sanitized fixtures from real demo responses for each message, including partial
-  fills, rejections and SL/TP changes.
+The encoders and decoders live in `crates/adapters/ctrader_open_api/src/trading/` and are checked
+against the pinned protos. Their tests use schema-derived fixtures; nothing has been sent to a demo
+account yet, so every item below still needs the demo-capture step.
+
+- [x] **Order requests** (`TradingRequest`): `new_order` (2106: market, limit and stop; volume in
+  cents; `clientOrderId` 1–50 printable ASCII bytes; absolute or relative SL/TP, relative only on
+  market orders), `amend_order` (2109), `cancel_order` (2108), `close_position` (2111) and
+  `amend_position_protection` (2110). Prices go out as the exact decimal double of the
+  fixed-point value.
+- [x] **Events:** `decode_execution_event` (2126), `decode_order_error_event` (2132) and
+  `decode_trailing_stop` (2107). Required fields are checked at every nesting depth. Quoted prices
+  must be exact at the symbol scale; VWAP prices (position price, close entry price, order
+  execution price) are kept at the finest exact scale up to 10 digits, never rounded.
+- [x] **State recovery:** `reconcile` (2124/2125), `order_list` (2175/2176), `deal_list`
+  (2133/2134), `order_details` (2181/2182) and `position_deals` (2179/2180), with bounded pages
+  and `hasMore`.
+- [x] **Account:** `trader` (2121/2122); `decode_trader` also reads `ProtoOATraderUpdatedEvent`
+  (2123). `ProtoOAMarginChangedEvent` (2141) is left for later.
+- [x] **Reference data:** `ProtoOAAssetListReq` (2112), used for the quote currency.
+- [x] **Session changes for trading:**
+  - An order request is answered by 2126 or by 2132; a rejection no longer faults the session.
+  - Later 2126/2132 frames for an answered request are queued as events instead of dropped.
+  - A 2164 for another account, or an uncorrelated `ProtoOAErrorRes` naming another account, is
+    queued for the event loop instead of failing the in-flight request. The request's account is
+    read from field 2 of its payload.
+- [x] **Safety:** every encoder that changes an order or position takes a `DemoAccount`; reads
+  take any observed account id.
+- [ ] **Fixtures:** capture sanitized demo responses for each message, including partial fills,
+  rejections and SL/TP changes, and replace the schema-derived fixtures. Open questions to settle
+  on demo: whether `moneyDigits` is always present (decoding rejects money without it), the time
+  in force a market order accepts, and whether an amend clears protection it omits.
 
 ### Phase 4: provider-neutral live venue (PF11) in `trading_runtime`
 

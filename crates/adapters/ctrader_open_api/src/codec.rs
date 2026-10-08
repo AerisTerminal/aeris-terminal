@@ -171,9 +171,25 @@ pub(crate) fn require_nested_fields(
     field: u32,
     required: &[(u32, &'static str)],
 ) -> Result<(), CodecError> {
+    require_nested_path(payload, &[field], required)
+}
+
+/// [`require_nested_fields`] for a message nested several levels deep: every occurrence
+/// at each step of `path` is visited.
+///
+/// # Errors
+/// Returns a missing-field or malformed-wire error.
+pub(crate) fn require_nested_path(
+    payload: &[u8],
+    path: &[u32],
+    required: &[(u32, &'static str)],
+) -> Result<(), CodecError> {
+    let Some((field, rest)) = path.split_first() else {
+        return require_fields(payload, required);
+    };
     visit_fields(payload, |tag, data| {
-        if tag == field {
-            require_fields(data.ok_or(CodecError::InvalidWireField)?, required)?;
+        if tag == *field {
+            require_nested_path(data.ok_or(CodecError::InvalidWireField)?, rest, required)?;
         }
         Ok(())
     })

@@ -64,13 +64,21 @@ pub fn strip(payload: &[u8], tag: u32) -> Vec<u8> {
 
 /// Remove `inner` from every occurrence of the nested message field `outer`.
 pub fn strip_nested(payload: &[u8], outer: u32, inner: u32) -> Vec<u8> {
+    strip_at(payload, &[outer], inner)
+}
+
+/// Remove `inner` from every message reached through the nested fields of `path`.
+pub fn strip_at(payload: &[u8], path: &[u32], inner: u32) -> Vec<u8> {
+    let Some((&outer, rest)) = path.split_first() else {
+        return strip(payload, inner);
+    };
     rewrite(payload, |field, value, output| {
         if field != outer {
             return false;
         }
         let mut body = value;
         let length = usize::try_from(decode_varint(&mut body).expect("length")).expect("length");
-        let nested = strip(&body[..length], inner);
+        let nested = strip_at(&body[..length], rest, inner);
         encode_key(outer, WireType::LengthDelimited, output);
         encode_varint(nested.len() as u64, output);
         output.extend_from_slice(&nested);

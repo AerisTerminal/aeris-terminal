@@ -78,6 +78,17 @@ impl DemoAccount {
     pub fn account(&self) -> &CtraderAccount {
         &self.0
     }
+
+    /// An observed demo account for encoder tests, which have no session.
+    #[cfg(test)]
+    pub(crate) fn observed_for_tests(ctid: u64) -> Self {
+        Self(CtraderAccount {
+            ctid,
+            is_live: false,
+            trader_login: None,
+            broker_title: None,
+        })
+    }
 }
 
 #[cfg(test)]

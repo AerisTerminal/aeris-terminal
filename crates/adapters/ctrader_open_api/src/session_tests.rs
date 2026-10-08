@@ -401,6 +401,123 @@ fn responses_correlate_out_of_order_unknown_ids_ignored_and_time_out() {
     server.join().unwrap();
 }
 
+fn cancel_order_request(session: &CtraderSession) -> crate::trading::TradingRequest {
+    let account = session.accounts()[0].clone();
+    let demo = DemoAccount::from_session(session, &account).unwrap();
+    crate::trading::TradingRequest::cancel_order(&demo, 9).unwrap()
+}
+
+#[test]
+fn later_order_events_for_an_answered_request_become_events() {
+    let (listener, address, roots, config) = listener();
+    let server = thread::spawn(move || {
+        let mut socket = accept(&listener, config);
+        authorize(&mut socket);
+        let request = codec::read_frame(&mut socket).unwrap();
+        assert_eq!(request.payload_type, 2108);
+        // Accepted, then cancelled, both under the request's id.
+        reply(&mut socket, &request, 2126, vec![24, 2]);
+        reply(&mut socket, &request, 2126, vec![24, 5]);
+        thread::sleep(Duration::from_millis(200));
+    });
+    let mut session = session(client(address, roots, Arc::new(AtomicBool::new(false))));
+    let request = cancel_order_request(&session);
+    let first = session
+        .request(
+            request.payload_type,
+            request.payload,
+            request.response_type,
+            request.bucket,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(first.payload.as_deref(), Some([24, 2].as_slice()));
+    let second = session
+        .next_event(Duration::from_secs(2))
+        .unwrap()
+        .expect("the later execution event is delivered, not dropped");
+    assert_eq!(
+        (second.payload_type, second.payload.as_deref()),
+        (2126, Some([24, 5].as_slice()))
+    );
+    session.close();
+    server.join().unwrap();
+}
+
+#[test]
+fn an_order_rejection_answers_its_request_instead_of_breaking_the_session() {
+    let (listener, address, roots, config) = listener();
+    let server = thread::spawn(move || {
+        let mut socket = accept(&listener, config);
+        authorize(&mut socket);
+        let request = codec::read_frame(&mut socket).unwrap();
+        reply(&mut socket, &request, 2132, vec![18, 1, b'X']);
+        thread::sleep(Duration::from_millis(200));
+    });
+    let mut session = session(client(address, roots, Arc::new(AtomicBool::new(false))));
+    let request = cancel_order_request(&session);
+    let answer = session
+        .request(
+            request.payload_type,
+            request.payload,
+            request.response_type,
+            request.bucket,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(answer.payload_type, 2132);
+    session.close();
+    server.join().unwrap();
+}
+
+#[test]
+fn another_accounts_disconnect_does_not_fail_an_in_flight_request() {
+    let (listener, address, roots, config) = listener();
+    let server = thread::spawn(move || {
+        let mut socket = accept(&listener, config);
+        authorize(&mut socket);
+        let request = codec::read_frame(&mut socket).unwrap();
+        assert_eq!(request.payload_type, 2102);
+        codec::write_frame(
+            &mut socket,
+            &ProtoMessage {
+                payload_type: 2164,
+                payload: Some(
+                    ProtoOaAccountDisconnectEvent {
+                        payload_type: None,
+                        ctid_trader_account_id: 8,
+                    }
+                    .encode_to_vec(),
+                ),
+                client_msg_id: None,
+            },
+        )
+        .unwrap();
+        reply(
+            &mut socket,
+            &request,
+            2103,
+            ProtoOaAccountAuthRes {
+                payload_type: None,
+                ctid_trader_account_id: 7,
+            }
+            .encode_to_vec(),
+        );
+        thread::sleep(Duration::from_millis(200));
+    });
+    let mut session = session(client(address, roots, Arc::new(AtomicBool::new(false))));
+    let account = session.accounts()[0].clone();
+    session
+        .authorize_account(&account, || panic!("unexpected refresh"))
+        .expect("account 7 authorizes despite account 8 disconnecting");
+    assert_eq!(
+        session.next_event(Duration::from_secs(1)),
+        Err(SessionFault::AccountDisconnect(8))
+    );
+    session.close();
+    server.join().unwrap();
+}
+
 #[test]
 fn cancellation_unblocks_both_named_workers_before_read_deadline() {
     let (listener, address, roots, config) = listener();
