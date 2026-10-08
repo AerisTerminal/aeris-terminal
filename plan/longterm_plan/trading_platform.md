@@ -25,7 +25,7 @@ unit test alone passes. Status as of 2026-10-08.
 | [T6](#t6--record-replay-and-review) Record, replay and review | D2, PF8, M4.1–M4.4 | **Open** | D2; data licensing checklist |
 | [T7](#t7--institutional-depth) Institutional depth | M1.1, M1.3, M1.8, M4.5, M5.6, M5.7 | **Open** | T6; Aeris Charts B4–B7; licensing checklist |
 | [T8](#t8--power-users) Power users | M6.1–M6.5, M7.3, M7.5–M7.8 | **Open** | Aeris Charts B9; a release path for M7.8 |
-| T9 cTrader forex and CFD | PF10, PF11, D7–D9 | **Partial**; status and checklist in [`ctrader_implementation.md`](ctrader_implementation.md) | D7 Spotware confirmation; D8; D9 |
+| T9 cTrader forex and CFD | PF10, PF11, D7–D9 | **Partial**; status and checklist in [`ctrader_implementation.md`](../ctrader_implementation.md) | D7 Spotware confirmation; D8; D9 |
 
 **Order:** T1 unblocked T2, T5, T6 and part of T7. T5 starts when Rithmic onboarding clears and
 reuses T2 unchanged against the live venue. T9 runs in parallel with T5 (D5); PF11, the live-venue

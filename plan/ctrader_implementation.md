@@ -1,7 +1,7 @@
 # cTrader implementation
 
 This file is the single status record and checklist for the cTrader Open API integration (batch T9
-in [`trading_platform.md`](trading_platform.md), foundations PF10 and PF11, decisions D7–D9). It
+in [`longterm_plan/trading_platform.md`](longterm_plan/trading_platform.md), foundations PF10 and PF11, decisions D7–D9). It
 tracks what is built and what is left.
 
 A step is checked only when it works through the real runtime and desktop path. A passing unit test
