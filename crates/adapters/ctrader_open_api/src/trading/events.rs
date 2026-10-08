@@ -457,8 +457,12 @@ fn position(
         side: TradeSide::from_wire(position.trade_data.trade_side)?,
         volume: volume(position.trade_data.volume, "volume")?,
         status: position_status(position.position_status)?,
+        // Observed on demo: a position with no fills yet (a pending order's empty position,
+        // or before a market fill) and a closed position carry `price = 0`, meaning no
+        // average price rather than a price of zero.
         price: position
             .price
+            .filter(|value| *value != 0.0)
             .map(|value| average_price(scale, value))
             .transpose()?,
         stop_loss: price(scale, position.stop_loss)?,
@@ -669,8 +673,8 @@ pub fn decode_trader(frame: &ProtoMessage, ctid: u64) -> Result<TraderAccount, M
     })
 }
 
-/// Fixtures follow the pinned schema; they are replaced by sanitized demo captures once
-/// demo orders are qualified (Phase 3 fixtures step).
+/// Fixtures carry the fields a demo EURUSD session sent on 2026-10-08 (captured with the
+/// `ctrader_trading_capture` example); ids, prices and the account are placeholders.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +713,11 @@ mod tests {
                 client_order_id: Some("aeris-1".into()),
                 position_id: Some(77),
                 utc_last_update_timestamp: Some(1_791_467_000_000),
+                closing_order: Some(false),
+                time_in_force: Some(3),
+                relative_stop_loss: Some(5_000),
+                relative_take_profit: Some(5_000),
+                stop_trigger_method: Some(1),
                 ..ProtoOaOrder::default()
             }),
             position: Some(ProtoOaPosition {
@@ -719,7 +728,12 @@ mod tests {
                 price: Some(1.08543),
                 stop_loss: Some(1.08343),
                 commission: Some(-350),
+                margin_rate: Some(1.08543),
+                mirroring_commission: Some(0),
+                guaranteed_stop_loss: Some(false),
+                used_margin: Some(361),
                 money_digits: Some(2),
+                trailing_stop_loss: Some(false),
                 ..ProtoOaPosition::default()
             }),
             deal: Some(ProtoOaDeal {
@@ -738,8 +752,65 @@ mod tests {
                 money_digits: Some(2),
                 ..ProtoOaDeal::default()
             }),
+            is_server_event: Some(false),
             ..ProtoOaExecutionEvent::default()
         }
+    }
+
+    #[test]
+    fn an_accepted_market_orders_empty_position_has_no_average_price() {
+        let mut event = filled_market_order();
+        event.execution_type = 2;
+        event.deal = None;
+        if let Some(order) = event.order.as_mut() {
+            order.order_status = 1;
+            order.execution_price = None;
+            order.executed_volume = Some(0);
+        }
+        if let Some(position) = event.position.as_mut() {
+            position.price = Some(0.0);
+            position.stop_loss = None;
+        }
+        let decoded = decode_execution_event(&frame(2126, &event), CTID, &scales).expect("ack");
+        assert_eq!(decoded.execution, ExecutionType::Accepted);
+        assert_eq!(decoded.position.expect("position").price, None);
+    }
+
+    #[test]
+    fn protection_arrives_as_a_server_created_closing_order() {
+        // After a protected market fill the server sends, without the request's id, an
+        // accepted STOP_LOSS_TAKE_PROFIT order that closes the position.
+        let mut event = filled_market_order();
+        event.execution_type = 2;
+        event.deal = None;
+        event.is_server_event = Some(true);
+        event.order = Some(ProtoOaOrder {
+            order_id: 10,
+            trade_data: ProtoOaTradeData {
+                trade_side: 2,
+                ..trade_data(100_000)
+            },
+            order_type: 4,
+            order_status: 1,
+            limit_price: Some(1.09043),
+            stop_price: Some(1.08043),
+            executed_volume: Some(0),
+            closing_order: Some(true),
+            client_order_id: Some("aeris-1".into()),
+            position_id: Some(77),
+            ..ProtoOaOrder::default()
+        });
+        let decoded = decode_execution_event(&frame(2126, &event), CTID, &scales).expect("sl/tp");
+        assert!(decoded.server_event);
+        let order = decoded.order.expect("protection order");
+        assert_eq!(
+            (order.kind, order.side, order.closing),
+            (OrderKind::StopLossTakeProfit, TradeSide::Sell, true)
+        );
+        assert_eq!(
+            (order.limit_price, order.stop_price),
+            (Some(109_043), Some(108_043))
+        );
     }
 
     #[test]

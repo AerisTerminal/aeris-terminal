@@ -66,6 +66,9 @@ violations and missing verification explicitly, and never describe them as satis
 - `trading_runtime` is the single in-process owner of broker accounts, orders, order events, fills,
   positions, PnL, simulated execution and the embedded user-record store. The desktop holds command/view
   handles only; `account_runtime`, charts and UI surfaces never own or duplicate broker trading state.
+- cTrader trading travels over the `market_runtime`-owned cTrader session for that host through the
+  bounded venue boundary. `market_runtime` relays venue requests and events but never holds order,
+  fill, position or account state; never open a second cTrader connection for trading.
 - Symbol, timeframe, viewport, tab, and layout changes must not tear down a healthy provider session.
 - `market_runtime` is the single owner that merges on-demand history and live state. Preserve one
   canonical forming candle, contiguous completed history, exact generation fencing, and explicit recovery.

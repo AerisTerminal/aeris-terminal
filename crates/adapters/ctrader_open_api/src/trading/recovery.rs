@@ -110,7 +110,9 @@ impl TradingRequest {
         ))
     }
 
-    /// `ProtoOADealListByPositionIdReq` (2179): one position's deals in a window.
+    /// `ProtoOADealListByPositionIdReq` (2179): one position's deals in a window. Unlike
+    /// the account deal list, the demo server rejects a `to_ms` in the future with
+    /// `INCORRECT_BOUNDARIES`, so callers end the window at the current time.
     ///
     /// # Errors
     /// Rejects zero ids or an empty or out-of-range window.

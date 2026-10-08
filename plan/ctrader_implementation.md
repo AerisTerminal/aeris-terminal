@@ -254,17 +254,17 @@ unsubscribe; it now reports `Cancelled`, covered by
   - Record the decision and the rotation path in the roadmap. Today a rotation needs a fresh
     `configure:ctrader`, and every desktop picks up the new value on its next
     `CH_CLIENT_AUTH_FAILURE` refetch. Test that path.
-- [ ] **D8: owner of the cTrader trading session.** cTrader limits connections, so one connection per
-  host should carry both market data and trading. The recommendation:
+- [x] **D8: owner of the cTrader trading session.** Decided 2026-10-08 by the maintainer: one
+  connection per host carries both market data and trading.
   - The `market_runtime` cTrader supervisor keeps sole ownership of the socket.
-  - It serves trading through the existing bounded `VenueRequest` / `VenueInbox` boundary.
-  - Trading state stays only in `trading_runtime`.
+  - It relays trading through the bounded `VenueRequest` / `VenueInbox` boundary, using a shared
+    venue contract so `market_runtime` does not depend on `trading_runtime`.
+  - Order, fill, position and account state stays only in `trading_runtime`.
 
-  Decide this before step 6.1 (attaching the venue), update `AGENTS.md` and `tools/naming_check` if
-  the ownership rules change, and record it here and in the roadmap.
-- [ ] **D9: hedging and netting.** cTrader accounts can be hedged or netted. Decide how
-  `trading_runtime` presents each (positions per id versus net), and which account types are allowed
-  for the first release.
+  Recorded in `AGENTS.md`; the roadmap entry is still to update.
+- [x] **D9: hedging and netting.** Decided 2026-10-08 by the maintainer: both account types are
+  allowed in the first release, each in its native shape. Hedged accounts show one position per
+  broker `positionId`; netted accounts show one net position per symbol.
 
 ## 6. Remaining checklist
 
@@ -313,9 +313,10 @@ gates (section 7) at the end of each phase.
 
 Check every field against the pinned `.proto` files and a demo response before code depends on it.
 
-The encoders and decoders live in `crates/adapters/ctrader_open_api/src/trading/` and are checked
-against the pinned protos. Their tests use schema-derived fixtures; nothing has been sent to a demo
-account yet, so every item below still needs the demo-capture step.
+The encoders and decoders live in `crates/adapters/ctrader_open_api/src/trading/`. They are checked
+against the pinned protos and were exercised on the maintainer's demo account on 2026-10-08 with
+`cargo run -p aeris_market_runtime --example ctrader_trading_capture` (minimum-volume EURUSD
+orders, all cancelled or closed by the run; reconcile is empty before and after).
 
 - [x] **Order requests** (`TradingRequest`): `new_order` (2106: market, limit and stop; volume in
   cents; `clientOrderId` 1–50 printable ASCII bytes; absolute or relative SL/TP, relative only on
@@ -340,10 +341,19 @@ account yet, so every item below still needs the demo-capture step.
     read from field 2 of its payload.
 - [x] **Safety:** every encoder that changes an order or position takes a `DemoAccount`; reads
   take any observed account id.
-- [ ] **Fixtures:** capture sanitized demo responses for each message, including partial fills,
-  rejections and SL/TP changes, and replace the schema-derived fixtures. Open questions to settle
-  on demo: whether `moneyDigits` is always present (decoding rejects money without it), the time
-  in force a market order accepts, and whether an amend clears protection it omits.
+- [x] **Fixtures:** test fixtures carry the field shapes the demo server sent. Observed on demo:
+  - Limit and stop orders: accepted, replaced on amend, cancelled; order details answer 2182.
+  - A market order with time in force IOC is accepted and filled under the request's id.
+  - Protection on a market order arrives as a separate server-created `STOP_LOSS_TAKE_PROFIT`
+    closing order, sent without the request's id (`isServerEvent`), carrying the parent's client
+    order id. Closing the position cancels it under the close request's id.
+  - A close-position order takes the request's `clientMsgId` as its `clientOrderId`.
+  - `ProtoOAPosition.price` is `0` before a fill and after a close; it decodes as no price.
+  - `moneyDigits` is present on positions, deals, close details and the trader (2).
+  - Amending only the stop loss removes the take profit.
+  - A volume below the minimum is answered by 2132 `TRADING_BAD_VOLUME` under the request's id.
+  - `position_deals` rejects a future end time with `INCORRECT_BOUNDARIES`.
+  - Not yet observed: a partial fill (EURUSD minimum volume fills whole) and a trailing stop.
 
 ### Phase 4: provider-neutral live venue (PF11) in `trading_runtime`
 
