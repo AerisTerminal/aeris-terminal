@@ -394,10 +394,11 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
   distances from the template's ticks (`BracketPlacement::BrokerProtected`); nothing is managed
   locally. Stop risk is checked first. Scale-out targets, trailing stops and break-even are refused
   for broker accounts with their reasons.
-- [ ] **Live risk:** risk checks run, but their inputs for broker accounts are still the
-  simulated ones: projected contracts ignore `broker_positions`, and broker positions carry no
-  unrealized P&L (the broker sends no mark). Decide whether session loss and trailing drawdown use
-  broker realized P&L, and project unrealized P&L from quotes.
+- [ ] **Live risk:** risk checks run on broker orders, and the maximum-contract rule counts open
+  broker positions (netted per instrument). Still open: broker positions carry no unrealized P&L
+  (the broker sends no mark, and the deposit currency can differ from the quote currency), so
+  decide whether session loss and trailing drawdown use broker realized P&L only, and project
+  unrealized P&L once quote-to-deposit conversion exists.
 - [ ] **Round trips:** trade-history round trips cover simulated accounts only; design broker trade
   history (hedged positions per broker id) with Phase 6.
 

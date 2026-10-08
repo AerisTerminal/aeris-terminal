@@ -860,6 +860,38 @@ fn a_broker_bracket_sends_server_protection_at_the_template_distances() {
 }
 
 #[test]
+fn open_broker_positions_count_toward_the_maximum_contract_rule() {
+    let (_directory, service, _receiver) = setup("venue-max-contracts");
+    service
+        .register_risk_profile(crate::RiskProfile {
+            account_id: broker().id,
+            profile_id: "two-contracts".into(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: point(0, 2),
+            daily_loss_limit: point(100_000, 2),
+            trailing_drawdown: None,
+            trailing_mode: crate::TrailingDrawdownMode::EndOfDay,
+            max_contracts: point(2, 0),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            economic_event_rule: None,
+            enabled: true,
+        })
+        .expect("profile");
+    service
+        .demo_venue_inbox()
+        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .expect("position");
+    assert!(
+        service
+            .place_order(request("third-contract"))
+            .expect_err("over the maximum")
+            .contains("maximum-contract")
+    );
+}
+
+#[test]
 fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
     let (_directory, service, receiver) = setup("venue-observed");
     let observed = |name: &str| {
