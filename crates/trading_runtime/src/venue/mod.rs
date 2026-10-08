@@ -1,7 +1,8 @@
-//! Bounded handoff between the broker reader and the trading owner.
+//! Bounded handoff between the broker relay and the trading owner. The request and event
+//! types are the provider-neutral contract in `aeris_trading::venue`.
 
-use crate::{Command, ModifyOrder, PlaceOrder};
-use aeris_trading::ClientOrderId;
+use crate::Command;
+pub use aeris_trading::venue::{VenueEvent, VenueRequest, VenueUpdate};
 use std::{
     collections::VecDeque,
     sync::{
@@ -16,28 +17,6 @@ pub const INBOX_CAPACITY: usize = 1024;
 pub const OUTBOUND_CAPACITY: usize = 64;
 const RETRY_INTERVAL: Duration = Duration::from_millis(20);
 const MAXIMUM_BLOCKED: Duration = Duration::from_secs(20);
-
-pub enum VenueRequest {
-    Place(PlaceOrder),
-    Modify(ModifyOrder),
-    Cancel(ClientOrderId),
-}
-
-pub struct VenueEvent {
-    pub session_generation: u64,
-    pub client_order_id: ClientOrderId,
-    pub update: VenueUpdate,
-    pub observed_unix_nanos: i64,
-}
-
-pub enum VenueUpdate {
-    Accepted,
-    Replaced,
-    Cancelled,
-    CancelRejected(String),
-    Expired,
-    Rejected(String),
-}
 
 #[derive(Default)]
 struct PendingEvents {

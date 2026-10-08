@@ -159,7 +159,12 @@ pub(crate) fn market_order(
     }
 }
 
-fn observation(bid: i64, ask: i64, sequence: u64, time: i64) -> SimulatedMarketObservation {
+pub(crate) fn observation(
+    bid: i64,
+    ask: i64,
+    sequence: u64,
+    time: i64,
+) -> SimulatedMarketObservation {
     SimulatedMarketObservation {
         instrument_id: instrument().instrument_id,
         bid: FixedPoint::try_new(bid, 2).expect("bid"),

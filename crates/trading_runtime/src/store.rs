@@ -25,7 +25,7 @@ use std::{
     path::Path,
 };
 
-pub(super) const SCHEMA_VERSION: u32 = 18;
+pub(super) const SCHEMA_VERSION: u32 = 19;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -212,6 +212,9 @@ const MIGRATION_V18: &str =
      balance_units INTEGER NOT NULL, balance_scale INTEGER NOT NULL,
      last_deal_unix_millis INTEGER, session_generation INTEGER NOT NULL
  ) STRICT;";
+/// The venue generation survives restarts so a new relay session always advances it and a
+/// retired session's events can never be mistaken for current ones.
+const MIGRATION_V19: &str = "INSERT INTO metadata(key, value) VALUES ('venue_generation', 0);";
 
 pub(super) struct StoredState {
     pub revision: u64,
@@ -226,6 +229,12 @@ pub(super) struct StoredState {
     pub trade_pnl_cycles: BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
     pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
+    /// Broker order id to owner order, for every broker order the venue has accepted.
+    pub broker_order_ids: BTreeMap<String, OrderId>,
+    /// The latest relay session generation ever attached.
+    pub venue_generation: u64,
+    /// The last balance each broker account reported.
+    pub broker_balances: BTreeMap<TradingAccountId, FixedPoint>,
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
     pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
     pub risk_rule_states: BTreeMap<TradingAccountId, RiskRuleState>,
@@ -241,6 +250,20 @@ pub(super) struct StoredState {
 pub(super) struct TradingStore {
     connection: Connection,
     retention: TradingRetention,
+}
+
+/// One broker deal and the owner order state it leaves behind.
+pub(super) struct BrokerFillRecord<'a> {
+    pub fill: &'a Fill,
+    /// The order after this fill.
+    pub order: &'a Order,
+    pub event: &'a OrderEvent,
+    /// A broker-originated order first seen through this deal, with its broker order id.
+    pub mirror: Option<(&'a Order, &'a str)>,
+    pub broker_deal_id: &'a str,
+    pub broker_position_id: &'a str,
+    /// What a closing deal realized, in the account currency.
+    pub realized_pnl: Option<FixedPoint>,
 }
 
 struct StoredRiskProfile {
@@ -447,7 +470,11 @@ impl TradingStore {
             version = 17;
         }
         if version == 17 {
-            self.apply_migration(SCHEMA_VERSION, MIGRATION_V18)?;
+            self.apply_migration(18, MIGRATION_V18)?;
+            version = 18;
+        }
+        if version == 18 {
+            self.apply_migration(SCHEMA_VERSION, MIGRATION_V19)?;
         }
         Ok(())
     }
@@ -533,6 +560,9 @@ impl TradingStore {
         let trade_pnl_cycles = self.load_trade_pnl_cycles()?;
         let positions = self.load_positions()?;
         let broker_positions = self.load_broker_positions()?;
+        let broker_order_ids = self.load_broker_order_ids()?;
+        let venue_generation = self.metadata("venue_generation")?;
+        let broker_balances = self.load_broker_balances()?;
         let risk_profiles = self.load_risk_profiles()?;
         let risk_locks = self.load_risk_locks()?;
         let risk_rule_states = self.load_risk_rule_states()?;
@@ -556,6 +586,9 @@ impl TradingStore {
             trade_pnl_cycles,
             positions,
             broker_positions,
+            broker_order_ids,
+            venue_generation,
+            broker_balances,
             risk_profiles,
             risk_locks,
             risk_rule_states,
@@ -1548,6 +1581,44 @@ impl TradingStore {
         transaction.commit().map_err(database_error)
     }
 
+    /// Persists a submitted broker order with its broker mapping row; the broker order id
+    /// is bound when the venue first reports the order.
+    pub(super) fn insert_broker_order(
+        &mut self,
+        order: &Order,
+        event: &OrderEvent,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        insert_order_row(&transaction, order)?;
+        insert_event_row(&transaction, event)?;
+        transaction
+            .execute(
+                "INSERT INTO broker_orders(order_id, broker_order_id, client_order_id,
+                    session_generation, updated_unix_nanos)
+                 VALUES (?1, NULL, ?2, ?3, ?4)",
+                params![
+                    order.id.as_str(),
+                    order.client_order_id.as_str(),
+                    sqlite_i64(order.provenance.session_generation)?,
+                    order.provenance.observed_unix_nanos,
+                ],
+            )
+            .map_err(database_error)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn set_venue_generation(&self, generation: u64) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE metadata SET value = ?1 WHERE key = 'venue_generation'",
+                [sqlite_i64(generation)?],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     /// Reverts a locally prepared place if the writer has no queue capacity. No pending
     /// order or event survives an explicitly rejected submission.
     pub(super) fn reject_unsent_broker_order(
@@ -1569,18 +1640,22 @@ impl TradingStore {
         transaction.commit().map_err(database_error)
     }
 
+    /// Persists one broker order transition. `binding` records the broker order id the
+    /// venue reported for it, in the same transaction.
     pub(super) fn transition_broker_order(
         &mut self,
         order: &Order,
         event: &OrderEvent,
         next_sequence: u64,
+        binding: Option<&str>,
     ) -> Result<(), String> {
         let transaction = self.connection.transaction().map_err(database_error)?;
         transaction
             .execute(
                 "UPDATE orders SET status = ?1, time_in_force = ?2, limit_units = ?3,
-             limit_scale = ?4, stop_units = ?5, stop_scale = ?6, provenance_json = ?7
-             WHERE id = ?8",
+             limit_scale = ?4, stop_units = ?5, stop_scale = ?6, provenance_json = ?7,
+             quantity_units = ?8, quantity_scale = ?9, filled_units = ?10, filled_scale = ?11
+             WHERE id = ?12",
                 params![
                     order.status.as_str(),
                     order.time_in_force.as_str(),
@@ -1589,13 +1664,231 @@ impl TradingStore {
                     order.stop_price.map(FixedPoint::units),
                     order.stop_price.map(FixedPoint::scale),
                     encode_provenance(&order.provenance),
+                    order.quantity.units(),
+                    order.quantity.scale(),
+                    order.filled_quantity.units(),
+                    order.filled_quantity.scale(),
                     order.id.as_str(),
                 ],
             )
             .map_err(database_error)?;
+        if let Some(broker_order_id) = binding {
+            transaction
+                .execute(
+                    "UPDATE broker_orders SET broker_order_id = ?1, session_generation = ?2,
+                        updated_unix_nanos = ?3 WHERE order_id = ?4",
+                    params![
+                        broker_order_id,
+                        sqlite_i64(order.provenance.session_generation)?,
+                        order.provenance.observed_unix_nanos,
+                        order.id.as_str(),
+                    ],
+                )
+                .map_err(database_error)?;
+        }
         insert_event_row(&transaction, event)?;
         update_next_sequence(&transaction, next_sequence)?;
         transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn broker_deal_recorded(&self, broker_deal_id: &str) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM broker_deals WHERE broker_deal_id = ?1",
+                [broker_deal_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .map_err(database_error)
+    }
+
+    /// Records one broker deal exactly once, with the order transition it causes. A
+    /// `mirror` is a broker-originated order first seen through this deal.
+    pub(super) fn insert_broker_fill(
+        &mut self,
+        record: &BrokerFillRecord<'_>,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        if let Some((mirror, broker_order_id)) = record.mirror {
+            insert_order_row(&transaction, mirror)?;
+            transaction
+                .execute(
+                    "INSERT INTO broker_orders(order_id, broker_order_id, client_order_id,
+                        session_generation, updated_unix_nanos) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        mirror.id.as_str(),
+                        broker_order_id,
+                        mirror.client_order_id.as_str(),
+                        sqlite_i64(mirror.provenance.session_generation)?,
+                        mirror.provenance.observed_unix_nanos,
+                    ],
+                )
+                .map_err(database_error)?;
+        }
+        let order = record.order;
+        transaction
+            .execute(
+                "UPDATE orders SET status = ?1, quantity_units = ?2, quantity_scale = ?3,
+                    filled_units = ?4, filled_scale = ?5, provenance_json = ?6 WHERE id = ?7",
+                params![
+                    order.status.as_str(),
+                    order.quantity.units(),
+                    order.quantity.scale(),
+                    order.filled_quantity.units(),
+                    order.filled_quantity.scale(),
+                    encode_provenance(&order.provenance),
+                    order.id.as_str(),
+                ],
+            )
+            .map_err(database_error)?;
+        insert_event_row(&transaction, record.event)?;
+        let fill = record.fill;
+        transaction
+            .execute(
+                "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
+                    price_scale, quantity_units, quantity_scale, execution_unix_nanos,
+                    provenance_json, realized_pnl_units, realized_pnl_scale)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    fill.id.as_str(),
+                    fill.order_id.as_str(),
+                    fill.account_id.as_str(),
+                    fill.instrument_id.as_str(),
+                    fill.side.as_str(),
+                    fill.price.units(),
+                    fill.price.scale(),
+                    fill.quantity.units(),
+                    fill.quantity.scale(),
+                    fill.execution_unix_nanos,
+                    encode_provenance(&fill.provenance),
+                    record.realized_pnl.map(FixedPoint::units),
+                    record.realized_pnl.map(FixedPoint::scale),
+                ],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO broker_deals(broker_deal_id, fill_id, account_id,
+                    broker_position_id, executed_unix_millis) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    record.broker_deal_id,
+                    fill.id.as_str(),
+                    fill.account_id.as_str(),
+                    record.broker_position_id,
+                    fill.execution_unix_nanos / 1_000_000,
+                ],
+            )
+            .map_err(database_error)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    /// Writes one account's broker positions: upserts and removals, or, with
+    /// `replace_all`, exactly the given positions.
+    pub(super) fn write_broker_positions(
+        &mut self,
+        account_id: &TradingAccountId,
+        upserts: &[BrokerPosition],
+        removals: &[String],
+        replace_all: bool,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        if replace_all {
+            transaction
+                .execute(
+                    "DELETE FROM broker_positions WHERE account_id = ?1",
+                    [account_id.as_str()],
+                )
+                .map_err(database_error)?;
+        }
+        for broker_position_id in removals {
+            transaction
+                .execute(
+                    "DELETE FROM broker_positions WHERE account_id = ?1
+                        AND broker_position_id = ?2",
+                    params![account_id.as_str(), broker_position_id],
+                )
+                .map_err(database_error)?;
+        }
+        for position in upserts {
+            position.validate().map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT INTO broker_positions(account_id, broker_position_id, instrument_id,
+                        side, quantity_units, quantity_scale, entry_units, entry_scale,
+                        stop_units, stop_scale, take_units, take_scale, swap_units, swap_scale,
+                        commission_units, commission_scale, gross_unrealized_units,
+                        gross_unrealized_scale, net_unrealized_units, net_unrealized_scale,
+                        opened_unix_nanos)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                        ?16, ?17, ?18, ?19, ?20, ?21)
+                     ON CONFLICT(account_id, broker_position_id) DO UPDATE SET
+                        instrument_id = excluded.instrument_id, side = excluded.side,
+                        quantity_units = excluded.quantity_units,
+                        quantity_scale = excluded.quantity_scale,
+                        entry_units = excluded.entry_units, entry_scale = excluded.entry_scale,
+                        stop_units = excluded.stop_units, stop_scale = excluded.stop_scale,
+                        take_units = excluded.take_units, take_scale = excluded.take_scale,
+                        swap_units = excluded.swap_units, swap_scale = excluded.swap_scale,
+                        commission_units = excluded.commission_units,
+                        commission_scale = excluded.commission_scale,
+                        gross_unrealized_units = excluded.gross_unrealized_units,
+                        gross_unrealized_scale = excluded.gross_unrealized_scale,
+                        net_unrealized_units = excluded.net_unrealized_units,
+                        net_unrealized_scale = excluded.net_unrealized_scale,
+                        opened_unix_nanos = excluded.opened_unix_nanos",
+                    params![
+                        position.account_id.as_str(),
+                        position.broker_position_id,
+                        position.instrument_id.as_str(),
+                        position.side.as_str(),
+                        position.quantity.units(),
+                        position.quantity.scale(),
+                        position.entry_price.units(),
+                        position.entry_price.scale(),
+                        position.stop_loss.map(FixedPoint::units),
+                        position.stop_loss.map(FixedPoint::scale),
+                        position.take_profit.map(FixedPoint::units),
+                        position.take_profit.map(FixedPoint::scale),
+                        position.swap.units(),
+                        position.swap.scale(),
+                        position.commission.units(),
+                        position.commission.scale(),
+                        position.gross_unrealized.units(),
+                        position.gross_unrealized.scale(),
+                        position.net_unrealized.units(),
+                        position.net_unrealized.scale(),
+                        position.opened_unix_nanos,
+                    ],
+                )
+                .map_err(database_error)?;
+        }
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(super) fn set_broker_balance(
+        &self,
+        account_id: &TradingAccountId,
+        balance: FixedPoint,
+        session_generation: u64,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT INTO broker_account_state(account_id, balance_units, balance_scale,
+                    session_generation) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(account_id) DO UPDATE SET balance_units = excluded.balance_units,
+                    balance_scale = excluded.balance_scale,
+                    session_generation = excluded.session_generation",
+                params![
+                    account_id.as_str(),
+                    balance.units(),
+                    balance.scale(),
+                    sqlite_i64(session_generation)?,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
     }
 
     pub(super) fn reject_unsent_broker_transition(
@@ -2292,6 +2585,53 @@ impl TradingStore {
             );
         }
         Ok(output)
+    }
+
+    fn load_broker_balances(&self) -> Result<BTreeMap<TradingAccountId, FixedPoint>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT account_id, balance_units, balance_scale FROM broker_account_state")
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, u8>(2)?,
+                ))
+            })
+            .map_err(database_error)?;
+        rows.map(|row| {
+            let (account, units, scale) = row.map_err(database_error)?;
+            Ok((
+                TradingAccountId::try_new(account).map_err(|error| error.to_string())?,
+                fixed(units, scale)?,
+            ))
+        })
+        .collect()
+    }
+
+    fn load_broker_order_ids(&self) -> Result<BTreeMap<String, OrderId>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT broker_order_id, order_id FROM broker_orders
+                 WHERE broker_order_id IS NOT NULL",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?;
+        rows.map(|row| {
+            let (broker_order_id, order_id) = row.map_err(database_error)?;
+            Ok((
+                broker_order_id,
+                OrderId::try_new(order_id).map_err(|error| error.to_string())?,
+            ))
+        })
+        .collect()
     }
 
     fn load_broker_positions(
@@ -3170,12 +3510,16 @@ mod tests {
             connection,
             retention: TradingRetention::default(),
         };
-        store.migrate().expect("v18 migration");
+        store.migrate().expect("v18 and v19 migrations");
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 18);
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            store.metadata("venue_generation").expect("v19 generation"),
+            0
+        );
         let (venue, broker_ref): (String, Option<String>) = store
             .connection
             .query_row(
@@ -3206,9 +3550,18 @@ mod tests {
                 .expect("table retained");
             assert_eq!(actual, count, "{table}");
         }
+    }
+
+    #[test]
+    fn a_newer_schema_is_rejected_instead_of_downgraded() {
+        let mut store = TradingStore {
+            connection: Connection::open_in_memory().expect("in-memory database"),
+            retention: TradingRetention::default(),
+        };
+        store.migrate().expect("fresh schema");
         store
             .connection
-            .pragma_update(None, "user_version", 19_u32)
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .expect("newer version");
         assert!(
             store

@@ -159,23 +159,32 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     );
     assert_eq!(
         service
-            .kill_switch(Some(broker.id), "test".into(), 2_000)
+            .kill_switch(Some(broker.id.clone()), "test".into(), 2_000)
             .unwrap_err(),
-        expected
-    );
-    assert_eq!(
-        service
-            .flatten_all(observation(10_000, 10_025, 2, 2_000))
-            .unwrap_err(),
-        expected
-    );
-    assert_eq!(
-        service.kill_switch(None, "test".into(), 2_000).unwrap_err(),
         expected
     );
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.orders.len(), 1);
     assert_eq!(snapshot.risk_locks.len(), 0);
+    assert_eq!(snapshot.orders[0].status, OrderStatus::Working);
+
+    // Global commands skip a data-only account instead of failing for every account; here
+    // it is the only account, so they change nothing.
+    assert!(
+        service
+            .flatten_all(observation(10_000, 10_025, 2, 2_000))
+            .expect("flatten all")
+            .incomplete
+            .is_none()
+    );
+    assert_eq!(
+        service
+            .kill_switch(None, "test".into(), 2_000)
+            .expect("global kill switch"),
+        0
+    );
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.risk_locks, []);
     assert_eq!(snapshot.orders[0].status, OrderStatus::Working);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
@@ -230,7 +239,8 @@ fn flatten_outcome_preserves_simulated_fills_with_no_pending_closes() {
             .expect("flatten"),
         FlattenOutcome {
             fills: vec![],
-            pending_close_requests: vec![]
+            pending_close_requests: vec![],
+            incomplete: None,
         }
     );
     service.shutdown(Duration::from_secs(2)).expect("shutdown");

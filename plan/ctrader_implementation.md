@@ -21,7 +21,7 @@ Last examined: 2026-10-08.
 | Market data in `market_runtime` | `market_service/ctrader.rs` | **Done**; M-1 to M-9 fixed, second broker not yet run |
 | Desktop market data (pick cTrader, chart, DOM) | `apps/desktop` | **Built and tested**; manual desktop check pending |
 | Adapter trading messages | `crates/adapters/ctrader_open_api` | **Built**, schema-tested; demo capture pending |
-| Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Skeleton only**; safety defects in section 4 |
+| Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Built**; T-1 to T-6 fixed; brackets and live-risk inputs open |
 | Session owner joining the adapter and `trading_runtime` | to decide (D8) | **Not started** |
 | Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Not started** |
 | Demo and live qualification | maintainer | **Not started** |
@@ -221,20 +221,23 @@ unsubscribe; it now reports `Cancelled`, covered by
 
 ### Trading
 
-- [ ] **T-1 Risk checks skipped.** `place_broker_order` returns before `evaluate_order_risk`, so a
+All six are fixed in the Phase 4 venue batch, with tests in `venue/scripted.rs` and
+`tests/foundation.rs`.
+
+- [x] **T-1 Risk checks skipped.** `place_broker_order` returns before `evaluate_order_risk`, so a
   demo order skips every M3.2 check: lock, plan, discipline, limits, currency and increment.
-- [ ] **T-2 Global commands blocked.** `preflight_accounts` errors whenever a demo account is in
+- [x] **T-2 Global commands blocked.** `preflight_accounts` errors whenever a demo account is in
   scope, so one registered demo account breaks the global kill switch, cancel-all and flatten-all for
   **every** account, simulated ones included.
-- [ ] **T-3 Simulator fills broker orders.** `market_fill_candidates` and
+- [x] **T-3 Simulator fills broker orders.** `market_fill_candidates` and
   `cancel_unfilled_immediate_orders` do not check the route, so the simulator can fill or cancel
   cTrader orders.
-- [ ] **T-4 Wrong order matched.** Venue events match orders by client order id without checking that
+- [x] **T-4 Wrong order matched.** Venue events match orders by client order id without checking that
   the order belongs to a cTrader account.
-- [ ] **T-5 Pending state overridden.** `Accepted` and `Cancelled` override `PendingModify` and
+- [x] **T-5 Pending state overridden.** `Accepted` and `Cancelled` override `PendingModify` and
   `PendingCancel`. After a reconnect, a `Replaced` event keeps the old prices, because the pending
   modification is held only in memory.
-- [ ] **T-6 Generation not persisted.** The venue generation resets to 0 on start, and orders left in a
+- [x] **T-6 Generation not persisted.** The venue generation resets to 0 on start, and orders left in a
   pending state survive on disk with nothing to reconcile them.
 
 ### Desktop
@@ -357,35 +360,45 @@ orders, all cancelled or closed by the run; reconcile is empty before and after)
 
 ### Phase 4: provider-neutral live venue (PF11) in `trading_runtime`
 
-- [ ] **Extend `VenueRequest`:** carry the account's `broker_ref`, SL/TP and order type. Add
-  `ClosePosition` and `AmendPositionSltp`.
-- [ ] **Extend `VenueUpdate`:**
-  - the broker order id;
-  - `PartiallyFilled` and `Filled`, with deal id, price, quantity and position id;
-  - position opened, updated and closed;
-  - balance updates;
-  - a `Reconciled` snapshot of open orders and positions.
-- [ ] **Persist state:**
-  - the client-to-broker order mapping in `broker_orders`;
-  - fills, written idempotently by deal id to `fills` and `broker_deals`;
-  - `broker_positions` and `broker_account_state`.
-- [ ] **Fix T-1 to T-6:**
-  - Run `evaluate_order_risk` and the increment and currency checks on the broker path.
-  - Replace the unconditional `DEMO_VENUE_UNAVAILABLE` in flatten, reverse, close and amend with real
-    broker requests when a venue is attached.
-  - The kill switch locks the account even with the venue disconnected.
-  - A demo account never blocks global kill, cancel or flatten for other accounts.
-  - Exclude broker orders from simulated fills.
-- [ ] **Recovery:**
-  - Persist the venue generation.
-  - Reconcile at startup and after every attach.
-  - Resolve every order left `Pending`, `PendingModify` or `PendingCancel` against the broker's
-    snapshot.
-  - Prove that no order is duplicated or lost.
-- [ ] **Brackets:** use server-side SL/TP on cTrader orders and positions instead of local managed
-  brackets, and label any part that stays local.
-- [ ] **Live risk:** decide whether live risk evaluation (daily loss, trailing drawdown) uses broker
-  fills and broker PnL for cTrader accounts.
+The provider-neutral contract is `aeris_trading::venue` (D8): `trading_runtime` owns the state and
+the bounded inbox, and a relay translates the contract to one broker's protocol.
+
+- [x] **Extend `VenueRequest`:** `Place` (broker account, order type, SL/TP as price or distance,
+  position id), `Amend`, `Cancel` by broker order id, `ClosePosition`, `AmendPositionProtection`
+  and `Reconcile`, each validated before it leaves the owner.
+- [x] **Extend `VenueUpdate`:** `Order` reports with the broker order id and filled quantity,
+  `Refused`, `Fill` (deal id, price, quantity, position id, realized close), `Position`,
+  `PositionClosed`, `Balance` and `Snapshot`.
+- [x] **Persist state** (schema v19): the broker order id is bound in `broker_orders` on first
+  report; deals are written once by deal id to `fills` and `broker_deals`; `broker_positions` and
+  `broker_account_state` follow reports. A closing deal for an order Aeris never placed (server
+  SL/TP, close request) creates a mirror order `ct-{broker id}`.
+- [x] **Fix T-1 to T-6:**
+  - `evaluate_order_risk` and the quantity-increment check run on the broker path. The practice
+    rule that contract currency equal account currency is not applied: the broker converts P&L
+    into the deposit currency.
+  - Flatten, reverse, close position and amend protection send real requests.
+  - The kill switch locks first, so it locks even with the venue disconnected, and reports broker
+    orders it could not cancel.
+  - No demo or live account blocks global kill, cancel or flatten for the others; flatten reports
+    what it could not request in `FlattenOutcome::incomplete`.
+  - The touch simulator and its IOC sweep skip broker orders.
+- [x] **Recovery:**
+  - The venue generation is persisted, and so are broker order id bindings.
+  - Every attach queues a `Reconcile` for each demo broker account.
+  - A snapshot replaces the account's positions, re-confirms orders still open (settling unanswered
+    modify or cancel requests to the broker's state), and settles orders it no longer holds:
+    filled from deals, cancelled when bound or partly filled, rejected when never received.
+  - Replayed deals are recorded once; tests cover duplicate, lost and offline-filled orders.
+- [ ] **Brackets:** `PlaceOrder` carries no SL/TP yet and bracket commands still refuse broker
+  accounts. Send server-side SL/TP through `VenueOrder.stop_loss/take_profit` and label any part
+  that stays local.
+- [ ] **Live risk:** risk checks run, but their inputs for broker accounts are still the
+  simulated ones: projected contracts ignore `broker_positions`, and broker positions carry no
+  unrealized P&L (the broker sends no mark). Decide whether session loss and trailing drawdown use
+  broker realized P&L, and project unrealized P&L from quotes.
+- [ ] **Round trips:** trade-history round trips cover simulated accounts only; design broker trade
+  history (hedged positions per broker id) with Phase 6.
 
 ### Phase 5: venue worker and account registration
 

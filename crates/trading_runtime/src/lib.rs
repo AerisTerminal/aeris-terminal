@@ -94,6 +94,9 @@ pub struct FlattenOutcome {
     pub fills: Vec<Fill>,
     /// Broker position IDs whose close requests have been submitted but not yet filled.
     pub pending_close_requests: Vec<String>,
+    /// What could not be requested (for example with a broker venue disconnected); every
+    /// other order and position in scope was still handled.
+    pub incomplete: Option<String>,
 }
 
 fn respond<T>(reply: &Reply<T>, result: Result<T, String>) {
@@ -297,6 +300,8 @@ pub struct TradingSnapshot {
     pub round_trips: Vec<TradeRoundTrip>,
     pub positions: Vec<Position>,
     pub broker_positions: Vec<BrokerPosition>,
+    /// The last balance each broker account reported, in its currency.
+    pub broker_balances: BTreeMap<TradingAccountId, FixedPoint>,
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
     pub risk_profiles: Vec<RiskProfile>,
@@ -442,9 +447,7 @@ struct Coordinator {
     practice_market_session: Option<Arc<PracticeMarketSession>>,
     venue_outbound: Option<SyncSender<VenueRequest>>,
     venue_inbox: Weak<VenueInbox>,
-    venue_generation: u64,
     venue_ingestion: u64,
-    pending_modifications: BTreeMap<ClientOrderId, ModifyOrder>,
 }
 
 /// Latest canonical BBO applied per registered instrument. Market panes can
@@ -509,9 +512,7 @@ impl TradingService {
                             practice_market_session: None,
                             venue_outbound: None,
                             venue_inbox: coordinator_venue_inbox,
-                            venue_generation: 0,
                             venue_ingestion: 0,
-                            pending_modifications: BTreeMap::new(),
                         };
                         coordinator.repair_loaded_position_projections()?;
                         Ok(coordinator)
@@ -1221,7 +1222,8 @@ impl Coordinator {
             }
             Command::CloseBrokerPosition(account_id, position_id, reply) => respond(
                 &reply,
-                self.broker_position_route(&account_id, &position_id, None),
+                self.require_broker_route(&account_id)
+                    .and_then(|()| self.close_broker_position(&account_id, &position_id)),
             ),
             Command::AmendBrokerPositionSltp(
                 account_id,
@@ -1231,11 +1233,14 @@ impl Coordinator {
                 reply,
             ) => respond(
                 &reply,
-                self.broker_position_route(
-                    &account_id,
-                    &position_id,
-                    Some((stop_loss, take_profit)),
-                ),
+                self.require_broker_route(&account_id).and_then(|()| {
+                    self.amend_broker_position_protection(
+                        &account_id,
+                        &position_id,
+                        stop_loss,
+                        take_profit,
+                    )
+                }),
             ),
             _ => {}
         }
@@ -1275,49 +1280,35 @@ impl Coordinator {
     }
 
     fn attach_venue(&mut self, generation: u64) -> Result<Receiver<VenueRequest>, String> {
-        if generation == 0 || generation <= self.venue_generation {
+        if generation == 0 || generation <= self.state.venue_generation {
             return Err("cTrader venue generation must advance".into());
         }
+        self.store.set_venue_generation(generation)?;
         let (outbound, receiver) = mpsc::sync_channel(venue::OUTBOUND_CAPACITY);
-        self.venue_outbound = Some(outbound);
-        self.venue_generation = generation;
-        self.venue_ingestion = 0;
-        self.pending_modifications.clear();
-        Ok(receiver)
-    }
-
-    fn broker_position_route(
-        &self,
-        account_id: &TradingAccountId,
-        position_id: &str,
-        prices: Option<(Option<FixedPoint>, Option<FixedPoint>)>,
-    ) -> Result<(), String> {
-        match self.route(account_id)? {
-            VenueRoute::Simulated => Err("broker position requires a cTrader account".into()),
-            VenueRoute::CtraderDemo if position_id.trim().is_empty() => {
-                Err("broker position identifier must not be empty".into())
-            }
-            VenueRoute::CtraderDemo
-                if prices.is_some_and(|(stop, take)| stop.is_none() && take.is_none()) =>
-            {
-                Err("stop-loss or take-profit is required".into())
-            }
-            VenueRoute::CtraderDemo => Err(DEMO_VENUE_UNAVAILABLE.into()),
-        }
-    }
-
-    fn preflight_accounts(&self, account_id: Option<&TradingAccountId>) -> Result<(), String> {
-        for account in self
+        // Every attach starts with a reconcile of each demo broker account, so state left
+        // by a restart or a dropped session is settled against the broker first.
+        for broker_account in self
             .state
             .accounts
             .values()
-            .filter(|account| account_id.is_none_or(|id| &account.id == id))
+            .filter(|account| account.environment == AccountEnvironment::Demo)
+            .filter_map(|account| account.broker_ref.clone())
         {
-            if self.route(&account.id)? == VenueRoute::CtraderDemo {
-                return Err(DEMO_VENUE_UNAVAILABLE.into());
-            }
+            outbound
+                .try_send(VenueRequest::Reconcile { broker_account })
+                .map_err(|_| "cTrader venue reconcile requests exceed the outbound queue")?;
         }
-        Ok(())
+        self.venue_outbound = Some(outbound);
+        self.state.venue_generation = generation;
+        self.venue_ingestion = 0;
+        Ok(receiver)
+    }
+
+    fn require_broker_route(&self, account_id: &TradingAccountId) -> Result<(), String> {
+        match self.route(account_id)? {
+            VenueRoute::Simulated => Err("broker position requires a cTrader account".into()),
+            VenueRoute::CtraderDemo => Ok(()),
+        }
     }
 
     fn create_practice_account(
@@ -1711,10 +1702,23 @@ impl Coordinator {
         if accounts.is_empty() {
             return Err("kill switch account is not registered".to_string());
         }
-        self.preflight_accounts(account_id)?;
-        let cancelled = self.cancel_all(account_id)?;
-        for account in &accounts {
+        // A targeted command on a data-only live account is refused before any change; a
+        // global one skips such accounts, which cannot trade, and protects the rest.
+        if let Some(account_id) = account_id {
+            self.route(account_id)?;
+        }
+        let tradable = accounts
+            .into_iter()
+            .filter(|account| self.route(account).is_ok())
+            .collect::<Vec<_>>();
+        // Locking is local and always possible, so it happens first: no new order can be
+        // placed even when a broker venue is disconnected and its orders cannot be cancelled.
+        for account in &tradable {
             self.lock_account(account.clone(), reason.to_string(), locked_at_unix_nanos)?;
+        }
+        let (cancelled, failures) = self.cancel_open_orders(account_id)?;
+        if let Some(failure) = failures {
+            return Err(format!("accounts are locked; {failure}"));
         }
         Ok(cancelled.len())
     }
@@ -1825,7 +1829,7 @@ impl Coordinator {
             .ok_or_else(|| "trading account is not registered".to_string())?;
         match VenueRoute::from_account(account)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return self.modify_broker_order(order, command),
+            VenueRoute::CtraderDemo => return self.modify_broker_order(order, &command),
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
         if !matches!(
@@ -1885,23 +1889,49 @@ impl Coordinator {
     }
 
     fn cancel_all(&mut self, account_id: Option<&TradingAccountId>) -> Result<Vec<Order>, String> {
-        self.preflight_accounts(account_id)?;
-        let client_order_ids = self
+        let (cancelled, failure) = self.cancel_open_orders(account_id)?;
+        failure.map_or(Ok(cancelled), Err)
+    }
+
+    /// Cancels every open order in scope: simulated orders at once, broker orders by
+    /// request. A broker order that cannot be requested (for example with its venue
+    /// disconnected) never stops the others; it is reported in the returned summary.
+    fn cancel_open_orders(
+        &mut self,
+        account_id: Option<&TradingAccountId>,
+    ) -> Result<(Vec<Order>, Option<String>), String> {
+        if let Some(account_id) = account_id {
+            self.route(account_id)?;
+        }
+        // Globally, accounts Aeris cannot trade (data-only live accounts) are skipped.
+        let candidates = self
             .state
             .orders
             .values()
             .filter(|order| order.status.is_open())
-            .filter(|order| {
-                account_id
-                    .as_ref()
-                    .is_none_or(|account_id| &order.account_id == *account_id)
+            .filter(|order| account_id.is_none_or(|account_id| &order.account_id == account_id))
+            .filter_map(|order| {
+                self.route(&order.account_id)
+                    .ok()
+                    .map(|route| (order.client_order_id.clone(), route))
             })
-            .map(|order| order.client_order_id.clone())
             .collect::<Vec<_>>();
-        client_order_ids
-            .into_iter()
-            .map(|client_order_id| self.cancel_order(&client_order_id))
-            .collect()
+        let mut cancelled = Vec::new();
+        let mut failed = 0_usize;
+        let mut last_error = None;
+        for (client_order_id, route) in candidates {
+            match (self.cancel_order(&client_order_id), route) {
+                (Ok(order), _) => cancelled.push(order),
+                (Err(error), VenueRoute::CtraderDemo) => {
+                    failed += 1;
+                    last_error = Some(error);
+                }
+                (Err(error), VenueRoute::Simulated) => return Err(error),
+            }
+        }
+        let failure = last_error
+            .map(|error| format!("{failed} cTrader order(s) could not be cancelled: {error}"));
+        Ok((cancelled, failure))
     }
 
     fn place_order(&mut self, command: &PlaceOrder) -> Result<Order, String> {
@@ -2267,13 +2297,7 @@ impl Coordinator {
         {
             return Err("order scales do not match the instrument".to_string());
         }
-        if instrument
-            .contract
-            .order_quantity_increment
-            .is_some_and(|increment| command.quantity.units() % increment.units() != 0)
-        {
-            return Err("order quantity must use whole provider units".to_string());
-        }
+        check_quantity_increment(instrument, command.quantity)?;
         if self
             .state
             .orders
@@ -2808,7 +2832,8 @@ impl Coordinator {
         self.validate_mark_to_market(observation, &instrument)?;
         self.recover_managed_brackets(observation, &instrument)?;
         self.update_managed_stops(observation, &instrument)?;
-        let mut candidates = market_fill_candidates(&self.state.orders, observation);
+        let mut candidates =
+            market_fill_candidates(&self.state.orders, &self.state.accounts, observation);
         if require_new_quote {
             candidates.retain(|(order_id, _)| {
                 self.state.orders.get(order_id).is_some_and(|order| {
@@ -3814,6 +3839,7 @@ impl Coordinator {
             .filter(|order| {
                 order.status.is_executable()
                     && order.instrument_id == observation.instrument_id
+                    && is_simulated(&self.state.accounts, &order.account_id)
                     && matches!(
                         order.time_in_force,
                         TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
@@ -3840,7 +3866,9 @@ impl Coordinator {
         }
         match self.route(account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+            VenueRoute::CtraderDemo => {
+                return self.flatten_broker_account(account_id, &observation.instrument_id);
+            }
         }
         let mut fills = self.observe_market(observation)?;
         self.cancel_all(Some(account_id))?;
@@ -3851,6 +3879,7 @@ impl Coordinator {
         Ok(FlattenOutcome {
             fills,
             pending_close_requests: Vec::new(),
+            incomplete: None,
         })
     }
 
@@ -3861,7 +3890,13 @@ impl Coordinator {
     ) -> Result<FlattenOutcome, String> {
         match self.route(account_id)? {
             VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
+            VenueRoute::CtraderDemo => {
+                return self.reverse_broker_position(
+                    account_id,
+                    &observation.instrument_id,
+                    &observation.provenance,
+                );
+            }
         }
         let key = (account_id.clone(), observation.instrument_id.clone());
         let position = self
@@ -4009,19 +4044,40 @@ impl Coordinator {
         if self.state.accounts.is_empty() {
             return Err("flatten requires at least one registered account".to_string());
         }
-        self.preflight_accounts(None)?;
         let mut fills = self.observe_market(observation)?;
-        self.cancel_all(None)?;
+        // A broker account never blocks flattening the others: what cannot be requested
+        // for it is reported, and everything else still runs.
+        let (_, mut incomplete) = self.cancel_open_orders(None)?;
+        let mut pending_close_requests = Vec::new();
         let accounts = self.state.accounts.keys().cloned().collect::<Vec<_>>();
         for account_id in accounts {
-            fills.extend(self.flatten_positions(&account_id, observation)?);
+            // Live accounts are data-only and hold nothing Aeris can close.
+            let Ok(route) = self.route(&account_id) else {
+                continue;
+            };
+            match route {
+                VenueRoute::Simulated => {
+                    fills.extend(self.flatten_positions(&account_id, observation)?);
+                }
+                VenueRoute::CtraderDemo => {
+                    match self.close_broker_positions_on(&account_id, &observation.instrument_id) {
+                        Ok(closes) => pending_close_requests.extend(closes),
+                        Err(error) => {
+                            incomplete.get_or_insert(format!(
+                                "cTrader positions were not closed: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
         }
         self.store.enforce_retention()?;
         self.enforce_memory_retention();
         self.bump_revision()?;
         Ok(FlattenOutcome {
             fills,
-            pending_close_requests: Vec::new(),
+            pending_close_requests,
+            incomplete,
         })
     }
 
@@ -4153,6 +4209,17 @@ impl Coordinator {
         Ok(Some(fill))
     }
 
+    /// The newest simulated-account fills, within the snapshot bound.
+    fn simulated_fills_newest_first(&self) -> Vec<&Fill> {
+        self.state
+            .fills
+            .iter()
+            .rev()
+            .filter(|fill| is_simulated(&self.state.accounts, &fill.account_id))
+            .take(MAXIMUM_SNAPSHOT_ITEMS)
+            .collect()
+    }
+
     fn snapshot(&self) -> Result<TradingSnapshot, String> {
         if self.state.accounts.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.instruments.len() > MAXIMUM_SNAPSHOT_ITEMS
@@ -4211,14 +4278,17 @@ impl Coordinator {
                         .map(|pnl| (fill.id.clone(), *pnl))
                 })
                 .collect(),
+            // Round trips are projected from simulated net positions; broker positions are
+            // hedged per broker id and are not paired this way.
             round_trips: round_trip::project_round_trips(
-                self.state.fills.iter().rev().take(MAXIMUM_SNAPSHOT_ITEMS),
+                self.simulated_fills_newest_first().into_iter(),
                 &self.state.positions,
                 &self.state.completed_trade_pnl,
                 &self.state.fill_realized_pnl,
             )?,
             positions: self.state.positions.values().cloned().collect(),
             broker_positions: self.state.broker_positions.values().cloned().collect(),
+            broker_balances: self.state.broker_balances.clone(),
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
             risk_profiles: self.state.risk_profiles.values().cloned().collect(),
@@ -4583,14 +4653,43 @@ fn touch_price(order: &Order, observation: &SimulatedMarketObservation) -> Optio
     }
 }
 
+fn is_simulated(
+    accounts: &BTreeMap<TradingAccountId, TradingAccount>,
+    account_id: &TradingAccountId,
+) -> bool {
+    accounts
+        .get(account_id)
+        .is_some_and(|account| account.environment == AccountEnvironment::Simulated)
+}
+
+/// Orders must be whole multiples of the provider's quantity step.
+fn check_quantity_increment(
+    instrument: &TradingInstrument,
+    quantity: FixedPoint,
+) -> Result<(), String> {
+    if instrument
+        .contract
+        .order_quantity_increment
+        .is_some_and(|increment| quantity.units() % increment.units() != 0)
+    {
+        return Err("order quantity must use whole provider units".to_string());
+    }
+    Ok(())
+}
+
+/// Orders the touch simulator may fill: executable simulated-account orders on the
+/// observed instrument. Broker orders are filled only by their broker.
 fn market_fill_candidates(
     orders: &BTreeMap<OrderId, Order>,
+    accounts: &BTreeMap<TradingAccountId, TradingAccount>,
     observation: &SimulatedMarketObservation,
 ) -> Vec<(OrderId, FixedPoint)> {
     orders
         .values()
         .filter(|order| {
-            order.status.is_executable() && order.instrument_id == observation.instrument_id
+            order.status.is_executable()
+                && order.instrument_id == observation.instrument_id
+                && is_simulated(accounts, &order.account_id)
         })
         .filter_map(|order| touch_price(order, observation).map(|price| (order.id.clone(), price)))
         .collect()

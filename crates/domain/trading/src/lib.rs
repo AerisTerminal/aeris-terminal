@@ -7,6 +7,8 @@ use aeris_instruments::InstrumentId;
 use core::fmt;
 use std::error::Error;
 
+pub mod venue;
+
 /// Maximum decimal scale accepted by canonical trading values.
 pub const MAXIMUM_DECIMAL_SCALE: u8 = 18;
 /// Maximum bytes accepted in one trading identity or presentation field.
