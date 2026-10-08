@@ -869,6 +869,9 @@ struct TradingPnlState {
     accounts: Vec<aeris_trading::TradingAccount>,
     orders: Vec<aeris_trading::Order>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
+    /// Broker positions, per broker position id; the broker sends no mark, so they carry
+    /// no unrealized P&L here.
+    broker_positions: Vec<aeris_trading::BrokerPosition>,
     risk_profiles: Vec<aeris_trading_runtime::RiskProfile>,
     risk_locks: Vec<aeris_trading_runtime::RiskLock>,
     feedback: Option<aeris_desktop::trading::TradingCommandFeedback>,
@@ -992,6 +995,44 @@ impl TimeSalesFilter {
     }
 }
 
+/// An account's net broker exposure on one instrument, with hedged positions summed by
+/// side. Its entry price is known only when a single position makes it up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BrokerExposure {
+    net_units: i64,
+    scale: u8,
+    entry_price: Option<aeris_trading::FixedPoint>,
+}
+
+fn broker_exposure(
+    positions: &[aeris_trading::BrokerPosition],
+    account_id: &aeris_trading::TradingAccountId,
+    instrument_id: &str,
+) -> Option<BrokerExposure> {
+    let mut matching = positions.iter().filter(|position| {
+        &position.account_id == account_id && position.instrument_id.as_str() == instrument_id
+    });
+    let first = matching.next()?;
+    let mut exposure = BrokerExposure {
+        net_units: first.side.sign().checked_mul(first.quantity.units())?,
+        scale: first.quantity.scale(),
+        entry_price: Some(first.entry_price),
+    };
+    for position in matching {
+        if position.quantity.scale() != exposure.scale {
+            return None;
+        }
+        exposure.net_units = exposure.net_units.checked_add(
+            position
+                .side
+                .sign()
+                .checked_mul(position.quantity.units())?,
+        )?;
+        exposure.entry_price = None;
+    }
+    (exposure.net_units != 0).then_some(exposure)
+}
+
 impl Default for TradingPnlState {
     fn default() -> Self {
         Self {
@@ -999,6 +1040,7 @@ impl Default for TradingPnlState {
             accounts: Vec::new(),
             orders: Vec::new(),
             positions: Vec::new(),
+            broker_positions: Vec::new(),
             risk_profiles: Vec::new(),
             risk_locks: Vec::new(),
             feedback: None,
@@ -2441,11 +2483,16 @@ fn dispatch_chart_close_position(
         return;
     };
     if intent.position_id.as_ref() != Some(&expected_position_id)
-        || !app.trading_pnl.positions.iter().any(|position| {
+        || !(app.trading_pnl.positions.iter().any(|position| {
             &position.position.account_id == account_id
                 && position.position.instrument_id.as_str() == product.instrument_id
                 && position.position.net_quantity.units() != 0
-        })
+        }) || broker_exposure(
+            &app.trading_pnl.broker_positions,
+            account_id,
+            &product.instrument_id,
+        )
+        .is_some())
     {
         reject_chart_intent(&chart, sequence, cx);
         return;
@@ -2465,10 +2512,10 @@ fn dispatch_chart_close_position(
         return;
     };
     let task = cx.background_executor().spawn(async move {
-        aeris_desktop::trading::record_outcome(
+        aeris_desktop::trading::record_result(aeris_desktop::trading::flatten_feedback(
+            "Position closed",
             service.flatten_account(account_id, observation),
-            "Practice position closed",
-        )
+        ))
     });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;

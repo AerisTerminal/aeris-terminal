@@ -49,9 +49,47 @@ fn record_feedback(result: Result<String, String>) {
 }
 
 /// Records a command result for the order-entry status line and reports whether it succeeded.
+/// Feedback for a flatten, reverse or close. Simulated fills are immediate; broker closes
+/// are requests whose fills the broker confirms later, so they are reported as requested,
+/// never as filled. Anything that could not be requested makes the outcome an error.
+///
+/// # Errors
+/// Returns the command's error, or the reported work with what could not be requested.
+pub fn flatten_feedback(
+    action: &str,
+    result: Result<aeris_trading_runtime::FlattenOutcome, String>,
+) -> Result<String, String> {
+    let outcome = result?;
+    let mut parts = vec![action.to_string()];
+    if !outcome.fills.is_empty() {
+        parts.push(format!("{} fill(s)", outcome.fills.len()));
+    }
+    if !outcome.pending_close_requests.is_empty() {
+        parts.push(format!(
+            "{} cTrader close request(s) sent",
+            outcome.pending_close_requests.len()
+        ));
+    }
+    let incomplete = outcome.incomplete;
+    parts.extend(incomplete.clone());
+    let message = parts.join(" · ");
+    if incomplete.is_some() {
+        Err(message)
+    } else {
+        Ok(message)
+    }
+}
+
 pub fn record_outcome<T>(result: Result<T, String>, success: &str) -> bool {
+    record_result(result.map(|_| success.to_string()))
+}
+
+/// Records feedback whose message the command already composed; returns whether it
+/// succeeded.
+#[must_use]
+pub fn record_result(result: Result<String, String>) -> bool {
     let accepted = result.is_ok();
-    record_feedback(result.map(|_| success.to_string()));
+    record_feedback(result);
     accepted
 }
 
@@ -718,16 +756,10 @@ pub fn flatten_simulated_account_for(
     };
     cx.background_executor()
         .spawn(async move {
-            record_feedback(
-                service
-                    .flatten_account(account_id, observation)
-                    .map(|outcome| {
-                        format!(
-                            "Flattened practice account · {} fill(s)",
-                            outcome.fills.len()
-                        )
-                    }),
-            );
+            record_feedback(flatten_feedback(
+                "Flattened",
+                service.flatten_account(account_id, observation),
+            ));
         })
         .detach();
 }
@@ -750,16 +782,10 @@ pub fn reverse_simulated_position(
     };
     cx.background_executor()
         .spawn(async move {
-            record_feedback(
-                service
-                    .reverse_position(account_id, observation)
-                    .map(|outcome| {
-                        format!(
-                            "Reversed practice position · {} fill(s)",
-                            outcome.fills.len()
-                        )
-                    }),
-            );
+            record_feedback(flatten_feedback(
+                "Reversed",
+                service.reverse_position(account_id, observation),
+            ));
         })
         .detach();
 }
@@ -776,12 +802,10 @@ pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx:
     };
     cx.background_executor()
         .spawn(async move {
-            record_feedback(service.flatten_all(observation).map(|outcome| {
-                format!(
-                    "Flattened all practice accounts · {} fill(s)",
-                    outcome.fills.len()
-                )
-            }));
+            record_feedback(flatten_feedback(
+                "Flattened all accounts",
+                service.flatten_all(observation),
+            ));
         })
         .detach();
 }
@@ -1154,6 +1178,35 @@ mod tests {
         assert_eq!(observation.instrument_id.as_str(), "test:instrument");
         assert_eq!(observation.bid.units(), 10_000);
         assert_eq!(observation.ask.units(), 10_001);
+    }
+
+    #[test]
+    fn flatten_feedback_reports_broker_closes_as_requests_and_partial_work_as_errors() {
+        use aeris_trading_runtime::FlattenOutcome;
+        assert_eq!(
+            super::flatten_feedback(
+                "Flattened",
+                Ok(FlattenOutcome {
+                    pending_close_requests: vec!["77".into(), "78".into()],
+                    ..FlattenOutcome::default()
+                })
+            ),
+            Ok("Flattened · 2 cTrader close request(s) sent".to_string())
+        );
+        assert_eq!(
+            super::flatten_feedback(
+                "Flattened all accounts",
+                Ok(FlattenOutcome {
+                    incomplete: Some("1 cTrader order(s) could not be cancelled".into()),
+                    ..FlattenOutcome::default()
+                })
+            ),
+            Err("Flattened all accounts · 1 cTrader order(s) could not be cancelled".to_string())
+        );
+        assert_eq!(
+            super::flatten_feedback("Reversed", Err("no position".into())),
+            Err("no position".to_string())
+        );
     }
 
     #[test]

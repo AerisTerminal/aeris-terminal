@@ -439,7 +439,12 @@ fn has_selected_open_position(
                     &position.position.account_id == account_id
                         && position.position.instrument_id.as_str() == frame.instrument_id
                         && position.position.net_quantity.units() != 0
-                })
+                }) || crate::desktop::broker_exposure(
+                    &surface.trading_pnl.broker_positions,
+                    account_id,
+                    &frame.instrument_id,
+                )
+                .is_some()
             })
     })
 }
@@ -507,11 +512,11 @@ fn project_working_order_markers(
     Option<aeris_terminal_ui::OrderBookPositionMarker>,
 ) {
     let selected_account = state.trading_pnl.order_entry.selected_account_id.as_ref();
-    let Some(instrument_id) = state
+    let Some((instrument_id, price_scale)) = state
         .order_book
         .read(cx)
         .frame()
-        .map(|frame| frame.instrument_id.as_str())
+        .map(|frame| (frame.instrument_id.as_str(), frame.price_scale))
     else {
         return (Vec::new(), None);
     };
@@ -535,10 +540,12 @@ fn project_working_order_markers(
         .take(8)
         .collect();
     let position_marker = selected_account.and_then(|account_id| {
-        let position = state.trading_pnl.positions.iter().find(|position| {
+        let Some(position) = state.trading_pnl.positions.iter().find(|position| {
             &position.position.account_id == account_id
                 && position.position.instrument_id.as_str() == instrument_id
-        })?;
+        }) else {
+            return broker_position_marker(state, account_id, instrument_id, price_scale);
+        };
         let price = position.position.average_entry_price?;
         let net_quantity = position.position.net_quantity.units();
         if net_quantity == 0 {
@@ -559,6 +566,41 @@ fn project_working_order_markers(
         })
     });
     (working_orders, position_marker)
+}
+
+/// The DOM marker for a broker account's net exposure. It carries no point value, so the
+/// ladder shows no P&L the broker has not reported; an entry price finer than the book
+/// (a volume-weighted average) or a hedged mix of positions shows no marker.
+fn broker_position_marker(
+    state: &WorkspaceSurface,
+    account_id: &aeris_trading::TradingAccountId,
+    instrument_id: &str,
+    price_scale: u8,
+) -> Option<aeris_terminal_ui::OrderBookPositionMarker> {
+    let exposure = crate::desktop::broker_exposure(
+        &state.trading_pnl.broker_positions,
+        account_id,
+        instrument_id,
+    )?;
+    let price = exposure.entry_price?.exact_rescale(price_scale).ok()?;
+    let currency_scale = state
+        .trading_pnl
+        .accounts
+        .iter()
+        .find(|account| &account.id == account_id)?
+        .currency_scale;
+    Some(aeris_terminal_ui::OrderBookPositionMarker {
+        price: price.units(),
+        side: if exposure.net_units > 0 {
+            aeris_terminal_ui::OrderBookLevelSide::Ask
+        } else {
+            aeris_terminal_ui::OrderBookLevelSide::Bid
+        },
+        quantity: i64::try_from(exposure.net_units.unsigned_abs()).ok()?,
+        quantity_scale: exposure.scale,
+        point_value: None,
+        currency_scale,
+    })
 }
 
 fn trading_pnl_refresh_due(
@@ -686,6 +728,7 @@ fn apply_trading_snapshot(
     let account_pnl = snapshot.account_pnl;
     state.trading_pnl.orders = snapshot.orders;
     state.trading_pnl.positions = snapshot.position_pnl;
+    state.trading_pnl.broker_positions = snapshot.broker_positions;
     state.trading_pnl.risk_profiles = snapshot.risk_profiles;
     state.trading_pnl.risk_locks = snapshot.risk_locks;
     state.trading_pnl.accounts = accounts;

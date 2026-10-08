@@ -425,9 +425,9 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
 - [x] **Bounds:** requests per relay turn (16), the outbound queue (64), the blocking inbox (1024,
   reattach after a 20 s stall), the spec cache (1024) and one deal page per reconcile. A deal
   replay longer than one page is logged; paging it is still to do.
-- [ ] **Day orders:** the desktop sends `Day` for pending orders, which cTrader does not offer; the
-  relay refuses them with a clear reason. Decide in Phase 6 between good-till-cancelled and
-  good-till-date at the 17:00 New York rollover.
+- [x] **Day orders:** decided 2026-10-08 by the maintainer: broker pending orders requested as
+  `Day` rest good-till-cancelled, and market orders carry immediate-or-cancel; the owner stores the
+  time in force the broker holds. The relay still refuses `Day` at the contract level.
 
 ### Phase 6: desktop trading
 
@@ -439,8 +439,14 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
   Simulated, demo and live accounts are always visually distinct.
 - [ ] **Order entry:** DOM and chart market, limit and stop orders; modify by drag; cancel; brackets
   as server SL/TP; close position; amend SL/TP; flatten; reverse.
-- [ ] **Feedback:** show rejections and `pending_close_requests` in flatten feedback. Never show a
-  fill before the broker confirms it.
+- [x] **Feedback:** flatten, reverse, flatten-all and chart close report fills, cTrader close
+  requests sent (never as fills) and anything incomplete, which makes the feedback an error.
+- [x] **Broker positions in the desktop:** the desktop holds `broker_positions` from the snapshot;
+  a broker account's net exposure enables flatten and reverse, allows the chart close, and draws
+  the DOM marker when one position makes it up and its entry is exact at the book scale. The
+  marker carries no point value, so no unrealized P&L is shown that the broker has not reported.
+- [ ] **Broker positions panel:** list hedged positions per broker id with SL/TP, swap and
+  commission, and project unrealized P&L once quote-to-deposit conversion exists.
 - [ ] **Kill switch and risk:** profiles apply to cTrader demo accounts exactly as to simulated ones.
 
 ### Phase 7: demo qualification

@@ -3016,6 +3016,55 @@ fn every_built_in_provider_maps_to_a_desktop_provider_or_is_hidden() {
 }
 
 #[test]
+fn broker_exposure_nets_hedged_positions_and_knows_a_single_entry() {
+    let account = aeris_trading::TradingAccountId::try_new("ctrader-demo-1001").expect("id");
+    let point = |units, scale| aeris_trading::FixedPoint::try_new(units, scale).expect("point");
+    let position = |id: &str, side, quantity| aeris_trading::BrokerPosition {
+        account_id: account.clone(),
+        instrument_id: aeris_instruments::InstrumentId::try_new("ctrader:demo:1001:1")
+            .expect("instrument"),
+        broker_position_id: id.into(),
+        side,
+        quantity: point(quantity, 2),
+        entry_price: point(108_250, 5),
+        stop_loss: None,
+        take_profit: None,
+        swap: point(0, 2),
+        commission: point(0, 2),
+        gross_unrealized: point(0, 2),
+        net_unrealized: point(0, 2),
+        opened_unix_nanos: 1,
+    };
+    let single = [position("77", aeris_trading::OrderSide::Buy, 100_000)];
+    assert_eq!(
+        super::broker_exposure(&single, &account, "ctrader:demo:1001:1"),
+        Some(super::BrokerExposure {
+            net_units: 100_000,
+            scale: 2,
+            entry_price: Some(point(108_250, 5)),
+        })
+    );
+    let hedged = [
+        position("77", aeris_trading::OrderSide::Buy, 100_000),
+        position("78", aeris_trading::OrderSide::Sell, 30_000),
+    ];
+    let exposure = super::broker_exposure(&hedged, &account, "ctrader:demo:1001:1").expect("net");
+    assert_eq!((exposure.net_units, exposure.entry_price), (70_000, None));
+    let flat = [
+        position("77", aeris_trading::OrderSide::Buy, 100_000),
+        position("78", aeris_trading::OrderSide::Sell, 100_000),
+    ];
+    assert_eq!(
+        super::broker_exposure(&flat, &account, "ctrader:demo:1001:1"),
+        None
+    );
+    assert_eq!(
+        super::broker_exposure(&single, &account, "ctrader:demo:1001:2"),
+        None
+    );
+}
+
+#[test]
 fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
     assert_eq!(
         super::terminal_provider_display(super::TerminalProvider::Rithmic),
