@@ -782,6 +782,44 @@ fn the_simulator_never_fills_a_broker_order() {
 }
 
 #[test]
+fn day_pending_orders_rest_good_till_cancelled_and_market_orders_fill_or_cancel() {
+    let (_directory, service, receiver) = setup("venue-time-in-force");
+    let day_limit = PlaceOrder {
+        time_in_force: TimeInForce::Day,
+        ..limit_request("day-limit", 9_000)
+    };
+    let placed = service.place_order(day_limit).expect("limit");
+    assert_eq!(placed.time_in_force, TimeInForce::GoodTillCancelled);
+    let VenueRequest::Place(sent) = receiver.try_recv().expect("place") else {
+        panic!("a place request");
+    };
+    assert_eq!(sent.time_in_force, TimeInForce::GoodTillCancelled);
+    let market = service.place_order(request("day-market")).expect("market");
+    assert_eq!(market.time_in_force, TimeInForce::ImmediateOrCancel);
+
+    // A desktop modify still names its day intent and is accepted.
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            order_update(report(&placed, "1101", 0), BrokerOrderState::Accepted),
+        ))
+        .expect("accepted");
+    let modify = ModifyOrder {
+        client_order_id: placed.client_order_id.clone(),
+        time_in_force: TimeInForce::Day,
+        limit_price: Some(point(9_025, 2)),
+        stop_price: None,
+        modified_unix_nanos: 3_000,
+        provenance: crate::tests::provenance(7, 3_000),
+    };
+    assert_eq!(
+        service.modify_order(modify).expect("modify").status,
+        OrderStatus::PendingModify
+    );
+}
+
+#[test]
 fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
     let (_directory, service, receiver) = setup("venue-observed");
     let observed = |name: &str| {

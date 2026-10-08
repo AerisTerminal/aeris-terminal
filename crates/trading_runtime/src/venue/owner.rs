@@ -162,13 +162,14 @@ impl Coordinator {
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.
         self.evaluate_order_risk(command)?;
+        let time_in_force = broker_time_in_force(command.order_type, command.time_in_force);
         let request = VenueRequest::Place(VenueOrder {
             client_order_id: command.client_order_id.clone(),
             broker_account: self.broker_account(&command.account_id)?,
             instrument_id: command.instrument_id.clone(),
             side: command.side,
             order_type: command.order_type,
-            time_in_force: command.time_in_force,
+            time_in_force,
             quantity: command.quantity,
             limit_price: command.limit_price,
             stop_price: command.stop_price,
@@ -188,7 +189,7 @@ impl Coordinator {
             instrument_id: command.instrument_id.clone(),
             side: command.side,
             order_type: command.order_type,
-            time_in_force: command.time_in_force,
+            time_in_force,
             quantity: command.quantity,
             filled_quantity: FixedPoint::try_new(0, command.quantity.scale())
                 .map_err(|error| error.to_string())?,
@@ -240,7 +241,7 @@ impl Coordinator {
         if command.modified_unix_nanos <= 0 {
             return Err("order modification timestamp must be positive".into());
         }
-        if command.time_in_force != order.time_in_force {
+        if broker_time_in_force(order.order_type, command.time_in_force) != order.time_in_force {
             return Err("cTrader cannot change an order's time in force".into());
         }
         let instrument = self
@@ -1082,6 +1083,17 @@ fn filled_order(
     };
     updated.validate().map_err(|error| error.to_string())?;
     Ok(updated)
+}
+
+/// The time in force a broker order actually carries. Market orders fill or cancel at once.
+/// cTrader offers no day orders, so a day pending order rests good-till-cancelled
+/// (maintainer decision, 2026-10-08); the stored order says so.
+const fn broker_time_in_force(order_type: OrderType, requested: TimeInForce) -> TimeInForce {
+    match (order_type, requested) {
+        (OrderType::Market, _) => TimeInForce::ImmediateOrCancel,
+        (_, TimeInForce::Day) => TimeInForce::GoodTillCancelled,
+        (_, requested) => requested,
+    }
 }
 
 /// The last confirmed working status of an order with a pending request.
