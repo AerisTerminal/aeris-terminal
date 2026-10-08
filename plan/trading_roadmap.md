@@ -31,7 +31,7 @@ Item IDs are stable: **T** batches, **PF** foundations, **M** features, **D** de
 
 ## 1. Status
 
-Updated 2026-10-05. A status is **Complete** only when every item works through the real runtime and
+Updated 2026-10-08. A status is **Complete** only when every item works through the real runtime and
 desktop path, not when a unit test alone passes.
 
 | Batch | Scope | Status | Blocked by |
@@ -44,9 +44,9 @@ desktop path, not when a unit test alone passes.
 | [T6](#t6--record-replay-and-review) Record, replay and review | D2, PF8, M4.1–M4.4 | **Open** | D2; data licensing checklist |
 | [T7](#t7--institutional-depth) Institutional depth | M1.1, M1.3, M1.8, M4.5, M5.6, M5.7 | **Open** | T6; Aeris Charts B4–B7; licensing checklist |
 | [T8](#t8--power-users) Power users | M6.1–M6.5, M7.3, M7.5–M7.8 | **Open** | Aeris Charts B9; a release path for M7.8 |
-| [T9](#t9--ctrader-forex-and-cfd) cTrader forex and CFD | PF10, PF11, D7 | **Open**; Spotware application not yet submitted | Spotware approval; D7 |
+| [T9](#t9--ctrader-forex-and-cfd) cTrader forex and CFD | PF10, PF11, D7 | **Partial**: AWS broker deployed, demo market data works in `market_runtime`; no desktop exposure, no trading (see `plan/ctrader_implementation.md`) | D7 confirmation; D8 |
 
-**Progress:** 3 of 9 batches complete, T2 partial. Of 45 catalog features, 17 are Present, 15 are
+**Progress:** 3 of 9 batches complete, T2 and T9 partial. Of 45 catalog features, 17 are Present, 15 are
 Partial and 13 are Absent (see [Feature catalog](#4-feature-catalog)). Foundations: 5 of 11 delivered.
 
 **Order:** T1 unblocks T2, T5, T6 and part of T7. T2 and T3 are independent. T5 starts when Rithmic
@@ -277,7 +277,11 @@ derived results, and journal statistics are reproducible from stored records.
 
 ### T9 — cTrader forex and CFD
 
-**Scope:** PF10, PF11, D7 · **Needs:** T1, T2 · **Status:** Open; runs in parallel with T5 (D5)
+**Scope:** PF10, PF11, D7 · **Needs:** T1, T2 · **Status:** Partial; runs in parallel with T5 (D5)
+
+**Build status and the working checklist live in
+[`plan/ctrader_implementation.md`](ctrader_implementation.md).** This section keeps the provider
+facts, constraints and acceptance; do not track progress in the lists below.
 
 One cTrader Open API application reaches every cTrader broker (IC Markets, Pepperstone, FP Markets,
 FxPro, BlackBull and others) through the user's own cTrader ID, without a contract per broker.
@@ -476,8 +480,8 @@ and release time; missing keys or outages show "unavailable", never invented val
 | PF7 | Local store for user-owned records | T1 | Delivered |
 | PF8 | Session recording store | T6 | Absent |
 | PF9 | Local simulated venue | T1 | Delivered |
-| PF10 | cTrader Open API, the first additional trading provider (see [Broker coverage](#9-broker-coverage)) | T9 | Absent |
-| PF11 | Provider-neutral live venue in `trading_runtime` | T9 | Absent |
+| PF10 | cTrader Open API, the first additional trading provider (see [Broker coverage](#9-broker-coverage)) | T9 | Partial (market data; no trading messages) |
+| PF11 | Provider-neutral live venue in `trading_runtime` | T9 | Partial (routing and venue boundary skeleton) |
 
 **PF1 — Rithmic order routing.** Submit, modify and cancel market, limit, stop and stop-limit
 orders; server-side brackets, OCO and trailing stops where Rithmic supports them; status, fill and
@@ -537,7 +541,8 @@ command. cTrader is its first consumer; Rithmic PF1 reuses it unchanged.
 | D4 | Order-level data leaving the Rithmic adapter | PF4, M1.6 | **Open.** Recommendation: a bounded canonical view in `domain/market_data`, keeping provider identity, local order and sequence evidence separate |
 | D5 | First additional trading provider | PF10 | **Decided 2026-10-05:** cTrader Open API (T9), built in parallel with Rithmic onboarding instead of waiting for it, because Rithmic onboarding is slow and cTrader reaches many brokers through one application |
 | D6 | Calendar distribution without a backend | M5.1 | **Decided:** fetch official BLS, BEA, Federal Reserve and EIA schedules directly through `context_runtime` |
-| D7 | Handling of the cTrader client secret, which every desktop connection must send | T9 | **Open.** Ask Spotware during application review. Never in source, builds, logs or fixtures; relaying market data through AWS is ruled out by operating constraint 1. Record the chosen handling and its rotation path here |
+| D7 | Handling of the cTrader client secret, which every desktop connection must send | T9 | **Implemented, awaiting Spotware confirmation:** the AWS broker returns the secret only to a desktop holding a `ready` connection and its proof (`app_credentials`); the desktop keeps it in zeroizing memory, never on disk or in logs. Rotation: rerun `configure:ctrader`; desktops refetch on `CH_CLIENT_AUTH_FAILURE`. Never in source, builds, logs or fixtures; relaying market data through AWS stays ruled out by operating constraint 1 |
+| D8 | Owner of the cTrader trading session | T9 | **Open.** Recommendation: the `market_runtime` cTrader supervisor keeps the single connection per host and serves trading through the bounded `VenueRequest`/`VenueInbox` boundary; trading state stays in `trading_runtime` |
 
 ---
 
@@ -618,7 +623,7 @@ live in `plan/go-to-market-strategy.md`. Never advertise a route before the brok
 | tastytrade | tastytrade customers: futures and equities | Present, Level 1 | Absent | `read` scope approved; `trade` scope only after traction |
 | Hyperliquid | Crypto perps and spot; US users blocked | Present, public | Absent | Builder code (100 USDC) and agent-wallet approval |
 | Crypto exchanges | OKX, Bybit, KuCoin, Binance, Kraken, Coinbase, Bitget, Gate, Deribit, Delta Exchange India, CoinDCX | Absent; public WebSocket, no login | Absent | Broker program per exchange; Indian legal check on rebates; geo-blocking |
-| cTrader Open API ([T9](#t9--ctrader-forex-and-cfd)) | IC Markets, Pepperstone, FP Markets, FxPro, BlackBull and other cTrader brokers; no US brokers | Absent; quotes and bars, depth (verify), no trade tape | Absent | Spotware app review; D7 |
+| cTrader Open API ([T9](#t9--ctrader-forex-and-cfd)) | IC Markets, Pepperstone, FP Markets, FxPro, BlackBull and other cTrader brokers; no US brokers | Partial: quotes, bars and depth verified on demo in `market_runtime`, no trade tape; not exposed in the desktop | Absent | D7 confirmation; D8 |
 | Other forex/CFD | TradeLocker, DXtrade, Match-Trader, OANDA, IBKR TWS, Capital.com, IG | Absent | Absent | Per route |
 | Excluded | MT4/MT5 brokers, Topstep, NinjaTrader/Tradovate | — | — | Not pursued |
 
