@@ -2310,7 +2310,7 @@ fn dispatch_chart_place_bracket(
         let result = service
             .place_inline_bracket(aeris_trading_runtime::PlaceInlineBracket { entry, template })
             .and_then(|_| service.observe_market(observation));
-        aeris_desktop::trading::record_outcome(result, "Practice bracket placed")
+        aeris_desktop::trading::record_outcome(result, "Bracket placed")
     });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;

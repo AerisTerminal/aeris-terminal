@@ -791,6 +791,9 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
             template: bracket_template(),
         })
         .expect("bracket accepted");
+    let BracketPlacement::Managed(awaiting) = awaiting else {
+        panic!("a simulated bracket is managed locally");
+    };
     assert_eq!(awaiting.status, ManagedBracketStatus::AwaitingEntry);
     assert!(awaiting.stop_client_order_id.is_none());
 

@@ -88,6 +88,26 @@ impl VenueRoute {
     }
 }
 
+/// How a bracket was placed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BracketPlacement {
+    /// Simulated accounts: the owner manages the stop and target child orders locally.
+    Managed(ManagedBracket),
+    /// Broker accounts: the entry order carries server-side stop-loss and take-profit, which
+    /// the broker holds and enforces.
+    BrokerProtected(Order),
+}
+
+impl BracketPlacement {
+    #[must_use]
+    pub const fn entry_client_order_id(&self) -> &ClientOrderId {
+        match self {
+            Self::Managed(bracket) => &bracket.entry_client_order_id,
+            Self::BrokerProtected(order) => &order.client_order_id,
+        }
+    }
+}
+
 /// Simulated closes fill immediately; broker closes are asynchronous requests.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FlattenOutcome {
@@ -385,8 +405,8 @@ enum Command {
     RegisterInstrument(TradingInstrument, Reply<()>),
     InstallPracticeMarketSession(Arc<PracticeMarketSession>, Reply<()>),
     Place(PlaceOrder, Reply<Order>),
-    PlaceBracket(PlaceBracket, Reply<ManagedBracket>),
-    PlaceInlineBracket(PlaceInlineBracket, Reply<ManagedBracket>),
+    PlaceBracket(PlaceBracket, Reply<BracketPlacement>),
+    PlaceInlineBracket(PlaceInlineBracket, Reply<BracketPlacement>),
     PlaceProtective(PlaceProtectiveOrder, Reply<Order>),
     EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),
     Modify(ModifyOrder, Reply<Order>),
@@ -634,7 +654,7 @@ impl TradingService {
     ///
     /// # Errors
     /// Returns an error when the template, entry, allocation, risk, or persistence is invalid.
-    pub fn place_bracket(&self, bracket: PlaceBracket) -> Result<ManagedBracket, String> {
+    pub fn place_bracket(&self, bracket: PlaceBracket) -> Result<BracketPlacement, String> {
         self.request(|reply| Command::PlaceBracket(bracket, reply))
     }
 
@@ -645,7 +665,7 @@ impl TradingService {
     pub fn place_inline_bracket(
         &self,
         bracket: PlaceInlineBracket,
-    ) -> Result<ManagedBracket, String> {
+    ) -> Result<BracketPlacement, String> {
         self.request(|reply| Command::PlaceInlineBracket(bracket, reply))
     }
 
@@ -2007,7 +2027,7 @@ impl Coordinator {
         Ok(source)
     }
 
-    fn place_bracket(&mut self, command: &PlaceBracket) -> Result<ManagedBracket, String> {
+    fn place_bracket(&mut self, command: &PlaceBracket) -> Result<BracketPlacement, String> {
         let template = self
             .state
             .strategy_templates
@@ -2022,7 +2042,7 @@ impl Coordinator {
         &mut self,
         entry_command: &PlaceOrder,
         template: BracketStrategyTemplate,
-    ) -> Result<ManagedBracket, String> {
+    ) -> Result<BracketPlacement, String> {
         if self.route(&entry_command.account_id)? != VenueRoute::Simulated {
             if template.trailing_stop.is_some() {
                 return Err("managed trailing stops are unavailable for broker accounts".into());
@@ -2030,12 +2050,16 @@ impl Coordinator {
             if template.break_even.is_some() {
                 return Err("managed break-even stops are unavailable for broker accounts".into());
             }
-            return Err("managed brackets are unavailable for broker accounts".into());
+            template.validate()?;
+            self.check_bracket_stop_risk(entry_command, &template)?;
+            return self
+                .place_broker_bracket(entry_command, &template)
+                .map(BracketPlacement::BrokerProtected);
         }
         template.validate()?;
         let bracket_id = entry_command.client_order_id.as_str().to_string();
         if let Some(existing) = self.state.managed_brackets.get(&bracket_id) {
-            return Ok(existing.clone());
+            return Ok(BracketPlacement::Managed(existing.clone()));
         }
         self.make_room_for_managed_bracket()?;
         allocated_target_quantities(entry_command.quantity, &template.targets)?;
@@ -2071,7 +2095,7 @@ impl Coordinator {
             .managed_brackets
             .insert(bracket_id, bracket.clone());
         self.bump_revision()?;
-        Ok(bracket)
+        Ok(BracketPlacement::Managed(bracket))
     }
 
     fn check_bracket_stop_risk(

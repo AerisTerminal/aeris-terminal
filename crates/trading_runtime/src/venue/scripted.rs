@@ -820,6 +820,46 @@ fn day_pending_orders_rest_good_till_cancelled_and_market_orders_fill_or_cancel(
 }
 
 #[test]
+fn a_broker_bracket_sends_server_protection_at_the_template_distances() {
+    let (_directory, service, receiver) = setup("venue-bracket");
+    let template = crate::BracketStrategyTemplate {
+        template_id: "broker-bracket".into(),
+        revision: 1,
+        name: "Broker bracket".into(),
+        stop_offset_ticks: 8,
+        targets: vec![crate::BracketTarget {
+            offset_ticks: 16,
+            quantity_percent: 100,
+        }],
+        trailing_stop: None,
+        break_even: None,
+        enabled: true,
+    };
+    let placement = service
+        .place_inline_bracket(crate::PlaceInlineBracket {
+            entry: request("protected-entry"),
+            template,
+        })
+        .expect("bracket");
+    let crate::BracketPlacement::BrokerProtected(order) = placement else {
+        panic!("a broker bracket is held by the broker");
+    };
+    assert_eq!(order.status, OrderStatus::Pending);
+    let VenueRequest::Place(sent) = receiver.try_recv().expect("place") else {
+        panic!("a place request");
+    };
+    // The fixture tick is 0.25, so 8 and 16 ticks are 2.00 and 4.00.
+    assert_eq!(
+        (sent.stop_loss, sent.take_profit),
+        (
+            Some(aeris_trading::venue::Protection::Distance(point(200, 2))),
+            Some(aeris_trading::venue::Protection::Distance(point(400, 2)))
+        )
+    );
+    assert_eq!(service.snapshot().expect("snapshot").managed_brackets, []);
+}
+
+#[test]
 fn observed_accounts_register_once_and_new_demo_accounts_reconcile_at_once() {
     let (_directory, service, receiver) = setup("venue-observed");
     let observed = |name: &str| {

@@ -1,6 +1,7 @@
 //! Broker order state is persisted and advanced only by the trading owner.
 
 use super::{VenueEvent, VenueRequest, VenueUpdate};
+use crate::BracketStrategyTemplate;
 use crate::{
     Coordinator, DEMO_VENUE_UNAVAILABLE, FlattenOutcome, MAXIMUM_OPEN_ORDERS, ModifyOrder,
     PlaceOrder, TradingProvenance, check_quantity_increment, current_unix_nanos,
@@ -11,8 +12,8 @@ use aeris_trading::{
     OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
     TradingAccount, TradingAccountId,
     venue::{
-        BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount, RealizedClose, VenueAmendment,
-        VenueOrder, VenuePosition, VenueSnapshot,
+        BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount, Protection, RealizedClose,
+        VenueAmendment, VenueOrder, VenuePosition, VenueSnapshot,
     },
 };
 use std::{collections::BTreeSet, sync::mpsc::TrySendError};
@@ -127,6 +128,62 @@ impl Coordinator {
     }
 
     pub(crate) fn place_broker_order(&mut self, command: &PlaceOrder) -> Result<Order, String> {
+        self.place_protected_broker_order(command, None, None)
+    }
+
+    /// A bracket on a broker account is one entry order carrying server-side protection:
+    /// the stop at the template's stop distance and the take-profit at its single target.
+    /// cTrader holds one take-profit per order, so scale-out targets are refused.
+    pub(crate) fn place_broker_bracket(
+        &mut self,
+        command: &PlaceOrder,
+        template: &BracketStrategyTemplate,
+    ) -> Result<Order, String> {
+        let take_profit_ticks = match template.targets.as_slice() {
+            [] => None,
+            [target] if target.quantity_percent == 100 => Some(target.offset_ticks),
+            _ => {
+                return Err(
+                    "cTrader holds one take-profit per order; scale-out targets are unavailable \
+                     for broker accounts"
+                        .into(),
+                );
+            }
+        };
+        let instrument = self
+            .state
+            .instruments
+            .get(&command.instrument_id)
+            .ok_or("trading instrument is not registered")?;
+        let tick = instrument
+            .contract
+            .tick_size
+            .ok_or("the instrument has no tick size")
+            .and_then(|tick| {
+                FixedPoint::try_new(tick.units(), tick.scale())
+                    .and_then(|tick| tick.exact_rescale(instrument.price_scale))
+                    .map_err(|_| "the instrument tick size does not fit its price scale")
+            })?;
+        let distance = |ticks: u32| {
+            tick.units()
+                .checked_mul(i64::from(ticks))
+                .ok_or_else(|| "bracket distance overflowed".to_string())
+                .and_then(|units| {
+                    FixedPoint::try_new(units, tick.scale()).map_err(|error| error.to_string())
+                })
+                .map(Protection::Distance)
+        };
+        let stop_loss = distance(template.stop_offset_ticks)?;
+        let take_profit = take_profit_ticks.map(distance).transpose()?;
+        self.place_protected_broker_order(command, Some(stop_loss), take_profit)
+    }
+
+    fn place_protected_broker_order(
+        &mut self,
+        command: &PlaceOrder,
+        stop_loss: Option<Protection>,
+        take_profit: Option<Protection>,
+    ) -> Result<Order, String> {
         if self.venue_outbound.is_none() {
             return Err(DEMO_VENUE_UNAVAILABLE.into());
         }
@@ -173,8 +230,8 @@ impl Coordinator {
             quantity: command.quantity,
             limit_price: command.limit_price,
             stop_price: command.stop_price,
-            stop_loss: None,
-            take_profit: None,
+            stop_loss,
+            take_profit,
             broker_position_id: None,
         });
         request.validate().map_err(|error| error.to_string())?;

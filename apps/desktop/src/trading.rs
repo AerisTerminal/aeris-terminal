@@ -308,7 +308,7 @@ pub fn dispatch_simulated_selected_order(
             let accepted = if let Some(template_id) = selection.template_id {
                 service
                     .place_bracket(PlaceBracket { entry, template_id })
-                    .map(|bracket| bracket.entry_client_order_id)
+                    .map(|placement| placement.entry_client_order_id().clone())
             } else {
                 service
                     .place_order(entry)

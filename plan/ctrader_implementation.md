@@ -390,9 +390,10 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
     modify or cancel requests to the broker's state), and settles orders it no longer holds:
     filled from deals, cancelled when bound or partly filled, rejected when never received.
   - Replayed deals are recorded once; tests cover duplicate, lost and offline-filled orders.
-- [ ] **Brackets:** `PlaceOrder` carries no SL/TP yet and bracket commands still refuse broker
-  accounts. Send server-side SL/TP through `VenueOrder.stop_loss/take_profit` and label any part
-  that stays local.
+- [x] **Brackets:** on a broker account a bracket is one entry order carrying server-side SL/TP
+  distances from the template's ticks (`BracketPlacement::BrokerProtected`); nothing is managed
+  locally. Stop risk is checked first. Scale-out targets, trailing stops and break-even are refused
+  for broker accounts with their reasons.
 - [ ] **Live risk:** risk checks run, but their inputs for broker accounts are still the
   simulated ones: projected contracts ignore `broker_positions`, and broker positions carry no
   unrealized P&L (the broker sends no mark). Decide whether session loss and trailing drawdown use

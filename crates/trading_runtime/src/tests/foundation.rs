@@ -283,7 +283,10 @@ fn managed_brackets_trailing_and_break_even_reject_broker_without_state() {
             match *feature {
                 "trailing" => "managed trailing stops are unavailable for broker accounts",
                 "break-even" => "managed break-even stops are unavailable for broker accounts",
-                _ => "managed brackets are unavailable for broker accounts",
+                _ => {
+                    "cTrader holds one take-profit per order; scale-out targets are \
+                     unavailable for broker accounts"
+                }
             }
         );
         let mut simulated = market_order(
