@@ -42,8 +42,6 @@ mod local_state;
 mod market_screener;
 #[path = "components/market_screener_view.rs"]
 mod market_screener_view;
-#[path = "components/modal_dialog.rs"]
-mod modal_dialog;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
 #[path = "components/order_book_panel.rs"]
@@ -194,10 +192,10 @@ use gpui_platform::application;
 use indicator_menu::{
     IndicatorDialogState, indicator_dialog_content, indicator_selector, native_indicator,
 };
-use modal_dialog::{ConfirmationDialog, ConfirmationTone, ModalLayer, modal_footer, modal_header};
 use native_ui::{
     button::{Button, ButtonSize, ButtonVariant, close_button},
     color_picker::{ColorPicker, normalize_hex_color, transparency_backdrop},
+    dialog::{ConfirmationDialog, ConfirmationTone, Dialog, DialogAlign, DialogSize},
     icon::Icon,
     input::{Input, InputEvent, InputState},
     loader::Loader,

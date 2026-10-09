@@ -315,15 +315,8 @@ fn study_settings_body(
     cx: &App,
 ) -> AnyElement {
     let colors = theme.colors;
-    let mut body = div()
-        .id("study_settings_dialog_body")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_3();
+    // The dialog body owns padding and scrolling; this column only spaces the settings rows.
+    let mut body = div().flex().flex_col().gap_2();
     let mut last_group: Option<&str> = None;
     for (index, spec) in dialog.specs.iter().enumerate() {
         if !workspace_surface::study_setting_condition_matches(
@@ -372,65 +365,6 @@ fn study_settings_body(
     body.into_any_element()
 }
 
-fn study_settings_header(
-    app: &Entity<WorkspaceSurface>,
-    dialog: &StudySettingsDialogState,
-    theme: &AerisTheme,
-) -> Div {
-    let cancel = app.clone();
-    modal_header(
-        "study_settings_close",
-        "Study settings",
-        Some(dialog.title.clone().into_any_element()),
-        theme,
-        move |_, cx| {
-            cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
-        },
-    )
-}
-
-fn study_settings_footer(app: &Entity<WorkspaceSurface>, busy: bool, theme: &AerisTheme) -> Div {
-    let reset = app.clone();
-    let cancel = app.clone();
-    let save = app.clone();
-    modal_footer(theme)
-        .justify_between()
-        .child(
-            Button::new("study_settings_reset", theme)
-                .variant(ButtonVariant::Destructive)
-                .label("Reset to defaults")
-                .disabled(busy)
-                .on_click(move |_, window, cx| {
-                    reset.update(cx, |surface, surface_cx| {
-                        surface.reset_study_settings_dialog(window, surface_cx);
-                    });
-                }),
-        )
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    Button::new("study_settings_cancel", theme)
-                        .variant(ButtonVariant::Secondary)
-                        .label("Cancel")
-                        .on_click(move |_, _, cx| {
-                            cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
-                        }),
-                )
-                .child(
-                    Button::new("study_settings_save", theme)
-                        .variant(ButtonVariant::Positive)
-                        .label(if busy { "Applying…" } else { "Apply" })
-                        .loading(busy)
-                        .disabled(busy)
-                        .on_click(move |_, _, cx| {
-                            save.update(cx, WorkspaceSurface::save_study_settings_dialog);
-                        }),
-                ),
-        )
-}
-
 pub(super) fn study_settings_dialog_layer(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
@@ -438,22 +372,55 @@ pub(super) fn study_settings_dialog_layer(
     cx: &App,
 ) -> AnyElement {
     let dismiss = app.clone();
+    let reset = app.clone();
+    let cancel = app.clone();
+    let save = app.clone();
     let busy = app
         .read(cx)
         .studies
         .reinitializing
         .contains_key(&dialog.study_id);
-    let body = study_settings_body(app, dialog, theme, cx);
-    let header = study_settings_header(app, dialog, theme);
-    let footer = study_settings_footer(app, busy, theme);
 
-    ModalLayer::new("study_settings_dialog", px(500.0), theme, move |_, cx| {
-        dismiss.update(cx, WorkspaceSurface::close_study_settings_dialog);
-    })
+    Dialog::new(
+        "study_settings_dialog",
+        DialogSize::Md,
+        theme,
+        move |_, cx| {
+            dismiss.update(cx, WorkspaceSurface::close_study_settings_dialog);
+        },
+    )
+    .title("Study settings")
+    .subtitle(dialog.title.clone())
     .max_height(px(640.0))
-    .radius(RadiusToken::Medium)
-    .child(header)
-    .child(body)
-    .child(footer)
+    .child(study_settings_body(app, dialog, theme, cx))
+    .footer_leading(
+        Button::new("study_settings_reset", theme)
+            .variant(ButtonVariant::Destructive)
+            .label("Reset to defaults")
+            .disabled(busy)
+            .on_click(move |_, window, cx| {
+                reset.update(cx, |surface, surface_cx| {
+                    surface.reset_study_settings_dialog(window, surface_cx);
+                });
+            }),
+    )
+    .action(
+        Button::new("study_settings_cancel", theme)
+            .variant(ButtonVariant::Secondary)
+            .label("Cancel")
+            .on_click(move |_, _, cx| {
+                cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
+            }),
+    )
+    .action(
+        Button::new("study_settings_save", theme)
+            .variant(ButtonVariant::Positive)
+            .label(if busy { "Applying…" } else { "Apply" })
+            .loading(busy)
+            .disabled(busy)
+            .on_click(move |_, _, cx| {
+                save.update(cx, WorkspaceSurface::save_study_settings_dialog);
+            }),
+    )
     .into_any_element()
 }

@@ -30,67 +30,32 @@ pub(super) fn command_palette_layer(
     let mnemonic_row = mnemonic
         .as_ref()
         .map(|mnemonic| mnemonic_command_row(terminal, mnemonic, theme));
-    div()
-        .id("command_palette_scrim")
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .occlude()
-        .flex()
-        .items_start()
-        .justify_center()
-        .pt(px(96.0))
-        .bg(gpui_color(colors.surface.with_alpha(0.62)))
-        .on_any_mouse_down(move |_, window, cx| {
+    Dialog::new(
+        "command_palette",
+        DialogSize::Lg,
+        theme,
+        move |window, cx| {
             dismiss.update(cx, |terminal, terminal_cx| {
                 terminal.close_command_palette(window, terminal_cx);
             });
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .id("command_palette")
-                .w(px(560.0))
-                .max_h(px(520.0))
-                .flex()
-                .flex_col()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .border_1()
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface))
-                .shadow_lg()
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .p_3()
-                        .border_b_1()
-                        .border_color(gpui_color(colors.border))
-                        .child(Input::new(input).platform(theme).flex_1()),
-                )
-                .children(mnemonic_row)
-                .children(rows)
-                .children(message.map(|message| {
-                    div()
-                        .px_5()
-                        .py_3()
-                        .text_sm()
-                        .text_color(gpui_color(colors.warning))
-                        .child(message)
-                }))
-                .child(
-                    div()
-                        .px_5()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(gpui_color(colors.border))
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child("↑↓ select · Enter run · Esc close"),
-                ),
-        )
-        .into_any_element()
+        },
+    )
+    .align(DialogAlign::Top)
+    .list_body()
+    .max_height(px(520.0))
+    .header(Input::new(input).platform(theme).flex_1())
+    .children(mnemonic_row)
+    .children(rows)
+    .children(message.map(|message| {
+        div()
+            .px_2()
+            .py_2()
+            .text_sm()
+            .text_color(gpui_color(colors.text_warning))
+            .child(message)
+    }))
+    .footer_leading("↑↓ select · Enter run · Esc close")
+    .into_any_element()
 }
 
 fn mnemonic_command_row(
@@ -121,17 +86,9 @@ fn mnemonic_command_row(
             .unwrap_or_default()
     );
     let execute = terminal.clone();
-    div()
-        .id("command_palette_mnemonic")
-        .mx_2()
-        .px_3()
-        .py_2()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .cursor_pointer()
-        .bg(gpui_color(theme.colors.primary.with_alpha(0.12)))
-        .text_sm()
-        .text_color(gpui_color(theme.colors.text_primary))
-        .child(label)
+    // The typed mnemonic is the palette's primary action, so it stays highlighted.
+    MenuRow::search_result("command_palette_mnemonic", label, theme)
+        .highlighted(true)
         .on_click(move |_, window, cx| {
             execute.update(cx, |terminal, terminal_cx| {
                 terminal.execute_command_palette_query(window, terminal_cx);
@@ -149,34 +106,10 @@ fn command_row(
     selected: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     let execute = terminal.clone();
-    div()
-        .id(("command_palette_row", index))
-        .mx_2()
-        .px_3()
-        .py_2()
-        .flex()
-        .items_center()
-        .justify_between()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .cursor_pointer()
-        .when(selected, |row| {
-            row.bg(gpui_color(colors.active_bg.over(colors.surface)))
-        })
-        .hover(|row| row.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-        .child(
-            div()
-                .text_sm()
-                .text_color(gpui_color(colors.text_primary))
-                .child(title),
-        )
-        .children(chord.map(|chord| {
-            div()
-                .text_xs()
-                .text_color(gpui_color(colors.text_muted))
-                .child(chord)
-        }))
+    MenuRow::search_result(("command_palette_row", index), title, theme)
+        .highlighted(selected)
+        .when_some(chord, MenuRow::detail)
         .on_click(move |_, window, cx| {
             execute.update(cx, |terminal, terminal_cx| {
                 terminal.execute_registered_command(command, window, terminal_cx);

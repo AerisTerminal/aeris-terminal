@@ -586,13 +586,9 @@ fn price_alert_existing_rows(
     rows.into_any_element()
 }
 
-fn price_alert_dialog_header(
-    close: Entity<WorkspaceSurface>,
-    symbol: &str,
-    price: &str,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let subtitle = div()
+/// "SYMBOL at PRICE", with the price in tabular numerals.
+fn price_alert_dialog_subtitle(symbol: &str, price: &str) -> Div {
+    div()
         .flex()
         .items_center()
         .gap_1()
@@ -603,45 +599,6 @@ fn price_alert_dialog_header(
                 .font_features(platform_tabular_numerals())
                 .child(price.to_string()),
         )
-        .into_any_element();
-    modal_header(
-        "price_alert_close",
-        "Create price alert",
-        Some(subtitle),
-        theme,
-        move |_, cx| {
-            close.update(cx, WorkspaceSurface::close_price_alert_dialog);
-        },
-    )
-    .into_any_element()
-}
-
-fn price_alert_dialog_footer(
-    cancel: Entity<WorkspaceSurface>,
-    create: Entity<WorkspaceSurface>,
-    capacity_reached: bool,
-    theme: &AerisTheme,
-) -> AnyElement {
-    modal_footer(theme)
-        .child(
-            Button::new("price_alert_cancel", theme)
-                .variant(ButtonVariant::Secondary)
-                .label("Cancel")
-                .on_click(move |_, _, cx| {
-                    cancel.update(cx, WorkspaceSurface::close_price_alert_dialog);
-                }),
-        )
-        .child(
-            Button::new("price_alert_create", theme)
-                .variant(ButtonVariant::Positive)
-                .icon(header_icon(HugeIcon::Add))
-                .label("Create alert")
-                .disabled(capacity_reached)
-                .on_click(move |_, _, cx| {
-                    create.update(cx, WorkspaceSurface::create_price_alert);
-                }),
-        )
-        .into_any_element()
 }
 
 fn price_alert_dialog_body(
@@ -653,13 +610,9 @@ fn price_alert_dialog_body(
 ) -> AnyElement {
     let colors = theme.colors;
     div()
-        .id("price_alert_dialog_body")
-        .flex_1()
-        .min_h_0()
         .flex()
         .flex_col()
         .gap_3()
-        .p_4()
         .child(
             div()
                 .text_xs()
@@ -721,7 +674,7 @@ fn price_alert_dialog_body(
 }
 
 pub(super) fn price_alert_dialog_layer(
-    app: Entity<WorkspaceSurface>,
+    app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
     alerts: &[WorkspacePriceAlertState],
     message: Option<&str>,
@@ -737,19 +690,32 @@ pub(super) fn price_alert_dialog_layer(
     );
     let existing = alerts_for_instrument(alerts, &dialog.instrument);
 
-    ModalLayer::new("price_alert_dialog", px(460.0), theme, move |_, cx| {
+    Dialog::new("price_alert_dialog", DialogSize::Md, theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_price_alert_dialog);
     })
-    .child(price_alert_dialog_header(cancel, symbol, &price, theme))
+    .title("Create price alert")
+    .subtitle(price_alert_dialog_subtitle(symbol, &price))
     .child(price_alert_dialog_body(
-        &app, dialog, &existing, message, theme,
+        app, dialog, &existing, message, theme,
     ))
-    .child(price_alert_dialog_footer(
-        app,
-        create,
-        alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER,
-        theme,
-    ))
+    .action(
+        Button::new("price_alert_cancel", theme)
+            .variant(ButtonVariant::Secondary)
+            .label("Cancel")
+            .on_click(move |_, _, cx| {
+                cancel.update(cx, WorkspaceSurface::close_price_alert_dialog);
+            }),
+    )
+    .action(
+        Button::new("price_alert_create", theme)
+            .variant(ButtonVariant::Positive)
+            .icon(header_icon(HugeIcon::Add))
+            .label("Create alert")
+            .disabled(alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER)
+            .on_click(move |_, _, cx| {
+                create.update(cx, WorkspaceSurface::create_price_alert);
+            }),
+    )
     .into_any_element()
 }
 

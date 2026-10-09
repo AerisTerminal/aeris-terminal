@@ -1,5 +1,6 @@
 pub(crate) mod button;
 pub(crate) mod color_picker;
+pub(crate) mod dialog;
 pub(crate) mod icon;
 pub(crate) mod input;
 pub(crate) mod loader;

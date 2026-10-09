@@ -161,98 +161,59 @@ fn show_volume_row(
     )
 }
 
-fn big_trades_body(
-    app: &Entity<WorkspaceSurface>,
-    dialog: &BigTradesDialogState,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let colors = theme.colors;
-    div()
-        .id("big_trades_dialog_body")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_3()
-        .child(filter_row(app, dialog, theme))
-        .when(dialog.intensity.is_none(), |body| {
-            body.child(minimum_volume_row(dialog, theme))
-        })
-        .child(size_row(app, dialog, theme))
-        .child(show_volume_row(app, dialog, theme))
-        .children(dialog.message.as_ref().map(|message| {
-            div()
-                .text_sm()
-                .text_color(gpui_color(colors.danger))
-                .child(message.clone())
-        }))
-        .into_any_element()
-}
-
-fn big_trades_footer(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> Div {
-    let reset = app.clone();
-    let cancel = app.clone();
-    let apply = app.clone();
-    modal_footer(theme)
-        .justify_between()
-        .child(
-            Button::new("big_trades_reset", theme)
-                .variant(ButtonVariant::Destructive)
-                .label("Reset to defaults")
-                .on_click(move |_, window, cx| {
-                    reset.update(cx, |surface, surface_cx| {
-                        surface.reset_big_trades_dialog(window, surface_cx);
-                    });
-                }),
-        )
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    Button::new("big_trades_cancel", theme)
-                        .variant(ButtonVariant::Secondary)
-                        .label("Cancel")
-                        .on_click(move |_, _, cx| {
-                            cancel.update(cx, WorkspaceSurface::close_big_trades_dialog);
-                        }),
-                )
-                .child(
-                    Button::new("big_trades_apply", theme)
-                        .variant(ButtonVariant::Positive)
-                        .label("Apply")
-                        .on_click(move |_, _, cx| {
-                            apply.update(cx, WorkspaceSurface::apply_big_trades_dialog);
-                        }),
-                ),
-        )
-}
-
 pub(super) fn big_trades_dialog_layer(
     app: &Entity<WorkspaceSurface>,
     dialog: &BigTradesDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
+    let colors = theme.colors;
     let dismiss = app.clone();
-    let close = app.clone();
-    let header = modal_header(
-        "big_trades_close",
-        "Indicator settings",
-        Some("Big Trades".into_any_element()),
-        theme,
-        move |_, cx| {
-            close.update(cx, WorkspaceSurface::close_big_trades_dialog);
-        },
-    );
-    ModalLayer::new("big_trades_dialog", px(460.0), theme, move |_, cx| {
+    let reset = app.clone();
+    let cancel = app.clone();
+    let apply = app.clone();
+    Dialog::new("big_trades_dialog", DialogSize::Md, theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_big_trades_dialog);
     })
+    .title("Indicator settings")
+    .subtitle("Big Trades")
     .max_height(px(640.0))
-    .radius(RadiusToken::Medium)
-    .child(header)
-    .child(big_trades_body(app, dialog, theme))
-    .child(big_trades_footer(app, theme))
+    .child(filter_row(app, dialog, theme))
+    .when(dialog.intensity.is_none(), |body| {
+        body.child(minimum_volume_row(dialog, theme))
+    })
+    .child(size_row(app, dialog, theme))
+    .child(show_volume_row(app, dialog, theme))
+    .children(dialog.message.as_ref().map(|message| {
+        div()
+            .text_sm()
+            .text_color(gpui_color(colors.danger))
+            .child(message.clone())
+    }))
+    .footer_leading(
+        Button::new("big_trades_reset", theme)
+            .variant(ButtonVariant::Destructive)
+            .label("Reset to defaults")
+            .on_click(move |_, window, cx| {
+                reset.update(cx, |surface, surface_cx| {
+                    surface.reset_big_trades_dialog(window, surface_cx);
+                });
+            }),
+    )
+    .action(
+        Button::new("big_trades_cancel", theme)
+            .variant(ButtonVariant::Secondary)
+            .label("Cancel")
+            .on_click(move |_, _, cx| {
+                cancel.update(cx, WorkspaceSurface::close_big_trades_dialog);
+            }),
+    )
+    .action(
+        Button::new("big_trades_apply", theme)
+            .variant(ButtonVariant::Positive)
+            .label("Apply")
+            .on_click(move |_, _, cx| {
+                apply.update(cx, WorkspaceSurface::apply_big_trades_dialog);
+            }),
+    )
     .into_any_element()
 }

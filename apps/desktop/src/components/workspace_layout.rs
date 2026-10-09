@@ -339,7 +339,7 @@ pub(super) fn workspace_market_area(
         let surface = pane.surface.read(cx);
         surface.price_alert_dialog.as_ref().map(|dialog| {
             price_alert_dialog_layer(
-                pane.surface.clone(),
+                &pane.surface,
                 dialog,
                 &surface.price_alerts,
                 surface.price_alert_message.as_deref(),
