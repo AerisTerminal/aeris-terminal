@@ -4297,6 +4297,35 @@ fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
 }
 
 #[test]
+fn clearing_every_drawing_kind_keeps_frames_and_history_working() {
+    let mut chart = interactive_chart();
+    for kind in (0..=u8::MAX).filter_map(DrawingKind::from_u8) {
+        chart.set_drawing_tool(Some(kind));
+        for x in [260.0, 340.0, 420.0, 500.0, 580.0] {
+            if chart.drawing_tool().is_none() {
+                break;
+            }
+            click(&mut chart, x, 200.0);
+        }
+        chart.cancel_drawing();
+    }
+    assert!(chart.drawing_count() > 0);
+    click(&mut chart, 300.0, 200.0);
+    move_to(&mut chart, pointer(310.0, 205.0), false);
+    std::hint::black_box(chart.engine.build_frame());
+
+    chart.clear_drawings();
+    chart.cancel_drawing();
+    assert_eq!(chart.drawing_count(), 0);
+    std::hint::black_box(chart.engine.build_frame());
+    move_to(&mut chart, pointer(320.0, 210.0), false);
+    std::hint::black_box(chart.engine.build_frame());
+    assert!(chart.undo_drawing());
+    assert!(chart.drawing_count() > 0);
+    std::hint::black_box(chart.engine.build_frame());
+}
+
+#[test]
 fn drawing_history_steps_back_and_forward_and_keeps_the_armed_tool() {
     let mut chart = interactive_chart();
     assert!(!chart.can_undo_drawing());
