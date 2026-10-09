@@ -262,8 +262,8 @@ while invalid.
   --danger: #f7525f;
   --danger-hover: #f96a75;
   --danger-active: #fb838c;
-  --danger-disabled: #5c2328;
-  --danger-disabled-foreground: #c7535c;
+  --danger-disabled: #a4444b;
+  --danger-disabled-foreground: #e9a3a8;
   --danger-ring: #c10007;
   --danger-foreground: #ffffff;
 
@@ -284,8 +284,8 @@ while invalid.
   --sell: #f7525f;
   --sell-hover: #f96a75;
   --sell-active: #fb838c;
-  --sell-disabled: #5c2328;
-  --sell-disabled-foreground: #c7535c;
+  --sell-disabled: #a4444b;
+  --sell-disabled-foreground: #e9a3a8;
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
