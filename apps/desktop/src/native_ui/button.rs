@@ -233,7 +233,6 @@ const fn text_toggle_appearance(
 ) -> ButtonAppearance {
     let colors = theme.colors;
     appearance.foreground = colors.text_interactive;
-    appearance.hover_foreground = colors.text_hover;
     appearance.selected_foreground = colors.text_active;
     appearance
 }
@@ -291,6 +290,13 @@ impl ButtonFlags {
     }
 }
 
+/// The fill and text a button paints while hovered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HoverStyle {
+    fill: ThemeColor,
+    foreground: ThemeColor,
+}
+
 /// The fill, text and outline a button paints for its current state.
 #[derive(Clone, Copy)]
 struct ResolvedStyle {
@@ -298,18 +304,21 @@ struct ResolvedStyle {
     foreground: ThemeColor,
     /// The visible outline; `None` keeps the border transparent.
     border: Option<ThemeColor>,
+    /// `None` keeps the engaged look under the pointer.
+    hover: Option<HoverStyle>,
 }
 
 impl ResolvedStyle {
     fn new(appearance: &ButtonAppearance, flags: ButtonFlags) -> Self {
         let disabled = flags.has(ButtonFlags::DISABLED);
         let engaged = flags.has(ButtonFlags::SELECTED) || flags.has(ButtonFlags::OPEN);
+        let text_toggle = flags.has(ButtonFlags::TEXT_TOGGLE);
         let (fill, foreground) = if disabled {
             (
                 appearance.disabled_fill.or(appearance.fill),
                 appearance.disabled_foreground,
             )
-        } else if engaged && flags.has(ButtonFlags::TEXT_TOGGLE) {
+        } else if engaged && text_toggle {
             // A text toggle marks its on state with the text alone; the surface stays put.
             (appearance.fill, appearance.selected_foreground)
         } else if engaged {
@@ -320,6 +329,22 @@ impl ResolvedStyle {
         } else {
             (appearance.fill, appearance.foreground)
         };
+        // A text toggle's hover is the fill alone, in both states: `text-hover` equals
+        // `text-active`, so a hover that changed the text would make a toggle that was just
+        // switched off look on while the pointer stays over it.
+        let hover = if text_toggle {
+            Some(HoverStyle {
+                fill: appearance.hover_fill,
+                foreground,
+            })
+        } else if engaged {
+            None
+        } else {
+            Some(HoverStyle {
+                fill: appearance.hover_fill,
+                foreground: appearance.hover_foreground,
+            })
+        };
         // A disabled outline keeps its outline: disabling changes only the foreground.
         let border = appearance
             .border
@@ -328,6 +353,7 @@ impl ResolvedStyle {
             fill,
             foreground,
             border,
+            hover,
         }
     }
 }
@@ -476,8 +502,8 @@ impl Button {
     }
 
     /// A toggle that shows its state through the interactive text tokens alone:
-    /// `text-interactive` off, `text-hover` on hover and `text-active` on, with no selected
-    /// fill. The chart header's panel toggles use it.
+    /// `text-interactive` off and `text-active` on, with no selected fill. Hover adds `hover-bg`
+    /// in both states and keeps the text. The chart header's panel toggles use it.
     pub(crate) fn text_toggle(mut self) -> Self {
         self.flags.set(ButtonFlags::TEXT_TOGGLE, true);
         self
@@ -717,7 +743,6 @@ fn paint_states(
     border_width: Pixels,
     focus_ring: ThemeColor,
     accepts_input: bool,
-    engaged: bool,
 ) -> BaseButton {
     let drop_border = appearance.border_rests_only;
     // Every variant keeps a border of `--border-width`, transparent unless it is outlined, so a
@@ -735,12 +760,12 @@ fn paint_states(
             button
                 .cursor_pointer()
                 .hover(move |style| {
-                    if engaged {
+                    let Some(hover) = resolved.hover else {
                         return style;
-                    }
+                    };
                     let style = style
-                        .bg(gpui_color(appearance.hover_fill))
-                        .text_color(gpui_color(appearance.hover_foreground));
+                        .bg(gpui_color(hover.fill))
+                        .text_color(gpui_color(hover.foreground));
                     if drop_border {
                         style.border_color(gpui::transparent_black())
                     } else {
@@ -826,7 +851,6 @@ impl RenderOnce for Button {
             border_width,
             self.theme.colors.ring_primary,
             policy.accepts_input(),
-            flags.has(ButtonFlags::SELECTED) || flags.has(ButtonFlags::OPEN),
         );
         let button = attach_activation(button, self.activation.filter(|_| policy.accepts_input()));
         let mut button = content.attach(button, flags.has(ButtonFlags::TRIGGER));
@@ -887,11 +911,47 @@ mod tests {
             let off = ResolvedStyle::new(&toggle, flags);
             assert_eq!(off.fill, None);
             assert_eq!(off.foreground, c.text_interactive);
-            assert_eq!(toggle.hover_foreground, c.text_hover);
             flags.set(ButtonFlags::SELECTED, true);
             let on = ResolvedStyle::new(&toggle, flags);
             assert_eq!(on.fill, None, "the on state adds no background");
             assert_eq!(on.foreground, c.text_active);
+            // Hover adds the same fill in both states and keeps each state's text, so a click
+            // under the pointer always shows the new state.
+            assert_eq!(
+                off.hover,
+                Some(super::HoverStyle {
+                    fill: c.hover_bg,
+                    foreground: c.text_interactive,
+                })
+            );
+            assert_eq!(
+                on.hover,
+                Some(super::HoverStyle {
+                    fill: c.hover_bg,
+                    foreground: c.text_active,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn engaged_fill_toggles_keep_their_look_under_the_pointer() {
+        let theme = AerisTheme::light();
+        let ghost = button_appearance(&theme, ButtonVariant::Ghost, false);
+        let resting = ResolvedStyle::new(&ghost, ButtonFlags::default());
+        assert_eq!(
+            resting.hover,
+            Some(super::HoverStyle {
+                fill: theme.colors.hover_bg,
+                foreground: theme.colors.text_default,
+            })
+        );
+        for flag in [ButtonFlags::SELECTED, ButtonFlags::OPEN] {
+            let mut flags = ButtonFlags::default();
+            flags.set(flag, true);
+            let engaged = ResolvedStyle::new(&ghost, flags);
+            assert_eq!(engaged.fill, Some(theme.colors.active_bg));
+            assert_eq!(engaged.hover, None);
         }
     }
 

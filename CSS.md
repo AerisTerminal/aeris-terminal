@@ -40,7 +40,8 @@ focus state. Callers add only layout (flex, gaps, margins, an explicit width).
 
 Sizes: `Sm` (24px, `text-xs`), `Default` (28px), `Lg` (32px, `--radius-default`). A button with only
 an icon is square. States and modifiers: `selected` (a toggle that is on), `text_toggle` (the on state
-changes only the text: `text-interactive` → `text-active`, no fill; chart-header panel toggles), `open` (a trigger whose menu
+changes only the text: `text-interactive` → `text-active`, no fill; hover adds `hover-bg` in both states
+and never changes the text; chart-header panel toggles), `open` (a trigger whose menu
 is open), `disabled`, `loading`, `round` (circle or pill), `danger_on_hover` (close / delete icons),
 `trigger` (label left, caret right), `full_width`, `strong` (trade actions). `close_button` is the one
 close control.
