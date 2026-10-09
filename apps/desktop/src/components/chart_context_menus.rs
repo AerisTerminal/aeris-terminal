@@ -1267,7 +1267,7 @@ fn chart_settings_sidebar(
         .flex()
         .flex_col()
         .gap_3()
-        .p_3()
+        .p_2()
         .border_r(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .child(sections)
@@ -1876,6 +1876,13 @@ fn chart_canvas_settings(
         "Customize chart guides without changing market data or scale state.",
         theme,
     )
+    .child(canvas_surface_settings(
+        terminal,
+        menu,
+        &snapshot.appearance,
+        color_picker,
+        theme,
+    ))
     .child(canvas_grid_settings(
         terminal,
         menu,
@@ -1926,6 +1933,41 @@ fn chart_trading_settings(
         theme,
     ))
     .into_any_element()
+}
+
+fn canvas_surface_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    appearance: &ChartAppearanceSettings,
+    color_picker: Option<&ChartColorPickerState>,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    div()
+        .child(settings_group_heading(
+            "Surface",
+            "Chart background and label text",
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Background,
+            &effective_appearance_color(
+                &appearance.background_color,
+                |colors| colors.background,
+                theme,
+            ),
+            color_picker,
+            theme,
+        ))
+        .child(settings_color_row(
+            terminal,
+            menu,
+            ChartColorSetting::Text,
+            &effective_appearance_color(&appearance.text_color, |colors| colors.text, theme),
+            color_picker,
+            theme,
+        ))
 }
 
 fn canvas_grid_settings(

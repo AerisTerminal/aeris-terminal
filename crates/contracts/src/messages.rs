@@ -426,6 +426,12 @@ pub struct WorkspaceChartAppearanceState {
     pub baseline_top_color: String,
     #[prost(string, tag = "23")]
     pub baseline_bottom_color: String,
+    /// Empty in layouts saved before canvas background control existed; restores as theme-following.
+    #[prost(string, tag = "24")]
+    pub background_color: String,
+    /// Empty in layouts saved before canvas text control existed; restores as theme-following.
+    #[prost(string, tag = "25")]
+    pub text_color: String,
 }
 
 /// Durable host-owned state for one native Study Runtime instance.

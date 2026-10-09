@@ -324,9 +324,11 @@ impl RenderOnce for Tab {
             }
             TabSurface::Sidebar => {
                 let state = sidebar_tab_colors(&self.theme, selected, disabled);
+                // The base button centers its content; section labels read from the leading edge.
                 tab.w_full()
                     .flex()
                     .items_center()
+                    .justify_start()
                     .h(design_rems(SIDEBAR_TAB_HEIGHT))
                     .px_3()
                     .text_sm()

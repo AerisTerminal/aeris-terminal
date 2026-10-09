@@ -2517,6 +2517,8 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
     let mut chart = interactive_chart();
     let revision = chart.user_state_revision();
     let appearance = ChartAppearanceSettings {
+        background_color: custom_color("#0B1220"),
+        text_color: custom_color("#E2E8F0"),
         grid_visible: false,
         grid_color: custom_color("#334155"),
         grid_style: 1,
@@ -2796,6 +2798,8 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     custom.border_up_color = custom_color("#123456");
     custom.border_down_color = custom_color("#654321");
     custom.crosshair_color = custom_color("#ABCDEF");
+    custom.background_color = custom_color("#0B1220");
+    custom.text_color = custom_color("#E2E8F0");
     custom.grid_visible = false;
     custom.grid_style = 2;
     custom.line_width = 4;
@@ -2803,6 +2807,11 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
 
     assert!(chart.set_appearance_settings(&custom));
     chart.set_theme(ChartTheme::Light);
+    assert_eq!(
+        chart.engine.options.get().layout.background.color,
+        "#0B1220"
+    );
+    assert_eq!(chart.engine.options.get().layout.text_color, "#E2E8F0");
 
     let series = series_entry(&chart, 0);
     assert_eq!(series.up_color.as_deref(), Some("#112233"));
@@ -2843,6 +2852,14 @@ fn custom_market_and_crosshair_colors_stay_pinned_across_theme_switches() {
     assert_eq!(
         effective.effective_crosshair_color(ChartTheme::Dark),
         defaults.crosshair
+    );
+    assert_eq!(
+        effective.effective_background_color(ChartTheme::Dark),
+        defaults.background
+    );
+    assert_eq!(
+        effective.effective_text_color(ChartTheme::Dark),
+        defaults.text
     );
 }
 

@@ -347,6 +347,8 @@ pub(super) fn persisted_chart_appearance(
         area_top_color: appearance.area_top_color.clone(),
         baseline_top_color: appearance.baseline_top_color.clone(),
         baseline_bottom_color: appearance.baseline_bottom_color.clone(),
+        background_color: persisted_appearance_color(&appearance.background_color),
+        text_color: persisted_appearance_color(&appearance.text_color),
     }
 }
 
@@ -359,6 +361,10 @@ pub(super) fn restored_chart_appearance(
     let line_width = u8::try_from(appearance.line_width).ok()?.clamp(1, 4);
     let line_style = u8::try_from(appearance.line_style).ok()?.min(4);
     Some(ChartAppearanceSettings {
+        background_color: restored_appearance_color(&appearance.background_color, |colors| {
+            colors.background
+        }),
+        text_color: restored_appearance_color(&appearance.text_color, |colors| colors.text),
         grid_visible: appearance.grid_visible,
         grid_color: restored_appearance_color(&appearance.grid_color, |colors| colors.grid),
         grid_style,
@@ -406,6 +412,7 @@ fn persisted_appearance_color(color: &ChartAppearanceColor) -> String {
 
 /// Layouts written before typed provenance flattened a theme-following color into that
 /// theme's concrete default, so either theme's default for the role follows the theme again.
+/// An empty value comes from a layout saved before the field existed and also follows the theme.
 fn restored_appearance_color(
     color: &str,
     role: fn(ChartThemeColors) -> &'static str,
@@ -413,7 +420,7 @@ fn restored_appearance_color(
     let theme_default = [AerisChartTheme::Light, AerisChartTheme::Dark]
         .into_iter()
         .any(|theme| role(ChartThemeColors::for_theme(theme)).eq_ignore_ascii_case(color));
-    if color == THEME_APPEARANCE_COLOR || theme_default {
+    if color.is_empty() || color == THEME_APPEARANCE_COLOR || theme_default {
         ChartAppearanceColor::Theme
     } else {
         ChartAppearanceColor::Custom(color.to_string())

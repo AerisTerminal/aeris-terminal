@@ -2846,11 +2846,14 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
 
     let appearance = ChartAppearanceSettings {
         up_color: ChartAppearanceColor::Custom("#abcdef".to_string()),
+        background_color: ChartAppearanceColor::Custom("#0b1220".to_string()),
         ..ChartAppearanceSettings::default()
     };
     let persisted = persisted_chart_appearance(&appearance);
     assert_eq!(persisted.grid_color, "theme");
+    assert_eq!(persisted.text_color, "theme");
     assert_eq!(persisted.up_color, "#abcdef");
+    assert_eq!(persisted.background_color, "#0b1220");
     assert_eq!(
         restored_chart_appearance(&persisted).expect("restored appearance"),
         appearance
@@ -2863,9 +2866,13 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
     legacy.grid_color = ChartThemeColors::for_theme(AerisChartTheme::Dark)
         .grid
         .to_string();
+    legacy.background_color.clear();
+    legacy.text_color.clear();
     let restored = restored_chart_appearance(&legacy).expect("legacy appearance");
     assert_eq!(restored.down_color, ChartAppearanceColor::Theme);
     assert_eq!(restored.grid_color, ChartAppearanceColor::Theme);
+    assert_eq!(restored.background_color, ChartAppearanceColor::Theme);
+    assert_eq!(restored.text_color, ChartAppearanceColor::Theme);
     assert_eq!(
         restored.up_color,
         ChartAppearanceColor::Custom("#abcdef".to_string())

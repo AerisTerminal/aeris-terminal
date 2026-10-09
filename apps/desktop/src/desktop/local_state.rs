@@ -532,6 +532,12 @@ fn valid_chart_appearance(appearance: &WorkspaceChartAppearanceState) -> bool {
     ]
     .into_iter()
     .all(color_is_valid)
+        && [
+            appearance.background_color.as_str(),
+            appearance.text_color.as_str(),
+        ]
+        .into_iter()
+        .all(|value| value.is_empty() || color_is_valid(value))
         && appearance.grid_style <= 4
         && (1..=4).contains(&appearance.crosshair_width)
         && appearance.crosshair_style <= 4
@@ -819,6 +825,8 @@ mod tests {
                 area_top_color: "#2563eb".to_string(),
                 baseline_top_color: "#22c55e".to_string(),
                 baseline_bottom_color: "#ef4444".to_string(),
+                background_color: "#0b1220".to_string(),
+                text_color: "#e2e8f0".to_string(),
             }),
             order_flow: Some(WorkspaceOrderFlowSettingsState {
                 display_mode: 2,
@@ -1386,6 +1394,8 @@ mod tests {
             area_top_color: "#2563eb".to_string(),
             baseline_top_color: "#22c55e".to_string(),
             baseline_bottom_color: "#ef4444".to_string(),
+            background_color: "theme".to_string(),
+            text_color: "theme".to_string(),
         });
 
         let sanitized = sanitize_workspace(workspace);

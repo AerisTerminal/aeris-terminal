@@ -473,7 +473,7 @@ const CHART_SETTINGS_PANEL_HEIGHT: f32 = 600.0;
 const CHART_SETTINGS_GROWTH_SHARE: f32 = 0.5;
 /// Design height of the settings title bar that doubles as the panel's drag handle.
 const CHART_SETTINGS_TITLE_BAR_HEIGHT: f32 = 36.0;
-const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 176.0;
+const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 140.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
 const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
@@ -4362,6 +4362,8 @@ enum ChartColorSetting {
     AreaTop,
     BaselineTop,
     BaselineBottom,
+    Background,
+    Text,
     Grid,
     Crosshair,
 }
@@ -4385,6 +4387,8 @@ impl ChartColorSetting {
             Self::AreaTop => "Area top",
             Self::BaselineTop => "Above baseline",
             Self::BaselineBottom => "Below baseline",
+            Self::Background => "Background",
+            Self::Text => "Text",
             Self::Grid => "Grid",
             Self::Crosshair => "Crosshair",
         }

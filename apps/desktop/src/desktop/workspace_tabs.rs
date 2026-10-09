@@ -1036,6 +1036,12 @@ impl TerminalApp {
             ChartColorSetting::BaselineBottom => {
                 appearance.baseline_bottom_color.clone_from(&color);
             }
+            ChartColorSetting::Background => {
+                appearance.background_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::Text => {
+                appearance.text_color = ChartAppearanceColor::Custom(color.clone());
+            }
             ChartColorSetting::Grid => {
                 appearance.grid_color = ChartAppearanceColor::Custom(color.clone());
             }
@@ -1044,7 +1050,10 @@ impl TerminalApp {
             }
         }
         surface.update(cx, |surface, surface_cx| match setting {
-            ChartColorSetting::Grid | ChartColorSetting::Crosshair => {
+            ChartColorSetting::Background
+            | ChartColorSetting::Text
+            | ChartColorSetting::Grid
+            | ChartColorSetting::Crosshair => {
                 surface.set_chart_canvas_appearance(&appearance, surface_cx);
             }
             _ => surface.set_chart_series_appearance(&appearance, surface_cx),
