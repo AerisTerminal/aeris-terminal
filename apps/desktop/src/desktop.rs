@@ -202,7 +202,7 @@ use native_ui::{
     menu::{
         MENU_PANEL_INSET, MENU_SEPARATOR_HEIGHT, MenuAlign, MenuAnchor, MenuPanel, MenuPlacement,
         MenuRow, MenuScale, MenuSide, PopupAnimationOrigin, animate_popup_from_origin,
-        menu_panel_chrome_height, menu_panel_height, menu_separator,
+        menu_panel_chrome_height, menu_panel_height,
     },
     platform_font_weight, platform_tabular_numerals,
     rem_scale::{ROOT_REM_PX, design_rems, rem_scaled},

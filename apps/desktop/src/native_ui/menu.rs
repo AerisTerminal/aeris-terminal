@@ -476,6 +476,8 @@ pub(crate) enum MenuSide {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MenuAlign {
     Start,
+    /// The menu's right edge on the trigger's, for triggers at a trailing edge.
+    End,
     /// The trigger's full width.
     Stretch,
 }
@@ -560,6 +562,15 @@ impl MenuPanel {
         self.animation = Some(origin);
         self
     }
+
+    /// A divider between groups of rows. Its line runs the panel's full width, through the
+    /// inset to both borders, while rows stay inset.
+    pub(crate) fn separator(mut self) -> Self {
+        let inset = self.scale.rems(PANEL_INSET.0);
+        self.children
+            .push(divider(&self.theme).mx(Rems(-inset.0)).into_any_element());
+        self
+    }
 }
 
 impl ParentElement for MenuPanel {
@@ -631,6 +642,7 @@ impl RenderOnce for MenuPanel {
                     };
                     match align {
                         MenuAlign::Start => panel.left_0(),
+                        MenuAlign::End => panel.right_0(),
                         MenuAlign::Stretch => panel.left_0().right_0(),
                     }
                 }
@@ -707,7 +719,8 @@ impl RenderOnce for MenuAnchor {
     }
 }
 
-pub(crate) fn menu_separator(theme: &AerisTheme) -> Div {
+/// A divider's line with its clear space; [`MenuPanel::separator`] stretches it to full width.
+fn divider(theme: &AerisTheme) -> Div {
     div()
         .h(SEPARATOR_HEIGHT)
         .flex_none()

@@ -45,7 +45,7 @@ is open), `disabled`, `loading`, `round` (circle or pill), `danger_on_hover` (cl
 close control.
 
 **`MenuPanel`** + **`MenuAnchor`** + **`MenuRow`** (`menu.rs`): every dropdown, context menu, flyout and
-select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | Stretch }` from a trigger, or
+select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
 `checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`.
 

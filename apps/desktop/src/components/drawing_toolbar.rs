@@ -964,7 +964,7 @@ pub(super) fn drawing_tool_menu_layer(
     let mut row = 0_usize;
     for (section_index, section) in group.sections.iter().enumerate() {
         if section_index > 0 {
-            panel = panel.child(menu_separator(theme));
+            panel = panel.separator();
         }
         panel = panel.child(drawing_tool_menu_title(section.title, theme));
         for entry in section.tools.iter().copied() {

@@ -209,7 +209,7 @@ pub(super) fn platform_menu_layer(
         .width(px(PLATFORM_MENU_WIDTH))
         .animate_from(animation_origin)
         .children(header)
-        .children(layout.identity.then(|| menu_separator(theme)))
+        .when(layout.identity, MenuPanel::separator)
         .children(account_action_rows(terminal, account, &actions, theme))
         .children(account.error.as_deref().map(|error| {
             div()
@@ -221,15 +221,15 @@ pub(super) fn platform_menu_layer(
                 .text_color(gpui_color(theme.colors.danger))
                 .child(error.to_string())
         }))
-        .children(layout.has_account_rows().then(|| menu_separator(theme)))
+        .when(layout.has_account_rows(), MenuPanel::separator)
         .child(theme_section(theme, &select_theme))
-        .child(menu_separator(theme))
+        .separator()
         .child(window_section(
             window_frame.frameless(),
             &toggle_frameless,
             theme,
         ))
-        .child(menu_separator(theme))
+        .separator()
         .child(about_section(
             details,
             &about_update_view(update, theme),

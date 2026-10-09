@@ -430,13 +430,14 @@ fn trade_history_header(
         .text_xs()
         .text_color(gpui_color(colors.text_secondary))
         .child(bottom_panel_tabs(terminal, state, theme))
-        .when(open && state.history.accounts.len() > 1, |header| {
-            header.child(trade_history_account_filter(terminal, state, theme))
-        })
         .when(open, |header| header.child(count_label))
         .child(div().flex_1())
         .when(rithmic_attribution, |header| {
             header.child(super::terminal_chrome::rithmic_attribution(theme))
+        })
+        // The account filter sits at the trailing edge, beside the collapse control.
+        .when(open && state.history.accounts.len() > 1, |header| {
+            header.child(trade_history_account_filter(terminal, state, theme))
         })
         .child(trade_history_expand_button(terminal, open, theme))
 }
@@ -548,9 +549,10 @@ fn trade_history_account_menu(
     let all_terminal = terminal.clone();
     let mut menu = MenuPanel::new(
         "trade_history_account_menu",
+        // The trigger sits at the header's right edge, so the menu lines up with it from there.
         MenuPlacement::Anchored {
             side: MenuSide::Above,
-            align: MenuAlign::Start,
+            align: MenuAlign::End,
         },
         theme,
     )

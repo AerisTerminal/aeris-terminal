@@ -247,7 +247,7 @@ pub(super) fn chart_context_menu_panel(
         .width(scale.px(CHART_CONTEXT_MENU_WIDTH));
     for (index, item) in chart_context_menu_items(state).into_iter().enumerate() {
         if matches!(index, 1 | 3 | 5 | 7 | 8) {
-            panel = panel.child(menu_separator(theme));
+            panel = panel.separator();
         }
         panel = panel.child(chart_context_menu_item(
             terminal,
@@ -567,7 +567,7 @@ pub(super) fn price_axis_menu_panel(
         .enumerate()
     {
         if matches!(index, 2 | 4) {
-            panel = panel.child(menu_separator(theme));
+            panel = panel.separator();
         }
         panel = panel.child(price_axis_menu_item(terminal, menu, row, theme, scale));
     }
@@ -597,7 +597,7 @@ pub(super) fn price_axis_flyout_panel(
         .enumerate()
     {
         if menu.flyout == PriceAxisMenuFlyout::Labels && index == 9 {
-            panel = panel.child(menu_separator(theme));
+            panel = panel.separator();
         }
         panel = panel.child(price_axis_menu_item(terminal, menu, row, theme, scale));
     }
