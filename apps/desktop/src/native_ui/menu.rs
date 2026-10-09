@@ -441,7 +441,11 @@ impl RenderOnce for MenuRow {
                     icon.group_hover_color(MENU_ROW_GROUP, gpui_color(hover_ink))
                 })
         });
+        // GPUI fixes a text run's colour at layout, before the row's group hitbox exists, so a
+        // group-hover text colour only applies to an element that keeps hover state: one with an
+        // id. Without it the glyph (coloured at paint) turns while the label never does.
         let label = div()
+            .id("menu_row_label")
             .flex_1()
             .min_w_0()
             .truncate()
