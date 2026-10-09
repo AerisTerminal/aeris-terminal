@@ -185,40 +185,39 @@ const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
     !disabled && has_activation
 }
 
-/// The label and leading-glyph colours of a row. A destructive row follows the `danger` ramp:
-/// `text-danger` at rest, `danger-foreground` on its `danger` hover, press and highlight fills,
-/// and `danger-disabled-foreground` while disabled.
+/// The label and leading-glyph colours of a row. A destructive row keeps the shared row fills
+/// and colours its text and glyph from the `danger` ramp: `danger` at rest, `danger-hover`
+/// while hovered or highlighted, and `danger-disabled` while disabled.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RowInk {
     label: ThemeColor,
     icon: ThemeColor,
-    /// Label and glyph colour on the hover, press and highlight fills; `None` keeps the resting
-    /// colours.
-    on_fill: Option<ThemeColor>,
+    /// Label and glyph colour while hovered or highlighted; `None` keeps the resting colours.
+    hover: Option<ThemeColor>,
 }
 
 const fn row_ink(theme: &AerisTheme, destructive: bool, enabled: bool) -> RowInk {
     let colors = theme.colors;
     match (destructive, enabled) {
         (true, true) => RowInk {
-            label: colors.text_danger,
-            icon: colors.text_danger,
-            on_fill: Some(colors.danger_foreground),
+            label: colors.danger,
+            icon: colors.danger,
+            hover: Some(colors.danger_hover),
         },
         (true, false) => RowInk {
-            label: colors.danger_disabled_foreground,
-            icon: colors.danger_disabled_foreground,
-            on_fill: None,
+            label: colors.danger_disabled,
+            icon: colors.danger_disabled,
+            hover: None,
         },
         (false, true) => RowInk {
             label: colors.text_primary,
             icon: colors.icon,
-            on_fill: None,
+            hover: None,
         },
         (false, false) => RowInk {
             label: colors.text_muted,
             icon: colors.text_muted,
-            on_fill: None,
+            hover: None,
         },
     }
 }
@@ -262,8 +261,6 @@ struct MenuRowPresentation {
     hover_ink: Option<ThemeColor>,
     highlighted_fill: ThemeColor,
     hover_fill: ThemeColor,
-    /// The fill while the pointer is held down; `None` keeps the hover fill.
-    press_fill: Option<ThemeColor>,
     height: Rems,
     horizontal_padding: Rems,
 }
@@ -322,7 +319,7 @@ impl MenuRow {
     }
 
     /// A leading glyph the row colours itself, so it always matches the label in every
-    /// state, including a destructive row's `danger-foreground` on its hover fill.
+    /// state, including a destructive row's `danger-hover` while hovered.
     pub(crate) fn leading_icon(mut self, icon: Icon) -> Self {
         self.leading_icon = Some(icon);
         self
@@ -393,28 +390,19 @@ impl MenuRow {
         let destructive = self.behavior.destructive;
         let highlighted = self.behavior.highlighted;
         let ink = row_ink(&self.theme, destructive, enabled);
-        // A highlighted row already sits on its fill, so it takes the on-fill ink outright; an
+        // A highlighted row is already in its hover look, so it takes the hover ink outright; an
         // enabled row switches to it only while the pointer is over the row.
-        let (label_ink, icon_ink) = match ink.on_fill.filter(|_| highlighted) {
-            Some(on_fill) => (on_fill, on_fill),
+        let (label_ink, icon_ink) = match ink.hover.filter(|_| highlighted) {
+            Some(hover) => (hover, hover),
             None => (ink.label, ink.icon),
         };
-        let hover_ink = ink.on_fill.filter(|_| enabled && !highlighted);
-        let highlighted_fill = if destructive {
-            colors.danger
-        } else {
-            match self.kind {
-                RowKind::Compact => colors.hover_bg,
-                RowKind::SearchResult => colors.active_bg,
-            }
-            .over(self.resting_fill)
-        };
-        let hover_fill = if destructive {
-            colors.danger
-        } else {
-            colors.hover_bg.over(self.resting_fill)
-        };
-        let press_fill = destructive.then_some(colors.danger_active);
+        let hover_ink = ink.hover.filter(|_| enabled && !highlighted);
+        let highlighted_fill = match self.kind {
+            RowKind::Compact => colors.hover_bg,
+            RowKind::SearchResult => colors.active_bg,
+        }
+        .over(self.resting_fill);
+        let hover_fill = colors.hover_bg.over(self.resting_fill);
         let (height, horizontal_padding) = row_geometry(self.kind, self.scale);
         MenuRowPresentation {
             enabled,
@@ -423,7 +411,6 @@ impl MenuRow {
             hover_ink,
             highlighted_fill,
             hover_fill,
-            press_fill,
             height,
             horizontal_padding,
         }
@@ -469,7 +456,6 @@ impl RenderOnce for MenuRow {
         let radius = px(f32::from(RadiusToken::Sm.logical_pixels()));
         // The visible pill: inset inside the row so neighbouring fills and dividers never touch.
         let fill = div()
-            .id("menu_row_fill")
             .size_full()
             .flex()
             .items_center()
@@ -482,11 +468,6 @@ impl RenderOnce for MenuRow {
             .when(presentation.enabled, |fill| {
                 fill.group_hover(MENU_ROW_GROUP, |style| {
                     style.bg(gpui_color(presentation.hover_fill))
-                })
-                .when_some(presentation.press_fill, |fill, press_fill| {
-                    fill.group_active(MENU_ROW_GROUP, move |style| {
-                        style.bg(gpui_color(press_fill))
-                    })
                 })
             })
             .children(leading_icon)
@@ -863,41 +844,42 @@ mod tests {
             assert_eq!(
                 enabled,
                 RowInk {
-                    label: c.text_danger,
-                    icon: c.text_danger,
-                    on_fill: Some(c.danger_foreground),
+                    label: c.danger,
+                    icon: c.danger,
+                    hover: Some(c.danger_hover),
                 }
             );
             assert_eq!(
                 row_ink(&theme, true, false),
                 RowInk {
-                    label: c.danger_disabled_foreground,
-                    icon: c.danger_disabled_foreground,
-                    on_fill: None,
+                    label: c.danger_disabled,
+                    icon: c.danger_disabled,
+                    hover: None,
                 }
             );
-            let row = MenuRow::compact("remove", "Remove drawings", &theme)
+            let destructive = MenuRow::compact("remove", "Remove drawings", &theme)
                 .destructive(true)
-                .on_click(|_, _, _| {});
-            let presentation = row.presentation();
-            assert_eq!(presentation.hover_fill, c.danger);
-            assert_eq!(presentation.highlighted_fill, c.danger);
-            assert_eq!(presentation.press_fill, Some(c.danger_active));
-            assert_eq!(presentation.label_ink, c.text_danger);
-            assert_eq!(presentation.hover_ink, Some(c.danger_foreground));
+                .on_click(|_, _, _| {})
+                .presentation();
+            let plain = MenuRow::compact("reset", "Reset view", &theme)
+                .on_click(|_, _, _| {})
+                .presentation();
+            // Only the text and glyph turn red; the row fills stay the shared neutral ones.
+            assert_eq!(destructive.hover_fill, plain.hover_fill);
+            assert_eq!(destructive.highlighted_fill, plain.highlighted_fill);
+            assert_eq!(destructive.label_ink, c.danger);
+            assert_eq!(destructive.hover_ink, Some(c.danger_hover));
             let highlighted = MenuRow::compact("remove", "Remove drawings", &theme)
                 .destructive(true)
                 .highlighted(true)
                 .on_click(|_, _, _| {})
                 .presentation();
-            assert_eq!(highlighted.label_ink, c.danger_foreground);
-            assert_eq!(highlighted.icon_ink, c.danger_foreground);
+            assert_eq!(highlighted.label_ink, c.danger_hover);
+            assert_eq!(highlighted.icon_ink, c.danger_hover);
             assert_eq!(highlighted.hover_ink, None);
-            let plain = MenuRow::compact("reset", "Reset view", &theme).on_click(|_, _, _| {});
-            assert_eq!(plain.presentation().press_fill, None);
             assert_eq!(row_ink(&theme, false, false).label, c.text_muted);
             assert_eq!(row_ink(&theme, false, true).icon, c.icon);
-            assert_eq!(row_ink(&theme, false, true).on_fill, None);
+            assert_eq!(row_ink(&theme, false, true).hover, None);
         }
     }
 

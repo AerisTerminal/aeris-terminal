@@ -33,15 +33,17 @@ focus state. Callers add only layout (flex, gaps, margins, an explicit width).
 | --- | --- | --- |
 | `Default` | `button-fill` neutral fill | the main neutral action |
 | `Secondary` | brand `primary` blue fill | the action that commits a form or dialog (Apply, Create, Save) |
-| `Outline` | `surface` + `border`, `text-default`; hover / press drop the border and fill `hover-bg` / `active-bg` | Cancel, select triggers, steppers, filters |
-| `Ghost` | no fill or border, `text-default`; hover / press fill `hover-bg` / `active-bg` | toolbar, header and icon actions |
+| `Outline` | `surface` + `border`, `text-default`; hover drops the border and fills `hover-bg` | Cancel, select triggers, steppers, filters |
+| `Ghost` | no fill or border, `text-default`; hover fills `hover-bg` | toolbar, header and icon actions |
 | `Destructive` | `danger` fill | irreversible actions (Delete, Reset to defaults) |
 | `Buy` / `Sell` | `buy` / `sell` fill | trade orders only |
 
 Sizes: `Sm` (24px, `text-xs`), `Default` (28px), `Lg` (32px, `--radius-default`). A button with only
-an icon is square. States and modifiers: `selected` (a toggle that is on), `text_toggle` (the on state
+an icon is square. No control paints a press state: hover is the only pointer feedback, and a click
+shows itself by changing the control's state (selected, open, text), never by flashing a second fill.
+States and modifiers: `selected` (a toggle that is on), `text_toggle` (the on state
 changes only the text: `text-interactive` → `text-active`, no fill; hover adds `hover-bg` in both states
-and never changes the text, and a press keeps that fill (no `active-bg` flash); chart-header panel toggles), `open` (a trigger whose menu
+and never changes the text; chart-header panel toggles), `open` (a trigger whose menu
 is open), `disabled`, `loading`, `round` (circle or pill), `danger_on_hover` (close / delete icons),
 `trigger` (label left, caret right), `full_width`, `strong` (trade actions). `close_button` is the one
 close control.
@@ -50,9 +52,9 @@ close control.
 select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
 `checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. A `destructive` row
-follows the danger ramp: `text-danger` label and glyph at rest, a `danger` hover with
-`danger-foreground` text and glyph, `danger-active` while pressed, and `danger-disabled-foreground`
-text with no hover while disabled. Pass glyphs through `leading_icon` so the row colours them.
+keeps the shared neutral row fills and colours only its label and glyph: `danger` at rest,
+`danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
+Pass glyphs through `leading_icon` so the row colours them.
 
 **`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal. Sizes `Sm` (420), `Md` (480), `Lg`
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the

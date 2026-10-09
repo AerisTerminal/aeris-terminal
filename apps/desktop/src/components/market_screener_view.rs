@@ -413,7 +413,6 @@ fn table_row(
         .role(Role::Button)
         .aria_label(format!("Open {} in the terminal", row.display_symbol))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-        .active(move |row| row.bg(gpui_color(colors.active_bg.over(colors.surface))))
         .on_click(move |_, _, cx| {
             open_terminal.update(cx, |terminal, terminal_cx| {
                 terminal.open_market_screener_row(&open_row, terminal_cx);

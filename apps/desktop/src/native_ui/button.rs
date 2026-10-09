@@ -58,11 +58,10 @@ pub(crate) enum ButtonVariant {
     Default,
     /// `secondary`: the brand `primary` blue, for the action that commits a form or dialog.
     Secondary,
-    /// `outline`: `surface` with a `border` outline and `text-default`. Hover and press drop the
-    /// outline and fill with `hover-bg` / `active-bg`.
+    /// `outline`: `surface` with a `border` outline and `text-default`. Hover drops the outline
+    /// and fills with `hover-bg`.
     Outline,
-    /// `ghost`: no fill or outline, `text-default`; hover and press fill with `hover-bg` /
-    /// `active-bg`.
+    /// `ghost`: no fill or outline, `text-default`; hover fills with `hover-bg`.
     Ghost,
     /// `destructive`: the `danger` ramp.
     Destructive,
@@ -143,7 +142,6 @@ struct ButtonAppearance {
     border_rests_only: bool,
     hover_fill: ThemeColor,
     hover_foreground: ThemeColor,
-    active_fill: ThemeColor,
     selected_fill: ThemeColor,
     selected_foreground: ThemeColor,
     /// `None` keeps the resting surface: a disabled icon or outline action never changes the
@@ -184,7 +182,6 @@ fn button_appearance(
                 border_rests_only: outline,
                 hover_fill: colors.hover_bg,
                 hover_foreground: colors.text_default,
-                active_fill: colors.active_bg,
                 selected_fill: colors.active_bg,
                 selected_foreground: colors.text_active,
                 // Disabled keeps the resting surface and outline; only the foreground mutes.
@@ -220,7 +217,6 @@ fn button_appearance(
     if danger_on_hover {
         appearance.hover_fill = colors.danger;
         appearance.hover_foreground = colors.danger_foreground;
-        appearance.active_fill = colors.danger_active;
     }
     appearance
 }
@@ -237,7 +233,7 @@ const fn text_toggle_appearance(
     appearance
 }
 
-/// A filled variant: one token ramp for rest, hover, press and disabled.
+/// A filled variant: one token ramp for rest, hover, selected and disabled.
 const fn ramp(
     fill: ThemeColor,
     foreground: ThemeColor,
@@ -253,7 +249,6 @@ const fn ramp(
         border_rests_only: false,
         hover_fill: hover,
         hover_foreground: foreground,
-        active_fill: active,
         selected_fill: active,
         selected_foreground: foreground,
         disabled_fill: Some(disabled),
@@ -306,8 +301,6 @@ struct ResolvedStyle {
     border: Option<ThemeColor>,
     /// `None` keeps the engaged look under the pointer.
     hover: Option<HoverStyle>,
-    /// The fill while the pointer is held down; `None` keeps the hover look.
-    press_fill: Option<ThemeColor>,
 }
 
 impl ResolvedStyle {
@@ -333,9 +326,7 @@ impl ResolvedStyle {
         };
         // A text toggle's hover is the fill alone, in both states: `text-hover` equals
         // `text-active`, so a hover that changed the text would make a toggle that was just
-        // switched off look on while the pointer stays over it. A press keeps that hover fill;
-        // the click's only feedback is the text switching state, never a flash of `active-bg`.
-        let press_fill = (!text_toggle).then_some(appearance.active_fill);
+        // switched off look on while the pointer stays over it.
         let hover = if text_toggle {
             Some(HoverStyle {
                 fill: appearance.hover_fill,
@@ -358,7 +349,6 @@ impl ResolvedStyle {
             foreground,
             border,
             hover,
-            press_fill,
         }
     }
 }
@@ -514,7 +504,7 @@ impl Button {
         self
     }
 
-    /// A trigger whose menu is open: drawn like the pressed state until the menu closes.
+    /// A trigger whose menu is open: drawn with the selected fill until the menu closes.
     pub(crate) fn open(mut self, open: bool) -> Self {
         self.flags.set(ButtonFlags::OPEN, open);
         self
@@ -751,7 +741,8 @@ fn paint_states(
 ) -> BaseButton {
     let drop_border = appearance.border_rests_only;
     // Every variant keeps a border of `--border-width`, transparent unless it is outlined, so a
-    // state change never shifts the layout.
+    // state change never shifts the layout. A press paints nothing of its own: the hover look
+    // holds until the click changes the button's state, so a click never flashes a second fill.
     button
         .when_some(resolved.fill, |button, fill| button.bg(gpui_color(fill)))
         .text_color(gpui_color(resolved.foreground))
@@ -762,32 +753,19 @@ fn paint_states(
                 .map_or_else(gpui::transparent_black, gpui_color),
         )
         .when(accepts_input, |button| {
-            button
-                .cursor_pointer()
-                .hover(move |style| {
-                    let Some(hover) = resolved.hover else {
-                        return style;
-                    };
-                    let style = style
-                        .bg(gpui_color(hover.fill))
-                        .text_color(gpui_color(hover.foreground));
-                    if drop_border {
-                        style.border_color(gpui::transparent_black())
-                    } else {
-                        style
-                    }
-                })
-                .active(move |style| {
-                    let Some(press_fill) = resolved.press_fill else {
-                        return style;
-                    };
-                    let style = style.bg(gpui_color(press_fill));
-                    if drop_border {
-                        style.border_color(gpui::transparent_black())
-                    } else {
-                        style
-                    }
-                })
+            button.cursor_pointer().hover(move |style| {
+                let Some(hover) = resolved.hover else {
+                    return style;
+                };
+                let style = style
+                    .bg(gpui_color(hover.fill))
+                    .text_color(gpui_color(hover.foreground));
+                if drop_border {
+                    style.border_color(gpui::transparent_black())
+                } else {
+                    style
+                }
+            })
         })
         // The Theme System focus style for every variant: a 2px `ring-primary` outline.
         .focus_visible(move |style| style.border_2().border_color(gpui_color(focus_ring)))
@@ -939,11 +917,6 @@ mod tests {
                     foreground: c.text_active,
                 })
             );
-            assert_eq!(
-                (off.press_fill, on.press_fill),
-                (None, None),
-                "a press keeps the hover fill instead of flashing active-bg"
-            );
         }
     }
 
@@ -959,7 +932,6 @@ mod tests {
                 foreground: theme.colors.text_default,
             })
         );
-        assert_eq!(resting.press_fill, Some(theme.colors.active_bg));
         for flag in [ButtonFlags::SELECTED, ButtonFlags::OPEN] {
             let mut flags = ButtonFlags::default();
             flags.set(flag, true);
@@ -1046,8 +1018,8 @@ mod tests {
         }
     }
 
-    /// Each filled variant is one Theme System token ramp: `(fill, text, hover, press, disabled
-    /// fill, disabled text)`.
+    /// Each filled variant is one Theme System token ramp: `(fill, text, hover, selected,
+    /// disabled fill, disabled text)`.
     #[test]
     fn filled_variants_match_the_theme_system_button() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
@@ -1115,7 +1087,7 @@ mod tests {
                         appearance.fill,
                         appearance.foreground,
                         appearance.hover_fill,
-                        appearance.active_fill,
+                        appearance.selected_fill,
                         appearance.disabled_fill,
                         appearance.disabled_foreground,
                     ),
@@ -1136,10 +1108,9 @@ mod tests {
             assert_eq!(outline.fill, Some(c.surface));
             assert_eq!(outline.border, Some(c.border));
             assert_eq!(outline.foreground, c.text_default);
-            // hover:border-transparent hover:bg-hover-bg, active:bg-active-bg
+            // hover:border-transparent hover:bg-hover-bg
             assert!(outline.border_rests_only);
             assert_eq!(outline.hover_fill, c.hover_bg);
-            assert_eq!(outline.active_fill, c.active_bg);
             // Disabled keeps the resting surface and outline; only the foreground mutes.
             let mut disabled = ButtonFlags::default();
             disabled.set(ButtonFlags::DISABLED, true);
@@ -1157,12 +1128,11 @@ mod tests {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let c = theme.colors;
             let ghost = button_appearance(&theme, ButtonVariant::Ghost, false);
-            // border-transparent text-text-default hover:bg-hover-bg active:bg-active-bg
+            // border-transparent text-text-default hover:bg-hover-bg
             assert_eq!(ghost.fill, None);
             assert_eq!(ghost.border, None);
             assert_eq!(ghost.foreground, c.text_default);
             assert_eq!(ghost.hover_fill, c.hover_bg);
-            assert_eq!(ghost.active_fill, c.active_bg);
             // A disabled icon action stays transparent; only its glyph mutes.
             assert_eq!(ghost.disabled_fill, None);
             assert_eq!(ghost.disabled_foreground, c.text_muted);
@@ -1171,7 +1141,7 @@ mod tests {
             let resolved = ResolvedStyle::new(&ghost, disabled);
             assert_eq!(resolved.fill, None);
             assert_eq!(resolved.foreground, c.text_muted);
-            // A ghost toggle that is on rests on the pressed fill.
+            // A ghost toggle that is on rests on the selected fill.
             assert_eq!(ghost.selected_fill, c.active_bg);
             assert_eq!(ghost.selected_foreground, c.text_active);
         }
@@ -1185,6 +1155,5 @@ mod tests {
         assert_eq!(close.fill, None);
         assert_eq!(close.hover_fill, colors.danger);
         assert_eq!(close.hover_foreground, colors.danger_foreground);
-        assert_eq!(close.active_fill, colors.danger_active);
     }
 }
