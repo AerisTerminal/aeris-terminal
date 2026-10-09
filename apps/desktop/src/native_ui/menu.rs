@@ -186,7 +186,7 @@ const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
 }
 
 /// The label and leading-glyph colours of a row. A destructive row keeps the shared row fills
-/// and colours its text and glyph from the `danger` ramp: `danger` at rest, `danger-hover`
+/// and colours its text and glyph from the danger tokens: `text-danger` at rest, `danger-hover`
 /// while hovered or highlighted, and `danger-disabled` while disabled.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RowInk {
@@ -200,8 +200,8 @@ const fn row_ink(theme: &AerisTheme, destructive: bool, enabled: bool) -> RowInk
     let colors = theme.colors;
     match (destructive, enabled) {
         (true, true) => RowInk {
-            label: colors.danger,
-            icon: colors.danger,
+            label: colors.text_danger,
+            icon: colors.text_danger,
             hover: Some(colors.danger_hover),
         },
         (true, false) => RowInk {
@@ -844,8 +844,8 @@ mod tests {
             assert_eq!(
                 enabled,
                 RowInk {
-                    label: c.danger,
-                    icon: c.danger,
+                    label: c.text_danger,
+                    icon: c.text_danger,
                     hover: Some(c.danger_hover),
                 }
             );
@@ -867,7 +867,8 @@ mod tests {
             // Only the text and glyph turn red; the row fills stay the shared neutral ones.
             assert_eq!(destructive.hover_fill, plain.hover_fill);
             assert_eq!(destructive.highlighted_fill, plain.highlighted_fill);
-            assert_eq!(destructive.label_ink, c.danger);
+            assert_eq!(destructive.label_ink, c.text_danger);
+            assert_eq!(destructive.icon_ink, c.text_danger);
             assert_eq!(destructive.hover_ink, Some(c.danger_hover));
             let highlighted = MenuRow::compact("remove", "Remove drawings", &theme)
                 .destructive(true)

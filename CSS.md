@@ -15,8 +15,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
   `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `buy-bubble` /
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `surface-overlay`
-  for scrims, `hover-bg` / `active-bg` for hover and press. Hover and press change the fill only, no
-  shadows.
+  for scrims, `hover-bg` for hover and `active-bg` for a selected or open state. Press paints
+  nothing of its own. Hover changes the fill only, no shadows.
 - Focus is one style everywhere: a 2px `ring-primary` outline (no glow, no background change).
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
@@ -52,7 +52,7 @@ close control.
 select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
 `checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. A `destructive` row
-keeps the shared neutral row fills and colours only its label and glyph: `danger` at rest,
+keeps the shared neutral row fills and colours only its label and glyph: `text-danger` at rest,
 `danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
 Pass glyphs through `leading_icon` so the row colours them.
 
