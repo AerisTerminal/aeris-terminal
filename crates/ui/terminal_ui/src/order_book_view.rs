@@ -16,6 +16,8 @@ use std::cmp::Ordering;
 use std::{sync::Arc, time::Instant};
 
 const HEADER_HEIGHT: f32 = 28.0;
+/// The Level 1 note above the column labels for top-of-book-only providers.
+const LEVEL_ONE_NOTE_HEIGHT: f32 = 18.0;
 const ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 11.0;
 const MAXIMUM_TRADE_PRICES_FOR_GRID_INFERENCE: usize = 64;
@@ -540,24 +542,13 @@ fn render_header(
     top_of_book_only: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    div()
+    // Column labels are fractions of the full row, exactly like the ladder below, so the
+    // Level 1 note takes its own line instead of a share of the label row.
+    let labels = div()
         .h(px(HEADER_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
-        .border_b(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border))
-        .text_size(px(TEXT_SIZE))
-        .text_color(gpui_color(theme.colors.text_secondary))
-        .bg(gpui_color(theme.colors.surface_secondary))
-        .children(
-            top_of_book_only.then_some(
-                div()
-                    .px_2()
-                    .text_color(gpui_color(theme.colors.text_secondary))
-                    .child("Level 1 · best bid/ask"),
-            ),
-        )
         .children(
             OrderBookColumn::ALL
                 .into_iter()
@@ -569,7 +560,26 @@ fn render_header(
                         column_alignment(column),
                     )
                 }),
-        )
+        );
+    div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(theme.colors.border))
+        .text_size(px(TEXT_SIZE))
+        .text_color(gpui_color(theme.colors.text_secondary))
+        .bg(gpui_color(theme.colors.surface_secondary))
+        .children(top_of_book_only.then(|| {
+            div()
+                .h(px(LEVEL_ONE_NOTE_HEIGHT))
+                .flex()
+                .items_center()
+                .px_2()
+                .truncate()
+                .child("Level 1 · best bid/ask")
+        }))
+        .child(labels)
 }
 
 /// Empty-panel copy: loading until the first frame, and the unavailable
