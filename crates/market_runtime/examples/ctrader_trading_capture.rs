@@ -17,7 +17,7 @@ use aeris_ctrader_open_api_adapter::{
     trading::{
         ExecutionType, NewOrder, OrderAmendment, OrderPrice, OrderType, Protection, TimeInForce,
         TradeSide, TradingRequest, decode_deal_page, decode_execution_event, decode_order_details,
-        decode_order_error_event, decode_reconcile, decode_trader,
+        decode_order_error_event, decode_position_unrealized_pnl, decode_reconcile, decode_trader,
     },
     transport::Bucket,
 };
@@ -42,7 +42,7 @@ fn nested_paths(payload_type: u32) -> &'static [&'static [u32]] {
     match payload_type {
         2126 => &[&[4], &[4, 2], &[5], &[5, 2], &[6], &[6, 16]],
         2125 => &[&[3], &[3, 2], &[4], &[4, 2]],
-        2122 | 2123 => &[&[3]],
+        2122 | 2123 | 2188 => &[&[3]],
         2182 => &[&[3], &[3, 2], &[4], &[4, 16]],
         2134 | 2180 => &[&[3], &[3, 16]],
         2176 => &[&[3], &[3, 2]],
@@ -175,6 +175,7 @@ impl Capture<'_> {
             },
             2182 => format!("{:?}", decode_order_details(frame, self.ctid, &scales)),
             2134 | 2180 => format!("{:?}", decode_deal_page(frame, self.ctid, &scales)),
+            2188 => format!("{:?}", decode_position_unrealized_pnl(frame, self.ctid)),
             // ProtoOAErrorRes: errorCode (3) and description (4).
             2142 => format!(
                 "ErrorRes {:?}",
@@ -465,6 +466,10 @@ fn scenario(
         capture.act(
             "reconcile open",
             TradingRequest::reconcile(capture.ctid).map_err(error)?,
+        )?;
+        capture.act(
+            "position unrealized pnl",
+            TradingRequest::position_unrealized_pnl(capture.ctid).map_err(error)?,
         )?;
         let now = now_ms()?;
         capture.act(

@@ -869,8 +869,8 @@ struct TradingPnlState {
     accounts: Vec<aeris_trading::TradingAccount>,
     orders: Vec<aeris_trading::Order>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
-    /// Broker positions, per broker position id; the broker sends no mark, so they carry
-    /// no unrealized P&L here.
+    /// Broker positions, per broker position id, with the broker's own unrealized P&L in
+    /// the account's deposit currency.
     broker_positions: Vec<aeris_trading::BrokerPosition>,
     /// Broker accounts the attached venue can reach now.
     connected_broker_accounts: std::collections::BTreeSet<aeris_trading::TradingAccountId>,

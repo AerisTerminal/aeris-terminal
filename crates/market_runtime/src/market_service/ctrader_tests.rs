@@ -365,6 +365,21 @@ fn reconcile_frame(orders: &[Vec<u8>], positions: &[Vec<u8>]) -> ProtoMessage {
     frame(2125, payload)
 }
 
+/// `(position id, gross, net)` in cents of the deposit currency.
+fn unrealized_pnl_frame(positions: &[(u64, i64, i64)]) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, DEMO_CTID.cast_signed());
+    for &(position, gross, net) in positions {
+        let mut body = Vec::new();
+        field_varint(&mut body, 1, position);
+        field_int(&mut body, 2, gross);
+        field_int(&mut body, 3, net);
+        field_bytes(&mut payload, 3, &body);
+    }
+    field_varint(&mut payload, 4, 2);
+    frame(2188, payload)
+}
+
 fn deal_list_frame(deals: &[Vec<u8>]) -> ProtoMessage {
     deal_page_frame(deals, false)
 }
@@ -731,7 +746,8 @@ impl CtraderMarketLink for ScriptLink {
                     .first()
                     .map(|count| u32::try_from(*count).expect("count")),
             },
-            trading @ (2106 | 2108 | 2109 | 2110 | 2111 | 2121 | 2124 | 2133 | 2179 | 2181) => {
+            trading @ (2106 | 2108 | 2109 | 2110 | 2111 | 2121 | 2124 | 2133 | 2179 | 2181
+            | 2187) => {
                 let logged = Logged::Trading {
                     live: self.live,
                     payload_type: trading,
@@ -2437,8 +2453,8 @@ mod venue_relay {
     use aeris_trading::{
         AccountEnvironment, FixedPoint, OrderSide, OrderType, TimeInForce,
         venue::{
-            BrokerOrderKind, BrokerOrderState, ObservedAccount, VenueEvent, VenueOrder,
-            VenueRequest, VenueUpdate,
+            BrokerOrderKind, BrokerOrderState, ObservedAccount, PositionUnrealizedPnl, VenueEvent,
+            VenueOrder, VenueRequest, VenueUpdate,
         },
     };
 
@@ -2693,6 +2709,34 @@ mod venue_relay {
             "{updates:?}"
         );
         assert_eq!(trading_requests(&harness), [2121, 2133, 2124]);
+    }
+
+    #[test]
+    fn unrealized_pnl_is_relayed_in_the_deposit_currency() {
+        let (mut harness, venue) = attached(trading_script());
+        venue.updates();
+        harness
+            .script
+            .lock()
+            .unwrap()
+            .trading
+            .push_back(unrealized_pnl_frame(&[(1, -125, -131)]));
+        venue
+            .requests
+            .send(VenueRequest::UnrealizedPnl {
+                broker_account: DEMO_CTID.to_string(),
+            })
+            .expect("queued");
+        harness.drive();
+        assert_eq!(
+            venue.updates(),
+            [VenueUpdate::UnrealizedPnl(vec![PositionUnrealizedPnl {
+                broker_position_id: "1".into(),
+                gross: point(-125, 2),
+                net: point(-131, 2),
+            }])]
+        );
+        assert_eq!(trading_requests(&harness), [2121, 2187]);
     }
 
     #[test]

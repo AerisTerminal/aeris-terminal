@@ -63,6 +63,9 @@ const MAXIMUM_COPY_DISPATCHES: usize = 128;
 const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
 const LIVE_TRADING_DISABLED: &str = "cTrader live accounts are data-only; trading is disabled";
 const DEMO_VENUE_UNAVAILABLE: &str = "cTrader demo venue is not connected";
+/// One request per connected account with open broker positions, well inside cTrader's
+/// 50 requests per second.
+const UNREALIZED_PNL_INTERVAL: Duration = Duration::from_secs(1);
 type Reply<T> = SyncSender<Result<T, String>>;
 
 /// The owner derives the venue from the registered account, never from order provenance.
@@ -1116,8 +1119,33 @@ impl Coordinator {
         saw_fill.then_some(rebuilt).flatten()
     }
 
+    /// The next command. While connected broker accounts hold positions, the broker's
+    /// unrealized P&L is requested every [`UNREALIZED_PNL_INTERVAL`] between commands.
+    fn next_command(
+        &self,
+        commands: &Receiver<Command>,
+        next_refresh: &mut Instant,
+    ) -> Option<Command> {
+        loop {
+            if !self.wants_unrealized_pnl() {
+                return commands.recv().ok();
+            }
+            let now = Instant::now();
+            if now >= *next_refresh {
+                self.request_unrealized_pnl();
+                *next_refresh = now + UNREALIZED_PNL_INTERVAL;
+            }
+            match commands.recv_timeout(next_refresh.saturating_duration_since(now)) {
+                Ok(command) => return Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+
     fn run(&mut self, commands: &Receiver<Command>) {
-        while let Ok(command) = commands.recv() {
+        let mut next_refresh = Instant::now();
+        while let Some(command) = self.next_command(commands, &mut next_refresh) {
             match command {
                 Command::Status(reply) => respond(&reply, Ok(self.status())),
                 Command::RegisterAccount(account, reply) => {
@@ -4391,6 +4419,9 @@ impl Coordinator {
                             ))
                         },
                     )?;
+                if account.broker_ref.is_some() {
+                    return self.broker_account_pnl(account, realized, unrealized);
+                }
                 Ok(AccountPnl {
                     account_id: account.id.clone(),
                     currency: account.currency.clone(),
@@ -4408,6 +4439,53 @@ impl Coordinator {
                 })
             })
             .collect()
+    }
+
+    /// A broker account adds the broker's net unrealized P&L of its open positions, and its
+    /// equity is the broker balance plus that amount. Both need the venue to reach the
+    /// account now, so a disconnected account shows no open P&L and no equity rather than
+    /// a stale value.
+    fn broker_account_pnl(
+        &self,
+        account: &TradingAccount,
+        realized: FixedPoint,
+        unrealized: FixedPoint,
+    ) -> Result<AccountPnl, String> {
+        let connected = self.connected_broker_accounts.contains(&account.id);
+        let unrealized = if connected {
+            self.state
+                .broker_positions
+                .values()
+                .filter(|position| position.account_id == account.id)
+                .try_fold(unrealized, |total, position| {
+                    position
+                        .net_unrealized
+                        .exact_rescale(account.currency_scale)
+                        .and_then(|net| total.checked_add(net))
+                })
+                .map_err(|error| error.to_string())?
+        } else {
+            unrealized
+        };
+        let equity = self
+            .state
+            .broker_balances
+            .get(&account.id)
+            .filter(|_| connected)
+            .map(|balance| {
+                balance
+                    .exact_rescale(account.currency_scale)
+                    .and_then(|balance| balance.checked_add(unrealized))
+            })
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        Ok(AccountPnl {
+            account_id: account.id.clone(),
+            currency: account.currency.clone(),
+            realized,
+            unrealized,
+            equity,
+        })
     }
 
     fn session_adherence_reviews(&self) -> Result<Vec<SessionAdherenceReview>, String> {

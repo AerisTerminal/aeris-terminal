@@ -288,7 +288,7 @@ pub(super) fn timestamp(value: i64, field: &'static str) -> Result<i64, MarketDe
     Ok(value)
 }
 
-fn money(units: i64, digits: Option<u32>) -> Result<Money, MarketDecodeError> {
+pub(super) fn money(units: i64, digits: Option<u32>) -> Result<Money, MarketDecodeError> {
     let digits = digits
         .filter(|digits| *digits <= MAXIMUM_MONEY_DIGITS)
         .ok_or(MarketDecodeError::InvalidField("moneyDigits"))?;

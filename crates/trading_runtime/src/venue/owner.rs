@@ -12,8 +12,8 @@ use aeris_trading::{
     OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
     TradingAccount, TradingAccountId,
     venue::{
-        BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount, Protection, RealizedClose,
-        VenueAmendment, VenueOrder, VenuePosition, VenueSnapshot,
+        BrokerFill, BrokerOrder, BrokerOrderState, ObservedAccount, PositionUnrealizedPnl,
+        Protection, RealizedClose, VenueAmendment, VenueOrder, VenuePosition, VenueSnapshot,
     },
 };
 use std::{collections::BTreeSet, sync::mpsc::TrySendError};
@@ -591,6 +591,83 @@ impl Coordinator {
                 self.bump_revision()
             }
             VenueUpdate::Snapshot(snapshot) => self.apply_snapshot(&account_id, snapshot),
+            VenueUpdate::UnrealizedPnl(positions) => {
+                self.apply_unrealized_pnl(&account_id, positions)
+            }
+        }
+    }
+
+    /// Broker accounts the venue can reach that hold open broker positions; only they need
+    /// the broker's unrealized P&L.
+    fn broker_accounts_with_positions(&self) -> BTreeSet<String> {
+        self.state
+            .broker_positions
+            .keys()
+            .filter(|(account_id, _)| self.connected_broker_accounts.contains(account_id))
+            .filter_map(|(account_id, _)| self.state.accounts.get(account_id))
+            .filter_map(|account| account.broker_ref.clone())
+            .collect()
+    }
+
+    pub(crate) fn wants_unrealized_pnl(&self) -> bool {
+        self.venue_outbound.is_some() && !self.broker_accounts_with_positions().is_empty()
+    }
+
+    /// Asks the venue for the unrealized P&L of every connected account with open broker
+    /// positions. A full outbound queue skips this round; the next interval asks again.
+    pub(crate) fn request_unrealized_pnl(&self) {
+        let Some(outbound) = &self.venue_outbound else {
+            return;
+        };
+        for broker_account in self.broker_accounts_with_positions() {
+            match outbound.try_send(VenueRequest::UnrealizedPnl { broker_account }) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => return,
+            }
+        }
+    }
+
+    /// Applies the broker's unrealized P&L to the positions it names. It is a live mark, so
+    /// it is held in memory; a position the owner has not seen yet gets its value on the
+    /// next refresh after its position event.
+    fn apply_unrealized_pnl(
+        &mut self,
+        account_id: &TradingAccountId,
+        reports: &[PositionUnrealizedPnl],
+    ) -> Result<(), String> {
+        let scale = self
+            .state
+            .accounts
+            .get(account_id)
+            .ok_or("trading account is not registered")?
+            .currency_scale;
+        let mut changed = false;
+        for report in reports {
+            let Some(position) = self
+                .state
+                .broker_positions
+                .get_mut(&(account_id.clone(), report.broker_position_id.clone()))
+            else {
+                continue;
+            };
+            let gross = report
+                .gross
+                .exact_rescale(scale)
+                .map_err(|error| error.to_string())?;
+            let net = report
+                .net
+                .exact_rescale(scale)
+                .map_err(|error| error.to_string())?;
+            if (position.gross_unrealized, position.net_unrealized) != (gross, net) {
+                position.gross_unrealized = gross;
+                position.net_unrealized = net;
+                changed = true;
+            }
+        }
+        if changed {
+            self.bump_revision()
+        } else {
+            Ok(())
         }
     }
 
@@ -760,6 +837,14 @@ impl Coordinator {
             .ok_or("trading account is not registered")?
             .currency_scale;
         let zero = FixedPoint::try_new(0, scale).map_err(|error| error.to_string())?;
+        // Position events carry no P&L; the last broker refresh holds until the next one.
+        let (gross_unrealized, net_unrealized) = self
+            .state
+            .broker_positions
+            .get(&(account_id.clone(), report.broker_position_id.clone()))
+            .map_or((zero, zero), |known| {
+                (known.gross_unrealized, known.net_unrealized)
+            });
         let position = BrokerPosition {
             account_id: account_id.clone(),
             instrument_id: report.instrument_id.clone(),
@@ -777,9 +862,8 @@ impl Coordinator {
                 .commission
                 .exact_rescale(scale)
                 .map_err(|error| error.to_string())?,
-            // The broker reports no mark; unrealized P&L is projected from quotes.
-            gross_unrealized: zero,
-            net_unrealized: zero,
+            gross_unrealized,
+            net_unrealized,
             opened_unix_nanos: report.opened_unix_nanos,
         };
         position.validate().map_err(|error| error.to_string())?;

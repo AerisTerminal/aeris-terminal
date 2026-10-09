@@ -5,8 +5,8 @@ use aeris_trading::{
     AccountEnvironment, ClientOrderId, FixedPoint, Order, OrderSide, OrderStatus, OrderType,
     TimeInForce, TradingAccount, TradingAccountId,
     venue::{
-        BrokerFill, BrokerOrder, BrokerOrderKind, BrokerOrderState, RealizedClose, VenuePosition,
-        VenueSnapshot,
+        BrokerFill, BrokerOrder, BrokerOrderKind, BrokerOrderState, PositionUnrealizedPnl,
+        RealizedClose, VenuePosition, VenueSnapshot,
     },
 };
 use std::{
@@ -888,6 +888,99 @@ fn open_broker_positions_count_toward_the_maximum_contract_rule() {
             .place_order(request("third-contract"))
             .expect_err("over the maximum")
             .contains("maximum-contract")
+    );
+}
+
+#[test]
+fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
+    let (_directory, service, receiver) = setup("venue-unrealized");
+    let inbox = service.demo_venue_inbox();
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::AccountObserved(aeris_trading::venue::ObservedAccount {
+                environment: AccountEnvironment::Demo,
+                display_name: broker().display_name,
+                currency: "USD".into(),
+                currency_scale: 2,
+            }),
+        ))
+        .expect("observed");
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Balance {
+                balance: point(100_000, 2),
+            },
+        ))
+        .expect("balance");
+    assert!(
+        receiver.try_recv().is_err(),
+        "no positions, so no P&L requests"
+    );
+    inbox
+        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .expect("position");
+    assert!(matches!(
+        receiver.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(VenueRequest::UnrealizedPnl { broker_account }) if broker_account == BROKER_ACCOUNT
+    ));
+
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::UnrealizedPnl(vec![
+                PositionUnrealizedPnl {
+                    broker_position_id: "77".into(),
+                    gross: point(-125, 2),
+                    net: point(-160, 2),
+                },
+                PositionUnrealizedPnl {
+                    broker_position_id: "unknown".into(),
+                    gross: point(5, 2),
+                    net: point(5, 2),
+                },
+            ]),
+        ))
+        .expect("pnl");
+    // A later position event carries no P&L and keeps the last refresh.
+    inbox
+        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .expect("position again");
+    let snapshot = service.snapshot().expect("snapshot");
+    let position = &snapshot.broker_positions[0];
+    assert_eq!(
+        (position.gross_unrealized, position.net_unrealized),
+        (point(-125, 2), point(-160, 2))
+    );
+    let pnl = snapshot
+        .account_pnl
+        .iter()
+        .find(|pnl| pnl.account_id == broker().id)
+        .expect("account pnl");
+    assert_eq!(pnl.unrealized, point(-160, 2));
+    assert_eq!(
+        pnl.equity,
+        Some(point(99_840, 2)),
+        "balance plus net open P&L"
+    );
+
+    // A new generation reaches no account yet: no open P&L or equity is claimed.
+    let (_generation, next) = service.attach_demo_venue().expect("reattach");
+    let snapshot = service.snapshot().expect("snapshot");
+    let pnl = snapshot
+        .account_pnl
+        .iter()
+        .find(|pnl| pnl.account_id == broker().id)
+        .expect("account pnl");
+    assert_eq!((pnl.unrealized, pnl.equity), (point(0, 2), None));
+    assert!(matches!(
+        next.try_recv(),
+        Ok(VenueRequest::Reconcile { .. })
+    ));
+    assert!(
+        next.try_recv().is_err(),
+        "an unreachable account is not polled"
     );
 }
 

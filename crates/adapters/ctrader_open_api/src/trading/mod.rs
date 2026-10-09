@@ -10,9 +10,11 @@
 //! inexact prices, foreign accounts, unknown symbols, bounds) are the same.
 
 mod events;
+mod pnl;
 mod recovery;
 mod requests;
 
+pub use pnl::{PositionUnrealizedPnl, decode_position_unrealized_pnl};
 pub use recovery::{
     DealPage, OrderDetails, OrderPage, TrailingStopChanged, decode_deal_page, decode_order_details,
     decode_order_list, decode_trailing_stop,

@@ -14,7 +14,8 @@ use aeris_ctrader_open_api_adapter::{
     market::{MarketDecodeError, MarketRequest, PriceScale, SymbolSpec, decode_symbol_by_id},
     trading::{
         self as wire, NewOrder, OrderAmendment, OrderPrice, TradingRequest, decode_deal_page,
-        decode_execution_event, decode_reconcile, decode_trader, event_account, referenced_symbols,
+        decode_execution_event, decode_position_unrealized_pnl, decode_reconcile, decode_trader,
+        event_account, referenced_symbols,
     },
 };
 use aeris_instruments::InstrumentId;
@@ -22,9 +23,9 @@ use aeris_observability::diagnostic;
 use aeris_trading::{
     AccountEnvironment, FixedPoint, OrderSide, OrderType, TimeInForce,
     venue::{
-        BrokerFill, BrokerOrder, BrokerOrderKind, BrokerOrderState, ObservedAccount, Protection,
-        RealizedClose, VenueAmendment, VenueEvent, VenueOrder, VenuePosition, VenueRequest,
-        VenueSnapshot, VenueUpdate,
+        BrokerFill, BrokerOrder, BrokerOrderKind, BrokerOrderState, ObservedAccount,
+        PositionUnrealizedPnl, Protection, RealizedClose, VenueAmendment, VenueEvent, VenueOrder,
+        VenuePosition, VenueRequest, VenueSnapshot, VenueUpdate,
     },
 };
 
@@ -509,7 +510,8 @@ fn refused(request: &VenueRequest, reason: String) -> Option<VenueUpdate> {
         } => client_order_id.clone(),
         VenueRequest::ClosePosition { .. }
         | VenueRequest::AmendPositionProtection { .. }
-        | VenueRequest::Reconcile { .. } => return None,
+        | VenueRequest::Reconcile { .. }
+        | VenueRequest::UnrealizedPnl { .. } => return None,
     };
     Some(VenueUpdate::Refused {
         client_order_id,
@@ -742,6 +744,19 @@ impl Worker {
             return self
                 .reconcile_account(ctid, deals_since_unix_nanos.map(|nanos| nanos / 1_000_000));
         }
+        if let VenueRequest::UnrealizedPnl { .. } = request {
+            return match self.unrealized_pnl(ctid) {
+                Ok(update) => {
+                    self.emit(ctid, update);
+                    Ok(())
+                }
+                Err(Failure::Request(error)) => {
+                    diagnostic!("Aeris cTrader unrealized P&L failed: {error}");
+                    Ok(())
+                }
+                Err(Failure::Host(fault)) => Err(fault),
+            };
+        }
         match self.send_trading(ctid, request) {
             Ok(frame) => {
                 self.relay_frame(ctid, &frame, Some(request));
@@ -833,10 +848,8 @@ impl Worker {
                     .map_err(|error| wire_error(&error))
                 })()
             }
-            VenueRequest::Reconcile { .. } => {
-                return Err(Failure::Request(
-                    "reconcile is not a trading request".into(),
-                ));
+            VenueRequest::Reconcile { .. } | VenueRequest::UnrealizedPnl { .. } => {
+                return Err(Failure::Request("not an order or position request".into()));
             }
         }
         .map_err(Failure::Request)?;
@@ -879,6 +892,28 @@ impl Worker {
             self.venue_spec(ctid, symbol_id)?;
         }
         Ok(())
+    }
+
+    /// The broker's unrealized P&L of the account's open positions, in its deposit currency.
+    fn unrealized_pnl(&mut self, ctid: u64) -> Result<VenueUpdate, Failure> {
+        let host = self.ensure_host(false)?;
+        host.authorize(ctid)?;
+        let frame = host.request(trading(
+            TradingRequest::position_unrealized_pnl(ctid).map_err(|error| request_error(&error))?,
+        ))?;
+        let positions = decode_position_unrealized_pnl(&frame, ctid)
+            .map_err(|error| request_error(&error))?
+            .into_iter()
+            .map(|position| {
+                Ok(PositionUnrealizedPnl {
+                    broker_position_id: position.position_id.to_string(),
+                    gross: money(position.gross)?,
+                    net: money(position.net)?,
+                })
+            })
+            .collect::<Result<_, String>>()
+            .map_err(Failure::Request)?;
+        Ok(VenueUpdate::UnrealizedPnl(positions))
     }
 
     /// Replays deals since `since_millis` (when given), then reports the account's open

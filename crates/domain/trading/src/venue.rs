@@ -95,6 +95,10 @@ pub enum VenueRequest {
         broker_account: String,
         deals_since_unix_nanos: Option<i64>,
     },
+    /// The broker's current unrealized P&L of every open position of the account.
+    UnrealizedPnl {
+        broker_account: String,
+    },
 }
 
 impl VenueRequest {
@@ -107,7 +111,8 @@ impl VenueRequest {
             Self::Cancel { broker_account, .. }
             | Self::ClosePosition { broker_account, .. }
             | Self::AmendPositionProtection { broker_account, .. }
-            | Self::Reconcile { broker_account, .. } => broker_account,
+            | Self::Reconcile { broker_account, .. }
+            | Self::UnrealizedPnl { broker_account } => broker_account,
         }
     }
 
@@ -165,6 +170,7 @@ impl VenueRequest {
                 }
                 Ok(())
             }
+            Self::UnrealizedPnl { .. } => Ok(()),
         }
     }
 }
@@ -326,6 +332,17 @@ pub enum VenueUpdate {
         balance: FixedPoint,
     },
     Snapshot(VenueSnapshot),
+    /// The broker's unrealized P&L of the account's open positions.
+    UnrealizedPnl(Vec<PositionUnrealizedPnl>),
+}
+
+/// One open position's unrealized P&L as the broker computes it, in the account's deposit
+/// currency. `net` includes swap and opening commission but not the closing commission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PositionUnrealizedPnl {
+    pub broker_position_id: String,
+    pub gross: FixedPoint,
+    pub net: FixedPoint,
 }
 
 /// One update for one broker account, stamped with the relay session that saw it.
