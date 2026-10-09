@@ -35,7 +35,6 @@ pub(super) fn accounts_panel_content(
             connections.get(HostedBroker::Ctrader),
             theme,
         ))
-        .child(public_feed_card(theme))
         .child(
             div()
                 .h(px(theme.dimensions.border_width))
@@ -306,38 +305,6 @@ fn broker_card(
                 }))
                 .child(message.clone())
         }))
-}
-
-fn public_feed_card(theme: &AerisTheme) -> impl IntoElement {
-    card("accounts_hyperliquid", theme).child(
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(provider_heading(
-                "Hyperliquid",
-                "Public market data · no login needed".to_string(),
-                true,
-                theme,
-            ))
-            .child(badge("Always on", theme)),
-    )
-}
-
-fn badge(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
-    div()
-        .flex_none()
-        .h(px(20.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface_secondary))
-        .text_xs()
-        .text_color(gpui_color(theme.colors.text_muted))
-        .child(label)
 }
 
 fn practice_accounts(
