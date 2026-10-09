@@ -179,6 +179,7 @@ pub(crate) struct MenuRow {
     resting_fill: ThemeColor,
     label: SharedString,
     leading: Option<AnyElement>,
+    detail: Option<SharedString>,
     trailing: Option<AnyElement>,
     activation: Option<Activation>,
     hover: Option<Hover>,
@@ -245,6 +246,7 @@ impl MenuRow {
             resting_fill: theme.colors.surface_secondary,
             label: label.into(),
             leading: None,
+            detail: None,
             trailing: None,
             activation: None,
             hover: None,
@@ -266,6 +268,12 @@ impl MenuRow {
 
     pub(crate) fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading = Some(element.into_any_element());
+        self
+    }
+
+    /// Muted secondary text after the label, such as an instrument's kind.
+    pub(crate) fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 
@@ -454,6 +462,15 @@ impl RenderOnce for MenuRow {
             )
             .children(self.leading)
             .child(label)
+            .children(self.detail.map(|detail| {
+                div()
+                    .flex_none()
+                    .max_w(scale.rems(10.0))
+                    .truncate()
+                    .text_size(scale.rems(0.75))
+                    .text_color(gpui_color(colors.text_muted))
+                    .child(detail)
+            }))
             .children(self.trailing)
     }
 }

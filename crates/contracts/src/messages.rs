@@ -800,6 +800,9 @@ pub struct ProviderInstrumentSummary {
     pub product_code: Option<String>,
     pub instrument_type: Option<String>,
     pub expiration_date: Option<String>,
+    /// Provider-owned asset-class name, such as "Forex" or "US Shares". Display text
+    /// only; consumers must not branch on it.
+    pub asset_class: Option<String>,
 }
 
 /// Completed bounded provider-instrument search publication.

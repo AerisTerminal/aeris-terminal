@@ -2781,6 +2781,8 @@ fn current_instrument_menu_index(entries: &[InstrumentMenuEntry]) -> Option<usiz
 #[derive(Clone)]
 struct InstrumentMenuEntry {
     label: String,
+    /// The provider's asset-class name, shown muted beside the label.
+    asset_class: Option<String>,
     checked: bool,
     selection: InstrumentMenuSelection,
 }

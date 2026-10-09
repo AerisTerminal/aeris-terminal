@@ -32,8 +32,8 @@ use aeris_ctrader_open_api_adapter::{
     market::{
         DepthUpdate, EventStamp, LightSymbol, MAXIMUM_STREAM_SYMBOLS, MAXIMUM_TRENDBARS_PER_PAGE,
         MarketDecodeError, MarketRequest, MarketStreams, PriceScale, SymbolStream, TrendbarPage,
-        TrendbarPeriod, decode_asset_list, decode_subscription_ack, decode_symbol_by_id,
-        decode_symbol_list, decode_trendbar_page,
+        TrendbarPeriod, decode_asset_classes, decode_asset_list, decode_subscription_ack,
+        decode_symbol_by_id, decode_symbol_categories, decode_symbol_list, decode_trendbar_page,
     },
     session::{AccessToken, CtraderSession, SessionFault},
 };
@@ -985,12 +985,44 @@ impl HistoryTask {
     }
 }
 
+/// One account's searchable symbols and the asset-class name of each symbol category.
+struct AccountCatalog {
+    symbols: Vec<LightSymbol>,
+    asset_classes: BTreeMap<u64, String>,
+}
+
+/// Maps each symbol category to its broker asset-class name. Categories are often
+/// generic ("Default Category") or countries, so the asset class is the useful label.
+fn asset_class_names(host: &mut HostSession, ctid: u64) -> Result<BTreeMap<u64, String>, Failure> {
+    let categories = host
+        .request(MarketRequest::symbol_categories(ctid).map_err(|error| request_error(&error))?)?;
+    let categories =
+        decode_symbol_categories(&categories, ctid).map_err(|error| request_error(&error))?;
+    let classes =
+        host.request(MarketRequest::asset_classes(ctid).map_err(|error| request_error(&error))?)?;
+    let classes: BTreeMap<u64, String> = decode_asset_classes(&classes, ctid)
+        .map_err(|error| request_error(&error))?
+        .into_iter()
+        .map(|class| (class.asset_class_id, class.name))
+        .collect();
+    Ok(categories
+        .into_iter()
+        .filter_map(|category| {
+            classes
+                .get(&category.asset_class_id)
+                .map(|name| (category.category_id, name.clone()))
+        })
+        .collect())
+}
+
 #[derive(Clone)]
 struct CatalogEntry {
     route: Route,
     name: String,
     description: Option<String>,
     quote_asset_id: Option<u64>,
+    /// The broker's own asset-class name, such as "Forex" or "US Shares".
+    asset_class: Option<String>,
 }
 impl CatalogEntry {
     fn summary(&self) -> ProviderInstrumentSummary {
@@ -1002,6 +1034,7 @@ impl CatalogEntry {
             product_code: None,
             instrument_type: None,
             expiration_date: None,
+            asset_class: self.asset_class.clone(),
         }
     }
 }
@@ -1083,7 +1116,7 @@ struct Worker {
     completions: VecDeque<Command>,
     ordinal: u64,
     account_list: Option<(Instant, Vec<CtraderAccount>)>,
-    catalogs: BTreeMap<(bool, u64), (Instant, Vec<LightSymbol>)>,
+    catalogs: BTreeMap<(bool, u64), (Instant, AccountCatalog)>,
     assets: BTreeMap<(bool, u64), (Instant, BTreeMap<u64, String>)>,
     catalog_job: Option<CatalogJob>,
     searches: BTreeMap<u64, (u64, Vec<CatalogEntry>)>,
@@ -1673,8 +1706,8 @@ impl Worker {
                 continue;
             }
             let fetched = !self.catalog_fresh(&account);
-            match self.symbols(&account) {
-                Ok(_) => job.loaded.push(account),
+            match self.load_catalog(&account) {
+                Ok(()) => job.loaded.push(account),
                 Err(Failure::Request(detail)) => {
                     diagnostic!("Aeris cTrader catalog skipped one account: {detail}");
                     job.first_failure.get_or_insert(detail);
@@ -1746,22 +1779,37 @@ impl Worker {
             .get(&(account.is_live, account.ctid))
             .is_some_and(|(loaded_at, _)| loaded_at.elapsed() < CATALOG_TTL)
     }
-    fn symbols(&mut self, account: &CtraderAccount) -> Result<&[LightSymbol], Failure> {
-        let key = (account.is_live, account.ctid);
-        if !self.catalog_fresh(account) {
-            let host = self.ensure_host(account.is_live)?;
-            host.authorize(account.ctid)?;
-            let frame = host.request(
-                MarketRequest::symbols_list(account.ctid).map_err(|error| request_error(&error))?,
-            )?;
-            let symbols =
-                decode_symbol_list(&frame, account.ctid).map_err(|error| request_error(&error))?;
-            self.catalogs.insert(key, (Instant::now(), symbols));
+    fn load_catalog(&mut self, account: &CtraderAccount) -> Result<(), Failure> {
+        if self.catalog_fresh(account) {
+            return Ok(());
         }
-        self.catalogs
-            .get(&key)
-            .map(|(_, symbols)| symbols.as_slice())
-            .ok_or_else(|| Failure::Request("cTrader symbol catalog is unavailable".into()))
+        let host = self.ensure_host(account.is_live)?;
+        host.authorize(account.ctid)?;
+        let frame = host.request(
+            MarketRequest::symbols_list(account.ctid).map_err(|error| request_error(&error))?,
+        )?;
+        let symbols =
+            decode_symbol_list(&frame, account.ctid).map_err(|error| request_error(&error))?;
+        // Labels only describe results, so a broker that refuses them still lists symbols.
+        let asset_classes = match asset_class_names(host, account.ctid) {
+            Ok(names) => names,
+            Err(Failure::Request(detail)) => {
+                diagnostic!("Aeris cTrader symbol labels are unavailable: {detail}");
+                BTreeMap::new()
+            }
+            Err(failure) => return Err(failure),
+        };
+        self.catalogs.insert(
+            (account.is_live, account.ctid),
+            (
+                Instant::now(),
+                AccountCatalog {
+                    symbols,
+                    asset_classes,
+                },
+            ),
+        );
+        Ok(())
     }
     fn search_results(
         &mut self,
@@ -1771,10 +1819,10 @@ impl Worker {
         let query = search.query.trim().to_ascii_uppercase();
         let mut matches = Vec::new();
         for account in accounts {
-            let Some((_, symbols)) = self.catalogs.get(&(account.is_live, account.ctid)) else {
+            let Some((_, catalog)) = self.catalogs.get(&(account.is_live, account.ctid)) else {
                 continue;
             };
-            for symbol in symbols.iter().filter(|symbol| symbol.enabled) {
+            for symbol in catalog.symbols.iter().filter(|symbol| symbol.enabled) {
                 let entry = CatalogEntry {
                     route: Route {
                         live: account.is_live,
@@ -1784,6 +1832,10 @@ impl Worker {
                     name: symbol.name.clone(),
                     description: symbol.description.clone(),
                     quote_asset_id: symbol.quote_asset_id,
+                    asset_class: symbol
+                        .category_id
+                        .and_then(|category| catalog.asset_classes.get(&category))
+                        .cloned(),
                 };
                 if let Some(rank) = search_rank(&entry, &query) {
                     matches.push((rank, entry));

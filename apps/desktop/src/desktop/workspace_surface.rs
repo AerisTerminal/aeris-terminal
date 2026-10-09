@@ -2170,6 +2170,7 @@ impl WorkspaceSurface {
             .enumerate()
             .map(|(index, instrument)| InstrumentMenuEntry {
                 label: instrument.display_symbol.clone(),
+                asset_class: instrument.asset_class.clone(),
                 checked: self.symbol_browser.selected().is_some_and(|selected| {
                     selected.instrument.symbol == instrument.symbol
                         && selected.instrument.exchange == instrument.exchange

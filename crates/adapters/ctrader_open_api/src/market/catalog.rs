@@ -2,7 +2,10 @@ use super::{MarketDecodeError, PriceScale, check_account};
 use crate::{
     ProtoMessage,
     codec::{self, require_nested_fields},
-    generated::{ProtoOaAssetListRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes},
+    generated::{
+        ProtoOaAssetClassListRes, ProtoOaAssetListRes, ProtoOaSymbolByIdRes,
+        ProtoOaSymbolCategoryListRes, ProtoOaSymbolsListRes,
+    },
 };
 
 /// Observed demo catalogs hold under a thousand symbols per account.
@@ -18,6 +21,17 @@ pub struct LightSymbol {
     pub enabled: bool,
     /// Prices, and so profit and loss, are in this asset.
     pub quote_asset_id: Option<u64>,
+    /// The broker's grouping of the symbol (`ProtoOASymbolCategory`).
+    pub category_id: Option<u64>,
+}
+
+/// One broker-defined symbol category (`ProtoOASymbolCategory`). Brokers name their own
+/// categories, so the name is presentation text, never a classification to branch on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SymbolCategory {
+    pub category_id: u64,
+    pub asset_class_id: u64,
+    pub name: String,
 }
 
 /// One account asset (`ProtoOAAsset`): a currency or other priced unit.
@@ -112,6 +126,82 @@ pub fn decode_symbol_list(
                     .transpose()?,
                 enabled: symbol.enabled.unwrap_or(true),
                 quote_asset_id: symbol.quote_asset_id.map(positive_asset_id).transpose()?,
+                category_id: symbol
+                    .symbol_category_id
+                    .map(|id| positive_id_field(id, "symbolCategoryId"))
+                    .transpose()?,
+            })
+        })
+        .collect()
+}
+
+fn positive_id_field(id: i64, field: &'static str) -> Result<u64, MarketDecodeError> {
+    u64::try_from(id)
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or(MarketDecodeError::InvalidField(field))
+}
+
+/// One broker-defined asset class (`ProtoOAAssetClass`), such as forex or stocks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetClassName {
+    pub asset_class_id: u64,
+    pub name: String,
+}
+
+/// Decode a `ProtoOAAssetClassListRes` (2154) for one account. Both fields are optional
+/// in the schema; a class without an id or name cannot label anything and is skipped.
+///
+/// # Errors
+/// Rejects another account, invalid ids or names, and oversized lists.
+pub fn decode_asset_classes(
+    frame: &ProtoMessage,
+    ctid: u64,
+) -> Result<Vec<AssetClassName>, MarketDecodeError> {
+    let list: ProtoOaAssetClassListRes =
+        codec::decode_typed(frame, 2154, &[(2, "ctidTraderAccountId")], |_| Ok(()))?;
+    check_account(ctid, list.ctid_trader_account_id)?;
+    if list.asset_class.len() > MAXIMUM_CATALOG_SYMBOLS {
+        return Err(MarketDecodeError::LimitExceeded("asset classes"));
+    }
+    list.asset_class
+        .into_iter()
+        .filter_map(|class| class.id.zip(class.name))
+        .map(|(id, name)| {
+            Ok(AssetClassName {
+                asset_class_id: positive_id_field(id, "id")?,
+                name: bounded_text(name, "name")?,
+            })
+        })
+        .collect()
+}
+
+/// Decode a `ProtoOASymbolCategoryListRes` (2161) for one account.
+///
+/// # Errors
+/// Rejects another account, missing ids or names, and oversized lists.
+pub fn decode_symbol_categories(
+    frame: &ProtoMessage,
+    ctid: u64,
+) -> Result<Vec<SymbolCategory>, MarketDecodeError> {
+    let list: ProtoOaSymbolCategoryListRes =
+        codec::decode_typed(frame, 2161, &[(2, "ctidTraderAccountId")], |_| Ok(()))?;
+    require_nested_fields(
+        frame.payload.as_deref().unwrap_or_default(),
+        3,
+        &[(1, "id"), (2, "assetClassId"), (3, "name")],
+    )?;
+    check_account(ctid, list.ctid_trader_account_id)?;
+    if list.symbol_category.len() > MAXIMUM_CATALOG_SYMBOLS {
+        return Err(MarketDecodeError::LimitExceeded("symbol categories"));
+    }
+    list.symbol_category
+        .into_iter()
+        .map(|category| {
+            Ok(SymbolCategory {
+                category_id: positive_id_field(category.id, "id")?,
+                asset_class_id: positive_id_field(category.asset_class_id, "assetClassId")?,
+                name: bounded_text(category.name, "name")?,
             })
         })
         .collect()
@@ -332,6 +422,69 @@ mod tests {
         let mut bad = list;
         bad.asset[0].name = " ".into();
         assert!(decode_asset_list(&frame(2113, &bad), CTID).is_err());
+    }
+
+    #[test]
+    fn categories_and_asset_classes_label_symbols() {
+        use crate::generated::{ProtoOaAssetClass, ProtoOaSymbolCategory};
+        let categories = ProtoOaSymbolCategoryListRes {
+            payload_type: None,
+            ctid_trader_account_id: CTID_WIRE,
+            symbol_category: vec![ProtoOaSymbolCategory {
+                id: 1,
+                asset_class_id: 3,
+                name: "Default Category".into(),
+                sorting_number: None,
+            }],
+        };
+        assert_eq!(
+            decode_symbol_categories(&frame(2161, &categories), CTID).expect("categories"),
+            [SymbolCategory {
+                category_id: 1,
+                asset_class_id: 3,
+                name: "Default Category".into()
+            }]
+        );
+        let payload = categories.encode_to_vec();
+        for inner in [1, 2, 3] {
+            assert!(
+                decode_symbol_categories(
+                    &bytes_frame(2161, strip_nested(&payload, 3, inner)),
+                    CTID
+                )
+                .is_err(),
+                "field {inner} must be required"
+            );
+        }
+        assert!(decode_symbol_categories(&frame(2161, &categories), CTID + 1).is_err());
+        let class = |id: Option<i64>, name: Option<&str>| ProtoOaAssetClass {
+            id,
+            name: name.map(Into::into),
+            sorting_number: None,
+        };
+        let classes = ProtoOaAssetClassListRes {
+            payload_type: None,
+            ctid_trader_account_id: CTID_WIRE,
+            asset_class: vec![
+                class(Some(3), Some("Forex")),
+                class(None, Some("Unnamed")),
+                class(Some(4), None),
+            ],
+        };
+        assert_eq!(
+            decode_asset_classes(&frame(2154, &classes), CTID).expect("classes"),
+            [AssetClassName {
+                asset_class_id: 3,
+                name: "Forex".into()
+            }],
+            "a class without an id or name labels nothing"
+        );
+        assert!(decode_asset_classes(&frame(2154, &classes), CTID + 1).is_err());
+        let mut bad = classes;
+        bad.asset_class[0].id = Some(0);
+        assert!(decode_asset_classes(&frame(2154, &bad), CTID).is_err());
+        let symbols = decode_symbol_list(&frame(2115, &list()), CTID).expect("catalog");
+        assert_eq!(symbols[0].category_id, Some(1));
     }
 
     #[test]

@@ -2,10 +2,11 @@ use super::{MarketDecodeError, TrendbarPeriod, account_id, check_account};
 use crate::{
     ProtoMessage, codec,
     generated::{
-        ProtoOaAssetListReq, ProtoOaGetTickDataReq, ProtoOaGetTrendbarsReq,
-        ProtoOaSubscribeDepthQuotesReq, ProtoOaSubscribeLiveTrendbarReq, ProtoOaSubscribeSpotsReq,
-        ProtoOaSymbolByIdReq, ProtoOaSymbolsListReq, ProtoOaUnsubscribeDepthQuotesReq,
-        ProtoOaUnsubscribeLiveTrendbarReq, ProtoOaUnsubscribeSpotsReq,
+        ProtoOaAssetClassListReq, ProtoOaAssetListReq, ProtoOaGetTickDataReq,
+        ProtoOaGetTrendbarsReq, ProtoOaSubscribeDepthQuotesReq, ProtoOaSubscribeLiveTrendbarReq,
+        ProtoOaSubscribeSpotsReq, ProtoOaSymbolByIdReq, ProtoOaSymbolCategoryListReq,
+        ProtoOaSymbolsListReq, ProtoOaUnsubscribeDepthQuotesReq, ProtoOaUnsubscribeLiveTrendbarReq,
+        ProtoOaUnsubscribeSpotsReq,
     },
     transport::Bucket,
 };
@@ -83,6 +84,36 @@ impl MarketRequest {
             2112,
             2113,
             &ProtoOaAssetListReq {
+                payload_type: None,
+                ctid_trader_account_id: account_id(ctid)?,
+            },
+        ))
+    }
+
+    /// `ProtoOAAssetClassListReq` (2153): the broker's asset classes.
+    ///
+    /// # Errors
+    /// Rejects an account id outside the wire range.
+    pub fn asset_classes(ctid: u64) -> Result<Self, MarketDecodeError> {
+        Ok(Self::general(
+            2153,
+            2154,
+            &ProtoOaAssetClassListReq {
+                payload_type: None,
+                ctid_trader_account_id: account_id(ctid)?,
+            },
+        ))
+    }
+
+    /// `ProtoOASymbolCategoryListReq` (2160): the broker's symbol categories.
+    ///
+    /// # Errors
+    /// Rejects an account id outside the wire range.
+    pub fn symbol_categories(ctid: u64) -> Result<Self, MarketDecodeError> {
+        Ok(Self::general(
+            2160,
+            2161,
+            &ProtoOaSymbolCategoryListReq {
                 payload_type: None,
                 ctid_trader_account_id: account_id(ctid)?,
             },
@@ -325,6 +356,20 @@ mod tests {
                 .ctid_trader_account_id,
             CTID_WIRE
         );
+        for (request, types) in [
+            (MarketRequest::symbol_categories(CTID), (2160, 2161)),
+            (MarketRequest::asset_classes(CTID), (2153, 2154)),
+        ] {
+            let request = request.expect("label request");
+            assert_eq!((request.payload_type, request.response_type), types);
+            assert_eq!(
+                ProtoOaAssetClassListReq::decode(request.payload.as_slice())
+                    .expect("decode")
+                    .ctid_trader_account_id,
+                CTID_WIRE,
+                "both requests carry only the account"
+            );
+        }
         assert!(MarketRequest::subscribe_spots(CTID, &[]).is_err());
         assert!(MarketRequest::subscribe_depth(CTID, &[0]).is_err());
         assert!(MarketRequest::subscribe_depth(CTID, &[1; 65]).is_err());

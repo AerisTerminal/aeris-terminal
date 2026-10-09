@@ -379,6 +379,9 @@ pub(super) fn instrument_dialog_row(
             });
         }
     });
+    if let Some(asset_class) = &instrument.asset_class {
+        row = row.detail(asset_class.clone());
+    }
     row = row.leading(provider_exchange_mark(
         state.menu_provider,
         px(CHROME_MENU_ROW_ICON_WELL),

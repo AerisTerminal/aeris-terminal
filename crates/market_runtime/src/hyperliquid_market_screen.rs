@@ -126,6 +126,7 @@ pub(crate) fn instrument_summary(instrument: &HyperliquidInstrument) -> Provider
             HyperliquidMarketKind::BuilderPerp { dex } => format!("builder-perpetual:{dex}"),
         }),
         expiration_date: None,
+        asset_class: None,
     }
 }
 

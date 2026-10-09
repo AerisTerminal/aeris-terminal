@@ -571,6 +571,7 @@ fn publish_catalog_callback(
                     product_code: result.product_code,
                     instrument_type: result.instrument_type,
                     expiration_date: result.expiration_date,
+                    asset_class: None,
                 })
                 .collect();
             let _ = publications.send(RithmicCatalogEvent::SearchCompleted(

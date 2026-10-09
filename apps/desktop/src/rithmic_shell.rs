@@ -325,6 +325,7 @@ mod tests {
             product_code: Some("ES".to_string()),
             instrument_type: Some("FUTURE".to_string()),
             expiration_date: None,
+            asset_class: None,
         }
     }
 

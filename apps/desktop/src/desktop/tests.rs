@@ -123,6 +123,7 @@ fn instrument_menu_requests_a_default_listing_only_when_idle_and_empty() {
         product_code: Some("BTC-USD".to_string()),
         instrument_type: Some("spot".to_string()),
         expiration_date: None,
+        asset_class: None,
     };
     assert!(browser.apply_results(startup, vec![result]));
     assert!(
@@ -1605,11 +1606,13 @@ fn instrument_menu_index_follows_the_checked_live_market() {
     let entries = [
         InstrumentMenuEntry {
             label: "BTC/USD".into(),
+            asset_class: None,
             checked: false,
             selection: InstrumentMenuSelection(0),
         },
         InstrumentMenuEntry {
             label: "ETH/USD".into(),
+            asset_class: None,
             checked: true,
             selection: InstrumentMenuSelection(1),
         },
@@ -1618,6 +1621,7 @@ fn instrument_menu_index_follows_the_checked_live_market() {
     assert_eq!(
         current_instrument_menu_index(&[InstrumentMenuEntry {
             label: "AAVE/USD".into(),
+            asset_class: None,
             checked: false,
             selection: InstrumentMenuSelection(0),
         }]),
@@ -1705,6 +1709,7 @@ fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
         product_code: Some("MNQ".to_string()),
         instrument_type: Some("FUTURE".to_string()),
         expiration_date: Some(expiration.to_string()),
+        asset_class: None,
     };
     let results = vec![
         result("MNQ", "20260918"),
@@ -1719,6 +1724,7 @@ fn default_rithmic_contract_skips_continuous_and_spread_symbols() {
             product_code: Some("NQ".to_string()),
             instrument_type: Some("FUTURE".to_string()),
             expiration_date: None,
+            asset_class: None,
         },
     ];
     assert_eq!(default_rithmic_contract_index(&results), Some(3));
@@ -2719,6 +2725,7 @@ fn provider_catalog_keeps_display_symbol_separate_from_wire_symbol() {
         product_code: None,
         instrument_type: Some("perpetual".to_string()),
         expiration_date: None,
+        asset_class: None,
     };
     assert_eq!(instrument.display_symbol, "BTC-USDC");
     assert_eq!(instrument.symbol, "BTC");

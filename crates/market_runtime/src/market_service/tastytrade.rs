@@ -1131,6 +1131,7 @@ fn instrument_summary(item: &SearchInstrument) -> ProviderInstrumentSummary {
         product_code: None,
         instrument_type: Some(item.instrument_type.clone()),
         expiration_date: None,
+        asset_class: None,
     }
 }
 fn catalog_venue(item: &SearchInstrument) -> String {

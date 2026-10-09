@@ -3,6 +3,7 @@ use aeris_ctrader_open_api_adapter::{
     accounts::CtraderAccount,
     host::CtraderHost,
     hosted::{CtraderHostedAccess, load_stored_connection},
+    market::{MarketRequest, decode_asset_classes, decode_symbol_categories},
     session::CtraderSession,
 };
 use serde_json::json;
@@ -18,6 +19,60 @@ fn masked(value: Option<i64>) -> String {
     let digits = value.map_or_else(|| "unknown".to_string(), |number| number.to_string());
     let suffix = digits.chars().rev().take(2).collect::<String>();
     format!("#****{}", suffix.chars().rev().collect::<String>())
+}
+
+/// The broker's symbol categories with how many catalog symbols each holds.
+fn category_counts(
+    session: &mut CtraderSession,
+    account: &CtraderAccount,
+) -> Result<Vec<(String, usize)>, String> {
+    let catalog = session
+        .symbol_catalog(account)
+        .map_err(|error| error.to_string())?;
+    let request =
+        MarketRequest::symbol_categories(account.ctid).map_err(|error| error.to_string())?;
+    let frame = session
+        .request(
+            request.payload_type,
+            request.payload,
+            request.response_type,
+            request.bucket,
+            std::time::Duration::from_secs(10),
+        )
+        .map_err(|error| error.to_string())?;
+    let categories =
+        decode_symbol_categories(&frame, account.ctid).map_err(|error| error.to_string())?;
+    let request = MarketRequest::asset_classes(account.ctid).map_err(|error| error.to_string())?;
+    let frame = session
+        .request(
+            request.payload_type,
+            request.payload,
+            request.response_type,
+            request.bucket,
+            std::time::Duration::from_secs(10),
+        )
+        .map_err(|error| error.to_string())?;
+    let classes = decode_asset_classes(&frame, account.ctid).map_err(|error| error.to_string())?;
+    let mut counts: Vec<(String, usize)> = categories
+        .iter()
+        .map(|category| {
+            let symbols = catalog
+                .iter()
+                .filter(|symbol| symbol.category_id == Some(category.category_id))
+                .count();
+            let class = classes
+                .iter()
+                .find(|class| class.asset_class_id == category.asset_class_id)
+                .map_or("(unknown class)", |class| class.name.as_str());
+            (format!("{class} / {}", category.name), symbols)
+        })
+        .collect();
+    let uncategorised = catalog
+        .iter()
+        .filter(|symbol| symbol.category_id.is_none())
+        .count();
+    counts.push(("(none)".into(), uncategorised));
+    Ok(counts)
 }
 
 fn inventory(
@@ -38,6 +93,8 @@ fn inventory(
         .collect();
     let mut results = Vec::with_capacity(accounts.len());
     for account in accounts {
+        let categories = category_counts(&mut session, &account)?;
+        println!("  categories (name: symbols): {categories:?}");
         let symbols = session
             .symbol_names(&account)
             .map_err(|error| error.to_string())?;

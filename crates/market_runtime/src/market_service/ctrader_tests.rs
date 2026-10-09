@@ -15,6 +15,7 @@ const DEMO_SYMBOL: u64 = 1;
 const LIVE_SYMBOL: u64 = 41;
 const M1: i32 = 1;
 const QUOTE_ASSET: u64 = 11;
+const SYMBOL_CATEGORY: u64 = 7;
 
 // ---------------------------------------------------------------------------
 // Minimal protobuf wire encoding for scripted responses.
@@ -197,12 +198,37 @@ fn symbols_list_frame(ctid: u64, symbols: &[(u64, String, Option<String>)]) -> P
         field_string(&mut body, 2, name);
         field_varint(&mut body, 3, 1);
         field_varint(&mut body, 5, QUOTE_ASSET);
+        field_varint(&mut body, 6, SYMBOL_CATEGORY);
         if let Some(description) = description {
             field_string(&mut body, 7, description);
         }
         field_bytes(&mut payload, 3, &body);
     }
     frame(2115, payload)
+}
+
+/// Every scripted symbol is in one category of the "Forex" asset class (id 3).
+fn symbol_categories_frame(ctid: u64) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, ctid.cast_signed());
+    let mut category = Vec::new();
+    field_varint(&mut category, 1, SYMBOL_CATEGORY);
+    field_varint(&mut category, 2, 3);
+    field_string(&mut category, 3, "Default Category");
+    field_bytes(&mut payload, 3, &category);
+    frame(2161, payload)
+}
+
+fn asset_classes_frame(ctid: u64) -> ProtoMessage {
+    let mut payload = Vec::new();
+    field_int(&mut payload, 2, ctid.cast_signed());
+    for (id, name) in [(3, "Forex"), (4, "US Shares")] {
+        let mut class = Vec::new();
+        field_varint(&mut class, 1, id);
+        field_string(&mut class, 2, name);
+        field_bytes(&mut payload, 3, &class);
+    }
+    frame(2154, payload)
 }
 
 fn asset_list_frame(ctid: u64) -> ProtoMessage {
@@ -456,6 +482,12 @@ enum Logged {
         live: bool,
         ctid: u64,
     },
+    SymbolCategories {
+        ctid: u64,
+    },
+    AssetClasses {
+        ctid: u64,
+    },
     History {
         live: bool,
         ctid: u64,
@@ -573,6 +605,8 @@ impl Script {
                     .collect::<Vec<_>>(),
             ),
             Logged::Assets { ctid, .. } => asset_list_frame(ctid),
+            Logged::SymbolCategories { ctid } => symbol_categories_frame(ctid),
+            Logged::AssetClasses { ctid } => asset_classes_frame(ctid),
             Logged::History {
                 ctid,
                 symbol,
@@ -673,6 +707,12 @@ impl CtraderMarketLink for ScriptLink {
             },
             2112 => Logged::Assets {
                 live: self.live,
+                ctid: scalar(&request.payload, 2),
+            },
+            2160 => Logged::SymbolCategories {
+                ctid: scalar(&request.payload, 2),
+            },
+            2153 => Logged::AssetClasses {
                 ctid: scalar(&request.payload, 2),
             },
             2116 => Logged::SymbolById {
@@ -1818,6 +1858,13 @@ fn search_and_select_cover_demo_and_live_catalogs() {
             ("demo:1001:1", "EURUSD", "cTrader Demo"),
             ("live:2002:1", "EURUSD", "cTrader Live"),
         ]
+    );
+    assert!(
+        result
+            .instruments
+            .iter()
+            .all(|summary| summary.asset_class.as_deref() == Some("Forex")),
+        "results carry the broker asset class, not the generic category name"
     );
     assert!(
         harness.requests().iter().any(|request| matches!(
