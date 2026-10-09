@@ -1058,37 +1058,13 @@ fn workspace_tab_close_button(
     tab_id: u64,
     label: &str,
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    let key_terminal = terminal.clone();
-    round_icon_button(
-        ("close_workspace", tab_id),
-        HugeIcon::Close,
-        format!("Close {label}"),
-    )
-    .text_color(gpui_color(colors.icon))
-    .cursor_pointer()
-    .tab_index(0)
-    .hover(move |close| {
-        close
-            .bg(gpui_color(colors.danger))
-            .text_color(gpui_color(colors.danger_foreground))
-    })
-    .focus_visible(move |close| close.border_2().border_color(gpui_color(colors.ring)))
-    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+) -> Button {
+    close_button(("close_workspace", tab_id), theme, move |window, cx| {
         terminal.update(cx, |terminal, cx| {
             terminal.close_workspace(tab_id, window, cx);
         });
-        cx.stop_propagation();
     })
-    .on_key_down(move |event, window, cx| {
-        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-            key_terminal.update(cx, |terminal, cx| {
-                terminal.close_workspace(tab_id, window, cx);
-            });
-            cx.stop_propagation();
-        }
-    })
+    .aria_label(format!("Close {label}"))
 }
 
 fn handle_workspace_tab_key(
@@ -1125,36 +1101,15 @@ fn workspace_add_button(
     terminal: Entity<TerminalApp>,
     enabled: bool,
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    let key_terminal = terminal.clone();
-    round_icon_button("add_workspace", HugeIcon::Add, "Create workspace")
-        .text_color(gpui_color(if enabled {
-            colors.icon
-        } else {
-            colors.text_muted
-        }))
-        .tab_index(0)
-        .tab_stop(enabled)
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(move |button| {
-                    button.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                })
-                .focus_visible(move |button| {
-                    button.border_2().border_color(gpui_color(colors.ring))
-                })
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    terminal.update(cx, |terminal, cx| terminal.add_workspace(window, cx));
-                    cx.stop_propagation();
-                })
-                .on_key_down(move |event, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        key_terminal.update(cx, |terminal, cx| terminal.add_workspace(window, cx));
-                        cx.stop_propagation();
-                    }
-                })
+) -> Button {
+    Button::new("add_workspace", theme)
+        .button_size(ButtonSize::Sm)
+        .round()
+        .icon(header_icon(HugeIcon::Add))
+        .aria_label("Create workspace")
+        .disabled(!enabled)
+        .on_press(move |_, window, cx| {
+            terminal.update(cx, |terminal, cx| terminal.add_workspace(window, cx));
         })
 }
 
@@ -1263,7 +1218,8 @@ fn workspace_tab_width_from_measurements(
         width += WORKSPACE_TAB_CONTENT_GAP + change_width;
     }
     if show_close {
-        width += WORKSPACE_TAB_CLOSE_GAP + WORKSPACE_TAB_ICON_HIT;
+        // The close control is the shared `close_button`, a small square button.
+        width += WORKSPACE_TAB_CLOSE_GAP + ButtonSize::Sm.logical_height();
     }
     width.ceil().min(WORKSPACE_TAB_MAX_WIDTH)
 }

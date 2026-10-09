@@ -5,75 +5,6 @@ use aeris_design_system::{
 use gpui::{FontWeight, Hsla, Pixels, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ButtonVariant {
-    Filled,
-    Secondary,
-    Ghost,
-    Destructive,
-    /// Affirmative confirm action. The `positive` status token has no interaction states, so
-    /// this reuses the `buy-*` ramp, which carries the same `positive` hue with every state.
-    Positive,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ButtonAppearance {
-    pub(crate) fill: ThemeColor,
-    pub(crate) foreground: ThemeColor,
-    pub(crate) border: Option<ThemeColor>,
-    pub(crate) hover: ThemeColor,
-    pub(crate) active: ThemeColor,
-    pub(crate) disabled_fill: Option<ThemeColor>,
-    pub(crate) disabled_foreground: Option<ThemeColor>,
-    pub(crate) focus_ring: ThemeColor,
-}
-
-pub(crate) fn button_appearance(theme: &AerisTheme, variant: ButtonVariant) -> ButtonAppearance {
-    let colors = theme.colors;
-    let (fill, foreground, border) = match variant {
-        ButtonVariant::Filled => (colors.button_fill, colors.button_fill_foreground, None),
-        ButtonVariant::Secondary => (
-            colors.surface_secondary,
-            colors.text_primary,
-            Some(colors.border_secondary),
-        ),
-        ButtonVariant::Ghost => (colors.surface, colors.text_secondary, None),
-        ButtonVariant::Destructive => (colors.danger, colors.danger_foreground, None),
-        ButtonVariant::Positive => (colors.buy, colors.buy_foreground, None),
-    };
-    let (hover, active) = match variant {
-        ButtonVariant::Filled => (colors.button_fill_hover, colors.button_fill_active),
-        ButtonVariant::Destructive => (colors.danger_hover, colors.danger_active),
-        ButtonVariant::Positive => (colors.buy_hover, colors.buy_active),
-        ButtonVariant::Secondary | ButtonVariant::Ghost => (colors.hover_bg, colors.active_bg),
-    };
-    let (disabled_fill, disabled_foreground, focus_ring) = match variant {
-        ButtonVariant::Destructive => (
-            Some(colors.danger_disabled),
-            Some(colors.danger_disabled_foreground),
-            colors.danger_ring,
-        ),
-        ButtonVariant::Positive => (
-            Some(colors.buy_disabled),
-            Some(colors.buy_disabled_foreground),
-            colors.buy_ring,
-        ),
-        ButtonVariant::Filled | ButtonVariant::Secondary | ButtonVariant::Ghost => {
-            (None, None, colors.ring)
-        }
-    };
-    ButtonAppearance {
-        fill,
-        foreground,
-        border,
-        hover,
-        active,
-        disabled_fill,
-        disabled_foreground,
-        focus_ring,
-    }
-}
-
 /// Text-field tokens, exactly as the Theme System `Input` uses them: a 1px `border` field that
 /// takes `hover-bg` on hover and focus, `border-strong` plus a 3px translucent `ring` halo on
 /// focus, and a `danger` border with a 3px `danger-ring` halo while invalid.
@@ -175,47 +106,11 @@ pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
 mod tests {
     use aeris_design_system::{AerisTheme, ThemeMode};
 
-    use super::{ButtonVariant, base_theme, button_appearance, gpui_color, input_appearance};
+    use super::{base_theme, gpui_color, input_appearance};
 
     #[test]
-    fn semantic_appearances_follow_platform_aliases_in_both_modes() {
+    fn input_appearance_follows_platform_aliases_in_both_modes() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
-            let filled = button_appearance(&theme, ButtonVariant::Filled);
-            assert_eq!(filled.fill, theme.colors.button_fill);
-            assert_eq!(filled.foreground, theme.colors.button_fill_foreground);
-
-            let secondary = button_appearance(&theme, ButtonVariant::Secondary);
-            assert_eq!(secondary.fill, theme.colors.surface_secondary);
-            assert_eq!(secondary.border, Some(theme.colors.border_secondary));
-
-            let destructive = button_appearance(&theme, ButtonVariant::Destructive);
-            assert_eq!(destructive.fill, theme.colors.danger);
-            assert_eq!(destructive.foreground, theme.colors.danger_foreground);
-            assert_eq!(destructive.hover, theme.colors.danger_hover);
-            assert_eq!(destructive.active, theme.colors.danger_active);
-            assert_eq!(
-                destructive.disabled_fill,
-                Some(theme.colors.danger_disabled)
-            );
-            assert_eq!(
-                destructive.disabled_foreground,
-                Some(theme.colors.danger_disabled_foreground)
-            );
-            assert_eq!(destructive.focus_ring, theme.colors.danger_ring);
-
-            let positive = button_appearance(&theme, ButtonVariant::Positive);
-            assert_eq!(positive.fill, theme.colors.positive);
-            assert_eq!(positive.fill, theme.colors.buy);
-            assert_eq!(positive.foreground, theme.colors.buy_foreground);
-            assert_eq!(positive.hover, theme.colors.buy_hover);
-            assert_eq!(positive.active, theme.colors.buy_active);
-            assert_eq!(positive.disabled_fill, Some(theme.colors.buy_disabled));
-            assert_eq!(
-                positive.disabled_foreground,
-                Some(theme.colors.buy_disabled_foreground)
-            );
-            assert_eq!(positive.focus_ring, theme.colors.buy_ring);
-
             let field = input_appearance(&theme);
             assert_eq!(
                 field.fill,

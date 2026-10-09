@@ -171,14 +171,11 @@ fn page_header(
         summary.push(format!("Updated {}", capture_time_label(captured)));
     }
     let refresh_terminal = terminal.clone();
-    let refresh = Button::new("screener_refresh")
-        .variant(theme, ButtonVariant::Secondary)
-        .size(px(CONTROL_HEIGHT))
-        .px_0()
+    let refresh = Button::new("screener_refresh", theme)
+        .variant(ButtonVariant::Secondary)
         .icon(header_icon(HugeIcon::Refresh))
         .aria_label("Refresh market statistics")
         .tooltip(TooltipSpec::new("Refresh", theme).show_delay(TOOLTIP_OPEN_DELAY))
-        .cursor_pointer()
         .on_click(move |_, _, cx| {
             refresh_terminal.update(cx, TerminalApp::refresh_market_screener);
         });

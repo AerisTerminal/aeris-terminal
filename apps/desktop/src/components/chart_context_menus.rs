@@ -1171,43 +1171,34 @@ fn chart_settings_actions(
     let close_terminal = terminal.clone();
     let reset_terminal = terminal.clone();
     let reset_menu = menu.clone();
-    let reset_tooltip = TooltipSpec::new(
-        "Reset this chart's appearance and trading overlays to defaults",
-        theme,
-    )
-    .show_delay(TOOLTIP_OPEN_DELAY);
     div()
         .flex()
         .items_center()
         .gap_1()
         .child(
-            chrome_icon_button(
-                "chart_settings_reset",
-                HugeIcon::Refresh,
-                "Reset settings",
-                ChromeIconButtonTone::Neutral,
-                theme,
-                move |_, cx| {
+            Button::new("chart_settings_reset", theme)
+                .button_size(ButtonSize::Sm)
+                .round()
+                .icon(header_icon(HugeIcon::Refresh))
+                .aria_label("Reset settings")
+                .tooltip(
+                    TooltipSpec::new(
+                        "Reset this chart's appearance and trading overlays to defaults",
+                        theme,
+                    )
+                    .show_delay(TOOLTIP_OPEN_DELAY),
+                )
+                .on_press(move |_, _, cx| {
                     reset_terminal.update(cx, |terminal, terminal_cx| {
                         terminal.reset_chart_settings(&reset_menu, terminal_cx);
                     });
-                },
-            )
-            .tooltip(reset_tooltip.builder())
-            .tooltip_show_delay(reset_tooltip.delay()),
+                }),
         )
-        .child(chrome_icon_button(
-            "chart_settings_close",
-            HugeIcon::Close,
-            "Close",
-            ChromeIconButtonTone::Destructive,
-            theme,
-            move |_, cx| {
-                close_terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.close_chart_settings_menu(terminal_cx);
-                });
-            },
-        ))
+        .child(close_button("chart_settings_close", theme, move |_, cx| {
+            close_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_settings_menu(terminal_cx);
+            });
+        }))
 }
 
 fn chart_settings_centered_origin(
@@ -1348,11 +1339,12 @@ fn chart_settings_template_control(
         .border_color(gpui_color(colors.border_secondary))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
         .child(
-            Button::new("chart_settings_templates")
-                .theme(theme)
-                .resting_fill(colors.surface)
-                .w_full()
-                .h(design_rems(32.0))
+            Button::new("chart_settings_templates", theme)
+                .variant(ButtonVariant::Outline)
+                .button_size(ButtonSize::Lg)
+                .trigger()
+                .full_width()
+                .open(state.overlay == ChartSettingsTemplateOverlay::Menu)
                 .label("Template")
                 .caret(header_icon(HugeIcon::ChevronDown))
                 .on_click(move |_, _, cx| {
@@ -2260,32 +2252,11 @@ fn settings_color_row(
                     .child(setting.label()),
             )
             .child(
-                div()
-                    .id(("chart_color_picker", setting as usize))
-                    .h(design_rems(30.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                    .border(platform_border_width(theme))
-                    .border_color(gpui_color(colors.border_secondary))
-                    .bg(gpui_color(colors.surface_secondary))
-                    .cursor_pointer()
-                    .hover(|button| button.bg(gpui_color(colors.hover_bg)))
-                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| {
-                        terminal_for_toggle.update(cx, |terminal, terminal_cx| {
-                            terminal.toggle_chart_color_picker(
-                                setting,
-                                &current_for_toggle,
-                                window,
-                                terminal_cx,
-                            );
-                        });
-                        cx.stop_propagation();
-                    })
-                    .child(
+                Button::new(("chart_color_picker", setting as usize), theme)
+                    .variant(ButtonVariant::Secondary)
+                    .open(open)
+                    .aria_label(setting.label())
+                    .leading(
                         div()
                             .size(design_rems(16.0))
                             .flex_none()
@@ -2298,11 +2269,20 @@ fn settings_color_row(
                     .child(
                         div()
                             .w(design_rems(62.0))
-                            .font_family(aeris_design_system::platform_font_family())
                             .text_xs()
                             .text_color(gpui_color(colors.text_muted))
                             .child(value.to_ascii_uppercase()),
-                    ),
+                    )
+                    .on_press(move |_, window, cx| {
+                        terminal_for_toggle.update(cx, |terminal, terminal_cx| {
+                            terminal.toggle_chart_color_picker(
+                                setting,
+                                &current_for_toggle,
+                                window,
+                                terminal_cx,
+                            );
+                        });
+                    }),
             ),
     );
     if open && let Some(picker) = open_picker {

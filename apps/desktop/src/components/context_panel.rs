@@ -1,8 +1,9 @@
 use super::{
-    AerisTheme, AnyElement, Context, ContextCredentialDialogState, ContextPanelTab,
-    ContextSnapshot, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
-    ScrollHandle, StatefulInteractiveElement, Styled, Tab, TabList, Window, WorkspaceSurface,
-    chrome_close_button, chrome_tooltip, div, gpui_color, platform_tabular_numerals, px,
+    AerisTheme, AnyElement, Button, ButtonSize, ButtonVariant, Context,
+    ContextCredentialDialogState, ContextPanelTab, ContextSnapshot, Entity, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Tab,
+    TabList, Window, WorkspaceSurface, chrome_tooltip, close_button, div, gpui_color,
+    platform_tabular_numerals, px,
 };
 use crate::desktop::native_ui::input::Input;
 use aeris_context_runtime::{
@@ -81,29 +82,20 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                 .child(TabList::new("context_panel_tabs", "Market context", theme).children(tabs))
                 .child(div().flex_1())
                 .child(
-                    div()
-                        .id("context_credentials")
-                        .px_2()
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(4.0))
-                        .text_xs()
-                        .text_color(gpui_color(theme.colors.text_muted))
-                        .cursor_pointer()
-                        .role(Role::Button)
+                    Button::new("context_credentials", theme)
+                        .button_size(ButtonSize::Sm)
+                        .label("API keys")
                         .aria_label("Configure official context API keys")
                         .on_click(move |_, window, cx| {
                             credentials_app.update(cx, |surface, surface_cx| {
                                 surface.toggle_context_credential_dialog(window, surface_cx);
                             });
-                        })
-                        .child("API keys"),
+                        }),
                 )
                 .child(chrome_tooltip(
                     "close_context_panel",
                     "Close market context",
-                    chrome_close_button("close_context_panel", theme, move |_, cx| {
+                    close_button("close_context_panel", theme, move |_, cx| {
                         close_app.update(cx, |surface, surface_cx| {
                             surface.set_context_panel_visible(false, surface_cx);
                         });
@@ -207,41 +199,31 @@ fn credential_editor(
         .child(
             div()
                 .flex()
+                .justify_end()
                 .gap_2()
-                .child(credential_action("Save", "save_context_credentials", move |window, cx| {
-                    save_app.update(cx, |surface, surface_cx| {
-                        surface.save_context_api_keys(window, surface_cx);
-                    });
-                }, theme))
-                .child(credential_action("Cancel", "cancel_context_credentials", move |window, cx| {
-                    cancel_app.update(cx, |surface, surface_cx| {
-                        surface.toggle_context_credential_dialog(window, surface_cx);
-                    });
-                }, theme)),
+                .child(
+                    Button::new("cancel_context_credentials", theme)
+                        .variant(ButtonVariant::Secondary)
+                        .button_size(ButtonSize::Sm)
+                        .label("Cancel")
+                        .on_click(move |_, window, cx| {
+                            cancel_app.update(cx, |surface, surface_cx| {
+                                surface.toggle_context_credential_dialog(window, surface_cx);
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("save_context_credentials", theme)
+                        .variant(ButtonVariant::Filled)
+                        .button_size(ButtonSize::Sm)
+                        .label("Save")
+                        .on_click(move |_, window, cx| {
+                            save_app.update(cx, |surface, surface_cx| {
+                                surface.save_context_api_keys(window, surface_cx);
+                            });
+                        }),
+                ),
         )
-        .into_any_element()
-}
-
-fn credential_action(
-    label: &'static str,
-    id: &'static str,
-    action: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
-    theme: &AerisTheme,
-) -> AnyElement {
-    div()
-        .id(id)
-        .px_3()
-        .h(px(24.0))
-        .flex()
-        .items_center()
-        .rounded(px(4.0))
-        .bg(gpui_color(theme.colors.hover_bg))
-        .text_xs()
-        .text_color(gpui_color(theme.colors.text_primary))
-        .cursor_pointer()
-        .role(Role::Button)
-        .on_click(move |_, window, cx| action(window, cx))
-        .child(label)
         .into_any_element()
 }
 

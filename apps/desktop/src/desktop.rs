@@ -166,12 +166,10 @@ use chart_toolbar_menus::{
     timeframe_flyout_offset, timeframe_flyout_row_is_active, timeframe_menu_row_label,
     timeframe_overlay_extent, timeframe_overlay_left,
 };
+use chrome_menu::chrome_menu_extent;
 #[cfg(test)]
 use chrome_menu::{
     CHROME_MENU_LIST_HEIGHT, CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH,
-};
-use chrome_menu::{
-    ChromeIconButtonTone, chrome_close_button, chrome_icon_button, chrome_menu_extent,
 };
 use command_palette::command_palette_layer;
 use context_panel::{ContextPanelHeightDrag, ContextPanelState, context_panel};
@@ -198,8 +196,8 @@ use indicator_menu::{
 };
 use modal_dialog::{ConfirmationDialog, ConfirmationTone, ModalLayer, modal_footer, modal_header};
 use native_ui::{
+    button::{Button, ButtonSize, ButtonVariant, close_button},
     color_picker::{ColorPicker, normalize_hex_color, transparency_backdrop},
-    control::Button,
     icon::Icon,
     input::{Input, InputEvent, InputState},
     loader::Loader,
@@ -211,7 +209,7 @@ use native_ui::{
     rem_scale::{design_rems, rem_scaled},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     tab::{Tab, TabList},
-    theme::{ButtonVariant, base_theme, gpui_color},
+    theme::{base_theme, gpui_color},
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;
@@ -245,14 +243,12 @@ use symbol_menu::{
 #[cfg(test)]
 use terminal_chrome::{
     CaptionPlatform, CaptionPointerOwner, DrawingHistoryControl, WindowMoveGestureTransition,
-    caption_keyboard_activates, caption_pointer_owner, chrome_control_foreground,
-    connection_presentation,
+    caption_keyboard_activates, caption_pointer_owner, connection_presentation,
 };
 use terminal_chrome::{
     ChartShortcut, WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme,
-    button_activation, button_activation_at, chart_shortcut, chrome_button_style, chrome_tooltip,
-    exchange_mark, fullscreen_escape_command, header_icon, mark_tile, round_icon_button,
-    series_glyph, terminal_header, watchlist_step, window_move_gesture_transition,
+    chart_shortcut, chrome_tooltip, exchange_mark, fullscreen_escape_command, header_icon,
+    mark_tile, series_glyph, terminal_header, watchlist_step, window_move_gesture_transition,
     workspace_title_bar,
 };
 use terminal_view::{
@@ -479,12 +475,6 @@ const CHART_SETTINGS_GROWTH_SHARE: f32 = 0.5;
 const CHART_SETTINGS_TITLE_BAR_HEIGHT: f32 = 36.0;
 const CHART_SETTINGS_SIDEBAR_WIDTH: f32 = 176.0;
 const WORKSPACE_TITLE_BAR_HEIGHT: f32 = 42.0;
-// GPUI snaps the hover fill and the glyph to device pixels independently, so the
-// hit/glyph inset must be a whole, equal number of device pixels on both sides at
-// every supported scale. 24/16 satisfies that at 100/125/150/175/200%; an odd or
-// fractional inset (the former 13px glyph) leaves the glyph off-centre in its hover.
-const WORKSPACE_TAB_ICON_HIT: f32 = 24.0;
-const WORKSPACE_TAB_ICON_GLYPH: f32 = 16.0;
 const WORKSPACE_PANE_BOTTOM_INSET: f32 = 2.0;
 // Bound UI work when a provider delivers a burst of updates. Remaining mailbox
 // messages stay queued and wake the next GPUI frame.

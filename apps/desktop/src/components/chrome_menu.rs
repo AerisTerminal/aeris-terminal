@@ -135,90 +135,29 @@ pub(super) fn chrome_menu_search_header(
         .child(chrome_menu_close_button(app, theme))
 }
 
-/// Compact 24px close control matching the workspace tab add button: a circular
-/// hit with a 13px glyph, flex-centered. The standard chrome `Button` is a 32px
-/// control whose 75% icon scaling and inner wrapper throw the X off-center.
-///
-/// Every close control in the chrome shares this so they stay identical.
-#[derive(Clone, Copy)]
-pub(super) enum ChromeIconButtonTone {
-    Neutral,
-    Destructive,
-}
-
-pub(super) fn chrome_icon_button<F: Fn(&mut Window, &mut App) + 'static>(
-    id: &'static str,
-    icon: HugeIcon,
-    label: &'static str,
-    tone: ChromeIconButtonTone,
-    theme: &AerisTheme,
-    on_activate: F,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    round_icon_button(id, icon, label)
-        .text_color(gpui_color(colors.icon))
-        .cursor_pointer()
-        .hover(move |button| match tone {
-            ChromeIconButtonTone::Neutral => button
-                .bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                .text_color(gpui_color(colors.text_primary)),
-            ChromeIconButtonTone::Destructive => button
-                .bg(gpui_color(colors.danger))
-                .text_color(gpui_color(colors.danger_foreground)),
-        })
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            on_activate(window, cx);
-            cx.stop_propagation();
-        })
-}
-
-pub(super) fn chrome_close_button<F: Fn(&mut Window, &mut App) + 'static>(
-    id: &'static str,
-    theme: &AerisTheme,
-    on_close: F,
-) -> impl IntoElement + use<F> {
-    chrome_icon_button(
-        id,
-        HugeIcon::Close,
-        "Close",
-        ChromeIconButtonTone::Destructive,
-        theme,
-        on_close,
-    )
-}
-
 pub(super) fn chrome_menu_close_button(
     app: &Entity<WorkspaceSurface>,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let close_app = app.clone();
-    chrome_close_button("chrome_menu_close", theme, move |window, cx| {
+    close_button("chrome_menu_close", theme, move |window, cx| {
         close_app.update(cx, |app, app_cx| {
             app.close_chrome_overlay(window, app_cx);
         });
     })
 }
 
-/// Compact add action used at the trailing edge of searchable menu rows.
-///
-/// Keep this geometry shared between the symbol and indicator pickers: the
-/// row action is a 24px square with the platform 8px radius, while the larger
-/// watchlist header add control remains a circular/full-radius chrome action.
+/// The add action at the trailing edge of searchable menu rows, shared by the symbol and
+/// indicator pickers. Rows own keyboard selection, so the action is not a tab stop.
 pub(super) fn compact_menu_add_button(
     id: impl Into<gpui::ElementId>,
     theme: &AerisTheme,
 ) -> Button {
-    Button::new(id)
-        .icon(header_icon(HugeIcon::Add).with_size(px(14.0)))
-        .theme(theme)
-        .resting_fill(theme.colors.surface)
-        .w(px(24.0))
-        .h(px(24.0))
-        .compact()
-        .border_1()
-        .border_color(gpui_color(theme.colors.border))
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .cursor_pointer()
+    Button::new(id, theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Sm)
+        .icon(header_icon(HugeIcon::Add))
+        .aria_label("Add")
         .tab_stop(false)
 }
 

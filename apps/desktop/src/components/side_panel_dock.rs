@@ -320,7 +320,7 @@ pub(super) fn side_panel_header(
         .child(chrome_tooltip(
             close_id,
             "Close side panel",
-            chrome_close_button(close_id, theme, move |_, cx| {
+            close_button(close_id, theme, move |_, cx| {
                 app.update(cx, |surface, surface_cx| {
                     surface.close_side_panel(panel, surface_cx);
                 });
@@ -338,25 +338,14 @@ pub(super) fn side_panel_header_button<F: Fn(&mut gpui::App) + 'static>(
     on_press: F,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
-    let tooltip = TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY);
-    round_icon_button(id, icon, label)
-        .text_color(gpui_color(if active {
-            colors.icon_active
-        } else {
-            colors.icon
-        }))
-        .cursor_pointer()
-        .when(active, |button| {
-            button.bg(gpui_color(colors.active_bg.over(colors.surface)))
-        })
-        .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            on_press(cx);
-            cx.stop_propagation();
-        })
-        .tooltip(tooltip.builder())
-        .tooltip_show_delay(tooltip.delay())
+    Button::new(id, theme)
+        .button_size(ButtonSize::Sm)
+        .round()
+        .icon(header_icon(icon))
+        .aria_label(label)
+        .selected(active)
+        .tooltip(TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .on_press(move |_, _, cx| on_press(cx))
         .into_any_element()
 }
 

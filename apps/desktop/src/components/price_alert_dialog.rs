@@ -376,40 +376,22 @@ fn dropdown_trigger(
     label: &'static str,
     open: bool,
     theme: &AerisTheme,
-) -> Stateful<Div> {
+) -> Button {
     let toggle = app.clone();
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .w_full()
-        .h(px(34.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_3()
-        .border_1()
-        .border_color(gpui_color(if open {
-            colors.ring
-        } else {
-            colors.border_secondary
-        }))
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .bg(gpui_color(colors.surface_secondary))
-        .text_sm()
-        .text_color(gpui_color(colors.text_primary))
-        .cursor_pointer()
-        .role(Role::Button)
+    Button::new(id, theme)
+        .variant(ButtonVariant::Secondary)
+        .button_size(ButtonSize::Xl)
+        .trigger()
+        .full_width()
+        .open(open)
         .aria_label(label)
-        .hover(move |style| style.bg(gpui_color(colors.hover_bg)))
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .on_click(move |_, _, cx| {
+        .label(label)
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_press(move |_, _, cx| {
             toggle.update(cx, |surface, surface_cx| {
                 surface.toggle_price_alert_dropdown(dropdown, surface_cx);
             });
-            cx.stop_propagation();
         })
-        .child(label)
-        .child(header_icon(HugeIcon::ChevronDown).with_size(px(14.0)))
 }
 
 fn dropdown_panel(id: &'static str, theme: &AerisTheme) -> Stateful<Div> {
@@ -592,12 +574,10 @@ fn price_alert_existing_rows(
                         ),
                 )
                 .child(
-                    Button::new(("delete_price_alert", index))
-                        .theme(theme)
-                        .with_size(px(28.0))
-                        .resting_fill(colors.surface)
+                    Button::new(("delete_price_alert", index), theme)
                         .icon(header_icon(HugeIcon::Trash))
                         .aria_label("Delete price alert")
+                        .danger_on_hover()
                         .on_click(move |_, _, cx| {
                             remove.update(cx, |surface, surface_cx| {
                                 surface.delete_price_alert(&id, surface_cx);
@@ -647,16 +627,16 @@ fn price_alert_dialog_footer(
 ) -> AnyElement {
     modal_footer(theme)
         .child(
-            Button::new("price_alert_cancel")
-                .variant(theme, ButtonVariant::Secondary)
+            Button::new("price_alert_cancel", theme)
+                .variant(ButtonVariant::Secondary)
                 .label("Cancel")
                 .on_click(move |_, _, cx| {
                     cancel.update(cx, WorkspaceSurface::close_price_alert_dialog);
                 }),
         )
         .child(
-            Button::new("price_alert_create")
-                .variant(theme, ButtonVariant::Positive)
+            Button::new("price_alert_create", theme)
+                .variant(ButtonVariant::Positive)
                 .icon(header_icon(HugeIcon::Add))
                 .label("Create alert")
                 .disabled(capacity_reached)

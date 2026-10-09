@@ -66,6 +66,15 @@ impl Icon {
         self
     }
 
+    /// Applies `size` unless the glyph already carries its own optical size.
+    pub(crate) fn or_size(self, size: Pixels) -> Self {
+        if self.size.is_some() {
+            self
+        } else {
+            self.with_size(size)
+        }
+    }
+
     pub(crate) fn small(self) -> Self {
         self.with_size(gpui::px(14.0))
     }

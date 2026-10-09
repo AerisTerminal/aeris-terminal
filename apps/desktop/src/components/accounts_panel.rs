@@ -8,7 +8,6 @@ use super::*;
 use gpui::Stateful;
 
 const ROW_HEIGHT: f32 = 44.0;
-const CONTROL_HEIGHT: f32 = 32.0;
 
 pub(super) fn accounts_panel_content(
     app_state: &WorkspaceSurface,
@@ -265,8 +264,8 @@ fn broker_card(
         ),
     };
     let action = if connected {
-        Button::new(disconnect_id)
-            .variant(theme, ButtonVariant::Secondary)
+        Button::new(disconnect_id, theme)
+            .variant(ButtonVariant::Secondary)
             .label("Disconnect")
             .on_click(move |_, window, cx| match broker {
                 HostedBroker::Tastytrade => {
@@ -275,8 +274,8 @@ fn broker_card(
                 HostedBroker::Ctrader => window.dispatch_action(Box::new(DisconnectCtrader), cx),
             })
     } else {
-        Button::new(connect_id)
-            .variant(theme, ButtonVariant::Filled)
+        Button::new(connect_id, theme)
+            .variant(ButtonVariant::Filled)
             .label("Connect")
             .on_click(move |_, window, cx| match broker {
                 HostedBroker::Tastytrade => {
@@ -285,7 +284,7 @@ fn broker_card(
                 HostedBroker::Ctrader => window.dispatch_action(Box::new(ConnectCtrader), cx),
             })
     }
-    .with_size(px(CONTROL_HEIGHT))
+    .button_size(ButtonSize::Lg)
     .loading(busy)
     .disabled(busy);
     card(card_id, theme)
@@ -387,11 +386,11 @@ fn practice_accounts(
     }
     let open = app.clone();
     list.child(
-        Button::new("accounts_new_practice_account")
-            .variant(theme, ButtonVariant::Secondary)
-            .leading(header_icon(HugeIcon::Add).with_size(px(16.0)))
+        Button::new("accounts_new_practice_account", theme)
+            .variant(ButtonVariant::Secondary)
+            .icon(header_icon(HugeIcon::Add))
             .label("New practice account")
-            .with_size(px(CONTROL_HEIGHT))
+            .button_size(ButtonSize::Lg)
             .on_click(move |_, window, cx| {
                 open.update(cx, |surface, surface_cx| {
                     open_practice_account_form(surface, window, surface_cx);
@@ -507,39 +506,18 @@ fn delete_account_button(
     account: &aeris_trading::TradingAccount,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let delete = app.clone();
     let account_id = account.id.clone();
-    div()
-        .id(("accounts_practice_delete", index))
-        .flex_none()
-        .size(px(28.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .text_color(gpui_color(colors.text_muted))
-        .cursor_pointer()
-        .role(Role::Button)
+    Button::new(("accounts_practice_delete", index), theme)
+        .icon(header_icon(HugeIcon::Trash))
         .aria_label(format!("Delete {}", account.display_name))
-        .hover(move |button| {
-            button
-                .bg(gpui_color(colors.danger))
-                .text_color(gpui_color(colors.danger_foreground))
-        })
-        .active(move |button| {
-            button
-                .bg(gpui_color(colors.danger_active))
-                .text_color(gpui_color(colors.danger_foreground))
-        })
-        .child(header_icon(HugeIcon::Trash).with_size(px(14.0)))
+        .danger_on_hover()
         .on_click(move |_, _, cx| {
             delete.update(cx, |surface, surface_cx| {
                 surface.trading_pnl.account_creator = None;
                 surface.trading_pnl.account_delete_confirmation = Some(account_id.clone());
                 surface_cx.notify();
             });
-            cx.stop_propagation();
         })
 }
 

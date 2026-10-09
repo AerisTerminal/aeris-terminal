@@ -66,21 +66,15 @@ pub(super) fn account_avatar_button(
     chrome_tooltip(
         "account_avatar",
         tooltip,
-        Button::new("account_avatar")
-            .theme(theme)
-            .h(px(32.0))
-            .w(px(56.0))
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .bg(gpui_color(colors.surface_secondary))
-            .cursor_pointer()
+        Button::new("account_avatar", theme)
+            .resting_fill(colors.surface_secondary)
+            .button_size(ButtonSize::Lg)
             .aria_label("Profile menu")
-            .hover(|button| button.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
             .on_click(move |event, _, cx| {
                 let anchor = event.position();
                 toggle_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.toggle_platform_menu_at(anchor, terminal_cx);
                 });
-                cx.stop_propagation();
             })
             .leading(
                 div()
@@ -93,7 +87,7 @@ pub(super) fn account_avatar_button(
                     .justify_center()
                     .child(account_avatar_face(account, theme)),
             )
-            .child(header_icon(HugeIcon::ChevronDown).with_size(px(14.0))),
+            .caret(header_icon(HugeIcon::ChevronDown)),
         theme,
     )
 }
@@ -971,9 +965,9 @@ fn update_row(view: &UpdateView, on_update: &UpdateActivate, theme: &AerisTheme)
     let colors = theme.colors;
     let action_button = view.action.map(|action| {
         let on_update = on_update.clone();
-        Button::new("platform_menu_update_action")
-            .variant(theme, ButtonVariant::Filled)
-            .compact()
+        Button::new("platform_menu_update_action", theme)
+            .variant(ButtonVariant::Filled)
+            .button_size(ButtonSize::Sm)
             .label(match action {
                 UpdateAction::Restart => "Restart",
                 UpdateAction::Retry => "Retry",

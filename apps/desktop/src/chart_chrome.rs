@@ -13,9 +13,7 @@ pub const CHART_CHROME_HEIGHT: f32 = 44.0;
 pub const CHART_CONTROL_SIZE: f32 = 32.0;
 pub const HEADER_CONTROL_CONTENT_SIZE: f32 = 24.0;
 pub const HEADER_ICON_SIZE: f32 = HEADER_CONTROL_CONTENT_SIZE * 0.75;
-pub const CHART_CONTROL_RADIUS: RadiusToken = RadiusToken::Sm;
 pub const CHART_SURFACE_RADIUS: RadiusToken = RadiusToken::Default;
-pub const SYMBOL_TRIGGER_RADIUS: RadiusToken = RadiusToken::Full;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndicatorKind {

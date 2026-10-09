@@ -153,7 +153,7 @@ pub(super) fn modal_header(
                         .child(subtitle)
                 })),
         )
-        .child(chrome_close_button(close_id, theme, on_close))
+        .child(close_button(close_id, theme, on_close))
 }
 
 /// Standard footer row for a modal; callers add the action buttons.
@@ -284,14 +284,14 @@ impl RenderOnce for ConfirmationDialog {
         .child(
             modal_footer(&theme)
                 .child(
-                    Button::new("confirmation_dialog_cancel")
-                        .variant(&theme, ButtonVariant::Secondary)
+                    Button::new("confirmation_dialog_cancel", &theme)
+                        .variant(ButtonVariant::Secondary)
                         .label("Cancel")
                         .on_click(move |_, window, cx| cancel(window, cx)),
                 )
                 .child(
-                    Button::new("confirmation_dialog_confirm")
-                        .variant(&theme, self.tone.button_variant())
+                    Button::new("confirmation_dialog_confirm", &theme)
+                        .variant(self.tone.button_variant())
                         .label(self.confirm_label)
                         .on_click(move |_, window, cx| confirm(window, cx)),
                 ),
@@ -312,15 +312,15 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             modal_footer(&self.0)
                 .child(
-                    Button::new("cancel")
-                        .variant(&self.0, ButtonVariant::Secondary)
+                    Button::new("cancel", &self.0)
+                        .variant(ButtonVariant::Secondary)
                         .label("Cancel")
                         .on_click(|_, _, _| {})
                         .debug_selector(|| "footer_cancel".into()),
                 )
                 .child(
-                    Button::new("delete")
-                        .variant(&self.0, ButtonVariant::Destructive)
+                    Button::new("delete", &self.0)
+                        .variant(ButtonVariant::Destructive)
                         .label("Delete")
                         .on_click(|_, _, _| {})
                         .debug_selector(|| "footer_delete".into()),

@@ -388,24 +388,19 @@ fn watchlist_add_symbol_control(
     app: Entity<WorkspaceSurface>,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let colors = theme.colors;
     chrome_tooltip(
         "watchlist_add_symbol",
         "Add symbol to watchlist",
-        round_icon_button(
-            "watchlist_add_symbol",
-            HugeIcon::Add,
-            "Add symbol to watchlist",
-        )
-        .text_color(gpui_color(colors.icon))
-        .cursor_pointer()
-        .hover(move |button| button.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-            app.update(cx, |surface, surface_cx| {
-                surface.open_watchlist_symbol_menu_at(event.position, window, surface_cx);
-            });
-            cx.stop_propagation();
-        }),
+        Button::new("watchlist_add_symbol", theme)
+            .button_size(ButtonSize::Sm)
+            .round()
+            .icon(header_icon(HugeIcon::Add))
+            .aria_label("Add symbol to watchlist")
+            .on_press(move |position, window, cx| {
+                app.update(cx, |surface, surface_cx| {
+                    surface.open_watchlist_symbol_menu_at(position, window, surface_cx);
+                });
+            }),
         theme,
     )
 }

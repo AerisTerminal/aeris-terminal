@@ -13,34 +13,24 @@ pub(super) fn indicator_selector(
     enabled: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let trigger = Button::new("indicator_selector")
-        .icon(header_icon(HugeIcon::Chart))
-        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-        .w(px(chart_chrome::CHART_CONTROL_SIZE))
-        .h(px(chart_chrome::CHART_CONTROL_SIZE))
-        .rounded(px(f32::from(
-            chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
-        )))
-        .disabled(!enabled)
-        .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed);
     chrome_tooltip(
         "indicator_selector",
         "Indicators",
-        button_activation_at(
-            chrome_button_style(trigger, theme, false, enabled),
-            enabled,
-            move |trigger_position, window, cx| {
+        Button::new("indicator_selector", theme)
+            .button_size(ButtonSize::Lg)
+            .icon(header_icon(HugeIcon::Chart))
+            .aria_label("Indicators")
+            .disabled(!enabled)
+            .on_click(move |event, window, cx| {
                 app.update(cx, |app, app_cx| {
                     app.open_chrome_overlay_at(
                         ChromeOverlay::Indicator,
-                        trigger_position,
+                        event.position(),
                         window,
                         app_cx,
                     );
                 });
-            },
-        ),
+            }),
         theme,
     )
 }
@@ -76,17 +66,17 @@ fn available_indicator_rows(
                         });
                     }
                 })
-                .trailing(button_activation(
-                    compact_menu_add_button(("add_indicator", index), theme),
-                    true,
-                    move |window, cx| {
-                        if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
-                            add_app.update(cx, |app, app_cx| {
-                                app.close_chrome_overlay(window, app_cx);
-                            });
-                        }
-                    },
-                ))
+                .trailing(
+                    compact_menu_add_button(("add_indicator", index), theme).on_click(
+                        move |_, window, cx| {
+                            if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
+                                add_app.update(cx, |app, app_cx| {
+                                    app.close_chrome_overlay(window, app_cx);
+                                });
+                            }
+                        },
+                    ),
+                )
                 .into_any_element()
         })
         .collect()
@@ -180,17 +170,17 @@ fn order_flow_study_rows(
                         });
                     }
                 })
-                .trailing(button_activation(
-                    compact_menu_add_button(("add_order_flow_study", index), theme),
-                    true,
-                    move |window, cx| {
-                        if add_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {
-                            add_app.update(cx, |app, app_cx| {
-                                app.close_chrome_overlay(window, app_cx);
-                            });
-                        }
-                    },
-                ))
+                .trailing(
+                    compact_menu_add_button(("add_order_flow_study", index), theme).on_click(
+                        move |_, window, cx| {
+                            if add_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {
+                                add_app.update(cx, |app, app_cx| {
+                                    app.close_chrome_overlay(window, app_cx);
+                                });
+                            }
+                        },
+                    ),
+                )
                 .into_any_element()
         })
         .collect()

@@ -513,36 +513,22 @@ fn trade_history_expand_button(
     open: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let toggle_terminal = terminal.clone();
     let label = if open {
         "Collapse bottom panel"
     } else {
         "Expand bottom panel"
     };
-    let chevron = header_icon(HugeIcon::ChevronDown).with_size(px(WORKSPACE_TAB_ICON_GLYPH));
+    let chevron = header_icon(HugeIcon::ChevronDown);
     let chevron = if open { chevron } else { chevron.rotate(0.5) };
     chrome_tooltip(
         "trade_history_expand",
         label,
-        div()
-            .id("trade_history_expand")
-            .size(px(WORKSPACE_TAB_ICON_HIT))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-            .role(Role::Button)
+        Button::new("trade_history_expand", theme)
+            .button_size(ButtonSize::Sm)
+            .round()
+            .icon(chevron)
             .aria_label(label)
-            .cursor_pointer()
-            .text_color(gpui_color(colors.icon))
-            .hover(move |button| {
-                button
-                    .bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                    .text_color(gpui_color(colors.icon_active))
-            })
-            .child(chevron)
             .on_click(move |_, _, cx| {
                 toggle_terminal.update(cx, TerminalApp::toggle_bottom_panel);
             }),
@@ -555,38 +541,15 @@ fn trade_history_account_filter(
     state: &BottomPanelState,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let toggle_terminal = terminal.clone();
     let dismiss_terminal = terminal.clone();
-    let trigger = div()
-        .id("trade_history_account_filter")
-        .h(px(TRADE_HISTORY_HEADER_CONTROL_HEIGHT))
-        .flex_none()
-        .px_2()
-        .flex()
-        .items_center()
-        .gap_1()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(if state.account_menu_open {
-            colors.active_bg.over(colors.surface_secondary)
-        } else {
-            colors.surface_secondary
-        }))
-        .text_color(gpui_color(colors.text_default))
-        .role(Role::Button)
+    let trigger = Button::new("trade_history_account_filter", theme)
+        .variant(ButtonVariant::Secondary)
+        .button_size(ButtonSize::Xs)
+        .open(state.account_menu_open)
         .aria_label("Filter trades by account")
-        .cursor_pointer()
-        .hover(move |trigger| {
-            trigger.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-        })
-        .child(state.filter_label())
-        .child(
-            header_icon(HugeIcon::ChevronDown)
-                .with_size(px(12.0))
-                .color(gpui_color(colors.icon)),
-        )
+        .label(state.filter_label())
+        .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |_, _, cx| {
             toggle_terminal.update(cx, TerminalApp::toggle_trade_history_account_menu);
         });
@@ -614,6 +577,7 @@ fn trade_history_account_menu(
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let all_terminal = terminal.clone();
+    let last_account = state.history.accounts.len().checked_sub(1);
     let mut menu = div()
         .id("trade_history_account_menu")
         .absolute()
@@ -631,6 +595,7 @@ fn trade_history_account_menu(
         .child(
             MenuRow::compact("trade_history_account_all", "All accounts", theme)
                 .highlighted(state.filter == TradeHistoryAccountFilter::All)
+                .flush_in_panel(true, last_account.is_none())
                 .on_click(move |_, _, cx| {
                     all_terminal.update(cx, |terminal, terminal_cx| {
                         terminal
@@ -649,6 +614,7 @@ fn trade_history_account_menu(
                 theme,
             )
             .highlighted(selected)
+            .flush_in_panel(false, Some(index) == last_account)
             .on_click(move |_, _, cx| {
                 let filter = filter.clone();
                 select_terminal.update(cx, |terminal, terminal_cx| {
@@ -961,10 +927,10 @@ fn position_row(
         ))
         .child(
             div().w(px(POSITION_ACTION_WIDTH)).flex_none().child(
-                Button::new(("position_close", index))
-                    .variant(theme, ButtonVariant::Secondary)
+                Button::new(("position_close", index), theme)
+                    .variant(ButtonVariant::Secondary)
+                    .button_size(ButtonSize::Sm)
                     .label("Close")
-                    .compact()
                     .disabled(!connected)
                     .on_click(move |_, _, cx| {
                         aeris_desktop::trading::close_broker_position(
@@ -972,7 +938,6 @@ fn position_row(
                             broker_position_id.clone(),
                             cx,
                         );
-                        cx.stop_propagation();
                     }),
             ),
         )

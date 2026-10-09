@@ -1,12 +1,11 @@
 //! Compact practice-trading controls owned by the order-book panel.
 
 use super::{
-    AerisTheme, App, ChromeOverlay, Div, Entity, FluentBuilder, HugeIcon, InteractiveElement,
-    IntoElement, ParentElement, RadiusToken, Role, SharedString, StatefulInteractiveElement,
-    Styled, TypographyRole, WorkspaceSurface, div, gpui_color, header_icon, platform_font_weight,
+    AerisTheme, App, Button, ButtonSize, ButtonVariant, ChromeOverlay, Div, Entity, FluentBuilder,
+    HugeIcon, IntoElement, ParentElement, Styled, WorkspaceSurface, div, gpui_color, header_icon,
     px,
 };
-use gpui::Stateful;
+use gpui::{ClickEvent, Window};
 
 #[derive(Clone, Copy)]
 pub(super) struct TradingOrderControlsState<'a> {
@@ -52,7 +51,7 @@ pub(super) fn trading_order_controls(
             state.order_entry.quantity,
             state.theme,
         ))
-        .child(action_row([
+        .child(action_row(
             trade_order_button(
                 "trading_buy_market",
                 "Buy",
@@ -73,8 +72,8 @@ pub(super) fn trading_order_controls(
                     dispatch_market(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
             ),
-        ]))
-        .child(action_row([
+        ))
+        .child(action_row(
             order_button(
                 "trading_join_bid",
                 "Join Bid",
@@ -93,14 +92,13 @@ pub(super) fn trading_order_controls(
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
             ),
-        ]))
+        ))
         .child(position_actions(state, ready && state.has_open_position))
         .child(global_actions(state))
         .children(status_rows(state.feedback, state.market_error, state.theme))
 }
 
 fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use<> {
-    let colors = state.theme.colors;
     let selected = state
         .order_entry
         .selected_account_id
@@ -114,38 +112,20 @@ fn account_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement +
     let open = state.app.clone();
     // Accounts are created, chosen and deleted in the header Accounts panel; the ticket
     // only shows which one it trades on.
-    div()
-        .id("trading_account_selector")
-        .h(px(CONTROL_HEIGHT))
-        .px_3()
-        .flex()
-        .items_center()
-        .justify_between()
-        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-        .border(px(state.theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .text_color(gpui_color(colors.text_primary))
-        .cursor_pointer()
-        .role(Role::Button)
+    Button::new("trading_account_selector", state.theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Lg)
+        .trigger()
+        .full_width()
         .aria_label("Open accounts")
-        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-        .active(move |button| button.bg(gpui_color(colors.active_bg)))
+        .label(label.to_string())
+        .when_some(badge, Button::trailing)
+        .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |_, window, cx| {
             open.update(cx, |surface, surface_cx| {
                 surface.open_chrome_overlay(ChromeOverlay::Accounts, window, surface_cx);
             });
         })
-        .child(div().min_w_0().flex_1().truncate().child(label.to_string()))
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_1()
-                .children(badge)
-                .child(header_icon(HugeIcon::ChevronDown)),
-        )
 }
 
 fn account_summary(
@@ -245,12 +225,9 @@ fn quantity_selector(
     for preset in [1_u64, 3, 5, 10, 15] {
         let select = app.clone();
         row = row.child(
-            compact_button(("trading_quantity", preset), preset.to_string(), theme)
-                .when(quantity == preset, |button| {
-                    button
-                        .bg(gpui_color(theme.colors.active_bg))
-                        .text_color(gpui_color(theme.colors.text_primary))
-                })
+            ticket_button(("trading_quantity", preset), theme)
+                .label(preset.to_string())
+                .selected(quantity == preset)
                 .on_click(move |_, _, cx| {
                     select.update(cx, |surface, surface_cx| {
                         surface.trading_pnl.order_entry.quantity = preset;
@@ -262,87 +239,77 @@ fn quantity_selector(
     row
 }
 
-fn quantity_step_button(
-    id: impl Into<gpui::ElementId>,
-    plus: bool,
-    theme: &AerisTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    let stroke = colors.text_secondary;
+/// The outline button every ticket control shares.
+fn ticket_button(id: impl Into<gpui::ElementId>, theme: &AerisTheme) -> Button {
+    Button::new(id, theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Lg)
+}
+
+fn quantity_step_button(id: impl Into<gpui::ElementId>, plus: bool, theme: &AerisTheme) -> Button {
+    ticket_button(id, theme)
+        .aria_label(if plus {
+            "Increase quantity"
+        } else {
+            "Decrease quantity"
+        })
+        .leading(quantity_step_glyph(plus, theme))
+}
+
+/// The icon set has no minus glyph, so the stepper draws its own matching +/− strokes.
+fn quantity_step_glyph(plus: bool, theme: &AerisTheme) -> Div {
+    let stroke = theme.colors.text_secondary;
     div()
-        .id(id)
-        .min_w(px(28.0))
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .cursor_pointer()
-        .role(Role::Button)
-        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-        .active(move |button| button.bg(gpui_color(colors.active_bg)))
+        .relative()
+        .size(px(14.0))
         .child(
             div()
-                .relative()
-                .size(px(14.0))
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(2.0))
-                        .top(px(6.5))
-                        .w(px(10.0))
-                        .h(px(1.0))
-                        .bg(gpui_color(stroke)),
-                )
-                .when(plus, |icon| {
-                    icon.child(
-                        div()
-                            .absolute()
-                            .left(px(6.5))
-                            .top(px(2.0))
-                            .w(px(1.0))
-                            .h(px(10.0))
-                            .bg(gpui_color(stroke)),
-                    )
-                }),
+                .absolute()
+                .left(px(2.0))
+                .top(px(6.5))
+                .w(px(10.0))
+                .h(px(1.0))
+                .bg(gpui_color(stroke)),
         )
+        .when(plus, |icon| {
+            icon.child(
+                div()
+                    .absolute()
+                    .left(px(6.5))
+                    .top(px(2.0))
+                    .w(px(1.0))
+                    .h(px(10.0))
+                    .bg(gpui_color(stroke)),
+            )
+        })
 }
 
-fn compact_button(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<SharedString>,
-    theme: &AerisTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .min_w(px(28.0))
-        .h_full()
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .text_color(gpui_color(colors.text_secondary))
-        .cursor_pointer()
-        .role(Role::Button)
-        .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-        .active(move |button| button.bg(gpui_color(colors.active_bg)))
-        .child(label.into())
-}
-
-fn action_row(buttons: [Stateful<Div>; 2]) -> Div {
+fn action_row(left: Button, right: Button) -> Div {
     div()
         .h(px(CONTROL_HEIGHT))
         .flex()
         .gap(px(GAP))
-        .children(buttons)
+        .child(left.flex_1())
+        .child(right.flex_1())
+}
+
+/// An action on the ticket's selected account at the latest book frame.
+fn frame_action(
+    state: &TradingOrderControlsState<'_>,
+    action: impl Fn(&aeris_market_data::OrderBookFrame, Option<String>, u64, &mut App) + 'static,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let frame = state.frame.cloned();
+    let account = state
+        .order_entry
+        .selected_account_id
+        .as_ref()
+        .map(|id| id.as_str().to_string());
+    let quantity = state.order_entry.quantity;
+    move |_, _, cx| {
+        if let Some(frame) = frame.as_ref() {
+            action(frame, account.clone(), quantity, cx);
+        }
+    }
 }
 
 fn order_button(
@@ -351,77 +318,18 @@ fn order_button(
     state: &TradingOrderControlsState<'_>,
     enabled: bool,
     action: impl Fn(&aeris_market_data::OrderBookFrame, Option<String>, u64, &mut App) + 'static,
-) -> Stateful<Div> {
-    let frame = state.frame.cloned();
-    let account = state
-        .order_entry
-        .selected_account_id
-        .as_ref()
-        .map(|id| id.as_str().to_string());
-    let quantity = state.order_entry.quantity;
-    let colors = state.theme.colors;
-    div()
-        .id(id)
-        .h_full()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-        .border(px(state.theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .text_color(gpui_color(if enabled {
-            colors.text_primary
-        } else {
-            colors.text_muted
-        }))
-        .font_weight(platform_font_weight(TypographyRole::Strong))
-        .role(Role::Button)
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-                .active(move |button| button.bg(gpui_color(colors.active_bg)))
-                .on_click(move |_, _, cx| {
-                    if let Some(frame) = frame.as_ref() {
-                        action(frame, account.clone(), quantity, cx);
-                    }
-                })
-        })
-        .when(!enabled, gpui::Styled::cursor_not_allowed)
-        .child(label)
+) -> Button {
+    ticket_button(id, state.theme)
+        .strong()
+        .label(label)
+        .disabled(!enabled)
+        .on_click(frame_action(state, action))
 }
 
-#[derive(Clone, Copy)]
-struct TradeButtonPalette {
-    fill: aeris_design_system::ThemeColor,
-    hover: aeris_design_system::ThemeColor,
-    active: aeris_design_system::ThemeColor,
-    disabled: aeris_design_system::ThemeColor,
-    foreground: aeris_design_system::ThemeColor,
-    disabled_foreground: aeris_design_system::ThemeColor,
-}
-
-fn trade_button_palette(theme: &AerisTheme, side: aeris_trading::OrderSide) -> TradeButtonPalette {
-    let colors = theme.colors;
+const fn trade_variant(side: aeris_trading::OrderSide) -> ButtonVariant {
     match side {
-        aeris_trading::OrderSide::Buy => TradeButtonPalette {
-            fill: colors.buy,
-            hover: colors.buy_hover,
-            active: colors.buy_active,
-            disabled: colors.buy_disabled,
-            foreground: colors.buy_foreground,
-            disabled_foreground: colors.buy_disabled_foreground,
-        },
-        aeris_trading::OrderSide::Sell => TradeButtonPalette {
-            fill: colors.sell,
-            hover: colors.sell_hover,
-            active: colors.sell_active,
-            disabled: colors.sell_disabled,
-            foreground: colors.sell_foreground,
-            disabled_foreground: colors.sell_disabled_foreground,
-        },
+        aeris_trading::OrderSide::Buy => ButtonVariant::Positive,
+        aeris_trading::OrderSide::Sell => ButtonVariant::Negative,
     }
 }
 
@@ -432,48 +340,14 @@ fn trade_order_button(
     enabled: bool,
     side: aeris_trading::OrderSide,
     action: impl Fn(&aeris_market_data::OrderBookFrame, Option<String>, u64, &mut App) + 'static,
-) -> Stateful<Div> {
-    let frame = state.frame.cloned();
-    let account = state
-        .order_entry
-        .selected_account_id
-        .as_ref()
-        .map(|id| id.as_str().to_string());
-    let quantity = state.order_entry.quantity;
-    let palette = trade_button_palette(state.theme, side);
-    div()
-        .id(id)
-        .h_full()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-        .bg(gpui_color(if enabled {
-            palette.fill
-        } else {
-            palette.disabled
-        }))
-        .text_color(gpui_color(if enabled {
-            palette.foreground
-        } else {
-            palette.disabled_foreground
-        }))
-        .font_weight(platform_font_weight(TypographyRole::Strong))
-        .role(Role::Button)
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(move |button| button.bg(gpui_color(palette.hover)))
-                .active(move |button| button.bg(gpui_color(palette.active)))
-                .on_click(move |_, _, cx| {
-                    if let Some(frame) = frame.as_ref() {
-                        action(frame, account.clone(), quantity, cx);
-                    }
-                })
-        })
-        .when(!enabled, gpui::Styled::cursor_not_allowed)
-        .child(label)
+) -> Button {
+    Button::new(id, state.theme)
+        .variant(trade_variant(side))
+        .button_size(ButtonSize::Lg)
+        .strong()
+        .label(label)
+        .disabled(!enabled)
+        .on_click(frame_action(state, action))
 }
 
 fn dispatch_market(
@@ -524,83 +398,27 @@ fn dispatch_join(
     }
 }
 
-fn neutral_action_button(
-    id: &'static str,
-    label: &'static str,
-    enabled: bool,
-    theme: &AerisTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .h_full()
-        .flex_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .text_color(gpui_color(if enabled {
-            colors.text_primary
-        } else {
-            colors.text_muted
-        }))
-        .font_weight(platform_font_weight(TypographyRole::Strong))
-        .role(Role::Button)
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(move |button| button.bg(gpui_color(colors.hover_bg)))
-                .active(move |button| button.bg(gpui_color(colors.active_bg)))
-        })
-        .when(!enabled, gpui::Styled::cursor_not_allowed)
-        .child(label)
-}
-
 fn position_actions(state: &TradingOrderControlsState<'_>, enabled: bool) -> Div {
-    let close_frame = state.frame.cloned();
-    let reverse_frame = state.frame.cloned();
-    let account = state
-        .order_entry
-        .selected_account_id
-        .as_ref()
-        .map(|id| id.as_str().to_string());
-    let close_account = account.clone();
-    action_row([
-        neutral_action_button(
+    action_row(
+        order_button(
             "trading_close_position",
             "Close Position",
+            state,
             enabled,
-            state.theme,
-        )
-        .when(enabled, |button| {
-            button.on_click(move |_, _, cx| {
-                if let Some(frame) = close_frame.as_ref() {
-                    aeris_desktop::trading::flatten_simulated_account_for(
-                        frame,
-                        close_account.clone(),
-                        cx,
-                    );
-                }
-            })
-        }),
-        neutral_action_button("trading_reverse_position", "Reverse", enabled, state.theme).when(
-            enabled,
-            |button| {
-                button.on_click(move |_, _, cx| {
-                    if let Some(frame) = reverse_frame.as_ref() {
-                        aeris_desktop::trading::reverse_simulated_position(
-                            frame,
-                            account.clone(),
-                            cx,
-                        );
-                    }
-                })
+            |frame, account, _, cx| {
+                aeris_desktop::trading::flatten_simulated_account_for(frame, account, cx);
             },
         ),
-    ])
+        order_button(
+            "trading_reverse_position",
+            "Reverse",
+            state,
+            enabled,
+            |frame, account, _, cx| {
+                aeris_desktop::trading::reverse_simulated_position(frame, account, cx);
+            },
+        ),
+    )
 }
 
 fn global_actions(state: &TradingOrderControlsState<'_>) -> Div {
@@ -610,33 +428,25 @@ fn global_actions(state: &TradingOrderControlsState<'_>) -> Div {
         .as_ref()
         .map(|id| id.as_str().to_string());
     let cancel_enabled = account.is_some();
-    let flatten_frame = state.frame.cloned();
-    action_row([
-        neutral_action_button(
-            "trading_cancel_all",
-            "Cancel All",
-            cancel_enabled,
-            state.theme,
-        )
-        .when(cancel_enabled, |button| {
-            button.on_click(move |_, _, cx| {
+    action_row(
+        // Cancelling needs no book frame, only the selected account.
+        ticket_button("trading_cancel_all", state.theme)
+            .strong()
+            .label("Cancel All")
+            .disabled(!cancel_enabled)
+            .on_click(move |_, _, cx| {
                 aeris_desktop::trading::cancel_simulated_account(account.clone(), cx);
-            })
-        }),
-        neutral_action_button(
+            }),
+        order_button(
             "trading_flatten_all",
             "Flatten All",
-            flatten_frame.is_some() && !state.accounts.is_empty(),
-            state.theme,
-        )
-        .when(!state.accounts.is_empty(), |button| {
-            button.when_some(flatten_frame, |button, frame| {
-                button.on_click(move |_, _, cx| {
-                    aeris_desktop::trading::flatten_simulated_accounts(&frame, cx);
-                })
-            })
-        }),
-    ])
+            state,
+            state.frame.is_some() && !state.accounts.is_empty(),
+            |frame, _, _, cx| {
+                aeris_desktop::trading::flatten_simulated_accounts(frame, cx);
+            },
+        ),
+    )
 }
 
 fn status_rows(
@@ -672,30 +482,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn market_buttons_use_the_dedicated_trade_tokens() {
-        for theme in [AerisTheme::light(), AerisTheme::dark()] {
-            let buy = trade_button_palette(&theme, aeris_trading::OrderSide::Buy);
-            assert_eq!(buy.fill, theme.colors.buy);
-            assert_eq!(buy.hover, theme.colors.buy_hover);
-            assert_eq!(buy.active, theme.colors.buy_active);
-            assert_eq!(buy.disabled, theme.colors.buy_disabled);
-            assert_eq!(buy.foreground, theme.colors.buy_foreground);
-            assert_eq!(
-                buy.disabled_foreground,
-                theme.colors.buy_disabled_foreground
-            );
-
-            let sell = trade_button_palette(&theme, aeris_trading::OrderSide::Sell);
-            assert_eq!(sell.fill, theme.colors.sell);
-            assert_eq!(sell.hover, theme.colors.sell_hover);
-            assert_eq!(sell.active, theme.colors.sell_active);
-            assert_eq!(sell.disabled, theme.colors.sell_disabled);
-            assert_eq!(sell.foreground, theme.colors.sell_foreground);
-            assert_eq!(
-                sell.disabled_foreground,
-                theme.colors.sell_disabled_foreground
-            );
-        }
+    fn market_buttons_use_the_dedicated_trade_variants() {
+        // The variants' `buy-*` / `sell-*` token ramps are covered in `native_ui::button`.
+        assert_eq!(
+            trade_variant(aeris_trading::OrderSide::Buy),
+            ButtonVariant::Positive
+        );
+        assert_eq!(
+            trade_variant(aeris_trading::OrderSide::Sell),
+            ButtonVariant::Negative
+        );
     }
 
     #[test]

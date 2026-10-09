@@ -61,8 +61,7 @@ fn boolean_control(
 ) -> AnyElement {
     let identifier = identifier.to_string();
     let update = app.clone();
-    Button::new(("study_setting_boolean", control_id))
-        .theme(theme)
+    Button::new(("study_setting_boolean", control_id), theme)
         .resting_fill(theme.colors.surface_secondary)
         .selected(selected)
         .disabled(!enabled)
@@ -90,11 +89,13 @@ fn choice_control(
         let setting_identifier = identifier.to_string();
         let option_identifier = option.identifier.clone();
         row = row.child(
-            Button::new((
-                "study_setting_choice",
-                control_id.saturating_mul(65).saturating_add(index),
-            ))
-            .theme(theme)
+            Button::new(
+                (
+                    "study_setting_choice",
+                    control_id.saturating_mul(65).saturating_add(index),
+                ),
+                theme,
+            )
             .resting_fill(theme.colors.surface_secondary)
             .selected(current == Some(option.identifier.as_str()))
             .disabled(!enabled)
@@ -198,8 +199,7 @@ fn line_thickness_row(
     for width in 1..=MAXIMUM_STUDY_LINE_WIDTH {
         let update = app.clone();
         choices = choices.child(
-            Button::new(("study_line_width", usize::from(width)))
-                .theme(theme)
+            Button::new(("study_line_width", usize::from(width)), theme)
                 .resting_fill(theme.colors.surface_secondary)
                 .selected(selected == width)
                 .label(format!("{width} px"))
@@ -396,8 +396,8 @@ fn study_settings_footer(app: &Entity<WorkspaceSurface>, busy: bool, theme: &Aer
     modal_footer(theme)
         .justify_between()
         .child(
-            Button::new("study_settings_reset")
-                .variant(theme, ButtonVariant::Destructive)
+            Button::new("study_settings_reset", theme)
+                .variant(ButtonVariant::Destructive)
                 .label("Reset to defaults")
                 .disabled(busy)
                 .on_click(move |_, window, cx| {
@@ -411,16 +411,16 @@ fn study_settings_footer(app: &Entity<WorkspaceSurface>, busy: bool, theme: &Aer
                 .flex()
                 .gap_2()
                 .child(
-                    Button::new("study_settings_cancel")
-                        .variant(theme, ButtonVariant::Secondary)
+                    Button::new("study_settings_cancel", theme)
+                        .variant(ButtonVariant::Secondary)
                         .label("Cancel")
                         .on_click(move |_, _, cx| {
                             cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
                         }),
                 )
                 .child(
-                    Button::new("study_settings_save")
-                        .variant(theme, ButtonVariant::Positive)
+                    Button::new("study_settings_save", theme)
+                        .variant(ButtonVariant::Positive)
                         .label(if busy { "Applying…" } else { "Apply" })
                         .loading(busy)
                         .disabled(busy)

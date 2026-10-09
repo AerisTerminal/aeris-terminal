@@ -57,8 +57,7 @@ fn choice_button(
     selected: bool,
     theme: &AerisTheme,
 ) -> Button {
-    Button::new(id)
-        .theme(theme)
+    Button::new(id, theme)
         .resting_fill(theme.colors.surface_secondary)
         .selected(selected)
         .label(label)
@@ -199,8 +198,8 @@ fn big_trades_footer(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> Div 
     modal_footer(theme)
         .justify_between()
         .child(
-            Button::new("big_trades_reset")
-                .variant(theme, ButtonVariant::Destructive)
+            Button::new("big_trades_reset", theme)
+                .variant(ButtonVariant::Destructive)
                 .label("Reset to defaults")
                 .on_click(move |_, window, cx| {
                     reset.update(cx, |surface, surface_cx| {
@@ -213,16 +212,16 @@ fn big_trades_footer(app: &Entity<WorkspaceSurface>, theme: &AerisTheme) -> Div 
                 .flex()
                 .gap_2()
                 .child(
-                    Button::new("big_trades_cancel")
-                        .variant(theme, ButtonVariant::Secondary)
+                    Button::new("big_trades_cancel", theme)
+                        .variant(ButtonVariant::Secondary)
                         .label("Cancel")
                         .on_click(move |_, _, cx| {
                             cancel.update(cx, WorkspaceSurface::close_big_trades_dialog);
                         }),
                 )
                 .child(
-                    Button::new("big_trades_apply")
-                        .variant(theme, ButtonVariant::Positive)
+                    Button::new("big_trades_apply", theme)
+                        .variant(ButtonVariant::Positive)
                         .label("Apply")
                         .on_click(move |_, _, cx| {
                             apply.update(cx, WorkspaceSurface::apply_big_trades_dialog);

@@ -893,21 +893,16 @@ fn panel_toggle(
     theme: &AerisTheme,
     app: Entity<WorkspaceSurface>,
 ) -> impl IntoElement {
-    let button = Button::new(state.id)
+    Button::new(state.id, theme)
+        .button_size(ButtonSize::Lg)
         .icon(header_icon(state.icon))
         .label(state.label)
         .aria_label(state.tooltip)
         .tooltip(TooltipSpec::new(state.tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
-        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
+        .selected(state.selected)
         .disabled(!state.enabled)
-        .when(state.enabled, Button::cursor_pointer)
-        .when(!state.enabled, Button::cursor_not_allowed);
-    let button = button_activation(button, state.enabled, move |_, cx| {
-        app.update(cx, state.toggle);
-    });
-    chrome_button_style(button, theme, state.selected, state.enabled)
-        .when(state.selected, |button| {
-            button.bg(gpui_color(theme.colors.surface))
+        .on_click(move |_, _, cx| {
+            app.update(cx, state.toggle);
         })
 }
 
@@ -962,47 +957,20 @@ fn drawing_history_control(
     history: DrawingHistoryState,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let enabled = control.enabled(history);
-    let button = Button::new(control.id())
+    let step = control.step();
+    Button::new(control.id(), theme)
+        .button_size(ButtonSize::Lg)
         .icon(header_icon(control.icon()))
         .aria_label(control.tooltip())
         .tooltip(TooltipSpec::new(control.tooltip(), theme).show_delay(TOOLTIP_OPEN_DELAY))
-        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-        .w(px(chart_chrome::CHART_CONTROL_SIZE))
-        .disabled(!enabled)
-        .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed);
-    let step = control.step();
-    let button = button_activation(button, enabled, move |_, cx| {
-        app.update(cx, step);
-    });
-    chrome_button_style(button, theme, false, enabled)
+        .disabled(!control.enabled(history))
+        .on_click(move |_, _, cx| {
+            app.update(cx, step);
+        })
 }
 
 pub(super) fn header_icon(name: HugeIcon) -> Icon {
     Icon::default().path(name.path())
-}
-
-/// Shared geometry of every round chrome icon action (panel headers, menu close,
-/// workspace tab close/add): a full-radius hit with the glyph centred at the one
-/// pixel-aligned size. Callers own colours, hover/active fills and activation.
-pub(super) fn round_icon_button(
-    id: impl Into<gpui::ElementId>,
-    icon: HugeIcon,
-    label: impl Into<SharedString>,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .occlude()
-        .size(px(WORKSPACE_TAB_ICON_HIT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .role(Role::Button)
-        .aria_label(label)
-        .child(header_icon(icon).with_size(px(WORKSPACE_TAB_ICON_GLYPH)))
 }
 
 pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
@@ -1188,30 +1156,25 @@ pub(super) fn series_selector(
     theme: &AerisTheme,
     enabled: bool,
 ) -> impl IntoElement {
-    let button = Button::new("series_selector")
+    let open_app = app.clone();
+    let bounds_app = app;
+    let button = Button::new("series_selector", theme)
+        .button_size(ButtonSize::Lg)
         .label(label)
         .loading_icon(header_icon(HugeIcon::Loader))
         .caret(header_icon(HugeIcon::ChevronDown))
         .disabled(!enabled)
         .loading(pending)
-        .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed);
-    let open_app = app.clone();
-    let bounds_app = app;
-    let button = button_activation_at(
-        chrome_button_style(button, theme, false, enabled),
-        enabled && !pending,
-        move |trigger_position, window, cx| {
+        .on_click(move |event, window, cx| {
             open_app.update(cx, |app, app_cx| {
                 app.open_chrome_overlay_at(
                     ChromeOverlay::Timeframe,
-                    trigger_position,
+                    event.position(),
                     window,
                     app_cx,
                 );
             });
-        },
-    );
+        });
     let trigger = div().relative().flex_none().child(button).child(
         canvas(
             move |bounds, _, cx| {
@@ -1242,29 +1205,23 @@ pub(super) fn chart_type_selector(
     enabled: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let button = Button::new("chart_type_selector")
-        .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
-        .aria_label(chart_type.label())
-        .w(px(chart_chrome::CHART_CONTROL_SIZE))
-        .disabled(!enabled)
-        .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed);
     let open_app = app.clone();
     let bounds_app = app;
-    let button = button_activation_at(
-        chrome_button_style(button, theme, false, enabled),
-        enabled,
-        move |trigger_position, window, cx| {
+    let button = Button::new("chart_type_selector", theme)
+        .button_size(ButtonSize::Lg)
+        .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
+        .aria_label(chart_type.label())
+        .disabled(!enabled)
+        .on_click(move |event, window, cx| {
             open_app.update(cx, |app, app_cx| {
                 app.open_chrome_overlay_at(
                     ChromeOverlay::ChartType,
-                    trigger_position,
+                    event.position(),
                     window,
                     app_cx,
                 );
             });
-        },
-    );
+        });
     let trigger = div().relative().flex_none().child(button).child(
         canvas(
             move |bounds, _, cx| {
@@ -1293,26 +1250,22 @@ pub(super) fn time_zone_selector(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     // The zone belongs to the pane, not the chart, so it is selectable before data loads.
-    let button = Button::new("time_zone_selector")
-        .label(clock)
-        .caret(header_icon(HugeIcon::ChevronDown))
-        .cursor_pointer();
     let open_app = app.clone();
     let bounds_app = app;
-    let button = button_activation_at(
-        chrome_button_style(button, theme, false, true),
-        true,
-        move |trigger_position, window, cx| {
+    let button = Button::new("time_zone_selector", theme)
+        .button_size(ButtonSize::Lg)
+        .label(clock)
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_click(move |event, window, cx| {
             open_app.update(cx, |app, app_cx| {
                 app.open_chrome_overlay_at(
                     ChromeOverlay::TimeZone,
-                    trigger_position,
+                    event.position(),
                     window,
                     app_cx,
                 );
             });
-        },
-    );
+        });
     let trigger = div().relative().flex_none().child(button).child(
         canvas(
             move |bounds, _, cx| {
@@ -1346,27 +1299,23 @@ fn accounts_selector(
     account_label: Option<String>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let button = Button::new("accounts_selector")
-        .leading(header_icon(HugeIcon::User).with_size(px(16.0)))
-        .label(account_label.unwrap_or_else(|| "Accounts".to_string()))
-        .caret(header_icon(HugeIcon::ChevronDown))
-        .cursor_pointer();
     let open_app = app.clone();
     let bounds_app = app;
-    let button = button_activation_at(
-        chrome_button_style(button, theme, false, true),
-        true,
-        move |trigger_position, window, cx| {
+    let button = Button::new("accounts_selector", theme)
+        .button_size(ButtonSize::Lg)
+        .icon(header_icon(HugeIcon::User))
+        .label(account_label.unwrap_or_else(|| "Accounts".to_string()))
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_click(move |event, window, cx| {
             open_app.update(cx, |app, app_cx| {
                 app.open_chrome_overlay_at(
                     ChromeOverlay::Accounts,
-                    trigger_position,
+                    event.position(),
                     window,
                     app_cx,
                 );
             });
-        },
-    );
+        });
     let trigger = div().relative().flex_none().child(button).child(
         canvas(
             move |bounds, _, cx| {
@@ -1391,67 +1340,6 @@ fn accounts_selector(
         trigger,
         theme,
     )
-}
-
-pub(super) fn chrome_button_style(
-    button: Button,
-    theme: &AerisTheme,
-    selected: bool,
-    enabled: bool,
-) -> Button {
-    let colors = theme.colors;
-    button
-        .theme(theme)
-        .resting_fill(colors.surface)
-        .selected(selected)
-        .h(px(chart_chrome::CHART_CONTROL_SIZE))
-        .border_0()
-        .text_color(gpui_color(chrome_control_foreground(
-            &colors, selected, enabled,
-        )))
-        .when(selected, |button| {
-            button.bg(gpui_color(colors.active_bg.over(colors.surface)))
-        })
-}
-
-pub(super) fn chrome_control_foreground(
-    colors: &aeris_design_system::ThemeColors,
-    selected: bool,
-    enabled: bool,
-) -> ThemeColor {
-    if !enabled {
-        colors.text_muted
-    } else if selected {
-        colors.icon_active
-    } else {
-        colors.icon
-    }
-}
-
-pub(super) fn button_activation(
-    button: Button,
-    enabled: bool,
-    handler: impl Fn(&mut Window, &mut App) + 'static,
-) -> Button {
-    button.when(enabled, |button| {
-        button.on_click(move |_, window, cx| {
-            handler(window, cx);
-            cx.stop_propagation();
-        })
-    })
-}
-
-pub(super) fn button_activation_at(
-    button: Button,
-    enabled: bool,
-    handler: impl Fn(gpui::Point<Pixels>, &mut Window, &mut App) + 'static,
-) -> Button {
-    button.when(enabled, |button| {
-        button.on_click(move |event, window, cx| {
-            handler(event.position(), window, cx);
-            cx.stop_propagation();
-        })
-    })
 }
 
 type ConnectionColor = fn(&AerisTheme) -> ThemeColor;
@@ -1616,10 +1504,7 @@ pub(super) const fn aeris_chart_theme(mode: ThemeMode) -> AerisChartTheme {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FeedConnectionState, TerminalProvider, WORKSPACE_TAB_ICON_GLYPH, WORKSPACE_TAB_ICON_HIT,
-        shows_rithmic_attribution,
-    };
+    use super::{FeedConnectionState, TerminalProvider, shows_rithmic_attribution};
 
     #[test]
     fn rithmic_attribution_follows_the_rithmic_session_only() {
@@ -1640,21 +1525,6 @@ mod tests {
             FeedConnectionState::Stopped,
         ] {
             assert!(!shows_rithmic_attribution(TerminalProvider::Rithmic, state));
-        }
-    }
-
-    #[test]
-    fn round_icon_glyph_centres_on_whole_device_pixels_at_supported_scales() {
-        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0] {
-            let hit = WORKSPACE_TAB_ICON_HIT * scale;
-            let glyph = WORKSPACE_TAB_ICON_GLYPH * scale;
-            let inset = (hit - glyph) / 2.0;
-            for (name, device_pixels) in [("hit", hit), ("glyph", glyph), ("inset", inset)] {
-                assert!(
-                    device_pixels.fract().abs() < f32::EPSILON,
-                    "{name} is {device_pixels} device px at {scale}x"
-                );
-            }
         }
     }
 }

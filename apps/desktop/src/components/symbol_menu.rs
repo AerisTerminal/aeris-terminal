@@ -36,54 +36,37 @@ pub(super) fn instrument_selector(
     state: &InstrumentSelectorState,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let trigger = Button::new("instrument_selector")
-        .leading(provider_exchange_mark(
-            state.provider,
-            px(16.0),
-            false,
-            &theme.colors,
-        ))
-        .loading_icon(header_icon(HugeIcon::Loader))
-        .label(state.label.clone())
-        .caret(header_icon(HugeIcon::ChevronDown))
-        .with_size(px(chart_chrome::HEADER_CONTROL_CONTENT_SIZE))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface_secondary))
-        .text_color(gpui_color(theme.colors.text_primary))
-        .theme(theme)
-        .resting_fill(theme.colors.surface_secondary)
-        .h(px(chart_chrome::CHART_CONTROL_SIZE))
-        .px_3()
-        .rounded(px(f32::from(
-            chart_chrome::SYMBOL_TRIGGER_RADIUS.logical_pixels(),
-        )))
-        .disabled(!state.availability.enabled)
-        .when(state.availability.enabled, Button::cursor_pointer)
-        .when(!state.availability.enabled, Button::cursor_not_allowed);
-    let trigger = trigger.when(!state.availability.enabled, |trigger| {
-        trigger.text_color(gpui_color(theme.colors.text_muted))
-    });
     chrome_tooltip(
         "instrument_selector",
         format!(
             "Search or select a {} market",
             terminal_provider_display(state.provider)
         ),
-        button_activation_at(
-            trigger.loading(state.availability.selection_pending),
-            state.availability.enabled,
-            move |trigger_position, window, cx| {
+        Button::new("instrument_selector", theme)
+            .variant(ButtonVariant::Secondary)
+            .button_size(ButtonSize::Lg)
+            .round()
+            .leading(provider_exchange_mark(
+                state.provider,
+                px(16.0),
+                false,
+                &theme.colors,
+            ))
+            .loading_icon(header_icon(HugeIcon::Loader))
+            .label(state.label.clone())
+            .caret(header_icon(HugeIcon::ChevronDown))
+            .disabled(!state.availability.enabled)
+            .loading(state.availability.selection_pending)
+            .on_click(move |event, window, cx| {
                 app.update(cx, |app, app_cx| {
                     app.open_chrome_overlay_at(
                         ChromeOverlay::Instrument,
-                        trigger_position,
+                        event.position(),
                         window,
                         app_cx,
                     );
                 });
-            },
-        ),
+            }),
         theme,
     )
 }
@@ -158,9 +141,9 @@ pub(super) fn instrument_dialog_content(
                 let provider_name = terminal_provider_display(state.menu_provider).to_string();
                 menu.child(
                     div().px_3().py_1().child(
-                        Button::new("symbol_menu_connect_hosted_broker")
+                        Button::new("symbol_menu_connect_hosted_broker", theme)
+                            .variant(ButtonVariant::Secondary)
                             .label(format!("Connect {provider_name} in Accounts"))
-                            .theme(theme)
                             .on_click(move |_, window, cx| {
                                 accounts.update(cx, |surface, surface_cx| {
                                     surface.open_chrome_overlay(
@@ -389,16 +372,15 @@ pub(super) fn instrument_dialog_row(
         &theme.colors,
     ));
     if state.target == SymbolSelectionTarget::Watchlist {
-        row = row.trailing(button_activation(
+        row = row.trailing(
             compact_menu_add_button(("add_watchlist_symbol", index), theme)
-                .disabled(state.availability.selection_pending),
-            !state.availability.selection_pending,
-            move |_, cx| {
-                add_app.update(cx, |app, cx| {
-                    app.select_instrument(selection, SymbolSelectionTarget::Watchlist, cx);
-                });
-            },
-        ));
+                .disabled(state.availability.selection_pending)
+                .on_click(move |_, _, cx| {
+                    add_app.update(cx, |app, cx| {
+                        app.select_instrument(selection, SymbolSelectionTarget::Watchlist, cx);
+                    });
+                }),
+        );
     } else if checked {
         row = row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
     }
@@ -426,32 +408,20 @@ pub(super) fn instrument_search_header(
         .text_color(gpui_color(colors.text_primary))
         .child({
             let toggle_app = app.clone();
-            div()
-                .id("symbol_provider_switcher")
-                .flex_none()
-                .size(px(28.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-                .border(px(theme.dimensions.border_width))
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(gpui_color(colors.surface_secondary))
-                .cursor_pointer()
-                .when(state.provider_menu_open, |hit| {
-                    hit.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                })
-                .hover(|hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary))))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    toggle_app.update(cx, WorkspaceSurface::toggle_symbol_provider_menu);
-                    cx.stop_propagation();
-                })
-                .child(provider_exchange_mark(
+            Button::new("symbol_provider_switcher", theme)
+                .variant(ButtonVariant::Secondary)
+                .round()
+                .open(state.provider_menu_open)
+                .aria_label("Switch market provider")
+                .leading(provider_exchange_mark(
                     state.menu_provider,
                     px(CHROME_MENU_SEARCH_ICON_SIZE),
                     false,
                     &colors,
                 ))
+                .on_press(move |_, _, cx| {
+                    toggle_app.update(cx, WorkspaceSurface::toggle_symbol_provider_menu);
+                })
         })
         .child(
             Input::new(input)

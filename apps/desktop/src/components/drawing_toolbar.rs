@@ -861,7 +861,9 @@ fn drawing_tool_slot(
     let group = &DRAWING_TOOL_GROUPS[slot.group];
     let entry = slot.entry;
     let arm = terminal.clone();
-    let button = drawing_toolbar_action(
+    let button = chrome_tooltip(
+        group.id,
+        entry.label,
         drawing_toolbar_button(
             group.id,
             entry.icon(theme),
@@ -869,13 +871,9 @@ fn drawing_tool_slot(
             entry.toolbar_icon_size(),
             theme,
             slot.selected,
-        ),
-        slot.enabled,
-    );
-    let button = chrome_tooltip(
-        group.id,
-        entry.label,
-        button_activation(button, slot.enabled, move |_, cx| {
+        )
+        .disabled(!slot.enabled)
+        .on_click(move |_, _, cx| {
             arm.update(cx, |terminal, terminal_cx| {
                 terminal.select_drawing_tool_on_active_workspace(entry.choice, terminal_cx);
             });
@@ -916,51 +914,23 @@ fn drawing_tool_group_arrow(
     slot: DrawingToolSlot,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let colors = theme.colors;
     let group = &DRAWING_TOOL_GROUPS[slot.group];
-    let spec = TooltipSpec::new(group.label, theme).show_delay(TOOLTIP_OPEN_DELAY);
     let toggle = terminal.clone();
     let index = slot.group;
-    div()
-        .id(group.menu_id)
-        .flex_none()
+    // A disclosure strip under the tool button: the tool button's width, the strip's own height.
+    Button::new(group.menu_id, theme)
+        .icon(Icon::new(Glyph::GroupArrow.path()).with_size(px(DRAWING_TOOL_GROUP_ARROW_ICON)))
+        .aria_label(group.label)
+        .tooltip(TooltipSpec::new(group.label, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .selected(slot.menu_open)
+        .disabled(!slot.enabled)
+        .on_press(move |_, _, cx| {
+            toggle.update(cx, |terminal, terminal_cx| {
+                terminal.toggle_drawing_tool_menu(index, terminal_cx);
+            });
+        })
         .w(px(DRAWING_TOOL_BUTTON_SIZE))
         .h(px(DRAWING_TOOL_GROUP_ARROW_HEIGHT))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(
-            chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
-        )))
-        .role(Role::Button)
-        .aria_label(group.label)
-        .text_color(gpui_color(if slot.menu_open {
-            colors.icon_active
-        } else {
-            colors.text_muted
-        }))
-        .when(slot.menu_open, |arrow| {
-            arrow.bg(gpui_color(colors.active_bg.over(colors.surface)))
-        })
-        .when(slot.enabled, |arrow| {
-            arrow
-                .cursor_pointer()
-                .hover(move |arrow| {
-                    arrow
-                        .bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                        .text_color(gpui_color(colors.text_primary))
-                })
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    toggle.update(cx, |terminal, terminal_cx| {
-                        terminal.toggle_drawing_tool_menu(index, terminal_cx);
-                    });
-                    cx.stop_propagation();
-                })
-        })
-        .when(!slot.enabled, Styled::cursor_not_allowed)
-        .tooltip(spec.builder())
-        .tooltip_show_delay(spec.delay())
-        .child(Icon::new(Glyph::GroupArrow.path()).with_size(px(DRAWING_TOOL_GROUP_ARROW_ICON)))
 }
 
 /// The open group's flyout, anchored beside its sidebar slot. Rows and titles have fixed rem
@@ -1125,23 +1095,18 @@ pub(super) fn drawing_favorites_toolbar_layer(
     let buttons = entries.into_iter().enumerate().map(|(index, entry)| {
         let arm = terminal.clone();
         let selected = entry.choice == armed;
-        let button = drawing_toolbar_action(
-            drawing_toolbar_button(
-                ("drawing_favorite", index),
-                entry.icon(theme),
-                entry.label,
-                entry.toolbar_icon_size(),
-                theme,
-                selected,
-            )
-            .size(px(DRAWING_FAVORITES_BUTTON_SIZE))
-            .resting_fill(colors.surface_secondary)
-            .when(selected, |button| {
-                button.bg(gpui_color(colors.active_bg.over(colors.surface_secondary)))
-            }),
-            enabled,
-        );
-        let button = button_activation(button, enabled, move |_, cx| {
+        let button = drawing_toolbar_button(
+            ("drawing_favorite", index),
+            entry.icon(theme),
+            entry.label,
+            entry.toolbar_icon_size(),
+            theme,
+            selected,
+        )
+        .button_size(ButtonSize::Md)
+        .resting_fill(colors.surface_secondary)
+        .disabled(!enabled)
+        .on_click(move |_, _, cx| {
             arm.update(cx, |terminal, terminal_cx| {
                 terminal.select_drawing_tool_on_active_workspace(entry.choice, terminal_cx);
             });
@@ -1228,9 +1193,6 @@ fn drawing_favorites_grip(
         .child(column())
 }
 
-const DRAWING_FAVORITE_STAR_SIZE: f32 = 24.0;
-const DRAWING_FAVORITE_STAR_ICON: f32 = 16.0;
-
 /// The row's own star target. It handles the press itself so starring a tool neither arms it
 /// nor closes the flyout.
 fn drawing_favorite_star(
@@ -1240,57 +1202,28 @@ fn drawing_favorite_star(
     favorite: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let colors = theme.colors;
     let label = if favorite {
         "Remove from favorites"
     } else {
         "Add to favorites"
     };
-    let spec = TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY);
     let toggle = terminal.clone();
-    div()
-        .id(("drawing_favorite_star", row))
-        .flex_none()
-        .size(px(DRAWING_FAVORITE_STAR_SIZE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(f32::from(
-            chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
-        )))
-        .cursor_pointer()
-        .role(Role::Button)
+    let star = if favorite {
+        // A starred tool keeps the warning-coloured star in every state.
+        Icon::new(HugeIcon::StarFilled.path()).color(gpui_color(theme.colors.warning))
+    } else {
+        Icon::new(HugeIcon::Star.path())
+    };
+    Button::new(("drawing_favorite_star", row), theme)
+        .button_size(ButtonSize::Sm)
+        .icon(star)
         .aria_label(label)
-        .text_color(gpui_color(if favorite {
-            colors.warning
-        } else {
-            colors.text_muted
-        }))
-        .hover(move |star| {
-            star.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
-                .text_color(gpui_color(if favorite {
-                    colors.warning
-                } else {
-                    colors.text_primary
-                }))
-        })
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+        .tooltip(TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .on_press(move |_, _, cx| {
             toggle.update(cx, |terminal, terminal_cx| {
                 terminal.toggle_drawing_favorite(choice, terminal_cx);
             });
-            cx.stop_propagation();
         })
-        .on_click(|_, _, cx| cx.stop_propagation())
-        .tooltip(spec.builder())
-        .tooltip_show_delay(spec.delay())
-        .child(
-            Icon::new(if favorite {
-                HugeIcon::StarFilled.path()
-            } else {
-                HugeIcon::Star.path()
-            })
-            .with_size(px(DRAWING_FAVORITE_STAR_ICON)),
-        )
 }
 
 fn drawing_tool_menu_title(title: &'static str, theme: &AerisTheme) -> impl IntoElement {
@@ -1350,7 +1283,9 @@ fn drawing_favorites_toggle(
         "Show favorites toolbar"
     };
     let toggle = terminal.clone();
-    let button = drawing_toolbar_action(
+    chrome_tooltip(
+        "drawing_favorites_toggle",
+        label,
         drawing_toolbar_button(
             "drawing_favorites_toggle",
             header_icon(if shown {
@@ -1362,13 +1297,9 @@ fn drawing_favorites_toggle(
             20.0,
             theme,
             shown,
-        ),
-        enabled,
-    );
-    chrome_tooltip(
-        "drawing_favorites_toggle",
-        label,
-        button_activation(button, enabled, move |_, cx| {
+        )
+        .disabled(!enabled)
+        .on_click(move |_, _, cx| {
             toggle.update(cx, TerminalApp::toggle_drawing_favorites_toolbar);
         }),
         theme,
@@ -1430,11 +1361,10 @@ fn drawing_toolbar_actions(
         ))
 }
 
-const DRAWING_TOOLBAR_TOGGLE_ICON: f32 = 14.0;
-/// The toggle's own icon plus 4 px above and below. Until a chart reports its time strip (no
-/// chart is attached during startup), this keeps the icon inside its row instead of drawing
-/// over the favorites button above it.
-const DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT: f32 = DRAWING_TOOLBAR_TOGGLE_ICON + 2.0 * 4.0;
+/// The toggle button's own height. Until a chart reports its time strip (no chart is attached
+/// during startup), this keeps the button inside its row instead of drawing over the favorites
+/// button above it.
+const DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT: f32 = ButtonSize::Xs.logical_height();
 
 fn drawing_toolbar_toggle_height(time_axis_height: f32) -> f32 {
     // Aeris Charts reserves the complete time strip inside the chart. The desktop pane then
@@ -1509,9 +1439,9 @@ fn drawing_action_control(
         spec.icon_size,
         theme,
         spec.selected,
-    );
-    let button = drawing_toolbar_action(button, spec.enabled);
-    let button = button_activation(button, spec.enabled, move |_, cx| {
+    )
+    .disabled(!spec.enabled)
+    .on_click(move |_, _, cx| {
         app.update(cx, spec.action);
     });
     chrome_tooltip(spec.id, spec.tooltip, button, theme)
@@ -1542,36 +1472,27 @@ pub(super) fn drawing_toolbar_expander(
     .bg(gpui_color(colors.surface))
 }
 
+/// The strip aligned with the chart's time axis that holds the toolbar's collapse or expand
+/// button. The strip is only a frame; the button inside it is the control.
 fn drawing_toolbar_toggle_hit(
     id: &'static str,
     icon: HugeIcon,
     tooltip: &'static str,
     theme: &AerisTheme,
     on_activate: impl Fn(&mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    let spec = TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY);
-    div()
-        .id(id)
-        .occlude()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(0.0))
-        .text_color(gpui_color(colors.icon))
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label(tooltip)
-        .hover(move |hit| hit.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            on_activate(window, cx);
-            cx.stop_propagation();
-        })
-        .tooltip(spec.builder())
-        .tooltip_show_delay(spec.delay())
-        .child(header_icon(icon).with_size(px(DRAWING_TOOLBAR_TOGGLE_ICON)))
+) -> Div {
+    div().flex().items_center().justify_center().child(
+        Button::new(id, theme)
+            .button_size(ButtonSize::Xs)
+            .icon(header_icon(icon))
+            .aria_label(tooltip)
+            .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
+            .on_press(move |_, window, cx| on_activate(window, cx)),
+    )
 }
 
+/// A drawing-toolbar tool or action. Each glyph keeps its own optical size because the tool
+/// artwork is drawn on differently padded artboards.
 fn drawing_toolbar_button(
     id: impl Into<gpui::ElementId>,
     icon: Icon,
@@ -1580,24 +1501,11 @@ fn drawing_toolbar_button(
     theme: &AerisTheme,
     selected: bool,
 ) -> Button {
-    let button = Button::new(id)
-        .icon(icon)
+    Button::new(id, theme)
+        .button_size(ButtonSize::Lg)
+        .icon(icon.with_size(px(icon_size)))
         .aria_label(label)
-        .compact()
-        .with_size(px(icon_size / 0.75))
-        .w(px(DRAWING_TOOL_BUTTON_SIZE))
-        .h(px(DRAWING_TOOL_BUTTON_SIZE))
-        .rounded(px(f32::from(
-            chart_chrome::CHART_CONTROL_RADIUS.logical_pixels(),
-        )));
-    chrome_button_style(button, theme, selected, true)
-}
-
-fn drawing_toolbar_action(button: Button, enabled: bool) -> Button {
-    button
-        .disabled(!enabled)
-        .when(enabled, Button::cursor_pointer)
-        .when(!enabled, Button::cursor_not_allowed)
+        .selected(selected)
 }
 
 #[cfg(test)]
@@ -1778,9 +1686,9 @@ mod tests {
     }
 
     #[test]
-    fn drawing_toggle_keeps_its_icon_inside_the_row_before_a_chart_reports_its_axis() {
+    fn drawing_toggle_keeps_its_button_inside_the_row_before_a_chart_reports_its_axis() {
         let detached = drawing_toolbar_toggle_height(0.0);
-        assert!(detached >= DRAWING_TOOLBAR_TOGGLE_ICON + WORKSPACE_PANE_BOTTOM_INSET);
+        assert!(detached >= ButtonSize::Xs.logical_height() + WORKSPACE_PANE_BOTTOM_INSET);
         // The startup row already has the default axis height, so attaching the chart does not
         // shift the sidebar.
         assert!((detached - drawing_toolbar_toggle_height(22.0)).abs() < f32::EPSILON);

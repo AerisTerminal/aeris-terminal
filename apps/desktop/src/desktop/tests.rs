@@ -15,8 +15,8 @@ use super::{
     active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
     caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
     chart_position_id, chart_shortcut, chart_status_detail, chart_surface_notice,
-    chart_time_seconds_from_unix_nanos, chrome_control_foreground, chrome_menu_extent,
-    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
+    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, current_instrument_menu_index,
     default_rithmic_contract_index, durable_workspace_viewport, fullscreen_escape_command,
@@ -50,7 +50,7 @@ pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
     })
     .expect("test trading service starts")
 }
-use aeris_design_system::{AerisTheme, ThemeColor, ThemeMode};
+use aeris_design_system::{ThemeColor, ThemeMode};
 use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_observability::FeedConnectionState;
 use gpui::{Bounds, point, px, size};
@@ -1556,20 +1556,6 @@ fn watchlist_drag_reflows_continuously_at_row_midpoints() {
             5,
         ),
         Some(3)
-    );
-}
-
-#[test]
-fn chrome_controls_use_icon_and_disabled_hierarchy() {
-    let colors = AerisTheme::light().colors;
-    assert_eq!(chrome_control_foreground(&colors, false, true), colors.icon);
-    assert_eq!(
-        chrome_control_foreground(&colors, true, true),
-        colors.icon_active
-    );
-    assert_eq!(
-        chrome_control_foreground(&colors, false, false),
-        colors.text_muted
     );
 }
 

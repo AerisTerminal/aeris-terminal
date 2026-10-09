@@ -401,27 +401,18 @@ fn trade_ordinal_is_in_sweep(sweeps: &[OrderFlowSweep], ordinal: u64) -> bool {
     index > 0 && ordinal <= sweeps[index - 1].last_ingestion_ordinal
 }
 
+/// A filter chip; each press steps its filter to the next value.
 fn time_sales_filter_button(
     id: &'static str,
     label: impl Into<SharedString>,
     on_click: impl Fn(&mut gpui::App) + 'static,
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(22.0))
-        .px_1()
-        .flex()
-        .items_center()
-        .rounded(px(3.0))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border))
-        .bg(gpui_color(theme.colors.surface_secondary))
-        .text_color(gpui_color(theme.colors.text_primary))
-        .text_xs()
+) -> Button {
+    Button::new(id, theme)
+        .variant(ButtonVariant::Secondary)
+        .button_size(ButtonSize::Xs)
+        .label(label)
         .whitespace_nowrap()
-        .cursor_pointer()
-        .child(label.into())
         .on_click(move |_, _, cx| on_click(cx))
 }
 
