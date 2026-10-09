@@ -50,7 +50,6 @@ macro_rules! platform_color_registry {
             primary_active => "primary-active",
             primary_disabled => "primary-disabled",
             primary_disabled_foreground => "primary-disabled-foreground",
-            primary_ring => "primary-ring",
             primary_subtle => "primary-subtle",
             primary_foreground => "primary-foreground",
             danger => "danger",
@@ -70,14 +69,12 @@ macro_rules! platform_color_registry {
             buy_active => "buy-active",
             buy_disabled => "buy-disabled",
             buy_disabled_foreground => "buy-disabled-foreground",
-            buy_ring => "buy-ring",
             buy_foreground => "buy-foreground",
             sell => "sell",
             sell_hover => "sell-hover",
             sell_active => "sell-active",
             sell_disabled => "sell-disabled",
             sell_disabled_foreground => "sell-disabled-foreground",
-            sell_ring => "sell-ring",
             sell_foreground => "sell-foreground",
             /// Order-book bid depth bar. Pair only with `book_bid_text`.
             book_bid_fill => "book-bid-fill",
@@ -87,8 +84,7 @@ macro_rules! platform_color_registry {
             book_ask_fill => "book-ask-fill",
             /// Order-book ask price text; passes 4.5:1 on `book_ask_fill`.
             book_ask_text => "book-ask-text",
-            ring => "ring",
-            /// Brand focus ring; always the `primary` color.
+            /// The one focus ring for every control; always the `primary` color.
             ring_primary => "ring-primary",
             /// Chart candles and volume only. Aeris Charts remains authoritative for chart rendering.
             bullish => "bullish",

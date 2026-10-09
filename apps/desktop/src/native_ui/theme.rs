@@ -5,15 +5,14 @@ use aeris_design_system::{
 use gpui::{FontWeight, Hsla, Pixels, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
 
-/// Text-field tokens, exactly as the Theme System `Input` uses them: a 1px `border` field that
-/// takes `hover-bg` on hover and focus, `border-strong` plus a 3px translucent `ring` halo on
-/// focus, and a `danger` border with a 3px `danger-ring` halo while invalid.
+/// Text-field tokens, exactly as the Theme System `Input` uses them: a `border` field on
+/// `surface` (`surface-secondary` in dark mode) that takes `hover-bg` on hover, the shared 2px
+/// `ring-primary` focus outline, and a `danger` border with a 3px `danger-ring` halo while invalid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct InputAppearance {
     pub(crate) fill: ThemeColor,
     pub(crate) hover_fill: ThemeColor,
     pub(crate) border: ThemeColor,
-    pub(crate) focus_border: ThemeColor,
     pub(crate) focus_ring: ThemeColor,
     pub(crate) invalid_border: ThemeColor,
     pub(crate) invalid_ring: ThemeColor,
@@ -28,8 +27,7 @@ pub(crate) fn input_appearance(theme: &AerisTheme) -> InputAppearance {
         },
         hover_fill: colors.hover_bg,
         border: colors.border,
-        focus_border: colors.border_strong,
-        focus_ring: colors.ring,
+        focus_ring: colors.ring_primary,
         invalid_border: colors.danger,
         invalid_ring: colors.danger_ring,
     }
@@ -75,7 +73,7 @@ pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
         destructive_foreground: gpui_color(colors.danger_foreground),
         border: gpui_color(colors.border),
         input: gpui_color(colors.border_secondary),
-        ring: gpui_color(colors.ring),
+        ring: gpui_color(colors.ring_primary),
         selection,
     };
     base.tokens.radius = RadiusTokens {
@@ -121,8 +119,7 @@ mod tests {
             );
             assert_eq!(field.hover_fill, theme.colors.hover_bg);
             assert_eq!(field.border, theme.colors.border);
-            assert_eq!(field.focus_border, theme.colors.border_strong);
-            assert_eq!(field.focus_ring, theme.colors.ring);
+            assert_eq!(field.focus_ring, theme.colors.ring_primary);
             assert_eq!(field.invalid_border, theme.colors.danger);
             assert_eq!(field.invalid_ring, theme.colors.danger_ring);
         }
@@ -137,7 +134,10 @@ mod tests {
                 gpui_color(theme.colors.text_primary)
             );
             assert_eq!(base.tokens.colors.accent, gpui_color(theme.colors.primary));
-            assert_eq!(base.tokens.colors.ring, gpui_color(theme.colors.ring));
+            assert_eq!(
+                base.tokens.colors.ring,
+                gpui_color(theme.colors.ring_primary)
+            );
             assert_eq!(
                 base.tokens.radius.md,
                 gpui::px(f32::from(

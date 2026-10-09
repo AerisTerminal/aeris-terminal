@@ -52,7 +52,6 @@ pub(super) fn account_avatar_button(
     account: &aeris_desktop::account::AccountMenuState,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let presentation = &account.presentation;
     let tooltip = if account.signed_in() && !presentation.display_name.is_empty() {
         format!("Account — {}", presentation.display_name)
@@ -66,7 +65,7 @@ pub(super) fn account_avatar_button(
         "account_avatar",
         tooltip,
         Button::new("account_avatar", theme)
-            .resting_fill(colors.surface_secondary)
+            .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Lg)
             .aria_label("Profile menu")
             .on_click(move |event, _, cx| {
@@ -932,7 +931,7 @@ fn update_row(view: &UpdateView, on_update: &UpdateActivate, theme: &AerisTheme)
     let action_button = view.action.map(|action| {
         let on_update = on_update.clone();
         Button::new("platform_menu_update_action", theme)
-            .variant(ButtonVariant::Filled)
+            .variant(ButtonVariant::Default)
             .button_size(ButtonSize::Sm)
             .label(match action {
                 UpdateAction::Restart => "Restart",

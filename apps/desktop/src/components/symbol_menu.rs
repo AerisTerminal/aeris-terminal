@@ -43,7 +43,7 @@ pub(super) fn instrument_selector(
             terminal_provider_display(state.provider)
         ),
         Button::new("instrument_selector", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Outline)
             .button_size(ButtonSize::Lg)
             .round()
             .leading(provider_exchange_mark(
@@ -142,7 +142,7 @@ pub(super) fn instrument_dialog_content(
                 menu.child(
                     div().px_3().py_1().child(
                         Button::new("symbol_menu_connect_hosted_broker", theme)
-                            .variant(ButtonVariant::Secondary)
+                            .variant(ButtonVariant::Outline)
                             .label(format!("Connect {provider_name} in Accounts"))
                             .on_click(move |_, window, cx| {
                                 accounts.update(cx, |surface, surface_cx| {
@@ -386,7 +386,7 @@ pub(super) fn instrument_search_header(
         .child({
             let toggle_app = app.clone();
             Button::new("symbol_provider_switcher", theme)
-                .variant(ButtonVariant::Secondary)
+                .variant(ButtonVariant::Outline)
                 .round()
                 .open(state.provider_menu_open)
                 .aria_label("Switch market provider")

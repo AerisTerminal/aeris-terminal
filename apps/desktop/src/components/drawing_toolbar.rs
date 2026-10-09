@@ -919,6 +919,7 @@ fn drawing_tool_group_arrow(
     let index = slot.group;
     // A disclosure strip under the tool button: the tool button's width, the strip's own height.
     Button::new(group.menu_id, theme)
+        .variant(ButtonVariant::Ghost)
         .icon(Icon::new(Glyph::GroupArrow.path()).with_size(px(DRAWING_TOOL_GROUP_ARROW_ICON)))
         .aria_label(group.label)
         .tooltip(TooltipSpec::new(group.label, theme).show_delay(TOOLTIP_OPEN_DELAY))
@@ -1096,8 +1097,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
             theme,
             selected,
         )
-        .button_size(ButtonSize::Md)
-        .resting_fill(colors.surface_secondary)
+        .button_size(ButtonSize::Default)
         .disabled(!enabled)
         .on_click(move |_, _, cx| {
             arm.update(cx, |terminal, terminal_cx| {
@@ -1208,6 +1208,7 @@ fn drawing_favorite_star(
         Icon::new(HugeIcon::Star.path())
     };
     Button::new(("drawing_favorite_star", row), theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .icon(star)
         .aria_label(label)
@@ -1355,10 +1356,12 @@ fn drawing_toolbar_actions(
         ))
 }
 
-/// The toggle button's own height. Until a chart reports its time strip (no chart is attached
-/// during startup), this keeps the button inside its row instead of drawing over the favorites
-/// button above it.
-const DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT: f32 = ButtonSize::Xs.logical_height();
+/// The axis share of the strip that fits the toggle button: the strip adds the pane's bottom
+/// inset, so the two together hold one `Sm` button. Until a chart reports its time strip (no
+/// chart is attached during startup), this keeps the button inside its row instead of drawing
+/// over the favorites button above it.
+const DRAWING_TOOLBAR_TOGGLE_MINIMUM_HEIGHT: f32 =
+    ButtonSize::Sm.logical_height() - WORKSPACE_PANE_BOTTOM_INSET;
 
 fn drawing_toolbar_toggle_height(time_axis_height: f32) -> f32 {
     // Aeris Charts reserves the complete time strip inside the chart. The desktop pane then
@@ -1477,7 +1480,8 @@ fn drawing_toolbar_toggle_hit(
 ) -> Div {
     div().flex().items_center().justify_center().child(
         Button::new(id, theme)
-            .button_size(ButtonSize::Xs)
+            .variant(ButtonVariant::Ghost)
+            .button_size(ButtonSize::Sm)
             .icon(header_icon(icon))
             .aria_label(tooltip)
             .tooltip(TooltipSpec::new(tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
@@ -1496,6 +1500,7 @@ fn drawing_toolbar_button(
     selected: bool,
 ) -> Button {
     Button::new(id, theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .icon(icon.with_size(px(icon_size)))
         .aria_label(label)
@@ -1685,7 +1690,7 @@ mod tests {
     #[test]
     fn drawing_toggle_keeps_its_button_inside_the_row_before_a_chart_reports_its_axis() {
         let detached = drawing_toolbar_toggle_height(0.0);
-        assert!(detached >= ButtonSize::Xs.logical_height() + WORKSPACE_PANE_BOTTOM_INSET);
+        assert!(detached >= ButtonSize::Sm.logical_height());
         // The startup row already has the default axis height, so attaching the chart does not
         // shift the sidebar.
         assert!((detached - drawing_toolbar_toggle_height(22.0)).abs() < f32::EPSILON);

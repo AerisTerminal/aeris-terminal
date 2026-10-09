@@ -751,7 +751,6 @@ pub(super) fn quick_timeframe_overlay_content(
                         .bordered(true)
                         .focus_bordered(true)
                         .platform(theme)
-                        .focus_border(theme.colors.ring_primary)
                         .invalid(error.is_some())
                         .flex_1(),
                 ),

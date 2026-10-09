@@ -1103,6 +1103,7 @@ fn workspace_add_button(
     theme: &AerisTheme,
 ) -> Button {
     Button::new("add_workspace", theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .round()
         .icon(header_icon(HugeIcon::Add))

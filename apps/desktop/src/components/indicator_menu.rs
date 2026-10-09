@@ -17,6 +17,7 @@ pub(super) fn indicator_selector(
         "indicator_selector",
         "Indicators",
         Button::new("indicator_selector", theme)
+            .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Lg)
             .icon(header_icon(HugeIcon::Chart))
             .aria_label("Indicators")

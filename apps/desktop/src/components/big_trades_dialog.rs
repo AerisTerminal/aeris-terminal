@@ -206,7 +206,7 @@ pub(super) fn big_trades_dialog_layer(
     )
     .action(
         Button::new("big_trades_cancel", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Outline)
             .label("Cancel")
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_big_trades_dialog);
@@ -214,7 +214,7 @@ pub(super) fn big_trades_dialog_layer(
     )
     .action(
         Button::new("big_trades_apply", theme)
-            .variant(ButtonVariant::Positive)
+            .variant(ButtonVariant::Secondary)
             .label("Apply")
             .on_click(move |_, _, cx| {
                 apply.update(cx, WorkspaceSurface::apply_big_trades_dialog);

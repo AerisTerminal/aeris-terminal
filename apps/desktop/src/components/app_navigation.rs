@@ -27,7 +27,7 @@ pub(super) fn app_navigation_button(
         "app_navigation",
         "Switch page",
         Button::new("app_navigation", theme)
-            .resting_fill(theme.colors.surface_secondary)
+            .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Lg)
             .aria_label(format!("Page: {}", current.label()))
             .icon(header_icon(current.icon()))

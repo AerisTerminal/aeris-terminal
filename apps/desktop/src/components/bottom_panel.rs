@@ -496,6 +496,7 @@ fn trade_history_expand_button(
         "trade_history_expand",
         label,
         Button::new("trade_history_expand", theme)
+            .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Sm)
             .round()
             .icon(chevron)
@@ -515,8 +516,8 @@ fn trade_history_account_filter(
     let toggle_terminal = terminal.clone();
     let dismiss_terminal = terminal.clone();
     let trigger = Button::new("trade_history_account_filter", theme)
-        .variant(ButtonVariant::Secondary)
-        .button_size(ButtonSize::Xs)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Sm)
         .open(state.account_menu_open)
         .aria_label("Filter trades by account")
         .label(state.filter_label())
@@ -885,7 +886,7 @@ fn position_row(
         .child(
             div().w(px(POSITION_ACTION_WIDTH)).flex_none().child(
                 Button::new(("position_close", index), theme)
-                    .variant(ButtonVariant::Secondary)
+                    .variant(ButtonVariant::Outline)
                     .button_size(ButtonSize::Sm)
                     .label("Close")
                     .disabled(!connected)

@@ -172,7 +172,7 @@ fn page_header(
     }
     let refresh_terminal = terminal.clone();
     let refresh = Button::new("screener_refresh", theme)
-        .variant(ButtonVariant::Secondary)
+        .variant(ButtonVariant::Outline)
         .icon(header_icon(HugeIcon::Refresh))
         .aria_label("Refresh market statistics")
         .tooltip(TooltipSpec::new("Refresh", theme).show_delay(TOOLTIP_OPEN_DELAY))

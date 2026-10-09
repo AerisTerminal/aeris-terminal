@@ -417,7 +417,7 @@ pub(super) fn study_settings_dialog_layer(
     )
     .action(
         Button::new("study_settings_cancel", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Outline)
             .label("Cancel")
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
@@ -425,7 +425,7 @@ pub(super) fn study_settings_dialog_layer(
     )
     .action(
         Button::new("study_settings_save", theme)
-            .variant(ButtonVariant::Positive)
+            .variant(ButtonVariant::Secondary)
             .label(if busy { "Applying…" } else { "Apply" })
             .loading(busy)
             .disabled(busy)

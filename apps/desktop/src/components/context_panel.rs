@@ -83,6 +83,7 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                 .child(div().flex_1())
                 .child(
                     Button::new("context_credentials", theme)
+                        .variant(ButtonVariant::Ghost)
                         .button_size(ButtonSize::Sm)
                         .label("API keys")
                         .aria_label("Configure official context API keys")
@@ -203,7 +204,7 @@ fn credential_editor(
                 .gap_2()
                 .child(
                     Button::new("cancel_context_credentials", theme)
-                        .variant(ButtonVariant::Secondary)
+                        .variant(ButtonVariant::Outline)
                         .button_size(ButtonSize::Sm)
                         .label("Cancel")
                         .on_click(move |_, window, cx| {
@@ -214,7 +215,7 @@ fn credential_editor(
                 )
                 .child(
                     Button::new("save_context_credentials", theme)
-                        .variant(ButtonVariant::Filled)
+                        .variant(ButtonVariant::Secondary)
                         .button_size(ButtonSize::Sm)
                         .label("Save")
                         .on_click(move |_, window, cx| {

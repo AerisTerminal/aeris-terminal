@@ -392,6 +392,7 @@ fn watchlist_add_symbol_control(
         "watchlist_add_symbol",
         "Add symbol to watchlist",
         Button::new("watchlist_add_symbol", theme)
+            .variant(ButtonVariant::Ghost)
             .button_size(ButtonSize::Sm)
             .round()
             .icon(header_icon(HugeIcon::Add))

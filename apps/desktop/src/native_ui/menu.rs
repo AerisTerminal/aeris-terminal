@@ -410,7 +410,7 @@ impl RenderOnce for MenuRow {
                     .hover(|style| style.bg(gpui_color(presentation.hover_fill)))
             })
             .when(!presentation.enabled, gpui::Styled::cursor_not_allowed)
-            .focus_visible(move |row| row.border_2().border_color(gpui_color(colors.ring)))
+            .focus_visible(move |row| row.border_2().border_color(gpui_color(colors.ring_primary)))
             .when_some(
                 self.activation.filter(|_| presentation.enabled),
                 |row, activation| {

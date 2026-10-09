@@ -17,13 +17,53 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `surface-overlay`
   for scrims, `hover-bg` / `active-bg` for hover and press. Hover and press change the fill only, no
   shadows.
-- Tabs and segmented controls use `TabList` + `Tab` (`apps/desktop/src/native_ui/tab.rs`), the native
-  Theme System `.ui-tabs` / `.ui-tab`: a `surface-raised` track with no border; unselected tabs have no fill
-  and `text-interactive` text, and hover / press change the text only (`text-hover` / `text-active`, never
-  `hover-bg`); the selected tab is raised onto `surface` with a `border` outline and `text-active`. Callers
-  add only layout; never restyle a tab's colors, borders or radius.
+- Focus is one style everywhere: a 2px `ring-primary` outline (no glow, no background change).
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
+
+## Components
+
+Controls come from `apps/desktop/src/native_ui`, never hand-built divs. Ask for a component and
+variant **by name**; the component owns every color, border, radius, hover, press, disabled and
+focus state. Callers add only layout (flex, gaps, margins, an explicit width).
+
+**`Button`** (`button.rs`), the Theme System `Button`. Variants:
+
+| Variant | Look | Use for |
+| --- | --- | --- |
+| `Default` | `button-fill` neutral fill | the main neutral action |
+| `Secondary` | brand `primary` blue fill | the action that commits a form or dialog (Apply, Create, Save) |
+| `Outline` | `surface` + `border`, `text-default`; hover / press drop the border and fill `hover-bg` / `active-bg` | Cancel, select triggers, steppers, filters |
+| `Ghost` | no fill or border, `text-default`; hover / press fill `hover-bg` / `active-bg` | toolbar, header and icon actions |
+| `Destructive` | `danger` fill | irreversible actions (Delete, Reset to defaults) |
+| `Buy` / `Sell` | `buy` / `sell` fill | trade orders only |
+
+Sizes: `Sm` (24px, `text-xs`), `Default` (28px), `Lg` (32px, `--radius-default`). A button with only
+an icon is square. States and modifiers: `selected` (a toggle that is on), `open` (a trigger whose menu
+is open), `disabled`, `loading`, `round` (circle or pill), `danger_on_hover` (close / delete icons),
+`trigger` (label left, caret right), `full_width`, `strong` (trade actions). `close_button` is the one
+close control.
+
+**`MenuPanel`** + **`MenuAnchor`** + **`MenuRow`** (`menu.rs`): every dropdown, context menu, flyout and
+select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | Stretch }` from a trigger, or
+`InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
+`checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`.
+
+**`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal. Sizes `Sm` (420), `Md` (480), `Lg`
+(560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the
+committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Secondary`.
+
+**`TabList`** + **`Tab`** (`tab.rs`), the Theme System `.ui-tabs` / `.ui-tab`: a `surface-raised` track with
+no border; unselected tabs have no fill and `text-interactive` text, and hover / press change the text
+only (`text-hover` / `text-active`, never `hover-bg`); the selected tab is raised onto `surface` with a
+`border` outline and `text-active`. Use for tabs and single-choice option groups; `wrap()` for open-ended
+option sets; `TabList::sidebar` + `Tab::sidebar` for vertical section navigation.
+
+**`Switch`** / **`SwitchRow`** (`switch.rs`): every on/off setting, never an "On" / "Off" button.
+
+**`Input`** (`input.rs`), the Theme System `Input`: a `border` field on `surface` (`surface-secondary` in
+dark), `hover-bg` on hover, the shared focus ring, and a `danger` border with a 3px `danger-ring` halo
+while invalid.
 
 ## Theme CSS
 
@@ -90,7 +130,6 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --primary-active: #0050b2;
   --primary-disabled: #b7d9f8;
   --primary-disabled-foreground: #5eb0ef;
-  --primary-ring: #cee7fe;
   --primary-subtle: #e1f0ff;
   --primary-foreground: #ffffff;
   --danger: #f7525f;
@@ -114,14 +153,12 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --buy-active: #056f5c;
   --buy-disabled: #b3e3da;
   --buy-disabled-foreground: #5cbfae;
-  --buy-ring: #b3e3da;
   --buy-foreground: #ffffff;
   --sell: #f7525f;
   --sell-hover: #e5404d;
   --sell-active: #c9303c;
   --sell-disabled: #ffc9c9;
   --sell-disabled-foreground: #ffa2a2;
-  --sell-ring: #ffc9c9;
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
@@ -131,7 +168,6 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --book-ask-text: #d91a2b;
 
   /* Focus */
-  --ring: color-mix(in srgb, #c2c2c2 50%, transparent);
   --ring-primary: var(--primary);
 
   /* Radius */
@@ -213,7 +249,6 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --primary-active: #0050b2;
   --primary-disabled: #5eb0ef;
   --primary-disabled-foreground: #b7d9f8;
-  --primary-ring: #5eb0ef;
   --primary-subtle: #0050b2;
   --primary-foreground: #ffffff;
   --danger: #f7525f;
@@ -237,14 +272,12 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --buy-active: #0bc0a2;
   --buy-disabled: #0f4a41;
   --buy-disabled-foreground: #3f9e8e;
-  --buy-ring: #0a6b5b;
   --buy-foreground: #ffffff;
   --sell: #f7525f;
   --sell-hover: #f96a75;
   --sell-active: #fb838c;
   --sell-disabled: #5c2328;
   --sell-disabled-foreground: #c7535c;
-  --sell-ring: #a3303a;
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
@@ -254,7 +287,6 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   --book-ask-text: #ff6b76;
 
   /* Focus */
-  --ring: color-mix(in srgb, #404040 50%, transparent);
   --ring-primary: var(--primary);
 
   /* Chart */

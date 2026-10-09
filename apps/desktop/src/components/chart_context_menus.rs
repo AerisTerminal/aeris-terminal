@@ -1141,6 +1141,7 @@ fn chart_settings_actions(
         .gap_1()
         .child(
             Button::new("chart_settings_reset", theme)
+                .variant(ButtonVariant::Ghost)
                 .button_size(ButtonSize::Sm)
                 .round()
                 .icon(header_icon(HugeIcon::Refresh))
@@ -2176,7 +2177,7 @@ fn settings_color_row(
             )
             .child(
                 Button::new(("chart_color_picker", setting as usize), theme)
-                    .variant(ButtonVariant::Secondary)
+                    .variant(ButtonVariant::Outline)
                     .open(open)
                     .aria_label(setting.label())
                     .leading(

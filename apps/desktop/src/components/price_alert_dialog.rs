@@ -379,8 +379,8 @@ fn dropdown_trigger(
 ) -> Button {
     let toggle = app.clone();
     Button::new(id, theme)
-        .variant(ButtonVariant::Secondary)
-        .button_size(ButtonSize::Xl)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Lg)
         .trigger()
         .full_width()
         .open(open)
@@ -572,6 +572,7 @@ fn price_alert_existing_rows(
                 )
                 .child(
                     Button::new(("delete_price_alert", index), theme)
+                        .variant(ButtonVariant::Ghost)
                         .icon(header_icon(HugeIcon::Trash))
                         .aria_label("Delete price alert")
                         .danger_on_hover()
@@ -700,7 +701,7 @@ pub(super) fn price_alert_dialog_layer(
     ))
     .action(
         Button::new("price_alert_cancel", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Outline)
             .label("Cancel")
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_price_alert_dialog);
@@ -708,7 +709,7 @@ pub(super) fn price_alert_dialog_layer(
     )
     .action(
         Button::new("price_alert_create", theme)
-            .variant(ButtonVariant::Positive)
+            .variant(ButtonVariant::Secondary)
             .icon(header_icon(HugeIcon::Add))
             .label("Create alert")
             .disabled(alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER)

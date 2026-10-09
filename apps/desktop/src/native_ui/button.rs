@@ -1,10 +1,23 @@
-//! `Aeris`'s one push/toggle button.
+//! `Aeris`'s one push/toggle button: the Theme System `Button`
+//! (`Theme_System/src/components/ui/showcase.tsx`) in GPUI.
 //!
-//! Every clickable control in the desktop is a [`Button`]: a [`ButtonVariant`] picks its colours,
-//! a [`ButtonSize`] picks its geometry and text size, and the state builders (`selected`, `open`,
-//! `disabled`, `loading`) restyle it from tokens. Callers add only layout (`flex_1`, margins, an
-//! explicit width, or a height for a strip such as a disclosure arrow); they never restyle a
-//! button's colours, borders, radius or hover states.
+//! Pick a [`ButtonVariant`] and a [`ButtonSize`] by name; the variant owns every colour, border,
+//! hover, press, disabled and focus state, exactly as the Theme System defines it. Callers add
+//! only layout (`flex_1`, margins, an explicit width, or a height for a strip such as a
+//! disclosure arrow); they never restyle a button's colours, borders, radius or hover states.
+//!
+//! | Variant       | Look                                    | Use for                               |
+//! |---------------|-----------------------------------------|---------------------------------------|
+//! | `Default`     | `button-fill` neutral fill              | the main neutral action               |
+//! | `Secondary`   | brand `primary` blue fill               | the committing action of a form/dialog |
+//! | `Outline`     | `surface` + `border`, `text-default`    | Cancel, triggers, steppers, filters    |
+//! | `Ghost`       | no fill or border, `text-default`       | toolbar, header and icon actions       |
+//! | `Destructive` | `danger` fill                           | irreversible actions                   |
+//! | `Buy`/`Sell`  | `buy`/`sell` fill                       | trade orders only                      |
+//!
+//! Aeris adds states the Theme System page has no example of, all from the same tokens:
+//! `selected` (a toggle that is on), `open` (a trigger whose menu is open), `danger_on_hover`
+//! (close and delete icons) and `round` (circular icon actions and pill triggers).
 //!
 //! `gpui-base` owns press/release pairing, focus and keyboard click synthesis. A button registers
 //! exactly one activation path: [`Button::on_click`] (release) or [`Button::on_press`] (press,
@@ -36,41 +49,40 @@ use super::{
 type ClickActivation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type PressActivation = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
 
-/// What a button looks like at rest, hovered, pressed, selected and disabled.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The Theme System `Button` variants, by the same names. See the module table for when to use
+/// each one.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ButtonVariant {
-    /// The neutral default call to action (`button-fill`).
-    Filled,
-    /// A raised neutral action on `surface-secondary` with a `border-secondary` outline.
+    /// `default`: neutral `button-fill`, darker on hover and press.
+    #[default]
+    Default,
+    /// `secondary`: the brand `primary` blue, for the action that commits a form or dialog.
     Secondary,
-    /// A bordered action on its resting surface: steppers, filters and select triggers.
+    /// `outline`: `surface` with a `border` outline and `text-default`. Hover and press drop the
+    /// outline and fill with `hover-bg` / `active-bg`.
     Outline,
-    /// Borderless chrome action that takes the surface it sits on and uses the interactive
-    /// text and icon tokens. Toolbar, header and panel icon actions are ghost buttons.
+    /// `ghost`: no fill or outline, `text-default`; hover and press fill with `hover-bg` /
+    /// `active-bg`.
     Ghost,
-    /// Irreversible action (`danger-*`).
+    /// `destructive`: the `danger` ramp.
     Destructive,
-    /// Affirmative confirm and buy action. The `positive` status token has no interaction
-    /// states, so this uses the `buy-*` ramp, which carries the same hue with every state.
-    Positive,
-    /// Sell action (`sell-*`), the trade counterpart of [`ButtonVariant::Positive`].
-    Negative,
+    /// `buy`: the `buy` trade ramp. Trade orders only.
+    Buy,
+    /// `sell`: the `sell` trade ramp. Trade orders only.
+    Sell,
 }
 
-/// The one height scale every button uses. Icon-only buttons are square at this height.
+/// The Theme System `Button` sizes. An icon-only button is square at its size's height, which at
+/// `Default` is the Theme System `icon` size.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ButtonSize {
-    /// 22 px: dense panel-header filters and triggers.
-    Xs,
-    /// 24 px: round panel actions and chart-header controls.
+    /// `sm`: `h-6` (24 px), `px-2`, `text-xs`.
     Sm,
-    /// 28 px: the Theme System default (`h-7`) for dialog and form actions.
+    /// `default`: `h-7` (28 px), `px-2.5`, `text-sm`.
     #[default]
-    Md,
-    /// 32 px: toolbars and order-ticket actions.
+    Default,
+    /// `lg`: `h-8` (32 px), `px-3`, `text-sm`, `--radius-default`.
     Lg,
-    /// 34 px: full-width select triggers in forms.
-    Xl,
 }
 
 /// Geometry is in design rems so a button grows with an enclosing [`RemScale`] panel and renders
@@ -81,115 +93,100 @@ impl ButtonSize {
     /// Logical height in pixels at the root rem size.
     pub(crate) const fn logical_height(self) -> f32 {
         match self {
-            Self::Xs => 22.0,
             Self::Sm => 24.0,
-            Self::Md => 28.0,
+            Self::Default => 28.0,
             Self::Lg => 32.0,
-            Self::Xl => 34.0,
         }
     }
 
     const fn logical_padding_x(self) -> f32 {
         match self {
-            Self::Xs => 6.0,
             Self::Sm => 8.0,
-            Self::Md => 10.0,
-            Self::Lg | Self::Xl => 12.0,
+            Self::Default => 10.0,
+            Self::Lg => 12.0,
         }
     }
 
-    /// Glyph size for an icon that does not carry its own optical size.
+    /// Glyph size for an icon that does not carry its own optical size. The Theme System draws
+    /// 14 px glyphs on the web; GPUI snaps a glyph and its hover fill to device pixels
+    /// separately, so `Sm` and `Default` use 16 px, which keeps the glyph centred at every
+    /// supported scale, and `Lg` keeps the chart header's 18 px glyph.
     fn icon(self) -> Pixels {
         px(match self {
-            Self::Xs => 14.0,
-            Self::Sm | Self::Md => 16.0,
-            Self::Lg | Self::Xl => 18.0,
+            Self::Sm | Self::Default => 16.0,
+            Self::Lg => 18.0,
         })
     }
 
     const fn dense_text(self) -> bool {
-        matches!(self, Self::Xs | Self::Sm)
+        matches!(self, Self::Sm)
+    }
+
+    const fn radius(self) -> RadiusToken {
+        match self {
+            Self::Sm | Self::Default => RadiusToken::Button,
+            Self::Lg => RadiusToken::Default,
+        }
     }
 }
 
-/// Resolved token colours for one variant on one resting surface.
+/// Resolved token colours for one variant.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ButtonAppearance {
     /// `None` leaves the button transparent over whatever it sits on.
     fill: Option<ThemeColor>,
     foreground: ThemeColor,
+    /// An outline at rest; every variant keeps a transparent border of the same width so
+    /// changing state never shifts the layout.
     border: Option<ThemeColor>,
+    /// The outline disappears while hovered, pressed, selected or disabled (`outline`).
+    border_rests_only: bool,
     hover_fill: ThemeColor,
     hover_foreground: ThemeColor,
     active_fill: ThemeColor,
     selected_fill: ThemeColor,
     selected_foreground: ThemeColor,
-    open_border: Option<ThemeColor>,
-    disabled_fill: Option<ThemeColor>,
+    disabled_fill: ThemeColor,
     disabled_foreground: ThemeColor,
-    focus_ring: ThemeColor,
 }
 
 fn button_appearance(
     theme: &AerisTheme,
     variant: ButtonVariant,
-    resting: Option<ThemeColor>,
     danger_on_hover: bool,
 ) -> ButtonAppearance {
     let colors = theme.colors;
     let mut appearance = match variant {
-        ButtonVariant::Filled => ButtonAppearance {
-            fill: Some(colors.button_fill),
-            foreground: colors.button_fill_foreground,
-            border: None,
-            hover_fill: colors.button_fill_hover,
-            hover_foreground: colors.button_fill_foreground,
-            active_fill: colors.button_fill_active,
-            selected_fill: colors.button_fill_active,
-            selected_foreground: colors.button_fill_foreground,
-            open_border: None,
-            disabled_fill: Some(colors.disabled_bg),
-            disabled_foreground: colors.text_muted,
-            focus_ring: colors.ring,
-        },
-        ButtonVariant::Secondary | ButtonVariant::Outline | ButtonVariant::Ghost => {
-            let (default_resting, foreground, border, selected_foreground) = match variant {
-                ButtonVariant::Secondary => (
-                    Some(colors.surface_secondary),
-                    colors.text_primary,
-                    Some(colors.border_secondary),
-                    colors.text_primary,
-                ),
-                ButtonVariant::Outline => (
-                    Some(colors.surface),
-                    colors.text_primary,
-                    Some(colors.border),
-                    colors.text_primary,
-                ),
-                _ => (None, colors.text_interactive, None, colors.text_active),
-            };
-            let fill = resting.or(default_resting);
-            // State tokens composite over an opaque resting surface, and paint as they are on a
-            // transparent ghost button.
-            let state = |token: ThemeColor| fill.map_or(token, |fill| token.over(fill));
-            let hover_foreground = if border.is_some() {
-                foreground
-            } else {
-                colors.text_hover
-            };
+        ButtonVariant::Default => ramp(
+            colors.button_fill,
+            colors.button_fill_foreground,
+            colors.button_fill_hover,
+            colors.button_fill_active,
+            colors.disabled_bg,
+            colors.text_muted,
+        ),
+        ButtonVariant::Secondary => ramp(
+            colors.primary,
+            colors.primary_foreground,
+            colors.primary_hover,
+            colors.primary_active,
+            colors.primary_disabled,
+            colors.primary_disabled_foreground,
+        ),
+        ButtonVariant::Outline | ButtonVariant::Ghost => {
+            let outline = variant == ButtonVariant::Outline;
             ButtonAppearance {
-                fill,
-                foreground,
-                border,
-                hover_fill: state(colors.hover_bg),
-                hover_foreground,
-                active_fill: state(colors.active_bg),
-                selected_fill: state(colors.active_bg),
-                selected_foreground,
-                open_border: border.map(|_| colors.border_strong),
-                disabled_fill: fill,
+                fill: outline.then_some(colors.surface),
+                foreground: colors.text_default,
+                border: outline.then_some(colors.border),
+                border_rests_only: outline,
+                hover_fill: colors.hover_bg,
+                hover_foreground: colors.text_default,
+                active_fill: colors.active_bg,
+                selected_fill: colors.active_bg,
+                selected_foreground: colors.text_active,
+                disabled_fill: colors.disabled_bg,
                 disabled_foreground: colors.text_muted,
-                focus_ring: colors.ring,
             }
         }
         ButtonVariant::Destructive => ramp(
@@ -199,25 +196,22 @@ fn button_appearance(
             colors.danger_active,
             colors.danger_disabled,
             colors.danger_disabled_foreground,
-            colors.danger_ring,
         ),
-        ButtonVariant::Positive => ramp(
+        ButtonVariant::Buy => ramp(
             colors.buy,
             colors.buy_foreground,
             colors.buy_hover,
             colors.buy_active,
             colors.buy_disabled,
             colors.buy_disabled_foreground,
-            colors.buy_ring,
         ),
-        ButtonVariant::Negative => ramp(
+        ButtonVariant::Sell => ramp(
             colors.sell,
             colors.sell_foreground,
             colors.sell_hover,
             colors.sell_active,
             colors.sell_disabled,
             colors.sell_disabled_foreground,
-            colors.sell_ring,
         ),
     };
     if danger_on_hover {
@@ -228,6 +222,7 @@ fn button_appearance(
     appearance
 }
 
+/// A filled variant: one token ramp for rest, hover, press and disabled.
 const fn ramp(
     fill: ThemeColor,
     foreground: ThemeColor,
@@ -235,21 +230,19 @@ const fn ramp(
     active: ThemeColor,
     disabled: ThemeColor,
     disabled_foreground: ThemeColor,
-    ring: ThemeColor,
 ) -> ButtonAppearance {
     ButtonAppearance {
         fill: Some(fill),
         foreground,
         border: None,
+        border_rests_only: false,
         hover_fill: hover,
         hover_foreground: foreground,
         active_fill: active,
         selected_fill: active,
         selected_foreground: foreground,
-        open_border: None,
-        disabled_fill: Some(disabled),
+        disabled_fill: disabled,
         disabled_foreground,
-        focus_ring: ring,
     }
 }
 
@@ -286,14 +279,20 @@ impl ButtonFlags {
 struct ResolvedStyle {
     fill: Option<ThemeColor>,
     foreground: ThemeColor,
+    /// The visible outline; `None` keeps the border transparent.
     border: Option<ThemeColor>,
 }
 
 impl ResolvedStyle {
     fn new(appearance: &ButtonAppearance, flags: ButtonFlags) -> Self {
-        let (fill, foreground) = if flags.has(ButtonFlags::DISABLED) {
-            (appearance.disabled_fill, appearance.disabled_foreground)
-        } else if flags.has(ButtonFlags::SELECTED) || flags.has(ButtonFlags::OPEN) {
+        let disabled = flags.has(ButtonFlags::DISABLED);
+        let engaged = flags.has(ButtonFlags::SELECTED) || flags.has(ButtonFlags::OPEN);
+        let (fill, foreground) = if disabled {
+            (
+                Some(appearance.disabled_fill),
+                appearance.disabled_foreground,
+            )
+        } else if engaged {
             (
                 Some(appearance.selected_fill),
                 appearance.selected_foreground,
@@ -301,11 +300,9 @@ impl ResolvedStyle {
         } else {
             (appearance.fill, appearance.foreground)
         };
-        let border = if flags.has(ButtonFlags::OPEN) {
-            appearance.open_border.or(appearance.border)
-        } else {
-            appearance.border
-        };
+        let border = appearance
+            .border
+            .filter(|_| !(appearance.border_rests_only && (disabled || engaged)));
         Self {
             fill,
             foreground,
@@ -340,7 +337,6 @@ pub(crate) struct Button {
     theme: AerisTheme,
     variant: ButtonVariant,
     size: ButtonSize,
-    resting_fill: Option<ThemeColor>,
     layout: StyleRefinement,
     icon: Option<Icon>,
     leading: Option<AnyElement>,
@@ -356,16 +352,15 @@ pub(crate) struct Button {
 }
 
 impl Button {
-    /// A medium ghost button.
+    /// A `Default`-variant, `Default`-size button, as in the Theme System.
     pub(crate) fn new(id: impl Into<ElementId>, theme: &AerisTheme) -> Self {
         let id = id.into();
         Self {
             base: BaseButton::new(id.clone()),
             id,
             theme: *theme,
-            variant: ButtonVariant::Ghost,
+            variant: ButtonVariant::default(),
             size: ButtonSize::default(),
-            resting_fill: None,
             layout: StyleRefinement::default(),
             icon: None,
             leading: None,
@@ -391,14 +386,7 @@ impl Button {
         self
     }
 
-    /// The opaque surface a ghost, outline or secondary button rests on. Hover, press and
-    /// selected fills composite the alpha tokens over it instead of replacing it.
-    pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
-        self.resting_fill = Some(fill);
-        self
-    }
-
-    /// A full-radius pill or circle instead of `--radius-button`.
+    /// A full-radius pill or circle instead of the size's radius.
     pub(crate) fn round(mut self) -> Self {
         self.flags.set(ButtonFlags::ROUND, true);
         self
@@ -466,7 +454,7 @@ impl Button {
         self
     }
 
-    /// A trigger whose menu is open: the selected fill plus the `border-strong` outline.
+    /// A trigger whose menu is open: drawn like the pressed state until the menu closes.
     pub(crate) fn open(mut self, open: bool) -> Self {
         self.flags.set(ButtonFlags::OPEN, open);
         self
@@ -529,7 +517,6 @@ impl Button {
         button_appearance(
             &self.theme,
             self.variant,
-            self.resting_fill,
             self.flags.has(ButtonFlags::DANGER_ON_HOVER),
         )
     }
@@ -538,7 +525,7 @@ impl Button {
         let token = if self.flags.has(ButtonFlags::ROUND) {
             RadiusToken::Full
         } else {
-            RadiusToken::Button
+            self.size.radius()
         };
         px(f32::from(token.logical_pixels()))
     }
@@ -694,29 +681,45 @@ fn paint_states(
     appearance: ButtonAppearance,
     resolved: ResolvedStyle,
     border_width: Pixels,
+    focus_ring: ThemeColor,
     accepts_input: bool,
 ) -> BaseButton {
+    let drop_border = appearance.border_rests_only;
+    // Every variant keeps a border of `--border-width`, transparent unless it is outlined, so a
+    // state change never shifts the layout.
     button
         .when_some(resolved.fill, |button, fill| button.bg(gpui_color(fill)))
         .text_color(gpui_color(resolved.foreground))
-        .when_some(resolved.border, |button, border| {
-            button.border(border_width).border_color(gpui_color(border))
-        })
+        .border(border_width)
+        .border_color(
+            resolved
+                .border
+                .map_or_else(gpui::transparent_black, gpui_color),
+        )
         .when(accepts_input, |button| {
             button
                 .cursor_pointer()
                 .hover(move |style| {
-                    style
+                    let style = style
                         .bg(gpui_color(appearance.hover_fill))
-                        .text_color(gpui_color(appearance.hover_foreground))
+                        .text_color(gpui_color(appearance.hover_foreground));
+                    if drop_border {
+                        style.border_color(gpui::transparent_black())
+                    } else {
+                        style
+                    }
                 })
-                .active(move |style| style.bg(gpui_color(appearance.active_fill)))
+                .active(move |style| {
+                    let style = style.bg(gpui_color(appearance.active_fill));
+                    if drop_border {
+                        style.border_color(gpui::transparent_black())
+                    } else {
+                        style
+                    }
+                })
         })
-        .focus_visible(move |style| {
-            style
-                .border_2()
-                .border_color(gpui_color(appearance.focus_ring))
-        })
+        // The Theme System focus style for every variant: a 2px `ring-primary` outline.
+        .focus_visible(move |style| style.border_2().border_color(gpui_color(focus_ring)))
 }
 
 /// Registers the button's single activation path.
@@ -783,6 +786,7 @@ impl RenderOnce for Button {
             appearance,
             resolved,
             border_width,
+            self.theme.colors.ring_primary,
             policy.accepts_input(),
         );
         let button = attach_activation(button, self.activation.filter(|_| policy.accepts_input()));
@@ -810,6 +814,7 @@ pub(crate) fn close_button(
     on_close: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Button {
     Button::new(id, theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .round()
         .danger_on_hover()
@@ -823,31 +828,43 @@ mod tests {
     use aeris_design_system::AerisTheme;
     use gpui::px;
 
-    use super::{ButtonPolicy, ButtonSize, ButtonVariant, button_appearance};
+    use aeris_design_system::RadiusToken;
+
+    use super::{
+        ButtonFlags, ButtonPolicy, ButtonSize, ButtonVariant, ResolvedStyle, button_appearance,
+    };
 
     #[test]
-    fn sizes_follow_the_one_height_scale() {
-        let heights: Vec<f32> = [
-            ButtonSize::Xs,
-            ButtonSize::Sm,
-            ButtonSize::Md,
-            ButtonSize::Lg,
-            ButtonSize::Xl,
-        ]
-        .into_iter()
-        .map(ButtonSize::logical_height)
-        .collect();
-        assert_eq!(heights, [22.0, 24.0, 28.0, 32.0, 34.0]);
-        assert_eq!(ButtonSize::default(), ButtonSize::Md);
+    fn sizes_follow_the_theme_system_button_sizes() {
+        let geometry: Vec<(f32, f32, RadiusToken)> =
+            [ButtonSize::Sm, ButtonSize::Default, ButtonSize::Lg]
+                .into_iter()
+                .map(|size| {
+                    (
+                        size.logical_height(),
+                        size.logical_padding_x(),
+                        size.radius(),
+                    )
+                })
+                .collect();
+        // sm: h-6 px-2, default: h-7 px-2.5, lg: h-8 px-3 rounded-default.
+        assert_eq!(
+            geometry,
+            [
+                (24.0, 8.0, RadiusToken::Button),
+                (28.0, 10.0, RadiusToken::Button),
+                (32.0, 12.0, RadiusToken::Default),
+            ]
+        );
+        assert_eq!(ButtonSize::default(), ButtonSize::Default);
+        assert_eq!(ButtonVariant::default(), ButtonVariant::Default);
     }
 
     #[test]
     fn glyphs_grow_with_the_button_size() {
-        assert_eq!(ButtonSize::Xl.icon(), px(18.0));
         assert_eq!(ButtonSize::Lg.icon(), px(18.0));
-        assert_eq!(ButtonSize::Md.icon(), px(16.0));
+        assert_eq!(ButtonSize::Default.icon(), px(16.0));
         assert_eq!(ButtonSize::Sm.icon(), px(16.0));
-        assert_eq!(ButtonSize::Xs.icon(), px(14.0));
     }
 
     #[test]
@@ -894,85 +911,136 @@ mod tests {
         }
     }
 
+    /// Each filled variant is one Theme System token ramp: `(fill, text, hover, press, disabled
+    /// fill, disabled text)`.
     #[test]
-    fn variants_use_their_token_ramps_in_both_modes() {
+    fn filled_variants_match_the_theme_system_button() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
-            let colors = theme.colors;
-            let filled = button_appearance(&theme, ButtonVariant::Filled, None, false);
-            assert_eq!(filled.fill, Some(colors.button_fill));
-            assert_eq!(filled.foreground, colors.button_fill_foreground);
-            assert_eq!(filled.hover_fill, colors.button_fill_hover);
-
-            let secondary = button_appearance(&theme, ButtonVariant::Secondary, None, false);
-            assert_eq!(secondary.fill, Some(colors.surface_secondary));
-            assert_eq!(secondary.border, Some(colors.border_secondary));
-
-            let outline = button_appearance(&theme, ButtonVariant::Outline, None, false);
-            assert_eq!(outline.fill, Some(colors.surface));
-            assert_eq!(outline.border, Some(colors.border));
-            assert_eq!(outline.open_border, Some(colors.border_strong));
-
-            let destructive = button_appearance(&theme, ButtonVariant::Destructive, None, false);
-            assert_eq!(destructive.fill, Some(colors.danger));
-            assert_eq!(destructive.disabled_fill, Some(colors.danger_disabled));
-            assert_eq!(destructive.focus_ring, colors.danger_ring);
-
-            let positive = button_appearance(&theme, ButtonVariant::Positive, None, false);
-            assert_eq!(positive.fill, Some(colors.buy));
-            assert_eq!(positive.hover_fill, colors.buy_hover);
-
-            let negative = button_appearance(&theme, ButtonVariant::Negative, None, false);
-            assert_eq!(negative.fill, Some(colors.sell));
-            assert_eq!(negative.active_fill, colors.sell_active);
-            assert_eq!(
-                negative.disabled_foreground,
-                colors.sell_disabled_foreground
-            );
+            let c = theme.colors;
+            for (variant, ramp) in [
+                (
+                    ButtonVariant::Default,
+                    (
+                        c.button_fill,
+                        c.button_fill_foreground,
+                        c.button_fill_hover,
+                        c.button_fill_active,
+                        c.disabled_bg,
+                        c.text_muted,
+                    ),
+                ),
+                (
+                    ButtonVariant::Secondary,
+                    (
+                        c.primary,
+                        c.primary_foreground,
+                        c.primary_hover,
+                        c.primary_active,
+                        c.primary_disabled,
+                        c.primary_disabled_foreground,
+                    ),
+                ),
+                (
+                    ButtonVariant::Destructive,
+                    (
+                        c.danger,
+                        c.danger_foreground,
+                        c.danger_hover,
+                        c.danger_active,
+                        c.danger_disabled,
+                        c.danger_disabled_foreground,
+                    ),
+                ),
+                (
+                    ButtonVariant::Buy,
+                    (
+                        c.buy,
+                        c.buy_foreground,
+                        c.buy_hover,
+                        c.buy_active,
+                        c.buy_disabled,
+                        c.buy_disabled_foreground,
+                    ),
+                ),
+                (
+                    ButtonVariant::Sell,
+                    (
+                        c.sell,
+                        c.sell_foreground,
+                        c.sell_hover,
+                        c.sell_active,
+                        c.sell_disabled,
+                        c.sell_disabled_foreground,
+                    ),
+                ),
+            ] {
+                let appearance = button_appearance(&theme, variant, false);
+                assert_eq!(
+                    (
+                        appearance.fill,
+                        appearance.foreground,
+                        appearance.hover_fill,
+                        appearance.active_fill,
+                        appearance.disabled_fill,
+                        appearance.disabled_foreground,
+                    ),
+                    (Some(ramp.0), ramp.1, ramp.2, ramp.3, ramp.4, ramp.5),
+                    "{variant:?}"
+                );
+                assert_eq!(appearance.border, None, "{variant:?} has no outline");
+            }
         }
     }
 
     #[test]
-    fn ghost_buttons_composite_states_over_their_resting_surface() {
-        let theme = AerisTheme::dark();
-        let colors = theme.colors;
-        let ghost = button_appearance(
-            &theme,
-            ButtonVariant::Ghost,
-            Some(colors.surface_secondary),
-            false,
-        );
-        assert_eq!(ghost.fill, Some(colors.surface_secondary));
-        assert_eq!(ghost.foreground, colors.text_interactive);
-        assert_eq!(
-            ghost.hover_fill,
-            colors.hover_bg.over(colors.surface_secondary)
-        );
-        assert_eq!(ghost.hover_foreground, colors.text_hover);
-        assert_eq!(
-            ghost.selected_fill,
-            colors.active_bg.over(colors.surface_secondary)
-        );
-        assert_eq!(ghost.selected_foreground, colors.text_active);
-        assert_eq!(ghost.disabled_foreground, colors.text_muted);
-        assert_eq!(ghost.border, None);
+    fn outline_rests_on_surface_and_drops_its_border_when_engaged() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let c = theme.colors;
+            let outline = button_appearance(&theme, ButtonVariant::Outline, false);
+            // border-border bg-surface text-text-default
+            assert_eq!(outline.fill, Some(c.surface));
+            assert_eq!(outline.border, Some(c.border));
+            assert_eq!(outline.foreground, c.text_default);
+            // hover:border-transparent hover:bg-hover-bg, active:bg-active-bg
+            assert!(outline.border_rests_only);
+            assert_eq!(outline.hover_fill, c.hover_bg);
+            assert_eq!(outline.active_fill, c.active_bg);
+            // disabled:border-transparent disabled:bg-disabled-bg disabled:text-text-muted
+            let mut disabled = ButtonFlags::default();
+            disabled.set(ButtonFlags::DISABLED, true);
+            let resolved = ResolvedStyle::new(&outline, disabled);
+            assert_eq!(resolved.border, None);
+            assert_eq!(resolved.fill, Some(c.disabled_bg));
+            assert_eq!(resolved.foreground, c.text_muted);
+            let resting = ResolvedStyle::new(&outline, ButtonFlags::default());
+            assert_eq!(resting.border, Some(c.border));
+        }
     }
 
     #[test]
-    fn ghost_buttons_without_a_surface_stay_transparent_and_use_raw_state_tokens() {
-        let theme = AerisTheme::light();
-        let colors = theme.colors;
-        let ghost = button_appearance(&theme, ButtonVariant::Ghost, None, false);
-        assert_eq!(ghost.fill, None);
-        assert_eq!(ghost.disabled_fill, None);
-        assert_eq!(ghost.hover_fill, colors.hover_bg);
-        assert_eq!(ghost.selected_fill, colors.active_bg);
+    fn ghost_is_text_only_until_hovered() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let c = theme.colors;
+            let ghost = button_appearance(&theme, ButtonVariant::Ghost, false);
+            // border-transparent text-text-default hover:bg-hover-bg active:bg-active-bg
+            assert_eq!(ghost.fill, None);
+            assert_eq!(ghost.border, None);
+            assert_eq!(ghost.foreground, c.text_default);
+            assert_eq!(ghost.hover_fill, c.hover_bg);
+            assert_eq!(ghost.active_fill, c.active_bg);
+            assert_eq!(ghost.disabled_fill, c.disabled_bg);
+            assert_eq!(ghost.disabled_foreground, c.text_muted);
+            // A ghost toggle that is on rests on the pressed fill.
+            assert_eq!(ghost.selected_fill, c.active_bg);
+            assert_eq!(ghost.selected_foreground, c.text_active);
+        }
     }
 
     #[test]
     fn close_actions_turn_danger_on_hover() {
         let theme = AerisTheme::light();
         let colors = theme.colors;
-        let close = button_appearance(&theme, ButtonVariant::Ghost, None, true);
+        let close = button_appearance(&theme, ButtonVariant::Ghost, true);
         assert_eq!(close.fill, None);
         assert_eq!(close.hover_fill, colors.danger);
         assert_eq!(close.hover_foreground, colors.danger_foreground);

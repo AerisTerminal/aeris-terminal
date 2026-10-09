@@ -571,15 +571,28 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "bullish"), "#089981");
         assert_eq!(token_source(&dark_tokens, "bearish"), "#f7525f");
         assert_eq!(
-            token_source(&light_tokens, "ring"),
-            "color-mix(in srgb, #c2c2c2 50%, transparent)"
-        );
-        assert_eq!(
             token_source(&light_tokens, "ring-primary"),
             "var(--primary)"
         );
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             assert_eq!(theme.colors.ring_primary, theme.colors.primary);
+        }
+    }
+
+    /// `--ring-primary` is the only focus style; the retired neutral and per-action rings must
+    /// not return.
+    #[test]
+    fn ring_primary_is_the_only_focus_token() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            for retired in ["ring", "primary-ring", "buy-ring", "sell-ring"] {
+                assert!(
+                    theme
+                        .color_tokens()
+                        .iter()
+                        .all(|token| token.canonical_identifier != retired),
+                    "retired focus token --{retired} is back"
+                );
+            }
         }
     }
 
@@ -805,10 +818,10 @@ mod tests {
             "-webkit-font-smoothing: antialiased;",
             "font-synthesis: none;",
             "transition: background-color 150ms ease, color 150ms ease;",
-            "outline: 2px solid var(--ring);",
-            "outline-offset: 2px;",
+            "outline: 2px solid var(--ring-primary);",
+            "outline-offset: 0;",
             "input:focus-visible",
-            "outline-color: var(--ring);",
+            "outline-color: var(--ring-primary);",
             "cursor: not-allowed;",
             "@media (prefers-reduced-motion: reduce)",
         ] {

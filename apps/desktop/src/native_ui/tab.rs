@@ -295,7 +295,9 @@ impl RenderOnce for Tab {
                         tab.hover(move |tab| tab.text_color(gpui_color(state.hover_text)))
                             .active(move |tab| tab.text_color(gpui_color(state.active_text)))
                     })
-                    .focus_visible(move |tab| tab.border_color(gpui_color(colors.border_strong)))
+                    .focus_visible(move |tab| {
+                        tab.border_2().border_color(gpui_color(colors.ring_primary))
+                    })
             }
             TabSurface::Sidebar => {
                 let state = sidebar_tab_colors(&self.theme, selected, disabled);
@@ -314,7 +316,9 @@ impl RenderOnce for Tab {
                                 .text_color(gpui_color(state.hover_text))
                         })
                     })
-                    .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring)).border_2())
+                    .focus_visible(move |tab| {
+                        tab.border_2().border_color(gpui_color(colors.ring_primary))
+                    })
             }
             TabSurface::Chrome {
                 resting,
@@ -333,7 +337,9 @@ impl RenderOnce for Tab {
                             .text_color(gpui_color(colors.text_primary))
                     })
                 })
-                .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring)).border_2()),
+                .focus_visible(move |tab| {
+                    tab.border_2().border_color(gpui_color(colors.ring_primary))
+                }),
         }
         .children(self.children);
         tab.style().refine(&self.style);

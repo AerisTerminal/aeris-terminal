@@ -409,8 +409,8 @@ fn time_sales_filter_button(
     theme: &AerisTheme,
 ) -> Button {
     Button::new(id, theme)
-        .variant(ButtonVariant::Secondary)
-        .button_size(ButtonSize::Xs)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Sm)
         .label(label)
         .whitespace_nowrap()
         .on_click(move |_, _, cx| on_click(cx))

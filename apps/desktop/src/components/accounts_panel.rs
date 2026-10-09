@@ -265,7 +265,7 @@ fn broker_card(
     };
     let action = if connected {
         Button::new(disconnect_id, theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Outline)
             .label("Disconnect")
             .on_click(move |_, window, cx| match broker {
                 HostedBroker::Tastytrade => {
@@ -275,7 +275,7 @@ fn broker_card(
             })
     } else {
         Button::new(connect_id, theme)
-            .variant(ButtonVariant::Filled)
+            .variant(ButtonVariant::Default)
             .label("Connect")
             .on_click(move |_, window, cx| match broker {
                 HostedBroker::Tastytrade => {
@@ -387,7 +387,7 @@ fn practice_accounts(
     let open = app.clone();
     list.child(
         Button::new("accounts_new_practice_account", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Outline)
             .icon(header_icon(HugeIcon::Add))
             .label("New practice account")
             .button_size(ButtonSize::Lg)
@@ -509,6 +509,7 @@ fn delete_account_button(
     let delete = app.clone();
     let account_id = account.id.clone();
     Button::new(("accounts_practice_delete", index), theme)
+        .variant(ButtonVariant::Ghost)
         .icon(header_icon(HugeIcon::Trash))
         .aria_label(format!("Delete {}", account.display_name))
         .danger_on_hover()

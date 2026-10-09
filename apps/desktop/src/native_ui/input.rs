@@ -1,6 +1,4 @@
-use aeris_design_system::{
-    AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
-};
+use aeris_design_system::{AerisTheme, RadiusToken, TypographyRole, platform_font_family};
 use gpui::{
     App, BoxShadow, Entity, Focusable, Hsla, IntoElement, Pixels, RenderOnce, Window, div,
     prelude::*, px,
@@ -14,10 +12,11 @@ use super::{
     theme::{gpui_color, input_appearance, platform_border_width},
 };
 
-/// Width of the halo drawn outside the border on focus and while invalid, matching the
-/// Theme System `Input` (`ring-[3px]`). One thin border plus this wider translucent halo reads
-/// as a single outlined field with a soft glow, not as two borders.
-const RING_WIDTH: f32 = 3.0;
+/// The shared focus outline, `outline: 2px solid var(--ring-primary)` at offset 0. GPUI has no
+/// outline, so it is drawn as a spread shadow hugging the border.
+const FOCUS_RING_WIDTH: f32 = 2.0;
+/// The invalid halo, Theme System `Input` `aria-invalid:ring-[3px]` in `danger-ring`.
+const INVALID_RING_WIDTH: f32 = 3.0;
 
 /// `Aeris`'s presentation wrapper around `gpui-base`'s single-line editing
 /// engine. Base owns text editing, selection, IME, clipboard, focus, keyboard,
@@ -30,7 +29,6 @@ pub(crate) struct Input {
     /// Field fill on hover and while focused.
     hover_fill: Option<Hsla>,
     border_color: Option<Hsla>,
-    focus_border_color: Option<Hsla>,
     focus_ring_color: Option<Hsla>,
     invalid_border_color: Option<Hsla>,
     invalid_ring_color: Option<Hsla>,
@@ -52,7 +50,6 @@ impl Input {
             fill: None,
             hover_fill: None,
             border_color: None,
-            focus_border_color: None,
             focus_ring_color: None,
             invalid_border_color: None,
             invalid_ring_color: None,
@@ -67,18 +64,11 @@ impl Input {
         self.fill = Some(gpui_color(appearance.fill));
         self.hover_fill = Some(gpui_color(appearance.hover_fill));
         self.border_color = Some(gpui_color(appearance.border));
-        self.focus_border_color = Some(gpui_color(appearance.focus_border));
         self.focus_ring_color = Some(gpui_color(appearance.focus_ring));
         self.invalid_border_color = Some(gpui_color(appearance.invalid_border));
         self.invalid_ring_color = Some(gpui_color(appearance.invalid_ring));
         self.muted_text_color = Some(gpui_color(theme.colors.text_secondary));
         self.border_width = Some(platform_border_width(theme));
-        self
-    }
-
-    /// Replaces the focus border color for a field that marks focus with another token.
-    pub(crate) fn focus_border(mut self, color: ThemeColor) -> Self {
-        self.focus_border_color = Some(gpui_color(color));
         self
     }
 
@@ -129,26 +119,25 @@ impl RenderOnce for Input {
         let invalid = self.has_presentation(Self::INVALID);
         let focus_shown = focused && self.has_presentation(Self::FOCUS_BORDERED);
         let resting_border = self.border_color.unwrap_or_else(|| color.opacity(0.25));
+        // Focus keeps the resting border and adds the ring; only an invalid value recolours it.
         let border_color = if invalid {
             self.invalid_border_color.unwrap_or(resting_border)
-        } else if focus_shown {
-            self.focus_border_color.unwrap_or(resting_border)
         } else {
             resting_border
         };
-        let ring_color = if invalid {
+        let ring = if invalid {
             self.invalid_ring_color
+                .map(|ring_color| (ring_color, INVALID_RING_WIDTH))
         } else if focus_shown {
-            Some(self.focus_ring_color.unwrap_or_else(|| color.opacity(0.65)))
+            Some((
+                self.focus_ring_color.unwrap_or_else(|| color.opacity(0.65)),
+                FOCUS_RING_WIDTH,
+            ))
         } else {
             None
         };
-        let fill = if focus_shown {
-            self.hover_fill.or(self.fill)
-        } else {
-            self.fill
-        };
-        let hover_fill = self.hover_fill.filter(|_| !focus_shown);
+        let fill = self.fill;
+        let hover_fill = self.hover_fill;
         let muted_text_color = self.muted_text_color.unwrap_or_else(|| color.opacity(0.74));
 
         self.state.update(cx, |state, _| {
@@ -181,9 +170,9 @@ impl RenderOnce for Input {
                     .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
                     .border_color(border_color)
             })
-            .when_some(ring_color, |element, ring_color| {
+            .when_some(ring, |element, (ring_color, width)| {
                 element.shadow(vec![
-                    BoxShadow::new(px(0.0), px(0.0), ring_color).spread_radius(px(RING_WIDTH)),
+                    BoxShadow::new(px(0.0), px(0.0), ring_color).spread_radius(px(width)),
                 ])
             })
             .child(BaseInput::new(&self.state))

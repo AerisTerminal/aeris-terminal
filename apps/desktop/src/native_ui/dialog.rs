@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use super::{
-    button::{Button, close_button},
+    button::{Button, ButtonVariant, close_button},
     platform_font_weight,
     theme::{gpui_color, platform_border_width},
 };
@@ -305,17 +305,17 @@ impl RenderOnce for Dialog {
 /// Which kind of action a confirmation commits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConfirmationTone {
-    /// Irreversible removal; uses the `danger` button.
+    /// Irreversible removal; uses the `Destructive` button.
     Destructive,
-    /// Creating or committing something; uses the positive button.
+    /// Creating or committing something; uses the `Secondary` (brand) button.
     Positive,
 }
 
 impl ConfirmationTone {
-    const fn button_variant(self) -> super::button::ButtonVariant {
+    const fn button_variant(self) -> ButtonVariant {
         match self {
-            Self::Destructive => super::button::ButtonVariant::Destructive,
-            Self::Positive => super::button::ButtonVariant::Positive,
+            Self::Destructive => ButtonVariant::Destructive,
+            Self::Positive => ButtonVariant::Secondary,
         }
     }
 }
@@ -397,7 +397,7 @@ impl RenderOnce for ConfirmationDialog {
         .children(self.children)
         .action(
             Button::new("confirmation_dialog_cancel", &theme)
-                .variant(super::button::ButtonVariant::Secondary)
+                .variant(ButtonVariant::Outline)
                 .label("Cancel")
                 .on_click(move |_, window, cx| cancel(window, cx)),
         )
@@ -430,7 +430,7 @@ mod tests {
                     .title("Delete")
                     .action(
                         Button::new("cancel", &self.0)
-                            .variant(ButtonVariant::Secondary)
+                            .variant(ButtonVariant::Outline)
                             .label("Cancel")
                             .on_click(|_, _, _| {})
                             .debug_selector(|| "footer_cancel".into()),
@@ -471,14 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_tones_use_destructive_and_positive_buttons() {
+    fn confirmation_tones_use_destructive_and_brand_buttons() {
         assert_eq!(
             ConfirmationTone::Destructive.button_variant(),
             ButtonVariant::Destructive
         );
         assert_eq!(
             ConfirmationTone::Positive.button_variant(),
-            ButtonVariant::Positive
+            ButtonVariant::Secondary
         );
     }
 }

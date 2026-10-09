@@ -84,7 +84,6 @@
   --primary-active: #0050b2;
   --primary-disabled: #b7d9f8;
   --primary-disabled-foreground: #5eb0ef;
-  --primary-ring: #cee7fe;
   --primary-subtle: #e1f0ff;
   --primary-foreground: #ffffff;
   --danger: #f7525f;
@@ -108,14 +107,12 @@
   --buy-active: #056f5c;
   --buy-disabled: #b3e3da;
   --buy-disabled-foreground: #5cbfae;
-  --buy-ring: #b3e3da;
   --buy-foreground: #ffffff;
   --sell: #f7525f;
   --sell-hover: #e5404d;
   --sell-active: #c9303c;
   --sell-disabled: #ffc9c9;
   --sell-disabled-foreground: #ffa2a2;
-  --sell-ring: #ffc9c9;
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
@@ -125,7 +122,6 @@
   --book-ask-text: #d91a2b;
 
   /* Focus */
-  --ring: color-mix(in srgb, #c2c2c2 50%, transparent);
   --ring-primary: var(--primary);
 
   /* Radius */
@@ -207,7 +203,6 @@
   --primary-active: #0050b2;
   --primary-disabled: #5eb0ef;
   --primary-disabled-foreground: #b7d9f8;
-  --primary-ring: #5eb0ef;
   --primary-subtle: #0050b2;
   --primary-foreground: #ffffff;
   --danger: #f7525f;
@@ -231,14 +226,12 @@
   --buy-active: #0bc0a2;
   --buy-disabled: #0f4a41;
   --buy-disabled-foreground: #3f9e8e;
-  --buy-ring: #0a6b5b;
   --buy-foreground: #ffffff;
   --sell: #f7525f;
   --sell-hover: #f96a75;
   --sell-active: #fb838c;
   --sell-disabled: #5c2328;
   --sell-disabled-foreground: #c7535c;
-  --sell-ring: #a3303a;
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
@@ -248,7 +241,6 @@
   --book-ask-text: #ff6b76;
 
   /* Focus */
-  --ring: color-mix(in srgb, #404040 50%, transparent);
   --ring-primary: var(--primary);
 
   /* Chart */
@@ -303,8 +295,8 @@ button,
 }
 
 :focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
+  outline: 2px solid var(--ring-primary);
+  outline-offset: 0;
 }
 
 ::selection {
@@ -391,7 +383,7 @@ textarea::placeholder {
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline-color: var(--ring);
+  outline-color: var(--ring-primary);
 }
 
 * {

@@ -332,8 +332,8 @@ fn order_button(
 
 const fn trade_variant(side: aeris_trading::OrderSide) -> ButtonVariant {
     match side {
-        aeris_trading::OrderSide::Buy => ButtonVariant::Positive,
-        aeris_trading::OrderSide::Sell => ButtonVariant::Negative,
+        aeris_trading::OrderSide::Buy => ButtonVariant::Buy,
+        aeris_trading::OrderSide::Sell => ButtonVariant::Sell,
     }
 }
 
@@ -490,11 +490,11 @@ mod tests {
         // The variants' `buy-*` / `sell-*` token ramps are covered in `native_ui::button`.
         assert_eq!(
             trade_variant(aeris_trading::OrderSide::Buy),
-            ButtonVariant::Positive
+            ButtonVariant::Buy
         );
         assert_eq!(
             trade_variant(aeris_trading::OrderSide::Sell),
-            ButtonVariant::Negative
+            ButtonVariant::Sell
         );
     }
 

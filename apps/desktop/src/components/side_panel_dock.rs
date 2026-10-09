@@ -339,6 +339,7 @@ pub(super) fn side_panel_header_button<F: Fn(&mut gpui::App) + 'static>(
     theme: &AerisTheme,
 ) -> AnyElement {
     Button::new(id, theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
         .round()
         .icon(header_icon(icon))

@@ -388,7 +388,9 @@ fn workspace_caption_control(
                 .aria_label(label)
                 .tab_index(0)
                 .focus_visible(move |control| {
-                    control.border_2().border_color(gpui_color(colors.ring))
+                    control
+                        .border_2()
+                        .border_color(gpui_color(colors.ring_primary))
                 })
                 .on_key_down(move |event, window, cx| {
                     if caption_keyboard_activates(event.keystroke.key.as_str()) {
@@ -894,6 +896,7 @@ fn panel_toggle(
     app: Entity<WorkspaceSurface>,
 ) -> impl IntoElement {
     Button::new(state.id, theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .icon(header_icon(state.icon))
         .label(state.label)
@@ -959,6 +962,7 @@ fn drawing_history_control(
 ) -> impl IntoElement + use<> {
     let step = control.step();
     Button::new(control.id(), theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .icon(header_icon(control.icon()))
         .aria_label(control.tooltip())
@@ -1159,6 +1163,7 @@ pub(super) fn series_selector(
     let open_app = app.clone();
     let bounds_app = app;
     let button = Button::new("series_selector", theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .label(label)
         .loading_icon(header_icon(HugeIcon::Loader))
@@ -1208,6 +1213,7 @@ pub(super) fn chart_type_selector(
     let open_app = app.clone();
     let bounds_app = app;
     let button = Button::new("chart_type_selector", theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
         .aria_label(chart_type.label())
@@ -1253,6 +1259,7 @@ pub(super) fn time_zone_selector(
     let open_app = app.clone();
     let bounds_app = app;
     let button = Button::new("time_zone_selector", theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .label(clock)
         .caret(header_icon(HugeIcon::ChevronDown))
@@ -1302,6 +1309,7 @@ fn accounts_selector(
     let open_app = app.clone();
     let bounds_app = app;
     let button = Button::new("accounts_selector", theme)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .icon(header_icon(HugeIcon::User))
         .label(account_label.unwrap_or_else(|| "Accounts".to_string()))
