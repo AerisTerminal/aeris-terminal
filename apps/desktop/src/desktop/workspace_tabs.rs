@@ -572,8 +572,9 @@ impl TerminalApp {
         true
     }
 
-    /// Shift+F: the active chart fills the screen. The window enters fullscreen unless it
-    /// already is, and every toolbar and panel hides; leaving restores both.
+    /// Shift+F: the workspace's charts, in their layout, fill the screen (a pane maximized
+    /// with Alt+click stays the only one). The window enters fullscreen unless it already is,
+    /// and every toolbar and panel hides; leaving restores both.
     pub(super) fn toggle_chart_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = self.chart_fullscreen.take() {
             if state.restores_window && window.is_fullscreen() {

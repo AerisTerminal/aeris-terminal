@@ -261,7 +261,7 @@ use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
     WorkspaceMaximizeTransition, keep_trading_pnl_fresh, workspace_market_area,
-    workspace_maximize_transition, workspace_pane_element,
+    workspace_maximize_transition, workspace_pane_grid,
 };
 
 fn install_platform_http_client(cx: &mut App) {
@@ -4504,7 +4504,7 @@ struct TerminalApp {
     pages: app_navigation::AppPages,
     frameless_title_bar: FramelessTitleBar,
     fullscreen_hint: FullscreenHint,
-    /// Shift+F chart-only fullscreen: only the active chart shows. Holds whether entering it
+    /// Shift+F chart-only fullscreen: only the workspace's charts show. Holds whether entering it
     /// also put the window into fullscreen, so leaving restores the window as it was.
     chart_fullscreen: Option<ChartFullscreen>,
     bottom_panel: bottom_panel::BottomPanelState,
