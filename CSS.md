@@ -9,7 +9,7 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - **Always use these tokens. Never hardcode** a color, alpha tint, radius or border width in UI code.
 - Colors come from `theme.colors.<token>` (the CSS name with `-` → `_`, e.g. `--book-bid-fill` → `book_bid_fill`).
   Do not derive a shade with `.with_alpha(..)`; if a state has no token, add one here first.
-- Radii come from `RadiusToken` (`Sm` = `--radius-small`, `Default`, `Medium`, `Button`, `Full` = `--radius-large`),
+- Radii come from `RadiusToken` (`Sm` = `--radius-small`, `Default`, `Medium`, `Compact`, `Full` = `--radius-large`),
   never `rounded(px(N))`.
 - Borders use `theme.dimensions.border_width` (`--border-width`), never `border_1()` or `px(1.0)`.
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
@@ -175,7 +175,7 @@ while invalid.
   --radius-medium: 12px;
   --radius-small: 4px;
   --radius-large: 999px;
-  --radius-button: 6px;
+  --radius-compact: 6px;
 
   /* Shadows */
   --shadow-1: 0 0 1px 0 color-mix(in srgb, #000000 20%, transparent), 0 1px 2px 0 color-mix(in srgb, #000000 5%, transparent), 0 1px 1px 0 color-mix(in srgb, #000000 1%, transparent);

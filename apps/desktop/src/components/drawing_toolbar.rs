@@ -1120,7 +1120,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
             .items_center()
             .gap(px(DRAWING_FAVORITES_GAP))
             .px(px(DRAWING_FAVORITES_PADDING_X))
-            .rounded(px(f32::from(RadiusToken::Button.logical_pixels())))
+            .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
             .border_1()
             .border_color(gpui_color(colors.border_secondary))
             .bg(gpui_color(colors.surface_secondary))

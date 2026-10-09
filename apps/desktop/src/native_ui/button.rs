@@ -124,7 +124,7 @@ impl ButtonSize {
 
     const fn radius(self) -> RadiusToken {
         match self {
-            Self::Sm | Self::Default => RadiusToken::Button,
+            Self::Sm | Self::Default => RadiusToken::Compact,
             Self::Lg => RadiusToken::Default,
         }
     }
@@ -851,8 +851,8 @@ mod tests {
         assert_eq!(
             geometry,
             [
-                (24.0, 8.0, RadiusToken::Button),
-                (28.0, 10.0, RadiusToken::Button),
+                (24.0, 8.0, RadiusToken::Compact),
+                (28.0, 10.0, RadiusToken::Compact),
                 (32.0, 12.0, RadiusToken::Default),
             ]
         );

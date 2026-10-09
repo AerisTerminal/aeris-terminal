@@ -428,7 +428,8 @@ pub enum RadiusToken {
     Sm,
     Default,
     Medium,
-    Button,
+    /// `--radius-compact`: compact controls such as small and default buttons.
+    Compact,
     Full,
 }
 
@@ -440,7 +441,7 @@ impl RadiusToken {
             Self::Sm => "radius-small",
             Self::Default => "radius-default",
             Self::Medium => "radius-medium",
-            Self::Button => "radius-button",
+            Self::Compact => "radius-compact",
             Self::Full => "radius-large",
         }
     }
@@ -458,7 +459,7 @@ impl RadiusToken {
             Self::Sm => RADIUS_SMALL,
             Self::Default => RADIUS_DEFAULT,
             Self::Medium => RADIUS_MEDIUM,
-            Self::Button => RADIUS_BUTTON,
+            Self::Compact => RADIUS_COMPACT,
             Self::Full => RADIUS_LARGE,
         }
     }
@@ -696,7 +697,7 @@ mod tests {
         assert_eq!(RadiusToken::Sm.logical_pixels(), 4);
         assert_eq!(RadiusToken::Default.logical_pixels(), 8);
         assert_eq!(RadiusToken::Medium.logical_pixels(), 12);
-        assert_eq!(RadiusToken::Button.logical_pixels(), 6);
+        assert_eq!(RadiusToken::Compact.logical_pixels(), 6);
         assert_eq!(RadiusToken::Full.logical_pixels(), 999);
         assert_eq!(RadiusToken::Sm.css_custom_property(), "--radius-small");
         assert_eq!(
@@ -705,7 +706,10 @@ mod tests {
         );
         assert_eq!(RadiusToken::Full.css_custom_property(), "--radius-large");
         assert_eq!(RadiusToken::Medium.css_custom_property(), "--radius-medium");
-        assert_eq!(RadiusToken::Button.css_custom_property(), "--radius-button");
+        assert_eq!(
+            RadiusToken::Compact.css_custom_property(),
+            "--radius-compact"
+        );
     }
 
     #[test]

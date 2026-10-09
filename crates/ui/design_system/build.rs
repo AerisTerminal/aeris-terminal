@@ -104,8 +104,8 @@ pub const PLATFORM_COLOR_COUNT: usize = {};",
     )?;
     emit_pixel_u16(
         &mut output,
-        "RADIUS_BUTTON",
-        &resolve(&root, "radius-button")?,
+        "RADIUS_COMPACT",
+        &resolve(&root, "radius-compact")?,
     )?;
 
     let path = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unavailable")?)

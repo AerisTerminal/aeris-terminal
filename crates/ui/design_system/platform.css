@@ -129,7 +129,7 @@
   --radius-medium: 12px;
   --radius-small: 4px;
   --radius-large: 999px;
-  --radius-button: 6px;
+  --radius-compact: 6px;
 
   /* Shadows */
   --shadow-1: 0 0 1px 0 color-mix(in srgb, #000000 20%, transparent), 0 1px 2px 0 color-mix(in srgb, #000000 5%, transparent), 0 1px 1px 0 color-mix(in srgb, #000000 1%, transparent);
@@ -306,7 +306,7 @@ button,
 .button-primary,
 .button-outline,
 .button-ghost {
-  border-radius: var(--radius-button);
+  border-radius: var(--radius-compact);
   transition: background-color 150ms ease, color 150ms ease;
 }
 
