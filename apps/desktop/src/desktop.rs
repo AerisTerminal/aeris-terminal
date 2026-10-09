@@ -202,14 +202,15 @@ use native_ui::{
     input::{Input, InputEvent, InputState},
     loader::Loader,
     menu::{
-        MenuRow, MenuScale, PopupAnimationOrigin, animate_popup_from_origin,
-        flat_compact_menu_panel, menu_separator,
+        MENU_PANEL_INSET, MenuAlign, MenuAnchor, MenuPanel, MenuPlacement, MenuRow, MenuScale,
+        MenuSide, PopupAnimationOrigin, animate_popup_from_origin, menu_panel_chrome_height,
+        menu_panel_height, menu_separator,
     },
     platform_font_weight, platform_tabular_numerals,
-    rem_scale::{design_rems, rem_scaled},
+    rem_scale::{ROOT_REM_PX, design_rems, rem_scaled},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
     tab::{Tab, TabList},
-    theme::{base_theme, gpui_color},
+    theme::{base_theme, gpui_color, platform_border_width},
     tooltip::{TooltipSpec, with_tooltip},
 };
 use num_traits::ToPrimitive;

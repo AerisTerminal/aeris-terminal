@@ -394,67 +394,71 @@ fn dropdown_trigger(
         })
 }
 
-fn dropdown_panel(id: &'static str, theme: &AerisTheme) -> Stateful<Div> {
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .absolute()
-        .top(px(38.0))
-        .left_0()
-        .right_0()
-        .occlude()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .shadow_md()
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+/// A form select: the trigger plus, while open, its menu stretched under it.
+fn select_field(
+    app: &Entity<WorkspaceSurface>,
+    id: &'static str,
+    trigger: Button,
+    menu: Option<MenuPanel>,
+) -> MenuAnchor {
+    let dismiss = app.clone();
+    MenuAnchor::new(id, trigger)
+        .full_width()
+        .menu(menu)
+        .on_dismiss(move |_, cx| {
+            dismiss.update(cx, WorkspaceSurface::close_price_alert_dropdown);
+        })
+}
+
+fn select_menu(id: &'static str, theme: &AerisTheme) -> MenuPanel {
+    MenuPanel::new(
+        id,
+        MenuPlacement::Anchored {
+            side: MenuSide::Below,
+            align: MenuAlign::Stretch,
+        },
+        theme,
+    )
+    .animate_from(PopupAnimationOrigin::TOP_LEFT)
 }
 
 fn condition_dropdown(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
     theme: &AerisTheme,
-) -> Div {
+) -> MenuAnchor {
     let open = dialog.open_dropdown == Some(PriceAlertDropdown::Condition);
-    let mut field = div()
-        .w_full()
-        .relative()
-        .flex_none()
-        .child(dropdown_trigger(
+    let menu = open.then(|| {
+        select_menu("price_alert_condition_menu", theme).children(CONDITIONS.into_iter().map(
+            |condition| {
+                let choose = app.clone();
+                MenuRow::compact(
+                    ("price_alert_condition_option", condition as u32),
+                    condition_label(condition),
+                    theme,
+                )
+                .checked(dialog.condition == condition)
+                .on_click(move |_, _, cx| {
+                    choose.update(cx, |surface, surface_cx| {
+                        surface.select_price_alert_condition(condition, surface_cx);
+                    });
+                })
+            },
+        ))
+    });
+    select_field(
+        app,
+        "price_alert_condition_field",
+        dropdown_trigger(
             app,
             PriceAlertDropdown::Condition,
             "price_alert_condition_select",
             condition_label(dialog.condition),
             open,
             theme,
-        ));
-    if open {
-        let mut menu = dropdown_panel("price_alert_condition_menu", theme);
-        for (index, condition) in CONDITIONS.into_iter().enumerate() {
-            let choose = app.clone();
-            menu = menu.child(
-                MenuRow::compact(
-                    ("price_alert_condition_option", condition as u32),
-                    condition_label(condition),
-                    theme,
-                )
-                .highlighted(dialog.condition == condition)
-                .flush_in_panel(index == 0, index + 1 == CONDITIONS.len())
-                .on_click(move |_, _, cx| {
-                    choose.update(cx, |surface, surface_cx| {
-                        surface.select_price_alert_condition(condition, surface_cx);
-                    });
-                }),
-            );
-        }
-        field = field.child(gpui::deferred(animate_popup_from_origin(
-            menu,
-            "price_alert_condition_menu_enter",
-            PopupAnimationOrigin::TOP_LEFT,
-        )));
-    }
-    field
+        ),
+        menu,
+    )
 }
 
 const fn frequency_label(frequency: PriceAlertFrequency) -> &'static str {
@@ -468,50 +472,43 @@ fn frequency_dropdown(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
     theme: &AerisTheme,
-) -> Div {
+) -> MenuAnchor {
     const FREQUENCIES: [PriceAlertFrequency; 2] = [
         PriceAlertFrequency::OnlyOnce,
         PriceAlertFrequency::EveryTime,
     ];
     let open = dialog.open_dropdown == Some(PriceAlertDropdown::Frequency);
-    let mut field = div()
-        .w_full()
-        .relative()
-        .flex_none()
-        .child(dropdown_trigger(
+    let menu = open.then(|| {
+        select_menu("price_alert_frequency_menu", theme).children(FREQUENCIES.into_iter().map(
+            |frequency| {
+                let choose = app.clone();
+                MenuRow::compact(
+                    ("price_alert_frequency_option", frequency as u32),
+                    frequency_label(frequency),
+                    theme,
+                )
+                .checked(dialog.frequency == frequency)
+                .on_click(move |_, _, cx| {
+                    choose.update(cx, |surface, surface_cx| {
+                        surface.select_price_alert_frequency(frequency, surface_cx);
+                    });
+                })
+            },
+        ))
+    });
+    select_field(
+        app,
+        "price_alert_frequency_field",
+        dropdown_trigger(
             app,
             PriceAlertDropdown::Frequency,
             "price_alert_frequency_select",
             frequency_label(dialog.frequency),
             open,
             theme,
-        ));
-    if open {
-        let mut menu = dropdown_panel("price_alert_frequency_menu", theme);
-        for (index, frequency) in FREQUENCIES.into_iter().enumerate() {
-            let choose = app.clone();
-            menu = menu.child(
-                MenuRow::compact(
-                    ("price_alert_frequency_option", frequency as u32),
-                    frequency_label(frequency),
-                    theme,
-                )
-                .highlighted(dialog.frequency == frequency)
-                .flush_in_panel(index == 0, index + 1 == FREQUENCIES.len())
-                .on_click(move |_, _, cx| {
-                    choose.update(cx, |surface, surface_cx| {
-                        surface.select_price_alert_frequency(frequency, surface_cx);
-                    });
-                }),
-            );
-        }
-        field = field.child(gpui::deferred(animate_popup_from_origin(
-            menu,
-            "price_alert_frequency_menu_enter",
-            PopupAnimationOrigin::TOP_LEFT,
-        )));
-    }
-    field
+        ),
+        menu,
+    )
 }
 
 fn alerts_for_instrument(
@@ -731,7 +728,6 @@ pub(super) fn price_alert_dialog_layer(
     theme: &AerisTheme,
 ) -> AnyElement {
     let dismiss = app.clone();
-    let dismiss_dropdown = app.clone();
     let cancel = app.clone();
     let create = app.clone();
     let symbol = dialog.instrument.display_symbol.as_str();
@@ -743,9 +739,6 @@ pub(super) fn price_alert_dialog_layer(
 
     ModalLayer::new("price_alert_dialog", px(460.0), theme, move |_, cx| {
         dismiss.update(cx, WorkspaceSurface::close_price_alert_dialog);
-    })
-    .on_panel_mouse_down(move |_, cx| {
-        dismiss_dropdown.update(cx, WorkspaceSurface::close_price_alert_dropdown);
     })
     .child(price_alert_dialog_header(cancel, symbol, &price, theme))
     .child(price_alert_dialog_body(

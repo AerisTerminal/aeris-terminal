@@ -21,10 +21,10 @@ use super::{
     connection_presentation, connectivity_chart_state, current_instrument_menu_index,
     default_rithmic_contract_index, durable_workspace_viewport, fullscreen_escape_command,
     gpui_color, instrument_listing_refresh_needed, instrument_row_highlighted,
-    instrument_selector_label, instrument_target_after_close, price_axis_flyout_rows,
-    price_axis_root_rows, publication_chart_state, ready_state_can_complete_switch,
-    reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
-    should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
+    instrument_selector_label, instrument_target_after_close, overlay_height,
+    price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+    ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
+    series_selector_label, should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
     stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
     switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
@@ -329,8 +329,8 @@ fn timeframe_menu_uses_dual_group_and_interval_containers() {
     );
     assert!((timeframe_flyout_offset(1) - CHART_CONTEXT_MENU_ROW_HEIGHT).abs() < f32::EPSILON);
     assert!(
-        (timeframe_flyout_height(1) - (CHART_CONTEXT_MENU_ROW_HEIGHT + 2.0)).abs() < f32::EPSILON,
-        "submenu height is the rows plus the 1px border"
+        (timeframe_flyout_height(1) - overlay_height(1.0, 0.0)).abs() < f32::EPSILON,
+        "submenu height is its rows inside the shared menu panel chrome"
     );
     assert!(
         (timeframe_overlay_extent(5, None).0 - TIMEFRAME_MENU_WIDTH).abs() < f32::EPSILON,

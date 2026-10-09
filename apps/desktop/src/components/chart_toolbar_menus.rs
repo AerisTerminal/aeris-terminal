@@ -26,7 +26,11 @@ pub(super) fn chrome_overlay_layer(
             | ChromeOverlay::Accounts
     );
     let quick_timeframe = overlay == ChromeOverlay::QuickTimeframe;
-    let dual_container = overlay == ChromeOverlay::Timeframe;
+    // Menu overlays draw their own `MenuPanel` surfaces; the frame only places and animates them.
+    let menu_overlay = matches!(
+        overlay,
+        ChromeOverlay::Timeframe | ChromeOverlay::ChartType | ChromeOverlay::TimeZone
+    );
     let menu_left = compact_menu_left(overlay, app_state, viewport);
     let animation_origin = chrome_overlay_animation_origin(overlay, app_state, menu_left, viewport);
     let phase = app_state.chrome_overlay_phase;
@@ -75,7 +79,7 @@ pub(super) fn chrome_overlay_layer(
                 theme,
                 ChromeOverlayPanelStyle {
                     interval_popup: compact_panel,
-                    dual_container,
+                    frameless: menu_overlay,
                     primary_surface: quick_timeframe,
                     radius: if matches!(
                         overlay,
@@ -306,7 +310,8 @@ pub(super) fn chrome_overlay_content(
 #[derive(Clone, Copy)]
 pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
-    dual_container: bool,
+    /// The content is one or more `MenuPanel`s that draw their own surface.
+    frameless: bool,
     primary_surface: bool,
     radius: RadiusToken,
 }
@@ -326,10 +331,10 @@ pub(super) fn chrome_overlay_panel(
         .id("chrome_overlay_panel")
         .relative()
         .flex_none()
-        .when(!style.dual_container, |panel| {
+        .when(!style.frameless, |panel| {
             panel
                 .rounded(px(f32::from(style.radius.logical_pixels())))
-                .border_1()
+                .border(platform_border_width(theme))
                 .border_color(gpui_color(if style.primary_surface {
                     colors.border
                 } else if style.interval_popup {
@@ -345,7 +350,8 @@ pub(super) fn chrome_overlay_panel(
                     colors.surface
                 }))
         })
-        .when(style.interval_popup && !style.dual_container, |panel| {
+        .when(style.frameless, Styled::max_h_full)
+        .when(style.interval_popup && !style.frameless, |panel| {
             panel.max_h_full().overflow_y_scroll()
         })
         .when(!style.interval_popup, |panel| {
@@ -391,7 +397,7 @@ pub(super) fn timeframe_flyout_offset(group_index: usize) -> f32 {
 }
 
 pub(super) fn timeframe_flyout_height(interval_count: usize) -> f32 {
-    CHART_CONTEXT_MENU_ROW_HEIGHT * bounded_menu_count(interval_count) + 2.0
+    overlay_height(bounded_menu_count(interval_count), 0.0)
 }
 
 fn bounded_menu_count(count: usize) -> f32 {
@@ -443,22 +449,8 @@ pub(super) fn timeframe_overlay_content(
         groups.len(),
         flyout_layout.map(|(_, index, count)| (index, count)),
     );
-    let hover_root = app.clone();
-    let mut root = timeframe_menu_surface(
-        "timeframe_overlay_root",
-        TIMEFRAME_MENU_WIDTH,
-        colors.surface,
-        colors.border,
-        0.0,
-        0.0,
-    )
-    .on_hover(move |hovered, window, cx| {
-        hover_root.update(cx, |app, app_cx| {
-            app.hover_timeframe_menu_region(*hovered, window, app_cx);
-        });
-    });
-    let group_count = groups.len();
-    let last_group = group_count.saturating_sub(1);
+    let mut root = MenuPanel::new("timeframe_overlay_root", MenuPlacement::InFlow, theme)
+        .width(px(TIMEFRAME_MENU_WIDTH));
     for (index, group) in groups.into_iter().enumerate() {
         let active_in_group = timeframe_group_intervals(group, intervals)
             .into_iter()
@@ -473,7 +465,6 @@ pub(super) fn timeframe_overlay_content(
                 active_label: active_in_group,
                 open: highlighted,
                 pending: state.pending,
-                position: MenuRowPosition::new(index, last_group),
             },
             theme,
         ));
@@ -487,7 +478,11 @@ pub(super) fn timeframe_overlay_content(
         .h(px(height))
         .occlude()
         .text_color(gpui_color(colors.text_primary))
-        .child(root);
+        .child(timeframe_hover_region(
+            app,
+            "timeframe_overlay_root_region",
+            root,
+        ));
     if let Some((group, index, count)) = flyout_layout {
         let flyout_height = timeframe_flyout_height(count);
         let bridge_app = app.clone();
@@ -565,24 +560,16 @@ pub(super) fn timeframe_flyout_panel(
     pending: bool,
     theme: &AerisTheme,
 ) -> Stateful<Div> {
-    let colors = theme.colors;
-    let hover_panel = app.clone();
-    let mut panel = timeframe_menu_surface(
-        "timeframe_overlay_flyout",
-        TIMEFRAME_FLYOUT_WIDTH,
-        colors.surface_secondary,
-        colors.border_secondary,
-        0.0,
-        0.0,
+    let mut panel = MenuPanel::new(
+        ("timeframe_overlay_flyout", group as usize),
+        MenuPlacement::InFlow,
+        theme,
     )
-    .on_hover(move |hovered, window, cx| {
-        hover_panel.update(cx, |app, app_cx| {
-            app.hover_timeframe_menu_region(*hovered, window, app_cx);
-        });
-    });
-    let rows = timeframe_group_intervals(group, intervals);
-    let last = rows.len().saturating_sub(1);
-    for (index, interval) in rows.into_iter().enumerate() {
+    .width(px(TIMEFRAME_FLYOUT_WIDTH));
+    for (index, interval) in timeframe_group_intervals(group, intervals)
+        .into_iter()
+        .enumerate()
+    {
         panel = panel.child(timeframe_overlay_row(
             app,
             interval,
@@ -592,15 +579,29 @@ pub(super) fn timeframe_flyout_panel(
                 selected: interval == selected,
                 pending,
             },
-            TimeframeRowStyle {
-                fill: colors.surface_secondary,
-                track_menu_hover: true,
-                position: MenuRowPosition::new(index, last),
-            },
             theme,
         ));
     }
-    panel
+    timeframe_hover_region(app, "timeframe_overlay_flyout_region", panel)
+}
+
+/// The timeframe root list and its flyout keep the menu open while the pointer is over either
+/// of them or the bridge between them.
+fn timeframe_hover_region(
+    app: &Entity<WorkspaceSurface>,
+    id: &'static str,
+    panel: MenuPanel,
+) -> Stateful<Div> {
+    let hover = app.clone();
+    div()
+        .id(id)
+        .flex_none()
+        .on_hover(move |hovered, window, cx| {
+            hover.update(cx, |app, app_cx| {
+                app.hover_timeframe_menu_region(*hovered, window, app_cx);
+            });
+        })
+        .child(panel)
 }
 
 pub(super) fn timeframe_flyout_row_is_active(
@@ -612,31 +613,6 @@ pub(super) fn timeframe_flyout_row_is_active(
     interval == selected || keyboard_index == Some(row_index)
 }
 
-pub(super) fn timeframe_menu_surface(
-    id: &'static str,
-    width: f32,
-    fill: ThemeColor,
-    border: ThemeColor,
-    vertical_padding: f32,
-    horizontal_padding: f32,
-) -> Stateful<Div> {
-    // Compact dropdown lists pass 0, 0. Do not restore panel padding here.
-    div()
-        .id(id)
-        .w(px(width))
-        .flex()
-        .flex_col()
-        .flex_none()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(border))
-        .bg(gpui_color(fill))
-        .px(px(horizontal_padding))
-        .py(px(vertical_padding))
-        .overflow_hidden()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-}
-
 pub(super) fn chart_type_overlay_content(
     app: &Entity<WorkspaceSurface>,
     chart_types: &[ChartType],
@@ -644,27 +620,27 @@ pub(super) fn chart_type_overlay_content(
     keyboard_selection: usize,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
-    let mut panel = div()
-        .w(px(TIMEFRAME_MENU_WIDTH))
-        .flex()
-        .flex_col()
-        .text_color(gpui_color(colors.text_primary));
-    let last = chart_types.len().saturating_sub(1);
-    for (index, chart_type) in chart_types.iter().copied().enumerate() {
-        panel = panel.child(chart_type_overlay_row(
-            app,
-            chart_type,
-            index,
-            ChartTypeRowState {
-                selected: selected == chart_type,
-                keyboard: keyboard_selection == index,
-                position: MenuRowPosition::new(index, last),
-            },
-            theme,
-        ));
-    }
-    panel
+    MenuPanel::new("chart_type_overlay", MenuPlacement::InFlow, theme)
+        .width(px(TIMEFRAME_MENU_WIDTH))
+        .max_height(relative(1.0))
+        .children(
+            chart_types
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, chart_type)| {
+                    chart_type_overlay_row(
+                        app,
+                        chart_type,
+                        index,
+                        ChartTypeRowState {
+                            selected: selected == chart_type,
+                            keyboard: keyboard_selection == index,
+                        },
+                        theme,
+                    )
+                }),
+        )
 }
 
 pub(super) fn time_zone_overlay_content(
@@ -681,58 +657,48 @@ pub(super) fn time_zone_overlay_content(
         .ok()
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or(0);
-    let mut rows = div()
-        .id("time_zone_rows")
-        .flex()
-        .flex_col()
-        .max_h(px(TIME_ZONE_MENU_MAX_HEIGHT - 58.0))
-        .overflow_y_scroll()
-        .track_scroll(&app_state.scrolls.time_zone);
-    for (index, time_zone) in matches.into_iter().enumerate() {
+    let rows = matches.into_iter().enumerate().map(|(index, time_zone)| {
         let row_app = app.clone();
         let display_name = time_zone.replace('_', " ");
         let badge = AerisChartView::time_zone_badge_label(time_zone, utc_seconds)
             .unwrap_or_else(|| "UTC".to_string());
-        let mut row = MenuRow::compact(("time_zone_row", index), display_name, theme)
+        // The UTC badge and the current-zone check share the trailing slot.
+        MenuRow::compact(("time_zone_row", index), display_name, theme)
             .highlighted(app_state.chrome_selection == index)
-            .fill_width()
             .on_click(move |_, window, cx| {
                 row_app.update(cx, |app, app_cx| {
                     if app.set_chart_time_zone(time_zone, app_cx) {
                         app.close_chrome_overlay(window, app_cx);
                     }
                 });
-            });
-        row = row.trailing(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(time_zone_badge(badge, theme))
-                .when(time_zone == selected, |trailing| {
-                    trailing.child(
-                        header_icon(HugeIcon::CheckIcon)
-                            .with_size(px(16.0))
-                            .color(gpui_color(colors.icon)),
-                    )
-                }),
-        );
-        rows = rows.child(row);
-    }
-    div()
-        .w(px(TIME_ZONE_MENU_WIDTH))
-        .max_h(px(TIME_ZONE_MENU_MAX_HEIGHT))
-        .flex()
-        .flex_col()
-        .bg(gpui_color(colors.surface))
-        .child(
+            })
+            .trailing(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(time_zone_badge(badge, theme))
+                    .when(time_zone == selected, |trailing| {
+                        trailing.child(
+                            header_icon(HugeIcon::CheckIcon)
+                                .with_size(px(16.0))
+                                .color(gpui_color(colors.icon_active)),
+                        )
+                    }),
+            )
+    });
+    MenuPanel::new("time_zone_overlay", MenuPlacement::InFlow, theme)
+        .width(px(TIME_ZONE_MENU_WIDTH))
+        .max_height(px(TIME_ZONE_MENU_MAX_HEIGHT))
+        .header(
             div()
                 .p_2()
-                .border_b_1()
+                .border_b(platform_border_width(theme))
                 .border_color(gpui_color(colors.border_secondary))
                 .child(Input::new(&app_state.time_zone_input).platform(theme)),
         )
-        .child(rows)
+        .track_scroll(&app_state.scrolls.time_zone)
+        .children(rows)
 }
 
 fn time_zone_badge(label: String, theme: &AerisTheme) -> impl IntoElement {
@@ -898,26 +864,10 @@ pub(super) fn chrome_typeahead_char_from(
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct MenuRowPosition {
-    first: bool,
-    last: bool,
-}
-
-impl MenuRowPosition {
-    const fn new(index: usize, last: usize) -> Self {
-        Self {
-            first: index == 0,
-            last: index == last,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
 pub(super) struct TimeframeGroupRowState {
     active_label: Option<&'static str>,
     open: bool,
     pending: bool,
-    position: MenuRowPosition,
 }
 
 pub(super) fn timeframe_group_row(
@@ -948,11 +898,9 @@ pub(super) fn timeframe_group_row(
         group.label(),
         theme,
     )
-    .resting_fill(theme.colors.surface)
     .highlighted(state.open)
     .disabled(state.pending)
     .trailing(trailing)
-    .flush_in_panel(state.position.first, state.position.last)
     .on_hover(move |hovered, window, cx| {
         hover_app.update(cx, |app, app_cx| {
             if *hovered {
@@ -981,47 +929,29 @@ pub(super) struct TimeframeRowState {
     pending: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct TimeframeRowStyle {
-    fill: ThemeColor,
-    track_menu_hover: bool,
-    position: MenuRowPosition,
-}
-
 pub(super) fn timeframe_overlay_row(
     app: &Entity<WorkspaceSurface>,
     interval: ChartInterval,
     index: usize,
     state: TimeframeRowState,
-    style: TimeframeRowStyle,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
-    let mut row = MenuRow::compact(
+    let hover_app = app.clone();
+    MenuRow::compact(
         ("timeframe_overlay_row", index),
         timeframe_menu_row_label(interval),
         theme,
     )
-    .resting_fill(style.fill)
     .highlighted(state.active)
     .disabled(state.pending)
-    .flush_in_panel(style.position.first, style.position.last);
-    if state.selected {
-        row = row.trailing(
-            header_icon(HugeIcon::CheckIcon)
-                .with_size(px(16.0))
-                .color(gpui_color(theme.colors.icon)),
-        );
-    }
-    if style.track_menu_hover {
-        let hover_app = app.clone();
-        row = row.on_hover(move |hovered, window, cx| {
-            hover_app.update(cx, |app, app_cx| {
-                app.hover_timeframe_menu_region(*hovered, window, app_cx);
-            });
+    .checked(state.selected)
+    .on_hover(move |hovered, window, cx| {
+        hover_app.update(cx, |app, app_cx| {
+            app.hover_timeframe_menu_region(*hovered, window, app_cx);
         });
-    }
-    row.on_click(move |_, window, cx| {
+    })
+    .on_click(move |_, window, cx| {
         row_app.update(cx, |app, app_cx| {
             if app.select_interval(interval, app_cx) {
                 app.close_chrome_overlay(window, app_cx);
@@ -1034,7 +964,6 @@ pub(super) fn timeframe_overlay_row(
 pub(super) struct ChartTypeRowState {
     selected: bool,
     keyboard: bool,
-    position: MenuRowPosition,
 }
 
 pub(super) fn chart_type_overlay_row(
@@ -1045,22 +974,14 @@ pub(super) fn chart_type_overlay_row(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let row_app = app.clone();
-    let mut row = MenuRow::compact(("chart_type_overlay_row", index), chart_type.label(), theme)
+    MenuRow::compact(("chart_type_overlay_row", index), chart_type.label(), theme)
         .leading(series_glyph(chart_type, px(chart_chrome::HEADER_ICON_SIZE)))
         .highlighted(state.keyboard)
-        .flush_in_panel(state.position.first, state.position.last)
+        .checked(state.selected)
         .on_click(move |_, window, cx| {
             row_app.update(cx, |app, app_cx| {
                 app.set_chart_type(chart_type, app_cx);
                 app.close_chrome_overlay(window, app_cx);
             });
-        });
-    if state.selected {
-        row = row.trailing(
-            header_icon(HugeIcon::CheckIcon)
-                .with_size(px(16.0))
-                .color(gpui_color(theme.colors.icon)),
-        );
-    }
-    row
+        })
 }

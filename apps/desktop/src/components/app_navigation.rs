@@ -52,10 +52,15 @@ pub(super) fn app_navigation_layer(
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let rows = AppView::ALL.len().to_f32().unwrap_or_default();
     let panel_size = size(
         px(APP_NAVIGATION_MENU_WIDTH),
-        px(rows * CHART_CONTEXT_MENU_ROW_HEIGHT + 2.0 * theme.dimensions.border_width),
+        menu_panel_height(
+            AppView::ALL.len(),
+            0,
+            theme,
+            MenuScale::BASE,
+            px(ROOT_REM_PX),
+        ),
     );
     let header_bottom = WORKSPACE_TITLE_BAR_HEIGHT + APP_NAVIGATION_MENU_GAP;
     let margin = px(OVERLAY_EDGE_MARGIN);
@@ -68,30 +73,18 @@ pub(super) fn app_navigation_layer(
     );
     let animation_origin =
         PopupAnimationOrigin::from_trigger(anchor, Bounds::new(origin, panel_size));
-    let last = AppView::ALL.len() - 1;
-    let rows = AppView::ALL.into_iter().enumerate().map(|(index, view)| {
+    let rows = AppView::ALL.into_iter().map(|view| {
         let select_terminal = terminal.clone();
         MenuRow::compact(
             SharedString::from(format!("app_navigation_{}", view.label())),
             view.label(),
             theme,
         )
-        .flush_in_panel(index == 0, index == last)
-        .highlighted(view == current)
+        .checked(view == current)
         .leading(
             header_icon(view.icon())
                 .with_size(px(APP_NAVIGATION_ICON_SIZE))
                 .color(gpui_color(colors.icon)),
-        )
-        .trailing(
-            div()
-                .size(px(APP_NAVIGATION_ICON_SIZE))
-                .flex_none()
-                .children((view == current).then(|| {
-                    header_icon(HugeIcon::CheckIcon)
-                        .with_size(px(APP_NAVIGATION_ICON_SIZE))
-                        .color(gpui_color(colors.icon_active))
-                })),
         )
         .on_click(move |_, window, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {
@@ -100,13 +93,10 @@ pub(super) fn app_navigation_layer(
         })
     });
     let dismiss = terminal.clone();
-    let panel = flat_compact_menu_panel(
-        "app_navigation_menu",
-        origin,
-        px(APP_NAVIGATION_MENU_WIDTH),
-        theme,
-    )
-    .children(rows);
+    let panel = MenuPanel::new("app_navigation_menu", MenuPlacement::At(origin), theme)
+        .width(px(APP_NAVIGATION_MENU_WIDTH))
+        .animate_from(animation_origin)
+        .children(rows);
     div()
         .id("app_navigation_scrim")
         .absolute()
@@ -121,11 +111,7 @@ pub(super) fn app_navigation_layer(
             });
             cx.stop_propagation();
         })
-        .child(animate_popup_from_origin(
-            panel,
-            "app_navigation_menu_enter",
-            animation_origin,
-        ))
+        .child(panel)
         .into_any_element()
 }
 

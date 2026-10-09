@@ -1,29 +1,37 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, TypographyRole, platform_font_family,
 };
 use gpui::{
     Animation, AnimationElement, AnimationExt, AnyElement, App, Bounds, ClickEvent, Div, ElementId,
-    IntoElement, Pixels, Point, Rems, RenderOnce, SharedString, Size, Stateful, Window, div,
-    ease_out_quint, point, prelude::*, px, rems,
+    IntoElement, Length, Pixels, Point, Rems, RenderOnce, ScrollHandle, SharedString, Size,
+    Stateful, Toggled, Window, div, ease_out_quint, point, prelude::*, px, rems,
 };
 use gpui_base::Button as BaseButton;
-use std::time::Duration;
+
+use crate::desktop::assets::UiIcon;
 
 use super::{
+    icon::Icon,
     platform_font_weight,
+    rem_scale::ROOT_REM_PX,
     theme::{gpui_color, platform_border_width},
 };
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type Hover = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
+type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
 
 // Row geometry is in rems (32px / 36px at the root rem) so rows also follow an
 // enclosing `RemScale` panel, not only an explicit `MenuRow::scale`.
 const COMPACT_ROW_HEIGHT: Rems = Rems(2.0);
 const SEARCH_ROW_HEIGHT: Rems = Rems(2.25);
 const SEPARATOR_HEIGHT: Pixels = px(1.0);
+/// Gap between a menu panel's border and its rows: 4px, which clears the `r(1 - 1/√2)` ≈ 2.2px a
+/// row's square corner needs to stay inside the panel's 8px rounded corner.
+pub(crate) const MENU_PANEL_INSET: f32 = 4.0;
+const PANEL_INSET: Rems = Rems(MENU_PANEL_INSET / ROOT_REM_PX);
 const POPUP_ENTER_DURATION: Duration = Duration::from_millis(130);
 const POPUP_ENTER_TRAVEL: f32 = 2.0;
 /// Logical viewport at which scaled menus render at their 1x design size.
@@ -157,19 +165,23 @@ enum RowKind {
     SearchResult,
 }
 
-fn row_geometry(kind: RowKind, scale: MenuScale) -> (Rems, Rems, bool) {
-    let (height, padding, rounded) = match kind {
-        RowKind::Compact => (COMPACT_ROW_HEIGHT, Rems(0.75), false),
-        RowKind::SearchResult => (SEARCH_ROW_HEIGHT, Rems(0.5), true),
+fn row_geometry(kind: RowKind, scale: MenuScale) -> (Rems, Rems) {
+    let (height, padding) = match kind {
+        RowKind::Compact => (COMPACT_ROW_HEIGHT, Rems(0.5)),
+        RowKind::SearchResult => (SEARCH_ROW_HEIGHT, Rems(0.5)),
     };
-    (scale.rems(height.0), scale.rems(padding.0), rounded)
+    (scale.rems(height.0), scale.rems(padding.0))
 }
 
 const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
     !disabled && has_activation
 }
 
-/// `Aeris`'s shared selectable row for compact menus and search results.
+/// `Aeris`'s shared selectable row for menus and search results.
+///
+/// A row is always full width with its own `--radius-small` corners, and sits inside a
+/// [`MenuPanel`] (or the search-menu body) that insets it from the panel's rounded edge, so its
+/// highlight never needs to know where in the panel it is.
 #[derive(IntoElement)]
 pub(crate) struct MenuRow {
     id: ElementId,
@@ -184,7 +196,6 @@ pub(crate) struct MenuRow {
     activation: Option<Activation>,
     hover: Option<Hover>,
     behavior: MenuRowBehavior,
-    edges: MenuRowEdges,
 }
 
 #[derive(Default)]
@@ -192,13 +203,7 @@ struct MenuRowBehavior {
     highlighted: bool,
     disabled: bool,
     destructive: bool,
-}
-
-#[derive(Default)]
-struct MenuRowEdges {
-    round_top: bool,
-    round_bottom: bool,
-    fill_width: bool,
+    checked: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -209,8 +214,6 @@ struct MenuRowPresentation {
     hover_fill: ThemeColor,
     height: Rems,
     horizontal_padding: Rems,
-    rounded: bool,
-    inner_radius: Pixels,
 }
 
 impl MenuRow {
@@ -251,18 +254,12 @@ impl MenuRow {
             activation: None,
             hover: None,
             behavior: MenuRowBehavior::default(),
-            edges: MenuRowEdges::default(),
         }
     }
 
     /// Sizes the row, its text and its spacing for a screen-aware menu.
     pub(crate) fn scale(mut self, scale: MenuScale) -> Self {
         self.scale = scale;
-        self
-    }
-
-    pub(crate) fn resting_fill(mut self, fill: ThemeColor) -> Self {
-        self.resting_fill = fill;
         self
     }
 
@@ -297,19 +294,11 @@ impl MenuRow {
         self
     }
 
-    pub(crate) fn round_panel_ends(mut self, top: bool, bottom: bool) -> Self {
-        self.edges.round_top = top;
-        self.edges.round_bottom = bottom;
+    /// A checkable option: a trailing check while `checked`, announced as toggled. The check
+    /// takes the trailing slot, so a checkable row carries no other trailing content.
+    pub(crate) fn checked(mut self, checked: bool) -> Self {
+        self.behavior.checked = Some(checked);
         self
-    }
-
-    pub(crate) fn fill_width(mut self) -> Self {
-        self.edges.fill_width = true;
-        self
-    }
-
-    pub(crate) fn flush_in_panel(self, first: bool, last: bool) -> Self {
-        self.fill_width().round_panel_ends(first, last)
     }
 
     pub(crate) fn on_click(
@@ -332,19 +321,14 @@ impl MenuRow {
         let colors = self.theme.colors;
         let enabled = accepts_input(self.behavior.disabled, self.activation.is_some());
         let destructive = self.behavior.destructive;
-        let label_color = if destructive {
-            if enabled {
-                colors.danger
-            } else {
-                colors.danger.with_alpha(0.55)
-            }
-        } else if enabled {
-            colors.text_primary
-        } else {
-            colors.text_muted
+        let label_color = match (destructive, enabled) {
+            (true, true) => colors.text_danger,
+            (true, false) => colors.danger_disabled_foreground,
+            (false, true) => colors.text_primary,
+            (false, false) => colors.text_muted,
         };
         let highlighted_fill = if destructive {
-            colors.danger.with_alpha(0.10).over(self.resting_fill)
+            colors.negative_subtle
         } else {
             match self.kind {
                 RowKind::Compact => colors.hover_bg,
@@ -353,14 +337,11 @@ impl MenuRow {
             .over(self.resting_fill)
         };
         let hover_fill = if destructive {
-            colors.danger.with_alpha(0.10).over(self.resting_fill)
+            colors.negative_subtle
         } else {
             colors.hover_bg.over(self.resting_fill)
         };
-        let (height, horizontal_padding, rounded) = row_geometry(self.kind, self.scale);
-        let inner_radius = px((f32::from(RadiusToken::Default.logical_pixels())
-            - self.theme.dimensions.border_width)
-            .max(0.0));
+        let (height, horizontal_padding) = row_geometry(self.kind, self.scale);
         MenuRowPresentation {
             enabled,
             label_color,
@@ -368,9 +349,16 @@ impl MenuRow {
             hover_fill,
             height,
             horizontal_padding,
-            rounded,
-            inner_radius,
         }
+    }
+
+    fn check_mark(&self) -> Option<AnyElement> {
+        self.behavior.checked.filter(|checked| *checked).map(|_| {
+            Icon::new(UiIcon::CheckIcon.path())
+                .with_size(px(16.0))
+                .color(gpui_color(self.theme.colors.icon_active))
+                .into_any_element()
+        })
     }
 }
 
@@ -378,10 +366,8 @@ impl RenderOnce for MenuRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
         let presentation = self.presentation();
+        let check_mark = self.check_mark();
         let hover = self.hover;
-        let round_top = self.edges.round_top;
-        let round_bottom = self.edges.round_bottom;
-        let fill_width = self.edges.fill_width;
         let scale = self.scale;
         let label = div()
             .flex_1()
@@ -393,61 +379,35 @@ impl RenderOnce for MenuRow {
         BaseButton::new(self.id)
             .disabled(!presentation.enabled)
             .accessibility_label(self.label.clone())
+            .when_some(self.behavior.checked, |row, checked| {
+                row.aria_toggled(if checked {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                })
+            })
             .block_mouse_except_scroll()
             .when_some(hover, |row, hover| {
                 row.on_hover(move |hovered, window, cx| hover(hovered, window, cx))
             })
-            .when(fill_width, gpui::Styled::w_full)
+            .w_full()
             .h(presentation.height)
             .flex_none()
             .flex()
             .items_center()
             .gap(scale.rems(0.5))
             .px(presentation.horizontal_padding)
+            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .text_size(scale.rems(0.875))
             .text_color(gpui_color(presentation.label_color))
-            .when(presentation.rounded, |row| {
-                row.rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-            })
-            .when(round_top, |row| {
-                row.rounded_tl(presentation.inner_radius)
-                    .rounded_tr(presentation.inner_radius)
-            })
-            .when(round_bottom, |row| {
-                row.rounded_bl(presentation.inner_radius)
-                    .rounded_br(presentation.inner_radius)
-            })
             .when(self.behavior.highlighted, |row| {
                 row.bg(gpui_color(presentation.highlighted_fill))
-                    .text_color(gpui_color(presentation.label_color))
-                    .when(round_top, |row| {
-                        row.rounded_tl(presentation.inner_radius)
-                            .rounded_tr(presentation.inner_radius)
-                    })
-                    .when(round_bottom, |row| {
-                        row.rounded_bl(presentation.inner_radius)
-                            .rounded_br(presentation.inner_radius)
-                    })
             })
             .when(presentation.enabled, |row| {
-                row.cursor_pointer().hover(|style| {
-                    let mut style = style
-                        .bg(gpui_color(presentation.hover_fill))
-                        .text_color(gpui_color(presentation.label_color));
-                    if round_top {
-                        style = style
-                            .rounded_tl(presentation.inner_radius)
-                            .rounded_tr(presentation.inner_radius);
-                    }
-                    if round_bottom {
-                        style = style
-                            .rounded_bl(presentation.inner_radius)
-                            .rounded_br(presentation.inner_radius);
-                    }
-                    style
-                })
+                row.cursor_pointer()
+                    .hover(|style| style.bg(gpui_color(presentation.hover_fill)))
             })
             .when(!presentation.enabled, gpui::Styled::cursor_not_allowed)
             .focus_visible(move |row| row.border_2().border_color(gpui_color(colors.ring)))
@@ -471,35 +431,261 @@ impl RenderOnce for MenuRow {
                     .text_color(gpui_color(colors.text_muted))
                     .child(detail)
             }))
-            .children(self.trailing)
+            .children(check_mark.or(self.trailing))
     }
 }
 
-/// Flat, shadowless compact dropdown surface: 1px rounded border, no panel padding.
-/// Rows use [`MenuRow::compact`] plus [`MenuRow::flush_in_panel`]; do not wrap
-/// this panel in `py`/`px` or `overflow_hidden` (that clips the border).
-pub(crate) fn flat_compact_menu_panel(
-    id: impl Into<ElementId>,
-    origin: Point<Pixels>,
-    width: Pixels,
+/// Where a [`MenuPanel`] sits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MenuPlacement {
+    /// Top-left corner at a point in the positioned overlay layer that hosts the menu. The
+    /// owner clamps the point into the viewport with [`menu_panel_height`].
+    At(Point<Pixels>),
+    /// Opens from a [`MenuAnchor`] trigger, below or above it.
+    Anchored { side: MenuSide, align: MenuAlign },
+    /// Laid out by its parent, e.g. a flex overlay that positions the menu itself.
+    InFlow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MenuSide {
+    Below,
+    Above,
+}
+
+/// Which trigger edges an anchored menu lines up with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MenuAlign {
+    Start,
+    /// The trigger's full width.
+    Stretch,
+}
+
+/// Space between a trigger and the menu it opens.
+const ANCHOR_GAP: Pixels = px(4.0);
+
+/// `Aeris`'s one menu surface: dropdowns, context menus, flyouts and select menus.
+///
+/// The panel owns the flat menu look (platform border, `--radius-default`, `surface-secondary`,
+/// no shadow), its placement, scrolling, entry motion and click containment. Its content is
+/// inset from the rounded border: GPUI clips to rectangles, and any inset of at least
+/// `r(1 - 1/√2)` keeps a row's rectangular highlight inside the panel's rounded corner, so rows
+/// never depend on their position in the panel.
+#[derive(IntoElement)]
+pub(crate) struct MenuPanel {
+    id: ElementId,
+    theme: AerisTheme,
+    placement: MenuPlacement,
+    scale: MenuScale,
+    width: Option<Length>,
+    max_height: Option<Length>,
+    header: Option<AnyElement>,
+    scroll: Option<ScrollHandle>,
+    animation: Option<PopupAnimationOrigin>,
+    children: Vec<AnyElement>,
+}
+
+impl MenuPanel {
+    pub(crate) fn new(
+        id: impl Into<ElementId>,
+        placement: MenuPlacement,
+        theme: &AerisTheme,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            theme: *theme,
+            placement,
+            scale: MenuScale::BASE,
+            width: None,
+            max_height: None,
+            header: None,
+            scroll: None,
+            animation: None,
+            children: Vec::new(),
+        }
+    }
+
+    /// Grows the inset with a screen-aware menu whose rows use the same scale.
+    pub(crate) fn scale(mut self, scale: MenuScale) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// A fixed width; without it the panel sizes to its content, or to the trigger when
+    /// stretched.
+    pub(crate) fn width(mut self, width: impl Into<Length>) -> Self {
+        self.width = Some(width.into());
+        self
+    }
+
+    /// Caps the panel height; the rows below the header scroll inside the cap.
+    pub(crate) fn max_height(mut self, height: impl Into<Length>) -> Self {
+        self.max_height = Some(height.into());
+        self
+    }
+
+    /// Content that stays above the scrolling rows, such as a search field.
+    pub(crate) fn header(mut self, header: impl IntoElement) -> Self {
+        self.header = Some(header.into_any_element());
+        self
+    }
+
+    /// Tracks the scrolling rows, e.g. to keep the keyboard selection in view.
+    pub(crate) fn track_scroll(mut self, scroll: &ScrollHandle) -> Self {
+        self.scroll = Some(scroll.clone());
+        self
+    }
+
+    /// The shared entry motion, settling toward the edge the menu opened from.
+    pub(crate) fn animate_from(mut self, origin: PopupAnimationOrigin) -> Self {
+        self.animation = Some(origin);
+        self
+    }
+}
+
+impl ParentElement for MenuPanel {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+/// The height a panel adds around its content: the inset and border on both edges.
+pub(crate) fn menu_panel_chrome_height(
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
-    div()
-        .id(id)
-        .absolute()
-        .left(origin.x)
-        .top(origin.y)
-        .w(width)
-        .occlude()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .font_family(platform_font_family())
-        .font_weight(platform_font_weight(TypographyRole::Normal))
-        .text_color(gpui_color(colors.text_primary))
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+    scale: MenuScale,
+    rem_size: Pixels,
+) -> Pixels {
+    let inset = rem_size * scale.rems(PANEL_INSET.0).0;
+    (inset + platform_border_width(theme)) * 2.0
+}
+
+/// Height of a panel holding `rows` compact rows and `separators` separators, so an owner can
+/// clamp the panel into the viewport before it is laid out.
+pub(crate) fn menu_panel_height(
+    rows: usize,
+    separators: usize,
+    theme: &AerisTheme,
+    scale: MenuScale,
+    rem_size: Pixels,
+) -> Pixels {
+    let row = rem_size * scale.rems(COMPACT_ROW_HEIGHT.0).0;
+    let rows = f32::from(u16::try_from(rows).unwrap_or(u16::MAX));
+    let separators = f32::from(u16::try_from(separators).unwrap_or(u16::MAX));
+    row * rows + SEPARATOR_HEIGHT * separators + menu_panel_chrome_height(theme, scale, rem_size)
+}
+
+impl RenderOnce for MenuPanel {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let colors = self.theme.colors;
+        let inset = self.scale.rems(PANEL_INSET.0);
+        let body = div()
+            .id("menu_panel_body")
+            .flex()
+            .flex_col()
+            .p(inset)
+            .children(self.children)
+            .when(self.max_height.is_some(), |body| {
+                body.flex_1().min_h_0().overflow_y_scroll()
+            })
+            .when_some(self.scroll, |body, scroll| body.track_scroll(&scroll));
+        let panel = div()
+            .id(self.id.clone())
+            .occlude()
+            .flex()
+            .flex_col()
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+            .border(platform_border_width(&self.theme))
+            .border_color(gpui_color(colors.border_secondary))
+            .bg(gpui_color(colors.surface_secondary))
+            .font_family(platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
+            .text_color(gpui_color(colors.text_primary))
+            .when_some(self.width, Styled::w)
+            .when_some(self.max_height, Styled::max_h)
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .map(|panel| match self.placement {
+                MenuPlacement::At(origin) => panel.absolute().left(origin.x).top(origin.y),
+                MenuPlacement::Anchored { side, align } => {
+                    let panel = match side {
+                        MenuSide::Below => panel.absolute().top_full().mt(ANCHOR_GAP),
+                        MenuSide::Above => panel.absolute().bottom_full().mb(ANCHOR_GAP),
+                    };
+                    match align {
+                        MenuAlign::Start => panel.left_0(),
+                        MenuAlign::Stretch => panel.left_0().right_0(),
+                    }
+                }
+                MenuPlacement::InFlow => panel,
+            })
+            .children(self.header)
+            .child(body);
+        match self.animation {
+            Some(origin) => animate_popup_from_origin(
+                panel,
+                ElementId::NamedChild(Arc::new(self.id), "enter".into()),
+                origin,
+            )
+            .into_any_element(),
+            None => panel.into_any_element(),
+        }
+    }
+}
+
+/// A trigger and the menu it opens. The menu renders above the surrounding layout, and any
+/// press outside the trigger and menu dismisses it, so pressing the trigger again toggles it
+/// closed instead of reopening it.
+#[derive(IntoElement)]
+pub(crate) struct MenuAnchor {
+    id: ElementId,
+    trigger: AnyElement,
+    menu: Option<MenuPanel>,
+    on_dismiss: Option<Dismiss>,
+    full_width: bool,
+}
+
+impl MenuAnchor {
+    pub(crate) fn new(id: impl Into<ElementId>, trigger: impl IntoElement) -> Self {
+        Self {
+            id: id.into(),
+            trigger: trigger.into_any_element(),
+            menu: None,
+            on_dismiss: None,
+            full_width: false,
+        }
+    }
+
+    /// The open menu, placed with [`MenuPlacement::Anchored`]; `None` while closed.
+    pub(crate) fn menu(mut self, menu: Option<MenuPanel>) -> Self {
+        self.menu = menu;
+        self
+    }
+
+    pub(crate) fn on_dismiss(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_dismiss = Some(Rc::new(handler));
+        self
+    }
+
+    /// Lets a full-width trigger, such as a form select, fill its row.
+    pub(crate) fn full_width(mut self) -> Self {
+        self.full_width = true;
+        self
+    }
+}
+
+impl RenderOnce for MenuAnchor {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let open = self.menu.is_some();
+        div()
+            .id(self.id)
+            .relative()
+            .flex_none()
+            .when(self.full_width, Styled::w_full)
+            .child(self.trigger)
+            .when_some(self.on_dismiss.filter(|_| open), |anchor, dismiss| {
+                anchor.on_mouse_down_out(move |_, window, cx| dismiss(window, cx))
+            })
+            .children(self.menu.map(gpui::deferred))
+    }
 }
 
 pub(crate) fn menu_separator(theme: &AerisTheme) -> Div {
@@ -513,11 +699,13 @@ pub(crate) fn menu_separator(theme: &AerisTheme) -> Div {
 
 #[cfg(test)]
 mod tests {
+    use aeris_design_system::{AerisTheme, RadiusToken};
     use gpui::{Bounds, Rems, point, px, size};
 
     use super::{
-        COMPACT_ROW_HEIGHT, MENU_SCALE_MAX, MenuScale, POPUP_ENTER_TRAVEL, PopupAnimationOrigin,
-        RowKind, SEARCH_ROW_HEIGHT, accepts_input, row_geometry,
+        COMPACT_ROW_HEIGHT, MENU_SCALE_MAX, MenuScale, PANEL_INSET, POPUP_ENTER_TRAVEL,
+        PopupAnimationOrigin, ROOT_REM_PX, RowKind, SEARCH_ROW_HEIGHT, accepts_input,
+        menu_panel_height, row_geometry,
     };
 
     #[test]
@@ -531,16 +719,38 @@ mod tests {
     fn row_kinds_preserve_menu_geometry() {
         assert_eq!(
             row_geometry(RowKind::Compact, MenuScale::BASE),
-            (COMPACT_ROW_HEIGHT, Rems(0.75), false)
+            (COMPACT_ROW_HEIGHT, Rems(0.5))
         );
         assert_eq!(
             row_geometry(RowKind::SearchResult, MenuScale::BASE),
-            (SEARCH_ROW_HEIGHT, Rems(0.5), true)
+            (SEARCH_ROW_HEIGHT, Rems(0.5))
         );
         assert_eq!(
             row_geometry(RowKind::SearchResult, MenuScale::clamped(1.5)),
-            (Rems(3.375), Rems(0.75), true)
+            (Rems(3.375), Rems(0.75))
         );
+    }
+
+    #[test]
+    fn panel_inset_keeps_square_row_corners_inside_the_rounded_border() {
+        // A row corner at (inset, inset) from the panel's inner edge must lie inside the corner
+        // circle of the inner radius, whatever row is highlighted or scrolled to the edge.
+        let inner_radius = f32::from(RadiusToken::Default.logical_pixels())
+            - AerisTheme::light().dimensions.border_width;
+        let inset = PANEL_INSET.0 * ROOT_REM_PX;
+        let offset = inner_radius - inset;
+        assert!(
+            (offset * offset * 2.0).sqrt() <= inner_radius,
+            "a {inset}px inset leaves row corners outside the {inner_radius}px corner"
+        );
+    }
+
+    #[test]
+    fn panel_height_adds_rows_separators_inset_and_border() {
+        let theme = AerisTheme::light();
+        let height = menu_panel_height(3, 1, &theme, MenuScale::BASE, px(16.0));
+        let expected = 3.0 * 32.0 + 1.0 + 2.0 * (4.0 + theme.dimensions.border_width);
+        assert!((f32::from(height) - expected).abs() < 1e-4);
     }
 
     #[test]

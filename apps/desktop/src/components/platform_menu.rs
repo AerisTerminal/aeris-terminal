@@ -168,9 +168,10 @@ pub(super) fn platform_menu_layer(
         about_details: details.len(),
     };
     let header_bottom = WORKSPACE_TITLE_BAR_HEIGHT + PLATFORM_MENU_GAP;
+    let panel_chrome = menu_panel_chrome_height(theme, MenuScale::BASE, px(ROOT_REM_PX));
     let panel_size = size(
         px(PLATFORM_MENU_WIDTH),
-        px(layout.height(theme.dimensions.border_width)),
+        px(layout.height(f32::from(panel_chrome))),
     );
     let origin = clamp_panel_origin(
         point(
@@ -206,18 +207,18 @@ pub(super) fn platform_menu_layer(
             UpdateAction::Retry => terminal.retry_update_check(terminal_cx),
         });
     });
-    let panel = flat_compact_menu_panel("platform_menu", origin, px(PLATFORM_MENU_WIDTH), theme)
+    let panel = MenuPanel::new("platform_menu", MenuPlacement::At(origin), theme)
+        .width(px(PLATFORM_MENU_WIDTH))
+        .animate_from(animation_origin)
         .children(header)
         .children(layout.identity.then(|| menu_separator(theme)))
-        .children(account_action_rows(
-            terminal, account, &actions, layout, theme,
-        ))
+        .children(account_action_rows(terminal, account, &actions, theme))
         .children(account.error.as_deref().map(|error| {
             div()
                 .h(px(ACCOUNT_ERROR_HEIGHT))
                 .flex()
                 .items_center()
-                .px_3()
+                .px_2()
                 .text_xs()
                 .text_color(gpui_color(theme.colors.danger))
                 .child(error.to_string())
@@ -251,11 +252,7 @@ pub(super) fn platform_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(animate_popup_from_origin(
-            panel,
-            "platform_menu_enter",
-            animation_origin,
-        ))
+        .child(panel)
         .into_any_element()
 }
 
@@ -287,7 +284,8 @@ impl PlatformMenuLayout {
         self.actions > 0 || self.error
     }
 
-    fn height(self, border_width: f32) -> f32 {
+    /// Content height plus `panel_chrome`, the panel's inset and border.
+    fn height(self, panel_chrome: f32) -> f32 {
         let separator = CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
         let identity = if self.identity {
             IDENTITY_HEIGHT + separator
@@ -305,7 +303,7 @@ impl PlatformMenuLayout {
         } else {
             0.0
         };
-        2.0 * border_width
+        panel_chrome
             + identity
             + rows
             + error
@@ -339,7 +337,7 @@ fn identity_header(
     }
     let colors = theme.colors;
     let presentation = &account.presentation;
-    let header = div().h(px(IDENTITY_HEIGHT)).flex().items_center().px_3();
+    let header = div().h(px(IDENTITY_HEIGHT)).flex().items_center().px_2();
     if account.signed_in() {
         let name = if presentation.display_name.is_empty() {
             presentation.state.to_string()
@@ -463,15 +461,13 @@ fn account_action_rows(
     terminal: &Entity<TerminalApp>,
     account: &aeris_desktop::account::AccountMenuState,
     actions: &[AccountAction],
-    layout: PlatformMenuLayout,
     theme: &AerisTheme,
 ) -> Vec<AnyElement> {
     let colors = theme.colors;
     let pending = account.presentation.pending;
     actions
         .iter()
-        .enumerate()
-        .map(|(index, &action)| {
+        .map(|&action| {
             let enabled = !(pending && action.waits_for_pending_request());
             let icon_color = match (action.destructive(), enabled) {
                 (true, true) => colors.danger,
@@ -488,7 +484,6 @@ fn account_action_rows(
                 )
                 .disabled(!enabled)
                 .destructive(action.destructive())
-                .flush_in_panel(!layout.identity && index == 0, false)
                 .on_click(move |_, window, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
                         run_account_action(terminal, action, window, terminal_cx);
@@ -555,7 +550,7 @@ fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
         .flex_none()
         .flex()
         .flex_col()
-        .px_3()
+        .px_2()
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("Theme", theme))
         .child(
@@ -700,7 +695,7 @@ fn window_section(frameless: bool, on_toggle: &FramelessToggle, theme: &AerisThe
         .flex_none()
         .flex()
         .flex_col()
-        .px_3()
+        .px_2()
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("Window", theme))
         .child(
@@ -776,7 +771,7 @@ fn about_section(
         .flex_none()
         .flex()
         .flex_col()
-        .px_3()
+        .px_2()
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("About", theme))
         .child(
@@ -1071,26 +1066,27 @@ mod tests {
 
     #[test]
     fn layout_height_counts_every_section_and_separator() {
-        let border = 1.0;
+        // The panel's inset plus border on both edges.
+        let panel_chrome = 9.0;
         let development = PlatformMenuLayout {
             identity: false,
             actions: 0,
             error: false,
             about_details: 2,
         };
-        let expected = 2.0
+        let expected = panel_chrome
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
             + 2.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
             + about_section_height(2);
-        assert!((development.height(border) - expected).abs() < f32::EPSILON);
+        assert!((development.height(panel_chrome) - expected).abs() < f32::EPSILON);
         let signed_in = PlatformMenuLayout {
             identity: true,
             actions: 2,
             error: true,
             about_details: 1,
         };
-        let expected = 2.0
+        let expected = panel_chrome
             + IDENTITY_HEIGHT
             + 2.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
             + ACCOUNT_ERROR_HEIGHT
@@ -1098,7 +1094,7 @@ mod tests {
             + WINDOW_SECTION_HEIGHT
             + about_section_height(1)
             + 4.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
-        assert!((signed_in.height(border) - expected).abs() < f32::EPSILON);
+        assert!((signed_in.height(panel_chrome) - expected).abs() < f32::EPSILON);
     }
 
     #[test]

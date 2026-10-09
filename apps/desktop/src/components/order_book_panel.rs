@@ -3,10 +3,10 @@
 use super::order_ticket::{TradingOrderControlsState, trading_order_controls};
 use super::side_panel_dock::{side_panel_header, side_panel_header_button};
 use super::{
-    AerisTheme, Div, Entity, HugeIcon, InteractiveElement, IntoElement, MenuRow, MouseButton,
-    OrderBookColumn, OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin, RadiusToken,
-    ReadOnlyOrderBookView, SidePanel, Styled, WorkspaceSurface, animate_popup_from_origin, div,
-    gpui_color, header_icon, px,
+    AerisTheme, Div, Entity, HugeIcon, InteractiveElement, IntoElement, MenuPanel, MenuPlacement,
+    MenuRow, MouseButton, OrderBookColumn, OrderBookColumnVisibility, ParentElement,
+    PopupAnimationOrigin, ReadOnlyOrderBookView, SidePanel, Styled, WorkspaceSurface, div,
+    gpui_color, px,
 };
 
 #[derive(Clone, Copy)]
@@ -83,32 +83,18 @@ fn order_book_column_menu_layer(
     columns: OrderBookColumnVisibility,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let colors = theme.colors;
     let dismiss_app = app;
-    let mut panel = div()
-        .id("order_book_column_menu")
-        .absolute()
-        .top(px(28.0))
-        .right(px(30.0))
-        .w(px(196.0))
-        .occlude()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .text_color(gpui_color(colors.text_primary))
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
-    let last = OrderBookColumn::ALL.len().saturating_sub(1);
-    for (index, column) in OrderBookColumn::ALL.into_iter().enumerate() {
-        panel = panel.child(order_book_column_menu_item(
-            order_book.clone(),
-            column,
-            columns.is_visible(column),
-            index == 0,
-            index == last,
-            theme,
-        ));
-    }
+    let panel = MenuPanel::new("order_book_column_menu", MenuPlacement::InFlow, theme)
+        .width(px(196.0))
+        .animate_from(PopupAnimationOrigin::TOP_RIGHT)
+        .children(OrderBookColumn::ALL.into_iter().map(|column| {
+            order_book_column_menu_item(
+                order_book.clone(),
+                column,
+                columns.is_visible(column),
+                theme,
+            )
+        }));
     div()
         .id("order_book_column_menu_layer")
         .absolute()
@@ -120,19 +106,14 @@ fn order_book_column_menu_layer(
                 cx.stop_propagation();
             },
         ))
-        .child(animate_popup_from_origin(
-            panel,
-            "order_book_column_menu_enter",
-            PopupAnimationOrigin::TOP_RIGHT,
-        ))
+        // The menu opens under the header's column control at the panel's right edge.
+        .child(div().absolute().top(px(28.0)).right(px(30.0)).child(panel))
 }
 
 fn order_book_column_menu_item(
     order_book: Entity<ReadOnlyOrderBookView>,
     column: OrderBookColumn,
     checked: bool,
-    first: bool,
-    last: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let available = column.available();
@@ -150,21 +131,12 @@ fn order_book_column_menu_item(
         OrderBookColumn::Ask => "order_book_column_ask",
         OrderBookColumn::Orders => "order_book_column_orders",
     };
-    let item_order_book = order_book;
-    let mut item = MenuRow::compact(id, label, theme)
+    MenuRow::compact(id, label, theme)
         .disabled(!available)
-        .flush_in_panel(first, last)
+        .checked(checked)
         .on_click(move |_, _, cx| {
-            item_order_book.update(cx, |order_book, order_book_cx| {
+            order_book.update(cx, |order_book, order_book_cx| {
                 order_book.toggle_column(column, order_book_cx);
             });
-        });
-    if checked {
-        item = item.trailing(
-            header_icon(HugeIcon::CheckIcon)
-                .with_size(px(16.0))
-                .color(gpui_color(theme.colors.icon)),
-        );
-    }
-    item
+        })
 }

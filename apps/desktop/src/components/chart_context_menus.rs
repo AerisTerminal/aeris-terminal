@@ -7,9 +7,15 @@ pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
 }
 
 pub(super) fn scaled_overlay_height(rows: f32, separators: f32, scale: MenuScale) -> f32 {
-    // 1px border on each side. Compact dropdowns have no extra panel padding.
-    2.0 + scale.len(CHART_CONTEXT_MENU_ROW_HEIGHT) * rows
+    // The `MenuPanel` inset plus a 1px border allowance on each side, around the rows.
+    2.0 * (scale.len(MENU_PANEL_INSET) + 1.0)
+        + scale.len(CHART_CONTEXT_MENU_ROW_HEIGHT) * rows
         + CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators
+}
+
+/// Top of a panel's first row below its origin: the 1px border allowance and the scaled inset.
+fn first_row_offset(scale: MenuScale) -> Pixels {
+    px(1.0 + scale.len(MENU_PANEL_INSET))
 }
 
 pub(super) fn clamp_overlay_origin(
@@ -185,11 +191,10 @@ pub(super) fn chart_context_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(animate_popup_from_origin(
-            chart_context_menu_panel(terminal, menu, state, origin, scale, theme),
-            "chart_context_menu_enter",
-            animation_origin,
-        ));
+        .child(
+            chart_context_menu_panel(terminal, menu, state, origin, scale, theme)
+                .animate_from(animation_origin),
+        );
     if menu.capture_flyout_open {
         let flyout_origin = clamp_chart_capture_flyout_origin(origin, viewport);
         let flyout_bounds = Bounds::new(
@@ -201,6 +206,7 @@ pub(super) fn chart_context_menu_layer(
         );
         let row_height = scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT);
         let parent_y = origin.y
+            + first_row_offset(scale)
             + row_height * CAPTURE_CHART_ROW
             + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * CAPTURE_CHART_ROW_SEPARATORS_BEFORE)
             + row_height / 2.0;
@@ -209,30 +215,23 @@ pub(super) fn chart_context_menu_layer(
         } else {
             origin.x + scale.px(CHART_CONTEXT_MENU_WIDTH)
         };
-        let mut flyout = flat_compact_menu_panel(
+        let flyout = MenuPanel::new(
             "capture_chart_menu",
-            flyout_origin,
-            scale.px(CHART_CAPTURE_FLYOUT_WIDTH),
+            MenuPlacement::At(flyout_origin),
             theme,
+        )
+        .scale(scale)
+        .width(scale.px(CHART_CAPTURE_FLYOUT_WIDTH))
+        .animate_from(PopupAnimationOrigin::from_trigger(
+            point(parent_x, parent_y),
+            flyout_bounds,
+        ))
+        .children(
+            chart_capture_menu_items(state)
+                .into_iter()
+                .map(|item| chart_context_menu_item(terminal, item, theme, menu.clone(), scale)),
         );
-        let items = chart_capture_menu_items(state);
-        let last = items.len().saturating_sub(1);
-        for (index, item) in items.into_iter().enumerate() {
-            flyout = flyout.child(chart_context_menu_item(
-                terminal,
-                item,
-                theme,
-                menu.clone(),
-                scale,
-                index == 0,
-                index == last,
-            ));
-        }
-        layer = layer.child(animate_popup_from_origin(
-            flyout,
-            "capture_chart_menu_enter",
-            PopupAnimationOrigin::from_trigger(point(parent_x, parent_y), flyout_bounds),
-        ));
+        layer = layer.child(flyout);
     }
     layer.into_any_element()
 }
@@ -244,16 +243,11 @@ pub(super) fn chart_context_menu_panel(
     origin: gpui::Point<Pixels>,
     scale: MenuScale,
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    let mut panel = flat_compact_menu_panel(
-        "chart_context_menu",
-        origin,
-        scale.px(CHART_CONTEXT_MENU_WIDTH),
-        theme,
-    );
-    let items = chart_context_menu_items(state);
-    let last = items.len().saturating_sub(1);
-    for (index, item) in items.into_iter().enumerate() {
+) -> MenuPanel {
+    let mut panel = MenuPanel::new("chart_context_menu", MenuPlacement::At(origin), theme)
+        .scale(scale)
+        .width(scale.px(CHART_CONTEXT_MENU_WIDTH));
+    for (index, item) in chart_context_menu_items(state).into_iter().enumerate() {
         if matches!(index, 1 | 3 | 5 | 7 | 8) {
             panel = panel.child(menu_separator(theme));
         }
@@ -263,8 +257,6 @@ pub(super) fn chart_context_menu_panel(
             theme,
             menu.clone(),
             scale,
-            index == 0,
-            index == last,
         ));
     }
     panel
@@ -364,8 +356,6 @@ pub(super) fn chart_context_menu_item(
     theme: &AerisTheme,
     menu: ChartContextMenu,
     scale: MenuScale,
-    first: bool,
-    last: bool,
 ) -> impl IntoElement {
     let icon_size = scale.px(16.0);
     let action_terminal = terminal.clone();
@@ -378,7 +368,7 @@ pub(super) fn chart_context_menu_item(
         if item.enabled {
             theme.colors.danger
         } else {
-            theme.colors.danger.with_alpha(0.55)
+            theme.colors.danger_disabled_foreground
         }
     } else if copy_feedback_generation.is_some() {
         theme.colors.primary
@@ -428,8 +418,7 @@ pub(super) fn chart_context_menu_item(
         .leading(leading)
         .disabled(!enabled)
         .destructive(destructive)
-        .highlighted(opens_capture_menu && menu.capture_flyout_open)
-        .flush_in_panel(first, last);
+        .highlighted(opens_capture_menu && menu.capture_flyout_open);
     if action == ChartContextAction::CopyPrice
         && let Some(price) = menu.copy_price.clone()
     {
@@ -529,11 +518,10 @@ pub(super) fn price_axis_menu_layer(
             });
             cx.stop_propagation();
         })
-        .child(animate_popup_from_origin(
-            price_axis_menu_panel(terminal, menu, state, origin, scale, theme),
-            "price_axis_menu_enter",
-            root_animation_origin,
-        ));
+        .child(
+            price_axis_menu_panel(terminal, menu, state, origin, scale, theme)
+                .animate_from(root_animation_origin),
+        );
     if menu.flyout != PriceAxisMenuFlyout::None {
         let flyout_origin = clamp_price_axis_flyout_origin(origin, viewport, menu.flyout);
         let (rows, separators, row, separators_before) = menu.flyout.geometry();
@@ -546,6 +534,7 @@ pub(super) fn price_axis_menu_layer(
         );
         let row_height = scale.px(CHART_CONTEXT_MENU_ROW_HEIGHT);
         let parent_y = origin.y
+            + first_row_offset(scale)
             + row_height * row
             + px(CHART_CONTEXT_MENU_SEPARATOR_HEIGHT * separators_before)
             + row_height / 2.0;
@@ -556,11 +545,10 @@ pub(super) fn price_axis_menu_layer(
         };
         let flyout_animation_origin =
             PopupAnimationOrigin::from_trigger(point(parent_x, parent_y), flyout_bounds);
-        layer = layer.child(animate_popup_from_origin(
-            price_axis_flyout_panel(terminal, menu, state, flyout_origin, viewport, scale, theme),
-            ("price_axis_flyout_enter", menu.flyout as usize),
-            flyout_animation_origin,
-        ));
+        layer = layer.child(
+            price_axis_flyout_panel(terminal, menu, state, flyout_origin, viewport, scale, theme)
+                .animate_from(flyout_animation_origin),
+        );
     }
     layer.into_any_element()
 }
@@ -572,28 +560,18 @@ pub(super) fn price_axis_menu_panel(
     origin: gpui::Point<Pixels>,
     scale: MenuScale,
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    let mut panel = flat_compact_menu_panel(
-        "price_axis_menu",
-        origin,
-        scale.px(CHART_CONTEXT_MENU_WIDTH),
-        theme,
-    );
-    let rows = price_axis_root_rows(menu.flyout, state);
-    let last = rows.len().saturating_sub(1);
-    for (index, row) in rows.into_iter().enumerate() {
+) -> MenuPanel {
+    let mut panel = MenuPanel::new("price_axis_menu", MenuPlacement::At(origin), theme)
+        .scale(scale)
+        .width(scale.px(CHART_CONTEXT_MENU_WIDTH));
+    for (index, row) in price_axis_root_rows(menu.flyout, state)
+        .into_iter()
+        .enumerate()
+    {
         if matches!(index, 2 | 4) {
             panel = panel.child(menu_separator(theme));
         }
-        panel = panel.child(price_axis_menu_item(
-            terminal,
-            menu,
-            row,
-            theme,
-            scale,
-            index == 0,
-            index == last,
-        ));
+        panel = panel.child(price_axis_menu_item(terminal, menu, row, theme, scale));
     }
     panel
 }
@@ -606,30 +584,24 @@ pub(super) fn price_axis_flyout_panel(
     viewport: gpui::Size<Pixels>,
     scale: MenuScale,
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    let mut panel = flat_compact_menu_panel(
-        "price_axis_flyout",
-        origin,
-        scale.px(PRICE_AXIS_FLYOUT_WIDTH),
+) -> MenuPanel {
+    // Keyed by flyout so switching flyouts replays the entry motion.
+    let mut panel = MenuPanel::new(
+        ("price_axis_flyout", menu.flyout as usize),
+        MenuPlacement::At(origin),
         theme,
     )
-    .max_h(viewport.height)
-    .overflow_y_scroll();
-    let rows = price_axis_flyout_rows(menu.flyout, state);
-    let last = rows.len().saturating_sub(1);
-    for (index, row) in rows.into_iter().enumerate() {
+    .scale(scale)
+    .width(scale.px(PRICE_AXIS_FLYOUT_WIDTH))
+    .max_height((viewport.height - px(2.0 * OVERLAY_EDGE_MARGIN)).max(px(0.0)));
+    for (index, row) in price_axis_flyout_rows(menu.flyout, state)
+        .into_iter()
+        .enumerate()
+    {
         if menu.flyout == PriceAxisMenuFlyout::Labels && index == 9 {
             panel = panel.child(menu_separator(theme));
         }
-        panel = panel.child(price_axis_menu_item(
-            terminal,
-            menu,
-            row,
-            theme,
-            scale,
-            index == 0,
-            index == last,
-        ));
+        panel = panel.child(price_axis_menu_item(terminal, menu, row, theme, scale));
     }
     panel
 }
@@ -831,14 +803,15 @@ pub(super) fn price_axis_menu_item(
     row: PriceAxisMenuRow,
     theme: &AerisTheme,
     scale: MenuScale,
-    first: bool,
-    last: bool,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let icon_size = scale.px(16.0);
     let action_terminal = terminal.clone();
     let enabled = row.enabled();
-    let checked = matches!(row, PriceAxisMenuRow::Toggle { checked: true, .. });
+    let toggle = match row {
+        PriceAxisMenuRow::Toggle { checked, .. } => Some(checked),
+        _ => None,
+    };
     let open = matches!(row, PriceAxisMenuRow::Flyout { open: true, .. });
     let chevron = matches!(row, PriceAxisMenuRow::Flyout { .. });
     let label = row.label();
@@ -847,7 +820,7 @@ pub(super) fn price_axis_menu_item(
         .scale(scale)
         .highlighted(open)
         .disabled(!enabled)
-        .flush_in_panel(first, last)
+        .when_some(toggle, MenuRow::checked)
         .on_click(move |_, _, cx| match row {
             PriceAxisMenuRow::Toggle { action, .. } => {
                 action_terminal.update(cx, |terminal, terminal_cx| {
@@ -861,13 +834,6 @@ pub(super) fn price_axis_menu_item(
             }
             PriceAxisMenuRow::Unavailable { .. } => {}
         });
-    if checked {
-        item = item.trailing(
-            header_icon(HugeIcon::CheckIcon)
-                .with_size(icon_size)
-                .color(gpui_color(colors.icon)),
-        );
-    }
     if chevron {
         item = item.trailing(
             header_icon(HugeIcon::ArrowRight)
@@ -1331,94 +1297,92 @@ fn chart_settings_template_control(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let toggle = terminal.clone();
-    let mut control = div()
-        .relative()
+    let trigger = Button::new("chart_settings_templates", theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Lg)
+        .trigger()
+        .full_width()
+        .open(state.overlay == ChartSettingsTemplateOverlay::Menu)
+        .label("Template")
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_click(move |_, _, cx| {
+            toggle.update(cx, |terminal, terminal_cx| {
+                terminal.toggle_chart_settings_template_menu(terminal_cx);
+            });
+        });
+    let menu = (state.overlay == ChartSettingsTemplateOverlay::Menu)
+        .then(|| chart_settings_template_menu(terminal, menu, state, theme));
+    // The settings panel closes its popovers on any press inside it; presses on this control
+    // belong to the trigger and its menu.
+    div()
         .w_full()
         .pt_3()
-        .border_t_1()
+        .border_t(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
         .child(
-            Button::new("chart_settings_templates", theme)
-                .variant(ButtonVariant::Outline)
-                .button_size(ButtonSize::Lg)
-                .trigger()
+            MenuAnchor::new("chart_settings_template_anchor", trigger)
                 .full_width()
-                .open(state.overlay == ChartSettingsTemplateOverlay::Menu)
-                .label("Template")
-                .caret(header_icon(HugeIcon::ChevronDown))
-                .on_click(move |_, _, cx| {
-                    toggle.update(cx, |terminal, terminal_cx| {
-                        terminal.toggle_chart_settings_template_menu(terminal_cx);
+                .menu(menu),
+        )
+}
+
+fn chart_settings_template_menu(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    state: ChartSettingsTemplateView<'_>,
+    theme: &AerisTheme,
+) -> MenuPanel {
+    let save = terminal.clone();
+    let apply_all = terminal.clone();
+    let apply_all_menu = menu.clone();
+    let mut popup = MenuPanel::new(
+        "chart_settings_template_menu",
+        MenuPlacement::Anchored {
+            side: MenuSide::Above,
+            align: MenuAlign::Start,
+        },
+        theme,
+    )
+    .width(design_rems(240.0))
+    .max_height(design_rems(360.0))
+    .animate_from(PopupAnimationOrigin::BOTTOM_LEFT)
+    .child(
+        MenuRow::compact("chart_template_save", "Save…", theme).on_click(move |_, window, cx| {
+            save.update(cx, |terminal, terminal_cx| {
+                terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
+            });
+        }),
+    );
+    if state.apply_to_all {
+        popup = popup.child(
+            MenuRow::compact("chart_template_apply_all", "Apply to all charts", theme).on_click(
+                move |_, _, cx| {
+                    apply_all.update(cx, |terminal, terminal_cx| {
+                        terminal.apply_chart_settings_to_all(&apply_all_menu, terminal_cx);
                     });
-                }),
+                },
+            ),
         );
-    if state.overlay == ChartSettingsTemplateOverlay::Menu {
-        let save = terminal.clone();
-        let apply_all = terminal.clone();
-        let apply_all_menu = menu.clone();
-        let template_count = state.templates.len();
-        let last = template_count + usize::from(state.apply_to_all);
-        let mut popup = div()
-            .id("chart_settings_template_menu")
-            .absolute()
-            .bottom(design_rems(36.0))
-            .left_0()
-            .w(design_rems(240.0))
-            .max_h(design_rems(360.0))
-            .overflow_y_scroll()
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .border_1()
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface))
-            .occlude()
-            .child(
-                MenuRow::compact("chart_template_save", "Save…", theme)
-                    .resting_fill(colors.surface)
-                    .flush_in_panel(true, last == 0)
-                    .on_click(move |_, window, cx| {
-                        save.update(cx, |terminal, terminal_cx| {
-                            terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
-                        });
-                    }),
-            );
-        if state.apply_to_all {
-            popup = popup.child(
-                MenuRow::compact("chart_template_apply_all", "Apply to all charts", theme)
-                    .resting_fill(colors.surface)
-                    .flush_in_panel(false, template_count == 0)
-                    .on_click(move |_, _, cx| {
-                        apply_all.update(cx, |terminal, terminal_cx| {
-                            terminal.apply_chart_settings_to_all(&apply_all_menu, terminal_cx);
-                        });
-                    }),
-            );
-        }
-        for (index, template) in state.templates.iter().enumerate() {
-            let apply = terminal.clone();
-            let apply_menu = menu.clone();
-            popup = popup.child(
-                MenuRow::compact(("chart_template", index), template.name.clone(), theme)
-                    .resting_fill(colors.surface)
-                    .flush_in_panel(false, index + 1 == template_count)
-                    .on_click(move |_, _, cx| {
-                        apply.update(cx, |terminal, terminal_cx| {
-                            terminal.apply_named_chart_settings_template(
-                                &apply_menu,
-                                index,
-                                terminal_cx,
-                            );
-                        });
-                    }),
-            );
-        }
-        control = control.child(gpui::deferred(animate_popup_from_origin(
-            popup,
-            "chart_settings_template_menu_enter",
-            PopupAnimationOrigin::BOTTOM_LEFT,
-        )));
     }
-    control
+    for (index, template) in state.templates.iter().enumerate() {
+        let apply = terminal.clone();
+        let apply_menu = menu.clone();
+        popup = popup.child(
+            MenuRow::compact(("chart_template", index), template.name.clone(), theme).on_click(
+                move |_, _, cx| {
+                    apply.update(cx, |terminal, terminal_cx| {
+                        terminal.apply_named_chart_settings_template(
+                            &apply_menu,
+                            index,
+                            terminal_cx,
+                        );
+                    });
+                },
+            ),
+        );
+    }
+    popup
 }
 
 fn chart_settings_template_save_dialog(

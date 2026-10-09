@@ -205,7 +205,6 @@ fn symbol_provider_menu(
     let flyout_row = providers
         .iter()
         .position(|provider| has_categories(*provider));
-    let last_row = providers.len().saturating_sub(1);
     let provider_rows = providers.into_iter().enumerate().map(|(index, provider)| {
         let row_app = app.clone();
         let hover_app = app.clone();
@@ -213,7 +212,11 @@ fn symbol_provider_menu(
         let opens_flyout = has_categories(provider);
         let mut trailing = div().flex().items_center().gap_1();
         if active {
-            trailing = trailing.child(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)));
+            trailing = trailing.child(
+                header_icon(HugeIcon::CheckIcon)
+                    .with_size(px(16.0))
+                    .color(gpui_color(colors.icon_active)),
+            );
         }
         if opens_flyout {
             trailing = trailing.child(
@@ -222,17 +225,17 @@ fn symbol_provider_menu(
                     .color(gpui_color(colors.icon)),
             );
         }
+        // A provider row can both be the current provider and open the markets flyout, so it
+        // carries its own check-and-chevron trailing content instead of `MenuRow::checked`.
         MenuRow::compact(
             ("symbol_provider_row", index),
             terminal_provider_display(provider),
             theme,
         )
-        .resting_fill(colors.surface)
         .leading(provider_exchange_mark(provider, px(18.0), false, &colors))
-        .highlighted(active || (opens_flyout && state.markets_flyout_open))
+        .highlighted(opens_flyout && state.markets_flyout_open)
         .disabled(state.availability.selection_pending)
         .trailing(trailing)
-        .flush_in_panel(index == 0, index == last_row)
         .on_hover(move |hovered, _, cx| {
             if *hovered {
                 hover_app.update(cx, |surface, surface_cx| {
@@ -246,33 +249,23 @@ fn symbol_provider_menu(
             });
         })
     });
-    let root = div()
-        .id("symbol_provider_menu")
-        .w(px(SYMBOL_PROVIDER_MENU_WIDTH))
-        .flex()
-        .flex_col()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface))
-        .overflow_hidden()
+    let root = MenuPanel::new("symbol_provider_menu", MenuPlacement::InFlow, theme)
+        .width(px(SYMBOL_PROVIDER_MENU_WIDTH))
+        .animate_from(PopupAnimationOrigin::TOP_LEFT)
         .children(provider_rows);
-    div()
-        .id("symbol_provider_menu_host")
-        .absolute()
-        .top(px(CHROME_MENU_SEARCH_HEIGHT + 4.0))
-        .left(px(12.0))
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(animate_popup_from_origin(
-            root,
-            "symbol_provider_menu_enter",
-            PopupAnimationOrigin::TOP_LEFT,
-        ))
-        .when_some(
-            flyout_row.filter(|_| state.markets_flyout_open),
-            |host, row| host.child(symbol_markets_flyout(app, state, row, theme)),
-        )
+    // Deferred so the menu paints over, and is never clipped by, the rounded symbol menu.
+    gpui::deferred(
+        div()
+            .id("symbol_provider_menu_host")
+            .absolute()
+            .top(px(CHROME_MENU_SEARCH_HEIGHT + 4.0))
+            .left(px(12.0))
+            .child(root)
+            .when_some(
+                flyout_row.filter(|_| state.markets_flyout_open),
+                |host, row| host.child(symbol_markets_flyout(app, state, row, theme)),
+            ),
+    )
 }
 
 /// Category toggles beside the provider menu, aligned to the hovered provider's row and styled
@@ -283,38 +276,21 @@ fn symbol_markets_flyout(
     provider_row_index: usize,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let colors = theme.colors;
-    let last = SymbolSearchCategory::ALL.len().saturating_sub(1);
     let rows = SymbolSearchCategory::ALL
         .into_iter()
         .enumerate()
         .map(|(index, category)| {
             let row_app = app.clone();
-            let row = MenuRow::compact(("symbol_category_row", index), category.label(), theme)
-                .resting_fill(colors.surface_secondary)
-                .flush_in_panel(index == 0, index == last)
+            MenuRow::compact(("symbol_category_row", index), category.label(), theme)
+                .checked(category.included(state.search_categories))
                 .on_click(move |_, _, cx| {
                     row_app.update(cx, |surface, surface_cx| {
                         surface.toggle_symbol_search_category(category, surface_cx);
                     });
-                });
-            if category.included(state.search_categories) {
-                row.trailing(header_icon(HugeIcon::CheckIcon).with_size(px(14.0)))
-            } else {
-                row
-            }
+                })
         });
-    let panel = div()
-        .id("symbol_markets_flyout")
-        .w(px(TIMEFRAME_FLYOUT_WIDTH))
-        .flex()
-        .flex_col()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .overflow_hidden()
-        .children(rows);
+    // Both panels share the same border and inset, so offsetting by whole rows lines the
+    // flyout's first row up with the provider row that opened it.
     let top =
         CHART_CONTEXT_MENU_ROW_HEIGHT * f32::from(u16::try_from(provider_row_index).unwrap_or(0));
     div()
@@ -322,11 +298,12 @@ fn symbol_markets_flyout(
         .absolute()
         .left(px(SYMBOL_PROVIDER_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP))
         .top(px(top))
-        .child(animate_popup_from_origin(
-            panel,
-            "symbol_markets_flyout_enter",
-            PopupAnimationOrigin::new(0.0, 0.25),
-        ))
+        .child(
+            MenuPanel::new("symbol_markets_flyout", MenuPlacement::InFlow, theme)
+                .width(px(TIMEFRAME_FLYOUT_WIDTH))
+                .animate_from(PopupAnimationOrigin::new(0.0, 0.25))
+                .children(rows),
+        )
 }
 
 pub(super) fn instrument_dialog_row(

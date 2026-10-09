@@ -553,19 +553,14 @@ fn trade_history_account_filter(
         .on_click(move |_, _, cx| {
             toggle_terminal.update(cx, TerminalApp::toggle_trade_history_account_menu);
         });
-    div()
-        .id("trade_history_account_filter_anchor")
-        .relative()
-        .flex_none()
-        .child(trigger)
-        .when(state.account_menu_open, |anchor| {
-            anchor
-                .on_mouse_down_out(move |_, _, cx| {
-                    dismiss_terminal.update(cx, TerminalApp::close_trade_history_account_menu);
-                })
-                .child(gpui::deferred(trade_history_account_menu(
-                    terminal, state, theme,
-                )))
+    MenuAnchor::new("trade_history_account_filter_anchor", trigger)
+        .menu(
+            state
+                .account_menu_open
+                .then(|| trade_history_account_menu(terminal, state, theme)),
+        )
+        .on_dismiss(move |_, cx| {
+            dismiss_terminal.update(cx, TerminalApp::close_trade_history_account_menu);
         })
 }
 
@@ -574,35 +569,27 @@ fn trade_history_account_menu(
     terminal: &Entity<TerminalApp>,
     state: &BottomPanelState,
     theme: &AerisTheme,
-) -> Stateful<Div> {
-    let colors = theme.colors;
+) -> MenuPanel {
     let all_terminal = terminal.clone();
-    let last_account = state.history.accounts.len().checked_sub(1);
-    let mut menu = div()
-        .id("trade_history_account_menu")
-        .absolute()
-        .bottom(px(TRADE_HISTORY_HEADER_CONTROL_HEIGHT + 4.0))
-        .left_0()
-        .w(px(TRADE_HISTORY_ACCOUNT_MENU_WIDTH))
-        .max_h(px(TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT))
-        .overflow_y_scroll()
-        .occlude()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-        .child(
-            MenuRow::compact("trade_history_account_all", "All accounts", theme)
-                .highlighted(state.filter == TradeHistoryAccountFilter::All)
-                .flush_in_panel(true, last_account.is_none())
-                .on_click(move |_, _, cx| {
-                    all_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal
-                            .set_trade_history_filter(TradeHistoryAccountFilter::All, terminal_cx);
-                    });
-                }),
-        );
+    let mut menu = MenuPanel::new(
+        "trade_history_account_menu",
+        MenuPlacement::Anchored {
+            side: MenuSide::Above,
+            align: MenuAlign::Start,
+        },
+        theme,
+    )
+    .width(px(TRADE_HISTORY_ACCOUNT_MENU_WIDTH))
+    .max_height(px(TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT))
+    .child(
+        MenuRow::compact("trade_history_account_all", "All accounts", theme)
+            .checked(state.filter == TradeHistoryAccountFilter::All)
+            .on_click(move |_, _, cx| {
+                all_terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.set_trade_history_filter(TradeHistoryAccountFilter::All, terminal_cx);
+                });
+            }),
+    );
     for (index, account) in state.history.accounts.iter().enumerate() {
         let select_terminal = terminal.clone();
         let filter = TradeHistoryAccountFilter::Account(account.id.as_str().to_string());
@@ -613,8 +600,7 @@ fn trade_history_account_menu(
                 account.display_name.clone(),
                 theme,
             )
-            .highlighted(selected)
-            .flush_in_panel(false, Some(index) == last_account)
+            .checked(selected)
             .on_click(move |_, _, cx| {
                 let filter = filter.clone();
                 select_terminal.update(cx, |terminal, terminal_cx| {

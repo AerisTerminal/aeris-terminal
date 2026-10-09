@@ -19,7 +19,6 @@ pub(super) struct ModalLayer {
     radius: RadiusToken,
     theme: AerisTheme,
     on_dismiss: ModalHandler,
-    on_panel_mouse_down: Option<ModalHandler>,
     children: Vec<AnyElement>,
 }
 
@@ -37,7 +36,6 @@ impl ModalLayer {
             radius: RadiusToken::Default,
             theme: *theme,
             on_dismiss: Rc::new(on_dismiss),
-            on_panel_mouse_down: None,
             children: Vec::new(),
         }
     }
@@ -52,15 +50,6 @@ impl ModalLayer {
         self.radius = radius;
         self
     }
-
-    /// Runs for presses inside the panel, e.g. to close a dropdown the panel owns.
-    pub(super) fn on_panel_mouse_down(
-        mut self,
-        handler: impl Fn(&mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_panel_mouse_down = Some(Rc::new(handler));
-        self
-    }
 }
 
 impl ParentElement for ModalLayer {
@@ -73,7 +62,6 @@ impl RenderOnce for ModalLayer {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
         let dismiss = self.on_dismiss;
-        let panel_mouse_down = self.on_panel_mouse_down;
         div()
             .id(self.id)
             .absolute()
@@ -104,12 +92,7 @@ impl RenderOnce for ModalLayer {
                     .border_color(gpui_color(colors.border_secondary))
                     .bg(gpui_color(colors.surface))
                     .shadow_lg()
-                    .on_any_mouse_down(move |_, window, cx| {
-                        if let Some(handler) = &panel_mouse_down {
-                            handler(window, cx);
-                        }
-                        cx.stop_propagation();
-                    })
+                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
                     .children(self.children),
             )
     }

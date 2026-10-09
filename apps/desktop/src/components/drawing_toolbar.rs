@@ -950,27 +950,24 @@ pub(super) fn drawing_tool_menu_layer(
     let armed = menu.armed_choice(active_tool);
     let panel_size = size(
         px(DRAWING_TOOL_MENU_WIDTH),
-        drawing_tool_menu_height(group, rem_size, theme.dimensions.border_width),
+        drawing_tool_menu_height(group, rem_size, theme),
     );
     let origin = drawing_tool_menu_origin(trigger, panel_size, viewport);
-    let mut panel = flat_compact_menu_panel(
+    let mut panel = MenuPanel::new(
         ("drawing_tool_menu", index),
-        origin,
-        panel_size.width,
+        MenuPlacement::At(origin),
         theme,
     )
-    .max_h((viewport.height - px(2.0 * OVERLAY_EDGE_MARGIN)).max(px(0.0)))
-    .overflow_y_scroll();
+    .width(panel_size.width)
+    .max_height((viewport.height - px(2.0 * OVERLAY_EDGE_MARGIN)).max(px(0.0)));
     let mut row = 0_usize;
     for (section_index, section) in group.sections.iter().enumerate() {
         if section_index > 0 {
             panel = panel.child(menu_separator(theme));
         }
         panel = panel.child(drawing_tool_menu_title(section.title, theme));
-        let last_section = section_index + 1 == group.sections.len();
-        for (tool_index, entry) in section.tools.iter().copied().enumerate() {
+        for entry in section.tools.iter().copied() {
             let select = terminal.clone();
-            let last = last_section && tool_index + 1 == section.tools.len();
             panel = panel.child(
                 MenuRow::compact(("drawing_tool_menu_row", row), entry.label, theme)
                     .leading(entry.icon(theme).with_size(px(DRAWING_TOOL_MENU_ICON)))
@@ -982,7 +979,6 @@ pub(super) fn drawing_tool_menu_layer(
                         theme,
                     ))
                     .highlighted(entry.choice == armed)
-                    .flush_in_panel(false, last)
                     .on_click(move |_, _, cx| {
                         select.update(cx, |terminal, terminal_cx| {
                             terminal
@@ -993,6 +989,10 @@ pub(super) fn drawing_tool_menu_layer(
             row += 1;
         }
     }
+    let panel = panel.animate_from(PopupAnimationOrigin::from_trigger(
+        trigger.center(),
+        Bounds::new(origin, panel_size),
+    ));
     let dismiss = terminal.clone();
     Some(
         div()
@@ -1009,14 +1009,7 @@ pub(super) fn drawing_tool_menu_layer(
                 });
                 cx.stop_propagation();
             })
-            .child(animate_popup_from_origin(
-                panel,
-                ("drawing_tool_menu_enter", index),
-                PopupAnimationOrigin::from_trigger(
-                    trigger.center(),
-                    Bounds::new(origin, panel_size),
-                ),
-            ))
+            .child(panel)
             .into_any_element(),
     )
 }
@@ -1231,7 +1224,8 @@ fn drawing_tool_menu_title(title: &'static str, theme: &AerisTheme) -> impl Into
         .h(gpui::rems(DRAWING_TOOL_MENU_TITLE_REMS))
         .flex()
         .items_center()
-        .px(gpui::rems(0.75))
+        // Lines the title up with the row labels inside the panel inset.
+        .px(gpui::rems(0.5))
         .text_xs()
         .text_color(gpui_color(theme.colors.text_muted))
         .child(title)
@@ -1240,7 +1234,7 @@ fn drawing_tool_menu_title(title: &'static str, theme: &AerisTheme) -> impl Into
 fn drawing_tool_menu_height(
     group: &DrawingToolGroup,
     rem_size: Pixels,
-    border_width: f32,
+    theme: &AerisTheme,
 ) -> Pixels {
     let rem = f32::from(rem_size);
     let sections = group.sections.len();
@@ -1248,8 +1242,8 @@ fn drawing_tool_menu_height(
     let count = |value: usize| f32::from(u16::try_from(value).unwrap_or(u16::MAX));
     px(count(rows) * DRAWING_TOOL_MENU_ROW_REMS * rem
         + count(sections) * DRAWING_TOOL_MENU_TITLE_REMS * rem
-        + count(sections.saturating_sub(1))
-        + 2.0 * border_width)
+        + count(sections.saturating_sub(1)))
+        + menu_panel_chrome_height(theme, MenuScale::BASE, rem_size)
 }
 
 /// Opens to the right of the slot, top-aligned with it, sliding up when the window is too short.
@@ -1671,10 +1665,13 @@ mod tests {
             px(700.0 - 650.0 - OVERLAY_EDGE_MARGIN)
         );
         let lines = &DRAWING_TOOL_GROUPS[1];
-        let height = drawing_tool_menu_height(lines, px(16.0), 1.0);
+        let theme = AerisTheme::light();
+        let height = drawing_tool_menu_height(lines, px(16.0), &theme);
         let rows = 20.0 * 32.0;
         let titles = 3.0 * 28.0;
-        assert_eq!(height, px(rows + titles + 2.0 + 2.0));
+        let separators = 2.0;
+        let panel_chrome = 2.0 * (MENU_PANEL_INSET + theme.dimensions.border_width);
+        assert_eq!(height, px(rows + titles + separators + panel_chrome));
     }
 
     #[test]
