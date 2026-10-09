@@ -25,11 +25,12 @@ impl WindowCommand {
 pub(super) enum ChartShortcut {
     NextWatchlistSymbol,
     PreviousWatchlistSymbol,
-    ToggleFullscreen,
+    /// The chart alone fills the screen.
+    ToggleChartFullscreen,
 }
 
-/// Space steps forward through the watchlist, Shift+Space back, and Shift+F toggles
-/// fullscreen. Any other modifier leaves the key to other shortcuts.
+/// Space steps forward through the watchlist, Shift+Space back, and Shift+F toggles the
+/// chart-only fullscreen. Any other modifier leaves the key to other shortcuts.
 pub(super) fn chart_shortcut(key: &str, modifiers: gpui::Modifiers) -> Option<ChartShortcut> {
     if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
         return None;
@@ -37,7 +38,7 @@ pub(super) fn chart_shortcut(key: &str, modifiers: gpui::Modifiers) -> Option<Ch
     match key {
         "space" if modifiers.shift => Some(ChartShortcut::PreviousWatchlistSymbol),
         "space" => Some(ChartShortcut::NextWatchlistSymbol),
-        "f" if modifiers.shift => Some(ChartShortcut::ToggleFullscreen),
+        "f" if modifiers.shift => Some(ChartShortcut::ToggleChartFullscreen),
         _ => None,
     }
 }
@@ -1007,6 +1008,9 @@ pub(super) fn round_icon_button(
 pub(super) fn series_icon_kind(chart_type: ChartType) -> assets::SeriesIcon {
     match chart_type {
         ChartType::Candles | ChartType::Footprint => assets::SeriesIcon::Candlestick,
+        ChartType::HollowCandles
+        | ChartType::HollowCandlesBullish
+        | ChartType::HollowCandlesBearish => assets::SeriesIcon::HollowCandles,
         ChartType::Bars => assets::SeriesIcon::OhlcBar,
         ChartType::Line | ChartType::Baseline => assets::SeriesIcon::Line,
         ChartType::LineWithMarkers => assets::SeriesIcon::LineWithMarkers,

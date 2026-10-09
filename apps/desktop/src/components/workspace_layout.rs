@@ -617,6 +617,24 @@ fn trading_pnl_refresh_due(
 /// or positions another pane already changed. The active pane owns the poll
 /// cadence; each pane still projects the snapshot for its own product, and the
 /// bottom panel's trade history adopts it once per owner revision.
+///
+/// The chart-only fullscreen renders no market area, so it calls this directly.
+pub(super) fn keep_trading_pnl_fresh(
+    active: &Entity<WorkspaceSurface>,
+    workspace: &WorkspaceTab,
+    cx: &mut Context<TerminalApp>,
+) {
+    refresh_trading_pnl(
+        active.clone(),
+        workspace
+            .panes
+            .iter()
+            .map(|pane| pane.surface.clone())
+            .collect(),
+        cx,
+    );
+}
+
 fn refresh_trading_pnl(
     active: Entity<WorkspaceSurface>,
     panes: Vec<Entity<WorkspaceSurface>>,

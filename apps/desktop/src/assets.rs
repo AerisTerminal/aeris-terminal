@@ -287,6 +287,7 @@ fn stamp_asset(path: &str) -> Option<&'static [u8]> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SeriesIcon {
     Candlestick,
+    HollowCandles,
     OhlcBar,
     Line,
     LineWithMarkers,
@@ -296,8 +297,9 @@ pub enum SeriesIcon {
 }
 
 impl SeriesIcon {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Candlestick,
+        Self::HollowCandles,
         Self::OhlcBar,
         Self::Line,
         Self::LineWithMarkers,
@@ -310,6 +312,7 @@ impl SeriesIcon {
     pub fn path(self) -> SharedString {
         let name = match self {
             Self::Candlestick => "candlestick-chart.svg",
+            Self::HollowCandles => "hollow-candles-chart.svg",
             Self::OhlcBar => "ohlc-bar-chart.svg",
             Self::Line => "line-chart-type.svg",
             Self::LineWithMarkers => "line-with-markers-chart.svg",
@@ -570,6 +573,9 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
 fn series_asset(path: &str) -> Option<&'static [u8]> {
     Some(match path.strip_prefix(SERIES_ASSET_PREFIX)? {
         "candlestick-chart.svg" => include_bytes!("../assets/icons/series/candlestick-chart.svg"),
+        "hollow-candles-chart.svg" => {
+            include_bytes!("../assets/icons/series/hollow-candles-chart.svg")
+        }
         "ohlc-bar-chart.svg" => include_bytes!("../assets/icons/series/ohlc-bar-chart.svg"),
         "line-chart-type.svg" => include_bytes!("../assets/icons/series/line-chart-type.svg"),
         "line-with-markers-chart.svg" => {

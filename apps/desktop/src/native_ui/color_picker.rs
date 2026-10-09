@@ -21,6 +21,8 @@ const FIELD_HEIGHT: f32 = 190.0;
 const FIELD_COLUMNS: u16 = 20;
 const FIELD_ROWS: u16 = 14;
 const SLIDER_STEPS: u16 = 36;
+/// The hex field matches the platform's 32 px control height.
+const HEX_ROW_HEIGHT: f32 = 32.0;
 const RECOMMENDED_COLORS: [&str; 8] = [
     "#6B7280", "#335CFF", "#FF7A45", "#FB3748", "#18B66A", "#F5A623", "#7C4DFF", "#45B8F2",
 ];
@@ -232,6 +234,9 @@ fn saturation_value_field(
         hits = hits.child(hit_row);
     }
 
+    // GPUI clips children to a rectangle, not a rounded one, so every layer carries the
+    // field's radius itself.
+    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
     div()
         .relative()
         .w(px(FIELD_WIDTH))
@@ -240,18 +245,18 @@ fn saturation_value_field(
             div()
                 .absolute()
                 .inset_0()
-                .overflow_hidden()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .rounded(radius)
                 .bg(pure_hue)
                 .child(
                     div()
                         .size_full()
+                        .rounded(radius)
                         .bg(linear_gradient(
                             90.0,
                             linear_color_stop(gpui::white(), 0.0),
                             linear_color_stop(transparent_white, 1.0),
                         ))
-                        .child(div().size_full().bg(linear_gradient(
+                        .child(div().size_full().rounded(radius).bg(linear_gradient(
                             180.0,
                             linear_color_stop(transparent_black, 0.0),
                             linear_color_stop(gpui::black(), 1.0),
@@ -282,18 +287,23 @@ fn hue_slider(
         hsla(5.0 / 6.0, 1.0, 0.5, 1.0),
         hsla(1.0, 1.0, 0.5, 1.0),
     ];
-    let mut gradient = div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .overflow_hidden()
-        .rounded_full();
-    for pair in stops.windows(2) {
-        gradient = gradient.child(div().flex_1().h_full().bg(linear_gradient(
-            90.0,
-            linear_color_stop(pair[0], 0.0),
-            linear_color_stop(pair[1], 1.0),
-        )));
+    // The bar is six gradient segments; the end segments carry the bar's rounded ends because
+    // GPUI clips children to a rectangle.
+    let mut gradient = div().absolute().inset_0().flex();
+    let last = stops.len() - 2;
+    for (index, pair) in stops.windows(2).enumerate() {
+        gradient = gradient.child(
+            div()
+                .flex_1()
+                .h_full()
+                .when(index == 0, gpui::Styled::rounded_l_full)
+                .when(index == last, gpui::Styled::rounded_r_full)
+                .bg(linear_gradient(
+                    90.0,
+                    linear_color_stop(pair[0], 0.0),
+                    linear_color_stop(pair[1], 1.0),
+                )),
+        );
     }
     let mut hits = div().absolute().inset_0().flex();
     for step in 0..SLIDER_STEPS {
@@ -321,8 +331,9 @@ fn hue_slider(
                 }),
         );
     }
-    slider_shell(theme)
+    slider_shell()
         .child(gradient)
+        .child(slider_outline(theme))
         .child(hits)
         .child(slider_handle(
             selected.hue * FIELD_WIDTH,
@@ -368,11 +379,14 @@ fn alpha_slider(
                 }),
         );
     }
-    slider_shell(theme)
-        .child(div().absolute().inset_0().rounded_full().bg(checkerboard(
-            gpui_color(theme.colors.text_muted).opacity(0.35),
-            4.0,
-        )))
+    slider_shell()
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .bg(transparency_backdrop(theme)),
+        )
         .child(
             div()
                 .absolute()
@@ -384,6 +398,7 @@ fn alpha_slider(
                     linear_color_stop(opaque, 1.0),
                 )),
         )
+        .child(slider_outline(theme))
         .child(hits)
         .child(slider_handle(
             selected.alpha * FIELD_WIDTH,
@@ -392,40 +407,60 @@ fn alpha_slider(
         ))
 }
 
-fn slider_shell(theme: &AerisTheme) -> gpui::Div {
+/// The checkerboard every color preview sits on, so a translucent color reads as translucent.
+pub(crate) fn transparency_backdrop(theme: &AerisTheme) -> gpui::Background {
+    checkerboard(gpui_color(theme.colors.text_muted).opacity(0.35), 4.0)
+}
+
+fn slider_shell() -> gpui::Div {
     div()
         .relative()
         .w(px(FIELD_WIDTH))
         .h(px(12.0))
         .rounded_full()
+}
+
+/// The slider's outline as its own layer under the handle. GPUI paints a div's border after
+/// its children, so a border on the shell would cross the handle.
+fn slider_outline(theme: &AerisTheme) -> gpui::Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded_full()
         .border(platform_border_width(theme))
         .border_color(gpui_color(theme.colors.border_secondary))
 }
 
-fn selection_handle(x: f32, y: f32, color: Hsla, theme: &AerisTheme) -> impl IntoElement {
+const HANDLE_SIZE: f32 = 14.0;
+const HANDLE_HOLE: f32 = 6.0;
+
+/// A solid disc with a centered hole that shows the selected color.
+fn handle_disc(color: Hsla, theme: &AerisTheme) -> gpui::Div {
     div()
         .absolute()
-        .left(px((x - 7.0).clamp(-1.0, FIELD_WIDTH - 13.0)))
-        .top(px((y - 7.0).clamp(-1.0, FIELD_HEIGHT - 13.0)))
-        .size(px(14.0))
+        .size(px(HANDLE_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
         .rounded_full()
-        .border(px(2.0))
-        .border_color(gpui_color(theme.colors.primary_foreground))
-        .bg(color)
+        .bg(gpui_color(theme.colors.primary_foreground))
         .shadow_sm()
+        .child(div().size(px(HANDLE_HOLE)).rounded_full().bg(color))
+}
+
+fn selection_handle(x: f32, y: f32, color: Hsla, theme: &AerisTheme) -> impl IntoElement {
+    let half = HANDLE_SIZE / 2.0;
+    handle_disc(color, theme)
+        .left(px((x - half).clamp(-1.0, FIELD_WIDTH - HANDLE_SIZE + 1.0)))
+        .top(px((y - half).clamp(-1.0, FIELD_HEIGHT - HANDLE_SIZE + 1.0)))
 }
 
 fn slider_handle(x: f32, color: Hsla, theme: &AerisTheme) -> impl IntoElement {
-    div()
-        .absolute()
-        .left(px((x - 6.0).clamp(-1.0, FIELD_WIDTH - 11.0)))
+    handle_disc(color, theme)
+        .left(px(
+            (x - HANDLE_SIZE / 2.0).clamp(-1.0, FIELD_WIDTH - HANDLE_SIZE + 1.0)
+        ))
         .top(px(-2.0))
-        .size(px(14.0))
-        .rounded_full()
-        .border(px(2.0))
-        .border_color(gpui_color(theme.colors.primary_foreground))
-        .bg(color)
-        .shadow_sm()
 }
 
 fn hex_input_row(
@@ -436,15 +471,21 @@ fn hex_input_row(
 ) -> impl IntoElement {
     let submit_input = input.clone();
     let submit_handler = handler.cloned();
+    // GPUI clips children to a rectangle, so the Set segment rounds its own outer corners to
+    // the field's inner radius; its hover fill then never paints past the field's corner.
+    let outer_radius = f32::from(RadiusToken::Default.logical_pixels());
+    let inner_radius = px((outer_radius - f32::from(platform_border_width(theme))).max(0.0));
     div()
-        .h(px(38.0))
+        .h(px(HEX_ROW_HEIGHT))
         .flex()
         .items_center()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        // The input shapes its text from the inherited style; pin it so typed text stays the
+        // size it opened at, whatever the picker is drawn over.
+        .text_sm()
+        .rounded(px(outer_radius))
         .border(platform_border_width(theme))
         .border_color(gpui_color(theme.colors.border_secondary))
         .bg(gpui_color(theme.colors.surface_secondary))
-        .overflow_hidden()
         .child(
             div()
                 .w(px(34.0))
@@ -475,6 +516,8 @@ fn hex_input_row(
                 .justify_center()
                 .border_l(platform_border_width(theme))
                 .border_color(gpui_color(theme.colors.border_secondary))
+                .rounded_tr(inner_radius)
+                .rounded_br(inner_radius)
                 .text_xs()
                 .font_weight(platform_font_weight(TypographyRole::Emphasis))
                 .text_color(gpui_color(theme.colors.text_secondary))

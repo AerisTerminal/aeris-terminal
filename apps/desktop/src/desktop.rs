@@ -146,8 +146,8 @@ use big_trades_dialog::big_trades_dialog_layer;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, FLOATING_PANEL_MOVE_CURSOR,
-    chart_context_menu_layer, chart_settings_menu_layer, clamp_floating_panel_origin,
-    overlay_height, price_axis_menu_layer,
+    chart_context_menu_layer, chart_settings_menu_layer, clamp_panel_origin_within, overlay_height,
+    price_axis_menu_layer,
 };
 #[cfg(test)]
 use chart_context_menus::{
@@ -198,7 +198,7 @@ use indicator_menu::{
 };
 use modal_dialog::{ConfirmationDialog, ConfirmationTone, ModalLayer, modal_footer, modal_header};
 use native_ui::{
-    color_picker::{ColorPicker, normalize_hex_color},
+    color_picker::{ColorPicker, normalize_hex_color, transparency_backdrop},
     control::Button,
     icon::Icon,
     input::{Input, InputEvent, InputState},
@@ -264,7 +264,8 @@ use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
-    WorkspaceMaximizeTransition, workspace_market_area, workspace_maximize_transition,
+    WorkspaceMaximizeTransition, keep_trading_pnl_fresh, workspace_market_area,
+    workspace_maximize_transition, workspace_pane_element,
 };
 
 fn install_platform_http_client(cx: &mut App) {
@@ -4461,6 +4462,13 @@ enum WorkspaceShellKind {
     Tabs,
 }
 
+/// Chart-only fullscreen state; see [`TerminalApp::toggle_chart_fullscreen`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChartFullscreen {
+    /// Entering put the window into fullscreen, so leaving takes it out again.
+    restores_window: bool,
+}
+
 /// Shell menus are small booleans by design; the account dropdown joins the
 /// two chart-menu options rather than growing a separate menu stack.
 #[allow(clippy::struct_excessive_bools)]
@@ -4506,6 +4514,9 @@ struct TerminalApp {
     pages: app_navigation::AppPages,
     frameless_title_bar: FramelessTitleBar,
     fullscreen_hint: FullscreenHint,
+    /// Shift+F chart-only fullscreen: only the active chart shows. Holds whether entering it
+    /// also put the window into fullscreen, so leaving restores the window as it was.
+    chart_fullscreen: Option<ChartFullscreen>,
     bottom_panel: bottom_panel::BottomPanelState,
     profile_refresh_on_activation: bool,
     command_palette_input: Entity<InputState>,

@@ -1155,6 +1155,96 @@ fn line_with_markers_survives_replay_and_appearance_reset_without_leaking_to_oth
 }
 
 #[test]
+fn hollow_candles_are_transparent_bodies_that_never_leak_into_the_user_appearance() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut chart = AerisChartView::empty();
+    chart.load_replay(&replay).expect("snapshot installs");
+    let solid = chart.appearance_settings();
+    for (chart_type, identifier) in [
+        (ChartType::HollowCandles, "hollow_candles"),
+        (ChartType::HollowCandlesBullish, "hollow_candles_bullish"),
+        (ChartType::HollowCandlesBearish, "hollow_candles_bearish"),
+    ] {
+        assert_eq!(ChartType::from_identifier(identifier), Some(chart_type));
+        assert!(ChartType::ALL.contains(&chart_type));
+    }
+
+    chart.set_chart_type(ChartType::HollowCandlesBullish);
+    let series = series_entry(&chart, 0);
+    assert_eq!(series.kind, aeris_charts_engine::SeriesKind::Candlestick);
+    assert_eq!(series.up_color.as_deref(), Some("transparent"));
+    let bullish = solid.effective_up_color(chart.theme);
+    assert_eq!(
+        series.border_up_color.as_deref(),
+        Some(bullish.as_str()),
+        "the frame is pinned to the bullish color, not left to follow the hollow body"
+    );
+    assert_eq!(series.wick_up_color.as_deref(), Some(bullish.as_str()));
+    assert_ne!(series.down_color.as_deref(), Some("transparent"));
+    assert_eq!(
+        chart.appearance_settings(),
+        solid,
+        "readback and persistence keep the user's colors"
+    );
+
+    chart.set_chart_type(ChartType::HollowCandles);
+    assert_eq!(
+        series_entry(&chart, 0).up_color.as_deref(),
+        Some("transparent")
+    );
+    assert_eq!(
+        series_entry(&chart, 0).down_color.as_deref(),
+        Some("transparent")
+    );
+
+    // A theme switch re-pins the frame to the new theme's candle colors.
+    let other = match chart.theme {
+        ChartTheme::Dark => ChartTheme::Light,
+        ChartTheme::Light => ChartTheme::Dark,
+    };
+    chart.set_theme(other);
+    assert_eq!(
+        series_entry(&chart, 0).border_down_color.as_deref(),
+        Some(solid.effective_down_color(other).as_str())
+    );
+    assert_eq!(
+        series_entry(&chart, 0).up_color.as_deref(),
+        Some("transparent")
+    );
+
+    // A user color edit while hollow becomes the frame color and is kept for solid candles.
+    let mut edited = chart.appearance_settings();
+    edited.up_color = aeris_charts_engine::AppearanceColor::Custom("#123456".into());
+    assert!(chart.set_series_appearance_settings(&edited));
+    assert_eq!(
+        series_entry(&chart, 0).border_up_color.as_deref(),
+        Some("#123456")
+    );
+    chart.set_chart_type(ChartType::Candles);
+    assert_eq!(series_entry(&chart, 0).up_color.as_deref(), Some("#123456"));
+    assert_eq!(chart.appearance_settings().up_color, edited.up_color);
+}
+
+#[test]
+fn a_trading_projection_without_an_account_still_names_the_instrument_tick() {
+    let mut chart = AerisChartView::empty();
+    chart
+        .set_trading_snapshot(TradingSnapshot::default())
+        .expect("empty projection installs");
+    let tick = chart.price_tick_size();
+    assert_eq!(chart.trading_snapshot().instrument.tick_size, Some(tick));
+    // A projection that already names a tick keeps it.
+    let mut named = TradingSnapshot::default();
+    named.instrument.tick_size = Some(0.25);
+    chart
+        .set_trading_snapshot(named)
+        .expect("projection installs");
+    assert_eq!(chart.trading_snapshot().instrument.tick_size, Some(0.25));
+}
+
+#[test]
 fn session_plan_levels_are_bounded_transient_lines_restored_with_the_price_series() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })

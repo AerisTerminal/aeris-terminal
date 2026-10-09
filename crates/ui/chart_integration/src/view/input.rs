@@ -98,6 +98,12 @@ impl AerisChartView {
     /// repaint.
     fn after_input(&mut self, cx: &mut Context<Self>) {
         self.process_input_events();
+        self.schedule_input_wake(cx);
+        cx.notify();
+    }
+
+    /// Replaces the pending wake with one at the engine's next input deadline, if any.
+    pub(super) fn schedule_input_wake(&mut self, cx: &mut Context<Self>) {
         self.input_wake = self.input.wake_delay(&self.engine).map(|delay| {
             cx.spawn(async move |chart, cx| {
                 cx.background_executor().timer(delay).await;
@@ -107,7 +113,6 @@ impl AerisChartView {
                 });
             })
         });
-        cx.notify();
     }
 
     pub(super) fn on_mouse_down(

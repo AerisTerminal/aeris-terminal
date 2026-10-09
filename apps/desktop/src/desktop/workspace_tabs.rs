@@ -97,22 +97,14 @@ pub(super) fn market_summary_requirements(
 }
 
 impl TerminalApp {
-    pub(super) fn new(
-        init: TerminalShellInit,
-        lifecycle: DesktopLifecycle,
-        command_palette_input: Entity<InputState>,
+    /// Gives every restored pane the shared market wake and its resource class, and persists
+    /// the layout when a pane's chart state changes.
+    fn wire_restored_surfaces(
+        workspaces: &[WorkspaceTab],
+        active: usize,
+        market_frame_wake: &UiWake,
         cx: &mut Context<Self>,
-    ) -> Self {
-        let mut workspaces = init.workspaces;
-        let market_frame_wake = UiWake::default();
-        lifecycle.set_context_publication_wake(market_frame_wake.callback());
-        for workspace in &mut workspaces {
-            workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
-        }
-        let active = init
-            .active_workspace_id
-            .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
-            .unwrap_or(0);
+    ) {
         for (index, workspace) in workspaces.iter().enumerate() {
             let resource_class = if index == active {
                 ConsumerResourceClass::Foreground
@@ -133,6 +125,25 @@ impl TerminalApp {
                 .detach();
             }
         }
+    }
+
+    pub(super) fn new(
+        init: TerminalShellInit,
+        lifecycle: DesktopLifecycle,
+        command_palette_input: Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut workspaces = init.workspaces;
+        let market_frame_wake = UiWake::default();
+        lifecycle.set_context_publication_wake(market_frame_wake.callback());
+        for workspace in &mut workspaces {
+            workspace.focus = workspace.focus.clone().tab_index(0).tab_stop(true);
+        }
+        let active = init
+            .active_workspace_id
+            .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
+            .unwrap_or(0);
+        Self::wire_restored_surfaces(&workspaces, active, &market_frame_wake, cx);
         let persisted_watchlist = init.watchlist_entries.clone();
         let watchlist = restore_watchlist(init.watchlist_entries);
         let workspace_persistence = (init.workspace_shell == WorkspaceShellKind::Tabs)
@@ -186,6 +197,7 @@ impl TerminalApp {
             pages: app_navigation::AppPages::default(),
             frameless_title_bar: FramelessTitleBar::default(),
             fullscreen_hint: FullscreenHint::default(),
+            chart_fullscreen: None,
             bottom_panel: bottom_panel::BottomPanelState::default(),
             profile_refresh_on_activation: false,
             command_palette_input,
@@ -553,11 +565,39 @@ impl TerminalApp {
             return true;
         }
         match shortcut {
-            ChartShortcut::ToggleFullscreen => WindowCommand::ToggleFullscreen.execute(window),
+            ChartShortcut::ToggleChartFullscreen => self.toggle_chart_fullscreen(window, cx),
             ChartShortcut::NextWatchlistSymbol => self.step_watchlist(true, cx),
             ChartShortcut::PreviousWatchlistSymbol => self.step_watchlist(false, cx),
         }
         true
+    }
+
+    /// Shift+F: the active chart fills the screen. The window enters fullscreen unless it
+    /// already is, and every toolbar and panel hides; leaving restores both.
+    pub(super) fn toggle_chart_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = self.chart_fullscreen.take() {
+            if state.restores_window && window.is_fullscreen() {
+                window.toggle_fullscreen();
+            }
+        } else {
+            let restores_window = !window.is_fullscreen();
+            if restores_window {
+                window.toggle_fullscreen();
+            }
+            self.chart_fullscreen = Some(ChartFullscreen { restores_window });
+        }
+        cx.notify();
+    }
+
+    /// Leaving window fullscreen another way (F11, Esc, the system) also ends a chart-only
+    /// fullscreen that entered it.
+    pub(super) fn track_chart_fullscreen(&mut self, window: &Window) {
+        if self
+            .chart_fullscreen
+            .is_some_and(|state| state.restores_window && !window.is_fullscreen())
+        {
+            self.chart_fullscreen = None;
+        }
     }
 
     /// Shows the next or previous watchlist symbol on the active chart.
@@ -2812,6 +2852,12 @@ impl TerminalApp {
             || self.chart_settings_menu.is_some()
             || self.pages.view != market_screener::AppView::Terminal
         {
+            return;
+        }
+        if event.keystroke.key.eq_ignore_ascii_case("escape") && self.chart_fullscreen.is_some() {
+            self.toggle_chart_fullscreen(window, cx);
+            window.prevent_default();
+            cx.stop_propagation();
             return;
         }
         if self.apply_chart_shortcut(event, window, cx) {

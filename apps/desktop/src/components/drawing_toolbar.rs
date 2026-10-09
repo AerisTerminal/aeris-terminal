@@ -716,7 +716,7 @@ impl TerminalApp {
         let favorites = &mut self.chart_chrome.drawing_favorites;
         let count = favorite_entries(favorites).count();
         let toolbar = drawing_favorites_toolbar_size(count, self.theme.dimensions.border_width);
-        let origin = clamp_floating_panel_origin(pointer - grab, viewport, toolbar);
+        let origin = clamp_drawing_favorites_origin(pointer - grab, viewport, toolbar);
         let origin = Some((f32::from(origin.x), f32::from(origin.y)));
         if favorites.toolbar_origin != origin {
             favorites.toolbar_origin = origin;
@@ -1071,6 +1071,16 @@ fn drawing_favorites_toolbar_size(count: usize, border_width: f32) -> gpui::Size
     )
 }
 
+/// The favorites toolbar may sit flush against any window edge, for example across the bottom
+/// panel's header row, so it uses no overlay edge margin.
+fn clamp_drawing_favorites_origin(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    toolbar: gpui::Size<Pixels>,
+) -> gpui::Point<Pixels> {
+    clamp_panel_origin_within(origin, viewport, toolbar, px(0.0))
+}
+
 /// The default spot beside the drawing sidebar and below the chart header.
 pub(super) fn drawing_favorites_default_origin(chart_top: f32) -> gpui::Point<Pixels> {
     point(
@@ -1111,7 +1121,7 @@ pub(super) fn drawing_favorites_toolbar_layer(
     let stored = favorites
         .toolbar_origin
         .map_or(toolbar.default_origin, |(x, y)| point(px(x), px(y)));
-    let origin = clamp_floating_panel_origin(stored, toolbar.viewport, panel_size);
+    let origin = clamp_drawing_favorites_origin(stored, toolbar.viewport, panel_size);
     let buttons = entries.into_iter().enumerate().map(|(index, entry)| {
         let arm = terminal.clone();
         let selected = entry.choice == armed;

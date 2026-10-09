@@ -1233,7 +1233,16 @@ pub(super) fn clamp_floating_panel_origin(
     viewport: gpui::Size<Pixels>,
     panel_size: gpui::Size<Pixels>,
 ) -> gpui::Point<Pixels> {
-    let margin = px(OVERLAY_EDGE_MARGIN);
+    clamp_panel_origin_within(origin, viewport, panel_size, px(OVERLAY_EDGE_MARGIN))
+}
+
+/// Keeps a panel inside the window, `margin` from every edge.
+pub(super) fn clamp_panel_origin_within(
+    origin: gpui::Point<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    panel_size: gpui::Size<Pixels>,
+    margin: Pixels,
+) -> gpui::Point<Pixels> {
     let max_x = (viewport.width - panel_size.width - margin).max(margin);
     let max_y = (viewport.height - panel_size.height - margin).max(margin);
     point(
@@ -1465,7 +1474,10 @@ fn chart_series_settings(
     theme: &AerisTheme,
 ) -> AnyElement {
     let body = match snapshot.chart_type {
-        ChartType::Candles => {
+        ChartType::Candles
+        | ChartType::HollowCandles
+        | ChartType::HollowCandlesBullish
+        | ChartType::HollowCandlesBearish => {
             candle_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
         }
         ChartType::Footprint => {
@@ -1636,6 +1648,7 @@ fn candle_series_settings(
     color_picker: Option<&ChartColorPickerState>,
     theme: &AerisTheme,
 ) -> AnyElement {
+    let candle = effective_candle_colors(appearance, theme);
     div()
         .child(settings_group_heading(
             "Body",
@@ -1646,7 +1659,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::Up,
-            &effective_appearance_color(&appearance.up_color, |colors| colors.bullish, theme),
+            &candle.up,
             color_picker,
             theme,
         ))
@@ -1654,7 +1667,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::Down,
-            &effective_appearance_color(&appearance.down_color, |colors| colors.bearish, theme),
+            &candle.down,
             color_picker,
             theme,
         ))
@@ -1675,7 +1688,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::WickUp,
-            &effective_appearance_color(&appearance.wick_up_color, |colors| colors.bullish, theme),
+            &candle.wick_up,
             color_picker,
             theme,
         ))
@@ -1683,11 +1696,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::WickDown,
-            &effective_appearance_color(
-                &appearance.wick_down_color,
-                |colors| colors.bearish,
-                theme,
-            ),
+            &candle.wick_down,
             color_picker,
             theme,
         ))
@@ -1708,11 +1717,7 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::BorderUp,
-            &effective_appearance_color(
-                &appearance.border_up_color,
-                |colors| colors.bullish,
-                theme,
-            ),
+            &candle.border_up,
             color_picker,
             theme,
         ))
@@ -1720,15 +1725,45 @@ fn candle_series_settings(
             terminal,
             menu,
             ChartColorSetting::BorderDown,
-            &effective_appearance_color(
-                &appearance.border_down_color,
-                |colors| colors.bearish,
-                theme,
-            ),
+            &candle.border_down,
             color_picker,
             theme,
         ))
         .into_any_element()
+}
+
+/// The candle colors Aeris Charts paints. Bodies use the engine's own theme resolution; an
+/// unpinned wick or border follows its body color (the engine's reference-parity rule), not
+/// the theme color, so a custom body shows the same wick and border the chart draws.
+#[derive(Debug, PartialEq, Eq)]
+struct CandleColors {
+    up: String,
+    down: String,
+    wick_up: String,
+    wick_down: String,
+    border_up: String,
+    border_down: String,
+}
+
+fn effective_candle_colors(
+    appearance: &ChartAppearanceSettings,
+    theme: &AerisTheme,
+) -> CandleColors {
+    let chart_theme = aeris_chart_theme(theme.mode);
+    let up = appearance.effective_up_color(chart_theme);
+    let down = appearance.effective_down_color(chart_theme);
+    let follow = |part: &ChartAppearanceColor, body: &str| match part {
+        ChartAppearanceColor::Custom(color) => color.clone(),
+        ChartAppearanceColor::Theme => body.to_string(),
+    };
+    CandleColors {
+        wick_up: follow(&appearance.wick_up_color, &up),
+        wick_down: follow(&appearance.wick_down_color, &down),
+        border_up: follow(&appearance.border_up_color, &up),
+        border_down: follow(&appearance.border_down_color, &down),
+        up,
+        down,
+    }
 }
 
 fn bar_series_settings(
@@ -2250,7 +2285,16 @@ fn settings_color_row(
                         });
                         cx.stop_propagation();
                     })
-                    .child(div().size(design_rems(16.0)).rounded_full().bg(color))
+                    .child(
+                        div()
+                            .size(design_rems(16.0))
+                            .flex_none()
+                            .rounded_full()
+                            .border(platform_border_width(theme))
+                            .border_color(gpui_color(colors.border_secondary))
+                            .bg(transparency_backdrop(theme))
+                            .child(div().size_full().rounded_full().bg(color)),
+                    )
                     .child(
                         div()
                             .w(design_rems(62.0))
@@ -2472,6 +2516,29 @@ mod tests {
         assert_eq!(
             chart_settings_centered_origin(viewport, panel_size),
             point(px(OVERLAY_EDGE_MARGIN), px(OVERLAY_EDGE_MARGIN))
+        );
+    }
+
+    #[test]
+    fn candle_settings_show_the_colors_the_chart_paints() {
+        let theme = AerisTheme::dark();
+        let mut appearance = ChartAppearanceSettings {
+            up_color: ChartAppearanceColor::Custom("#123456".into()),
+            ..ChartAppearanceSettings::default()
+        };
+        let colors = effective_candle_colors(&appearance, &theme);
+        assert_eq!(colors.up, "#123456");
+        assert_eq!(
+            (colors.wick_up.as_str(), colors.border_up.as_str()),
+            ("#123456", "#123456"),
+            "an unpinned wick and border follow the custom body, as Aeris Charts paints them"
+        );
+        let bearish = appearance.effective_down_color(aeris_chart_theme(theme.mode));
+        assert_eq!(colors.wick_down, bearish);
+        appearance.wick_up_color = ChartAppearanceColor::Custom("#ABCDEF".into());
+        assert_eq!(
+            effective_candle_colors(&appearance, &theme).wick_up,
+            "#ABCDEF"
         );
     }
 

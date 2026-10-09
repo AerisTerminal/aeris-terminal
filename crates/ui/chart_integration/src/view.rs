@@ -13,6 +13,7 @@ use aeris_application::{
     EmbeddedReplaySource, LoadEmbeddedReplay, MarketEventProvenance, ReplaySnapshot,
     ReplayStreamUpdate, ReplayValidationError,
 };
+use aeris_charts_engine::AppearanceColor;
 pub use aeris_charts_engine::DrawingKind as ChartDrawingKind;
 #[cfg(test)]
 use aeris_charts_engine::FinancialThemeColors;
@@ -336,6 +337,12 @@ impl std::error::Error for ChartIndicatorError {}
 pub enum ChartType {
     #[default]
     Candles,
+    /// Candles with both bodies hollow.
+    HollowCandles,
+    /// Candles with hollow bullish bodies and solid bearish ones.
+    HollowCandlesBullish,
+    /// Candles with hollow bearish bodies and solid bullish ones.
+    HollowCandlesBearish,
     Footprint,
     Bars,
     Line,
@@ -446,14 +453,89 @@ pub struct OrderFlowSweep {
 /// Aeris Charts-owned typed financial appearance, re-exported under the Terminal API name.
 pub type ChartAppearanceSettings = FinancialAppearance;
 
+/// The CSS keyword Aeris Charts reads as "no fill"; a candle body set to it is hollow.
+const HOLLOW_BODY: &str = "transparent";
+
+/// Hollow candles from the user's appearance: each hollow side gets a transparent body, and
+/// its border and wick are pinned to that side's visible color, because an unpinned part
+/// follows the body and would vanish with it. Colors the user pinned are kept, and borders
+/// stay on so the frame shows.
+fn hollow_appearance(
+    base: &ChartAppearanceSettings,
+    bullish: bool,
+    bearish: bool,
+    theme: ChartTheme,
+) -> ChartAppearanceSettings {
+    fn pinned(part: &AppearanceColor, body: &str) -> AppearanceColor {
+        match part {
+            AppearanceColor::Custom(color) => AppearanceColor::Custom(color.clone()),
+            AppearanceColor::Theme => AppearanceColor::Custom(body.to_string()),
+        }
+    }
+    let mut hollow = base.clone();
+    if bullish {
+        let body = base.effective_up_color(theme);
+        hollow.border_up_color = pinned(&base.border_up_color, &body);
+        hollow.wick_up_color = pinned(&base.wick_up_color, &body);
+        hollow.up_color = AppearanceColor::Custom(HOLLOW_BODY.to_string());
+    }
+    if bearish {
+        let body = base.effective_down_color(theme);
+        hollow.border_down_color = pinned(&base.border_down_color, &body);
+        hollow.wick_down_color = pinned(&base.wick_down_color, &body);
+        hollow.down_color = AppearanceColor::Custom(HOLLOW_BODY.to_string());
+    }
+    hollow.border_visible = true;
+    hollow
+}
+
+/// `appearance` with the candle colors the hollow transformation replaces taken from `base`.
+fn with_candle_colors(
+    mut appearance: ChartAppearanceSettings,
+    base: &ChartAppearanceSettings,
+) -> ChartAppearanceSettings {
+    appearance.up_color.clone_from(&base.up_color);
+    appearance.down_color.clone_from(&base.down_color);
+    appearance.wick_up_color.clone_from(&base.wick_up_color);
+    appearance.wick_down_color.clone_from(&base.wick_down_color);
+    appearance.border_up_color.clone_from(&base.border_up_color);
+    appearance
+        .border_down_color
+        .clone_from(&base.border_down_color);
+    appearance.border_visible = base.border_visible;
+    appearance
+}
+
 impl ChartType {
     const fn shows_ohlc_legend(self) -> bool {
-        matches!(self, Self::Candles | Self::Footprint | Self::Bars)
+        matches!(
+            self,
+            Self::Candles
+                | Self::HollowCandles
+                | Self::HollowCandlesBullish
+                | Self::HollowCandlesBearish
+                | Self::Footprint
+                | Self::Bars
+        )
+    }
+
+    /// Which candle bodies are hollow, as `(bullish, bearish)`; `None` for every solid type.
+    /// Aeris Charts has no hollow series: a hollow body is a transparent body color.
+    const fn hollow_sides(self) -> Option<(bool, bool)> {
+        match self {
+            Self::HollowCandles => Some((true, true)),
+            Self::HollowCandlesBullish => Some((true, false)),
+            Self::HollowCandlesBearish => Some((false, true)),
+            _ => None,
+        }
     }
 
     /// Built-in OHLC chart types Aeris Charts can render from the product price series.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::Candles,
+        Self::HollowCandles,
+        Self::HollowCandlesBullish,
+        Self::HollowCandlesBearish,
         Self::Footprint,
         Self::Bars,
         Self::Line,
@@ -468,6 +550,9 @@ impl ChartType {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Candles => "Candles",
+            Self::HollowCandles => "Hollow candles",
+            Self::HollowCandlesBullish => "Hollow candles: bullish only",
+            Self::HollowCandlesBearish => "Hollow candles: bearish only",
             Self::Footprint => "Footprint",
             Self::Bars => "Bars",
             Self::Line => "Line",
@@ -483,6 +568,9 @@ impl ChartType {
     pub const fn identifier(self) -> &'static str {
         match self {
             Self::Candles => "candles",
+            Self::HollowCandles => "hollow_candles",
+            Self::HollowCandlesBullish => "hollow_candles_bullish",
+            Self::HollowCandlesBearish => "hollow_candles_bearish",
             Self::Footprint => "footprint",
             Self::Bars => "bars",
             Self::Line => "line",
@@ -513,7 +601,11 @@ impl ChartType {
 
     pub(crate) const fn series_kind(self) -> aeris_charts_engine::SeriesKind {
         match self {
-            Self::Candles | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
+            Self::Candles
+            | Self::HollowCandles
+            | Self::HollowCandlesBullish
+            | Self::HollowCandlesBearish
+            | Self::Footprint => aeris_charts_engine::SeriesKind::Candlestick,
             Self::Bars => aeris_charts_engine::SeriesKind::Bar,
             Self::Line | Self::LineWithMarkers => aeris_charts_engine::SeriesKind::Line,
             Self::Area | Self::BrushableArea => aeris_charts_engine::SeriesKind::Area,
@@ -810,6 +902,10 @@ pub struct AerisChartView {
     instrument_price_scale: u8,
     price_precision_override: Option<u8>,
     chart_type: ChartType,
+    /// The user's own series appearance while a hollow chart type shows. Aeris Charts holds
+    /// the derived transparent bodies; this keeps the colors the user chose, so readback,
+    /// persistence and a return to solid candles never see the hollow transformation.
+    hollow_base: Option<ChartAppearanceSettings>,
     order_flow_settings: OrderFlowSettings,
     order_flow_state: Option<OrderFlowChartState>,
     product_bars: ProductPriceBars,
@@ -911,6 +1007,7 @@ impl AerisChartView {
             instrument_price_scale: 2,
             price_precision_override: None,
             chart_type: ChartType::Candles,
+            hollow_base: None,
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars: ProductPriceBars::default(),
@@ -1016,6 +1113,7 @@ impl AerisChartView {
             instrument_price_scale: replay.instrument().precision.price_scale(),
             price_precision_override: None,
             chart_type: ChartType::Candles,
+            hollow_base: None,
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars,
@@ -1336,6 +1434,8 @@ impl AerisChartView {
         }
         self.theme = theme;
         self.engine.set_theme(theme);
+        // A hollow frame is pinned to the theme's candle colors, so it follows a theme switch.
+        self.sync_hollow_candles();
         apply_platform_chrome_contract(&mut self.engine, time_visible);
         self.sync_big_trades_options();
         self.sync_footprint_visual_options();
@@ -1792,7 +1892,11 @@ impl AerisChartView {
     /// series/options internals to the desktop shell.
     #[must_use]
     pub fn appearance_settings(&self) -> ChartAppearanceSettings {
-        self.engine.financial_appearance(0).unwrap_or_default()
+        let appearance = self.engine.financial_appearance(0).unwrap_or_default();
+        match &self.hollow_base {
+            Some(base) => with_candle_colors(appearance, base),
+            None => appearance,
+        }
     }
 
     /// Applies host-authored series/canvas presentation in place. Market data,
@@ -1839,11 +1943,43 @@ impl AerisChartView {
     }
 
     fn apply_series_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
-        let changed = self.engine.apply_financial_series_appearance(0, appearance);
+        let changed = match self.chart_type.hollow_sides() {
+            Some((bullish, bearish)) => {
+                let before = self.appearance_settings();
+                self.engine.apply_financial_series_appearance(
+                    0,
+                    &hollow_appearance(appearance, bullish, bearish, self.theme),
+                );
+                self.hollow_base = Some(appearance.clone());
+                before != self.appearance_settings()
+            }
+            None => self.engine.apply_financial_series_appearance(0, appearance),
+        };
         if changed {
             self.invalidate_series_frame();
         }
         changed
+    }
+
+    /// Shows or removes the hollow transformation for the current chart type and theme. The
+    /// engine's colors are replaced only while a hollow type shows or when leaving one.
+    fn sync_hollow_candles(&mut self) {
+        match (self.hollow_base.take(), self.chart_type.hollow_sides()) {
+            (None, None) => {}
+            (Some(base), None) => {
+                self.engine.apply_financial_series_appearance(0, &base);
+            }
+            (base, Some((bullish, bearish))) => {
+                let base = base
+                    .or_else(|| self.engine.financial_appearance(0))
+                    .unwrap_or_default();
+                self.engine.apply_financial_series_appearance(
+                    0,
+                    &hollow_appearance(&base, bullish, bearish, self.theme),
+                );
+                self.hollow_base = Some(base);
+            }
+        }
     }
 
     /// Restores Aeris Charts-owned styling through the chart engine's canonical reset API.
@@ -1851,6 +1987,8 @@ impl AerisChartView {
     /// remain owned and preserved by Aeris Charts.
     pub fn reset_appearance_settings(&mut self) {
         self.engine.reset_style_to_defaults();
+        self.hollow_base = None;
+        self.sync_hollow_candles();
         apply_product_series_markers(&mut self.engine, self.chart_type);
         self.reapply_study_line_widths();
         self.invalidate_series_layout();
@@ -1894,7 +2032,15 @@ impl AerisChartView {
     ///
     /// # Errors
     /// Returns the chart engine validation error when the snapshot is malformed or over capacity.
-    pub fn set_trading_snapshot(&mut self, snapshot: TradingSnapshot) -> Result<(), String> {
+    pub fn set_trading_snapshot(&mut self, mut snapshot: TradingSnapshot) -> Result<(), String> {
+        // Aeris Charts snaps drawings to the instrument tick and otherwise falls back to the
+        // display precision, so a projection without an account still names the chart's tick.
+        if snapshot.instrument.tick_size.is_none() {
+            snapshot.instrument.tick_size = Some(self.price_tick_size());
+        }
+        if self.engine.trading_snapshot() == snapshot {
+            return Ok(());
+        }
         self.engine
             .set_trading_snapshot(snapshot)
             .map_err(|error| error.to_string())?;
@@ -2241,6 +2387,7 @@ impl AerisChartView {
     fn apply_price_series_kind(&mut self) {
         self.remove_session_plan_price_lines();
         install_product_price_series(&mut self.engine, self.chart_type, &self.product_bars);
+        self.sync_hollow_candles();
         self.install_session_plan_price_lines();
         self.sync_brushable_interaction();
         self.invalidate_series_layout();
@@ -2868,6 +3015,11 @@ impl Render for AerisChartView {
                             chart.input.set_canvas_bounds(bounds);
                             if chart.rebuild(width, height, scale_factor, mutation, window) {
                                 chart_cx.notify();
+                            }
+                            // The frame's input tick can arm a new deadline (the text caret
+                            // blink does); without a wake for it the caret never toggles.
+                            if chart.input_wake.is_none() {
+                                chart.schedule_input_wake(chart_cx);
                             }
                         });
                         bounds

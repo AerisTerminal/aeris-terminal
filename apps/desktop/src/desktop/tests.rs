@@ -1081,7 +1081,7 @@ fn chart_keys_step_the_watchlist_and_toggle_fullscreen_like_tradingview() {
     );
     assert_eq!(
         chart_shortcut("f", shift),
-        Some(ChartShortcut::ToggleFullscreen)
+        Some(ChartShortcut::ToggleChartFullscreen)
     );
     assert_eq!(
         chart_shortcut("f", gpui::Modifiers::default()),

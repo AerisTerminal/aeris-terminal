@@ -67,7 +67,7 @@ impl AerisChartView {
 
     /// The instrument's minimum price increment in chart price units, or the smallest displayed
     /// step when the provider publishes none.
-    fn price_tick_size(&self) -> f64 {
+    pub(super) fn price_tick_size(&self) -> f64 {
         self.instrument_price_increment
             .filter(|&increment| increment > 0)
             .and_then(|increment| increment.to_f64())

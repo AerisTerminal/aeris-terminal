@@ -553,6 +553,7 @@ impl TerminalApp {
         self.reconcile_active_drags(cx);
         self.track_window_activation(window, cx);
         self.track_fullscreen_hint(window, cx);
+        self.track_chart_fullscreen(window);
         self.absorb_render_requests(window, cx);
         self.synchronize_linked_charts(cx);
         self.dispatch_due_economic_event_rules(cx);
@@ -824,6 +825,28 @@ impl TerminalApp {
         let market = self.rendered_market_area(&terminal, &active, cx);
         let fullscreen_hint = fullscreen_hint_layer(&self.fullscreen_hint, &self.theme);
         let app_navigation = self.app_navigation_overlay(&terminal, window.viewport_size());
+        if self.chart_fullscreen.is_some() {
+            let workspace = &self.workspaces[self.active];
+            let chart = workspace
+                .panes
+                .get(workspace.active_pane)
+                .map(|pane| workspace_pane_element(&terminal, workspace, pane.id, &self.theme, cx));
+            keep_trading_pnl_fresh(&active, workspace, cx);
+            return self
+                .page_root()
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .bg(gpui_color(self.theme.colors.surface))
+                        .children(chart),
+                )
+                .children(fullscreen_hint)
+                .children(overlay)
+                .children(context_menu)
+                .children(settings_menu)
+                .children(command_palette);
+        }
         self.page_root()
             .children(title_bar)
             .child(header)
