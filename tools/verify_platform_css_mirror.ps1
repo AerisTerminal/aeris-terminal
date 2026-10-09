@@ -1,5 +1,5 @@
 param(
-    [string]$WebsiteCss = (Join-Path $PSScriptRoot "..\..\..\Axiusflow-Org\axiusflow-website\src\styles\platform.css")
+    [string]$WebsiteCss = (Join-Path $PSScriptRoot "..\..\aeris-website\src\styles\platform.css")
 )
 
 $ErrorActionPreference = "Stop"
