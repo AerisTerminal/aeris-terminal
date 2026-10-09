@@ -189,11 +189,13 @@ fn button_appearance(
                 disabled_foreground: colors.text_muted,
             }
         }
+        // The danger ramp has no separate selected step; a destructive action is never a
+        // toggle or menu trigger, so its selected look reuses the hover fill.
         ButtonVariant::Destructive => ramp(
             colors.danger,
             colors.danger_foreground,
             colors.danger_hover,
-            colors.danger_active,
+            colors.danger_hover,
             colors.danger_disabled,
             colors.danger_disabled_foreground,
         ),
@@ -1053,7 +1055,7 @@ mod tests {
                         c.danger,
                         c.danger_foreground,
                         c.danger_hover,
-                        c.danger_active,
+                        c.danger_hover,
                         c.danger_disabled,
                         c.danger_disabled_foreground,
                     ),

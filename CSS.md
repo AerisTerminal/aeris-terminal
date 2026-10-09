@@ -142,7 +142,6 @@ while invalid.
   --primary-foreground: #ffffff;
   --danger: #f7525f;
   --danger-hover: #e5404d;
-  --danger-active: #c9303c;
   --danger-disabled: #ffc9c9;
   --danger-disabled-foreground: #ffa2a2;
   --danger-ring: #ffc9c9;
@@ -192,8 +191,8 @@ while invalid.
   --shadow-dialog: 0 4px 6px -4px color-mix(in srgb, #101828 10%, transparent), 0 10px 15px -3px color-mix(in srgb, #000000 10%, transparent);
 
   /* Chart */
-  --bullish: #089981;
-  --bearish: #f7525f;
+  --bullish: var(--positive);
+  --bearish: var(--negative);
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
   --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
   --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);
@@ -261,9 +260,8 @@ while invalid.
   --primary-foreground: #ffffff;
   --danger: #f7525f;
   --danger-hover: #f96a75;
-  --danger-active: #fb838c;
-  --danger-disabled: #a4444b;
-  --danger-disabled-foreground: #e9a3a8;
+  --danger-disabled: #6b3135;
+  --danger-disabled-foreground: #d0646c;
   --danger-ring: #c10007;
   --danger-foreground: #ffffff;
 
@@ -284,8 +282,8 @@ while invalid.
   --sell: #f7525f;
   --sell-hover: #f96a75;
   --sell-active: #fb838c;
-  --sell-disabled: #a4444b;
-  --sell-disabled-foreground: #e9a3a8;
+  --sell-disabled: #6b3135;
+  --sell-disabled-foreground: #ae8e90;
   --sell-foreground: #ffffff;
 
   /* Order book — depth-bar fills and the price text drawn over them (text passes 4.5:1 on its fill). */
@@ -297,9 +295,6 @@ while invalid.
   /* Focus */
   --ring-primary: var(--primary);
 
-  /* Chart */
-  --bullish: #089981;
-  --bearish: #f7525f;
   /* Big-trade bubble fills; the bubble outline uses bullish / bearish. */
   --buy-bubble: color-mix(in srgb, #089981 35%, transparent);
   --sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);

@@ -567,10 +567,10 @@ mod tests {
         assert_eq!(token_source(&light_tokens, "button-fill"), "#333333");
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#f5f5f5");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
-        assert_eq!(token_source(&light_tokens, "bullish"), "#089981");
-        assert_eq!(token_source(&light_tokens, "bearish"), "#f7525f");
-        assert_eq!(token_source(&dark_tokens, "bullish"), "#089981");
-        assert_eq!(token_source(&dark_tokens, "bearish"), "#f7525f");
+        for tokens in [&light_tokens, &dark_tokens] {
+            assert_eq!(token_source(tokens, "bullish"), "var(--positive)");
+            assert_eq!(token_source(tokens, "bearish"), "var(--negative)");
+        }
         assert_eq!(
             token_source(&light_tokens, "ring-primary"),
             "var(--primary)"
@@ -836,8 +836,8 @@ mod tests {
         assert!(!css.contains("border-color: var(--primary);"));
         assert!(!css.contains("transform: scale("));
         assert!(css.contains("/* Chart */"));
-        assert!(css.contains("--bullish: #089981;"));
-        assert!(css.contains("--bearish: #f7525f;"));
+        assert!(css.contains("--bullish: var(--positive);"));
+        assert!(css.contains("--bearish: var(--negative);"));
         assert!(css.contains("--buy-bubble: color-mix(in srgb, #089981 35%, transparent);"));
         assert!(css.contains("--sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);"));
         assert_eq!(platform_font_family(), "HK Grotesk");
