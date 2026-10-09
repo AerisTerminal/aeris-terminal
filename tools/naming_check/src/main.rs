@@ -731,6 +731,98 @@ mod tests {
         }
     }
 
+    /// Buttons, menus, dialogs, tabs and switches are `native_ui` components. Desktop components
+    /// compose them; they never hand-build a click target, menu panel, scrim or tab, and the
+    /// retired per-file helpers stay gone. The few remaining exceptions are listed with why.
+    #[test]
+    fn desktop_controls_come_from_native_ui_components() {
+        // Retired helpers, built with `concat!` so this rule never matches itself.
+        const RETIRED_HELPERS: &[&str] = &[
+            concat!("flat_compact_", "menu_panel"),
+            concat!("flush_", "in_panel"),
+            concat!("round_panel_", "ends"),
+            concat!("round_icon_", "button"),
+            concat!("chrome_icon_", "button"),
+            concat!("chrome_button_", "style"),
+            concat!("button_", "activation"),
+            concat!("Modal", "Layer"),
+            concat!("modal_", "header("),
+            concat!("modal_", "footer("),
+            concat!("native_ui::", "control"),
+        ];
+        // Each entry: a hand-built pattern, and the files that may still use it with the reason.
+        let owned_patterns: &[(&str, &[(&str, &str)])] = &[
+            (
+                concat!(".cursor_", "pointer()"),
+                &[
+                    ("accounts_panel.rs", "selectable account rows"),
+                    (
+                        "market_screener_view.rs",
+                        "sortable column headers and market rows",
+                    ),
+                    ("platform_menu.rs", "theme radio cards"),
+                    ("watchlist_panel.rs", "selectable watchlist rows"),
+                ],
+            ),
+            (
+                concat!("Role::", "Button"),
+                &[
+                    ("accounts_panel.rs", "selectable account rows"),
+                    ("drawing_toolbar.rs", "favorites toolbar drag handle"),
+                    (
+                        "market_screener_view.rs",
+                        "sortable column headers and market rows",
+                    ),
+                    (
+                        "terminal_chrome.rs",
+                        "window caption controls own native hit-testing",
+                    ),
+                    ("watchlist_panel.rs", "selectable watchlist rows"),
+                ],
+            ),
+            (concat!("Role::", "Tab)"), &[]),
+            (
+                concat!("Role::", "TabList"),
+                &[(
+                    "terminal_view.rs",
+                    "draggable, closable workspace tab strip",
+                )],
+            ),
+            (
+                concat!("gpui_base::", "Button"),
+                &[("platform_menu.rs", "theme radio cards")],
+            ),
+            (concat!("surface_", "overlay"), &[]),
+        ];
+
+        for path in production_sources_under("apps/desktop/src/components") {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            let production = production_prefix(&contents);
+            let relative = relative_string(&path);
+            let file = relative.rsplit('/').next().unwrap_or_default();
+            for retired in RETIRED_HELPERS {
+                assert!(
+                    !production.contains(retired),
+                    "{relative} restores the retired UI helper {retired}; use the native_ui component"
+                );
+            }
+            for (pattern, allowed) in owned_patterns {
+                if allowed
+                    .iter()
+                    .any(|(allowed_file, _)| *allowed_file == file)
+                {
+                    continue;
+                }
+                assert!(
+                    !production.contains(pattern),
+                    "{relative} hand-builds {pattern}; use the native_ui Button, MenuPanel, \
+                     Dialog, TabList/Tab or Switch component"
+                );
+            }
+        }
+    }
+
     #[test]
     fn ci_cargo_packages_and_targets_exist_in_the_workspace() {
         // Validate executable targets as well as artifact names: an obsolete package
