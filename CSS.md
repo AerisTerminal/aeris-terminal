@@ -41,7 +41,7 @@ focus state. Callers add only layout (flex, gaps, margins, an explicit width).
 Sizes: `Sm` (24px, `text-xs`), `Default` (28px), `Lg` (32px, `--radius-default`). A button with only
 an icon is square. States and modifiers: `selected` (a toggle that is on), `text_toggle` (the on state
 changes only the text: `text-interactive` → `text-active`, no fill; hover adds `hover-bg` in both states
-and never changes the text; chart-header panel toggles), `open` (a trigger whose menu
+and never changes the text, and a press keeps that fill (no `active-bg` flash); chart-header panel toggles), `open` (a trigger whose menu
 is open), `disabled`, `loading`, `round` (circle or pill), `danger_on_hover` (close / delete icons),
 `trigger` (label left, caret right), `full_width`, `strong` (trade actions). `close_button` is the one
 close control.
@@ -50,8 +50,9 @@ close control.
 select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
 `checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. A `destructive` row
-paints its label and glyph `text-danger` (glyph colour from `MenuRow::leading_icon_color`) with a
-`negative-subtle` hover; disabled, it is `text-muted` like every other disabled row.
+follows the danger ramp: `text-danger` label and glyph at rest, a `danger` hover with
+`danger-foreground` text and glyph, `danger-active` while pressed, and `danger-disabled-foreground`
+text with no hover while disabled. Pass glyphs through `leading_icon` so the row colours them.
 
 **`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal. Sizes `Sm` (420), `Md` (480), `Lg`
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the

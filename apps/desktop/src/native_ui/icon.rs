@@ -28,6 +28,7 @@ pub(crate) struct Icon {
     path: SharedString,
     style: StyleRefinement,
     color: Option<Hsla>,
+    group_hover_color: Option<(SharedString, Hsla)>,
     size: Option<Pixels>,
     rotation_turns: Option<f32>,
     exact_alpha: bool,
@@ -39,6 +40,7 @@ impl Clone for Icon {
             path: self.path.clone(),
             style: self.style.clone(),
             color: self.color,
+            group_hover_color: self.group_hover_color.clone(),
             size: self.size,
             rotation_turns: self.rotation_turns,
             exact_alpha: self.exact_alpha,
@@ -58,6 +60,13 @@ impl Icon {
 
     pub(crate) fn color(mut self, color: Hsla) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// Repaints the glyph while the pointer is over `group`, such as a menu row whose hover
+    /// fill needs a contrasting glyph. Exact-alpha rasters keep their resting colour.
+    pub(crate) fn group_hover_color(mut self, group: impl Into<SharedString>, color: Hsla) -> Self {
+        self.group_hover_color = Some((group.into(), color));
         self
     }
 
@@ -199,7 +208,12 @@ impl RenderOnce for Icon {
         }
         let mut glyph = svg().path(self.path).flex_none().flex_shrink_0();
         *glyph.style() = self.style;
-        let glyph = glyph.size(size).text_color(color);
+        let glyph = glyph.size(size).text_color(color).when_some(
+            self.group_hover_color,
+            |glyph, (group, hover_color)| {
+                glyph.group_hover(group, move |style| style.text_color(hover_color))
+            },
+        );
         let glyph = if let Some(turns) = self.rotation_turns {
             glyph
                 .with_transformation(Transformation::rotate(gpui::percentage(turns)))

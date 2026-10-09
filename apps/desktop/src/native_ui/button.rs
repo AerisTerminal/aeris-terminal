@@ -306,6 +306,8 @@ struct ResolvedStyle {
     border: Option<ThemeColor>,
     /// `None` keeps the engaged look under the pointer.
     hover: Option<HoverStyle>,
+    /// The fill while the pointer is held down; `None` keeps the hover look.
+    press_fill: Option<ThemeColor>,
 }
 
 impl ResolvedStyle {
@@ -331,7 +333,9 @@ impl ResolvedStyle {
         };
         // A text toggle's hover is the fill alone, in both states: `text-hover` equals
         // `text-active`, so a hover that changed the text would make a toggle that was just
-        // switched off look on while the pointer stays over it.
+        // switched off look on while the pointer stays over it. A press keeps that hover fill;
+        // the click's only feedback is the text switching state, never a flash of `active-bg`.
+        let press_fill = (!text_toggle).then_some(appearance.active_fill);
         let hover = if text_toggle {
             Some(HoverStyle {
                 fill: appearance.hover_fill,
@@ -354,6 +358,7 @@ impl ResolvedStyle {
             foreground,
             border,
             hover,
+            press_fill,
         }
     }
 }
@@ -773,7 +778,10 @@ fn paint_states(
                     }
                 })
                 .active(move |style| {
-                    let style = style.bg(gpui_color(appearance.active_fill));
+                    let Some(press_fill) = resolved.press_fill else {
+                        return style;
+                    };
+                    let style = style.bg(gpui_color(press_fill));
                     if drop_border {
                         style.border_color(gpui::transparent_black())
                     } else {
@@ -931,6 +939,11 @@ mod tests {
                     foreground: c.text_active,
                 })
             );
+            assert_eq!(
+                (off.press_fill, on.press_fill),
+                (None, None),
+                "a press keeps the hover fill instead of flashing active-bg"
+            );
         }
     }
 
@@ -946,6 +959,7 @@ mod tests {
                 foreground: theme.colors.text_default,
             })
         );
+        assert_eq!(resting.press_fill, Some(theme.colors.active_bg));
         for flag in [ButtonFlags::SELECTED, ButtonFlags::OPEN] {
             let mut flags = ButtonFlags::default();
             flags.set(flag, true);

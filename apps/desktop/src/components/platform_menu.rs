@@ -477,14 +477,9 @@ fn account_action_rows(
         .iter()
         .map(|&action| {
             let enabled = !(pending && action.waits_for_pending_request());
-            let icon_color = MenuRow::leading_icon_color(theme, action.destructive(), enabled);
             let terminal = terminal.clone();
             MenuRow::compact(action.id(), action.label(), theme)
-                .leading(
-                    header_icon(action.icon())
-                        .with_size(px(16.0))
-                        .color(gpui_color(icon_color)),
-                )
+                .leading_icon(header_icon(action.icon()).with_size(px(16.0)))
                 .disabled(!enabled)
                 .destructive(action.destructive())
                 .on_click(move |_, window, cx| {

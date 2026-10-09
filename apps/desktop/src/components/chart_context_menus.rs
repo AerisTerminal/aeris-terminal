@@ -381,38 +381,36 @@ pub(super) fn chart_context_menu_item(
         enabled,
         action,
     } = item;
-    let leading = if let Some(generation) = copy_feedback_generation {
-        div()
-            .size(icon_size)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                header_icon(HugeIcon::CopySuccess)
-                    .with_size(icon_size)
-                    .color(icon_color),
-            )
-            .with_animation(
-                ("chart_copy_success", generation),
-                Animation::new(CHART_COPY_SUCCESS_ANIMATION_DURATION).with_easing(ease_out_quint()),
-                |icon, delta| icon.opacity(delta).mt(px((1.0 - delta) * 2.0)),
-            )
-            .into_any_element()
-    } else {
-        header_icon(icon)
-            .with_size(icon_size)
-            .color(icon_color)
-            .into_any_element()
-    };
     let row_label = if copy_feedback_generation.is_some() {
         "Copied"
     } else {
         label
     };
     let opens_capture_menu = action == ChartContextAction::CaptureMenu;
-    let mut row = MenuRow::compact(id, row_label, theme)
-        .scale(scale)
-        .leading(leading)
+    let row = MenuRow::compact(id, row_label, theme).scale(scale);
+    let row = if let Some(generation) = copy_feedback_generation {
+        row.leading(
+            div()
+                .size(icon_size)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    header_icon(HugeIcon::CopySuccess)
+                        .with_size(icon_size)
+                        .color(icon_color),
+                )
+                .with_animation(
+                    ("chart_copy_success", generation),
+                    Animation::new(CHART_COPY_SUCCESS_ANIMATION_DURATION)
+                        .with_easing(ease_out_quint()),
+                    |icon, delta| icon.opacity(delta).mt(px((1.0 - delta) * 2.0)),
+                ),
+        )
+    } else {
+        row.leading_icon(header_icon(icon).with_size(icon_size))
+    };
+    let mut row = row
         .disabled(!enabled)
         .destructive(destructive)
         .highlighted(opens_capture_menu && menu.capture_flyout_open);
