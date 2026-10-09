@@ -146,7 +146,9 @@ struct ButtonAppearance {
     active_fill: ThemeColor,
     selected_fill: ThemeColor,
     selected_foreground: ThemeColor,
-    disabled_fill: ThemeColor,
+    /// `None` keeps the resting surface: a disabled icon or outline action never changes the
+    /// look of the surface it sits on, only its foreground dims.
+    disabled_fill: Option<ThemeColor>,
     disabled_foreground: ThemeColor,
 }
 
@@ -185,7 +187,8 @@ fn button_appearance(
                 active_fill: colors.active_bg,
                 selected_fill: colors.active_bg,
                 selected_foreground: colors.text_active,
-                disabled_fill: colors.disabled_bg,
+                // Disabled keeps the resting surface and outline; only the foreground mutes.
+                disabled_fill: None,
                 disabled_foreground: colors.text_muted,
             }
         }
@@ -241,7 +244,7 @@ const fn ramp(
         active_fill: active,
         selected_fill: active,
         selected_foreground: foreground,
-        disabled_fill: disabled,
+        disabled_fill: Some(disabled),
         disabled_foreground,
     }
 }
@@ -289,7 +292,7 @@ impl ResolvedStyle {
         let engaged = flags.has(ButtonFlags::SELECTED) || flags.has(ButtonFlags::OPEN);
         let (fill, foreground) = if disabled {
             (
-                Some(appearance.disabled_fill),
+                appearance.disabled_fill.or(appearance.fill),
                 appearance.disabled_foreground,
             )
         } else if engaged {
@@ -300,9 +303,10 @@ impl ResolvedStyle {
         } else {
             (appearance.fill, appearance.foreground)
         };
+        // A disabled outline keeps its outline: disabling changes only the foreground.
         let border = appearance
             .border
-            .filter(|_| !(appearance.border_rests_only && (disabled || engaged)));
+            .filter(|_| !(appearance.border_rests_only && engaged && !disabled));
         Self {
             fill,
             foreground,
@@ -984,7 +988,7 @@ mod tests {
                         appearance.disabled_fill,
                         appearance.disabled_foreground,
                     ),
-                    (Some(ramp.0), ramp.1, ramp.2, ramp.3, ramp.4, ramp.5),
+                    (Some(ramp.0), ramp.1, ramp.2, ramp.3, Some(ramp.4), ramp.5),
                     "{variant:?}"
                 );
                 assert_eq!(appearance.border, None, "{variant:?} has no outline");
@@ -1005,12 +1009,12 @@ mod tests {
             assert!(outline.border_rests_only);
             assert_eq!(outline.hover_fill, c.hover_bg);
             assert_eq!(outline.active_fill, c.active_bg);
-            // disabled:border-transparent disabled:bg-disabled-bg disabled:text-text-muted
+            // Disabled keeps the resting surface and outline; only the foreground mutes.
             let mut disabled = ButtonFlags::default();
             disabled.set(ButtonFlags::DISABLED, true);
             let resolved = ResolvedStyle::new(&outline, disabled);
-            assert_eq!(resolved.border, None);
-            assert_eq!(resolved.fill, Some(c.disabled_bg));
+            assert_eq!(resolved.border, Some(c.border));
+            assert_eq!(resolved.fill, Some(c.surface));
             assert_eq!(resolved.foreground, c.text_muted);
             let resting = ResolvedStyle::new(&outline, ButtonFlags::default());
             assert_eq!(resting.border, Some(c.border));
@@ -1028,8 +1032,14 @@ mod tests {
             assert_eq!(ghost.foreground, c.text_default);
             assert_eq!(ghost.hover_fill, c.hover_bg);
             assert_eq!(ghost.active_fill, c.active_bg);
-            assert_eq!(ghost.disabled_fill, c.disabled_bg);
+            // A disabled icon action stays transparent; only its glyph mutes.
+            assert_eq!(ghost.disabled_fill, None);
             assert_eq!(ghost.disabled_foreground, c.text_muted);
+            let mut disabled = ButtonFlags::default();
+            disabled.set(ButtonFlags::DISABLED, true);
+            let resolved = ResolvedStyle::new(&ghost, disabled);
+            assert_eq!(resolved.fill, None);
+            assert_eq!(resolved.foreground, c.text_muted);
             // A ghost toggle that is on rests on the pressed fill.
             assert_eq!(ghost.selected_fill, c.active_bg);
             assert_eq!(ghost.selected_foreground, c.text_active);

@@ -79,7 +79,11 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
                 .px_2()
                 .border_b_1()
                 .border_color(gpui_color(theme.colors.border))
-                .child(TabList::new("context_panel_tabs", "Market context", theme).children(tabs))
+                .child(
+                    TabList::new("context_panel_tabs", "Market context", theme)
+                        .compact()
+                        .children(tabs),
+                )
                 .child(div().flex_1())
                 .child(
                     Button::new("context_credentials", theme)
@@ -236,6 +240,7 @@ fn context_tab(
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     Tab::new(("context_panel_tab", index), theme)
+        .compact()
         .selected(candidate == selected)
         .aria_label(format!("Show {} context", candidate.label()))
         .on_click(move |_, _, cx| {

@@ -200,9 +200,9 @@ use native_ui::{
     input::{Input, InputEvent, InputState},
     loader::Loader,
     menu::{
-        MENU_PANEL_INSET, MenuAlign, MenuAnchor, MenuPanel, MenuPlacement, MenuRow, MenuScale,
-        MenuSide, PopupAnimationOrigin, animate_popup_from_origin, menu_panel_chrome_height,
-        menu_panel_height, menu_separator,
+        MENU_PANEL_INSET, MENU_SEPARATOR_HEIGHT, MenuAlign, MenuAnchor, MenuPanel, MenuPlacement,
+        MenuRow, MenuScale, MenuSide, PopupAnimationOrigin, animate_popup_from_origin,
+        menu_panel_chrome_height, menu_panel_height, menu_separator,
     },
     platform_font_weight, platform_tabular_numerals,
     rem_scale::{ROOT_REM_PX, design_rems, rem_scaled},
@@ -450,7 +450,7 @@ fn current_plan_limits() -> PlanLimits {
 }
 const CHART_CONTEXT_MENU_WIDTH: f32 = 228.0;
 const CHART_CONTEXT_MENU_ROW_HEIGHT: f32 = 32.0;
-const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 1.0;
+const CHART_CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = MENU_SEPARATOR_HEIGHT;
 const PRICE_AXIS_FLYOUT_WIDTH: f32 = 296.0;
 const PRICE_AXIS_FLYOUT_GAP: f32 = 4.0;
 const CHART_CAPTURE_FLYOUT_WIDTH: f32 = 180.0;

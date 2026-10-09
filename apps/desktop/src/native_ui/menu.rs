@@ -27,7 +27,15 @@ type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
 // enclosing `RemScale` panel, not only an explicit `MenuRow::scale`.
 const COMPACT_ROW_HEIGHT: Rems = Rems(2.0);
 const SEARCH_ROW_HEIGHT: Rems = Rems(2.25);
-const SEPARATOR_HEIGHT: Pixels = px(1.0);
+/// A divider's full height: its 1px line plus clear space above and below, so the line never
+/// touches a hovered or highlighted row.
+pub(crate) const MENU_SEPARATOR_HEIGHT: f32 = 5.0;
+const SEPARATOR_HEIGHT: Pixels = px(MENU_SEPARATOR_HEIGHT);
+/// Vertical inset of a row's hover and highlight fill inside its row height, so two filled rows
+/// next to each other (hover beside the current value) read as separate pills.
+const ROW_FILL_INSET: Rems = Rems(0.125);
+/// Group name tying a row's inset fill to hovering the whole row.
+const MENU_ROW_GROUP: &str = "menu_row";
 /// Gap between a menu panel's border and its rows: 4px, which clears the `r(1 - 1/√2)` ≈ 2.2px a
 /// row's square corner needs to stay inside the panel's 8px rounded corner.
 pub(crate) const MENU_PANEL_INSET: f32 = 4.0;
@@ -376,7 +384,38 @@ impl RenderOnce for MenuRow {
             .text_color(gpui_color(presentation.label_color))
             .child(self.label.clone());
 
+        let radius = px(f32::from(RadiusToken::Sm.logical_pixels()));
+        // The visible pill: inset inside the row so neighbouring fills and dividers never touch.
+        let fill = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .gap(scale.rems(0.5))
+            .px(presentation.horizontal_padding)
+            .rounded(radius)
+            .when(self.behavior.highlighted, |fill| {
+                fill.bg(gpui_color(presentation.highlighted_fill))
+            })
+            .when(presentation.enabled, |fill| {
+                fill.group_hover(MENU_ROW_GROUP, |style| {
+                    style.bg(gpui_color(presentation.hover_fill))
+                })
+            })
+            .children(self.leading)
+            .child(label)
+            .children(self.detail.map(|detail| {
+                div()
+                    .flex_none()
+                    .max_w(scale.rems(10.0))
+                    .truncate()
+                    .text_size(scale.rems(0.75))
+                    .text_color(gpui_color(colors.text_muted))
+                    .child(detail)
+            }))
+            .children(check_mark.or(self.trailing));
+
         BaseButton::new(self.id)
+            .group(MENU_ROW_GROUP)
             .disabled(!presentation.enabled)
             .accessibility_label(self.label.clone())
             .when_some(self.behavior.checked, |row, checked| {
@@ -393,22 +432,13 @@ impl RenderOnce for MenuRow {
             .w_full()
             .h(presentation.height)
             .flex_none()
-            .flex()
-            .items_center()
-            .gap(scale.rems(0.5))
-            .px(presentation.horizontal_padding)
-            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
+            .py(scale.rems(ROW_FILL_INSET.0))
+            .rounded(radius)
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
             .text_size(scale.rems(0.875))
             .text_color(gpui_color(presentation.label_color))
-            .when(self.behavior.highlighted, |row| {
-                row.bg(gpui_color(presentation.highlighted_fill))
-            })
-            .when(presentation.enabled, |row| {
-                row.cursor_pointer()
-                    .hover(|style| style.bg(gpui_color(presentation.hover_fill)))
-            })
+            .when(presentation.enabled, gpui::Styled::cursor_pointer)
             .when(!presentation.enabled, gpui::Styled::cursor_not_allowed)
             .focus_visible(move |row| row.border_2().border_color(gpui_color(colors.ring_primary)))
             .when_some(
@@ -420,18 +450,7 @@ impl RenderOnce for MenuRow {
                     })
                 },
             )
-            .children(self.leading)
-            .child(label)
-            .children(self.detail.map(|detail| {
-                div()
-                    .flex_none()
-                    .max_w(scale.rems(10.0))
-                    .truncate()
-                    .text_size(scale.rems(0.75))
-                    .text_color(gpui_color(colors.text_muted))
-                    .child(detail)
-            }))
-            .children(check_mark.or(self.trailing))
+            .child(fill)
     }
 }
 
@@ -689,12 +708,17 @@ impl RenderOnce for MenuAnchor {
 }
 
 pub(crate) fn menu_separator(theme: &AerisTheme) -> Div {
-    div().h(SEPARATOR_HEIGHT).flex().items_center().child(
-        div()
-            .h_px()
-            .w_full()
-            .bg(gpui_color(theme.colors.border_secondary)),
-    )
+    div()
+        .h(SEPARATOR_HEIGHT)
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .h_px()
+                .w_full()
+                .bg(gpui_color(theme.colors.border_secondary)),
+        )
 }
 
 #[cfg(test)]
@@ -703,10 +727,23 @@ mod tests {
     use gpui::{Bounds, Rems, point, px, size};
 
     use super::{
-        COMPACT_ROW_HEIGHT, MENU_SCALE_MAX, MenuScale, PANEL_INSET, POPUP_ENTER_TRAVEL,
-        PopupAnimationOrigin, ROOT_REM_PX, RowKind, SEARCH_ROW_HEIGHT, accepts_input,
-        menu_panel_height, row_geometry,
+        COMPACT_ROW_HEIGHT, MENU_SCALE_MAX, MENU_SEPARATOR_HEIGHT, MenuScale, PANEL_INSET,
+        POPUP_ENTER_TRAVEL, PopupAnimationOrigin, ROOT_REM_PX, ROW_FILL_INSET, RowKind,
+        SEARCH_ROW_HEIGHT, accepts_input, menu_panel_height, row_geometry,
     };
+
+    #[test]
+    fn neighbouring_row_fills_and_dividers_never_touch() {
+        // Each row insets its fill on both edges, so two filled rows leave twice the inset
+        // between them, and a divider keeps clear space around its 1px line on top of that.
+        let inset = ROW_FILL_INSET.0 * ROOT_REM_PX;
+        assert!(2.0 * inset >= 4.0, "filled rows need a visible gap");
+        let divider_clearance = (MENU_SEPARATOR_HEIGHT - 1.0) / 2.0 + inset;
+        assert!(
+            divider_clearance >= 4.0,
+            "a divider needs clear space from row fills"
+        );
+    }
 
     #[test]
     fn disabled_rows_never_accept_activation() {
@@ -749,7 +786,8 @@ mod tests {
     fn panel_height_adds_rows_separators_inset_and_border() {
         let theme = AerisTheme::light();
         let height = menu_panel_height(3, 1, &theme, MenuScale::BASE, px(16.0));
-        let expected = 3.0 * 32.0 + 1.0 + 2.0 * (4.0 + theme.dimensions.border_width);
+        let expected =
+            3.0 * 32.0 + MENU_SEPARATOR_HEIGHT + 2.0 * (4.0 + theme.dimensions.border_width);
         assert!((f32::from(height) - expected).abs() < 1e-4);
     }
 

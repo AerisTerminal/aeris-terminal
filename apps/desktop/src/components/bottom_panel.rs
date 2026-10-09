@@ -448,35 +448,38 @@ fn bottom_panel_tabs(
     state: &BottomPanelState,
     theme: &AerisTheme,
 ) -> TabList {
-    TabList::new("bottom_panel_tabs", "Bottom panel", theme).children(
-        [BottomPanelTab::TradeHistory, BottomPanelTab::Positions].map(|tab| {
-            let select_terminal = terminal.clone();
-            let active = state.open && state.tab == tab;
-            let (id, label, show, hide) = match tab {
-                BottomPanelTab::TradeHistory => (
-                    "trade_history_tab",
-                    "Trade history",
-                    "Show trade history",
-                    "Hide trade history",
-                ),
-                BottomPanelTab::Positions => (
-                    "positions_tab",
-                    "Positions",
-                    "Show open positions",
-                    "Hide open positions",
-                ),
-            };
-            Tab::new(id, theme)
-                .selected(active)
-                .aria_label(if active { hide } else { show })
-                .child(label)
-                .on_click(move |_, _, cx| {
-                    select_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.select_bottom_panel_tab(tab, terminal_cx);
-                    });
-                })
-        }),
-    )
+    TabList::new("bottom_panel_tabs", "Bottom panel", theme)
+        .compact()
+        .children(
+            [BottomPanelTab::TradeHistory, BottomPanelTab::Positions].map(|tab| {
+                let select_terminal = terminal.clone();
+                let active = state.open && state.tab == tab;
+                let (id, label, show, hide) = match tab {
+                    BottomPanelTab::TradeHistory => (
+                        "trade_history_tab",
+                        "Trade history",
+                        "Show trade history",
+                        "Hide trade history",
+                    ),
+                    BottomPanelTab::Positions => (
+                        "positions_tab",
+                        "Positions",
+                        "Show open positions",
+                        "Hide open positions",
+                    ),
+                };
+                Tab::new(id, theme)
+                    .compact()
+                    .selected(active)
+                    .aria_label(if active { hide } else { show })
+                    .child(label)
+                    .on_click(move |_, _, cx| {
+                        select_terminal.update(cx, |terminal, terminal_cx| {
+                            terminal.select_bottom_panel_tab(tab, terminal_cx);
+                        });
+                    })
+            }),
+        )
 }
 
 fn trade_history_expand_button(

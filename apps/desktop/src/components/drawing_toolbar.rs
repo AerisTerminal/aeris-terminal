@@ -1243,7 +1243,7 @@ fn drawing_tool_menu_height(
     let count = |value: usize| f32::from(u16::try_from(value).unwrap_or(u16::MAX));
     px(count(rows) * DRAWING_TOOL_MENU_ROW_REMS * rem
         + count(sections) * DRAWING_TOOL_MENU_TITLE_REMS * rem
-        + count(sections.saturating_sub(1)))
+        + count(sections.saturating_sub(1)) * MENU_SEPARATOR_HEIGHT)
         + menu_panel_chrome_height(theme, MenuScale::BASE, rem_size)
 }
 
@@ -1674,7 +1674,7 @@ mod tests {
         let height = drawing_tool_menu_height(lines, px(16.0), &theme);
         let rows = 20.0 * 32.0;
         let titles = 3.0 * 28.0;
-        let separators = 2.0;
+        let separators = 2.0 * MENU_SEPARATOR_HEIGHT;
         let panel_chrome = 2.0 * (MENU_PANEL_INSET + theme.dimensions.border_width);
         assert_eq!(height, px(rows + titles + separators + panel_chrome));
     }

@@ -2183,7 +2183,9 @@ fn capture_chart_submenu_opens_beside_its_row_inside_the_window() {
     );
     assert_eq!(
         right.y,
-        root.y + px(super::CHART_CONTEXT_MENU_ROW_HEIGHT * 2.0 + 1.0)
+        root.y
+            + px(super::CHART_CONTEXT_MENU_ROW_HEIGHT * 2.0
+                + super::CHART_CONTEXT_MENU_SEPARATOR_HEIGHT)
     );
 
     let near_right_edge = point(px(1200.0 - CHART_CONTEXT_MENU_WIDTH - 8.0), px(100.0));

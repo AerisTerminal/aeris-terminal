@@ -24,6 +24,10 @@ const TAB_LIST_HEIGHT: Pixels = px(28.0);
 const TAB_LIST_INSET: Pixels = px(2.0);
 const TAB_HEIGHT: Pixels = px(24.0);
 const TAB_PADDING_X: Pixels = px(8.0);
+/// Compact tabs for dense panel headers: the same track inset around a slimmer tab.
+const COMPACT_TAB_LIST_HEIGHT: Pixels = px(22.0);
+const COMPACT_TAB_HEIGHT: Pixels = px(18.0);
+const COMPACT_TAB_PADDING_X: Pixels = px(6.0);
 /// Sidebar sections are a comfortable 36 px click target that grows with a scaled panel.
 const SIDEBAR_TAB_HEIGHT: f32 = 36.0;
 
@@ -75,6 +79,12 @@ impl TabList {
                 .flex_col()
                 .gap(TAB_LIST_INSET),
         }
+    }
+
+    /// The slim track for dense panel headers; pair it with [`Tab::compact`] tabs.
+    pub(crate) fn compact(mut self) -> Self {
+        self.base = self.base.h(COMPACT_TAB_LIST_HEIGHT);
+        self
     }
 
     /// Lets an open-ended option set wrap onto more rows. The track keeps its inset and gap
@@ -186,6 +196,7 @@ pub(crate) struct Tab {
     theme: AerisTheme,
     selected: bool,
     disabled: bool,
+    compact: bool,
     surface: TabSurface,
     children: Vec<AnyElement>,
 }
@@ -198,9 +209,16 @@ impl Tab {
             theme: *theme,
             selected: false,
             disabled: false,
+            compact: false,
             surface: TabSurface::Segmented,
             children: Vec::new(),
         }
+    }
+
+    /// A slim segmented tab for a [`TabList::compact`] track in a dense panel header.
+    pub(crate) const fn compact(mut self) -> Self {
+        self.compact = true;
+        self
     }
 
     pub(crate) const fn selected(mut self, selected: bool) -> Self {
@@ -276,12 +294,17 @@ impl RenderOnce for Tab {
         let mut tab = match self.surface {
             TabSurface::Segmented => {
                 let state = segmented_tab_colors(&self.theme, selected, disabled);
+                let (height, padding) = if self.compact {
+                    (COMPACT_TAB_HEIGHT, COMPACT_TAB_PADDING_X)
+                } else {
+                    (TAB_HEIGHT, TAB_PADDING_X)
+                };
                 tab.flex()
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .h(TAB_HEIGHT)
-                    .px(TAB_PADDING_X)
+                    .h(height)
+                    .px(padding)
                     .text_xs()
                     .whitespace_nowrap()
                     .border_color(
