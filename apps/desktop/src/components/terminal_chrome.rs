@@ -902,6 +902,7 @@ fn panel_toggle(
         .label(state.label)
         .aria_label(state.tooltip)
         .tooltip(TooltipSpec::new(state.tooltip, theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .text_toggle()
         .selected(state.selected)
         .disabled(!state.enabled)
         .on_click(move |_, _, cx| {

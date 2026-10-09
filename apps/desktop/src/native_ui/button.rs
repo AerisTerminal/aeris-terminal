@@ -225,6 +225,19 @@ fn button_appearance(
     appearance
 }
 
+/// The interactive text tokens a text toggle uses, so its on state differs from its off state
+/// by the text and icon colour alone.
+const fn text_toggle_appearance(
+    mut appearance: ButtonAppearance,
+    theme: &AerisTheme,
+) -> ButtonAppearance {
+    let colors = theme.colors;
+    appearance.foreground = colors.text_interactive;
+    appearance.hover_foreground = colors.text_hover;
+    appearance.selected_foreground = colors.text_active;
+    appearance
+}
+
 /// A filled variant: one token ramp for rest, hover, press and disabled.
 const fn ramp(
     fill: ThemeColor,
@@ -263,6 +276,7 @@ impl ButtonFlags {
     const FULL_WIDTH: u16 = 1 << 7;
     const STRONG: u16 = 1 << 8;
     const SKIP_TAB_STOP: u16 = 1 << 9;
+    const TEXT_TOGGLE: u16 = 1 << 10;
 
     const fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
@@ -295,6 +309,9 @@ impl ResolvedStyle {
                 appearance.disabled_fill.or(appearance.fill),
                 appearance.disabled_foreground,
             )
+        } else if engaged && flags.has(ButtonFlags::TEXT_TOGGLE) {
+            // A text toggle marks its on state with the text alone; the surface stays put.
+            (appearance.fill, appearance.selected_foreground)
         } else if engaged {
             (
                 Some(appearance.selected_fill),
@@ -458,6 +475,14 @@ impl Button {
         self
     }
 
+    /// A toggle that shows its state through the interactive text tokens alone:
+    /// `text-interactive` off, `text-hover` on hover and `text-active` on, with no selected
+    /// fill. The chart header's panel toggles use it.
+    pub(crate) fn text_toggle(mut self) -> Self {
+        self.flags.set(ButtonFlags::TEXT_TOGGLE, true);
+        self
+    }
+
     /// A trigger whose menu is open: drawn like the pressed state until the menu closes.
     pub(crate) fn open(mut self, open: bool) -> Self {
         self.flags.set(ButtonFlags::OPEN, open);
@@ -518,11 +543,16 @@ impl Button {
     }
 
     fn appearance(&self) -> ButtonAppearance {
-        button_appearance(
+        let appearance = button_appearance(
             &self.theme,
             self.variant,
             self.flags.has(ButtonFlags::DANGER_ON_HOVER),
-        )
+        );
+        if self.flags.has(ButtonFlags::TEXT_TOGGLE) {
+            text_toggle_appearance(appearance, &self.theme)
+        } else {
+            appearance
+        }
     }
 
     fn radius(&self) -> Pixels {
@@ -836,7 +866,29 @@ mod tests {
 
     use super::{
         ButtonFlags, ButtonPolicy, ButtonSize, ButtonVariant, ResolvedStyle, button_appearance,
+        text_toggle_appearance,
     };
+
+    #[test]
+    fn text_toggles_mark_their_state_with_text_only() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let c = theme.colors;
+            let toggle = text_toggle_appearance(
+                button_appearance(&theme, ButtonVariant::Ghost, false),
+                &theme,
+            );
+            let mut flags = ButtonFlags::default();
+            flags.set(ButtonFlags::TEXT_TOGGLE, true);
+            let off = ResolvedStyle::new(&toggle, flags);
+            assert_eq!(off.fill, None);
+            assert_eq!(off.foreground, c.text_interactive);
+            assert_eq!(toggle.hover_foreground, c.text_hover);
+            flags.set(ButtonFlags::SELECTED, true);
+            let on = ResolvedStyle::new(&toggle, flags);
+            assert_eq!(on.fill, None, "the on state adds no background");
+            assert_eq!(on.foreground, c.text_active);
+        }
+    }
 
     #[test]
     fn sizes_follow_the_theme_system_button_sizes() {
