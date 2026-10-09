@@ -262,8 +262,8 @@ while invalid.
   --danger: #f7525f;
   --danger-hover: #f96a75;
   --danger-active: #fb838c;
-  --danger-disabled: #9f0712;
-  --danger-disabled-foreground: #ff6467;
+  --danger-disabled: #5c2328;
+  --danger-disabled-foreground: #c7535c;
   --danger-ring: #c10007;
   --danger-foreground: #ffffff;
 
