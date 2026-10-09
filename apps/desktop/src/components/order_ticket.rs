@@ -2,8 +2,8 @@
 
 use super::{
     AerisTheme, App, Button, ButtonSize, ButtonVariant, ChromeOverlay, Div, Entity, FluentBuilder,
-    HugeIcon, IntoElement, ParentElement, Styled, WorkspaceSurface, div, gpui_color, header_icon,
-    px,
+    HugeIcon, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Tab, TabList,
+    WorkspaceSurface, div, gpui_color, header_icon, px,
 };
 use gpui::{ClickEvent, Window};
 
@@ -186,10 +186,13 @@ fn quantity_selector(
     quantity: u64,
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
-    let mut row = div().h(px(CONTROL_HEIGHT)).flex().gap(px(GAP));
     let decrement = app.clone();
     let increment = app.clone();
-    row = row
+    div()
+        .h(px(CONTROL_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(GAP))
         .child(
             quantity_step_button("trading_quantity_decrement", false, theme).on_click(
                 move |_, _, cx| {
@@ -221,22 +224,23 @@ fn quantity_selector(
                     });
                 },
             ),
-        );
-    for preset in [1_u64, 3, 5, 10, 15] {
-        let select = app.clone();
-        row = row.child(
-            ticket_button(("trading_quantity", preset), theme)
-                .label(preset.to_string())
-                .selected(quantity == preset)
-                .on_click(move |_, _, cx| {
-                    select.update(cx, |surface, surface_cx| {
-                        surface.trading_pnl.order_entry.quantity = preset;
-                        surface_cx.notify();
-                    });
+        )
+        .child(
+            TabList::new("trading_quantity_presets", "Quantity presets", theme).children(
+                [1_u64, 3, 5, 10, 15].map(|preset| {
+                    let select = app.clone();
+                    Tab::new(("trading_quantity", preset), theme)
+                        .selected(quantity == preset)
+                        .child(preset.to_string())
+                        .on_click(move |_, _, cx| {
+                            select.update(cx, |surface, surface_cx| {
+                                surface.trading_pnl.order_entry.quantity = preset;
+                                surface_cx.notify();
+                            });
+                        })
                 }),
-        );
-    }
-    row
+            ),
+        )
 }
 
 /// The outline button every ticket control shares.

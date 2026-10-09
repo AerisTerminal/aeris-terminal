@@ -51,16 +51,13 @@ fn setting_row(
         .into_any_element()
 }
 
-fn choice_button(
+fn choice_tab(
     id: (&'static str, usize),
     label: &'static str,
     selected: bool,
     theme: &AerisTheme,
-) -> Button {
-    Button::new(id, theme)
-        .resting_fill(theme.colors.surface_secondary)
-        .selected(selected)
-        .label(label)
+) -> Tab {
+    Tab::new(id, theme).selected(selected).child(label)
 }
 
 fn filter_row(
@@ -68,29 +65,36 @@ fn filter_row(
     dialog: &BigTradesDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let mut choices = div().flex().flex_wrap().gap_2();
-    for (index, (label, intensity)) in FILTER_CHOICES.into_iter().enumerate() {
-        let update = app.clone();
-        choices = choices.child(
-            choice_button(
-                ("big_trades_filter", index),
-                label,
-                dialog.intensity == intensity,
-                theme,
-            )
-            .on_click(move |_, _, cx| {
-                update.update(cx, |surface, surface_cx| {
-                    surface.set_big_trades_dialog_filter(intensity, surface_cx);
-                });
+    let choices = TabList::new("big_trades_filter", "Filter", theme).children(
+        FILTER_CHOICES
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, intensity))| {
+                let update = app.clone();
+                choice_tab(
+                    ("big_trades_filter", index),
+                    label,
+                    dialog.intensity == intensity,
+                    theme,
+                )
+                .on_click(move |_, _, cx| {
+                    update.update(cx, |surface, surface_cx| {
+                        surface.set_big_trades_dialog_filter(intensity, surface_cx);
+                    });
+                })
             }),
-        );
-    }
+    );
     let description = if dialog.intensity.is_some() {
         "Adapts to recent order sizes. Weak shows the most bubbles, Strong only the largest orders."
     } else {
         "Every order of at least the minimum volume."
     };
-    setting_row("Filter", description, choices.into_any_element(), theme)
+    setting_row(
+        "Filter",
+        description,
+        div().flex().child(choices).into_any_element(),
+        theme,
+    )
 }
 
 fn minimum_volume_row(dialog: &BigTradesDialogState, theme: &AerisTheme) -> AnyElement {
@@ -110,27 +114,29 @@ fn size_row(
     dialog: &BigTradesDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let mut choices = div().flex().flex_wrap().gap_2();
-    for (index, (label, size)) in SIZE_CHOICES.into_iter().enumerate() {
-        let update = app.clone();
-        choices = choices.child(
-            choice_button(
-                ("big_trades_size", index),
-                label,
-                dialog.size == size,
-                theme,
-            )
-            .on_click(move |_, _, cx| {
-                update.update(cx, |surface, surface_cx| {
-                    surface.set_big_trades_dialog_size(size, surface_cx);
-                });
+    let choices = TabList::new("big_trades_size", "Bubble size", theme).children(
+        SIZE_CHOICES
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, size))| {
+                let update = app.clone();
+                choice_tab(
+                    ("big_trades_size", index),
+                    label,
+                    dialog.size == size,
+                    theme,
+                )
+                .on_click(move |_, _, cx| {
+                    update.update(cx, |surface, surface_cx| {
+                        surface.set_big_trades_dialog_size(size, surface_cx);
+                    });
+                })
             }),
-        );
-    }
+    );
     setting_row(
         "Bubble size",
         "Bubbles grow with order volume within this range.",
-        choices.into_any_element(),
+        div().flex().child(choices).into_any_element(),
         theme,
     )
 }
@@ -141,24 +147,23 @@ fn show_volume_row(
     theme: &AerisTheme,
 ) -> AnyElement {
     let update = app.clone();
-    let show_volume = dialog.show_volume;
-    setting_row(
-        "Show volume",
-        "Print the order volume inside bubbles large enough to hold it.",
-        choice_button(
-            ("big_trades_show_volume", 0),
-            if show_volume { "On" } else { "Off" },
-            show_volume,
-            theme,
+    div()
+        .px_3()
+        .child(
+            SwitchRow::new(
+                "big_trades_show_volume",
+                "Show volume",
+                dialog.show_volume,
+                theme,
+            )
+            .description("Print the order volume inside bubbles large enough to hold it.")
+            .on_change(move |show_volume, _, _, cx| {
+                update.update(cx, |surface, surface_cx| {
+                    surface.set_big_trades_dialog_show_volume(show_volume, surface_cx);
+                });
+            }),
         )
-        .on_click(move |_, _, cx| {
-            update.update(cx, |surface, surface_cx| {
-                surface.set_big_trades_dialog_show_volume(!show_volume, surface_cx);
-            });
-        })
-        .into_any_element(),
-        theme,
-    )
+        .into_any_element()
 }
 
 pub(super) fn big_trades_dialog_layer(

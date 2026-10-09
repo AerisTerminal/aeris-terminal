@@ -7,7 +7,6 @@ use aeris_observability::diagnostic;
 use std::rc::Rc;
 
 use super::*;
-use crate::desktop::native_ui::{switch::Switch, theme::platform_border_width};
 use aeris_design_system::ThemeMode;
 use gpui_base::Button as BaseButton;
 
@@ -688,7 +687,6 @@ fn theme_preview(preview: &AerisTheme) -> Div {
 
 /// Window section: the frameless mode switch with a one-line description of what it does.
 fn window_section(frameless: bool, on_toggle: &FramelessToggle, theme: &AerisTheme) -> Div {
-    let colors = theme.colors;
     let on_toggle = on_toggle.clone();
     div()
         .h(px(WINDOW_SECTION_HEIGHT))
@@ -699,45 +697,18 @@ fn window_section(frameless: bool, on_toggle: &FramelessToggle, theme: &AerisThe
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("Window", theme))
         .child(
-            div()
-                .h(px(WINDOW_SETTING_HEIGHT))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(gpui_color(colors.text_primary))
-                                .child("Frameless mode"),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(gpui_color(colors.text_muted))
-                                .child("Show the tab bar when pointing at the top edge"),
-                        ),
+            div().h(px(WINDOW_SETTING_HEIGHT)).flex_none().child(
+                SwitchRow::new(
+                    "platform_menu_frameless_window",
+                    "Frameless mode",
+                    frameless,
+                    theme,
                 )
-                .child(
-                    Switch::new(
-                        "platform_menu_frameless_window",
-                        "Frameless mode",
-                        frameless,
-                        theme,
-                    )
-                    .on_change(move |enabled, _, window, cx| {
-                        on_toggle(enabled, window, cx);
-                        cx.stop_propagation();
-                    }),
-                ),
+                .description("Show the tab bar when pointing at the top edge")
+                .on_change(move |enabled, _, window, cx| {
+                    on_toggle(enabled, window, cx);
+                }),
+            ),
         )
 }
 

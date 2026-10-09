@@ -54,24 +54,27 @@ fn constraint_hint(control: &StudySettingControl) -> Option<String> {
 fn boolean_control(
     app: &Entity<WorkspaceSurface>,
     control_id: usize,
-    identifier: &str,
+    spec: &StudySettingSpec,
     selected: bool,
     enabled: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let identifier = identifier.to_string();
+    let label = spec.presentation.label.clone();
+    let identifier = spec.identifier.clone();
     let update = app.clone();
-    Button::new(("study_setting_boolean", control_id), theme)
-        .resting_fill(theme.colors.surface_secondary)
-        .selected(selected)
-        .disabled(!enabled)
-        .label(if selected { "On" } else { "Off" })
-        .on_click(move |_, _, cx| {
-            update.update(cx, |surface, surface_cx| {
-                surface.set_study_setting_boolean(&identifier, !selected, surface_cx);
-            });
-        })
-        .into_any_element()
+    Switch::new(
+        ("study_setting_boolean", control_id),
+        label,
+        selected,
+        theme,
+    )
+    .disabled(!enabled)
+    .on_change(move |checked, _, _, cx| {
+        update.update(cx, |surface, surface_cx| {
+            surface.set_study_setting_boolean(&identifier, checked, surface_cx);
+        });
+    })
+    .into_any_element()
 }
 
 fn choice_control(
@@ -83,35 +86,43 @@ fn choice_control(
     enabled: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let mut row = div().flex().flex_wrap().gap_2();
-    for (index, option) in options.iter().enumerate() {
+    // Study authors define the options, so the set is open-ended and wraps.
+    let tabs = options.iter().enumerate().map(|(index, option)| {
         let update = app.clone();
         let setting_identifier = identifier.to_string();
         let option_identifier = option.identifier.clone();
-        row = row.child(
-            Button::new(
-                (
-                    "study_setting_choice",
-                    control_id.saturating_mul(65).saturating_add(index),
-                ),
+        Tab::new(
+            (
+                "study_setting_choice",
+                control_id.saturating_mul(65).saturating_add(index),
+            ),
+            theme,
+        )
+        .selected(current == Some(option.identifier.as_str()))
+        .disabled(!enabled)
+        .child(option.label.clone())
+        .on_click(move |_, _, cx| {
+            update.update(cx, |surface, surface_cx| {
+                surface.select_study_setting_choice(
+                    &setting_identifier,
+                    &option_identifier,
+                    surface_cx,
+                );
+            });
+        })
+    });
+    div()
+        .flex()
+        .child(
+            TabList::new(
+                ("study_setting_choices", control_id),
+                identifier.to_string(),
                 theme,
             )
-            .resting_fill(theme.colors.surface_secondary)
-            .selected(current == Some(option.identifier.as_str()))
-            .disabled(!enabled)
-            .label(option.label.clone())
-            .on_click(move |_, _, cx| {
-                update.update(cx, |surface, surface_cx| {
-                    surface.select_study_setting_choice(
-                        &setting_identifier,
-                        &option_identifier,
-                        surface_cx,
-                    );
-                });
-            }),
-        );
-    }
-    row.into_any_element()
+            .wrap()
+            .children(tabs),
+        )
+        .into_any_element()
 }
 
 fn text_control(
@@ -157,7 +168,7 @@ fn setting_control(
         StudySettingControl::Boolean => boolean_control(
             app,
             control_id,
-            &spec.identifier,
+            spec,
             matches!(
                 dialog.draft_values.get(&spec.identifier),
                 Some(StudySettingValue::Boolean(true))
@@ -195,21 +206,21 @@ fn line_thickness_row(
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let mut choices = div().flex().flex_wrap().gap_2();
-    for width in 1..=MAXIMUM_STUDY_LINE_WIDTH {
-        let update = app.clone();
-        choices = choices.child(
-            Button::new(("study_line_width", usize::from(width)), theme)
-                .resting_fill(theme.colors.surface_secondary)
-                .selected(selected == width)
-                .label(format!("{width} px"))
-                .on_click(move |_, _, cx| {
-                    update.update(cx, |surface, surface_cx| {
-                        surface.set_study_settings_line_width(width, surface_cx);
-                    });
-                }),
-        );
-    }
+    let choices = div().flex().child(
+        TabList::new("study_line_width", "Line thickness", theme).children(
+            (1..=MAXIMUM_STUDY_LINE_WIDTH).map(|width| {
+                let update = app.clone();
+                Tab::new(("study_line_width", usize::from(width)), theme)
+                    .selected(selected == width)
+                    .child(format!("{width} px"))
+                    .on_click(move |_, _, cx| {
+                        update.update(cx, |surface, surface_cx| {
+                            surface.set_study_settings_line_width(width, surface_cx);
+                        });
+                    })
+            }),
+        ),
+    );
     div()
         .flex()
         .flex_col()

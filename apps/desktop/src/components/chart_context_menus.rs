@@ -1,6 +1,4 @@
 use super::*;
-use crate::desktop::native_ui::switch::Switch;
-use crate::desktop::native_ui::theme::platform_border_width;
 
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     scaled_overlay_height(rows, separators, MenuScale::BASE)
@@ -1232,46 +1230,22 @@ fn chart_settings_sidebar(
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let mut sections = div().flex_1().min_h_0().flex().flex_col().gap_0p5();
-    for section in ChartSettingsSection::ALL {
-        let active = selected == section;
-        let terminal = terminal.clone();
-        sections = sections.child(
-            div()
-                .id(("chart_settings_section", section as usize))
-                .w_full()
-                .h(design_rems(36.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-                .role(Role::Button)
-                .cursor_pointer()
-                .when(active, |item| {
-                    item.bg(gpui_color(colors.active_bg.over(colors.surface)))
-                })
-                .when(!active, |item| {
-                    item.hover(|item| item.bg(gpui_color(colors.hover_bg.over(colors.surface))))
-                })
+    let sections = TabList::sidebar("chart_settings_sections", "Chart settings sections")
+        .flex_1()
+        .min_h_0()
+        .children(ChartSettingsSection::ALL.into_iter().map(|section| {
+            let terminal = terminal.clone();
+            Tab::new(("chart_settings_section", section as usize), theme)
+                .sidebar()
+                .selected(selected == section)
                 .on_click(move |_, _, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
                         terminal.set_chart_settings_section(section, terminal_cx);
                     });
                     cx.stop_propagation();
                 })
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Normal))
-                        .text_color(gpui_color(if active {
-                            colors.text_primary
-                        } else {
-                            colors.text_secondary
-                        }))
-                        .child(section.label()),
-                ),
-        );
-    }
+                .child(section.label())
+        }));
     div()
         .id("chart_settings_sidebar")
         .w(design_rems(CHART_SETTINGS_SIDEBAR_WIDTH))
@@ -1281,7 +1255,7 @@ fn chart_settings_sidebar(
         .flex_col()
         .gap_3()
         .p_3()
-        .border_r_1()
+        .border_r(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .child(sections)
         .child(chart_settings_template_control(
@@ -2152,28 +2126,13 @@ fn settings_toggle_row(
     action: ChartSettingsAction,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let terminal = terminal.clone();
     let menu = menu.clone();
-    div()
-        .h(design_rems(38.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .text_sm()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(label),
-        )
-        .child(
-            Switch::new(label, label, enabled, theme).on_change(move |_, _, _, cx| {
-                terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.apply_chart_settings_action(&menu, action, terminal_cx);
-                });
-                cx.stop_propagation();
-            }),
-        )
+    SwitchRow::new(label, label, enabled, theme).on_change(move |_, _, _, cx| {
+        terminal.update(cx, |terminal, terminal_cx| {
+            terminal.apply_chart_settings_action(&menu, action, terminal_cx);
+        });
+    })
 }
 
 /// Effective CSS color of a theme-following appearance field under the active theme.

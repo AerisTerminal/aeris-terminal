@@ -207,6 +207,7 @@ use native_ui::{
     platform_font_weight, platform_tabular_numerals,
     rem_scale::{ROOT_REM_PX, design_rems, rem_scaled},
     scroll::{ThinScrollbar, tracked_overflow_y_scrollbar},
+    switch::{Switch, SwitchRow},
     tab::{Tab, TabList},
     theme::{base_theme, gpui_color, platform_border_width},
     tooltip::{TooltipSpec, with_tooltip},

@@ -18,8 +18,6 @@ const TRADE_HISTORY_MAXIMUM_HEIGHT: f32 = 640.0;
 /// Space a resize always leaves for the title bar, chart header and workspace above.
 const TRADE_HISTORY_MINIMUM_WORKSPACE_HEIGHT: f32 = 240.0;
 const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
-/// Header controls stay inside the panel header with room around their hover fill.
-const TRADE_HISTORY_HEADER_CONTROL_HEIGHT: f32 = 22.0;
 const TRADE_HISTORY_ROW_HEIGHT: f32 = 28.0;
 const TRADE_HISTORY_TIME_WIDTH: f32 = 112.0;
 const TRADE_HISTORY_ACCOUNT_WIDTH: f32 = 85.0;
@@ -431,18 +429,7 @@ fn trade_history_header(
         })
         .text_xs()
         .text_color(gpui_color(colors.text_secondary))
-        .child(bottom_panel_tab(
-            terminal,
-            state,
-            BottomPanelTab::TradeHistory,
-            theme,
-        ))
-        .child(bottom_panel_tab(
-            terminal,
-            state,
-            BottomPanelTab::Positions,
-            theme,
-        ))
+        .child(bottom_panel_tabs(terminal, state, theme))
         .when(open && state.history.accounts.len() > 1, |header| {
             header.child(trade_history_account_filter(terminal, state, theme))
         })
@@ -454,58 +441,42 @@ fn trade_history_header(
         .child(trade_history_expand_button(terminal, open, theme))
 }
 
-fn bottom_panel_tab(
+/// The panel's tabs. While the panel is collapsed no tab is selected; choosing the open tab
+/// again collapses the panel.
+fn bottom_panel_tabs(
     terminal: &Entity<TerminalApp>,
     state: &BottomPanelState,
-    tab: BottomPanelTab,
     theme: &AerisTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    let select_terminal = terminal.clone();
-    let active = state.open && state.tab == tab;
-    let (id, label, show, hide) = match tab {
-        BottomPanelTab::TradeHistory => (
-            "trade_history_tab",
-            "TRADE HISTORY",
-            "Show trade history",
-            "Hide trade history",
-        ),
-        BottomPanelTab::Positions => (
-            "positions_tab",
-            "POSITIONS",
-            "Show open positions",
-            "Hide open positions",
-        ),
-    };
-    div()
-        .id(id)
-        .h(px(TRADE_HISTORY_HEADER_CONTROL_HEIGHT))
-        .flex_none()
-        .px_2()
-        .flex()
-        .items_center()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .role(Role::Button)
-        .aria_label(if active { hide } else { show })
-        .cursor_pointer()
-        .text_color(gpui_color(if active {
-            colors.text_active
-        } else {
-            colors.text_interactive
-        }))
-        .when(active, |tab| {
-            tab.bg(gpui_color(colors.active_bg.over(colors.surface)))
-        })
-        .hover(move |tab| {
-            tab.bg(gpui_color(colors.hover_bg.over(colors.surface)))
-                .text_color(gpui_color(colors.text_hover))
-        })
-        .child(label)
-        .on_click(move |_, _, cx| {
-            select_terminal.update(cx, |terminal, terminal_cx| {
-                terminal.select_bottom_panel_tab(tab, terminal_cx);
-            });
-        })
+) -> TabList {
+    TabList::new("bottom_panel_tabs", "Bottom panel", theme).children(
+        [BottomPanelTab::TradeHistory, BottomPanelTab::Positions].map(|tab| {
+            let select_terminal = terminal.clone();
+            let active = state.open && state.tab == tab;
+            let (id, label, show, hide) = match tab {
+                BottomPanelTab::TradeHistory => (
+                    "trade_history_tab",
+                    "Trade history",
+                    "Show trade history",
+                    "Hide trade history",
+                ),
+                BottomPanelTab::Positions => (
+                    "positions_tab",
+                    "Positions",
+                    "Show open positions",
+                    "Hide open positions",
+                ),
+            };
+            Tab::new(id, theme)
+                .selected(active)
+                .aria_label(if active { hide } else { show })
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    select_terminal.update(cx, |terminal, terminal_cx| {
+                        terminal.select_bottom_panel_tab(tab, terminal_cx);
+                    });
+                })
+        }),
+    )
 }
 
 fn trade_history_expand_button(
