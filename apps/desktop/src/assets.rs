@@ -30,6 +30,7 @@ pub enum UiIcon {
     EraserIcon,
     Failure,
     Lock,
+    Minus,
     Moon,
     Redo,
     Refresh,
@@ -56,7 +57,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -75,6 +76,7 @@ impl UiIcon {
         Self::EraserIcon,
         Self::Failure,
         Self::Lock,
+        Self::Minus,
         Self::Moon,
         Self::Redo,
         Self::Refresh,
@@ -121,6 +123,7 @@ impl UiIcon {
             Self::EraserIcon => "eraser.svg",
             Self::Failure => "failure.svg",
             Self::Lock => "lock.svg",
+            Self::Minus => "minus.svg",
             Self::Moon => "moon.svg",
             Self::Redo => "redo.svg",
             Self::Refresh => "refresh.svg",
@@ -550,6 +553,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "eraser.svg" => include_bytes!("../assets/icons/ui/eraser.svg"),
         "failure.svg" => include_bytes!("../assets/icons/ui/failure.svg"),
         "lock.svg" => include_bytes!("../assets/icons/ui/lock.svg"),
+        "minus.svg" => include_bytes!("../assets/icons/ui/minus.svg"),
         "moon.svg" => include_bytes!("../assets/icons/ui/moon.svg"),
         "redo.svg" => include_bytes!("../assets/icons/ui/redo.svg"),
         "refresh.svg" => include_bytes!("../assets/icons/ui/refresh.svg"),

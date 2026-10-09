@@ -257,35 +257,11 @@ fn quantity_step_button(id: impl Into<gpui::ElementId>, plus: bool, theme: &Aeri
         } else {
             "Decrease quantity"
         })
-        .leading(quantity_step_glyph(plus, theme))
-}
-
-/// The icon set has no minus glyph, so the stepper draws its own matching +/− strokes.
-fn quantity_step_glyph(plus: bool, theme: &AerisTheme) -> Div {
-    let stroke = theme.colors.text_secondary;
-    div()
-        .relative()
-        .size(px(14.0))
-        .child(
-            div()
-                .absolute()
-                .left(px(2.0))
-                .top(px(6.5))
-                .w(px(10.0))
-                .h(px(1.0))
-                .bg(gpui_color(stroke)),
-        )
-        .when(plus, |icon| {
-            icon.child(
-                div()
-                    .absolute()
-                    .left(px(6.5))
-                    .top(px(2.0))
-                    .w(px(1.0))
-                    .h(px(10.0))
-                    .bg(gpui_color(stroke)),
-            )
-        })
+        .icon(header_icon(if plus {
+            HugeIcon::Add
+        } else {
+            HugeIcon::Minus
+        }))
 }
 
 fn action_row(left: Button, right: Button) -> Div {
