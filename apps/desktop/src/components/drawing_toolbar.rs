@@ -90,7 +90,7 @@ impl DrawingToolEntry {
     /// Stamps carry their chart color; tool glyphs follow the control's text color.
     fn icon(self, theme: &AerisTheme) -> Icon {
         match self.glyph {
-            DrawingToolGlyph::Asset(icon) => Icon::new(icon.path()),
+            DrawingToolGlyph::Asset(icon) => Icon::new(icon.path()).exact_alpha(icon.translucent()),
             DrawingToolGlyph::Stamp(stamp) => {
                 Icon::new(assets::stamp_icon_path(stamp)).color(gpui_color(stamp.color(theme)))
             }

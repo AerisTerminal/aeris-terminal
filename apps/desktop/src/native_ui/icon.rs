@@ -1,7 +1,22 @@
-use gpui::{
-    App, Hsla, IntoElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled,
-    Transformation, Window, div, prelude::*, svg,
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
 };
+
+use gpui::{
+    App, AssetSource, Hsla, ImageSource, IntoElement, ObjectFit, Pixels, RenderImage, RenderOnce,
+    SharedString, StyleRefinement, Styled, Transformation, Window, div, img, prelude::*, svg,
+};
+
+/// Exact-alpha rasters per (path, device size, color). Icons come from a fixed asset set and
+/// colors from theme tokens, so the set is small; the cap only guards against a runaway.
+const MAXIMUM_EXACT_RASTERS: usize = 512;
+
+/// Icon path, device size bits, and the RGB channel bits it was painted with.
+type ExactRasterKey = (SharedString, u32, [u32; 3]);
+
+static EXACT_RASTERS: LazyLock<Mutex<HashMap<ExactRasterKey, Arc<RenderImage>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// An `Aeris`-owned SVG icon loaded through the application's `AssetSource`.
 ///
@@ -15,6 +30,7 @@ pub(crate) struct Icon {
     color: Option<Hsla>,
     size: Option<Pixels>,
     rotation_turns: Option<f32>,
+    exact_alpha: bool,
 }
 
 impl Clone for Icon {
@@ -25,6 +41,7 @@ impl Clone for Icon {
             color: self.color,
             size: self.size,
             rotation_turns: self.rotation_turns,
+            exact_alpha: self.exact_alpha,
         }
     }
 }
@@ -58,6 +75,14 @@ impl Icon {
         self
     }
 
+    /// Paints the icon from an exact-color raster instead of GPUI's monochrome mask. GPUI runs
+    /// monochrome masks through the text contrast and gamma correction, which brightens
+    /// partial alpha, so an icon whose design uses a translucent fill opts into this.
+    pub(crate) fn exact_alpha(mut self, exact_alpha: bool) -> Self {
+        self.exact_alpha = exact_alpha;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn path_ref(&self) -> &SharedString {
         &self.path
@@ -81,14 +106,88 @@ impl Styled for Icon {
     }
 }
 
+/// The SVG root's `width` attribute, the unit its raster scale is measured against.
+pub(crate) fn svg_intrinsic_width(bytes: &[u8]) -> Option<f32> {
+    let header = std::str::from_utf8(bytes.get(..bytes.len().min(768))?).ok()?;
+    let svg = header.find("<svg")?;
+    let width = header[svg..].find("width=\"")? + svg + 7;
+    let rest = &header[width..];
+    let end = rest.find('"')?;
+    rest[..end].parse().ok()
+}
+
+/// The icon's SVG with `currentColor` resolved, rasterized at its device-pixel size. The
+/// color's alpha is left to the caller, so one raster serves every opacity.
+fn exact_raster(
+    path: &SharedString,
+    size: Pixels,
+    scale_factor: f32,
+    color: Hsla,
+    cx: &App,
+) -> Option<Arc<RenderImage>> {
+    let rgba = color.to_rgb();
+    let [red, green, blue] = [rgba.r, rgba.g, rgba.b].map(|channel| channel.clamp(0.0, 1.0));
+    let device = f32::from(size) * scale_factor.max(1.0);
+    let key = (
+        path.clone(),
+        device.to_bits(),
+        [red.to_bits(), green.to_bits(), blue.to_bits()],
+    );
+    if let Some(image) = EXACT_RASTERS
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
+        return Some(image);
+    }
+    let bytes = crate::desktop::assets::AerisAssets
+        .load(path.as_ref())
+        .ok()??;
+    let intrinsic = svg_intrinsic_width(&bytes)?;
+    let source = std::str::from_utf8(&bytes).ok()?.replace(
+        "currentColor",
+        &format!(
+            "rgb({:.3}%, {:.3}%, {:.3}%)",
+            red * 100.0,
+            green * 100.0,
+            blue * 100.0
+        ),
+    );
+    let image = cx
+        .svg_renderer()
+        .render_single_frame(source.as_bytes(), device / intrinsic)
+        .ok()?;
+    if let Ok(mut cache) = EXACT_RASTERS.lock() {
+        if cache.len() >= MAXIMUM_EXACT_RASTERS {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&image));
+    }
+    Some(image)
+}
+
 impl RenderOnce for Icon {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let size = device_pixel_size(
             self.size
                 .unwrap_or_else(|| window.text_style().font_size.to_pixels(window.rem_size())),
             window.scale_factor(),
         );
         let color = self.color.unwrap_or_else(|| window.text_style().color);
+        if self.exact_alpha
+            && let Some(image) = exact_raster(&self.path, size, window.scale_factor(), color, cx)
+        {
+            return div()
+                .size(size)
+                .flex_none()
+                .child(
+                    img(ImageSource::Render(image))
+                        .size(size)
+                        .object_fit(ObjectFit::Fill)
+                        .opacity(color.a),
+                )
+                .into_any_element();
+        }
         let mut glyph = svg().path(self.path).flex_none().flex_shrink_0();
         *glyph.style() = self.style;
         let glyph = glyph.size(size).text_color(color);
@@ -109,6 +208,7 @@ impl RenderOnce for Icon {
             .justify_center()
             .overflow_hidden()
             .child(glyph)
+            .into_any_element()
     }
 }
 

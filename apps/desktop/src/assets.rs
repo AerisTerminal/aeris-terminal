@@ -168,6 +168,13 @@ macro_rules! drawing_icons {
                 }
                 .into()
             }
+
+            /// Whether the glyph's design relies on a translucent fill, which must be painted at
+            /// its exact alpha rather than through GPUI's contrast-boosted monochrome mask.
+            #[must_use]
+            pub const fn translucent(self) -> bool {
+                matches!(self, Self::LongPosition | Self::ShortPosition)
+            }
         }
 
         fn drawing_asset(path: &str) -> Option<&'static [u8]> {
@@ -713,17 +720,22 @@ mod tests {
     }
 
     // `Icon` paints only the SVG alpha mask in one tint, so any paint other than
-    // `currentColor` collapses into a solid silhouette instead of showing its color.
+    // `currentColor` collapses into a solid silhouette instead of showing its color. Only
+    // translucent drawing icons, which are painted at exact alpha, may use opacity.
     #[test]
     fn monochrome_icons_paint_only_current_color() {
         let assets = AerisAssets;
         let paths = DrawingIcon::ALL
             .iter()
-            .map(|icon| icon.path())
-            .chain(ChartDrawingStamp::ALL.into_iter().map(stamp_icon_path))
-            .chain(UiIcon::ALL.into_iter().map(UiIcon::path));
+            .map(|icon| (icon.path(), icon.translucent()))
+            .chain(
+                ChartDrawingStamp::ALL
+                    .into_iter()
+                    .map(|stamp| (stamp_icon_path(stamp), false)),
+            )
+            .chain(UiIcon::ALL.into_iter().map(|icon| (icon.path(), false)));
 
-        for path in paths {
+        for (path, translucent) in paths {
             let bytes = assets
                 .load(path.as_ref())
                 .expect("asset lookup")
@@ -731,9 +743,14 @@ mod tests {
             let svg = std::str::from_utf8(&bytes)
                 .expect("UTF-8 SVG")
                 .to_ascii_lowercase();
-            for paint in ["#", "rgb(", "white", "black", "opacity"] {
+            for paint in ["#", "rgb(", "white", "black"] {
                 assert!(!svg.contains(paint), "{path} paints with {paint}");
             }
+            assert_eq!(
+                svg.contains("opacity"),
+                translucent,
+                "{path} opacity disagrees with its exact-alpha flag"
+            );
         }
     }
 

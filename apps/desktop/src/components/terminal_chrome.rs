@@ -1041,15 +1041,6 @@ pub(super) fn ordered_f32_key(value: f32) -> u64 {
     value.to_bits().into()
 }
 
-pub(super) fn svg_intrinsic_width(bytes: &[u8]) -> Option<f32> {
-    let header = std::str::from_utf8(bytes.get(..768)?).ok()?;
-    let svg = header.find("<svg")?;
-    let width = header[svg..].find("width=\"")? + svg + 7;
-    let rest = &header[width..];
-    let end = rest.find('"')?;
-    rest[..end].parse().ok()
-}
-
 pub(super) fn rasterize_colored_svg(
     path: &SharedString,
     logical_size: Pixels,
@@ -1073,7 +1064,7 @@ pub(super) fn rasterize_colored_svg(
         .ok_or_else(|| {
             gpui::ImageCacheError::Asset(format!("Embedded resource not found: {path}").into())
         })?;
-    let intrinsic = svg_intrinsic_width(&bytes).ok_or_else(|| {
+    let intrinsic = native_ui::icon::svg_intrinsic_width(&bytes).ok_or_else(|| {
         gpui::ImageCacheError::Asset(format!("SVG intrinsic width missing: {path}").into())
     })?;
     let target_logical = f32::from(logical_size) * window_scale;
