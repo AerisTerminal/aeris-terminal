@@ -573,7 +573,13 @@ impl Coordinator {
                 client_order_id,
                 reason,
             } => self.apply_refusal(&account_id, client_order_id, reason),
-            VenueUpdate::Fill(fill) => self.apply_broker_fill(&account_id, fill),
+            VenueUpdate::Fill(fill) => {
+                self.apply_broker_fill(&account_id, fill)?;
+                if fill.realized.is_some() {
+                    self.evaluate_live_risk(event.observed_unix_nanos)?;
+                }
+                Ok(())
+            }
             VenueUpdate::Position(position) => {
                 let position = self.broker_position(&account_id, position)?;
                 self.write_positions(&account_id, position.into_iter().collect(), &[], false)
@@ -592,7 +598,10 @@ impl Coordinator {
             }
             VenueUpdate::Snapshot(snapshot) => self.apply_snapshot(&account_id, snapshot),
             VenueUpdate::UnrealizedPnl(positions) => {
-                self.apply_unrealized_pnl(&account_id, positions)
+                if self.apply_unrealized_pnl(&account_id, positions)? {
+                    self.evaluate_live_risk(event.observed_unix_nanos)?;
+                }
+                Ok(())
             }
         }
     }
@@ -627,14 +636,14 @@ impl Coordinator {
         }
     }
 
-    /// Applies the broker's unrealized P&L to the positions it names. It is a live mark, so
-    /// it is held in memory; a position the owner has not seen yet gets its value on the
-    /// next refresh after its position event.
+    /// Applies the broker's unrealized P&L to the positions it names and reports whether
+    /// any value changed. It is a live mark, so it is held in memory; a position the owner
+    /// has not seen yet gets its value on the next refresh after its position event.
     fn apply_unrealized_pnl(
         &mut self,
         account_id: &TradingAccountId,
         reports: &[PositionUnrealizedPnl],
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let scale = self
             .state
             .accounts
@@ -665,10 +674,9 @@ impl Coordinator {
             }
         }
         if changed {
-            self.bump_revision()
-        } else {
-            Ok(())
+            self.bump_revision()?;
         }
+        Ok(changed)
     }
 
     /// Records one broker deal once. Our order's filled quantity is the larger of what

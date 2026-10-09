@@ -63,6 +63,8 @@ const MAXIMUM_COPY_DISPATCHES: usize = 128;
 const MAXIMUM_USER_RECORD_BYTES: usize = 1024 * 1024;
 const LIVE_TRADING_DISABLED: &str = "cTrader live accounts are data-only; trading is disabled";
 const DEMO_VENUE_UNAVAILABLE: &str = "cTrader demo venue is not connected";
+const BROKER_PNL_UNAVAILABLE: &str =
+    "the broker account is unreachable, so its open P&L for the loss rules is unknown";
 /// One request per connected account with open broker positions, well inside cTrader's
 /// 50 requests per second.
 const UNREALIZED_PNL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1597,9 +1599,18 @@ impl Coordinator {
         {
             return Err("risk profile revision must advance".to_string());
         }
-        let current = self.session_pnl(&profile)?;
+        if self.route(&profile.account_id)? != VenueRoute::Simulated
+            && profile.session_start_realized_pnl.units() != 0
+        {
+            return Err(
+                "a broker account's session P&L starts from its deals; the baseline must be zero"
+                    .into(),
+            );
+        }
         let zero = FixedPoint::try_new(0, profile.daily_loss_limit.scale())
             .map_err(|error| error.to_string())?;
+        // An unreachable broker account starts its peak at zero; the live check raises it.
+        let current = self.session_pnl(&profile)?.unwrap_or(zero);
         let rule_state = RiskRuleState {
             account_id: profile.account_id.clone(),
             profile_id: profile.profile_id.clone(),
@@ -2163,7 +2174,7 @@ impl Coordinator {
         )?
         .exact_rescale(profile.daily_loss_limit.scale())
         .map_err(|error| error.to_string())?;
-        let current = self.session_pnl(profile)?;
+        let current = self.session_pnl(profile)?.ok_or(BROKER_PNL_UNAVAILABLE)?;
         let daily_remaining = remaining_limit(profile.daily_loss_limit, negative_loss(current)?)?;
         if potential_loss.units() >= daily_remaining.units() {
             return Err("bracket loss at stop would reach the daily loss limit".to_string());
@@ -2447,7 +2458,7 @@ impl Coordinator {
             });
         }
         self.check_restriction(command, &profile)?;
-        let current_session_pnl = self.session_pnl(&profile)?;
+        let current_session_pnl = self.session_pnl(&profile)?.ok_or(BROKER_PNL_UNAVAILABLE)?;
         self.check_loss_limits(command, &profile, current_session_pnl)?;
         let projected_contracts = self.projected_contracts(command)?;
         let maximum_contracts = profile
@@ -2777,7 +2788,16 @@ impl Coordinator {
         Ok(warnings)
     }
 
+    /// Realized P&L since the session start. A broker account sums the realized P&L of its
+    /// deals executed since then; its baseline is zero, enforced at registration.
     fn realized_since_session(&self, profile: &RiskProfile) -> Result<FixedPoint, String> {
+        if self.route(&profile.account_id)? != VenueRoute::Simulated {
+            return self.broker_realized_since(
+                &profile.account_id,
+                profile.session_start_unix_nanos,
+                profile.daily_loss_limit.scale(),
+            );
+        }
         let current = self
             .state
             .positions
@@ -2811,23 +2831,82 @@ impl Coordinator {
             .map_err(|error| error.to_string())
     }
 
-    fn session_pnl(&self, profile: &RiskProfile) -> Result<FixedPoint, String> {
+    /// Session P&L: realized since the session start plus open P&L. `None` while a broker
+    /// account is unreachable, because its open P&L is then unknown.
+    fn session_pnl(&self, profile: &RiskProfile) -> Result<Option<FixedPoint>, String> {
+        let scale = profile.daily_loss_limit.scale();
+        let realized = self.realized_since_session(profile)?;
+        if self.route(&profile.account_id)? != VenueRoute::Simulated {
+            let Some(unrealized) = self.broker_unrealized(&profile.account_id, scale)? else {
+                return Ok(None);
+            };
+            return realized
+                .checked_add(unrealized)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
         self.state
             .positions
             .values()
             .filter(|position| position.account_id == profile.account_id)
             .map(|position| position.unrealized_pnl)
-            .try_fold(
-                self.realized_since_session(profile)?,
-                |total, unrealized| {
-                    let unrealized = unrealized
-                        .exact_rescale(profile.daily_loss_limit.scale())
-                        .map_err(|error| error.to_string())?;
-                    total
-                        .checked_add(unrealized)
-                        .map_err(|error| error.to_string())
-                },
-            )
+            .try_fold(realized, |total, unrealized| {
+                let unrealized = unrealized
+                    .exact_rescale(scale)
+                    .map_err(|error| error.to_string())?;
+                total
+                    .checked_add(unrealized)
+                    .map_err(|error| error.to_string())
+            })
+            .map(Some)
+    }
+
+    /// The broker-reported realized P&L of the account's deals executed at or after `since`.
+    fn broker_realized_since(
+        &self,
+        account_id: &TradingAccountId,
+        since_unix_nanos: i64,
+        scale: u8,
+    ) -> Result<FixedPoint, String> {
+        let zero = FixedPoint::try_new(0, scale).map_err(|error| error.to_string())?;
+        self.state
+            .fills
+            .iter()
+            .filter(|fill| {
+                &fill.account_id == account_id && fill.execution_unix_nanos >= since_unix_nanos
+            })
+            .filter_map(|fill| self.state.fill_realized_pnl.get(&fill.id))
+            .try_fold(zero, |total, realized| {
+                realized
+                    .exact_rescale(scale)
+                    .and_then(|realized| total.checked_add(realized))
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    /// The broker's net unrealized P&L of the account's open positions, or `None` while the
+    /// venue cannot reach the account.
+    fn broker_unrealized(
+        &self,
+        account_id: &TradingAccountId,
+        scale: u8,
+    ) -> Result<Option<FixedPoint>, String> {
+        if !self.connected_broker_accounts.contains(account_id) {
+            return Ok(None);
+        }
+        let zero = FixedPoint::try_new(0, scale).map_err(|error| error.to_string())?;
+        self.state
+            .broker_positions
+            .values()
+            .filter(|position| &position.account_id == account_id)
+            .try_fold(zero, |total, position| {
+                position
+                    .net_unrealized
+                    .exact_rescale(scale)
+                    .and_then(|net| total.checked_add(net))
+            })
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
 
     fn drain_observations(&mut self) {
@@ -2993,7 +3072,10 @@ impl Coordinator {
             if self.state.risk_locks.contains_key(&profile.account_id) {
                 continue;
             }
-            let current = self.session_pnl(&profile)?;
+            // An unreachable broker account is not locked on a guess.
+            let Some(current) = self.session_pnl(&profile)? else {
+                continue;
+            };
             if current.units() < 0
                 && current.units().unsigned_abs() >= profile.daily_loss_limit.units().unsigned_abs()
             {
@@ -4451,27 +4533,15 @@ impl Coordinator {
         realized: FixedPoint,
         unrealized: FixedPoint,
     ) -> Result<AccountPnl, String> {
-        let connected = self.connected_broker_accounts.contains(&account.id);
-        let unrealized = if connected {
-            self.state
-                .broker_positions
-                .values()
-                .filter(|position| position.account_id == account.id)
-                .try_fold(unrealized, |total, position| {
-                    position
-                        .net_unrealized
-                        .exact_rescale(account.currency_scale)
-                        .and_then(|net| total.checked_add(net))
-                })
-                .map_err(|error| error.to_string())?
-        } else {
-            unrealized
-        };
+        let broker_unrealized = self.broker_unrealized(&account.id, account.currency_scale)?;
+        let unrealized = broker_unrealized
+            .map_or(Ok(unrealized), |broker| unrealized.checked_add(broker))
+            .map_err(|error| error.to_string())?;
         let equity = self
             .state
             .broker_balances
             .get(&account.id)
-            .filter(|_| connected)
+            .filter(|_| broker_unrealized.is_some())
             .map(|balance| {
                 balance
                     .exact_rescale(account.currency_scale)
@@ -4577,13 +4647,17 @@ impl Coordinator {
             .collect()
     }
 
+    /// One meter per risk profile; an unreachable broker account has no meter until its open
+    /// P&L is known again.
     fn risk_meters(&self) -> Result<Vec<RiskMeter>, String> {
         self.state
             .risk_profiles
             .values()
-            .map(|profile| {
+            .map(|profile| -> Result<Option<RiskMeter>, String> {
                 let current_realized_pnl = self.realized_since_session(profile)?;
-                let current_session_pnl = self.session_pnl(profile)?;
+                let Some(current_session_pnl) = self.session_pnl(profile)? else {
+                    return Ok(None);
+                };
                 let loss_used = negative_loss(current_session_pnl)?;
                 let daily_loss_remaining = remaining_limit(profile.daily_loss_limit, loss_used)?;
                 let trailing_drawdown_remaining = profile
@@ -4623,7 +4697,7 @@ impl Coordinator {
                     })
                     .transpose()?
                     .unwrap_or((None, None));
-                Ok(RiskMeter {
+                Ok(Some(RiskMeter {
                     account_id: profile.account_id.clone(),
                     profile_id: profile.profile_id.clone(),
                     profile_version: profile.version,
@@ -4649,8 +4723,9 @@ impl Coordinator {
                                 .and_then(|state| state.cooldown_until_unix_nanos)
                                 .map(|until| format!("rapid-loss cooldown active until {until}"))
                         }),
-                })
+                }))
             })
+            .filter_map(Result::transpose)
             .collect()
     }
 

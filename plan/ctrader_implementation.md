@@ -21,7 +21,7 @@ Last examined: 2026-10-09.
 | Market data in `market_runtime` | `market_service/ctrader.rs` | **Done**; M-1 to M-9 fixed, second broker not yet run |
 | Desktop market data (pick cTrader, chart, DOM) | `apps/desktop` | **Built and tested**; manual desktop check pending |
 | Adapter trading messages | `crates/adapters/ctrader_open_api` | **Done**, qualified on demo |
-| Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Built**; T-1 to T-6 fixed; brackets server-side; broker unrealized P&L shown, not yet in loss rules |
+| Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Built**; T-1 to T-6 fixed; brackets server-side; broker unrealized P&L shown and in loss rules |
 | Session owner joining the adapter and `trading_runtime` | `market_runtime` relay (D8) | **Built**, verified on demo |
 | Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Built**; manual check and a positions panel pending |
 | AWS broker hardening (Phase 9) | `aeris-website` | Uncommitted work in progress there, not by this plan's agent |
@@ -403,9 +403,12 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
   on our side; verified on demo 2026-10-09: gross -0.01, net -0.06 EUR on 1,000 EURUSD). The
   owner requests it every second while a connected account holds broker positions; a broker
   account's summary shows that open P&L and equity = balance + net unrealized, and neither
-  while the account is unreachable. Still open (maintainer decision): whether session loss and
-  trailing drawdown include broker unrealized P&L; risk rules still read simulated positions
-  only.
+  while the account is unreachable. Decided 2026-10-09 by the maintainer: loss rules include it.
+  A broker account's session P&L is the realized P&L of its deals since the profile's session
+  start (baseline must be zero) plus cTrader's net unrealized; rules re-check on every refresh
+  and realized deal. While the account is unreachable, orders are refused, the live check does
+  not lock on a guess, and the risk meter is omitted. Session plans still read simulated
+  positions only.
 - [ ] **Round trips:** trade-history round trips cover simulated accounts only; design broker trade
   history (hedged positions per broker id) with Phase 6.
 

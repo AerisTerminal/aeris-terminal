@@ -859,26 +859,47 @@ fn a_broker_bracket_sends_server_protection_at_the_template_distances() {
     assert_eq!(service.snapshot().expect("snapshot").managed_brackets, []);
 }
 
+fn risk_profile(daily_loss_limit: i64, max_contracts: i64) -> crate::RiskProfile {
+    crate::RiskProfile {
+        account_id: broker().id,
+        profile_id: "broker-rules".into(),
+        version: 1,
+        session_start_unix_nanos: 1_500,
+        session_start_realized_pnl: point(0, 2),
+        daily_loss_limit: point(daily_loss_limit, 2),
+        trailing_drawdown: None,
+        trailing_mode: crate::TrailingDrawdownMode::EndOfDay,
+        max_contracts: point(max_contracts, 0),
+        consistency_max_single_trade_percent: None,
+        restricted_until_unix_nanos: None,
+        economic_event_rule: None,
+        enabled: true,
+    }
+}
+
+/// Announces the scripted broker account, so the venue can reach it.
+fn observe_broker(service: &TradingService) {
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            VenueUpdate::AccountObserved(aeris_trading::venue::ObservedAccount {
+                environment: AccountEnvironment::Demo,
+                display_name: broker().display_name,
+                currency: "USD".into(),
+                currency_scale: 2,
+            }),
+        ))
+        .expect("observed");
+}
+
 #[test]
 fn open_broker_positions_count_toward_the_maximum_contract_rule() {
     let (_directory, service, _receiver) = setup("venue-max-contracts");
     service
-        .register_risk_profile(crate::RiskProfile {
-            account_id: broker().id,
-            profile_id: "two-contracts".into(),
-            version: 1,
-            session_start_unix_nanos: 1,
-            session_start_realized_pnl: point(0, 2),
-            daily_loss_limit: point(100_000, 2),
-            trailing_drawdown: None,
-            trailing_mode: crate::TrailingDrawdownMode::EndOfDay,
-            max_contracts: point(2, 0),
-            consistency_max_single_trade_percent: None,
-            restricted_until_unix_nanos: None,
-            economic_event_rule: None,
-            enabled: true,
-        })
+        .register_risk_profile(risk_profile(100_000, 2))
         .expect("profile");
+    observe_broker(&service);
     service
         .demo_venue_inbox()
         .push(venue(1, VenueUpdate::Position(position("77", 2))))
@@ -892,20 +913,78 @@ fn open_broker_positions_count_toward_the_maximum_contract_rule() {
 }
 
 #[test]
-fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
-    let (_directory, service, receiver) = setup("venue-unrealized");
+fn broker_loss_rules_count_session_deals_and_the_broker_open_pnl() {
+    let (_directory, service, _receiver) = setup("venue-loss-rules");
+    let mut baseline = risk_profile(1_000, 10);
+    baseline.session_start_realized_pnl = point(5, 2);
+    assert!(
+        service
+            .register_risk_profile(baseline)
+            .expect_err("broker baseline")
+            .contains("baseline must be zero")
+    );
+    service
+        .register_risk_profile(risk_profile(1_000, 10))
+        .expect("an unreachable account still registers");
+    assert!(
+        service
+            .place_order(request("unknown-open-pnl"))
+            .expect_err("fails closed")
+            .contains("unreachable"),
+    );
+    assert_eq!(
+        service.snapshot().expect("snapshot").risk_meters,
+        [],
+        "no meter while the open P&L is unknown"
+    );
+
+    observe_broker(&service);
     let inbox = service.demo_venue_inbox();
+    inbox
+        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .expect("position");
+    // A closing deal in the session realizes -4.00 gross and -1.00 commission.
     inbox
         .push(venue(
             1,
-            VenueUpdate::AccountObserved(aeris_trading::venue::ObservedAccount {
-                environment: AccountEnvironment::Demo,
-                display_name: broker().display_name,
-                currency: "USD".into(),
-                currency_scale: 2,
+            VenueUpdate::Fill(BrokerFill {
+                realized: Some(RealizedClose {
+                    gross_profit: point(-400, 2),
+                    swap: point(0, 2),
+                    commission: point(-100, 2),
+                    balance: point(99_500, 2),
+                }),
+                ..fill("901", "closing-order", 1)
             }),
         ))
-        .expect("observed");
+        .expect("realized");
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.risk_locks, []);
+    assert_eq!(snapshot.risk_meters[0].current_realized_pnl, point(-500, 2));
+    assert_eq!(snapshot.risk_meters[0].daily_loss_remaining, point(500, 2));
+
+    // The broker's open P&L takes the session to the limit, and the account locks.
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::UnrealizedPnl(vec![PositionUnrealizedPnl {
+                broker_position_id: "77".into(),
+                gross: point(-480, 2),
+                net: point(-500, 2),
+            }]),
+        ))
+        .expect("pnl");
+    let locks = service.snapshot().expect("snapshot").risk_locks;
+    assert_eq!(locks.len(), 1);
+    assert_eq!(locks[0].account_id, broker().id);
+    assert!(locks[0].reason.contains("daily loss limit"));
+}
+
+#[test]
+fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
+    let (_directory, service, receiver) = setup("venue-unrealized");
+    observe_broker(&service);
+    let inbox = service.demo_venue_inbox();
     inbox
         .push(venue(
             1,
