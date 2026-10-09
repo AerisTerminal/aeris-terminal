@@ -23,7 +23,7 @@ Last examined: 2026-10-09.
 | Adapter trading messages | `crates/adapters/ctrader_open_api` | **Done**, qualified on demo |
 | Live venue in `trading_runtime` (PF11) | `crates/trading_runtime` | **Built**; T-1 to T-6 fixed; brackets server-side; broker unrealized P&L shown and in loss rules |
 | Session owner joining the adapter and `trading_runtime` | `market_runtime` relay (D8) | **Built**, verified on demo |
-| Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Built**; manual check and a positions panel pending |
+| Desktop trading (accounts, DOM, chart orders) | `apps/desktop` | **Built**, positions tab included; manual check pending |
 | AWS broker hardening (Phase 9) | `aeris-website` | Uncommitted work in progress there, not by this plan's agent |
 | Demo and live qualification | maintainer | **Not started** |
 
@@ -459,8 +459,11 @@ the bounded inbox, and a relay translates the contract to one broker's protocol.
   a broker account's net exposure enables flatten and reverse, allows the chart close, and draws
   the DOM marker when one position makes it up and its entry is exact at the book scale. The
   marker carries no point value, so no unrealized P&L is shown that the broker has not reported.
-- [ ] **Broker positions panel:** list hedged positions per broker id with SL/TP, swap and
-  commission, and project unrealized P&L once quote-to-deposit conversion exists.
+- [ ] **Broker positions panel:** a POSITIONS tab in the bottom panel (maintainer's choice,
+  2026-10-09) lists each broker position (hedged positions separately, newest first) with
+  entry, SL, TP and cTrader's open P&L, filtered by the shared account filter; Close sends the
+  close off the UI thread and is disabled while the account is unreachable. Visual check
+  pending; SL/TP editing from the row is not built yet.
 - [ ] **Kill switch and risk:** profiles apply to cTrader demo accounts exactly as to simulated ones.
 
 ### Phase 7: demo qualification

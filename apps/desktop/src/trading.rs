@@ -451,6 +451,27 @@ pub fn cancel_simulated_order(client_order_key: String, cx: &mut gpui::App) {
         .detach();
 }
 
+/// Requests closing one whole broker position off the UI thread. The position stays until the
+/// broker reports it closed.
+pub fn close_broker_position(account_key: String, broker_position_id: String, cx: &mut gpui::App) {
+    let Some(service) = handle() else {
+        record_feedback(Err("Trading is unavailable".to_string()));
+        return;
+    };
+    let Ok(account_id) = aeris_trading::TradingAccountId::try_new(account_key) else {
+        record_feedback(Err("Broker account identifier is invalid".to_string()));
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            record_outcome(
+                service.close_broker_position(account_id, broker_position_id),
+                "Close sent to the broker",
+            );
+        })
+        .detach();
+}
+
 /// Reprices one working simulated limit order to the current best bid or ask off the UI thread.
 pub fn reprice_simulated_order(
     client_order_key: String,

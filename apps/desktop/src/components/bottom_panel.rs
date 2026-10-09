@@ -1,15 +1,16 @@
-//! Bottom trade-history panel. Its header stays docked at the window bottom while collapsed
-//! and rides the top edge of the panel while open; the open panel resizes from that edge.
+//! Bottom panel with trade-history and open-position tabs. Its header stays docked at the window
+//! bottom while collapsed and rides the top edge of the panel while open; the open panel resizes
+//! from that edge.
 //!
-//! The trading owner stays authoritative for fills and the round trips grouped from them. This
-//! module keeps one shared presentation copy of its bounded, newest-first round-trip projection,
-//! replaced only when the owner's snapshot revision changes, plus the viewer's open, height and
-//! account-filter choices.
+//! The trading owner stays authoritative for fills, the round trips grouped from them and broker
+//! positions. This module keeps one shared presentation copy of its bounded, newest-first
+//! round-trip projection and open broker positions, replaced only when the owner's snapshot
+//! revision changes, plus the viewer's tab, open, height and account-filter choices.
 
 use super::side_panel_dock::SIDE_PANEL_HEADER_HEIGHT;
 use super::*;
 use gpui::{Stateful, UniformListScrollHandle, uniform_list};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 const TRADE_HISTORY_INITIAL_HEIGHT: f32 = 260.0;
 const TRADE_HISTORY_MINIMUM_HEIGHT: f32 = 140.0;
@@ -27,6 +28,10 @@ const TRADE_HISTORY_SIDE_WIDTH: f32 = 40.0;
 const TRADE_HISTORY_QUANTITY_WIDTH: f32 = 50.0;
 const TRADE_HISTORY_PRICE_WIDTH: f32 = 72.0;
 const TRADE_HISTORY_PNL_WIDTH: f32 = 95.0;
+/// Entry, stop loss and take profit share one narrower width so the positions tab fits the
+/// same compact window as the trade history.
+const POSITION_PRICE_WIDTH: f32 = 64.0;
+const POSITION_ACTION_WIDTH: f32 = 56.0;
 const TRADE_HISTORY_CELL_GAP: f32 = 8.0;
 const TRADE_HISTORY_ACCOUNT_MENU_WIDTH: f32 = 220.0;
 const TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT: f32 = 180.0;
@@ -88,26 +93,51 @@ impl TradeHistory {
     }
 }
 
+/// Which list the open bottom panel shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum BottomPanelTab {
+    #[default]
+    TradeHistory,
+    Positions,
+}
+
+/// Shared presentation copy of the trading owner's open broker positions.
+#[derive(Clone, Default)]
+struct OpenPositions {
+    /// Newest opened first.
+    positions: Arc<[aeris_trading::BrokerPosition]>,
+    /// Broker accounts the venue reaches now; only their open P&L is current.
+    connected: Arc<BTreeSet<aeris_trading::TradingAccountId>>,
+    /// Indices into `positions` that pass the current account filter.
+    rows: Arc<[usize]>,
+}
+
 /// Viewer state of the bottom panel. It owns presentation only, never trading state.
 pub(super) struct BottomPanelState {
-    pub(super) trade_history_open: bool,
+    pub(super) open: bool,
+    pub(super) tab: BottomPanelTab,
     pub(super) account_menu_open: bool,
     /// Height of the open panel, including its header.
     height: f32,
     filter: TradeHistoryAccountFilter,
     history: TradeHistory,
+    positions: OpenPositions,
     scroll: UniformListScrollHandle,
+    positions_scroll: UniformListScrollHandle,
 }
 
 impl Default for BottomPanelState {
     fn default() -> Self {
         Self {
-            trade_history_open: false,
+            open: false,
+            tab: BottomPanelTab::TradeHistory,
             account_menu_open: false,
             height: TRADE_HISTORY_INITIAL_HEIGHT,
             filter: TradeHistoryAccountFilter::All,
             history: TradeHistory::default(),
+            positions: OpenPositions::default(),
             scroll: UniformListScrollHandle::new(),
+            positions_scroll: UniformListScrollHandle::new(),
         }
     }
 }
@@ -136,8 +166,24 @@ impl BottomPanelState {
                 })
                 .collect(),
         );
-        self.refresh_rows();
+        self.adopt_positions(
+            &snapshot.broker_positions,
+            &snapshot.connected_broker_accounts,
+        );
         true
+    }
+
+    /// Replaces the open-position copy, newest opened first, and re-filters both lists.
+    fn adopt_positions(
+        &mut self,
+        positions: &[aeris_trading::BrokerPosition],
+        connected: &BTreeSet<aeris_trading::TradingAccountId>,
+    ) {
+        let mut positions = positions.to_vec();
+        positions.sort_by_key(|position| std::cmp::Reverse(position.opened_unix_nanos));
+        self.positions.positions = positions.into();
+        self.positions.connected = Arc::new(connected.clone());
+        self.refresh_rows();
     }
 
     /// Applies a bounded panel height. Returns whether it changed.
@@ -148,6 +194,13 @@ impl BottomPanelState {
         }
         self.height = height;
         true
+    }
+
+    /// Opens the panel on `tab`; selecting the tab already shown collapses the panel.
+    fn select_tab(&mut self, tab: BottomPanelTab) {
+        self.open = !(self.open && self.tab == tab);
+        self.tab = tab;
+        self.account_menu_open = false;
     }
 
     pub(super) fn set_filter(&mut self, filter: TradeHistoryAccountFilter) {
@@ -169,6 +222,7 @@ impl BottomPanelState {
             self.filter = TradeHistoryAccountFilter::All;
         }
         self.history.rows = trade_history_rows(&self.history.round_trips, &self.filter).into();
+        self.positions.rows = position_rows(&self.positions.positions, &self.filter).into();
     }
 
     fn shows_account_column(&self) -> bool {
@@ -202,10 +256,32 @@ fn trade_history_rows(
         .collect()
 }
 
+fn position_rows(
+    positions: &[aeris_trading::BrokerPosition],
+    filter: &TradeHistoryAccountFilter,
+) -> Vec<usize> {
+    positions
+        .iter()
+        .enumerate()
+        .filter(|(_, position)| match filter {
+            TradeHistoryAccountFilter::All => true,
+            TradeHistoryAccountFilter::Account(account_key) => {
+                position.account_id.as_str() == account_key
+            }
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 impl TerminalApp {
-    fn toggle_trade_history(&mut self, cx: &mut Context<Self>) {
-        self.bottom_panel.trade_history_open = !self.bottom_panel.trade_history_open;
+    fn toggle_bottom_panel(&mut self, cx: &mut Context<Self>) {
+        self.bottom_panel.open = !self.bottom_panel.open;
         self.bottom_panel.account_menu_open = false;
+        cx.notify();
+    }
+
+    fn select_bottom_panel_tab(&mut self, tab: BottomPanelTab, cx: &mut Context<Self>) {
+        self.bottom_panel.select_tab(tab);
         cx.notify();
     }
 
@@ -258,7 +334,7 @@ pub(super) fn bottom_panel(
         chart,
         rithmic_attribution,
     } = view;
-    let open = state.trade_history_open;
+    let open = state.open;
     let resize_terminal = terminal.clone();
     div()
         .id("bottom_panel")
@@ -277,14 +353,18 @@ pub(super) fn bottom_panel(
             rithmic_attribution,
             theme,
         ))
-        .when(open, |panel| {
-            panel
+        .when(open, |panel| match state.tab {
+            BottomPanelTab::TradeHistory => panel
                 .child(trade_history_column_header(
                     state.shows_account_column(),
                     theme,
                 ))
                 .child(trade_history_list(state, chart, theme))
-                .child(trade_history_resize_handle())
+                .child(trade_history_resize_handle()),
+            BottomPanelTab::Positions => panel
+                .child(position_column_header(state.shows_account_column(), theme))
+                .child(position_list(state, chart, theme))
+                .child(trade_history_resize_handle()),
         })
         .on_drag_move::<TradeHistoryHeightDrag>(move |event, window, cx| {
             // The panel's bottom edge is the window's bottom edge, so the pointer's distance
@@ -322,8 +402,20 @@ fn trade_history_header(
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;
-    let open = state.trade_history_open;
-    let count = state.history.rows.len();
+    let open = state.open;
+    let count_label = match state.tab {
+        BottomPanelTab::TradeHistory => {
+            let count = state.history.rows.len();
+            format!("{count} {}", if count == 1 { "trade" } else { "trades" })
+        }
+        BottomPanelTab::Positions => {
+            let count = state.positions.rows.len();
+            format!(
+                "{count} {}",
+                if count == 1 { "position" } else { "positions" }
+            )
+        }
+    };
     div()
         .h(px(SIDE_PANEL_HEADER_HEIGHT))
         .flex_none()
@@ -339,16 +431,22 @@ fn trade_history_header(
         })
         .text_xs()
         .text_color(gpui_color(colors.text_secondary))
-        .child(trade_history_tab(terminal, open, theme))
+        .child(bottom_panel_tab(
+            terminal,
+            state,
+            BottomPanelTab::TradeHistory,
+            theme,
+        ))
+        .child(bottom_panel_tab(
+            terminal,
+            state,
+            BottomPanelTab::Positions,
+            theme,
+        ))
         .when(open && state.history.accounts.len() > 1, |header| {
             header.child(trade_history_account_filter(terminal, state, theme))
         })
-        .when(open, |header| {
-            header.child(format!(
-                "{count} {}",
-                if count == 1 { "trade" } else { "trades" }
-            ))
-        })
+        .when(open, |header| header.child(count_label))
         .child(div().flex_1())
         .when(rithmic_attribution, |header| {
             header.child(super::terminal_chrome::rithmic_attribution(theme))
@@ -356,15 +454,31 @@ fn trade_history_header(
         .child(trade_history_expand_button(terminal, open, theme))
 }
 
-fn trade_history_tab(
+fn bottom_panel_tab(
     terminal: &Entity<TerminalApp>,
-    open: bool,
+    state: &BottomPanelState,
+    tab: BottomPanelTab,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
-    let toggle_terminal = terminal.clone();
+    let select_terminal = terminal.clone();
+    let active = state.open && state.tab == tab;
+    let (id, label, show, hide) = match tab {
+        BottomPanelTab::TradeHistory => (
+            "trade_history_tab",
+            "TRADE HISTORY",
+            "Show trade history",
+            "Hide trade history",
+        ),
+        BottomPanelTab::Positions => (
+            "positions_tab",
+            "POSITIONS",
+            "Show open positions",
+            "Hide open positions",
+        ),
+    };
     div()
-        .id("trade_history_tab")
+        .id(id)
         .h(px(TRADE_HISTORY_HEADER_CONTROL_HEIGHT))
         .flex_none()
         .px_2()
@@ -372,27 +486,25 @@ fn trade_history_tab(
         .items_center()
         .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
         .role(Role::Button)
-        .aria_label(if open {
-            "Hide trade history"
-        } else {
-            "Show trade history"
-        })
+        .aria_label(if active { hide } else { show })
         .cursor_pointer()
-        .text_color(gpui_color(if open {
+        .text_color(gpui_color(if active {
             colors.text_active
         } else {
             colors.text_interactive
         }))
-        .when(open, |tab| {
+        .when(active, |tab| {
             tab.bg(gpui_color(colors.active_bg.over(colors.surface)))
         })
         .hover(move |tab| {
             tab.bg(gpui_color(colors.hover_bg.over(colors.surface)))
                 .text_color(gpui_color(colors.text_hover))
         })
-        .child("TRADE HISTORY")
+        .child(label)
         .on_click(move |_, _, cx| {
-            toggle_terminal.update(cx, TerminalApp::toggle_trade_history);
+            select_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.select_bottom_panel_tab(tab, terminal_cx);
+            });
         })
 }
 
@@ -404,9 +516,9 @@ fn trade_history_expand_button(
     let colors = theme.colors;
     let toggle_terminal = terminal.clone();
     let label = if open {
-        "Collapse trade history"
+        "Collapse bottom panel"
     } else {
-        "Expand trade history"
+        "Expand bottom panel"
     };
     let chevron = header_icon(HugeIcon::ChevronDown).with_size(px(WORKSPACE_TAB_ICON_GLYPH));
     let chevron = if open { chevron } else { chevron.rotate(0.5) };
@@ -432,7 +544,7 @@ fn trade_history_expand_button(
             })
             .child(chevron)
             .on_click(move |_, _, cx| {
-                toggle_terminal.update(cx, TerminalApp::toggle_trade_history);
+                toggle_terminal.update(cx, TerminalApp::toggle_bottom_panel);
             }),
         theme,
     )
@@ -709,6 +821,163 @@ fn trade_history_row(
         .child(trade_history_pnl_cell(trip.final_pnl, currency, theme))
 }
 
+fn position_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoElement {
+    let colors = theme.colors;
+    let right =
+        |width: f32, label: &'static str| trade_history_cell(width).text_right().child(label);
+    trade_history_row_frame()
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border_subtle))
+        .text_color(gpui_color(colors.text_secondary))
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Opened"))
+        .when(show_account, |row| {
+            row.child(trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH).child("Account"))
+        })
+        .child(trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH).child("Symbol"))
+        .child(trade_history_cell(TRADE_HISTORY_SIDE_WIDTH).child("Side"))
+        .child(right(TRADE_HISTORY_QUANTITY_WIDTH, "Qty"))
+        .child(right(POSITION_PRICE_WIDTH, "Entry"))
+        .child(right(POSITION_PRICE_WIDTH, "SL"))
+        .child(right(POSITION_PRICE_WIDTH, "TP"))
+        .child(right(TRADE_HISTORY_PNL_WIDTH, "Open P&L"))
+        .child(div().w(px(POSITION_ACTION_WIDTH)).flex_none())
+}
+
+fn position_list(
+    state: &BottomPanelState,
+    chart: Option<Entity<AerisChartView>>,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    if state.positions.rows.is_empty() {
+        let message = if state.positions.positions.is_empty() {
+            "No open broker positions"
+        } else {
+            "No open broker positions for this account"
+        };
+        return div()
+            .flex_1()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_sm()
+            .text_color(gpui_color(colors.text_secondary))
+            .child(message)
+            .into_any_element();
+    }
+    let positions = state.positions.clone();
+    let history = state.history.clone();
+    let show_account = state.shows_account_column();
+    let list_theme = *theme;
+    uniform_list(
+        "position_rows",
+        positions.rows.len(),
+        move |range, _, cx| {
+            let chart = chart.as_ref().map(|chart| chart.read(cx));
+            range
+                .filter_map(|index| {
+                    let position = positions.positions.get(*positions.rows.get(index)?)?;
+                    Some(position_row(
+                        index,
+                        position,
+                        positions.connected.contains(&position.account_id),
+                        &history,
+                        chart,
+                        show_account,
+                        &list_theme,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .track_scroll(&state.positions_scroll)
+    .w_full()
+    .flex_1()
+    .min_h_0()
+    .into_any_element()
+}
+
+/// One open broker position. Its open P&L is the broker's own value and shows only while the
+/// venue reaches the account; closing it is asynchronous, so the row stays until the broker
+/// reports the position closed.
+fn position_row(
+    index: usize,
+    position: &aeris_trading::BrokerPosition,
+    connected: bool,
+    history: &TradeHistory,
+    chart: Option<&AerisChartView>,
+    show_account: bool,
+    theme: &AerisTheme,
+) -> Stateful<Div> {
+    let colors = theme.colors;
+    let (side, side_color) = match position.side {
+        aeris_trading::OrderSide::Buy => ("Long", colors.text_positive),
+        aeris_trading::OrderSide::Sell => ("Short", colors.text_negative),
+    };
+    let price = |value: Option<aeris_trading::FixedPoint>| {
+        trade_history_text(value.map(trade_history_decimal))
+    };
+    let right = |width: f32, text: String| trade_history_cell(width).text_right().child(text);
+    let account_key = position.account_id.as_str().to_string();
+    let broker_position_id = position.broker_position_id.clone();
+    trade_history_row_frame()
+        .id(("position_row", index))
+        .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
+        .text_color(gpui_color(colors.text_default))
+        .child(
+            trade_history_cell(TRADE_HISTORY_TIME_WIDTH)
+                .child(trade_history_time(chart, position.opened_unix_nanos)),
+        )
+        .when(show_account, |row| {
+            row.child(
+                trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH)
+                    .child(history.account_name(position.account_id.as_str())),
+            )
+        })
+        .child(
+            trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH)
+                .child(history.symbol(&position.instrument_id)),
+        )
+        .child(
+            trade_history_cell(TRADE_HISTORY_SIDE_WIDTH)
+                .text_color(gpui_color(side_color))
+                .child(side),
+        )
+        .child(right(
+            TRADE_HISTORY_QUANTITY_WIDTH,
+            trade_history_decimal(position.quantity),
+        ))
+        .child(right(
+            POSITION_PRICE_WIDTH,
+            trade_history_decimal(position.entry_price),
+        ))
+        .child(right(POSITION_PRICE_WIDTH, price(position.stop_loss)))
+        .child(right(POSITION_PRICE_WIDTH, price(position.take_profit)))
+        .child(trade_history_pnl_cell(
+            connected.then_some(position.net_unrealized),
+            history.account_currency(position.account_id.as_str()),
+            theme,
+        ))
+        .child(
+            div().w(px(POSITION_ACTION_WIDTH)).flex_none().child(
+                Button::new(("position_close", index))
+                    .variant(theme, ButtonVariant::Secondary)
+                    .label("Close")
+                    .compact()
+                    .disabled(!connected)
+                    .on_click(move |_, _, cx| {
+                        aeris_desktop::trading::close_broker_position(
+                            account_key.clone(),
+                            broker_position_id.clone(),
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }),
+            ),
+        )
+}
+
 fn trade_history_time(chart: Option<&AerisChartView>, unix_nanos: i64) -> String {
     chart.map_or_else(
         || "—".to_string(),
@@ -836,6 +1105,92 @@ mod tests {
         assert_eq!(trade_history_pnl_text(Some(loss), "USD"), "USD -2525.00");
         assert_eq!(trade_history_pnl_text(Some(gain), "USD"), "USD 7350.00");
         assert_eq!(trade_history_pnl_text(None, "USD"), "—");
+    }
+
+    fn broker_position(account: &str, id: &str, opened: i64) -> aeris_trading::BrokerPosition {
+        let money = |units| aeris_trading::FixedPoint::try_new(units, 2).expect("money");
+        aeris_trading::BrokerPosition {
+            account_id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
+            instrument_id: aeris_instruments::InstrumentId::try_new("ctrader:demo:1001:1")
+                .expect("instrument"),
+            broker_position_id: id.into(),
+            side: aeris_trading::OrderSide::Buy,
+            quantity: money(100_000),
+            entry_price: aeris_trading::FixedPoint::try_new(112_142, 5).expect("entry"),
+            stop_loss: None,
+            take_profit: None,
+            swap: money(0),
+            commission: money(-5),
+            gross_unrealized: money(-1),
+            net_unrealized: money(-6),
+            opened_unix_nanos: opened,
+        }
+    }
+
+    #[test]
+    fn positions_follow_the_account_filter_newest_opened_first() {
+        let mut state = BottomPanelState::default();
+        state.adopt_positions(
+            &[
+                broker_position("a", "1", 10),
+                broker_position("b", "2", 30),
+                broker_position("a", "3", 20),
+            ],
+            &BTreeSet::new(),
+        );
+        let ids = |state: &BottomPanelState| {
+            state
+                .positions
+                .rows
+                .iter()
+                .map(|row| state.positions.positions[*row].broker_position_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&state), ["2", "3", "1"]);
+        assert_eq!(
+            position_rows(
+                &state.positions.positions,
+                &TradeHistoryAccountFilter::Account("a".to_string())
+            ),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn selecting_the_shown_tab_collapses_and_another_tab_switches() {
+        let mut state = BottomPanelState::default();
+        state.select_tab(BottomPanelTab::Positions);
+        assert!(state.open);
+        assert_eq!(state.tab, BottomPanelTab::Positions);
+        state.select_tab(BottomPanelTab::TradeHistory);
+        assert!(state.open, "switching tabs keeps the panel open");
+        assert_eq!(state.tab, BottomPanelTab::TradeHistory);
+        state.select_tab(BottomPanelTab::TradeHistory);
+        assert!(!state.open);
+    }
+
+    #[test]
+    fn all_position_columns_fit_a_compact_window() {
+        let columns = [
+            TRADE_HISTORY_TIME_WIDTH,
+            TRADE_HISTORY_ACCOUNT_WIDTH,
+            TRADE_HISTORY_SYMBOL_WIDTH,
+            TRADE_HISTORY_SIDE_WIDTH,
+            TRADE_HISTORY_QUANTITY_WIDTH,
+            POSITION_PRICE_WIDTH,
+            POSITION_PRICE_WIDTH,
+            POSITION_PRICE_WIDTH,
+            TRADE_HISTORY_PNL_WIDTH,
+            POSITION_ACTION_WIDTH,
+        ];
+        let width = columns.iter().sum::<f32>()
+            + TRADE_HISTORY_CELL_GAP
+                * f32::from(u8::try_from(columns.len() - 1).expect("column count fits"))
+            + 16.0;
+        assert!(
+            width <= 800.0 - 12.0,
+            "the Close action must remain visible"
+        );
     }
 
     #[test]
