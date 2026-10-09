@@ -49,7 +49,9 @@ close control.
 **`MenuPanel`** + **`MenuAnchor`** + **`MenuRow`** (`menu.rs`): every dropdown, context menu, flyout and
 select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
-`checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`.
+`checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. A `destructive` row
+paints its label and glyph `text-danger` (glyph colour from `MenuRow::leading_icon_color`) with a
+`negative-subtle` hover; disabled, it is `text-muted` like every other disabled row.
 
 **`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal. Sizes `Sm` (420), `Md` (480), `Lg`
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the

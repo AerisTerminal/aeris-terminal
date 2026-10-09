@@ -472,18 +472,12 @@ fn account_action_rows(
     actions: &[AccountAction],
     theme: &AerisTheme,
 ) -> Vec<AnyElement> {
-    let colors = theme.colors;
     let pending = account.presentation.pending;
     actions
         .iter()
         .map(|&action| {
             let enabled = !(pending && action.waits_for_pending_request());
-            let icon_color = match (action.destructive(), enabled) {
-                (true, true) => colors.danger,
-                (true, false) => colors.danger_disabled,
-                (false, true) => colors.icon,
-                (false, false) => colors.text_muted,
-            };
+            let icon_color = MenuRow::leading_icon_color(theme, action.destructive(), enabled);
             let terminal = terminal.clone();
             MenuRow::compact(action.id(), action.label(), theme)
                 .leading(

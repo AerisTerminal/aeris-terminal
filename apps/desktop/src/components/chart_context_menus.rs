@@ -369,18 +369,10 @@ pub(super) fn chart_context_menu_item(
         .copy_feedback
         .filter(|feedback| feedback.action == item.action)
         .map(|feedback| feedback.generation);
-    let icon_color = gpui_color(if destructive {
-        if item.enabled {
-            theme.colors.danger
-        } else {
-            theme.colors.danger_disabled_foreground
-        }
-    } else if copy_feedback_generation.is_some() {
+    let icon_color = gpui_color(if copy_feedback_generation.is_some() {
         theme.colors.primary
-    } else if item.enabled {
-        theme.colors.icon
     } else {
-        theme.colors.text_muted
+        MenuRow::leading_icon_color(theme, destructive, item.enabled)
     });
     let ChartContextMenuItem {
         id,

@@ -185,6 +185,33 @@ const fn accepts_input(disabled: bool, has_activation: bool) -> bool {
     !disabled && has_activation
 }
 
+/// The label and leading-glyph colours of a row. A disabled row is muted whatever its tone:
+/// the danger colours mark an action that is available, so a disabled destructive row reads
+/// like every other disabled row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowInk {
+    label: ThemeColor,
+    icon: ThemeColor,
+}
+
+const fn row_ink(theme: &AerisTheme, destructive: bool, enabled: bool) -> RowInk {
+    let colors = theme.colors;
+    match (destructive, enabled) {
+        (true, true) => RowInk {
+            label: colors.text_danger,
+            icon: colors.text_danger,
+        },
+        (false, true) => RowInk {
+            label: colors.text_primary,
+            icon: colors.icon,
+        },
+        (_, false) => RowInk {
+            label: colors.text_muted,
+            icon: colors.text_muted,
+        },
+    }
+}
+
 /// `Aeris`'s shared selectable row for menus and search results.
 ///
 /// A row is always full width with its own `--radius-small` corners, and sits inside a
@@ -325,16 +352,21 @@ impl MenuRow {
         self
     }
 
+    /// The colour for a row's leading glyph, matched to the label the row paints for the same
+    /// `destructive` and enabled state.
+    pub(crate) const fn leading_icon_color(
+        theme: &AerisTheme,
+        destructive: bool,
+        enabled: bool,
+    ) -> ThemeColor {
+        row_ink(theme, destructive, enabled).icon
+    }
+
     fn presentation(&self) -> MenuRowPresentation {
         let colors = self.theme.colors;
         let enabled = accepts_input(self.behavior.disabled, self.activation.is_some());
         let destructive = self.behavior.destructive;
-        let label_color = match (destructive, enabled) {
-            (true, true) => colors.text_danger,
-            (true, false) => colors.danger_disabled_foreground,
-            (false, true) => colors.text_primary,
-            (false, false) => colors.text_muted,
-        };
+        let label_color = row_ink(&self.theme, destructive, enabled).label;
         let highlighted_fill = if destructive {
             colors.negative_subtle
         } else {
@@ -743,7 +775,7 @@ mod tests {
     use super::{
         COMPACT_ROW_HEIGHT, MENU_SCALE_MAX, MENU_SEPARATOR_HEIGHT, MenuScale, PANEL_INSET,
         POPUP_ENTER_TRAVEL, PopupAnimationOrigin, ROOT_REM_PX, ROW_FILL_INSET, RowKind,
-        SEARCH_ROW_HEIGHT, accepts_input, menu_panel_height, row_geometry,
+        SEARCH_ROW_HEIGHT, accepts_input, menu_panel_height, row_geometry, row_ink,
     };
 
     #[test]
@@ -764,6 +796,26 @@ mod tests {
         assert!(accepts_input(false, true));
         assert!(!accepts_input(true, true));
         assert!(!accepts_input(false, false));
+    }
+
+    #[test]
+    fn destructive_rows_paint_danger_only_while_enabled() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let c = theme.colors;
+            let enabled = row_ink(&theme, true, true);
+            assert_eq!(enabled.label, c.text_danger);
+            assert_eq!(
+                enabled.icon, enabled.label,
+                "glyph and label share one danger ink"
+            );
+            assert_eq!(
+                row_ink(&theme, true, false),
+                row_ink(&theme, false, false),
+                "a disabled destructive row looks like any disabled row"
+            );
+            assert_eq!(row_ink(&theme, false, false).label, c.text_muted);
+            assert_eq!(row_ink(&theme, false, true).icon, c.icon);
+        }
     }
 
     #[test]
