@@ -175,6 +175,7 @@ pub(super) fn chart_context_menu_layer(
     );
     let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, popup_bounds);
     let dismiss = terminal.clone();
+    let dismiss_right = terminal.clone();
     let mut layer = div()
         .id("chart_context_menu_scrim")
         .absolute()
@@ -183,8 +184,14 @@ pub(super) fn chart_context_menu_layer(
         .right_0()
         .bottom_0()
         .occlude()
-        .on_any_mouse_down(move |_, _, cx| {
+        .on_click(move |_, _, cx| {
             dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_context_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            dismiss_right.update(cx, |terminal, terminal_cx| {
                 terminal.close_chart_context_menu(terminal_cx);
             });
             cx.stop_propagation();
@@ -502,6 +509,7 @@ pub(super) fn price_axis_menu_layer(
     );
     let root_animation_origin = PopupAnimationOrigin::from_trigger(menu.position, root_bounds);
     let dismiss = terminal.clone();
+    let dismiss_right = terminal.clone();
     let mut layer = div()
         .id("price_axis_menu_scrim")
         .absolute()
@@ -510,8 +518,14 @@ pub(super) fn price_axis_menu_layer(
         .right_0()
         .bottom_0()
         .occlude()
-        .on_any_mouse_down(move |_, _, cx| {
+        .on_click(move |_, _, cx| {
             dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_context_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            dismiss_right.update(cx, |terminal, terminal_cx| {
                 terminal.close_chart_context_menu(terminal_cx);
             });
             cx.stop_propagation();
@@ -909,6 +923,7 @@ pub(super) fn chart_settings_menu_layer(
     let bounds = Bounds::new(origin, panel_size);
     let animation_origin = PopupAnimationOrigin::from_trigger(menu.position, bounds);
     let dismiss = terminal.clone();
+    let dismiss_right = terminal.clone();
     let move_terminal = terminal.clone();
     let content = match view.section {
         ChartSettingsSection::Series => {
@@ -929,8 +944,14 @@ pub(super) fn chart_settings_menu_layer(
         .right_0()
         .bottom_0()
         .occlude()
-        .on_any_mouse_down(move |_, _, cx| {
+        .on_click(move |_, _, cx| {
             dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_settings_menu(terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            dismiss_right.update(cx, |terminal, terminal_cx| {
                 terminal.close_chart_settings_menu(terminal_cx);
             });
             cx.stop_propagation();
@@ -997,6 +1018,7 @@ fn chart_settings_panel(
             });
             cx.stop_propagation();
         })
+        .on_click(|_, _, cx| cx.stop_propagation())
         .child(rem_scaled(
             scale,
             div()

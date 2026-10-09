@@ -995,6 +995,7 @@ pub(super) fn drawing_tool_menu_layer(
         Bounds::new(origin, panel_size),
     ));
     let dismiss = terminal.clone();
+    let dismiss_right = terminal.clone();
     Some(
         div()
             .id("drawing_tool_menu_scrim")
@@ -1004,8 +1005,14 @@ pub(super) fn drawing_tool_menu_layer(
             .right_0()
             .bottom_0()
             .occlude()
-            .on_any_mouse_down(move |_, _, cx| {
+            .on_click(move |_, _, cx| {
                 dismiss.update(cx, |terminal, terminal_cx| {
+                    terminal.close_drawing_tool_menu(terminal_cx);
+                });
+                cx.stop_propagation();
+            })
+            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                dismiss_right.update(cx, |terminal, terminal_cx| {
                     terminal.close_drawing_tool_menu(terminal_cx);
                 });
                 cx.stop_propagation();

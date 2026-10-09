@@ -155,7 +155,6 @@ pub(super) fn platform_menu_layer(
     window_frame: chart_chrome::WindowFrame,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let dismiss = terminal.clone();
     let header = identity_header(account, theme);
     let actions = account_actions(account);
     let details = about_details(account, update);
@@ -236,6 +235,12 @@ pub(super) fn platform_menu_layer(
             &run_update,
             theme,
         ));
+    platform_menu_scrim(terminal, panel)
+}
+
+fn platform_menu_scrim(terminal: &Entity<TerminalApp>, panel: MenuPanel) -> AnyElement {
+    let dismiss = terminal.clone();
+    let dismiss_right = terminal.clone();
     div()
         .id("platform_menu_scrim")
         .absolute()
@@ -244,8 +249,14 @@ pub(super) fn platform_menu_layer(
         .right_0()
         .bottom_0()
         .occlude()
-        .on_any_mouse_down(move |_, window, cx| {
+        .on_click(move |_, window, cx| {
             dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_platform_menu(window, terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+            dismiss_right.update(cx, |terminal, terminal_cx| {
                 terminal.close_platform_menu(window, terminal_cx);
             });
             cx.stop_propagation();

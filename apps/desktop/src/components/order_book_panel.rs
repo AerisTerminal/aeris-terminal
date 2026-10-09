@@ -4,10 +4,10 @@ use super::order_ticket::{TradingOrderControlsState, trading_order_controls};
 use super::side_panel_dock::{side_panel_header, side_panel_header_button};
 use super::{
     AerisTheme, Div, Entity, HugeIcon, InteractiveElement, IntoElement, MenuPanel, MenuPlacement,
-    MenuRow, MouseButton, OrderBookColumn, OrderBookColumnVisibility, ParentElement,
-    PopupAnimationOrigin, ReadOnlyOrderBookView, SidePanel, Styled, WorkspaceSurface, div,
-    gpui_color, px,
+    MenuRow, OrderBookColumn, OrderBookColumnVisibility, ParentElement, PopupAnimationOrigin,
+    ReadOnlyOrderBookView, SidePanel, Styled, WorkspaceSurface, div, gpui_color, px,
 };
+use gpui::StatefulInteractiveElement;
 
 #[derive(Clone, Copy)]
 pub(super) struct OrderBookPanelState<'a> {
@@ -99,13 +99,17 @@ fn order_book_column_menu_layer(
         .id("order_book_column_menu_layer")
         .absolute()
         .inset_0()
-        .child(div().absolute().inset_0().occlude().on_mouse_down(
-            MouseButton::Left,
-            move |_, _, cx| {
-                dismiss_app.update(cx, WorkspaceSurface::close_order_book_column_menu);
-                cx.stop_propagation();
-            },
-        ))
+        .child(
+            div()
+                .id("order_book_column_menu_scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_click(move |_, _, cx| {
+                    dismiss_app.update(cx, WorkspaceSurface::close_order_book_column_menu);
+                    cx.stop_propagation();
+                }),
+        )
         // The menu opens under the header's column control at the panel's right edge.
         .child(div().absolute().top(px(28.0)).right(px(30.0)).child(panel))
 }

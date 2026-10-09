@@ -633,6 +633,7 @@ impl RenderOnce for MenuPanel {
             .when_some(self.width, Styled::w)
             .when_some(self.max_height, Styled::max_h)
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation())
             .map(|panel| match self.placement {
                 MenuPlacement::At(origin) => panel.absolute().left(origin.x).top(origin.y),
                 MenuPlacement::Anchored { side, align } => {

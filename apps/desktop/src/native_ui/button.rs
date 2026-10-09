@@ -717,6 +717,7 @@ fn paint_states(
     border_width: Pixels,
     focus_ring: ThemeColor,
     accepts_input: bool,
+    engaged: bool,
 ) -> BaseButton {
     let drop_border = appearance.border_rests_only;
     // Every variant keeps a border of `--border-width`, transparent unless it is outlined, so a
@@ -734,6 +735,9 @@ fn paint_states(
             button
                 .cursor_pointer()
                 .hover(move |style| {
+                    if engaged {
+                        return style;
+                    }
                     let style = style
                         .bg(gpui_color(appearance.hover_fill))
                         .text_color(gpui_color(appearance.hover_foreground));
@@ -822,6 +826,7 @@ impl RenderOnce for Button {
             border_width,
             self.theme.colors.ring_primary,
             policy.accepts_input(),
+            flags.has(ButtonFlags::SELECTED) || flags.has(ButtonFlags::OPEN),
         );
         let button = attach_activation(button, self.activation.filter(|_| policy.accepts_input()));
         let mut button = content.attach(button, flags.has(ButtonFlags::TRIGGER));

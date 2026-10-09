@@ -2297,6 +2297,12 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.chrome_overlay == Some(overlay)
+            && self.chrome_overlay_phase != ChromeOverlayPhase::Closing
+        {
+            self.close_chrome_overlay(window, cx);
+            return;
+        }
         if overlay == ChromeOverlay::Instrument {
             self.symbol_selection_target = SymbolSelectionTarget::Chart;
         }

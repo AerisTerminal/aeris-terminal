@@ -93,6 +93,7 @@ pub(super) fn app_navigation_layer(
         })
     });
     let dismiss = terminal.clone();
+    let dismiss_right = terminal.clone();
     let panel = MenuPanel::new("app_navigation_menu", MenuPlacement::At(origin), theme)
         .width(px(APP_NAVIGATION_MENU_WIDTH))
         .animate_from(animation_origin)
@@ -105,8 +106,14 @@ pub(super) fn app_navigation_layer(
         .right_0()
         .bottom_0()
         .occlude()
-        .on_any_mouse_down(move |_, window, cx| {
+        .on_click(move |_, window, cx| {
             dismiss.update(cx, |terminal, terminal_cx| {
+                terminal.close_app_navigation(window, terminal_cx);
+            });
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+            dismiss_right.update(cx, |terminal, terminal_cx| {
                 terminal.close_app_navigation(window, terminal_cx);
             });
             cx.stop_propagation();

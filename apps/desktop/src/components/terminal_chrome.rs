@@ -1181,27 +1181,31 @@ pub(super) fn series_selector(
                 );
             });
         });
-    let trigger = div().relative().flex_none().child(button).child(
-        canvas(
-            move |bounds, _, cx| {
-                bounds_app.update(cx, |app, app_cx| {
-                    if app.timeframe_trigger_bounds == Some(bounds) {
-                        return;
-                    }
-                    app.timeframe_trigger_bounds = Some(bounds);
-                    if matches!(
-                        app.chrome_overlay,
-                        Some(ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe)
-                    ) {
-                        app_cx.notify();
-                    }
-                });
-            },
-            |_, (), _, _| {},
+    let trigger = div()
+        .relative()
+        .flex_none()
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    bounds_app.update(cx, |app, app_cx| {
+                        if app.timeframe_trigger_bounds == Some(bounds) {
+                            return;
+                        }
+                        app.timeframe_trigger_bounds = Some(bounds);
+                        if matches!(
+                            app.chrome_overlay,
+                            Some(ChromeOverlay::Timeframe | ChromeOverlay::QuickTimeframe)
+                        ) {
+                            app_cx.notify();
+                        }
+                    });
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .inset_0(),
         )
-        .absolute()
-        .inset_0(),
-    );
+        .child(button);
     chrome_tooltip("series_selector", "Select chart timeframe", trigger, theme)
 }
 
@@ -1229,24 +1233,28 @@ pub(super) fn chart_type_selector(
                 );
             });
         });
-    let trigger = div().relative().flex_none().child(button).child(
-        canvas(
-            move |bounds, _, cx| {
-                bounds_app.update(cx, |app, app_cx| {
-                    if app.chart_type_trigger_bounds == Some(bounds) {
-                        return;
-                    }
-                    app.chart_type_trigger_bounds = Some(bounds);
-                    if app.chrome_overlay == Some(ChromeOverlay::ChartType) {
-                        app_cx.notify();
-                    }
-                });
-            },
-            |_, (), _, _| {},
+    let trigger = div()
+        .relative()
+        .flex_none()
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    bounds_app.update(cx, |app, app_cx| {
+                        if app.chart_type_trigger_bounds == Some(bounds) {
+                            return;
+                        }
+                        app.chart_type_trigger_bounds = Some(bounds);
+                        if app.chrome_overlay == Some(ChromeOverlay::ChartType) {
+                            app_cx.notify();
+                        }
+                    });
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .inset_0(),
         )
-        .absolute()
-        .inset_0(),
-    );
+        .child(button);
     chrome_tooltip("chart_type_selector", "Select chart type", trigger, theme)
 }
 
@@ -1274,24 +1282,28 @@ pub(super) fn time_zone_selector(
                 );
             });
         });
-    let trigger = div().relative().flex_none().child(button).child(
-        canvas(
-            move |bounds, _, cx| {
-                bounds_app.update(cx, |app, app_cx| {
-                    if app.time_zone_trigger_bounds == Some(bounds) {
-                        return;
-                    }
-                    app.time_zone_trigger_bounds = Some(bounds);
-                    if app.chrome_overlay == Some(ChromeOverlay::TimeZone) {
-                        app_cx.notify();
-                    }
-                });
-            },
-            |_, (), _, _| {},
+    let trigger = div()
+        .relative()
+        .flex_none()
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    bounds_app.update(cx, |app, app_cx| {
+                        if app.time_zone_trigger_bounds == Some(bounds) {
+                            return;
+                        }
+                        app.time_zone_trigger_bounds = Some(bounds);
+                        if app.chrome_overlay == Some(ChromeOverlay::TimeZone) {
+                            app_cx.notify();
+                        }
+                    });
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .inset_0(),
         )
-        .absolute()
-        .inset_0(),
-    );
+        .child(button);
     chrome_tooltip(
         "time_zone_selector",
         format!("Chart time zone · {time_zone_id}"),
@@ -1325,24 +1337,28 @@ fn accounts_selector(
                 );
             });
         });
-    let trigger = div().relative().flex_none().child(button).child(
-        canvas(
-            move |bounds, _, cx| {
-                bounds_app.update(cx, |app, app_cx| {
-                    if app.menu_state.accounts_trigger_bounds == Some(bounds) {
-                        return;
-                    }
-                    app.menu_state.accounts_trigger_bounds = Some(bounds);
-                    if app.chrome_overlay == Some(ChromeOverlay::Accounts) {
-                        app_cx.notify();
-                    }
-                });
-            },
-            |_, (), _, _| {},
+    let trigger = div()
+        .relative()
+        .flex_none()
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    bounds_app.update(cx, |app, app_cx| {
+                        if app.menu_state.accounts_trigger_bounds == Some(bounds) {
+                            return;
+                        }
+                        app.menu_state.accounts_trigger_bounds = Some(bounds);
+                        if app.chrome_overlay == Some(ChromeOverlay::Accounts) {
+                            app_cx.notify();
+                        }
+                    });
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .inset_0(),
         )
-        .absolute()
-        .inset_0(),
-    );
+        .child(button);
     chrome_tooltip(
         "accounts_selector",
         "Accounts and connections",

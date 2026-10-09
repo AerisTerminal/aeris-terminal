@@ -656,6 +656,19 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn clicking_the_same_chrome_menu_trigger_twice_closes_it(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, surface_cx| {
+                surface.open_chrome_overlay(ChromeOverlay::ChartType, window, surface_cx);
+                assert_eq!(surface.chrome_overlay, Some(ChromeOverlay::ChartType));
+                surface.open_chrome_overlay(ChromeOverlay::ChartType, window, surface_cx);
+                assert_eq!(surface.chrome_overlay_phase, ChromeOverlayPhase::Closing);
+            });
+        });
+    }
+
+    #[gpui::test]
     fn closing_quick_menu_ignores_delayed_submit_and_change(cx: &mut TestAppContext) {
         let (surface, requests, _publications, cx) = harness(cx);
         cx.simulate_keystrokes("1 d escape");
