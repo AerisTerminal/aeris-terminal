@@ -19,6 +19,43 @@ impl WindowCommand {
     }
 }
 
+/// Trading View style keys on a focused chart. The chart engine binds neither key, so they
+/// fall through to the workspace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChartShortcut {
+    NextWatchlistSymbol,
+    PreviousWatchlistSymbol,
+    ToggleFullscreen,
+}
+
+/// Space steps forward through the watchlist, Shift+Space back, and Shift+F toggles
+/// fullscreen. Any other modifier leaves the key to other shortcuts.
+pub(super) fn chart_shortcut(key: &str, modifiers: gpui::Modifiers) -> Option<ChartShortcut> {
+    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+        return None;
+    }
+    match key {
+        "space" if modifiers.shift => Some(ChartShortcut::PreviousWatchlistSymbol),
+        "space" => Some(ChartShortcut::NextWatchlistSymbol),
+        "f" if modifiers.shift => Some(ChartShortcut::ToggleFullscreen),
+        _ => None,
+    }
+}
+
+/// The watchlist row a step lands on, wrapping at both ends. A chart showing a symbol that is
+/// not in the watchlist starts from the first row going forward and the last going back.
+pub(super) fn watchlist_step(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match (current, forward) {
+        (Some(index), true) => (index + 1) % len,
+        (Some(index), false) => (index + len - 1) % len,
+        (None, true) => 0,
+        (None, false) => len - 1,
+    })
+}
+
 pub(super) fn fullscreen_escape_command(key: &str, is_fullscreen: bool) -> Option<WindowCommand> {
     if key.eq_ignore_ascii_case("escape") && is_fullscreen {
         return Some(WindowCommand::ToggleFullscreen);

@@ -3,8 +3,8 @@
 use super::{
     CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_LIST_HEIGHT,
     CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH, CaptionPlatform,
-    CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase,
-    ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
+    CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartShortcut, ChartState,
+    ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
     InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
     PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
     RithmicSwitchState, SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget,
@@ -14,7 +14,7 @@ use super::{
     WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
     active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
     caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-    chart_position_id, chart_status_detail, chart_surface_notice,
+    chart_position_id, chart_shortcut, chart_status_detail, chart_surface_notice,
     chart_time_seconds_from_unix_nanos, chrome_control_foreground, chrome_menu_extent,
     chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
@@ -30,10 +30,10 @@ use super::{
     timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
     timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
     timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
-    watchlist_drag_destination, watchlist_drag_translation, window_move_gesture_transition,
-    workspace_drag_destination, workspace_drag_translation, workspace_label,
-    workspace_maximize_transition, workspace_series, workspace_split_ratio, workspace_switch,
-    wrapped_workspace_index,
+    watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
+    window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
+    workspace_label, workspace_maximize_transition, workspace_series, workspace_split_ratio,
+    workspace_switch, wrapped_workspace_index,
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
@@ -1059,6 +1059,58 @@ fn escape_exits_fullscreen_without_stealing_regular_escape() {
     );
     assert_eq!(fullscreen_escape_command("escape", false), None);
     assert_eq!(fullscreen_escape_command("enter", true), None);
+}
+
+#[test]
+fn chart_keys_step_the_watchlist_and_toggle_fullscreen_like_tradingview() {
+    let shift = gpui::Modifiers {
+        shift: true,
+        ..gpui::Modifiers::default()
+    };
+    let control = gpui::Modifiers {
+        control: true,
+        ..gpui::Modifiers::default()
+    };
+    assert_eq!(
+        chart_shortcut("space", gpui::Modifiers::default()),
+        Some(ChartShortcut::NextWatchlistSymbol)
+    );
+    assert_eq!(
+        chart_shortcut("space", shift),
+        Some(ChartShortcut::PreviousWatchlistSymbol)
+    );
+    assert_eq!(
+        chart_shortcut("f", shift),
+        Some(ChartShortcut::ToggleFullscreen)
+    );
+    assert_eq!(
+        chart_shortcut("f", gpui::Modifiers::default()),
+        None,
+        "a plain F still starts symbol search"
+    );
+    assert_eq!(chart_shortcut("space", control), None);
+    assert_eq!(
+        chart_shortcut(
+            "f",
+            gpui::Modifiers {
+                control: true,
+                shift: true,
+                ..gpui::Modifiers::default()
+            }
+        ),
+        None,
+        "Ctrl+Shift+F stays the flatten command"
+    );
+}
+
+#[test]
+fn watchlist_steps_wrap_and_start_from_the_ends() {
+    assert_eq!(watchlist_step(Some(0), 3, true), Some(1));
+    assert_eq!(watchlist_step(Some(2), 3, true), Some(0));
+    assert_eq!(watchlist_step(Some(0), 3, false), Some(2));
+    assert_eq!(watchlist_step(None, 3, true), Some(0));
+    assert_eq!(watchlist_step(None, 3, false), Some(2));
+    assert_eq!(watchlist_step(None, 0, true), None);
 }
 
 #[test]

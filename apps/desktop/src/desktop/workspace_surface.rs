@@ -2454,6 +2454,18 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    /// Whether chart shortcuts may act: the chart holds keyboard focus, no chrome overlay or
+    /// modal is open, and no drawing text is being edited.
+    pub(super) fn chart_shortcuts_ready(&self, window: &Window, cx: &App) -> bool {
+        self.chrome_overlay.is_none()
+            && self.trading_pnl.account_creator.is_none()
+            && self.trading_pnl.account_delete_confirmation.is_none()
+            && self.chart.as_ref().is_some_and(|chart| {
+                let chart = chart.read(cx);
+                chart.has_keyboard_focus(window) && !chart.is_editing_text()
+            })
+    }
+
     pub(super) fn on_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,

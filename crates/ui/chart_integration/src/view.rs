@@ -1457,6 +1457,14 @@ impl AerisChartView {
         true
     }
 
+    /// Whether the chart holds keyboard focus, so keys it leaves unconsumed may act on it.
+    #[must_use]
+    pub fn has_keyboard_focus(&self, window: &Window) -> bool {
+        self.focus_handle
+            .as_ref()
+            .is_some_and(|handle| handle.is_focused(window))
+    }
+
     /// Returns whether the newest bar is at the platform's real-time presentation edge, including
     /// its intentional right-side future-time margin.
     #[must_use]

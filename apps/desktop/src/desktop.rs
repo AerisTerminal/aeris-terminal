@@ -249,10 +249,11 @@ use terminal_chrome::{
     connection_presentation,
 };
 use terminal_chrome::{
-    WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme,
-    button_activation, button_activation_at, chrome_button_style, chrome_tooltip, exchange_mark,
-    fullscreen_escape_command, header_icon, mark_tile, round_icon_button, series_glyph,
-    terminal_header, window_move_gesture_transition, workspace_title_bar,
+    ChartShortcut, WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme,
+    button_activation, button_activation_at, chart_shortcut, chrome_button_style, chrome_tooltip,
+    exchange_mark, fullscreen_escape_command, header_icon, mark_tile, round_icon_button,
+    series_glyph, terminal_header, watchlist_step, window_move_gesture_transition,
+    workspace_title_bar,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,

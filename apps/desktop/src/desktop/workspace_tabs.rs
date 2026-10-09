@@ -531,6 +531,59 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Applies a chart shortcut when the active chart is ready for one. A held key acts once,
+    /// so holding Space never streams symbol switches.
+    fn apply_chart_shortcut(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(shortcut) = chart_shortcut(&event.keystroke.key, event.keystroke.modifiers) else {
+            return false;
+        };
+        if !self
+            .active_surface()
+            .read(cx)
+            .chart_shortcuts_ready(window, cx)
+        {
+            return false;
+        }
+        if event.is_held {
+            return true;
+        }
+        match shortcut {
+            ChartShortcut::ToggleFullscreen => WindowCommand::ToggleFullscreen.execute(window),
+            ChartShortcut::NextWatchlistSymbol => self.step_watchlist(true, cx),
+            ChartShortcut::PreviousWatchlistSymbol => self.step_watchlist(false, cx),
+        }
+        true
+    }
+
+    /// Shows the next or previous watchlist symbol on the active chart.
+    fn step_watchlist(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let current = {
+            let surface = self.active_surface().read(cx);
+            let active = surface
+                .rithmic_pending_product
+                .as_ref()
+                .or(surface.product.as_ref());
+            active.and_then(|active| {
+                self.watchlist.iter().position(|instrument| {
+                    active.provider == instrument.provider
+                        && active.instrument_id == instrument.instrument_id
+                })
+            })
+        };
+        let Some(instrument) = watchlist_step(current, self.watchlist.len(), forward)
+            .and_then(|index| self.watchlist.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.select_watchlist_instrument(&instrument, cx);
+    }
+
     pub(super) fn select_watchlist_instrument(
         &mut self,
         instrument: &InstallProviderInstrument,
@@ -2759,6 +2812,11 @@ impl TerminalApp {
             || self.chart_settings_menu.is_some()
             || self.pages.view != market_screener::AppView::Terminal
         {
+            return;
+        }
+        if self.apply_chart_shortcut(event, window, cx) {
+            window.prevent_default();
+            cx.stop_propagation();
             return;
         }
         let handled = self.active_surface().update(cx, |workspace, workspace_cx| {
