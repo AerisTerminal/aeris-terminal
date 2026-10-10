@@ -1037,6 +1037,20 @@ impl CatalogEntry {
             asset_class: self.asset_class.clone(),
         }
     }
+    fn is_forex(&self) -> bool {
+        self.asset_class.as_deref().is_some_and(|class| {
+            let class = class.to_ascii_lowercase();
+            class.contains("forex") || class.split_whitespace().any(|word| word == "fx")
+        })
+    }
+}
+/// Brokers name their asset classes freely ("US Shares", "Stocks", "Equities").
+/// Share CFDs are not listed: Aeris uses cTrader for forex, indices, commodities and crypto.
+fn is_share_class(asset_class: &str) -> bool {
+    let class = asset_class.to_ascii_lowercase();
+    ["share", "stock", "equit"]
+        .iter()
+        .any(|word| class.contains(word))
 }
 fn search_rank(entry: &CatalogEntry, query: &str) -> Option<u8> {
     if query.is_empty() {
@@ -1077,6 +1091,8 @@ struct WorkerConfig {
     idle_stop: Duration,
     /// An epoch that stays connected this long clears the retry count.
     healthy_after: Duration,
+    /// Loads the symbol catalogs as soon as the worker starts, before any search.
+    warm_catalogs_on_start: bool,
 }
 
 /// One search in progress. Symbol lists load one account per worker turn, so
@@ -1116,9 +1132,13 @@ struct Worker {
     completions: VecDeque<Command>,
     ordinal: u64,
     account_list: Option<(Instant, Vec<CtraderAccount>)>,
+    /// Each account's catalog with the instant it expires.
     catalogs: BTreeMap<(bool, u64), (Instant, AccountCatalog)>,
     assets: BTreeMap<(bool, u64), (Instant, BTreeMap<u64, String>)>,
     catalog_job: Option<CatalogJob>,
+    /// Accounts whose catalogs still load in the background, one per worker turn.
+    catalog_warmup: Option<VecDeque<CtraderAccount>>,
+    catalog_warmup_requested: bool,
     searches: BTreeMap<u64, (u64, Vec<CatalogEntry>)>,
     selection_generation: u64,
     /// The trading relay for the attached venue generation, if any.
@@ -1128,6 +1148,7 @@ impl Worker {
     fn new(ports: WorkerPorts, config: WorkerConfig) -> Self {
         Self {
             ports,
+            catalog_warmup_requested: config.warm_catalogs_on_start,
             config,
             hosts: BTreeMap::new(),
             demand: Demand::default(),
@@ -1145,6 +1166,7 @@ impl Worker {
             catalogs: BTreeMap::new(),
             assets: BTreeMap::new(),
             catalog_job: None,
+            catalog_warmup: None,
             searches: BTreeMap::new(),
             selection_generation: 0,
             venue: None,
@@ -1239,6 +1261,8 @@ impl Worker {
                         );
                     }
                     self.account_list = None;
+                    self.catalog_warmup = None;
+                    self.catalog_warmup_requested = ready;
                     self.catalogs.clear();
                     self.assets.clear();
                     self.searches.clear();
@@ -1624,6 +1648,7 @@ impl Worker {
             return;
         }
         let Ok(control) = self.ports.catalog.try_recv() else {
+            self.warm_catalogs();
             return;
         };
         match control {
@@ -1695,8 +1720,9 @@ impl Worker {
             selection,
         });
     }
-    /// Loads cached catalogs without a round trip and at most one uncached
-    /// account per call, then publishes once every account was attempted.
+    /// Answers from loaded catalogs without a round trip, even expired ones, which
+    /// then refresh in the background. At most one unloaded account is fetched per
+    /// call, and results publish once every account was attempted.
     fn advance_search(&mut self) {
         let Some(mut job) = self.catalog_job.take() else {
             return;
@@ -1705,8 +1731,16 @@ impl Worker {
             if job.failed_hosts.contains(&account.is_live) {
                 continue;
             }
-            let fetched = !self.catalog_fresh(&account);
-            match self.load_catalog(&account) {
+            let fetched = !self.catalogs.contains_key(&(account.is_live, account.ctid));
+            if !fetched && !self.catalog_fresh(&account) {
+                self.catalog_warmup_requested = true;
+            }
+            let loaded = if fetched {
+                self.load_catalog(&account)
+            } else {
+                Ok(())
+            };
+            match loaded {
                 Ok(()) => job.loaded.push(account),
                 Err(Failure::Request(detail)) => {
                     diagnostic!("Aeris cTrader catalog skipped one account: {detail}");
@@ -1777,12 +1811,73 @@ impl Worker {
     fn catalog_fresh(&self, account: &CtraderAccount) -> bool {
         self.catalogs
             .get(&(account.is_live, account.ctid))
-            .is_some_and(|(loaded_at, _)| loaded_at.elapsed() < CATALOG_TTL)
+            .is_some_and(|(expires_at, _)| Instant::now() < *expires_at)
+    }
+    /// Loads account catalogs before they are searched, one account per worker
+    /// turn so live events keep flowing. It runs at startup, after connecting and
+    /// after a search was answered from an expired catalog.
+    fn warm_catalogs(&mut self) {
+        if self.epoch_state.paused {
+            self.catalog_warmup = None;
+            return;
+        }
+        if self.catalog_warmup.is_none() {
+            if !std::mem::take(&mut self.catalog_warmup_requested) {
+                return;
+            }
+            match self.accounts() {
+                Ok(accounts) => {
+                    self.catalogs.retain(|(live, ctid), _| {
+                        accounts
+                            .iter()
+                            .any(|account| account.is_live == *live && account.ctid == *ctid)
+                    });
+                    self.catalog_warmup = Some(
+                        accounts
+                            .into_iter()
+                            .take(MAXIMUM_CATALOG_ACCOUNTS)
+                            .collect(),
+                    );
+                }
+                Err(failure) => {
+                    // Listing accounts fails only when opening a session fails, so no
+                    // session exists to recover.
+                    diagnostic!(
+                        "Aeris cTrader symbol catalog warm-up skipped: {}",
+                        failure.detail()
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(account) = self.catalog_warmup.as_mut().and_then(VecDeque::pop_front) else {
+            self.catalog_warmup = None;
+            return;
+        };
+        if self.catalog_fresh(&account) {
+            return;
+        }
+        match self.load_catalog(&account) {
+            Ok(()) => {}
+            Err(Failure::Request(detail)) => {
+                diagnostic!("Aeris cTrader catalog warm-up skipped one account: {detail}");
+            }
+            Err(Failure::Host(fault)) => {
+                diagnostic!(
+                    "Aeris cTrader catalog warm-up stopped on {}: {}",
+                    venue(account.is_live),
+                    fault.detail
+                );
+                self.catalog_warmup = None;
+                // A session that faulted is broken for every user; one that never
+                // opened has nothing to recover.
+                if self.hosts.contains_key(&account.is_live) {
+                    self.recover(fault);
+                }
+            }
+        }
     }
     fn load_catalog(&mut self, account: &CtraderAccount) -> Result<(), Failure> {
-        if self.catalog_fresh(account) {
-            return Ok(());
-        }
         let host = self.ensure_host(account.is_live)?;
         host.authorize(account.ctid)?;
         let frame = host.request(
@@ -1802,7 +1897,7 @@ impl Worker {
         self.catalogs.insert(
             (account.is_live, account.ctid),
             (
-                Instant::now(),
+                Instant::now() + CATALOG_TTL,
                 AccountCatalog {
                     symbols,
                     asset_classes,
@@ -1837,13 +1932,21 @@ impl Worker {
                         .and_then(|category| catalog.asset_classes.get(&category))
                         .cloned(),
                 };
+                if entry.asset_class.as_deref().is_some_and(is_share_class) {
+                    continue;
+                }
                 if let Some(rank) = search_rank(&entry, &query) {
                     matches.push((rank, entry));
                 }
             }
         }
         matches.sort_by(|(left_rank, left), (right_rank, right)| {
-            (left_rank, &left.name, left.route).cmp(&(right_rank, &right.name, right.route))
+            (left_rank, !left.is_forex(), &left.name, left.route).cmp(&(
+                right_rank,
+                !right.is_forex(),
+                &right.name,
+                right.route,
+            ))
         });
         let limit = usize::try_from(search.maximum_results)
             .unwrap_or(MAXIMUM_SEARCH_RESULTS)
@@ -2114,6 +2217,7 @@ pub(super) fn start_record(
             opener,
             idle_stop: IDLE_STOP,
             healthy_after: HEALTHY_SESSION,
+            warm_catalogs_on_start: true,
         },
     )
 }

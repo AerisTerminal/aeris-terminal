@@ -16,6 +16,8 @@ const LIVE_SYMBOL: u64 = 41;
 const M1: i32 = 1;
 const QUOTE_ASSET: u64 = 11;
 const SYMBOL_CATEGORY: u64 = 7;
+const SHARE_CATEGORY: u64 = 8;
+const INDEX_CATEGORY: u64 = 9;
 
 // ---------------------------------------------------------------------------
 // Minimal protobuf wire encoding for scripted responses.
@@ -189,7 +191,11 @@ fn depth_frame(
     frame(2155, payload)
 }
 
-fn symbols_list_frame(ctid: u64, symbols: &[(u64, String, Option<String>)]) -> ProtoMessage {
+fn symbols_list_frame(
+    ctid: u64,
+    symbols: &[(u64, String, Option<String>)],
+    categories: &BTreeMap<u64, u64>,
+) -> ProtoMessage {
     let mut payload = Vec::new();
     field_int(&mut payload, 2, ctid.cast_signed());
     for (symbol, name, description) in symbols {
@@ -198,7 +204,11 @@ fn symbols_list_frame(ctid: u64, symbols: &[(u64, String, Option<String>)]) -> P
         field_string(&mut body, 2, name);
         field_varint(&mut body, 3, 1);
         field_varint(&mut body, 5, QUOTE_ASSET);
-        field_varint(&mut body, 6, SYMBOL_CATEGORY);
+        field_varint(
+            &mut body,
+            6,
+            categories.get(symbol).copied().unwrap_or(SYMBOL_CATEGORY),
+        );
         if let Some(description) = description {
             field_string(&mut body, 7, description);
         }
@@ -207,22 +217,29 @@ fn symbols_list_frame(ctid: u64, symbols: &[(u64, String, Option<String>)]) -> P
     frame(2115, payload)
 }
 
-/// Every scripted symbol is in one category of the "Forex" asset class (id 3).
+/// Scripted symbols are in a "Forex" category (asset class 3) unless the script
+/// places them in the "US Shares" (4) or "Indices" (5) category.
 fn symbol_categories_frame(ctid: u64) -> ProtoMessage {
     let mut payload = Vec::new();
     field_int(&mut payload, 2, ctid.cast_signed());
-    let mut category = Vec::new();
-    field_varint(&mut category, 1, SYMBOL_CATEGORY);
-    field_varint(&mut category, 2, 3);
-    field_string(&mut category, 3, "Default Category");
-    field_bytes(&mut payload, 3, &category);
+    for (category_id, asset_class) in [
+        (SYMBOL_CATEGORY, 3),
+        (SHARE_CATEGORY, 4),
+        (INDEX_CATEGORY, 5),
+    ] {
+        let mut category = Vec::new();
+        field_varint(&mut category, 1, category_id);
+        field_varint(&mut category, 2, asset_class);
+        field_string(&mut category, 3, "Default Category");
+        field_bytes(&mut payload, 3, &category);
+    }
     frame(2161, payload)
 }
 
 fn asset_classes_frame(ctid: u64) -> ProtoMessage {
     let mut payload = Vec::new();
     field_int(&mut payload, 2, ctid.cast_signed());
-    for (id, name) in [(3, "Forex"), (4, "US Shares")] {
+    for (id, name) in [(3, "Forex"), (4, "US Shares"), (5, "Indices")] {
         let mut class = Vec::new();
         field_varint(&mut class, 1, id);
         field_string(&mut class, 2, name);
@@ -540,6 +557,8 @@ struct Script {
     series: BTreeMap<(u64, i32), Vec<i64>>,
     page_limit: Option<usize>,
     symbols: BTreeMap<(bool, u64), ScriptedSymbols>,
+    /// Symbol categories other than the default "Forex" one.
+    categories: BTreeMap<u64, u64>,
     digits: BTreeMap<(bool, u64, u64), i32>,
     /// Answers to trading requests, in request order.
     trading: VecDeque<ProtoMessage>,
@@ -605,6 +624,7 @@ impl Script {
                     .cloned()
                     .as_deref()
                     .unwrap_or(&[]),
+                &self.categories,
             ),
             Logged::SymbolById {
                 ctid, ref symbols, ..
@@ -861,6 +881,7 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
             opener,
             idle_stop,
             healthy_after: Duration::from_hours(1),
+            warm_catalogs_on_start: false,
         },
     );
     Harness {
@@ -2418,6 +2439,113 @@ fn account_list_is_cached_so_searches_do_not_reopen_hosts() {
         [("live:2002:41", "XAUUSD", "cTrader Live")]
     );
     assert_eq!(harness.opens().len(), opens);
+}
+
+fn symbol_list_requests(harness: &Harness) -> usize {
+    harness
+        .requests()
+        .iter()
+        .filter(|request| matches!(request, Logged::SymbolsList { .. }))
+        .count()
+}
+
+#[test]
+fn listings_hide_share_cfds_and_put_forex_first() {
+    let script = catalog_script();
+    {
+        let mut guard = script.lock().unwrap();
+        let demo = guard.symbols.entry((false, DEMO_CTID)).or_default();
+        demo.push((3, "AAPL".to_string(), Some("Apple Inc".to_string())));
+        demo.push((4, "AUS200".to_string(), None));
+        guard.categories.insert(3, SHARE_CATEGORY);
+        guard.categories.insert(4, INDEX_CATEGORY);
+    }
+    let mut harness = harness(script, Duration::ZERO);
+
+    let listing = drive_search(&mut harness, 1, "");
+    let names: Vec<_> = listing
+        .instruments
+        .iter()
+        .map(|summary| {
+            (
+                summary.display_symbol.as_str(),
+                summary.asset_class.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("EURGBP", Some("Forex")),
+            ("EURUSD", Some("Forex")),
+            ("EURUSD", Some("Forex")),
+            ("XAUUSD", Some("Forex")),
+            ("AUS200", Some("Indices")),
+        ],
+        "forex leads, other markets follow and share CFDs are not listed"
+    );
+    assert_eq!(drive_search(&mut harness, 2, "AAPL").instruments, []);
+}
+
+#[test]
+fn catalogs_load_in_the_background_before_the_first_search() {
+    let mut harness = harness(catalog_script(), Duration::from_secs(60));
+    harness.worker.catalog_warmup_requested = true;
+    for _ in 0..=MAXIMUM_CATALOG_ACCOUNTS {
+        harness.drive();
+    }
+    assert_eq!(symbol_list_requests(&harness), 2, "one list per account");
+
+    harness
+        .catalog_controls
+        .try_send(search(7, 1, "EUR"))
+        .expect("catalog control queue accepts");
+    harness.drive();
+    let events = harness.take_catalog();
+    assert!(
+        matches!(events.as_slice(), [CatalogEvent::Search(result)] if result.instruments.len() == 3),
+        "the first search is answered in one turn"
+    );
+    assert_eq!(
+        symbol_list_requests(&harness),
+        2,
+        "no list is fetched again"
+    );
+}
+
+#[test]
+fn an_expired_catalog_answers_at_once_and_refreshes_in_the_background() {
+    let mut harness = harness(catalog_script(), Duration::from_secs(60));
+    drive_search(&mut harness, 1, "EUR");
+    assert_eq!(symbol_list_requests(&harness), 2);
+    let now = Instant::now();
+    for (expires_at, _) in harness.worker.catalogs.values_mut() {
+        *expires_at = now;
+    }
+
+    harness
+        .catalog_controls
+        .try_send(search(7, 2, "EUR"))
+        .expect("catalog control queue accepts");
+    harness.drive();
+    assert_eq!(
+        harness.take_catalog().len(),
+        1,
+        "answered from the old catalog"
+    );
+    assert_eq!(symbol_list_requests(&harness), 2);
+
+    for _ in 0..=MAXIMUM_CATALOG_ACCOUNTS {
+        harness.drive();
+    }
+    assert_eq!(symbol_list_requests(&harness), 4, "both accounts refreshed");
+    assert!(
+        harness
+            .worker
+            .catalogs
+            .values()
+            .all(|(expires_at, _)| *expires_at > now)
+    );
 }
 
 // ---------------------------------------------------------------------------
