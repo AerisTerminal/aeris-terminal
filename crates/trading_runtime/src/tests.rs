@@ -1679,6 +1679,53 @@ fn entry_and_exit_fills_form_one_round_trip_with_its_final_pnl() {
         trip.final_pnl,
         Some(FixedPoint::try_new(5_000, 2).expect("pnl"))
     );
+    assert_eq!(trip.open_pnl, None);
+    assert_eq!(trip.current_pnl(), trip.final_pnl);
+}
+
+#[test]
+fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
+    let directory = TestDirectory::new("open-round-trip-pnl");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+
+    execute_market_order(&service, 1, OrderSide::Buy, 2, (9_975, 10_000));
+    let snapshot = service.snapshot().expect("open snapshot");
+    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(-2_500)));
+    assert_eq!(snapshot.round_trips[0].final_pnl, None);
+
+    service
+        .observe_market(observation(10_100, 10_125, 5, 4_000))
+        .expect("live mark");
+    let snapshot = service.snapshot().expect("marked snapshot");
+    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(10_000)));
+
+    execute_market_order(&service, 2, OrderSide::Sell, 1, (10_100, 10_125));
+    let snapshot = service.snapshot().expect("partial exit snapshot");
+    assert!(!snapshot.round_trips[0].closed);
+    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(10_000)));
+    assert_eq!(snapshot.round_trips[0].final_pnl, None);
+
+    service
+        .observe_market(observation(10_200, 10_225, 7, 6_000))
+        .expect("next live mark");
+    let snapshot = service.snapshot().expect("updated mark snapshot");
+    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(15_000)));
+
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let restarted = start_service(&directory);
+    let snapshot = restarted.snapshot().expect("restored open snapshot");
+    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(15_000)));
+
+    execute_market_order(&restarted, 3, OrderSide::Sell, 1, (10_200, 10_225));
+    let snapshot = restarted.snapshot().expect("closed snapshot");
+    assert!(snapshot.round_trips[0].closed);
+    assert_eq!(snapshot.round_trips[0].open_pnl, None);
+    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(15_000)));
 }
 
 #[test]

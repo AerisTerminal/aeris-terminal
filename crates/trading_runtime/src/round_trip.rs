@@ -61,9 +61,22 @@ pub struct TradeRoundTrip {
     /// Final realized P&L of a closed trade. `None` while open, or when no complete record of
     /// the trade's realized P&L exists.
     pub final_pnl: Option<FixedPoint>,
+    /// Realized exits in this cycle plus the current unrealized position P&L. `None` for a
+    /// closed trade or when the owner's cycle baseline is unknown.
+    pub open_pnl: Option<FixedPoint>,
 }
 
 impl TradeRoundTrip {
+    /// The owner's known P&L for this trade: live while open, final after close.
+    #[must_use]
+    pub fn current_pnl(&self) -> Option<FixedPoint> {
+        if self.closed {
+            self.final_pnl
+        } else {
+            self.open_pnl
+        }
+    }
+
     /// Time of the trade's most recent fill.
     #[must_use]
     pub fn last_fill_unix_nanos(&self) -> i64 {
@@ -138,6 +151,7 @@ impl OpenTrade {
         key: &PositionKey,
         closed: bool,
         completed_pnl: Option<FixedPoint>,
+        open_pnl: Option<FixedPoint>,
     ) -> TradeRoundTrip {
         // The owner records final P&L on the closing fill. When that record predates it, the
         // exits' realized P&L is still exact, but only if every exit of the trade is retained.
@@ -156,7 +170,38 @@ impl OpenTrade {
             } else {
                 None
             },
+            open_pnl,
         }
+    }
+
+    fn open_pnl(
+        &self,
+        key: &PositionKey,
+        positions: &BTreeMap<PositionKey, Position>,
+        trade_pnl_cycles: &BTreeMap<PositionKey, FixedPoint>,
+    ) -> Result<Option<FixedPoint>, String> {
+        let Some(position) = positions
+            .get(key)
+            .filter(|position| position.net_quantity.units().signum() == self.side.sign())
+        else {
+            return Ok(None);
+        };
+        let realized = match trade_pnl_cycles.get(key).copied() {
+            Some(pnl) => pnl,
+            None if self.entry_known && self.exits_recorded => self.exit_realized_pnl.unwrap_or(
+                FixedPoint::try_new(0, position.unrealized_pnl.scale())
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => return Ok(None),
+        };
+        let realized = realized
+            .exact_rescale(position.unrealized_pnl.scale())
+            .map_err(|error| error.to_string())?;
+        position
+            .unrealized_pnl
+            .checked_add(realized)
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -178,6 +223,7 @@ pub(super) fn project_round_trips<'a>(
     positions: &BTreeMap<PositionKey, Position>,
     completed_trade_pnl: &BTreeMap<FillId, FixedPoint>,
     fill_realized_pnl: &BTreeMap<FillId, FixedPoint>,
+    trade_pnl_cycles: &BTreeMap<PositionKey, FixedPoint>,
 ) -> Result<Vec<TradeRoundTrip>, String> {
     let mut net_after = BTreeMap::<PositionKey, FixedPoint>::new();
     let mut quantity_before = Vec::new();
@@ -233,7 +279,12 @@ pub(super) fn project_round_trips<'a>(
             continue;
         }
         if let Some(trade) = open.remove(&key) {
-            round_trips.push(trade.finish(&key, true, completed_trade_pnl.get(&fill.id).copied()));
+            round_trips.push(trade.finish(
+                &key,
+                true,
+                completed_trade_pnl.get(&fill.id).copied(),
+                None,
+            ));
         }
         if after != 0 {
             open.insert(
@@ -242,10 +293,10 @@ pub(super) fn project_round_trips<'a>(
             );
         }
     }
-    round_trips.extend(
-        open.into_iter()
-            .map(|(key, trade)| trade.finish(&key, false, None)),
-    );
+    for (key, trade) in open {
+        let open_pnl = trade.open_pnl(&key, positions, trade_pnl_cycles)?;
+        round_trips.push(trade.finish(&key, false, None, open_pnl));
+    }
     round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
     Ok(round_trips)
 }

@@ -747,7 +747,7 @@ fn trade_history_row(
                 .text_right()
                 .child(trade_history_text(exit_price)),
         )
-        .child(trade_history_pnl_cell(trip.final_pnl, currency, theme))
+        .child(trade_history_pnl_cell(trip.current_pnl(), currency, theme))
 }
 
 fn position_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoElement {
@@ -921,7 +921,7 @@ fn trade_history_text(value: Option<String>) -> String {
     value.unwrap_or_else(|| "—".to_string())
 }
 
-/// A signed P&L amount colored by its sign; a trade without a final result shows a dash.
+/// A signed P&L amount colored by its sign; an unavailable result shows a dash.
 fn trade_history_pnl_cell(
     pnl: Option<aeris_trading::FixedPoint>,
     currency: &str,
@@ -989,6 +989,7 @@ mod tests {
             exit: Some(leg),
             closed: true,
             final_pnl: Some(aeris_trading::FixedPoint::try_new(0, 2).expect("pnl")),
+            open_pnl: None,
         }
     }
 
@@ -1033,6 +1034,17 @@ mod tests {
         assert_eq!(trade_history_pnl_text(Some(loss), "USD"), "USD -2525.00");
         assert_eq!(trade_history_pnl_text(Some(gain), "USD"), "USD 7350.00");
         assert_eq!(trade_history_pnl_text(None, "USD"), "—");
+
+        let mut open = round_trip("a");
+        open.closed = false;
+        open.final_pnl = None;
+        open.open_pnl = Some(loss);
+        assert_eq!(
+            trade_history_pnl_text(open.current_pnl(), "USD"),
+            "USD -2525.00"
+        );
+        open.closed = true;
+        assert_eq!(trade_history_pnl_text(open.current_pnl(), "USD"), "—");
     }
 
     fn broker_position(account: &str, id: &str, opened: i64) -> aeris_trading::BrokerPosition {

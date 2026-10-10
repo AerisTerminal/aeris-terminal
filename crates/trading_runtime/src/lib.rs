@@ -4446,6 +4446,7 @@ impl Coordinator {
                 &self.state.positions,
                 &self.state.completed_trade_pnl,
                 &self.state.fill_realized_pnl,
+                &self.state.trade_pnl_cycles,
             )?,
             positions: self.state.positions.values().cloned().collect(),
             broker_positions: self.state.broker_positions.values().cloned().collect(),
