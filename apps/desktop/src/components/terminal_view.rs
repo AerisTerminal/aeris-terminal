@@ -811,12 +811,12 @@ impl TerminalApp {
         );
         let platform_menu = self.platform_menu_overlay(&terminal, window.viewport_size());
         let drawing_tool_menu = self.drawing_tool_menu_overlay(&terminal, window, cx);
-        let drawing_favorites = self.drawing_favorites_overlay(
-            &terminal,
-            title_bar_row_height + chart_chrome::CHART_CHROME_HEIGHT,
-            window,
-            cx,
-        );
+        let chart_top = if self.chart_fullscreen.is_some() {
+            0.0
+        } else {
+            title_bar_row_height + chart_chrome::CHART_CHROME_HEIGHT
+        };
+        let drawing_favorites = self.drawing_favorites_overlay(&terminal, chart_top, window, cx);
         let command_palette = self.rendered_command_palette(&terminal, cx);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
@@ -840,10 +840,12 @@ impl TerminalApp {
                         .bg(gpui_color(self.theme.colors.surface))
                         .child(charts),
                 )
+                .children(drawing_favorites)
                 .children(fullscreen_hint)
                 .children(overlay)
                 .children(context_menu)
                 .children(settings_menu)
+                .children(drawing_tool_menu)
                 .children(command_palette);
         }
         self.page_root()

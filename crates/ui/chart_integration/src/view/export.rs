@@ -350,6 +350,7 @@ impl AerisChartView {
     /// Capture the chart as it is shown, with its latest-bar legend and no crosshair. The
     /// capture invalidates the engine's retained frame, so callers repaint the live chart.
     fn capture(&mut self, utc_seconds: i64) -> Result<ChartCapture, String> {
+        register_export_fonts()?;
         let image = prepare_engine_image(
             &mut self.engine,
             ImageExportOptions {
@@ -358,6 +359,7 @@ impl AerisChartView {
                 scale: EXPORT_SCALE,
                 include_crosshair: false,
                 include_trading: true,
+                trim_right_axis: true,
             },
         );
         let colors = platform_theme(self.theme).colors;
@@ -554,6 +556,46 @@ mod tests {
             live
         );
         assert_eq!(chart.engine.crosshair, Some((40.0, 40.0)));
+    }
+
+    #[test]
+    fn capture_trims_unused_right_axis_space_without_reflowing_the_chart() {
+        let mut chart = AerisChartView::new();
+        chart
+            .engine
+            .set_series_data(
+                0,
+                &[1.0, 2.0, 3.0],
+                &[10.0, 11.0, 12.0],
+                &[11.0, 12.0, 13.0],
+                &[9.0, 10.0, 11.0],
+                &[10.5, 11.5, 12.5],
+            )
+            .expect("main series accepts candles");
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 100.0, |_, _| 100.0);
+        let live = (
+            chart.engine.css_width,
+            chart.engine.pane_w,
+            chart.engine.axis_w,
+        );
+        let capture = chart.capture(0).expect("capture uses the bundled fonts");
+        assert!(f64::from(capture.image.size().0) < live.0 * f64::from(super::EXPORT_SCALE));
+        assert_eq!(
+            (
+                chart.engine.css_width,
+                chart.engine.pane_w,
+                chart.engine.axis_w
+            ),
+            live
+        );
+        assert!(
+            capture
+                .render_png()
+                .expect("capture rasterizes")
+                .starts_with(b"\x89PNG")
+        );
     }
 
     #[test]
