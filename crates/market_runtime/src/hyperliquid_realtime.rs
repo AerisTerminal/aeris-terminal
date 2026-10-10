@@ -1002,12 +1002,7 @@ fn reconcile_subscriptions(
         instruments.insert(book.wire_coin.clone(), book.clone());
     }
     remove_retired_subscriptions(socket, &desired, state)?;
-    state.book_sequences.retain(|coin, _| {
-        desired.keys().any(|key| match key {
-            SubscriptionKey::Book { coin: active } => active == coin,
-            _ => false,
-        })
-    });
+    retain_book_sequences(&mut state.book_sequences, &desired);
     for (key, frame) in &desired {
         if !state.active.contains_key(key) {
             socket.send_text(frame).map_err(|error| error.to_string())?;
@@ -1019,6 +1014,20 @@ fn reconcile_subscriptions(
     }
     state.instruments = instruments;
     Ok(())
+}
+
+fn retain_book_sequences(
+    sequences: &mut BTreeMap<String, u64>,
+    desired: &BTreeMap<SubscriptionKey, String>,
+) {
+    sequences.retain(|coin, _| {
+        desired.keys().any(|key| match key {
+            SubscriptionKey::Bbo { coin: active } | SubscriptionKey::Book { coin: active } => {
+                active == coin
+            }
+            _ => false,
+        })
+    });
 }
 
 fn remove_retired_subscriptions(
@@ -1528,6 +1537,45 @@ mod tests {
         );
         assert_eq!(quote.bid.map(|level| level.price), Some(1_000_000_000));
         assert_eq!(quote.ask.map(|level| level.price), Some(1_050_000_000));
+    }
+
+    #[test]
+    fn bbo_sequence_survives_reconciliation_without_full_depth() {
+        let mut sequences = BTreeMap::from([("BTC".to_string(), 101), ("ETH".to_string(), 15)]);
+        let desired = BTreeMap::from([
+            (SubscriptionKey::Bbo { coin: "BTC".into() }, String::new()),
+            (
+                SubscriptionKey::Candle {
+                    coin: "BTC".into(),
+                    interval: "1m".into(),
+                },
+                String::new(),
+            ),
+            (
+                SubscriptionKey::Trades { coin: "ETH".into() },
+                String::new(),
+            ),
+        ]);
+        retain_book_sequences(&mut sequences, &desired);
+        assert_eq!(sequences, BTreeMap::from([("BTC".to_string(), 101)]));
+
+        let (instruments, mut failures, mut trades, _, _) = harness();
+        let (events, received) = std::sync::mpsc::sync_channel(8);
+        handle(
+            r#"{"channel":"bbo","data":{"coin":"BTC","time":1700000000000,"bbo":[{"px":"10.0","sz":"2.0","n":1},{"px":"10.5","sz":"3.0","n":2}]}}"#,
+            &instruments,
+            &mut failures,
+            &mut trades,
+            &mut sequences,
+            &events,
+        )
+        .expect("bbo remains valid after reconciliation");
+        let HyperliquidRealtimeEvent::Quote(_, quote) = received.try_recv().expect("quote event")
+        else {
+            panic!("expected quote event");
+        };
+        assert_eq!(quote.metadata.source_sequence, 101);
+        assert_eq!(sequences.get("BTC"), Some(&102));
     }
 
     #[test]
