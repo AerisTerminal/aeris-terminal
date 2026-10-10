@@ -21,10 +21,11 @@ pub const MAXIMUM_CODE_BYTES: usize = 2048;
 pub const MAXIMUM_STATE_BYTES: usize = 256;
 
 const PLATFORM_STYLESHEET: &str = include_str!("../../../ui/design_system/platform.css");
-const PLATFORM_MEDIUM_FONT: &[u8] =
-    include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Medium.ttf");
-const PLATFORM_BOLD_FONT: &[u8] =
-    include_bytes!("../../../ui/design_system/assets/fonts/HKGrotesk-Bold.ttf");
+const PLATFORM_FONT: &[u8] =
+    include_bytes!("../../../ui/design_system/assets/fonts/inter_regular.ttf");
+const BRAND_FONT: &[u8] = include_bytes!(
+    "../../../ui/design_system/assets/fonts/faculty-glyphic/FacultyGlyphic-Regular.ttf"
+);
 const BRAND_MARK: &str = include_str!("../../../../apps/desktop/assets/aeris_assets/logo.svg");
 const SYSTEM_THEME_BOOTSTRAP: &str = r"<script>(function(){var q=window.matchMedia('(prefers-color-scheme: dark)');function apply(){var d=q.matches;document.documentElement.classList.toggle('dark',d);document.documentElement.dataset.theme=d?'dark':'light';document.documentElement.style.colorScheme=d?'dark':'light'}apply();if(q.addEventListener){q.addEventListener('change',apply)}else if(q.addListener){q.addListener(apply)}})();</script>";
 
@@ -207,10 +208,10 @@ fn browser_platform_styles() -> &'static str {
 }
 
 fn browser_font_faces() -> String {
-    let medium = STANDARD.encode(PLATFORM_MEDIUM_FONT);
-    let bold = STANDARD.encode(PLATFORM_BOLD_FONT);
+    let inter = STANDARD.encode(PLATFORM_FONT);
+    let faculty = STANDARD.encode(BRAND_FONT);
     format!(
-        r#"@font-face{{font-family:"HK Grotesk";src:url("data:font/ttf;base64,{medium}") format("truetype");font-style:normal;font-weight:500;font-display:swap}}@font-face{{font-family:"HK Grotesk";src:url("data:font/ttf;base64,{bold}") format("truetype");font-style:normal;font-weight:700;font-display:swap}}"#
+        r#"@font-face{{font-family:"Inter";src:url("data:font/ttf;base64,{inter}") format("truetype");font-style:normal;font-weight:400;font-display:swap}}@font-face{{font-family:"Faculty Glyphic";src:url("data:font/ttf;base64,{faculty}") format("truetype");font-style:normal;font-weight:400;font-display:swap}}"#
     )
 }
 
@@ -421,7 +422,8 @@ mod tests {
         assert!(response.contains("var(--primary)"));
         assert!(!response.contains("var(--bullish)"));
         assert!(!response.contains("#090b0f"));
-        assert!(response.contains("font-family:\"HK Grotesk\""));
+        assert!(response.contains("font-family:\"Inter\""));
+        assert!(response.contains("font-family:\"Faculty Glyphic\""));
         assert!(response.contains("data:font/ttf;base64,"));
         assert!(response.contains("classList.toggle('dark',d)"));
         assert!(response.contains("class=\"brand-mark\"><svg"));
