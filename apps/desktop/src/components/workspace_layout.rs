@@ -1,16 +1,77 @@
 use super::*;
 use aeris_desktop::command_registry::{self, WorkspaceShortcut};
 
+/// Fill notices belong to the workspace, not one chart, so they stack on the pane in its
+/// top-right corner.
+#[derive(Clone, Copy)]
+pub(super) struct PaneNotices<'a> {
+    host_pane: u64,
+    fills: &'a FillNotifications,
+}
+
 pub(super) fn workspace_pane_grid(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
+    fills: &FillNotifications,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
     if let Some(pane_id) = workspace.maximized_pane {
-        return workspace_pane_element(terminal, workspace, pane_id, theme, cx);
+        let notices = PaneNotices {
+            host_pane: pane_id,
+            fills,
+        };
+        return workspace_pane_element(terminal, workspace, pane_id, notices, theme, cx);
     }
-    workspace_layout_element(terminal, workspace, &workspace.layout.layout(), theme, cx)
+    let layout = workspace.layout.layout();
+    let notices = PaneNotices {
+        host_pane: top_right_pane(&layout),
+        fills,
+    };
+    workspace_layout_element(terminal, workspace, &layout, notices, theme, cx)
+}
+
+fn top_right_pane(layout: &ChartWorkspaceLayout) -> u64 {
+    match layout {
+        ChartWorkspaceLayout::Cell { id } => *id,
+        ChartWorkspaceLayout::Split {
+            direction: ChartSplitDirection::Horizontal,
+            b: right,
+            ..
+        } => top_right_pane(right),
+        ChartWorkspaceLayout::Split {
+            direction: ChartSplitDirection::Vertical,
+            a: top,
+            ..
+        } => top_right_pane(top),
+    }
+}
+
+/// The chart notice a pane shows now, from its chart state, connection and data.
+pub(super) fn pane_chart_notice(
+    surface: &WorkspaceSurface,
+    cx: &App,
+) -> Option<ChartSurfaceNotice> {
+    let connection_state = surface
+        .connection_state
+        .unwrap_or(FeedConnectionState::Disconnected);
+    let chart_has_market_data = surface
+        .chart
+        .as_ref()
+        .is_some_and(|chart| chart.read(cx).has_market_data());
+    let chart_state =
+        connectivity_chart_state(surface.chart_state, connection_state, chart_has_market_data);
+    chart_surface_notice(
+        chart_state,
+        chart_has_market_data,
+        surface.showing_superseded_series(),
+        chart_status_detail(
+            chart_state,
+            connection_state,
+            &surface.chart_state_message,
+            surface.connection_message.as_deref(),
+        ),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,11 +99,12 @@ pub(super) fn workspace_layout_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     layout: &ChartWorkspaceLayout,
+    notices: PaneNotices<'_>,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
     if let ChartWorkspaceLayout::Cell { id } = layout {
-        return workspace_pane_element(terminal, workspace, *id, theme, cx);
+        return workspace_pane_element(terminal, workspace, *id, notices, theme, cx);
     }
 
     let ChartWorkspaceLayout::Split {
@@ -58,8 +120,8 @@ pub(super) fn workspace_layout_element(
     let second_ids = second.leaf_ids();
     let left_pane_id = *first_ids.last().unwrap_or(&0);
     let right_pane_id = *second_ids.first().unwrap_or(&0);
-    let first_element = workspace_layout_element(terminal, workspace, first, theme, cx);
-    let second_element = workspace_layout_element(terminal, workspace, second, theme, cx);
+    let first_element = workspace_layout_element(terminal, workspace, first, notices, theme, cx);
+    let second_element = workspace_layout_element(terminal, workspace, second, notices, theme, cx);
     let workspace_id = workspace.id;
     let split_id = format!("workspace_split_{workspace_id}_{left_pane_id}_{right_pane_id}");
     let direction = *direction;
@@ -207,6 +269,7 @@ pub(super) fn workspace_pane_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     pane_id: u64,
+    notices: PaneNotices<'_>,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
@@ -214,28 +277,23 @@ pub(super) fn workspace_pane_element(
         return div().into_any_element();
     };
     let surface = pane.surface.read(cx);
-    let connection_state = surface
-        .connection_state
-        .unwrap_or(FeedConnectionState::Disconnected);
-    let chart_has_market_data = surface
-        .chart
-        .as_ref()
-        .is_some_and(|chart| chart.read(cx).has_market_data());
-    let chart_state =
-        connectivity_chart_state(surface.chart_state, connection_state, chart_has_market_data);
+    let mut corner_notices: Vec<AnyElement> = surface
+        .chart_corner_notice
+        .card(theme)
+        .into_iter()
+        .collect();
+    if notices.host_pane == pane_id {
+        corner_notices.extend(notices.fills.cards(terminal, theme));
+    }
     let content = market_workspace(MarketWorkspaceState {
         pane_id,
         chart: surface.chart.as_ref(),
-        chart_has_market_data,
-        chart_is_superseded: surface.showing_superseded_series(),
-        chart_state,
-        chart_status_detail: chart_status_detail(
-            chart_state,
-            connection_state,
-            &surface.chart_state_message,
-            surface.connection_message.as_deref(),
-        )
-        .to_string(),
+        notice: pane_chart_notice(surface, cx),
+        corner_notices,
+        price_axis_width: surface
+            .chart
+            .as_ref()
+            .map_or(0.0, |chart| chart.read(cx).price_axis_width()),
         theme,
     });
     let study_settings_dialog = surface
@@ -316,26 +374,32 @@ pub(super) fn workspace_pane_element(
         .into_any_element()
 }
 
+pub(super) struct WorkspaceMarketArea<'a> {
+    pub(super) terminal: &'a Entity<TerminalApp>,
+    pub(super) workspace: &'a WorkspaceTab,
+    pub(super) active_surface: &'a Entity<WorkspaceSurface>,
+    pub(super) expanded_drawing_toolbar: Option<DrawingSidebar<'a>>,
+    pub(super) watchlist: WatchlistPanelState,
+    pub(super) fills: &'a FillNotifications,
+    pub(super) theme: &'a AerisTheme,
+}
+
 pub(super) fn workspace_market_area(
-    terminal: &Entity<TerminalApp>,
-    workspace: &WorkspaceTab,
-    active_surface: &Entity<WorkspaceSurface>,
-    expanded_drawing_toolbar: Option<DrawingSidebar<'_>>,
-    watchlist: WatchlistPanelState,
-    theme: &AerisTheme,
+    area: WorkspaceMarketArea<'_>,
     cx: &mut Context<TerminalApp>,
 ) -> impl IntoElement + use<> {
+    let WorkspaceMarketArea {
+        terminal,
+        workspace,
+        active_surface,
+        expanded_drawing_toolbar,
+        watchlist,
+        fills,
+        theme,
+    } = area;
     let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
-    refresh_trading_pnl(
-        active_surface.clone(),
-        workspace
-            .panes
-            .iter()
-            .map(|pane| pane.surface.clone())
-            .collect(),
-        cx,
-    );
-    let grid = workspace_pane_grid(terminal, workspace, theme, cx);
+    keep_trading_pnl_fresh(active_surface, workspace, cx);
+    let grid = workspace_pane_grid(terminal, workspace, fills, theme, cx);
     let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
         let surface = pane.surface.read(cx);
         surface.price_alert_dialog.as_ref().map(|dialog| {
@@ -618,8 +682,6 @@ fn trading_pnl_refresh_due(
 /// or positions another pane already changed. The active pane owns the poll
 /// cadence; each pane still projects the snapshot for its own product, and the
 /// bottom panel's trade history adopts it once per owner revision.
-///
-/// The chart-only fullscreen renders no market area, so it calls this directly.
 pub(super) fn keep_trading_pnl_fresh(
     active: &Entity<WorkspaceSurface>,
     workspace: &WorkspaceTab,
@@ -662,6 +724,7 @@ fn refresh_trading_pnl(
                 if terminal.bottom_panel.apply_snapshot(snapshot) {
                     terminal_cx.notify();
                 }
+                terminal.announce_fills(snapshot, terminal_cx);
             });
         }
         let feedback = aeris_desktop::trading::latest_feedback();

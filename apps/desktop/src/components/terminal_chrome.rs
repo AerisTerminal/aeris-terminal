@@ -1490,7 +1490,7 @@ fn market_tooltip_rows(
     rows
 }
 
-fn current_unix_nanos() -> i64 {
+pub(super) fn current_unix_nanos() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()

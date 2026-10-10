@@ -2003,7 +2003,7 @@ fn terminal_session_stop_is_a_truthful_chart_error_with_or_without_data() {
         )
         .expect("retained chart error notice")
         .placement,
-        ChartNoticePlacement::BottomRight
+        ChartNoticePlacement::Corner
     );
     assert_eq!(
         chart_surface_notice(
@@ -2095,7 +2095,7 @@ fn a_superseded_chart_is_covered_and_named_not_left_looking_current() {
     // different: it stays out of the way.
     let repairing = chart_surface_notice(ChartState::Loading, true, false, "repairing coverage")
         .expect("a repair is announced");
-    assert_eq!(repairing.placement, ChartNoticePlacement::BottomRight);
+    assert_eq!(repairing.placement, ChartNoticePlacement::Corner);
 }
 
 #[test]
@@ -2905,7 +2905,7 @@ fn chart_notice_distinguishes_empty_loading_from_retained_recovery() {
     )
     .expect("recovery notice");
     assert_eq!(recovery.label, "Reconnecting chart");
-    assert_eq!(recovery.placement, ChartNoticePlacement::BottomRight);
+    assert_eq!(recovery.placement, ChartNoticePlacement::Corner);
     assert_eq!(recovery.tone, ChartNoticeTone::Warning);
     assert!(chart_surface_notice(ChartState::Ready, true, false, "current").is_none());
 }

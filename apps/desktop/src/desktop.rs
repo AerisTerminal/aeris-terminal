@@ -46,6 +46,8 @@ mod market_screener;
 mod market_screener_view;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
+#[path = "components/notifications.rs"]
+mod notifications;
 #[path = "components/order_book_panel.rs"]
 mod order_book_panel;
 #[path = "components/order_ticket.rs"]
@@ -216,6 +218,7 @@ use native_ui::{
     theme::{base_theme, gpui_color, platform_border_width},
     tooltip::{TooltipSpec, with_tooltip},
 };
+use notifications::{ChartCornerNotice, FillNotifications};
 use num_traits::ToPrimitive;
 use order_book_panel::OrderBookPanelState;
 use order_ticket::TradingOrderControlsState;
@@ -263,8 +266,8 @@ use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
-    WorkspaceMaximizeTransition, keep_trading_pnl_fresh, workspace_market_area,
-    workspace_maximize_transition, workspace_pane_grid,
+    WorkspaceMarketArea, WorkspaceMaximizeTransition, keep_trading_pnl_fresh, pane_chart_notice,
+    workspace_market_area, workspace_maximize_transition, workspace_pane_grid,
 };
 
 fn install_platform_http_client(cx: &mut App) {
@@ -777,6 +780,7 @@ struct WorkspaceSurface {
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_state_message: String,
+    chart_corner_notice: ChartCornerNotice,
     theme: AerisTheme,
     replay_label: String,
     worker_label: String,
@@ -3125,7 +3129,8 @@ impl MarketSummaryEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChartNoticePlacement {
     Center,
-    BottomRight,
+    /// Top-right of the chart, clear of its price axis, over a chart the trader is reading.
+    Corner,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3150,7 +3155,7 @@ fn chart_surface_notice(
     detail: &str,
 ) -> Option<ChartSurfaceNotice> {
     let placement = if has_market_data && !superseded {
-        ChartNoticePlacement::BottomRight
+        ChartNoticePlacement::Corner
     } else {
         ChartNoticePlacement::Center
     };
@@ -4514,6 +4519,7 @@ struct TerminalApp {
     pages: app_navigation::AppPages,
     frameless_title_bar: FramelessTitleBar,
     fullscreen_hint: FullscreenHint,
+    fill_notifications: FillNotifications,
     /// Shift+F chart-only fullscreen: only the workspace's charts show. Holds whether entering it
     /// also put the window into fullscreen, so leaving restores the window as it was.
     chart_fullscreen: Option<ChartFullscreen>,

@@ -1,44 +1,42 @@
 //! Chart pane host and chart-surface notices.
 
+use super::notifications::{chart_notice_accent, corner_notice_stack, notice_card};
 use super::{
-    AerisChartView, AerisTheme, ChartNoticePlacement, ChartNoticeTone, ChartState,
-    ChartSurfaceNotice, Div, Entity, HugeIcon, InteractiveElement, IntoElement, Loader,
-    ParentElement, Role, StatefulInteractiveElement, Styled, chart_chrome, chart_surface_notice,
-    div, gpui_color, px,
+    AerisChartView, AerisTheme, AnyElement, ChartNoticePlacement, ChartState, ChartSurfaceNotice,
+    Div, Entity, HugeIcon, InteractiveElement, IntoElement, Loader, ParentElement, Role,
+    SharedString, StatefulInteractiveElement, Styled, div, gpui_color, px,
 };
 
 pub(super) struct MarketWorkspaceState<'a> {
     pub(super) pane_id: u64,
     pub(super) chart: Option<&'a Entity<AerisChartView>>,
-    pub(super) chart_has_market_data: bool,
-    pub(super) chart_is_superseded: bool,
-    pub(super) chart_state: ChartState,
-    pub(super) chart_status_detail: String,
+    /// The chart's notice when it covers or centres on the surface; corner notices arrive in
+    /// `corner_notices`.
+    pub(super) notice: Option<ChartSurfaceNotice>,
+    /// Cards for the top-right stack, top first.
+    pub(super) corner_notices: Vec<AnyElement>,
+    pub(super) price_axis_width: f32,
     pub(super) theme: &'a AerisTheme,
 }
 
-#[allow(clippy::too_many_lines)]
 pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElement + use<> {
     let MarketWorkspaceState {
         pane_id,
         chart,
-        chart_has_market_data,
-        chart_is_superseded,
-        chart_state,
-        chart_status_detail,
+        notice,
+        corner_notices,
+        price_axis_width,
         theme,
     } = state;
-    let colors = theme.colors;
-    let notice = chart_surface_notice(
-        chart_state,
-        chart_has_market_data,
-        chart_is_superseded,
-        &chart_status_detail,
-    );
     let chart_surface = chart_pane_host(chart)
         .id(("primary_chart", pane_id))
-        .bg(gpui_color(colors.surface))
-        .children(notice.map(|notice| chart_notice(notice, theme)));
+        .bg(gpui_color(theme.colors.surface))
+        .children(
+            notice
+                .filter(|notice| notice.placement == ChartNoticePlacement::Center)
+                .map(|notice| chart_notice(notice, theme)),
+        )
+        .children(corner_notice_stack(corner_notices, price_axis_width));
     div().size_full().overflow_hidden().child(chart_surface)
 }
 
@@ -92,71 +90,33 @@ fn opaque_status_overlay(
         .justify_center()
 }
 
-pub(super) fn chart_notice(
-    notice: ChartSurfaceNotice,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    let colors = theme.colors;
+/// A notice centred on a chart with no data of its own to read.
+fn chart_notice(notice: ChartSurfaceNotice, theme: &AerisTheme) -> AnyElement {
     if notice.label == ChartState::Loading.label() {
-        if notice.placement != ChartNoticePlacement::Center {
-            // A repair behind the chart the trader is still reading is announced by
-            // the symbol legend's own spinner, beside the symbol it belongs to. A
-            // second one in the corner lands on top of that legend.
-            return div().into_any_element();
-        }
         let spinner = Loader::from_path("chart_notice_loader", HugeIcon::Loader.path())
             .with_size(px(40.0))
-            .color(gpui_color(colors.icon));
+            .color(gpui_color(theme.colors.icon));
         return opaque_status_overlay("chart_loading_status", notice, Some(spinner), theme)
             .into_any_element();
     }
-    if notice.label == ChartState::AwaitingData.label()
-        && notice.placement == ChartNoticePlacement::Center
-    {
+    if notice.label == ChartState::AwaitingData.label() {
         // Settled, not in progress: the same opaque surface as loading, without
         // a spinner that would suggest the wait is ours.
         return opaque_status_overlay("chart_awaiting_data_status", notice, None, theme)
             .into_any_element();
     }
-    let tone = match notice.tone {
-        ChartNoticeTone::Muted => colors.text_secondary,
-        ChartNoticeTone::Warning => colors.warning,
-        ChartNoticeTone::Loss => colors.danger,
-    };
-    let label = div()
+    let card = notice_card(
+        chart_notice_accent(notice.tone, theme),
+        notice.label,
+        notice.detail.map(SharedString::from),
+        theme,
+    );
+    div()
+        .absolute()
+        .inset_0()
         .flex()
-        .flex_col()
-        .gap_1()
-        .px_2()
-        .py_1()
-        .border_1()
-        .rounded(px(f32::from(
-            chart_chrome::CHART_SURFACE_RADIUS.logical_pixels(),
-        )))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface.with_alpha(0.94)))
-        .text_xs()
-        .text_color(gpui_color(tone))
-        .child(notice.label)
-        .children(notice.detail.map(|detail| {
-            div()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(detail)
-        }));
-    match notice.placement {
-        ChartNoticePlacement::Center => div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(label)
-            .into_any_element(),
-        ChartNoticePlacement::BottomRight => div()
-            .absolute()
-            .right_2()
-            .bottom_2()
-            .child(label)
-            .into_any_element(),
-    }
+        .items_center()
+        .justify_center()
+        .child(card)
+        .into_any_element()
 }

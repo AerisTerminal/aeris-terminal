@@ -1582,6 +1582,12 @@ impl AerisChartView {
         self.data_bridge.is_some()
     }
 
+    /// Width of the right price axis as last laid out, so host overlays can stay clear of it.
+    #[must_use]
+    pub fn price_axis_width(&self) -> f32 {
+        self.engine.axis_w.to_f32().unwrap_or_default()
+    }
+
     /// Marks a load the trader is waiting on, so the symbol legend can carry it.
     ///
     /// Returns whether the surface changed, so a caller polling the host's

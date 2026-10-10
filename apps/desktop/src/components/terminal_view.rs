@@ -575,6 +575,7 @@ impl TerminalApp {
         self.reconcile_active_drags(cx);
         self.track_window_activation(window, cx);
         self.track_fullscreen_hint(window, cx);
+        self.track_chart_corner_notices(cx);
         self.track_chart_fullscreen(window);
         self.absorb_render_requests(window, cx);
         self.synchronize_linked_charts(cx);
@@ -690,15 +691,20 @@ impl TerminalApp {
     ) -> impl IntoElement + use<> {
         let watchlist = self.watchlist_panel_state(cx);
         workspace_market_area(
-            terminal,
-            &self.workspaces[self.active],
-            active,
-            (!self.drawing_toolbar.is_collapsed()).then_some(DrawingSidebar {
-                menu: &self.drawing_tool_menu,
-                favorites: self.chart_chrome.drawing_favorites,
-            }),
-            watchlist,
-            &self.theme,
+            WorkspaceMarketArea {
+                terminal,
+                workspace: &self.workspaces[self.active],
+                active_surface: active,
+                expanded_drawing_toolbar: (!self.drawing_toolbar.is_collapsed()).then_some(
+                    DrawingSidebar {
+                        menu: &self.drawing_tool_menu,
+                        favorites: self.chart_chrome.drawing_favorites,
+                    },
+                ),
+                watchlist,
+                fills: &self.fill_notifications,
+                theme: &self.theme,
+            },
             cx,
         )
     }
@@ -860,7 +866,13 @@ impl TerminalApp {
             // Every chart in the workspace layout fills the screen; a pane maximized with
             // Alt+click stays the only one shown, exactly as in the docked workspace.
             let workspace = &self.workspaces[self.active];
-            let charts = workspace_pane_grid(&terminal, workspace, &self.theme, cx);
+            let charts = workspace_pane_grid(
+                &terminal,
+                workspace,
+                &self.fill_notifications,
+                &self.theme,
+                cx,
+            );
             keep_trading_pnl_fresh(&active, workspace, cx);
             return self
                 .page_root()

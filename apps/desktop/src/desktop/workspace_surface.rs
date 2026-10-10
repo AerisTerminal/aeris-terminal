@@ -84,6 +84,8 @@ struct WorkspaceSurfaceInitialization {
     theme: AerisTheme,
 }
 
+// One line per surface field; splitting the literal would only scatter the defaults.
+#[allow(clippy::too_many_lines)]
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
     WorkspaceSurface {
         chart: init.startup.chart,
@@ -111,6 +113,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         scrolls: WorkspaceScrollHandles::default(),
         chart_state: init.startup.chart_state,
         chart_state_message: init.startup.chart_state_message,
+        chart_corner_notice: ChartCornerNotice::default(),
         theme: init.theme,
         replay_label: init.startup.replay_label,
         worker_label: init.startup.worker_label,
