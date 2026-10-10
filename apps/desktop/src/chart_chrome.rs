@@ -261,6 +261,7 @@ pub struct ChartChromePreferences {
     pub symbol_search_categories: InstrumentSearchCategories,
     pub window_frame: WindowFrame,
     pub drawing_favorites: DrawingFavorites,
+    pub trading_shortcuts: TradingShortcutMode,
 }
 
 const STAMP_FAVORITE_PREFIX: &str = "stamp:";
@@ -400,6 +401,40 @@ impl WindowFrame {
     }
 }
 
+/// Whether trading shortcuts ask before they send.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TradingShortcutMode {
+    /// Each shortcut opens a confirmation first.
+    #[default]
+    Confirm,
+    /// One-click trading: shortcuts send at once.
+    OneClick,
+}
+
+impl TradingShortcutMode {
+    #[must_use]
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::OneClick => "one_click",
+        }
+    }
+
+    /// Only the exact one-click identifier skips confirmation; anything else keeps it.
+    #[must_use]
+    pub fn from_identifier(value: &str) -> Self {
+        match value.trim() {
+            "one_click" => Self::OneClick,
+            _ => Self::Confirm,
+        }
+    }
+
+    #[must_use]
+    pub const fn one_click(self) -> bool {
+        matches!(self, Self::OneClick)
+    }
+}
+
 impl Default for ChartChromePreferences {
     fn default() -> Self {
         Self {
@@ -410,6 +445,7 @@ impl Default for ChartChromePreferences {
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
             drawing_favorites: DrawingFavorites::default(),
+            trading_shortcuts: TradingShortcutMode::Confirm,
         }
     }
 }
@@ -536,6 +572,8 @@ pub fn parse_chart_chrome_preferences(contents: &str) -> ChartChromePreferences 
             preferences.drawing_favorites.toolbar_visible = parse_chrome_flag(value);
         } else if let Some(value) = line.strip_prefix("drawing_favorites_origin=") {
             preferences.drawing_favorites.toolbar_origin = parse_toolbar_origin(value);
+        } else if let Some(value) = line.strip_prefix("trading_shortcuts=") {
+            preferences.trading_shortcuts = TradingShortcutMode::from_identifier(value);
         }
     }
     // A search that excludes every category would never return anything.
@@ -555,7 +593,7 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
         .map(|(x, y)| format!("drawing_favorites_origin={x},{y}\n"))
         .unwrap_or_default();
     format!(
-        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\n{origin}",
+        "indicator_name_labels={}\nindicator_value_labels={}\nindicator_price_lines={}\nchart_type={}\nsymbol_search_futures={}\nsymbol_search_equities={}\nwindow_frame={}\ndrawing_favorites={}\ndrawing_favorites_toolbar={}\ntrading_shortcuts={}\n{origin}",
         u8::from(preferences.indicator_name_labels_visible),
         u8::from(preferences.indicator_value_labels_visible),
         u8::from(preferences.indicator_price_lines_visible),
@@ -565,6 +603,7 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
         preferences.window_frame.identifier(),
         favorites.encode_tools(),
         u8::from(favorites.toolbar_visible),
+        preferences.trading_shortcuts.identifier(),
     )
 }
 
@@ -792,7 +831,7 @@ mod tests {
     use super::{
         ChartChromePreferences, ChartChromeSaveState, DrawingFavorites, INDICATOR_SPECS,
         IndicatorKind, IndicatorLocation, IndicatorParameters, InstrumentSearchCategories,
-        WindowFrame, chart_chrome_backup_path, chart_chrome_staging_path,
+        TradingShortcutMode, WindowFrame, chart_chrome_backup_path, chart_chrome_staging_path,
         encode_chart_chrome_preferences, filter_indicator_specs,
         load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
@@ -976,10 +1015,21 @@ mod tests {
                 toolbar_origin: Some((120.5, 80.0)),
                 ..starred_trend_line_and_star()
             },
+            trading_shortcuts: TradingShortcutMode::OneClick,
         };
         assert_eq!(
             encode_chart_chrome_preferences(hidden),
-            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ndrawing_favorites_origin=120.5,80\n"
+            "indicator_name_labels=0\nindicator_value_labels=1\nindicator_price_lines=0\nchart_type=bars\nsymbol_search_futures=1\nsymbol_search_equities=0\nwindow_frame=frameless\ndrawing_favorites=trend_line,stamp:star\ndrawing_favorites_toolbar=0\ntrading_shortcuts=one_click\ndrawing_favorites_origin=120.5,80\n"
+        );
+        assert_eq!(
+            defaults.trading_shortcuts,
+            TradingShortcutMode::Confirm,
+            "trading shortcuts ask first by default"
+        );
+        assert_eq!(
+            parse_chart_chrome_preferences("trading_shortcuts=1\n").trading_shortcuts,
+            TradingShortcutMode::Confirm,
+            "only the exact one-click identifier skips confirmation"
         );
         assert_eq!(defaults.window_frame, WindowFrame::Framed);
         assert_eq!(
@@ -1027,6 +1077,7 @@ mod tests {
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
             drawing_favorites: DrawingFavorites::default(),
+            trading_shortcuts: TradingShortcutMode::Confirm,
         };
         let pending = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -1036,6 +1087,7 @@ mod tests {
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
             drawing_favorites: DrawingFavorites::default(),
+            trading_shortcuts: TradingShortcutMode::Confirm,
         };
         save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
 
@@ -1062,6 +1114,7 @@ mod tests {
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
             drawing_favorites: DrawingFavorites::default(),
+            trading_shortcuts: TradingShortcutMode::Confirm,
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -1071,6 +1124,7 @@ mod tests {
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
             drawing_favorites: DrawingFavorites::default(),
+            trading_shortcuts: TradingShortcutMode::Confirm,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let (_, inflight) = {
@@ -1121,6 +1175,7 @@ mod tests {
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
             drawing_favorites: DrawingFavorites::default(),
+            trading_shortcuts: TradingShortcutMode::Confirm,
         };
         let second = ChartChromePreferences {
             indicator_name_labels_visible: true,
@@ -1130,6 +1185,7 @@ mod tests {
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
             drawing_favorites: DrawingFavorites::default(),
+            trading_shortcuts: TradingShortcutMode::Confirm,
         };
         let state = Mutex::new(ChartChromeSaveState::default());
         let failed_generation = {

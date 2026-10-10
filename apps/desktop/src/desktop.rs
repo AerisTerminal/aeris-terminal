@@ -71,6 +71,8 @@ mod terminal_chrome;
 mod terminal_view;
 #[path = "components/time_sales_panel.rs"]
 mod time_sales_panel;
+#[path = "components/trading_hotkeys.rs"]
+mod trading_hotkeys;
 #[path = "update.rs"]
 mod update;
 #[path = "components/watchlist_panel.rs"]
@@ -515,6 +517,8 @@ actions!(
         SplitPaneHorizontal,
         SplitPaneVertical,
         ClosePane,
+        ToggleTradingArmed,
+        ToggleOneClickTrading,
         TradingBuyMarket,
         TradingSellMarket,
         TradingCancelAll,
@@ -4519,6 +4523,7 @@ struct TerminalApp {
     command_palette_open: bool,
     command_palette_selection: usize,
     command_palette_message: Option<String>,
+    keyboard_trading: trading_hotkeys::KeyboardTrading,
     broker_connection_task: Option<gpui::Task<()>>,
     broker_connections: HostedBrokerConnections,
     linked_sync_revisions: BTreeMap<String, u64>,
@@ -5075,11 +5080,10 @@ fn mount_desktop(
     let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
     let chart_chrome = configured.chart_chrome;
-    if let Err(error) = validate_trading_keymap() {
-        diagnostic!("Aeris trading keymap is invalid: {error}");
+    if let Err(error) = bind_desktop_keys(cx) {
+        diagnostic!("Aeris keyboard shortcuts are invalid: {error}");
         return None;
     }
-    bind_desktop_keys(cx);
     let quit_lifecycle = lifecycle.clone();
     cx.on_app_quit(move |cx| {
         let quit = quit_lifecycle.begin_quit(cx);
@@ -5153,96 +5157,80 @@ fn mount_desktop(
     existing_root
 }
 
-fn validate_trading_keymap() -> Result<(), String> {
-    let keymap = aeris_desktop::keymap::KeymapOwner::defaults()?;
-    keymap.validate_against_reserved(&[
-        "f11",
-        "alt-enter",
-        "alt-f9",
-        "alt-f10",
-        "alt-f4",
-        "ctrl-t",
-        "ctrl-tab",
-        "ctrl-shift-tab",
-        "ctrl-shift-pageup",
-        "ctrl-shift-pagedown",
-        "ctrl-w",
-        "ctrl-alt-h",
-        "ctrl-alt-v",
-        "ctrl-shift-w",
-    ])
+/// The GPUI action a key binding dispatches for a command. Commands without one run only from
+/// the command palette, so the registry must not give them a chord.
+fn command_key_action(
+    id: aeris_desktop::command_registry::CommandId,
+) -> Option<Box<dyn gpui::Action>> {
+    use aeris_desktop::command_registry::CommandId;
+    Some(match id {
+        CommandId::OpenPalette => Box::new(OpenCommandPalette),
+        CommandId::ToggleFullscreen => Box::new(ToggleFullscreen),
+        CommandId::MinimizeWindow => Box::new(MinimizeWindow),
+        CommandId::ZoomWindow => Box::new(ZoomWindow),
+        CommandId::CloseWindow => Box::new(CloseWindow),
+        CommandId::NewWorkspace => Box::new(NewWorkspace),
+        CommandId::SelectNextWorkspace => Box::new(SelectNextWorkspace),
+        CommandId::SelectPreviousWorkspace => Box::new(SelectPreviousWorkspace),
+        CommandId::MoveWorkspaceLeft => Box::new(MoveWorkspaceLeft),
+        CommandId::MoveWorkspaceRight => Box::new(MoveWorkspaceRight),
+        CommandId::CloseWorkspace => Box::new(CloseWorkspace),
+        CommandId::SplitHorizontal => Box::new(SplitPaneHorizontal),
+        CommandId::SplitVertical => Box::new(SplitPaneVertical),
+        CommandId::ClosePane => Box::new(ClosePane),
+        CommandId::ToggleTradingArmed => Box::new(ToggleTradingArmed),
+        CommandId::ToggleOneClickTrading => Box::new(ToggleOneClickTrading),
+        CommandId::BuyMarket => Box::new(TradingBuyMarket),
+        CommandId::SellMarket => Box::new(TradingSellMarket),
+        CommandId::CancelAll => Box::new(TradingCancelAll),
+        CommandId::FlattenAccount => Box::new(TradingFlattenAccount),
+        CommandId::KillSwitch => Box::new(TradingKillSwitch),
+        CommandId::ToggleContext
+        | CommandId::ToggleOrderBook
+        | CommandId::ToggleTimeSales
+        | CommandId::ToggleWatchlist
+        | CommandId::ChartCandles
+        | CommandId::ChartBars
+        | CommandId::ChartLine
+        | CommandId::ChartArea
+        | CommandId::ChartBaseline
+        | CommandId::ChartFootprint
+        | CommandId::Interval1Minute
+        | CommandId::Interval5Minutes
+        | CommandId::Interval15Minutes
+        | CommandId::Interval1Hour
+        | CommandId::Interval1Day => return None,
+    })
 }
 
-fn bind_desktop_keys(cx: &mut App) {
-    use aeris_desktop::command_registry::{CommandId, command};
-    cx.bind_keys([
-        KeyBinding::new("f11", ToggleFullscreen, None),
-        KeyBinding::new("alt-enter", ToggleFullscreen, None),
-        KeyBinding::new("alt-f9", MinimizeWindow, None),
-        KeyBinding::new("alt-f10", ZoomWindow, None),
-        KeyBinding::new("alt-f4", CloseWindow, None),
-        KeyBinding::new(
-            command(CommandId::NewWorkspace).chord.unwrap_or("ctrl-t"),
-            NewWorkspace,
-            None,
-        ),
-        KeyBinding::new("ctrl-tab", SelectNextWorkspace, None),
-        KeyBinding::new("ctrl-shift-tab", SelectPreviousWorkspace, None),
-        KeyBinding::new("ctrl-shift-pageup", MoveWorkspaceLeft, None),
-        KeyBinding::new("ctrl-shift-pagedown", MoveWorkspaceRight, None),
-        KeyBinding::new("ctrl-w", CloseWorkspace, None),
-        KeyBinding::new(
-            command(CommandId::SplitHorizontal)
-                .chord
-                .unwrap_or("ctrl-alt-h"),
-            SplitPaneHorizontal,
-            None,
-        ),
-        KeyBinding::new(
-            command(CommandId::SplitVertical)
-                .chord
-                .unwrap_or("ctrl-alt-v"),
-            SplitPaneVertical,
-            None,
-        ),
-        KeyBinding::new("ctrl-shift-w", ClosePane, None),
-        KeyBinding::new(
-            command(CommandId::BuyMarket).chord.unwrap_or("ctrl-b"),
-            TradingBuyMarket,
-            None,
-        ),
-        KeyBinding::new(
-            command(CommandId::SellMarket).chord.unwrap_or("ctrl-s"),
-            TradingSellMarket,
-            None,
-        ),
-        KeyBinding::new(
-            command(CommandId::CancelAll)
-                .chord
-                .unwrap_or("ctrl-shift-x"),
-            TradingCancelAll,
-            None,
-        ),
-        KeyBinding::new(
-            command(CommandId::FlattenAccount)
-                .chord
-                .unwrap_or("ctrl-shift-f"),
-            TradingFlattenAccount,
-            None,
-        ),
-        KeyBinding::new(
-            command(CommandId::KillSwitch)
-                .chord
-                .unwrap_or("ctrl-shift-k"),
-            TradingKillSwitch,
-            None,
-        ),
-        KeyBinding::new(
-            command(CommandId::OpenPalette).chord.unwrap_or("ctrl-k"),
-            OpenCommandPalette,
-            None,
-        ),
-    ]);
+/// Builds every desktop key binding from the command registry after checking it against the
+/// system shortcuts and the keys the chart consumes.
+fn desktop_key_bindings() -> Result<Vec<KeyBinding>, String> {
+    use aeris_desktop::command_registry::{COMMANDS, validate_chords};
+    validate_chords(COMMANDS, &aeris_chart_integration::chart_keystrokes())?;
+    let mut bindings = Vec::new();
+    for spec in COMMANDS.iter().filter(|spec| !spec.chords.is_empty()) {
+        let action = command_key_action(spec.id)
+            .ok_or_else(|| format!("{} has a shortcut but no key action", spec.title))?;
+        for chord in spec.chords {
+            let binding = KeyBinding::load(
+                chord,
+                action.boxed_clone(),
+                None,
+                false,
+                None,
+                &gpui::DummyKeyboardMapper,
+            )
+            .map_err(|error| format!("{} chord {chord}: {error}", spec.title))?;
+            bindings.push(binding);
+        }
+    }
+    Ok(bindings)
+}
+
+fn bind_desktop_keys(cx: &mut App) -> Result<(), String> {
+    cx.bind_keys(desktop_key_bindings()?);
+    Ok(())
 }
 #[cfg(test)]
 mod tests;

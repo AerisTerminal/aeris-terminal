@@ -252,11 +252,15 @@ impl AerisChartView {
             return;
         }
         let editing = self.engine.drawing_text_edit().is_some();
-        if self.input.key_down(&mut self.engine, event, cx) {
+        let handled = self.input.key_down(&mut self.engine, event, cx);
+        if handled {
             if editing {
                 window.prevent_default();
             }
             cx.stop_propagation();
+        }
+        // An unconsumed key can still change the chart: Escape always drops hover.
+        if handled || self.engine.frame_pending() {
             self.after_input(cx);
         }
     }

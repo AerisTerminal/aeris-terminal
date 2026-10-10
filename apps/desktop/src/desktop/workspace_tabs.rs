@@ -204,6 +204,7 @@ impl TerminalApp {
             command_palette_open: false,
             command_palette_selection: 0,
             command_palette_message: None,
+            keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
             broker_connection_task: None,
             broker_connections: HostedBrokerConnections::default(),
             linked_sync_revisions: BTreeMap::new(),
@@ -2853,6 +2854,13 @@ impl TerminalApp {
             cx.stop_propagation();
             return;
         }
+        if self.keyboard_trading.confirming() {
+            if self.trading_confirmation_key_down(event, window, cx) {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
         if event.keystroke.key.eq_ignore_ascii_case("escape") && self.platform_menu_anchor.is_some()
         {
             self.close_platform_menu(window, cx);
@@ -2921,6 +2929,10 @@ impl TerminalApp {
     pub(super) fn track_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let window_active = window.is_window_active();
         let became_active = window_active && !self.window_active;
+        if !window_active && self.window_active {
+            // A key released in another window never reaches this one.
+            self.keyboard_trading.release_key();
+        }
         self.window_active = window_active;
         if !window_active {
             self.handle_window_move_gesture(WindowMoveGestureEvent::Cancel, window);

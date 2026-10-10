@@ -35,6 +35,8 @@ pub use aeris_charts_engine::{
 pub use aeris_charts_engine::{
     AppearanceColor as ChartAppearanceColor, FinancialThemeColors as ChartThemeColors,
 };
+/// The keys a focused chart consumes; desktop shortcuts must stay off them.
+pub use aeris_charts_render_gpui::input::chart_keystrokes;
 pub use bridge::ChartBridgeMetrics;
 pub use view::{
     AerisChartView, BigTradesFilter, BigTradesIntensity, BigTradesSettings, BigTradesSize,

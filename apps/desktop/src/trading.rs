@@ -84,6 +84,12 @@ pub fn record_outcome<T>(result: Result<T, String>, success: &str) -> bool {
     record_result(result.map(|_| success.to_string()))
 }
 
+/// Shows a message in the trading status row for something the desktop decided rather than a
+/// command result, such as a shortcut refused while keyboard trading is off.
+pub fn record_notice(notice: Result<String, String>) {
+    record_feedback(notice);
+}
+
 /// Records feedback whose message the command already composed; returns whether it
 /// succeeded.
 #[must_use]

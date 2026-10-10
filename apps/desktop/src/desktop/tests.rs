@@ -19,10 +19,10 @@ use super::{
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, current_instrument_menu_index,
-    default_rithmic_contract_index, durable_workspace_viewport, fullscreen_escape_command,
-    gpui_color, instrument_listing_refresh_needed, instrument_row_highlighted,
-    instrument_selector_label, instrument_target_after_close, overlay_height,
-    price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
+    default_rithmic_contract_index, desktop_key_bindings, durable_workspace_viewport,
+    fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
+    instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
+    overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
     ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
     series_selector_label, should_autoload_rithmic_catalog, should_finish_chrome_overlay_close,
     stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
@@ -833,7 +833,7 @@ mod timeframe_input {
         );
         let (view, cx) = cx.add_window_view(move |window, cx| {
             gpui_base::init(cx);
-            bind_desktop_keys(cx);
+            bind_desktop_keys(cx).expect("the registry shortcuts bind");
             let terminal = terminal_root(
                 MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
                     product,
@@ -915,6 +915,68 @@ mod timeframe_input {
         assert!(!chart_focused(cx));
         cx.simulate_keystrokes("ctrl-tab");
         assert!(chart_focused(cx), "Ctrl+Tab focuses the workspace's chart");
+    }
+
+    #[gpui::test]
+    fn trading_shortcuts_need_arming_ask_first_and_send_once_per_press(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        let armed =
+            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).keyboard_trading.armed());
+        let confirming = |cx: &mut VisualTestContext| {
+            cx.read(|cx| terminal.read(cx).keyboard_trading.confirming())
+        };
+        let release = |cx: &mut VisualTestContext, key: &str| {
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).expect("key"),
+            });
+        };
+        assert!(!armed(cx), "every launch starts disarmed");
+        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(
+            !confirming(cx),
+            "a disarmed shortcut sends and asks nothing"
+        );
+        release(cx, "x");
+
+        cx.simulate_keystrokes("ctrl-shift-a");
+        assert!(armed(cx));
+        cx.simulate_keystrokes("ctrl-shift-a");
+        assert!(armed(cx), "holding the arm chord toggles it once");
+        release(cx, "a");
+
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(confirming(cx), "an armed shortcut asks first");
+        cx.simulate_keystrokes("escape");
+        assert!(!confirming(cx), "Escape cancels the confirmation");
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(
+            !confirming(cx),
+            "a key repeat of the held chord does not ask again"
+        );
+        release(cx, "x");
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(confirming(cx), "a new press asks again");
+        cx.simulate_keystrokes("enter");
+        assert!(!confirming(cx), "Enter confirms");
+        release(cx, "enter");
+
+        cx.update(|_, cx| {
+            terminal.update(cx, |terminal, _| {
+                terminal.chart_chrome.trading_shortcuts =
+                    crate::desktop::chart_chrome::TradingShortcutMode::OneClick;
+            });
+        });
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(!confirming(cx), "one-click trading sends without asking");
+        release(cx, "x");
+
+        cx.simulate_keystrokes("ctrl-shift-a");
+        assert!(!armed(cx), "the arm chord disarms");
     }
 
     #[gpui::test]
@@ -1205,6 +1267,27 @@ fn escape_exits_fullscreen_without_stealing_regular_escape() {
     );
     assert_eq!(fullscreen_escape_command("escape", false), None);
     assert_eq!(fullscreen_escape_command("enter", true), None);
+}
+
+#[test]
+fn every_registry_shortcut_binds_and_stays_off_the_chart_keys() {
+    let bindings = desktop_key_bindings().expect("the registry shortcuts bind");
+    let chord_count = aeris_desktop::command_registry::COMMANDS
+        .iter()
+        .map(|spec| spec.chords.len())
+        .sum::<usize>();
+    assert_eq!(
+        bindings.len(),
+        chord_count,
+        "one binding per registry chord"
+    );
+    for key in aeris_chart_integration::chart_keystrokes() {
+        assert_eq!(
+            chart_shortcut(&key.key, key.modifiers),
+            None,
+            "{key} belongs to the chart, so no workspace key may claim it"
+        );
+    }
 }
 
 #[test]

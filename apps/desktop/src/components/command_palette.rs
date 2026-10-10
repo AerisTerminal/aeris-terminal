@@ -21,7 +21,7 @@ pub(super) fn command_palette_layer(
             terminal,
             spec.id,
             spec.title,
-            spec.chord,
+            spec.shortcut_label(),
             index,
             index == selected,
             theme,
@@ -101,7 +101,7 @@ fn command_row(
     terminal: &Entity<TerminalApp>,
     command: CommandId,
     title: &'static str,
-    chord: Option<&'static str>,
+    shortcut: Option<String>,
     index: usize,
     selected: bool,
     theme: &AerisTheme,
@@ -109,7 +109,7 @@ fn command_row(
     let execute = terminal.clone();
     MenuRow::search_result(("command_palette_row", index), title, theme)
         .highlighted(selected)
-        .when_some(chord, MenuRow::detail)
+        .when_some(shortcut, MenuRow::detail)
         .on_click(move |_, window, cx| {
             execute.update(cx, |terminal, terminal_cx| {
                 terminal.execute_registered_command(command, window, terminal_cx);

@@ -221,6 +221,7 @@ pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) error: Option<&'a str>,
     pub(super) workspace_drag: Option<WorkspaceDragState>,
     pub(super) app_view: super::market_screener::AppView,
+    pub(super) keyboard_trading: super::trading_hotkeys::KeyboardTradingIndicator,
     pub(super) theme: AerisTheme,
 }
 
@@ -330,6 +331,11 @@ pub(super) fn workspace_title_bar(
                 .child(tabs)
                 .child(drag_region),
         )
+        .child(super::trading_hotkeys::keyboard_trading_toggle(
+            terminal,
+            state.keyboard_trading,
+            &theme,
+        ))
         .child(workspace_window_controls(terminal, window, &theme))
 }
 

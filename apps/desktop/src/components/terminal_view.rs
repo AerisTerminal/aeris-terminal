@@ -1,3 +1,4 @@
+use super::trading_hotkeys::TradingHotkey;
 use super::*;
 use aeris_desktop::command_registry::{self, CommandId};
 use gpui::Focusable;
@@ -301,30 +302,54 @@ impl TerminalApp {
                     surface.select_interval(interval, surface_cx);
                 });
             }
+            CommandId::ToggleFullscreen => {
+                window.toggle_fullscreen();
+                self.chrome_focus.focus(window, cx);
+            }
+            CommandId::MinimizeWindow => window.minimize_window(),
+            CommandId::ZoomWindow => WindowCommand::MaximizeOrRestore.execute(window),
+            CommandId::CloseWindow => self.close_window(&CloseWindow, window, cx),
             CommandId::NewWorkspace => self.new_workspace(&NewWorkspace, window, cx),
+            CommandId::SelectNextWorkspace => {
+                self.select_next_workspace(&SelectNextWorkspace, window, cx);
+            }
+            CommandId::SelectPreviousWorkspace => {
+                self.select_previous_workspace(&SelectPreviousWorkspace, window, cx);
+            }
+            CommandId::MoveWorkspaceLeft => {
+                self.move_workspace_left(&MoveWorkspaceLeft, window, cx);
+            }
+            CommandId::MoveWorkspaceRight => {
+                self.move_workspace_right(&MoveWorkspaceRight, window, cx);
+            }
+            CommandId::CloseWorkspace => {
+                self.close_active_workspace(&CloseWorkspace, window, cx);
+            }
             CommandId::SplitHorizontal => {
                 self.split_pane_horizontal(&SplitPaneHorizontal, window, cx);
             }
             CommandId::SplitVertical => self.split_pane_vertical(&SplitPaneVertical, window, cx),
-            CommandId::BuyMarket => {
-                self.chrome_focus.focus(window, cx);
-                self.trading_buy_market(&TradingBuyMarket, window, cx);
+            CommandId::ClosePane => self.close_active_pane(&ClosePane, window, cx),
+            CommandId::ToggleTradingArmed => {
+                self.set_trading_armed(!self.keyboard_trading.armed(), cx);
             }
-            CommandId::SellMarket => {
-                self.chrome_focus.focus(window, cx);
-                self.trading_sell_market(&TradingSellMarket, window, cx);
+            CommandId::ToggleOneClickTrading => {
+                self.toggle_one_click_trading(&ToggleOneClickTrading, window, cx);
             }
-            CommandId::CancelAll => {
+            CommandId::BuyMarket
+            | CommandId::SellMarket
+            | CommandId::CancelAll
+            | CommandId::FlattenAccount
+            | CommandId::KillSwitch => {
+                let hotkey = match command {
+                    CommandId::BuyMarket => TradingHotkey::BuyMarket,
+                    CommandId::SellMarket => TradingHotkey::SellMarket,
+                    CommandId::CancelAll => TradingHotkey::CancelAll,
+                    CommandId::FlattenAccount => TradingHotkey::FlattenAccount,
+                    _ => TradingHotkey::KillSwitch,
+                };
                 self.chrome_focus.focus(window, cx);
-                self.trading_cancel_all(&TradingCancelAll, window, cx);
-            }
-            CommandId::FlattenAccount => {
-                self.chrome_focus.focus(window, cx);
-                self.trading_flatten_account(&TradingFlattenAccount, window, cx);
-            }
-            CommandId::KillSwitch => {
-                self.chrome_focus.focus(window, cx);
-                self.trading_kill_switch(&TradingKillSwitch, window, cx);
+                self.run_trading_hotkey(hotkey, window, cx);
             }
         }
     }
@@ -584,6 +609,7 @@ impl TerminalApp {
                 error: self.workspace_error.as_deref(),
                 workspace_drag: self.workspace_drag,
                 app_view: self.pages.view,
+                keyboard_trading: self.keyboard_trading_indicator(),
                 theme: self.theme,
             },
             window,
@@ -714,6 +740,10 @@ impl Render for TerminalApp {
         let fullscreen_focus = self.chrome_focus.clone();
         page.track_focus(&self.chrome_focus)
             .on_key_down(cx.listener(Self::on_key_down))
+            // Captured so a chart that consumes the release cannot leave a shortcut latched.
+            .capture_key_up(cx.listener(|terminal, _, _, _| {
+                terminal.keyboard_trading.release_key();
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|terminal, _, window, cx| {
@@ -733,6 +763,8 @@ impl Render for TerminalApp {
                 fullscreen_focus.focus(window, cx);
             })
             .on_action(cx.listener(Self::close_window))
+            .on_action(cx.listener(Self::toggle_trading_armed))
+            .on_action(cx.listener(Self::toggle_one_click_trading))
             .on_action(cx.listener(Self::trading_buy_market))
             .on_action(cx.listener(Self::trading_sell_market))
             .on_action(cx.listener(Self::trading_cancel_all))
@@ -778,6 +810,7 @@ impl TerminalApp {
             .children(self.platform_menu_overlay(terminal, window.viewport_size()))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
             .children(self.rendered_command_palette(terminal, cx))
+            .children(self.trading_confirmation_layer(terminal))
     }
 
     fn rendered_terminal_page(
@@ -818,6 +851,7 @@ impl TerminalApp {
         };
         let drawing_favorites = self.drawing_favorites_overlay(&terminal, chart_top, window, cx);
         let command_palette = self.rendered_command_palette(&terminal, cx);
+        let trading_confirmation = self.trading_confirmation_layer(&terminal);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
         let header = self.rendered_header(&terminal, &active, cx);
@@ -846,7 +880,8 @@ impl TerminalApp {
                 .children(context_menu)
                 .children(settings_menu)
                 .children(drawing_tool_menu)
-                .children(command_palette);
+                .children(command_palette)
+                .children(trading_confirmation);
         }
         self.page_root()
             .children(title_bar)
@@ -870,16 +905,20 @@ impl TerminalApp {
             .children(platform_menu)
             .children(app_navigation)
             .children(command_palette)
+            .children(trading_confirmation)
     }
 }
 
 impl TerminalApp {
-    fn trading_hotkeys_enabled(&self, window: &Window, cx: &App) -> bool {
+    pub(super) fn trading_hotkeys_enabled(&self, window: &Window, cx: &App) -> bool {
         self.pages.view == market_screener::AppView::Terminal
             && self.workspace_keyboard_focused(window, cx)
     }
 
-    fn trading_order_frame(&self, cx: &App) -> Option<aeris_market_data::OrderBookFrame> {
+    pub(super) fn trading_order_frame(
+        &self,
+        cx: &App,
+    ) -> Option<aeris_market_data::OrderBookFrame> {
         self.active_surface()
             .read(cx)
             .order_book
@@ -888,7 +927,7 @@ impl TerminalApp {
             .cloned()
     }
 
-    fn trading_order_entry(
+    pub(super) fn trading_order_entry(
         &self,
         cx: &App,
     ) -> (
@@ -909,8 +948,20 @@ impl TerminalApp {
         )
     }
 
-    fn trading_order_entry_locked(&self, cx: &App) -> bool {
+    pub(super) fn trading_order_entry_locked(&self, cx: &App) -> bool {
         super::selected_account_lock_reason(&self.active_surface().read(cx).trading_pnl).is_some()
+    }
+
+    /// A trading key the workspace does not take moves on to the focused element.
+    fn trading_key_action(
+        &mut self,
+        hotkey: TradingHotkey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.run_trading_hotkey(hotkey, window, cx) {
+            cx.propagate();
+        }
     }
 
     fn trading_buy_market(
@@ -919,22 +970,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window, cx) || self.trading_order_entry_locked(cx) {
-            return;
-        }
-        let Some(frame) = self.trading_order_frame(cx) else {
-            return;
-        };
-        let (account_id, quantity, order_type, time_in_force) = self.trading_order_entry(cx);
-        aeris_desktop::trading::dispatch_simulated_order(
-            &frame,
-            aeris_trading::OrderSide::Buy,
-            account_id,
-            quantity,
-            order_type,
-            time_in_force,
-            cx,
-        );
+        self.trading_key_action(TradingHotkey::BuyMarket, window, cx);
     }
 
     fn trading_sell_market(
@@ -943,22 +979,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window, cx) || self.trading_order_entry_locked(cx) {
-            return;
-        }
-        let Some(frame) = self.trading_order_frame(cx) else {
-            return;
-        };
-        let (account_id, quantity, order_type, time_in_force) = self.trading_order_entry(cx);
-        aeris_desktop::trading::dispatch_simulated_order(
-            &frame,
-            aeris_trading::OrderSide::Sell,
-            account_id,
-            quantity,
-            order_type,
-            time_in_force,
-            cx,
-        );
+        self.trading_key_action(TradingHotkey::SellMarket, window, cx);
     }
 
     fn trading_cancel_all(
@@ -967,10 +988,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window, cx) {
-            return;
-        }
-        aeris_desktop::trading::cancel_simulated_accounts(cx);
+        self.trading_key_action(TradingHotkey::CancelAll, window, cx);
     }
 
     fn trading_flatten_account(
@@ -979,15 +997,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.trading_hotkeys_enabled(window, cx)
-            && let Some(frame) = self.trading_order_frame(cx)
-        {
-            aeris_desktop::trading::flatten_simulated_account_for(
-                &frame,
-                self.trading_order_entry(cx).0,
-                cx,
-            );
-        }
+        self.trading_key_action(TradingHotkey::FlattenAccount, window, cx);
     }
 
     fn trading_kill_switch(
@@ -996,10 +1006,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window, cx) {
-            return;
-        }
-        aeris_desktop::trading::kill_simulated_accounts(cx);
+        self.trading_key_action(TradingHotkey::KillSwitch, window, cx);
     }
 }
 

@@ -1,9 +1,18 @@
 //! Product command metadata shared by menus, keyboard bindings, and the command palette.
+//!
+//! This table is the only source of desktop keyboard shortcuts. Keys the chart consumes belong
+//! to Aeris Charts; [`validate_chords`] keeps every shortcut here off them.
+
+use gpui::Keystroke;
 
 /// Stable command identifiers. Execution stays at the owning desktop surface/runtime boundary.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CommandId {
     OpenPalette,
+    ToggleFullscreen,
+    MinimizeWindow,
+    ZoomWindow,
+    CloseWindow,
     ToggleContext,
     ToggleOrderBook,
     ToggleTimeSales,
@@ -20,8 +29,16 @@ pub enum CommandId {
     Interval1Hour,
     Interval1Day,
     NewWorkspace,
+    SelectNextWorkspace,
+    SelectPreviousWorkspace,
+    MoveWorkspaceLeft,
+    MoveWorkspaceRight,
+    CloseWorkspace,
     SplitHorizontal,
     SplitVertical,
+    ClosePane,
+    ToggleTradingArmed,
+    ToggleOneClickTrading,
     BuyMarket,
     SellMarket,
     CancelAll,
@@ -30,8 +47,12 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 36] = [
         Self::OpenPalette,
+        Self::ToggleFullscreen,
+        Self::MinimizeWindow,
+        Self::ZoomWindow,
+        Self::CloseWindow,
         Self::ToggleContext,
         Self::ToggleOrderBook,
         Self::ToggleTimeSales,
@@ -48,8 +69,16 @@ impl CommandId {
         Self::Interval1Hour,
         Self::Interval1Day,
         Self::NewWorkspace,
+        Self::SelectNextWorkspace,
+        Self::SelectPreviousWorkspace,
+        Self::MoveWorkspaceLeft,
+        Self::MoveWorkspaceRight,
+        Self::CloseWorkspace,
         Self::SplitHorizontal,
         Self::SplitVertical,
+        Self::ClosePane,
+        Self::ToggleTradingArmed,
+        Self::ToggleOneClickTrading,
         Self::BuyMarket,
         Self::SellMarket,
         Self::CancelAll,
@@ -63,155 +92,291 @@ pub struct CommandSpec {
     pub id: CommandId,
     pub title: &'static str,
     pub keywords: &'static str,
-    pub chord: Option<&'static str>,
+    /// GPUI keystrokes bound to the command, the displayed shortcut first.
+    pub chords: &'static [&'static str],
+}
+
+impl CommandSpec {
+    /// The shortcut shown next to the command, written for people (`Ctrl+Shift+K`).
+    #[must_use]
+    pub fn shortcut_label(&self) -> Option<String> {
+        self.chords.first().map(|chord| chord_label(chord))
+    }
+}
+
+/// Writes a GPUI chord such as `ctrl-shift-pageup` as `Ctrl+Shift+Page Up`.
+#[must_use]
+pub fn chord_label(chord: &str) -> String {
+    chord
+        .split('-')
+        .map(|part| match part {
+            "ctrl" => "Ctrl".to_string(),
+            "shift" => "Shift".to_string(),
+            "alt" => "Alt".to_string(),
+            "pageup" => "Page Up".to_string(),
+            "pagedown" => "Page Down".to_string(),
+            key => {
+                let mut characters = key.chars();
+                characters.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().chain(characters).collect()
+                })
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+const fn spec(
+    id: CommandId,
+    title: &'static str,
+    keywords: &'static str,
+    chords: &'static [&'static str],
+) -> CommandSpec {
+    CommandSpec {
+        id,
+        title,
+        keywords,
+        chords,
+    }
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        id: CommandId::OpenPalette,
-        title: "Open command palette",
-        keywords: "search commands",
-        chord: Some("ctrl-k"),
-    },
-    CommandSpec {
-        id: CommandId::ToggleContext,
-        title: "Market context",
-        keywords: "toggle show hide calendar macro energy cot agriculture fundamentals",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ToggleOrderBook,
-        title: "Order book",
-        keywords: "toggle show hide dom depth",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ToggleTimeSales,
-        title: "Time & Sales",
-        keywords: "toggle show hide tape trades prints",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ToggleWatchlist,
-        title: "Watchlist",
-        keywords: "toggle show hide symbols",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ChartCandles,
-        title: "Chart: Candles",
-        keywords: "candlestick",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ChartBars,
-        title: "Chart: Bars",
-        keywords: "ohlc",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ChartLine,
-        title: "Chart: Line",
-        keywords: "close",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ChartArea,
-        title: "Chart: Area",
-        keywords: "filled",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ChartBaseline,
-        title: "Chart: Baseline",
-        keywords: "comparison",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::ChartFootprint,
-        title: "Chart: Footprint",
-        keywords: "order flow bid ask delta",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::Interval1Minute,
-        title: "Interval: 1 minute",
-        keywords: "1m",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::Interval5Minutes,
-        title: "Interval: 5 minutes",
-        keywords: "5m",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::Interval15Minutes,
-        title: "Interval: 15 minutes",
-        keywords: "15m",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::Interval1Hour,
-        title: "Interval: 1 hour",
-        keywords: "1h 60m",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::Interval1Day,
-        title: "Interval: 1 day",
-        keywords: "1d daily",
-        chord: None,
-    },
-    CommandSpec {
-        id: CommandId::NewWorkspace,
-        title: "New workspace",
-        keywords: "tab",
-        chord: Some("ctrl-t"),
-    },
-    CommandSpec {
-        id: CommandId::SplitHorizontal,
-        title: "Split pane horizontally",
-        keywords: "layout",
-        chord: Some("ctrl-alt-h"),
-    },
-    CommandSpec {
-        id: CommandId::SplitVertical,
-        title: "Split pane vertically",
-        keywords: "layout",
-        chord: Some("ctrl-alt-v"),
-    },
-    CommandSpec {
-        id: CommandId::BuyMarket,
-        title: "Trading: Buy market",
-        keywords: "order",
-        chord: Some("ctrl-b"),
-    },
-    CommandSpec {
-        id: CommandId::SellMarket,
-        title: "Trading: Sell market",
-        keywords: "order",
-        chord: Some("ctrl-s"),
-    },
-    CommandSpec {
-        id: CommandId::CancelAll,
-        title: "Trading: Cancel all",
-        keywords: "orders",
-        chord: Some("ctrl-shift-x"),
-    },
-    CommandSpec {
-        id: CommandId::FlattenAccount,
-        title: "Trading: Flatten account",
-        keywords: "close positions",
-        chord: Some("ctrl-shift-f"),
-    },
-    CommandSpec {
-        id: CommandId::KillSwitch,
-        title: "Trading: Kill switch",
-        keywords: "cancel flatten lock",
-        chord: Some("ctrl-shift-k"),
-    },
+    spec(
+        CommandId::OpenPalette,
+        "Open command palette",
+        "search commands",
+        &["ctrl-k"],
+    ),
+    spec(
+        CommandId::ToggleFullscreen,
+        "Toggle fullscreen",
+        "window full screen",
+        &["f11", "alt-enter"],
+    ),
+    spec(
+        CommandId::MinimizeWindow,
+        "Minimize window",
+        "window",
+        &["alt-f9"],
+    ),
+    spec(
+        CommandId::ZoomWindow,
+        "Maximize or restore window",
+        "window zoom",
+        &["alt-f10"],
+    ),
+    spec(
+        CommandId::CloseWindow,
+        "Close window",
+        "window quit exit",
+        &["alt-f4"],
+    ),
+    spec(
+        CommandId::ToggleContext,
+        "Market context",
+        "toggle show hide calendar macro energy cot agriculture fundamentals",
+        &[],
+    ),
+    spec(
+        CommandId::ToggleOrderBook,
+        "Order book",
+        "toggle show hide dom depth",
+        &[],
+    ),
+    spec(
+        CommandId::ToggleTimeSales,
+        "Time & Sales",
+        "toggle show hide tape trades prints",
+        &[],
+    ),
+    spec(
+        CommandId::ToggleWatchlist,
+        "Watchlist",
+        "toggle show hide symbols",
+        &[],
+    ),
+    spec(
+        CommandId::ChartCandles,
+        "Chart: Candles",
+        "candlestick",
+        &[],
+    ),
+    spec(CommandId::ChartBars, "Chart: Bars", "ohlc", &[]),
+    spec(CommandId::ChartLine, "Chart: Line", "close", &[]),
+    spec(CommandId::ChartArea, "Chart: Area", "filled", &[]),
+    spec(
+        CommandId::ChartBaseline,
+        "Chart: Baseline",
+        "comparison",
+        &[],
+    ),
+    spec(
+        CommandId::ChartFootprint,
+        "Chart: Footprint",
+        "order flow bid ask delta",
+        &[],
+    ),
+    spec(CommandId::Interval1Minute, "Interval: 1 minute", "1m", &[]),
+    spec(
+        CommandId::Interval5Minutes,
+        "Interval: 5 minutes",
+        "5m",
+        &[],
+    ),
+    spec(
+        CommandId::Interval15Minutes,
+        "Interval: 15 minutes",
+        "15m",
+        &[],
+    ),
+    spec(CommandId::Interval1Hour, "Interval: 1 hour", "1h 60m", &[]),
+    spec(CommandId::Interval1Day, "Interval: 1 day", "1d daily", &[]),
+    spec(CommandId::NewWorkspace, "New workspace", "tab", &["ctrl-t"]),
+    spec(
+        CommandId::SelectNextWorkspace,
+        "Next workspace",
+        "tab switch",
+        &["ctrl-tab"],
+    ),
+    spec(
+        CommandId::SelectPreviousWorkspace,
+        "Previous workspace",
+        "tab switch",
+        &["ctrl-shift-tab"],
+    ),
+    spec(
+        CommandId::MoveWorkspaceLeft,
+        "Move workspace left",
+        "tab reorder",
+        &["ctrl-shift-pageup"],
+    ),
+    spec(
+        CommandId::MoveWorkspaceRight,
+        "Move workspace right",
+        "tab reorder",
+        &["ctrl-shift-pagedown"],
+    ),
+    spec(
+        CommandId::CloseWorkspace,
+        "Close workspace",
+        "tab",
+        &["ctrl-w"],
+    ),
+    spec(
+        CommandId::SplitHorizontal,
+        "Split pane horizontally",
+        "layout",
+        &["ctrl-alt-h"],
+    ),
+    spec(
+        CommandId::SplitVertical,
+        "Split pane vertically",
+        "layout",
+        &["ctrl-alt-v"],
+    ),
+    spec(
+        CommandId::ClosePane,
+        "Close pane",
+        "layout",
+        &["ctrl-shift-w"],
+    ),
+    spec(
+        CommandId::ToggleTradingArmed,
+        "Trading: Arm or disarm keyboard trading",
+        "hotkeys shortcuts enable disable",
+        &["ctrl-shift-a"],
+    ),
+    spec(
+        CommandId::ToggleOneClickTrading,
+        "Trading: Toggle one-click trading",
+        "confirm confirmation hotkeys",
+        &[],
+    ),
+    spec(
+        CommandId::BuyMarket,
+        "Trading: Buy market",
+        "order",
+        &["ctrl-b"],
+    ),
+    spec(
+        CommandId::SellMarket,
+        "Trading: Sell market",
+        "order",
+        &["ctrl-s"],
+    ),
+    spec(
+        CommandId::CancelAll,
+        "Trading: Cancel all",
+        "orders",
+        &["ctrl-shift-x"],
+    ),
+    spec(
+        CommandId::FlattenAccount,
+        "Trading: Flatten account",
+        "close positions",
+        &["ctrl-shift-f"],
+    ),
+    spec(
+        CommandId::KillSwitch,
+        "Trading: Kill switch",
+        "cancel flatten lock",
+        &["ctrl-shift-k"],
+    ),
 ];
+
+/// Chords Windows owns. An application binding would never fire or would break a system habit.
+/// Any chord with the Windows key is rejected as well.
+const SYSTEM_CHORDS: &[&str] = &[
+    "alt-tab",
+    "alt-shift-tab",
+    "alt-escape",
+    "alt-space",
+    "ctrl-escape",
+    "ctrl-shift-escape",
+    "ctrl-alt-delete",
+];
+
+fn same_chord(left: &Keystroke, right: &Keystroke) -> bool {
+    left.key == right.key && left.modifiers == right.modifiers
+}
+
+/// Checks every chord in `commands`: it parses as a GPUI keystroke, no two bindings share it, it
+/// is not a system chord, and it does not shadow a key the chart consumes. `chart_keys` is the
+/// key contract Aeris Charts publishes.
+///
+/// # Errors
+///
+/// Returns the first chord that fails, naming the conflict.
+pub fn validate_chords(commands: &[CommandSpec], chart_keys: &[Keystroke]) -> Result<(), String> {
+    let system = SYSTEM_CHORDS
+        .iter()
+        .map(|chord| Keystroke::parse(chord).map_err(|error| format!("{chord}: {error}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut bound: Vec<(Keystroke, &CommandSpec)> = Vec::new();
+    for spec in commands {
+        for chord in spec.chords {
+            let keystroke = Keystroke::parse(chord)
+                .map_err(|error| format!("{} chord {chord}: {error}", spec.title))?;
+            if let Some((_, owner)) = bound
+                .iter()
+                .find(|(other, _)| same_chord(other, &keystroke))
+            {
+                return Err(format!(
+                    "{chord} is bound to both {} and {}",
+                    owner.title, spec.title
+                ));
+            }
+            if keystroke.modifiers.platform || system.iter().any(|s| same_chord(s, &keystroke)) {
+                return Err(format!("{chord} ({}) is a system shortcut", spec.title));
+            }
+            if chart_keys.iter().any(|key| same_chord(key, &keystroke)) {
+                return Err(format!("{chord} ({}) shadows a chart key", spec.title));
+            }
+            bound.push((keystroke, spec));
+        }
+    }
+    Ok(())
+}
 
 #[must_use]
 /// Returns the metadata for a stable command identifier.
@@ -311,6 +476,47 @@ mod tests {
         assert_eq!(ids, CommandId::ALL.into_iter().collect());
         assert_eq!(search("chart", 3).len(), 3);
         assert_eq!(command(CommandId::ToggleContext).title, "Market context");
+    }
+
+    #[test]
+    fn chord_validation_rejects_duplicates_system_keys_and_chart_keys() {
+        assert_eq!(validate_chords(COMMANDS, &[]), Ok(()));
+        let buy = command(CommandId::BuyMarket);
+        let sell = CommandSpec {
+            chords: &["ctrl-b"],
+            ..*command(CommandId::SellMarket)
+        };
+        let error = validate_chords(&[*buy, sell], &[]).expect_err("duplicate");
+        assert!(error.contains("ctrl-b is bound to both"), "{error}");
+        let alt_tab = CommandSpec {
+            chords: &["alt-tab"],
+            ..*buy
+        };
+        assert!(validate_chords(&[alt_tab], &[]).is_err());
+        let windows_key = CommandSpec {
+            chords: &["cmd-b"],
+            ..*buy
+        };
+        assert!(validate_chords(&[windows_key], &[]).is_err());
+        let malformed = CommandSpec {
+            chords: &["meta-b"],
+            ..*buy
+        };
+        assert!(validate_chords(&[malformed], &[]).is_err());
+        let chart_key = Keystroke::parse("ctrl-b").expect("chart key");
+        let error = validate_chords(&[*buy], &[chart_key]).expect_err("shadowed");
+        assert!(error.contains("shadows a chart key"), "{error}");
+    }
+
+    #[test]
+    fn shortcut_labels_read_as_written_in_menus() {
+        assert_eq!(
+            command(CommandId::KillSwitch).shortcut_label().as_deref(),
+            Some("Ctrl+Shift+K")
+        );
+        assert_eq!(chord_label("ctrl-shift-pageup"), "Ctrl+Shift+Page Up");
+        assert_eq!(chord_label("f11"), "F11");
+        assert_eq!(command(CommandId::ToggleContext).shortcut_label(), None);
     }
 
     #[test]

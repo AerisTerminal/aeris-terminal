@@ -2,6 +2,5 @@
 
 pub mod account;
 pub mod command_registry;
-pub mod keymap;
 pub mod market_worker;
 pub mod trading;

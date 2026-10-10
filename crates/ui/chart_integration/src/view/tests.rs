@@ -4354,7 +4354,10 @@ fn lock_summary_delete_clear_and_escape_follow_toolbar_contract() {
     assert_eq!(chart.drawing_count(), 1);
     assert_eq!(chart.drawings_lock_summary().locked_count, 1);
 
-    assert!(key(&mut chart, ChartKey::Escape));
+    assert!(
+        !key(&mut chart, ChartKey::Escape),
+        "with nothing to cancel, Escape reaches the platform"
+    );
     assert_eq!(chart.drawing_tool(), None);
     assert!(!chart.engine.drawing_create_active());
     chart.clear_drawings();
@@ -4465,7 +4468,10 @@ fn keyboard_navigation_scrolls_zooms_resets_and_ignores_unknown_keys() {
 
     hover(&mut chart, 100.0, 100.0);
     assert!(chart.engine.crosshair.is_some());
-    assert!(key(&mut chart, ChartKey::Escape));
+    assert!(
+        !key(&mut chart, ChartKey::Escape),
+        "hover alone leaves Escape to the platform"
+    );
     assert!(chart.engine.crosshair.is_none());
     assert!(key(&mut chart, ChartKey::Home));
     let reset_margin = chart.engine.pane_w * 0.10 / chart.engine.bar_spacing();
