@@ -1,7 +1,8 @@
 //! The platform menu: the one dropdown under the header avatar. It stacks every
 //! application-level section in a single panel: account (only while sign-in exists), Theme
 //! with a preview card per mode, Window with frameless mode, the keyboard shortcuts list, and
-//! About with version, system, build mode and updates.
+//! About with version, system, build mode, Rithmic's notices while a Rithmic session is held, and
+//! updates.
 
 use aeris_observability::diagnostic;
 use std::rc::Rc;
@@ -143,6 +144,15 @@ fn account_avatar_face(
         .into_any_element()
 }
 
+/// The application state the platform menu shows below the account.
+#[derive(Clone, Copy)]
+pub(super) struct PlatformMenuContent<'a> {
+    pub(super) update: Option<&'a UpdatePresentation>,
+    pub(super) window_frame: chart_chrome::WindowFrame,
+    /// Rithmic's notices appear under About only while a Rithmic session is held.
+    pub(super) rithmic_notices: bool,
+}
+
 /// The platform menu anchored under the avatar's click point. Every section
 /// has a fixed height, so the panel clamps into the viewport without
 /// measuring a frame first.
@@ -151,10 +161,14 @@ pub(super) fn platform_menu_layer(
     account: &aeris_desktop::account::AccountMenuState,
     anchor: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
-    update: Option<&UpdatePresentation>,
-    window_frame: chart_chrome::WindowFrame,
+    content: PlatformMenuContent<'_>,
     theme: &AerisTheme,
 ) -> AnyElement {
+    let PlatformMenuContent {
+        update,
+        window_frame,
+        rithmic_notices,
+    } = content;
     let header = identity_header(account, theme);
     let actions = account_actions(account);
     let details = about_details(account, update);
@@ -163,6 +177,7 @@ pub(super) fn platform_menu_layer(
         actions: actions.len(),
         error: account.error.is_some(),
         about_details: details.len(),
+        rithmic_notices,
     };
     let header_bottom = WORKSPACE_TITLE_BAR_HEIGHT + PLATFORM_MENU_GAP;
     let panel_chrome = menu_panel_chrome_height(theme, MenuScale::BASE, px(ROOT_REM_PX));
@@ -233,6 +248,7 @@ pub(super) fn platform_menu_layer(
         .separator()
         .child(about_section(
             details,
+            rithmic_notices,
             &about_update_view(update, theme),
             &run_update,
             theme,
@@ -288,6 +304,7 @@ struct PlatformMenuLayout {
     actions: usize,
     error: bool,
     about_details: usize,
+    rithmic_notices: bool,
 }
 
 impl PlatformMenuLayout {
@@ -325,15 +342,20 @@ impl PlatformMenuLayout {
             + separator
             + CHART_CONTEXT_MENU_ROW_HEIGHT
             + separator
-            + about_section_height(self.about_details)
+            + about_section_height(self.about_details, self.rithmic_notices)
     }
 }
 
-fn about_section_height(details: usize) -> f32 {
+fn about_section_height(details: usize, rithmic_notices: bool) -> f32 {
+    let notices = if rithmic_notices {
+        ABOUT_NOTICES_HEIGHT
+    } else {
+        0.0
+    };
     SECTION_TITLE_HEIGHT
         + ABOUT_BRAND_HEIGHT
         + details.to_f32().unwrap_or_default() * ABOUT_DETAIL_HEIGHT
-        + ABOUT_NOTICES_HEIGHT
+        + notices
         + ABOUT_UPDATE_HEIGHT
         + SECTION_BOTTOM_PADDING
 }
@@ -750,12 +772,13 @@ fn about_details(
 
 fn about_section(
     details: Vec<(&'static str, String)>,
+    rithmic_notices: bool,
     update: &UpdateView,
     on_update: &UpdateActivate,
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;
-    let height = about_section_height(details.len());
+    let height = about_section_height(details.len(), rithmic_notices);
     div()
         .h(px(height))
         .flex_none()
@@ -809,12 +832,14 @@ fn about_section(
                         .child(value),
                 )
         }))
-        .child(provider_notices(current_utc_year(), theme))
+        .when(rithmic_notices, |about| {
+            about.child(provider_notices(current_utc_year(), theme))
+        })
         .child(update_row(update, on_update, theme))
 }
 
-/// Copyright and trademark notices Rithmic requires wherever the terminal shows
-/// its own; the year follows the clock as their wording asks.
+/// Copyright and trademark notices Rithmic attaches to its software, shown beside the terminal's
+/// own while a Rithmic session is held; the year follows the clock as their wording asks.
 fn provider_notice_texts(year: i64) -> [String; 3] {
     [
         format!(
@@ -1017,11 +1042,22 @@ mod tests {
                 .child(
                     about_section(
                         about_details(&account, None),
+                        false,
                         &about_update_view(None, &theme),
                         &ignore_update,
                         &theme,
                     )
                     .debug_selector(|| "about_section".into()),
+                )
+                .child(
+                    about_section(
+                        about_details(&account, None),
+                        true,
+                        &about_update_view(None, &theme),
+                        &ignore_update,
+                        &theme,
+                    )
+                    .debug_selector(|| "about_section_rithmic".into()),
                 )
         }
     }
@@ -1037,9 +1073,24 @@ mod tests {
             let theme_bounds = cx.debug_bounds("theme_section").expect("theme section");
             let window_bounds = cx.debug_bounds("window_section").expect("window section");
             let about_bounds = cx.debug_bounds("about_section").expect("about section");
+            let rithmic_bounds = cx
+                .debug_bounds("about_section_rithmic")
+                .expect("about section with Rithmic notices");
             assert_eq!(theme_bounds.size.height, px(THEME_SECTION_HEIGHT));
             assert_eq!(window_bounds.size.height, px(WINDOW_SECTION_HEIGHT));
-            assert_eq!(about_bounds.size.height, px(about_section_height(2)));
+            assert_eq!(about_bounds.size.height, px(about_section_height(2, false)));
+            assert_eq!(
+                rithmic_bounds.size.height,
+                px(about_section_height(2, true))
+            );
+            assert!(
+                (about_section_height(2, true)
+                    - about_section_height(2, false)
+                    - ABOUT_NOTICES_HEIGHT)
+                    .abs()
+                    < f32::EPSILON,
+                "without a Rithmic session the notices take no room"
+            );
         }
     }
 
@@ -1063,19 +1114,21 @@ mod tests {
             actions: 0,
             error: false,
             about_details: 2,
+            rithmic_notices: false,
         };
         let expected = panel_chrome
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
             + CHART_CONTEXT_MENU_ROW_HEIGHT
             + 3.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
-            + about_section_height(2);
+            + about_section_height(2, false);
         assert!((development.height(panel_chrome) - expected).abs() < f32::EPSILON);
         let signed_in = PlatformMenuLayout {
             identity: true,
             actions: 2,
             error: true,
             about_details: 1,
+            rithmic_notices: true,
         };
         let expected = panel_chrome
             + IDENTITY_HEIGHT
@@ -1083,7 +1136,7 @@ mod tests {
             + ACCOUNT_ERROR_HEIGHT
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
-            + about_section_height(1)
+            + about_section_height(1, true)
             + 5.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
         assert!((signed_in.height(panel_chrome) - expected).abs() < f32::EPSILON);
     }

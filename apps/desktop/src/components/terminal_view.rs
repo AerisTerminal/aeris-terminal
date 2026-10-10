@@ -802,7 +802,7 @@ impl TerminalApp {
             ))
             .children(fullscreen_hint_layer(&self.fullscreen_hint, &self.theme))
             .children(frameless_reveal_zone)
-            .children(self.platform_menu_overlay(terminal, window.viewport_size()))
+            .children(self.platform_menu_overlay(terminal, window.viewport_size(), cx))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
             .children(self.keyboard_shortcuts_layer(terminal))
             .children(self.rendered_command_palette(terminal, cx))
@@ -838,7 +838,7 @@ impl TerminalApp {
             window.viewport_size(),
             cx,
         );
-        let platform_menu = self.platform_menu_overlay(&terminal, window.viewport_size());
+        let platform_menu = self.platform_menu_overlay(&terminal, window.viewport_size(), cx);
         let drawing_tool_menu = self.drawing_tool_menu_overlay(&terminal, window, cx);
         let chart_top = if self.chart_fullscreen.is_some() {
             0.0

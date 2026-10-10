@@ -1688,10 +1688,28 @@ impl TerminalApp {
         self.updater.as_ref().map(DesktopUpdater::presentation)
     }
 
+    /// Whether any pane holds a Rithmic session, the condition Rithmic's attribution and notices
+    /// follow.
+    fn holds_rithmic_session(&self, cx: &App) -> bool {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.panes)
+            .any(|pane| {
+                let surface = pane.surface.read(cx);
+                terminal_chrome::shows_rithmic_attribution(
+                    surface.provider,
+                    surface
+                        .connection_state
+                        .unwrap_or(FeedConnectionState::Disconnected),
+                )
+            })
+    }
+
     pub(super) fn platform_menu_overlay(
         &self,
         terminal: &Entity<Self>,
         viewport: gpui::Size<Pixels>,
+        cx: &App,
     ) -> Option<AnyElement> {
         let anchor = self.platform_menu_anchor?;
         let account = aeris_desktop::account::DesktopAccount::shared()
@@ -1703,8 +1721,11 @@ impl TerminalApp {
             &account,
             anchor,
             viewport,
-            self.update_presentation(),
-            self.chart_chrome.window_frame,
+            platform_menu::PlatformMenuContent {
+                update: self.update_presentation(),
+                window_frame: self.chart_chrome.window_frame,
+                rithmic_notices: self.holds_rithmic_session(cx),
+            },
             &self.theme,
         ))
     }
