@@ -1927,6 +1927,14 @@ fn chart_trading_settings(
     .child(settings_toggle_row(
         terminal,
         menu,
+        "Extend order lines left",
+        snapshot.trading_visibility.extend_order_lines_left,
+        ChartSettingsAction::ToggleExtendOrderLinesLeft,
+        theme,
+    ))
+    .child(settings_toggle_row(
+        terminal,
+        menu,
         "Execution marks",
         snapshot.trading_visibility.show_execution_marks,
         ChartSettingsAction::ToggleExecutionMarks,

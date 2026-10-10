@@ -107,6 +107,7 @@ fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_rest
     let explicit = WorkspaceChartState {
         show_order_management_lines: Some(false),
         show_execution_marks: Some(true),
+        extend_order_lines_left: Some(false),
         ..WorkspaceChartState::default()
     };
     assert_eq!(
@@ -114,6 +115,7 @@ fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_rest
         ChartTradingVisibilitySettings {
             show_order_management_lines: false,
             show_execution_marks: true,
+            extend_order_lines_left: false,
         }
     );
 }

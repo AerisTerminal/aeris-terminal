@@ -850,6 +850,7 @@ mod tests {
             time_zone: "America/New_York".to_string(),
             show_order_management_lines: Some(false),
             show_execution_marks: Some(true),
+            extend_order_lines_left: Some(false),
         }
     }
 
@@ -862,6 +863,7 @@ mod tests {
             time_zone: "Europe/London".to_string(),
             show_order_management_lines: Some(false),
             show_execution_marks: Some(true),
+            extend_order_lines_left: Some(false),
         }
     }
 

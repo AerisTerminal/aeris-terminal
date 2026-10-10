@@ -231,6 +231,9 @@ pub struct WorkspaceChartSettingsTemplateState {
     /// templates.
     #[prost(bool, optional, tag = "7")]
     pub show_execution_marks: Option<bool>,
+    /// Whether order and position lines extend to the pane's left edge. Absent means enabled.
+    #[prost(bool, optional, tag = "8")]
+    pub extend_order_lines_left: Option<bool>,
 }
 
 /// Persisted presentation state for one pane.
@@ -333,6 +336,9 @@ pub struct WorkspaceChartState {
     /// Host-only execution/fill marker presentation. Absent in legacy workspaces means visible.
     #[prost(bool, optional, tag = "18")]
     pub show_execution_marks: Option<bool>,
+    /// Chart order and position line extension. Absent in legacy workspaces means enabled.
+    #[prost(bool, optional, tag = "19")]
+    pub extend_order_lines_left: Option<bool>,
 }
 
 /// Tags 4 and 5 held the retired footprint trade-bubble toggle and threshold; never reuse them.

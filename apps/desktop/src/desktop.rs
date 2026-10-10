@@ -4415,12 +4415,14 @@ enum ChartSettingsAction {
     FootprintTicksPerRow(u32),
     ToggleOrderManagementLines,
     ToggleExecutionMarks,
+    ToggleExtendOrderLinesLeft,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ChartTradingVisibilitySettings {
     show_order_management_lines: bool,
     show_execution_marks: bool,
+    extend_order_lines_left: bool,
 }
 
 impl Default for ChartTradingVisibilitySettings {
@@ -4428,6 +4430,7 @@ impl Default for ChartTradingVisibilitySettings {
         Self {
             show_order_management_lines: true,
             show_execution_marks: true,
+            extend_order_lines_left: true,
         }
     }
 }

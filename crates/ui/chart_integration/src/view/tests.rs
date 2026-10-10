@@ -1245,6 +1245,19 @@ fn a_trading_projection_without_an_account_still_names_the_instrument_tick() {
 }
 
 #[test]
+fn order_line_extension_changes_style_without_replacing_trading_state() {
+    let mut chart = AerisChartView::empty();
+    let before = chart.trading_snapshot();
+    assert!(chart.order_lines_extend_left());
+    assert_eq!(chart.set_order_lines_extend_left(false), Ok(true));
+    assert!(!chart.order_lines_extend_left());
+    assert_eq!(chart.trading_snapshot(), before);
+    assert_eq!(chart.set_order_lines_extend_left(false), Ok(false));
+    assert_eq!(chart.set_order_lines_extend_left(true), Ok(true));
+    assert!(chart.order_lines_extend_left());
+}
+
+#[test]
 fn session_plan_levels_are_bounded_transient_lines_restored_with_the_price_series() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })

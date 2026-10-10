@@ -925,6 +925,7 @@ mod tests {
             ChartTradingVisibilitySettings {
                 show_order_management_lines: false,
                 show_execution_marks: true,
+                ..ChartTradingVisibilitySettings::default()
             },
         );
         assert_eq!(
@@ -939,6 +940,7 @@ mod tests {
             ChartTradingVisibilitySettings {
                 show_order_management_lines: true,
                 show_execution_marks: false,
+                ..ChartTradingVisibilitySettings::default()
             },
         );
         assert_eq!(filtered.positions.len(), 1);

@@ -393,6 +393,7 @@ mod tests {
             time_zone: "Etc/UTC".to_string(),
             show_order_management_lines: Some(true),
             show_execution_marks: Some(false),
+            extend_order_lines_left: Some(false),
         };
 
         let watchlist_entry = WorkspaceWatchlistEntryState {

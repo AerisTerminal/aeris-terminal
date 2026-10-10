@@ -2048,6 +2048,29 @@ impl AerisChartView {
         Ok(())
     }
 
+    /// Applies the host's order-line extension preference without changing trading state.
+    ///
+    /// # Errors
+    /// Returns a chart engine style validation error.
+    pub fn set_order_lines_extend_left(&mut self, extend: bool) -> Result<bool, String> {
+        if self.engine.trading_style().extend_lines_left == extend {
+            return Ok(false);
+        }
+        self.engine
+            .apply_trading_style(aeris_charts_engine::TradingStyleOptions {
+                extend_lines_left: Some(extend),
+                ..Default::default()
+            })
+            .map_err(|error| error.to_string())?;
+        self.invalidate_series_frame();
+        Ok(true)
+    }
+
+    #[must_use]
+    pub fn order_lines_extend_left(&self) -> bool {
+        self.engine.trading_style().extend_lines_left
+    }
+
     /// Replaces transient, host-owned event markers and time windows.
     ///
     /// # Errors

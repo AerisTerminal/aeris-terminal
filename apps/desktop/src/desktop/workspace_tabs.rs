@@ -1122,6 +1122,7 @@ impl TerminalApp {
             action,
             ChartSettingsAction::ToggleOrderManagementLines
                 | ChartSettingsAction::ToggleExecutionMarks
+                | ChartSettingsAction::ToggleExtendOrderLinesLeft
         ) {
             let mut visibility = surface.read(cx).chart_trading_visibility();
             match action {
@@ -1131,6 +1132,9 @@ impl TerminalApp {
                 }
                 ChartSettingsAction::ToggleExecutionMarks => {
                     visibility.show_execution_marks = !visibility.show_execution_marks;
+                }
+                ChartSettingsAction::ToggleExtendOrderLinesLeft => {
+                    visibility.extend_order_lines_left = !visibility.extend_order_lines_left;
                 }
                 _ => unreachable!(),
             }
@@ -1156,7 +1160,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleDeltaHistogram
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
-            | ChartSettingsAction::ToggleExecutionMarks => unreachable!(),
+            | ChartSettingsAction::ToggleExecutionMarks
+            | ChartSettingsAction::ToggleExtendOrderLinesLeft => unreachable!(),
             ChartSettingsAction::CrosshairWidth(width) => {
                 appearance.crosshair_width = width.clamp(1, 4);
             }
@@ -1193,7 +1198,8 @@ impl TerminalApp {
             | ChartSettingsAction::ToggleDeltaHistogram
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
-            | ChartSettingsAction::ToggleExecutionMarks => unreachable!(),
+            | ChartSettingsAction::ToggleExecutionMarks
+            | ChartSettingsAction::ToggleExtendOrderLinesLeft => unreachable!(),
         });
         cx.notify();
     }
@@ -1232,6 +1238,7 @@ impl TerminalApp {
                 snapshot.trading_visibility.show_order_management_lines,
             ),
             show_execution_marks: Some(snapshot.trading_visibility.show_execution_marks),
+            extend_order_lines_left: Some(snapshot.trading_visibility.extend_order_lines_left),
         })
     }
 
@@ -1263,6 +1270,7 @@ impl TerminalApp {
         let trading_visibility = ChartTradingVisibilitySettings {
             show_order_management_lines: template.show_order_management_lines.unwrap_or(true),
             show_execution_marks: template.show_execution_marks.unwrap_or(true),
+            extend_order_lines_left: template.extend_order_lines_left.unwrap_or(true),
         };
         surface.update(cx, |surface, surface_cx| {
             surface.set_chart_type(chart_type, surface_cx);

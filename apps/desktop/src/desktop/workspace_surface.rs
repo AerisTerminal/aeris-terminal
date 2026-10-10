@@ -47,6 +47,9 @@ pub(super) fn restored_chart_trading_visibility(
         show_execution_marks: restored
             .and_then(|state| state.show_execution_marks)
             .unwrap_or(true),
+        extend_order_lines_left: restored
+            .and_then(|state| state.extend_order_lines_left)
+            .unwrap_or(true),
     }
 }
 
@@ -1528,6 +1531,7 @@ impl WorkspaceSurface {
                 self.chart_trading_visibility.show_order_management_lines,
             ),
             show_execution_marks: Some(self.chart_trading_visibility.show_execution_marks),
+            extend_order_lines_left: Some(self.chart_trading_visibility.extend_order_lines_left),
         })
     }
 
@@ -1650,9 +1654,13 @@ impl WorkspaceSurface {
         if let Some(chart) = startup_state.chart.as_ref() {
             // A chart created at startup never takes the restored-state path.
             let time_zone = chart_time_zone.clone();
+            let extend_order_lines_left = chart_trading_visibility.extend_order_lines_left;
             chart.update(cx, |chart, _| {
                 if let Err(error) = chart.set_time_zone(&time_zone) {
                     diagnostic!("Aeris chart time zone could not be applied: {error}");
+                }
+                if let Err(error) = chart.set_order_lines_extend_left(extend_order_lines_left) {
+                    diagnostic!("Aeris chart order-line extension could not be applied: {error}");
                 }
             });
         }
@@ -2766,6 +2774,12 @@ impl WorkspaceSurface {
         } else {
             self.apply_retained_chart_state_to_chart(&chart, cx);
         }
+        let extend_order_lines_left = self.chart_trading_visibility.extend_order_lines_left;
+        chart.update(cx, |chart, _| {
+            if let Err(error) = chart.set_order_lines_extend_left(extend_order_lines_left) {
+                diagnostic!("Aeris chart order-line extension could not be applied: {error}");
+            }
+        });
         self.apply_surface_time_zone(&chart, cx);
         self.apply_market_session_to_chart(&chart, cx);
         self.apply_provider_trade_prints(&chart, cx);
@@ -4090,19 +4104,43 @@ impl WorkspaceSurface {
         if self.chart_trading_visibility == visibility {
             return;
         }
+        let visibility_changed = self.chart_trading_visibility.show_order_management_lines
+            != visibility.show_order_management_lines
+            || self.chart_trading_visibility.show_execution_marks
+                != visibility.show_execution_marks;
+        let extension_changed = self.chart_trading_visibility.extend_order_lines_left
+            != visibility.extend_order_lines_left;
         self.chart_trading_visibility = visibility;
         if let Some(chart) = &self.chart {
-            let current = chart.read(cx).trading_snapshot();
-            let filtered = workspace_layout::apply_chart_trading_visibility(current, visibility);
-            chart.update(cx, |chart, chart_cx| {
-                if chart.set_trading_snapshot(filtered).is_ok() {
-                    chart_cx.notify();
-                }
-            });
+            if visibility_changed {
+                let current = chart.read(cx).trading_snapshot();
+                let filtered =
+                    workspace_layout::apply_chart_trading_visibility(current, visibility);
+                chart.update(cx, |chart, chart_cx| {
+                    if chart.set_trading_snapshot(filtered).is_ok() {
+                        chart_cx.notify();
+                    }
+                });
+            }
+            if extension_changed {
+                chart.update(cx, |chart, chart_cx| {
+                    match chart.set_order_lines_extend_left(visibility.extend_order_lines_left) {
+                        Ok(true) => chart_cx.notify(),
+                        Ok(false) => {}
+                        Err(error) => {
+                            diagnostic!(
+                                "Aeris chart order-line extension could not be applied: {error}"
+                            );
+                        }
+                    }
+                });
+            }
         }
         // Enabling either layer needs the next authoritative runtime snapshot to restore any
         // presentation objects that were intentionally filtered out while hidden.
-        self.trading_pnl.next_refresh = std::time::Instant::now();
+        if visibility_changed {
+            self.trading_pnl.next_refresh = std::time::Instant::now();
+        }
         self.chart_persistence_dirty = true;
         cx.notify();
     }
