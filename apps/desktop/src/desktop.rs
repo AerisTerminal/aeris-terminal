@@ -5049,15 +5049,15 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             cx.set_global(base_theme(&AerisTheme::dark()));
             install_platform_http_client(cx);
             cx.set_app_identity("com.aeris.desktop", "Aeris Terminal");
-            cx.text_system()
-                .add_fonts(
-                    PLATFORM_FONT_BYTES
-                        .iter()
-                        .map(|font| Cow::Borrowed(*font))
-                        .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
-                        .collect(),
-                )
-                .expect("the bundled platform font is valid");
+            if let Err(error) = cx.text_system().add_fonts(
+                PLATFORM_FONT_BYTES
+                    .iter()
+                    .map(|font| Cow::Borrowed(*font))
+                    .chain(std::iter::once(Cow::Borrowed(BRAND_FONT_BYTES)))
+                    .collect(),
+            ) {
+                diagnostic!("Aeris bundled fonts unavailable, using system fallback: {error}");
+            }
             mount_desktop(configured, lifecycle, None, cx);
         });
 }

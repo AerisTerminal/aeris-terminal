@@ -95,14 +95,22 @@ fn resolve_inner(
         return Err(format!("cyclic custom-property reference at --{name}"));
     }
     let value = source(declarations, name)?;
-    let resolved = if let Some(reference) = value
-        .strip_prefix("var(--")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        resolve_inner(declarations, reference.trim(), visiting)?
-    } else {
-        value.to_owned()
-    };
+    let mut resolved = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find("var(--") {
+        resolved.push_str(&remaining[..start]);
+        let reference_start = &remaining[start + "var(--".len()..];
+        let end = reference_start
+            .find(')')
+            .ok_or_else(|| format!("unterminated custom-property reference in --{name}"))?;
+        resolved.push_str(&resolve_inner(
+            declarations,
+            reference_start[..end].trim(),
+            visiting,
+        )?);
+        remaining = &reference_start[end + 1..];
+    }
+    resolved.push_str(remaining);
     visiting.remove(name);
     Ok(resolved)
 }
@@ -144,12 +152,9 @@ pub(crate) fn parse_color(value: &str) -> Result<[u8; 4], String> {
         .and_then(|value| value.strip_suffix(')'))
         .ok_or_else(|| format!("expected a supported color, found `{value}`"))?
         .trim();
-    let (color_and_weight, transparent) = inner
+    let (color_and_weight, second_color) = inner
         .split_once(',')
         .ok_or_else(|| format!("invalid color-mix `{value}`"))?;
-    if transparent.trim() != "transparent" {
-        return Err(format!("unsupported color-mix `{value}`"));
-    }
     let (color, weight) = color_and_weight
         .trim()
         .split_once(' ')
@@ -163,10 +168,30 @@ pub(crate) fn parse_color(value: &str) -> Result<[u8; 4], String> {
     if percent > 100 {
         return Err(format!("color-mix percentage is out of range in `{value}`"));
     }
-    let [red, green, blue, color_alpha] = parse_hex(color)?;
-    let alpha = u8::try_from((u16::from(color_alpha) * percent + 50) / 100)
+    let first = parse_hex(color)?;
+    let second = match second_color.trim() {
+        "transparent" => [0, 0, 0, 0],
+        "white" => [255, 255, 255, 255],
+        color => parse_hex(color)?,
+    };
+    let weight = u32::from(percent);
+    let other_weight = 100 - weight;
+    let alpha_sum = u32::from(first[3]) * weight + u32::from(second[3]) * other_weight;
+    if alpha_sum == 0 {
+        return Ok([0, 0, 0, 0]);
+    }
+    let alpha = u8::try_from((alpha_sum + 50) / 100)
         .map_err(|_| format!("color-mix alpha is out of range in `{value}`"))?;
-    Ok([red, green, blue, alpha])
+    let channel = |index| {
+        u8::try_from(
+            (u32::from(first[index]) * u32::from(first[3]) * weight
+                + u32::from(second[index]) * u32::from(second[3]) * other_weight
+                + alpha_sum / 2)
+                / alpha_sum,
+        )
+        .map_err(|_| format!("color-mix channel is out of range in `{value}`"))
+    };
+    Ok([channel(0)?, channel(1)?, channel(2)?, alpha])
 }
 
 pub(crate) fn parse_pixels(value: &str) -> Result<f32, String> {
@@ -216,6 +241,26 @@ mod tests {
         assert_eq!(
             parse_color("color-mix(in srgb, #c2c2c2 50%, transparent)").unwrap(),
             [194, 194, 194, 128]
+        );
+    }
+
+    #[test]
+    fn color_mix_resolves_embedded_aliases_and_opaque_colors() {
+        let (root, dark) = parse_theme_blocks(
+            ":root { --primary: #006edd; --surface: #ffffff; --subtle: color-mix(in srgb, var(--primary) 12%, var(--surface)); } .dark { --surface: #1f1f1f; --subtle: color-mix(in srgb, var(--primary) 22%, var(--surface)); }",
+        )
+        .unwrap();
+        assert_eq!(
+            parse_color(&resolve(&root, "subtle").unwrap()).unwrap(),
+            [224, 238, 251, 255]
+        );
+        assert_eq!(
+            parse_color(&resolve(&cascade(&root, &dark), "subtle").unwrap()).unwrap(),
+            [24, 48, 73, 255]
+        );
+        assert_eq!(
+            parse_color("color-mix(in srgb, #006edd 65%, white)").unwrap(),
+            [89, 161, 233, 255]
         );
     }
 }

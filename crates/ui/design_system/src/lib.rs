@@ -14,11 +14,8 @@ include!(concat!(env!("OUT_DIR"), "/platform_tokens.rs"));
 /// Canonical portable stylesheet shared with the native presentation layer.
 pub const PLATFORM_CSS: &str = include_str!("../platform.css");
 
-/// Bundled platform faces referenced by `platform.css`.
-pub static PLATFORM_FONT_BYTES: [&[u8]; 2] = [
-    include_bytes!("../assets/fonts/HKGrotesk-Medium.ttf"),
-    include_bytes!("../assets/fonts/HKGrotesk-Bold.ttf"),
-];
+/// The one bundled platform face referenced by `platform.css`.
+pub static PLATFORM_FONT_BYTES: [&[u8]; 1] = [include_bytes!("../assets/fonts/inter_regular.ttf")];
 
 /// Bundled Aeris brand face. It is intentionally separate from the platform
 /// typography so only explicit brand lockups opt into it.
@@ -503,7 +500,7 @@ mod tests {
         assert_eq!(light.text_secondary, ThemeColor::from_rgb8(100, 100, 101));
         assert_eq!(light.text_muted, ThemeColor::from_rgb8(194, 194, 194));
         assert_eq!(dark.text_secondary, ThemeColor::from_rgb8(194, 194, 194));
-        assert_eq!(light.primary, ThemeColor::from_rgb8(0, 145, 255));
+        assert_eq!(light.primary, ThemeColor::from_rgb8(0, 110, 221));
         assert_eq!(dark.primary, light.primary);
         assert_eq!(light.warning, ThemeColor::from_rgb8(255, 105, 0));
         assert_eq!(dark.warning, light.warning);
@@ -563,7 +560,7 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "danger"), "#f7525f");
         assert_eq!(token_source(&dark_tokens, "warning"), "#ff6900");
         assert_eq!(token_source(&dark_tokens, "positive"), "#089981");
-        assert_eq!(token_source(&dark_tokens, "primary"), "#0091ff");
+        assert_eq!(token_source(&dark_tokens, "primary"), "#006EDD");
         assert_eq!(token_source(&light_tokens, "button-fill"), "#333333");
         assert_eq!(token_source(&dark_tokens, "button-fill"), "#f5f5f5");
         assert_eq!(token_source(&light_tokens, "danger-foreground"), "#ffffff");
@@ -741,10 +738,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         bundled_fonts.sort();
-        assert_eq!(
-            bundled_fonts,
-            ["HKGrotesk-Bold.ttf", "HKGrotesk-Medium.ttf"]
-        );
+        assert_eq!(bundled_fonts, ["inter_regular.ttf"]);
+        assert!(font_dir.join("inter_license.txt").is_file());
         let brand_font = font_dir.join("faculty-glyphic/FacultyGlyphic-Regular.ttf");
         let brand_license = font_dir.join("faculty-glyphic/OFL.txt");
         assert!(brand_font.is_file());
@@ -809,15 +804,14 @@ mod tests {
     fn css_manifest_carries_the_portable_interaction_contract() {
         let css = include_str!("../platform.css");
         for required in [
-            "--font-sans: \"HK Grotesk\", sans-serif;",
+            "--font-sans: \"Inter\", sans-serif;",
             "--font-weight-normal: 500;",
             "--font-weight-emphasis: 700;",
             "--font-weight-strong: 700;",
             "--font-feature-tabular-numerals: \"tnum\";",
-            "HKGrotesk-Medium.ttf",
-            "HKGrotesk-Bold.ttf",
-            "font-weight: 500;",
-            "font-weight: 700;",
+            "inter_regular.ttf",
+            "font-weight: 400;",
+            "font-weight: var(--font-weight-strong);",
             "font-variant-numeric: tabular-nums;",
             "-webkit-font-smoothing: antialiased;",
             "font-synthesis: none;",
@@ -831,7 +825,7 @@ mod tests {
         ] {
             assert!(css.contains(required), "CSS is missing `{required}`");
         }
-        assert!(!css.contains("HKGrotesk-SemiBold.ttf"));
+        assert!(!css.contains("HK Grotesk"));
         assert!(!css.contains("font-weight: 600;"));
         assert!(!css.contains("border-color: var(--primary);"));
         assert!(!css.contains("transform: scale("));
@@ -840,8 +834,8 @@ mod tests {
         assert!(css.contains("--bearish: var(--negative);"));
         assert!(css.contains("--buy-bubble: color-mix(in srgb, #089981 35%, transparent);"));
         assert!(css.contains("--sell-bubble: color-mix(in srgb, #f7525f 35%, transparent);"));
-        assert_eq!(platform_font_family(), "HK Grotesk");
-        assert_eq!(platform_font_stack(), "\"HK Grotesk\", sans-serif");
+        assert_eq!(platform_font_family(), "Inter");
+        assert_eq!(platform_font_stack(), "\"Inter\", sans-serif");
 
         let typography = platform_typography();
         assert_eq!(typography.weight(TypographyRole::Normal), 500);

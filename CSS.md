@@ -18,6 +18,9 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   for scrims, `hover-bg` for hover and `active-bg` for a selected or open state. Press paints
   nothing of its own. Hover changes the fill only, no shadows.
 - Focus is one style everywhere: a 2px `ring-primary` outline (no glow, no background change).
+- Typography uses the bundled Inter Regular face for platform text and the bundled Faculty Glyphic
+  Regular face only for brand/display text. There is no HK Grotesk dependency. The CSS `--font-sans`
+  and native `platform_font_family()` both resolve to Inter; keep the web mirror in sync.
 - To change a value, change it in the Theme System, then update this file and `platform.css` together
   (see "Design system coordination" in `AGENTS.md`). The three must stay identical.
 
@@ -133,12 +136,12 @@ while invalid.
   --purple-subtle: #f3e8ff;
 
   /* Actions */
-  --primary: #0091ff;
-  --primary-hover: #0077fa;
+  --primary: #006EDD;
+  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
   --primary-active: #0050b2;
-  --primary-disabled: #b7d9f8;
-  --primary-disabled-foreground: #5eb0ef;
-  --primary-subtle: #e1f0ff;
+  --primary-disabled: color-mix(in srgb, var(--primary) 30%, var(--surface));
+  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, var(--surface));
+  --primary-subtle: color-mix(in srgb, var(--primary) 12%, var(--surface));
   --primary-foreground: #ffffff;
   --danger: #f7525f;
   --danger-hover: #e5404d;
@@ -251,12 +254,12 @@ while invalid.
   --purple-subtle: #59168b;
 
   /* Actions */
-  --primary: #0091ff;
-  --primary-hover: #0077fa;
+  --primary: #006EDD;
+  --primary-hover: color-mix(in srgb, var(--primary) 80%, transparent);
   --primary-active: #0050b2;
-  --primary-disabled: #5eb0ef;
-  --primary-disabled-foreground: #b7d9f8;
-  --primary-subtle: #0050b2;
+  --primary-disabled: color-mix(in srgb, var(--primary) 35%, var(--surface));
+  --primary-disabled-foreground: color-mix(in srgb, var(--primary) 65%, white);
+  --primary-subtle: color-mix(in srgb, var(--primary) 22%, var(--surface));
   --primary-foreground: #ffffff;
   --danger: #f7525f;
   --danger-hover: #f96a75;
