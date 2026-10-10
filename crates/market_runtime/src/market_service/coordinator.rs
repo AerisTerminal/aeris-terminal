@@ -1089,16 +1089,21 @@ impl Coordinator<'_> {
 
     pub(super) fn reconcile_order_books(&mut self) {
         let mut required_identities = BTreeSet::new();
+        let mut depth_identities = BTreeSet::new();
         for (series, subscription) in self.engine.subscriptions() {
+            let identity = (
+                series.provider_id.clone(),
+                series.instrument_id.clone(),
+                series.entitlement_id.clone(),
+            );
+            if subscription.streams.contains(MarketStream::Depth) {
+                depth_identities.insert(identity.clone());
+            }
             if subscription.streams.contains(MarketStream::Depth)
                 || subscription.streams.contains(MarketStream::Trades)
                 || subscription.streams.contains(MarketStream::Quotes)
             {
-                required_identities.insert((
-                    series.provider_id.clone(),
-                    series.instrument_id.clone(),
-                    series.entitlement_id.clone(),
-                ));
+                required_identities.insert(identity);
             }
         }
         let required = self
@@ -1130,24 +1135,29 @@ impl Coordinator<'_> {
                 instrument.provider.clone(),
                 instrument.instrument_id.clone(),
             );
+            let depth_subscribed = depth_identities.contains(&(
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+                instrument.entitlement_id.clone(),
+            ));
             if let Some(book) = self.order_books.get_mut(&identity) {
                 // Catalog selection counters describe consumers, not a new book.
                 // Keep canonical revisions monotonic across metadata refreshes;
                 // transport generations are fenced by provider_depth itself.
                 book.update_instrument(instrument);
+                book.set_depth_subscribed(depth_subscribed);
             } else {
                 let Some(descriptor) = self.providers.descriptor(&instrument.provider) else {
                     diagnostic!("Aeris market instrument references an unregistered provider");
                     continue;
                 };
-                self.order_books.insert(
-                    identity,
-                    ProviderOrderBook::new(
-                        instrument,
-                        descriptor.trade_continuity,
-                        !descriptor.presentation.depth_available,
-                    ),
+                let mut book = ProviderOrderBook::new(
+                    instrument,
+                    descriptor.trade_continuity,
+                    !descriptor.presentation.depth_available,
                 );
+                book.set_depth_subscribed(depth_subscribed);
+                self.order_books.insert(identity, book);
             }
         }
         self.display_depth.retain(|identity, display| {
@@ -3934,6 +3944,68 @@ mod tests {
                         )
                     )
         ));
+    }
+
+    #[test]
+    fn quote_book_publishes_top_of_book_only_until_some_consumer_subscribes_depth() {
+        let mut coordinator = coordinator();
+        let selected = hyperliquid_instrument();
+        let selected_series = hyperliquid_series();
+        coordinator.catalog.insert(
+            (selected.provider.clone(), selected.instrument_id.clone()),
+            selected.clone(),
+        );
+        let chart = consumer(1);
+        let order_book_panel = consumer(2);
+        register(&mut coordinator, chart);
+        register(&mut coordinator, order_book_panel);
+        let quotes = StreamRequirements::BARS.with(MarketStream::Quotes);
+        for consumer_id in [chart, order_book_panel] {
+            coordinator
+                .engine
+                .set_series_demand_with_streams(
+                    consumer_id,
+                    generation(3),
+                    &selected_series,
+                    quotes,
+                )
+                .expect("quote demand installs");
+        }
+        coordinator.reconcile_order_books();
+        let identity = (selected.provider.clone(), selected.instrument_id.clone());
+        let top_of_book_only = |coordinator: &Coordinator<'_>| {
+            coordinator
+                .order_books
+                .get(&identity)
+                .expect("quote demand keeps a canonical book")
+                .publishes_top_of_book_only()
+        };
+        assert!(top_of_book_only(&coordinator));
+
+        assert!(
+            coordinator
+                .engine
+                .set_stream_requirements(
+                    order_book_panel,
+                    generation(3),
+                    quotes.with(MarketStream::Depth),
+                )
+                .expect("order book opens")
+        );
+        coordinator.reconcile_order_books();
+        assert!(!top_of_book_only(&coordinator));
+
+        assert!(
+            coordinator
+                .engine
+                .set_stream_requirements(order_book_panel, generation(3), quotes)
+                .expect("order book closes")
+        );
+        coordinator.reconcile_order_books();
+        assert!(
+            top_of_book_only(&coordinator),
+            "the chart keeps receiving the live quote after the last depth consumer closes"
+        );
     }
 
     #[test]

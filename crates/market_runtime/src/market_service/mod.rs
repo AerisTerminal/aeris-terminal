@@ -680,6 +680,9 @@ struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
     trade_continuity: TradeContinuity,
     top_of_book_only: bool,
+    /// Set while no current demand subscribes depth. Providers stop maintaining the
+    /// canonical image then, so consumers receive only the live top of book.
+    depth_unsubscribed: bool,
     book: OrderBook,
     top_of_book: Option<TopOfBookQuote>,
     recent_trades: VecDeque<crate::RetainedMarketTrade>,

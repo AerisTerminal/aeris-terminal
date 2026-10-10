@@ -132,6 +132,7 @@ impl ProviderOrderBook {
             instrument,
             trade_continuity,
             top_of_book_only,
+            depth_unsubscribed: false,
             book: OrderBook::new(
                 NonZeroUsize::new(MAXIMUM_CANONICAL_DEPTH_LEVELS).unwrap_or(NonZeroUsize::MIN),
             ),
@@ -148,6 +149,16 @@ impl ProviderOrderBook {
             trade_tape_published_at: None,
             retention_clock_unix_nanos: 0,
         }
+    }
+
+    pub(super) fn set_depth_subscribed(&mut self, subscribed: bool) {
+        self.depth_unsubscribed = !subscribed;
+    }
+
+    /// Consumers receive only the top of book when the provider has no depth or
+    /// no current demand keeps the canonical image maintained.
+    pub(super) const fn publishes_top_of_book_only(&self) -> bool {
+        self.top_of_book_only || self.depth_unsubscribed
     }
 
     pub(super) fn update_instrument(&mut self, instrument: InstallProviderInstrument) {

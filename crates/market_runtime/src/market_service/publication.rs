@@ -110,7 +110,13 @@ pub(super) fn order_book_snapshot(
     order_book: &ProviderOrderBook,
     display_depth: Option<&crate::MarketDisplayDepth>,
 ) -> MarketRuntimeEvent {
+    let top_of_book_only = order_book.publishes_top_of_book_only();
     let mut publication = order_book.book.publication();
+    if top_of_book_only {
+        // Without a depth subscription the retained image is no longer current.
+        publication.bids.clear();
+        publication.asks.clear();
+    }
     if publication.provider_id.is_empty() {
         publication
             .provider_id
@@ -123,6 +129,16 @@ pub(super) fn order_book_snapshot(
             .clone_from(&order_book.instrument.entitlement_id);
         publication.session_generation = order_book.instrument.session_generation;
     }
+    if top_of_book_only
+        && let Some(quote) = order_book.top_of_book.as_ref()
+        && quote.metadata.session_generation > publication.session_generation
+    {
+        // A retained image keeps the provider session it was captured in. The live
+        // quote is fenced to the current session, and an older image watermark
+        // cannot order it.
+        publication.session_generation = quote.metadata.session_generation;
+        publication.source_watermark = 0;
+    }
     let provider_generation = publication.session_generation;
     if order_book.trade_session_generation == provider_generation {
         publication
@@ -130,20 +146,7 @@ pub(super) fn order_book_snapshot(
             .clone_from(&order_book.traded_volumes);
         publication.trade_source_watermark = order_book.last_trade_source_sequence;
     }
-    publication.top_of_book_only = order_book.top_of_book_only;
-    if order_book.top_of_book_only {
-        publication.state = if order_book
-            .top_of_book
-            .as_ref()
-            .is_some_and(|quote| quote.bid.is_some() && quote.ask.is_some())
-        {
-            aeris_market_data::OrderBookState::Ready
-        } else {
-            aeris_market_data::OrderBookState::Recovering(
-                aeris_market_data::OrderBookRecoveryReason::AwaitingSnapshot,
-            )
-        };
-    }
+    publication.top_of_book_only = top_of_book_only;
     if let Some(quote) = order_book
         .top_of_book
         .as_ref()
@@ -161,12 +164,23 @@ pub(super) fn order_book_snapshot(
         publication.best_ask = publication.asks.first().copied().map(Into::into);
         publication.bbo_source_watermark = publication.source_watermark;
     }
+    if top_of_book_only {
+        publication.state = if publication.best_bid.is_some() && publication.best_ask.is_some() {
+            aeris_market_data::OrderBookState::Ready
+        } else {
+            aeris_market_data::OrderBookState::Recovering(
+                aeris_market_data::OrderBookRecoveryReason::AwaitingSnapshot,
+            )
+        };
+    }
     MarketRuntimeEvent::OrderBookSnapshot(MarketOrderBookSnapshot {
         consumer_id,
         generation,
         publication,
         display_depth: display_depth
-            .filter(|display| display.provider_generation == provider_generation)
+            .filter(|display| {
+                !top_of_book_only && display.provider_generation == provider_generation
+            })
             .cloned(),
     })
 }
@@ -1048,5 +1062,146 @@ mod tests {
             [] as [aeris_market_data::DepthLevel; 0]
         );
         assert!(snapshot.publication.best_bid.is_some());
+    }
+
+    fn hyperliquid_instrument(
+        session_generation: u64,
+    ) -> aeris_contracts::InstallProviderInstrument {
+        aeris_contracts::InstallProviderInstrument {
+            provider: "hyperliquid".into(),
+            session_generation,
+            instrument_id: "hyperliquid:perp:HYPE".into(),
+            entitlement_id: "hyperliquid-public".into(),
+            price_scale: 8,
+            ..Default::default()
+        }
+    }
+
+    fn metadata(
+        instrument: &aeris_contracts::InstallProviderInstrument,
+        session_generation: u64,
+        source_sequence: u64,
+    ) -> aeris_market_data::EventMetadata {
+        aeris_market_data::EventMetadata {
+            provider_id: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            entitlement_id: instrument.entitlement_id.clone(),
+            source_sequence,
+            session_generation,
+            timestamps: aeris_market_data::QualifiedTimestamp {
+                exchange_unix_nanos: Some(1),
+                provider_unix_nanos: None,
+                received_unix_nanos: 1,
+            },
+        }
+    }
+
+    fn quote(
+        instrument: &aeris_contracts::InstallProviderInstrument,
+        session_generation: u64,
+        source_sequence: u64,
+        bid: i64,
+    ) -> aeris_market_data::TopOfBookQuote {
+        aeris_market_data::TopOfBookQuote {
+            metadata: metadata(instrument, session_generation, source_sequence),
+            bid: Some(aeris_market_data::QuoteLevel {
+                price: bid,
+                quantity: Some(2),
+                order_count: None,
+            }),
+            ask: Some(aeris_market_data::QuoteLevel {
+                price: bid + 1,
+                quantity: Some(3),
+                order_count: None,
+            }),
+        }
+    }
+
+    fn publication(order_book: &ProviderOrderBook) -> aeris_market_data::OrderBookPublication {
+        let MarketRuntimeEvent::OrderBookSnapshot(snapshot) = order_book_snapshot(
+            ConsumerId(std::num::NonZeroU64::MIN),
+            GenerationId(std::num::NonZeroU64::MIN),
+            order_book,
+            None,
+        ) else {
+            panic!("order-book publication expected");
+        };
+        snapshot.publication
+    }
+
+    #[test]
+    fn depth_capable_book_without_a_depth_subscription_publishes_the_live_quote() {
+        let instrument = hyperliquid_instrument(1);
+        let mut order_book = ProviderOrderBook::new(
+            instrument.clone(),
+            super::super::TradeContinuity::Indexed,
+            false,
+        );
+        order_book.set_depth_subscribed(false);
+        assert!(order_book.install_top_of_book(&quote(&instrument, 1, 7, 8_381_500_000)));
+
+        let unsubscribed = publication(&order_book);
+        assert!(unsubscribed.top_of_book_only);
+        assert_eq!(unsubscribed.state, aeris_market_data::OrderBookState::Ready);
+        assert_eq!(
+            unsubscribed.best_bid.map(|level| level.price),
+            Some(8_381_500_000)
+        );
+        assert_eq!(unsubscribed.bbo_source_watermark, 7);
+
+        order_book.set_depth_subscribed(true);
+        let subscribed = publication(&order_book);
+        assert!(!subscribed.top_of_book_only);
+        assert_eq!(
+            subscribed.state,
+            aeris_market_data::OrderBookState::Recovering(
+                aeris_market_data::OrderBookRecoveryReason::AwaitingSnapshot
+            ),
+            "a depth consumer still waits for a complete canonical image"
+        );
+    }
+
+    #[test]
+    fn unsubscribed_depth_never_republishes_a_retained_image_from_an_older_session() {
+        let instrument = hyperliquid_instrument(1);
+        let mut order_book = ProviderOrderBook::new(
+            instrument.clone(),
+            super::super::TradeContinuity::Indexed,
+            false,
+        );
+        let level = |price| aeris_market_data::DepthLevel {
+            price,
+            quantity: 1,
+            order_count: None,
+        };
+        assert!(matches!(
+            order_book
+                .book
+                .install_snapshot(&aeris_market_data::DepthSnapshot {
+                    metadata: metadata(&instrument, 1, 40),
+                    bids: vec![level(8_381_000_000)],
+                    asks: vec![level(8_381_100_000)],
+                }),
+            Ok(aeris_market_data::OrderBookApplyOutcome::Published)
+        ));
+        order_book.set_depth_subscribed(false);
+        assert_eq!(
+            publication(&order_book).bids,
+            [] as [aeris_market_data::DepthLevel; 0]
+        );
+
+        order_book.update_instrument(hyperliquid_instrument(2));
+        assert!(order_book.install_top_of_book(&quote(&instrument, 2, 3, 8_376_500_000)));
+
+        let reconnected = publication(&order_book);
+        assert_eq!(reconnected.state, aeris_market_data::OrderBookState::Ready);
+        assert_eq!(reconnected.session_generation, 2);
+        assert_eq!(reconnected.source_watermark, 0);
+        assert_eq!(reconnected.bbo_source_watermark, 3);
+        assert_eq!(
+            reconnected.best_bid.map(|level| level.price),
+            Some(8_376_500_000)
+        );
+        assert_eq!(reconnected.asks, [] as [aeris_market_data::DepthLevel; 0]);
     }
 }
