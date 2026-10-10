@@ -918,12 +918,10 @@ mod timeframe_input {
     }
 
     #[gpui::test]
-    fn trading_shortcuts_need_arming_ask_first_and_send_once_per_press(cx: &mut TestAppContext) {
+    fn trading_shortcuts_ask_first_and_send_once_per_press(cx: &mut TestAppContext) {
         let (terminal, cx) = terminal_harness(cx);
         let surface = cx.read(|cx| terminal.read(cx).active_surface());
         publish_snapshot(&surface, cx);
-        let armed =
-            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).keyboard_trading.armed());
         let confirming = |cx: &mut VisualTestContext| {
             cx.read(|cx| terminal.read(cx).keyboard_trading.confirming())
         };
@@ -932,25 +930,11 @@ mod timeframe_input {
                 keystroke: gpui::Keystroke::parse(key).expect("key"),
             });
         };
-        assert!(!armed(cx), "every launch starts disarmed");
         cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
         cx.run_until_parked();
 
         cx.simulate_keystrokes("ctrl-shift-x");
-        assert!(
-            !confirming(cx),
-            "a disarmed shortcut sends and asks nothing"
-        );
-        release(cx, "x");
-
-        cx.simulate_keystrokes("ctrl-shift-a");
-        assert!(armed(cx));
-        cx.simulate_keystrokes("ctrl-shift-a");
-        assert!(armed(cx), "holding the arm chord toggles it once");
-        release(cx, "a");
-
-        cx.simulate_keystrokes("ctrl-shift-x");
-        assert!(confirming(cx), "an armed shortcut asks first");
+        assert!(confirming(cx), "a shortcut works at once and asks first");
         cx.simulate_keystrokes("escape");
         assert!(!confirming(cx), "Escape cancels the confirmation");
         cx.simulate_keystrokes("ctrl-shift-x");
@@ -974,9 +958,6 @@ mod timeframe_input {
         cx.simulate_keystrokes("ctrl-shift-x");
         assert!(!confirming(cx), "one-click trading sends without asking");
         release(cx, "x");
-
-        cx.simulate_keystrokes("ctrl-shift-a");
-        assert!(!armed(cx), "the arm chord disarms");
     }
 
     #[gpui::test]

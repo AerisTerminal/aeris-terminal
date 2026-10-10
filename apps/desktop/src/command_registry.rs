@@ -37,7 +37,6 @@ pub enum CommandId {
     SplitHorizontal,
     SplitVertical,
     ClosePane,
-    ToggleTradingArmed,
     ToggleOneClickTrading,
     BuyMarket,
     SellMarket,
@@ -47,7 +46,7 @@ pub enum CommandId {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 35] = [
         Self::OpenPalette,
         Self::ToggleFullscreen,
         Self::MinimizeWindow,
@@ -77,7 +76,6 @@ impl CommandId {
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::ClosePane,
-        Self::ToggleTradingArmed,
         Self::ToggleOneClickTrading,
         Self::BuyMarket,
         Self::SellMarket,
@@ -279,12 +277,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Close pane",
         "layout",
         &["ctrl-shift-w"],
-    ),
-    spec(
-        CommandId::ToggleTradingArmed,
-        "Trading: Arm or disarm keyboard trading",
-        "hotkeys shortcuts enable disable",
-        &["ctrl-shift-a"],
     ),
     spec(
         CommandId::ToggleOneClickTrading,

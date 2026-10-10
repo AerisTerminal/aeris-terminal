@@ -330,9 +330,6 @@ impl TerminalApp {
             }
             CommandId::SplitVertical => self.split_pane_vertical(&SplitPaneVertical, window, cx),
             CommandId::ClosePane => self.close_active_pane(&ClosePane, window, cx),
-            CommandId::ToggleTradingArmed => {
-                self.set_trading_armed(!self.keyboard_trading.armed(), cx);
-            }
             CommandId::ToggleOneClickTrading => {
                 self.toggle_one_click_trading(&ToggleOneClickTrading, window, cx);
             }
@@ -609,7 +606,6 @@ impl TerminalApp {
                 error: self.workspace_error.as_deref(),
                 workspace_drag: self.workspace_drag,
                 app_view: self.pages.view,
-                keyboard_trading: self.keyboard_trading_indicator(),
                 theme: self.theme,
             },
             window,
@@ -763,7 +759,6 @@ impl Render for TerminalApp {
                 fullscreen_focus.focus(window, cx);
             })
             .on_action(cx.listener(Self::close_window))
-            .on_action(cx.listener(Self::toggle_trading_armed))
             .on_action(cx.listener(Self::toggle_one_click_trading))
             .on_action(cx.listener(Self::trading_buy_market))
             .on_action(cx.listener(Self::trading_sell_market))

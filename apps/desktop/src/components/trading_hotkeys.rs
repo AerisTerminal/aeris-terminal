@@ -1,10 +1,8 @@
-//! Keyboard trading: the per-session arm switch, the held-key guard, and the order confirmation
-//! that one-click trading skips. Clicks on the order ticket are not keyboard trading and never
-//! pass through here.
+//! Keyboard trading: the held-key guard and the order confirmation that one-click trading skips.
+//! Clicks on the order ticket are not keyboard trading and never pass through here.
 
 use super::chart_chrome::TradingShortcutMode;
 use super::*;
-use aeris_desktop::command_registry::{self, CommandId};
 
 /// A trading command sent by a shortcut or the command palette.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,11 +54,9 @@ impl TradingHotkey {
     }
 }
 
-/// Keyboard trading state for this run of the app. Nothing here is saved, so every launch
-/// starts disarmed.
+/// Keyboard trading state for this run of the app.
 #[derive(Default)]
 pub(super) struct KeyboardTrading {
-    armed: bool,
     /// Set when a shortcut runs and cleared by the next key release, so holding a chord sends
     /// once instead of once per key repeat.
     key_latched: bool,
@@ -68,10 +64,6 @@ pub(super) struct KeyboardTrading {
 }
 
 impl KeyboardTrading {
-    pub(super) const fn armed(&self) -> bool {
-        self.armed
-    }
-
     pub(super) const fn confirming(&self) -> bool {
         self.confirmation.is_some()
     }
@@ -97,51 +89,7 @@ struct TradingConfirmation {
     skip_next_time: bool,
 }
 
-/// The title-bar state of keyboard trading.
-#[derive(Clone, Copy)]
-pub(super) struct KeyboardTradingIndicator {
-    pub(super) armed: bool,
-    pub(super) one_click: bool,
-}
-
-fn arm_shortcut_label() -> String {
-    command_registry::command(CommandId::ToggleTradingArmed)
-        .shortcut_label()
-        .unwrap_or_else(|| "the command palette".to_string())
-}
-
 impl TerminalApp {
-    pub(super) const fn keyboard_trading_indicator(&self) -> KeyboardTradingIndicator {
-        KeyboardTradingIndicator {
-            armed: self.keyboard_trading.armed(),
-            one_click: self.chart_chrome.trading_shortcuts.one_click(),
-        }
-    }
-
-    pub(super) fn toggle_trading_armed(
-        &mut self,
-        _: &ToggleTradingArmed,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.keyboard_trading.claim_key() {
-            self.set_trading_armed(!self.keyboard_trading.armed, cx);
-        }
-    }
-
-    pub(super) fn set_trading_armed(&mut self, armed: bool, cx: &mut Context<Self>) {
-        self.keyboard_trading.armed = armed;
-        if !armed {
-            self.keyboard_trading.confirmation = None;
-        }
-        aeris_desktop::trading::record_notice(Ok(if armed {
-            "Keyboard trading armed for this session".to_string()
-        } else {
-            "Keyboard trading off".to_string()
-        }));
-        cx.notify();
-    }
-
     pub(super) fn toggle_one_click_trading(
         &mut self,
         _: &ToggleOneClickTrading,
@@ -188,14 +136,6 @@ impl TerminalApp {
             return false;
         }
         if !self.keyboard_trading.claim_key() {
-            return true;
-        }
-        if !self.keyboard_trading.armed {
-            aeris_desktop::trading::record_notice(Err(format!(
-                "Keyboard trading is off. Press {} to arm it for this session.",
-                arm_shortcut_label()
-            )));
-            cx.notify();
             return true;
         }
         let message = match self.trading_hotkey_summary(hotkey, cx) {
@@ -311,9 +251,7 @@ impl TerminalApp {
         if confirmation.skip_next_time {
             self.set_trading_shortcut_mode(TradingShortcutMode::OneClick, cx);
         }
-        if self.keyboard_trading.armed {
-            self.send_trading_hotkey(confirmation.hotkey, cx);
-        }
+        self.send_trading_hotkey(confirmation.hotkey, cx);
         self.focus_workspace(window, cx);
         cx.notify();
     }
@@ -395,67 +333,4 @@ impl TerminalApp {
             .into_any_element(),
         )
     }
-}
-
-/// The title-bar switch for keyboard trading. It shows whether shortcuts can trade and arms or
-/// disarms them for this session.
-pub(super) fn keyboard_trading_toggle(
-    terminal: &Entity<TerminalApp>,
-    indicator: KeyboardTradingIndicator,
-    theme: &AerisTheme,
-) -> Div {
-    let colors = theme.colors;
-    let label = match indicator {
-        KeyboardTradingIndicator { armed: false, .. } => "Hotkeys off",
-        KeyboardTradingIndicator {
-            armed: true,
-            one_click: false,
-        } => "Hotkeys armed",
-        KeyboardTradingIndicator {
-            armed: true,
-            one_click: true,
-        } => "Hotkeys armed · one-click",
-    };
-    let toggle = terminal.clone();
-    let armed = indicator.armed;
-    div()
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .px_2()
-        .child(
-            Button::new("keyboard_trading_toggle", theme)
-                .variant(ButtonVariant::Ghost)
-                .button_size(ButtonSize::Sm)
-                .selected(armed)
-                .leading(div().size(px(6.0)).rounded_full().bg(gpui_color(if armed {
-                    colors.danger
-                } else {
-                    colors.text_muted
-                })))
-                .label(label)
-                .aria_label(if armed {
-                    "Disarm keyboard trading"
-                } else {
-                    "Arm keyboard trading"
-                })
-                .tooltip(
-                    TooltipSpec::new(
-                        format!(
-                            "Keyboard trading for this session ({})",
-                            arm_shortcut_label()
-                        ),
-                        theme,
-                    )
-                    .show_delay(TOOLTIP_OPEN_DELAY),
-                )
-                .on_click(move |_, window, cx| {
-                    toggle.update(cx, |terminal, terminal_cx| {
-                        terminal.set_trading_armed(!armed, terminal_cx);
-                        // The button took focus; shortcuts trade only from the workspace.
-                        terminal.focus_workspace(window, terminal_cx);
-                    });
-                }),
-        )
 }
