@@ -3,8 +3,8 @@
 use super::{
     CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_LIST_HEIGHT,
     CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH, CaptionPlatform,
-    CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartShortcut, ChartState,
-    ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
+    CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase,
+    ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
     InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
     PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
     RithmicSwitchState, SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget,
@@ -14,7 +14,7 @@ use super::{
     WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
     active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
     caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-    chart_position_id, chart_shortcut, chart_status_detail, chart_surface_notice,
+    chart_position_id, chart_status_detail, chart_surface_notice,
     chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
     chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
@@ -1294,55 +1294,6 @@ fn every_registry_shortcut_binds_and_stays_off_the_chart_keys() {
         bindings.len(),
         chord_count,
         "one binding per registry chord"
-    );
-    for key in aeris_chart_integration::chart_keystrokes() {
-        assert_eq!(
-            chart_shortcut(&key.key, key.modifiers),
-            None,
-            "{key} belongs to the chart, so no workspace key may claim it"
-        );
-    }
-}
-
-#[test]
-fn chart_keys_step_the_watchlist_and_toggle_fullscreen_like_tradingview() {
-    let shift = gpui::Modifiers {
-        shift: true,
-        ..gpui::Modifiers::default()
-    };
-    let control = gpui::Modifiers {
-        control: true,
-        ..gpui::Modifiers::default()
-    };
-    assert_eq!(
-        chart_shortcut("space", gpui::Modifiers::default()),
-        Some(ChartShortcut::NextWatchlistSymbol)
-    );
-    assert_eq!(
-        chart_shortcut("space", shift),
-        Some(ChartShortcut::PreviousWatchlistSymbol)
-    );
-    assert_eq!(
-        chart_shortcut("f", shift),
-        Some(ChartShortcut::ToggleChartFullscreen)
-    );
-    assert_eq!(
-        chart_shortcut("f", gpui::Modifiers::default()),
-        None,
-        "a plain F still starts symbol search"
-    );
-    assert_eq!(chart_shortcut("space", control), None);
-    assert_eq!(
-        chart_shortcut(
-            "f",
-            gpui::Modifiers {
-                control: true,
-                shift: true,
-                ..gpui::Modifiers::default()
-            }
-        ),
-        None,
-        "Ctrl+Shift+F stays the flatten command"
     );
 }
 

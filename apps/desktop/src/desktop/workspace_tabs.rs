@@ -576,7 +576,8 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(shortcut) = chart_shortcut(&event.keystroke.key, event.keystroke.modifiers) else {
+        use aeris_desktop::command_registry::{WorkspaceShortcut, workspace_key_shortcut};
+        let Some(shortcut) = workspace_key_shortcut(&event.keystroke) else {
             return false;
         };
         if !self.workspace_keyboard_focused(window, cx)
@@ -588,9 +589,10 @@ impl TerminalApp {
             return true;
         }
         match shortcut {
-            ChartShortcut::ToggleChartFullscreen => self.toggle_chart_fullscreen(window, cx),
-            ChartShortcut::NextWatchlistSymbol => self.step_watchlist(true, cx),
-            ChartShortcut::PreviousWatchlistSymbol => self.step_watchlist(false, cx),
+            WorkspaceShortcut::ToggleChartFullscreen => self.toggle_chart_fullscreen(window, cx),
+            WorkspaceShortcut::NextWatchlistSymbol => self.step_watchlist(true, cx),
+            WorkspaceShortcut::PreviousWatchlistSymbol => self.step_watchlist(false, cx),
+            WorkspaceShortcut::MaximizePane => return false,
         }
         true
     }

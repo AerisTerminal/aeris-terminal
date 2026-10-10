@@ -1,9 +1,9 @@
 //! Product command metadata shared by menus, keyboard bindings, and the command palette.
 //!
-//! This table is the only source of desktop keyboard shortcuts. Keys the chart consumes belong
-//! to Aeris Charts; [`validate_chords`] keeps every shortcut here off them.
+//! [`COMMANDS`] and [`WORKSPACE_SHORTCUTS`] are the only sources of desktop shortcuts. Keys the
+//! chart consumes belong to Aeris Charts; [`validate_chords`] keeps every shortcut here off them.
 
-use gpui::Keystroke;
+use gpui::{Keystroke, Modifiers, MouseButton};
 
 /// Stable command identifiers. Execution stays at the owning desktop surface/runtime boundary.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -158,20 +158,138 @@ impl CommandGroup {
     }
 }
 
-/// Every command that has a shortcut, grouped under its heading in registry order. Groups
-/// without a shortcut are left out.
+/// One line of the shortcuts list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShortcutRow {
+    pub title: &'static str,
+    /// Alternatives, the displayed shortcut first.
+    pub triggers: Vec<ShortcutTrigger>,
+}
+
+/// Every shortcut, grouped under its heading: the bound commands in registry order, then the
+/// workspace shortcuts. Groups without a shortcut are left out.
 #[must_use]
-pub fn shortcut_sections() -> Vec<(CommandGroup, Vec<&'static CommandSpec>)> {
+pub fn shortcut_sections() -> Vec<(CommandGroup, Vec<ShortcutRow>)> {
     CommandGroup::ALL
         .into_iter()
         .filter_map(|group| {
             let commands = COMMANDS
                 .iter()
                 .filter(|spec| spec.id.group() == group && !spec.chords.is_empty())
-                .collect::<Vec<_>>();
-            (!commands.is_empty()).then_some((group, commands))
+                .map(|spec| ShortcutRow {
+                    title: spec.short_title(),
+                    triggers: spec
+                        .chords
+                        .iter()
+                        .copied()
+                        .map(ShortcutTrigger::Key)
+                        .collect(),
+                });
+            let workspace = WORKSPACE_SHORTCUTS
+                .iter()
+                .filter(|spec| spec.group == group)
+                .map(|spec| ShortcutRow {
+                    title: spec.title,
+                    triggers: vec![spec.trigger],
+                });
+            let rows = commands.chain(workspace).collect::<Vec<_>>();
+            (!rows.is_empty()).then_some((group, rows))
         })
         .collect()
+}
+
+/// Shortcuts the workspace matches itself instead of binding them in the GPUI keymap. They act
+/// on the focused chart or on the pane under the pointer, so they must give way to text fields
+/// and chart drawing, which a window-wide binding cannot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceShortcut {
+    MaximizePane,
+    ToggleChartFullscreen,
+    NextWatchlistSymbol,
+    PreviousWatchlistSymbol,
+}
+
+/// What the user presses for a shortcut.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShortcutTrigger {
+    /// A GPUI keystroke such as `shift-f`, matched on its exact modifiers.
+    Key(&'static str),
+    /// A primary-button press with Alt held.
+    AltClick,
+}
+
+impl ShortcutTrigger {
+    /// The keys as people write them, for keycaps: `shift-f` is `Shift`, `F`.
+    #[must_use]
+    pub fn keys(self) -> Vec<String> {
+        match self {
+            Self::Key(chord) => chord_keys(chord),
+            Self::AltClick => vec!["Alt".to_string(), "Click".to_string()],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceShortcutSpec {
+    pub shortcut: WorkspaceShortcut,
+    pub group: CommandGroup,
+    pub title: &'static str,
+    pub trigger: ShortcutTrigger,
+}
+
+pub const WORKSPACE_SHORTCUTS: &[WorkspaceShortcutSpec] = &[
+    WorkspaceShortcutSpec {
+        shortcut: WorkspaceShortcut::MaximizePane,
+        group: CommandGroup::Panes,
+        title: "Maximize or restore pane",
+        trigger: ShortcutTrigger::AltClick,
+    },
+    WorkspaceShortcutSpec {
+        shortcut: WorkspaceShortcut::ToggleChartFullscreen,
+        group: CommandGroup::Chart,
+        title: "Chart fullscreen",
+        trigger: ShortcutTrigger::Key("shift-f"),
+    },
+    WorkspaceShortcutSpec {
+        shortcut: WorkspaceShortcut::NextWatchlistSymbol,
+        group: CommandGroup::Chart,
+        title: "Next watchlist symbol",
+        trigger: ShortcutTrigger::Key("space"),
+    },
+    WorkspaceShortcutSpec {
+        shortcut: WorkspaceShortcut::PreviousWatchlistSymbol,
+        group: CommandGroup::Chart,
+        title: "Previous watchlist symbol",
+        trigger: ShortcutTrigger::Key("shift-space"),
+    },
+];
+
+/// The workspace shortcut a key press triggers, if any.
+#[must_use]
+pub fn workspace_key_shortcut(keystroke: &Keystroke) -> Option<WorkspaceShortcut> {
+    WORKSPACE_SHORTCUTS
+        .iter()
+        .find_map(|spec| match spec.trigger {
+            ShortcutTrigger::Key(chord) => Keystroke::parse(chord)
+                .is_ok_and(|bound| same_chord(&bound, keystroke))
+                .then_some(spec.shortcut),
+            ShortcutTrigger::AltClick => None,
+        })
+}
+
+/// The workspace shortcut a mouse press triggers, if any.
+#[must_use]
+pub fn workspace_click_shortcut(
+    button: MouseButton,
+    modifiers: Modifiers,
+) -> Option<WorkspaceShortcut> {
+    if button != MouseButton::Left || !modifiers.alt {
+        return None;
+    }
+    WORKSPACE_SHORTCUTS
+        .iter()
+        .find(|spec| spec.trigger == ShortcutTrigger::AltClick)
+        .map(|spec| spec.shortcut)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,40 +556,46 @@ fn same_chord(left: &Keystroke, right: &Keystroke) -> bool {
     left.key == right.key && left.modifiers == right.modifiers
 }
 
-/// Checks every chord in `commands`: it parses as a GPUI keystroke, no two bindings share it, it
-/// is not a system chord, and it does not shadow a key the chart consumes. `chart_keys` is the
-/// key contract Aeris Charts publishes.
+/// Checks every key chord in `commands` and `workspace`: it parses as a GPUI keystroke, no two
+/// shortcuts share it, it is not a system chord, and it does not shadow a key the chart
+/// consumes. `chart_keys` is the key contract Aeris Charts publishes.
 ///
 /// # Errors
 ///
 /// Returns the first chord that fails, naming the conflict.
-pub fn validate_chords(commands: &[CommandSpec], chart_keys: &[Keystroke]) -> Result<(), String> {
+pub fn validate_chords(
+    commands: &[CommandSpec],
+    workspace: &[WorkspaceShortcutSpec],
+    chart_keys: &[Keystroke],
+) -> Result<(), String> {
     let system = SYSTEM_CHORDS
         .iter()
         .map(|chord| Keystroke::parse(chord).map_err(|error| format!("{chord}: {error}")))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut bound: Vec<(Keystroke, &CommandSpec)> = Vec::new();
-    for spec in commands {
-        for chord in spec.chords {
-            let keystroke = Keystroke::parse(chord)
-                .map_err(|error| format!("{} chord {chord}: {error}", spec.title))?;
-            if let Some((_, owner)) = bound
-                .iter()
-                .find(|(other, _)| same_chord(other, &keystroke))
-            {
-                return Err(format!(
-                    "{chord} is bound to both {} and {}",
-                    owner.title, spec.title
-                ));
-            }
-            if keystroke.modifiers.platform || system.iter().any(|s| same_chord(s, &keystroke)) {
-                return Err(format!("{chord} ({}) is a system shortcut", spec.title));
-            }
-            if chart_keys.iter().any(|key| same_chord(key, &keystroke)) {
-                return Err(format!("{chord} ({}) shadows a chart key", spec.title));
-            }
-            bound.push((keystroke, spec));
+    let command_chords = commands
+        .iter()
+        .flat_map(|spec| spec.chords.iter().map(|chord| (spec.title, *chord)));
+    let workspace_chords = workspace.iter().filter_map(|spec| match spec.trigger {
+        ShortcutTrigger::Key(chord) => Some((spec.title, chord)),
+        ShortcutTrigger::AltClick => None,
+    });
+    let mut bound: Vec<(Keystroke, &str)> = Vec::new();
+    for (title, chord) in command_chords.chain(workspace_chords) {
+        let keystroke =
+            Keystroke::parse(chord).map_err(|error| format!("{title} chord {chord}: {error}"))?;
+        if let Some((_, owner)) = bound
+            .iter()
+            .find(|(other, _)| same_chord(other, &keystroke))
+        {
+            return Err(format!("{chord} is bound to both {owner} and {title}"));
         }
+        if keystroke.modifiers.platform || system.iter().any(|s| same_chord(s, &keystroke)) {
+            return Err(format!("{chord} ({title}) is a system shortcut"));
+        }
+        if chart_keys.iter().any(|key| same_chord(key, &keystroke)) {
+            return Err(format!("{chord} ({title}) shadows a chart key"));
+        }
+        bound.push((keystroke, title));
     }
     Ok(())
 }
@@ -578,32 +702,74 @@ mod tests {
 
     #[test]
     fn chord_validation_rejects_duplicates_system_keys_and_chart_keys() {
-        assert_eq!(validate_chords(COMMANDS, &[]), Ok(()));
+        assert_eq!(validate_chords(COMMANDS, WORKSPACE_SHORTCUTS, &[]), Ok(()));
         let buy = command(CommandId::BuyMarket);
         let sell = CommandSpec {
             chords: &["ctrl-b"],
             ..*command(CommandId::SellMarket)
         };
-        let error = validate_chords(&[*buy, sell], &[]).expect_err("duplicate");
+        let error = validate_chords(&[*buy, sell], &[], &[]).expect_err("duplicate");
         assert!(error.contains("ctrl-b is bound to both"), "{error}");
         let alt_tab = CommandSpec {
             chords: &["alt-tab"],
             ..*buy
         };
-        assert!(validate_chords(&[alt_tab], &[]).is_err());
+        assert!(validate_chords(&[alt_tab], &[], &[]).is_err());
         let windows_key = CommandSpec {
             chords: &["cmd-b"],
             ..*buy
         };
-        assert!(validate_chords(&[windows_key], &[]).is_err());
+        assert!(validate_chords(&[windows_key], &[], &[]).is_err());
         let malformed = CommandSpec {
             chords: &["meta-b"],
             ..*buy
         };
-        assert!(validate_chords(&[malformed], &[]).is_err());
+        assert!(validate_chords(&[malformed], &[], &[]).is_err());
         let chart_key = Keystroke::parse("ctrl-b").expect("chart key");
-        let error = validate_chords(&[*buy], &[chart_key]).expect_err("shadowed");
+        let error = validate_chords(&[*buy], &[], &[chart_key]).expect_err("shadowed");
         assert!(error.contains("shadows a chart key"), "{error}");
+
+        let fullscreen = WorkspaceShortcutSpec {
+            trigger: ShortcutTrigger::Key("ctrl-b"),
+            ..WORKSPACE_SHORTCUTS[1]
+        };
+        let error = validate_chords(&[*buy], &[fullscreen], &[]).expect_err("duplicate");
+        assert!(error.contains("ctrl-b is bound to both"), "{error}");
+        let space = Keystroke::parse("space").expect("chart key");
+        let error = validate_chords(&[], WORKSPACE_SHORTCUTS, &[space]).expect_err("shadowed");
+        assert!(error.contains("Next watchlist symbol"), "{error}");
+    }
+
+    #[test]
+    fn workspace_shortcuts_match_exact_keys_and_alt_click() {
+        let key = |chord| workspace_key_shortcut(&Keystroke::parse(chord).expect("keystroke"));
+        assert_eq!(
+            key("shift-f"),
+            Some(WorkspaceShortcut::ToggleChartFullscreen)
+        );
+        assert_eq!(key("space"), Some(WorkspaceShortcut::NextWatchlistSymbol));
+        assert_eq!(
+            key("shift-space"),
+            Some(WorkspaceShortcut::PreviousWatchlistSymbol)
+        );
+        assert_eq!(key("f"), None, "a plain F still starts symbol search");
+        assert_eq!(key("ctrl-space"), None);
+        assert_eq!(key("ctrl-shift-f"), None, "Ctrl+Shift+F stays flatten");
+
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            workspace_click_shortcut(MouseButton::Left, alt),
+            Some(WorkspaceShortcut::MaximizePane)
+        );
+        assert_eq!(
+            workspace_click_shortcut(MouseButton::Left, Modifiers::default()),
+            None
+        );
+        assert_eq!(workspace_click_shortcut(MouseButton::Right, alt), None);
+        assert_eq!(ShortcutTrigger::AltClick.keys(), ["Alt", "Click"]);
     }
 
     #[test]
@@ -619,37 +785,57 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_sections_list_every_bound_command_once_trading_first() {
+    fn shortcut_sections_list_every_shortcut_once_trading_first() {
         let sections = shortcut_sections();
+        let labels = |rows: &[ShortcutRow]| {
+            rows.iter()
+                .map(|row| {
+                    let keys = row
+                        .triggers
+                        .iter()
+                        .map(|trigger| trigger.keys().join("+"))
+                        .collect::<Vec<_>>();
+                    (row.title, keys.join(" or "))
+                })
+                .collect::<Vec<_>>()
+        };
         let (group, trading) = &sections[0];
         assert_eq!(*group, CommandGroup::Trading);
         assert_eq!(
-            trading
-                .iter()
-                .map(|spec| (spec.short_title(), spec.shortcut_label()))
-                .collect::<Vec<_>>(),
+            labels(trading),
             [
-                ("Buy market", Some("Ctrl+B".to_string())),
-                ("Sell market", Some("Ctrl+S".to_string())),
-                ("Cancel all", Some("Ctrl+Shift+X".to_string())),
-                ("Flatten account", Some("Ctrl+Shift+F".to_string())),
-                ("Kill switch", Some("Ctrl+Shift+K".to_string())),
+                ("Buy market", "Ctrl+B".to_string()),
+                ("Sell market", "Ctrl+S".to_string()),
+                ("Cancel all", "Ctrl+Shift+X".to_string()),
+                ("Flatten account", "Ctrl+Shift+F".to_string()),
+                ("Kill switch", "Ctrl+Shift+K".to_string()),
             ]
         );
-        let listed = sections
-            .iter()
-            .flat_map(|(_, commands)| commands.iter().map(|spec| spec.id))
-            .collect::<Vec<_>>();
+        let section = |wanted| {
+            sections
+                .iter()
+                .find(|(group, _)| *group == wanted)
+                .map(|(_, rows)| labels(rows))
+                .expect("section")
+        };
+        assert_eq!(
+            section(CommandGroup::Panes).last(),
+            Some(&("Maximize or restore pane", "Alt+Click".to_string()))
+        );
+        assert_eq!(
+            section(CommandGroup::Chart),
+            [
+                ("Chart fullscreen", "Shift+F".to_string()),
+                ("Next watchlist symbol", "Space".to_string()),
+                ("Previous watchlist symbol", "Shift+Space".to_string()),
+            ]
+        );
+        let listed = sections.iter().map(|(_, rows)| rows.len()).sum::<usize>();
         let bound = COMMANDS
             .iter()
             .filter(|spec| !spec.chords.is_empty())
             .count();
-        assert_eq!(listed.len(), bound);
-        assert!(
-            sections
-                .iter()
-                .all(|(group, commands)| commands.iter().all(|spec| spec.id.group() == *group))
-        );
+        assert_eq!(listed, bound + WORKSPACE_SHORTCUTS.len());
         assert_eq!(
             command(CommandId::NewWorkspace).short_title(),
             "New workspace"

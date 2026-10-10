@@ -19,30 +19,6 @@ impl WindowCommand {
     }
 }
 
-/// Trading View style keys on a focused chart. The chart engine binds neither key, so they
-/// fall through to the workspace.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ChartShortcut {
-    NextWatchlistSymbol,
-    PreviousWatchlistSymbol,
-    /// The chart alone fills the screen.
-    ToggleChartFullscreen,
-}
-
-/// Space steps forward through the watchlist, Shift+Space back, and Shift+F toggles the
-/// chart-only fullscreen. Any other modifier leaves the key to other shortcuts.
-pub(super) fn chart_shortcut(key: &str, modifiers: gpui::Modifiers) -> Option<ChartShortcut> {
-    if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
-        return None;
-    }
-    match key {
-        "space" if modifiers.shift => Some(ChartShortcut::PreviousWatchlistSymbol),
-        "space" => Some(ChartShortcut::NextWatchlistSymbol),
-        "f" if modifiers.shift => Some(ChartShortcut::ToggleChartFullscreen),
-        _ => None,
-    }
-}
-
 /// The watchlist row a step lands on, wrapping at both ends. A chart showing a symbol that is
 /// not in the watchlist starts from the first row going forward and the last going back.
 pub(super) fn watchlist_step(current: Option<usize>, len: usize, forward: bool) -> Option<usize> {

@@ -250,10 +250,9 @@ use terminal_chrome::{
     caption_keyboard_activates, caption_pointer_owner, connection_presentation,
 };
 use terminal_chrome::{
-    ChartShortcut, WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme,
-    chart_shortcut, chrome_tooltip, exchange_mark, fullscreen_escape_command, header_icon,
-    mark_tile, series_glyph, terminal_header, watchlist_step, window_move_gesture_transition,
-    workspace_title_bar,
+    WindowCommand, WindowMoveGestureEvent, WorkspaceTabBarState, aeris_chart_theme, chrome_tooltip,
+    exchange_mark, fullscreen_escape_command, header_icon, mark_tile, series_glyph,
+    terminal_header, watchlist_step, window_move_gesture_transition, workspace_title_bar,
 };
 use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
@@ -5204,11 +5203,15 @@ fn command_key_action(
     })
 }
 
-/// Builds every desktop key binding from the command registry after checking it against the
-/// system shortcuts and the keys the chart consumes.
+/// Builds every desktop key binding from the command registry after checking it, and the
+/// workspace shortcuts, against the system shortcuts and the keys the chart consumes.
 fn desktop_key_bindings() -> Result<Vec<KeyBinding>, String> {
-    use aeris_desktop::command_registry::{COMMANDS, validate_chords};
-    validate_chords(COMMANDS, &aeris_chart_integration::chart_keystrokes())?;
+    use aeris_desktop::command_registry::{COMMANDS, WORKSPACE_SHORTCUTS, validate_chords};
+    validate_chords(
+        COMMANDS,
+        WORKSPACE_SHORTCUTS,
+        &aeris_chart_integration::chart_keystrokes(),
+    )?;
     let mut bindings = Vec::new();
     for spec in COMMANDS.iter().filter(|spec| !spec.chords.is_empty()) {
         let action = command_key_action(spec.id)

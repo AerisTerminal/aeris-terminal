@@ -1,4 +1,5 @@
 use super::*;
+use aeris_desktop::command_registry::{self, WorkspaceShortcut};
 
 pub(super) fn workspace_pane_grid(
     terminal: &Entity<TerminalApp>,
@@ -268,7 +269,8 @@ pub(super) fn workspace_pane_element(
                 terminal.begin_workspace_pane_alt_click(
                     workspace_id,
                     pane_id,
-                    event.button == MouseButton::Left && event.modifiers.alt,
+                    command_registry::workspace_click_shortcut(event.button, event.modifiers)
+                        == Some(WorkspaceShortcut::MaximizePane),
                     cx,
                 )
             });

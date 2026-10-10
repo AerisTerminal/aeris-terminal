@@ -1,10 +1,10 @@
 //! The keyboard shortcuts dialog, opened from the profile menu. It reads every shortcut from the
-//! command registry, the same table the key bindings are built from, so the list cannot drift
-//! from the keys the app actually binds.
+//! command registry, the same tables the key bindings and workspace shortcuts are matched from,
+//! so the list cannot drift from the keys the app actually handles.
 
 use super::chart_chrome::TradingShortcutMode;
 use super::*;
-use aeris_desktop::command_registry::{self, CommandGroup, CommandSpec};
+use aeris_desktop::command_registry::{self, CommandGroup, ShortcutRow};
 
 const KEYBOARD_SHORTCUTS_MAX_HEIGHT: f32 = 600.0;
 const SHORTCUT_ROW_HEIGHT: f32 = 32.0;
@@ -55,7 +55,7 @@ fn keyboard_shortcuts_dialog(
     .children(
         command_registry::shortcut_sections()
             .into_iter()
-            .map(|(group, commands)| shortcut_section(group, &commands, trading_shortcuts, theme)),
+            .map(|(group, rows)| shortcut_section(group, &rows, trading_shortcuts, theme)),
     )
     .footer_leading("Esc close")
     .into_any_element()
@@ -63,7 +63,7 @@ fn keyboard_shortcuts_dialog(
 
 fn shortcut_section(
     group: CommandGroup,
-    commands: &[&CommandSpec],
+    rows: &[ShortcutRow],
     trading_shortcuts: TradingShortcutMode,
     theme: &AerisTheme,
 ) -> AnyElement {
@@ -92,13 +92,13 @@ fn shortcut_section(
                 .text_color(gpui_color(colors.text_muted))
                 .child(note)
         }))
-        .children(commands.iter().map(|spec| shortcut_row(spec, theme)))
+        .children(rows.iter().map(|row| shortcut_row(row, theme)))
         .into_any_element()
 }
 
-fn shortcut_row(spec: &CommandSpec, theme: &AerisTheme) -> Div {
+fn shortcut_row(row: &ShortcutRow, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
-    let chords = spec.chords.iter().enumerate().map(|(index, chord)| {
+    let triggers = row.triggers.iter().enumerate().map(|(index, trigger)| {
         div()
             .flex()
             .items_center()
@@ -110,11 +110,7 @@ fn shortcut_row(spec: &CommandSpec, theme: &AerisTheme) -> Div {
                     .text_color(gpui_color(colors.text_muted))
                     .child("or")
             }))
-            .children(
-                command_registry::chord_keys(chord)
-                    .into_iter()
-                    .map(|key| keycap(key, theme)),
-            )
+            .children(trigger.keys().into_iter().map(|key| keycap(key, theme)))
     });
     div()
         .h(px(SHORTCUT_ROW_HEIGHT))
@@ -130,7 +126,7 @@ fn shortcut_row(spec: &CommandSpec, theme: &AerisTheme) -> Div {
                 .truncate()
                 .text_sm()
                 .text_color(gpui_color(colors.text_primary))
-                .child(spec.short_title()),
+                .child(row.title),
         )
         .child(
             div()
@@ -138,7 +134,7 @@ fn shortcut_row(spec: &CommandSpec, theme: &AerisTheme) -> Div {
                 .flex_none()
                 .items_center()
                 .gap_2()
-                .children(chords),
+                .children(triggers),
         )
 }
 
