@@ -1019,15 +1019,70 @@ pub(super) fn rasterize_colored_svg(
     let target_logical = f32::from(logical_size) * window_scale;
     let scale_factor = (target_logical / intrinsic).max(1.0 / intrinsic);
 
-    let image = cx
+    let rendered = cx
         .svg_renderer()
         .render_single_frame(&bytes, scale_factor)
         .map_err(|error| gpui::ImageCacheError::Usvg(Arc::new(error)))?;
+    let image = without_dark_edge_fringe(&rendered).unwrap_or(rendered);
 
     if let Ok(mut cache) = MARK_CACHE.lock() {
         cache.images.insert(key, Arc::clone(&image));
     }
     Ok(image)
+}
+
+/// GPUI stores rasters with straight alpha, leaves fully transparent texels black and samples
+/// them with a linear filter. Sampling a light mark's edge therefore blends in black and draws
+/// a dark ring around it; giving the transparent texels the color of their visible neighbours
+/// keeps every sampled edge the mark's own color.
+fn without_dark_edge_fringe(image: &gpui::RenderImage) -> Option<Arc<gpui::RenderImage>> {
+    let size = image.size(0);
+    let width = u32::try_from(size.width.0).ok()?;
+    let height = u32::try_from(size.height.0).ok()?;
+    let mut pixels = image.as_bytes(0)?.to_vec();
+    bleed_edge_colors(
+        &mut pixels,
+        usize::try_from(width).ok()?,
+        usize::try_from(height).ok()?,
+    );
+    let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
+    Some(Arc::new(gpui::RenderImage::new([image::Frame::new(
+        buffer,
+    )])))
+}
+
+/// Copies the alpha-weighted color of each fully transparent texel's visible neighbours into
+/// it, leaving its alpha at zero. `pixels` holds four bytes per texel with alpha last.
+fn bleed_edge_colors(pixels: &mut [u8], width: usize, height: usize) {
+    if pixels.len() != width * height * 4 {
+        return;
+    }
+    let source = pixels.to_vec();
+    for y in 0..height {
+        for x in 0..width {
+            let texel = (y * width + x) * 4;
+            if source[texel + 3] != 0 {
+                continue;
+            }
+            let mut sums = [0_u32; 3];
+            let mut weight = 0_u32;
+            for neighbour_y in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+                for neighbour_x in x.saturating_sub(1)..=(x + 1).min(width - 1) {
+                    let neighbour = &source[(neighbour_y * width + neighbour_x) * 4..][..4];
+                    let alpha = u32::from(neighbour[3]);
+                    for (sum, channel) in sums.iter_mut().zip(&neighbour[..3]) {
+                        *sum += u32::from(*channel) * alpha;
+                    }
+                    weight += alpha;
+                }
+            }
+            for (channel, sum) in pixels[texel..texel + 3].iter_mut().zip(sums) {
+                if let Some(average) = sum.checked_div(weight) {
+                    *channel = u8::try_from(average).unwrap_or(u8::MAX);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, IntoElement)]
@@ -1505,7 +1560,31 @@ pub(super) const fn aeris_chart_theme(mode: ThemeMode) -> AerisChartTheme {
 
 #[cfg(test)]
 mod tests {
-    use super::{FeedConnectionState, TerminalProvider, shows_rithmic_attribution};
+    use super::{
+        FeedConnectionState, TerminalProvider, bleed_edge_colors, shows_rithmic_attribution,
+    };
+
+    #[test]
+    fn transparent_texels_take_their_visible_neighbours_color() {
+        // A white opaque texel, a transparent edge texel beside it and a far transparent one.
+        let mut pixels = vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0];
+        bleed_edge_colors(&mut pixels, 3, 1);
+        assert_eq!(
+            &pixels[4..8],
+            &[255, 255, 255, 0],
+            "edge keeps the mark's color"
+        );
+        assert_eq!(
+            &pixels[8..12],
+            &[0, 0, 0, 0],
+            "only direct neighbours are filled"
+        );
+        assert_eq!(
+            &pixels[..4],
+            &[255, 255, 255, 255],
+            "visible texels never change"
+        );
+    }
 
     #[test]
     fn rithmic_attribution_follows_the_rithmic_session_only() {

@@ -42,6 +42,8 @@ display-info = "=0.5.9"
 embed-resource = "=3.0.11"
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "=0.4.3"
+# GPUI's own raster type; pinned to the version GPUI resolves so frames share one type.
+image = { version = "=0.25.10", default-features = false }
 keyring = { version = "=4.2.0", default-features = false, features = ["v1"] }
 notify-rust = "=4.18.1"
 serde = { version = "=1.0.229", features = ["derive"] }

@@ -294,6 +294,7 @@ dependencies = [
  "gpui",
  "gpui-base",
  "gpui_platform",
+ "image",
  "num-traits",
  "prost",
  "reqwest_client",
