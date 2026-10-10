@@ -1,34 +1,32 @@
+use super::toaster::{ToastLayer, ToastStack, toast_stack};
 use super::*;
 use aeris_desktop::command_registry::{self, WorkspaceShortcut};
-
-/// Fill notices belong to the workspace, not one chart, so they stack on the pane in its
-/// top-right corner.
-#[derive(Clone, Copy)]
-pub(super) struct PaneNotices<'a> {
-    host_pane: u64,
-    fills: &'a FillNotifications,
-}
 
 pub(super) fn workspace_pane_grid(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
-    fills: &FillNotifications,
+    toaster: &Toaster,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
     if let Some(pane_id) = workspace.maximized_pane {
-        let notices = PaneNotices {
-            host_pane: pane_id,
-            fills,
-        };
-        return workspace_pane_element(terminal, workspace, pane_id, notices, theme, cx);
+        return workspace_pane_element(terminal, workspace, pane_id, toaster, theme, cx);
     }
     let layout = workspace.layout.layout();
-    let notices = PaneNotices {
-        host_pane: top_right_pane(&layout),
-        fills,
-    };
-    workspace_layout_element(terminal, workspace, &layout, notices, theme, cx)
+    workspace_layout_element(terminal, workspace, &layout, toaster, theme, cx)
+}
+
+/// Toasts that belong to the workspace rather than one chart, such as fills, stack on the pane
+/// in its top-right corner.
+pub(super) fn toast_host(workspace: &WorkspaceTab) -> Option<ToastStack> {
+    let pane_id = workspace
+        .maximized_pane
+        .unwrap_or_else(|| top_right_pane(&workspace.layout.layout()));
+    workspace
+        .panes
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .map(|pane| ToastStack::of(&pane.surface))
 }
 
 fn top_right_pane(layout: &ChartWorkspaceLayout) -> u64 {
@@ -99,12 +97,12 @@ pub(super) fn workspace_layout_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     layout: &ChartWorkspaceLayout,
-    notices: PaneNotices<'_>,
+    toaster: &Toaster,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
     if let ChartWorkspaceLayout::Cell { id } = layout {
-        return workspace_pane_element(terminal, workspace, *id, notices, theme, cx);
+        return workspace_pane_element(terminal, workspace, *id, toaster, theme, cx);
     }
 
     let ChartWorkspaceLayout::Split {
@@ -120,8 +118,8 @@ pub(super) fn workspace_layout_element(
     let second_ids = second.leaf_ids();
     let left_pane_id = *first_ids.last().unwrap_or(&0);
     let right_pane_id = *second_ids.first().unwrap_or(&0);
-    let first_element = workspace_layout_element(terminal, workspace, first, notices, theme, cx);
-    let second_element = workspace_layout_element(terminal, workspace, second, notices, theme, cx);
+    let first_element = workspace_layout_element(terminal, workspace, first, toaster, theme, cx);
+    let second_element = workspace_layout_element(terminal, workspace, second, toaster, theme, cx);
     let workspace_id = workspace.id;
     let split_id = format!("workspace_split_{workspace_id}_{left_pane_id}_{right_pane_id}");
     let direction = *direction;
@@ -269,7 +267,7 @@ pub(super) fn workspace_pane_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
     pane_id: u64,
-    notices: PaneNotices<'_>,
+    toaster: &Toaster,
     theme: &AerisTheme,
     cx: &App,
 ) -> AnyElement {
@@ -277,23 +275,22 @@ pub(super) fn workspace_pane_element(
         return div().into_any_element();
     };
     let surface = pane.surface.read(cx);
-    let mut corner_notices: Vec<AnyElement> = surface
-        .chart_corner_notice
-        .card(theme)
-        .into_iter()
-        .collect();
-    if notices.host_pane == pane_id {
-        corner_notices.extend(notices.fills.cards(terminal, theme));
-    }
-    let content = market_workspace(MarketWorkspaceState {
-        pane_id,
-        chart: surface.chart.as_ref(),
-        notice: pane_chart_notice(surface, cx),
-        corner_notices,
+    let toasts = toast_stack(&ToastLayer {
+        host: terminal,
+        toaster,
+        stack: ToastStack::of(&pane.surface),
         price_axis_width: surface
             .chart
             .as_ref()
             .map_or(0.0, |chart| chart.read(cx).price_axis_width()),
+        theme,
+        now: Instant::now(),
+    });
+    let content = market_workspace(MarketWorkspaceState {
+        pane_id,
+        chart: surface.chart.as_ref(),
+        notice: pane_chart_notice(surface, cx),
+        toasts,
         theme,
     });
     let study_settings_dialog = surface
@@ -380,7 +377,7 @@ pub(super) struct WorkspaceMarketArea<'a> {
     pub(super) active_surface: &'a Entity<WorkspaceSurface>,
     pub(super) expanded_drawing_toolbar: Option<DrawingSidebar<'a>>,
     pub(super) watchlist: WatchlistPanelState,
-    pub(super) fills: &'a FillNotifications,
+    pub(super) toaster: &'a Toaster,
     pub(super) theme: &'a AerisTheme,
 }
 
@@ -394,12 +391,12 @@ pub(super) fn workspace_market_area(
         active_surface,
         expanded_drawing_toolbar,
         watchlist,
-        fills,
+        toaster,
         theme,
     } = area;
     let drawing_toolbar_collapsed = expanded_drawing_toolbar.is_none();
     keep_trading_pnl_fresh(active_surface, workspace, cx);
-    let grid = workspace_pane_grid(terminal, workspace, fills, theme, cx);
+    let grid = workspace_pane_grid(terminal, workspace, toaster, theme, cx);
     let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
         let surface = pane.surface.read(cx);
         surface.price_alert_dialog.as_ref().map(|dialog| {

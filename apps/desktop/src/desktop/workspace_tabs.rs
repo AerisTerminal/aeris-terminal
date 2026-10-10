@@ -197,7 +197,7 @@ impl TerminalApp {
             pages: app_navigation::AppPages::default(),
             frameless_title_bar: FramelessTitleBar::default(),
             fullscreen_hint: FullscreenHint::default(),
-            fill_notifications: FillNotifications::default(),
+            toaster: Toaster::default(),
             chart_fullscreen: None,
             bottom_panel: bottom_panel::BottomPanelState::default(),
             profile_refresh_on_activation: false,

@@ -575,7 +575,7 @@ impl TerminalApp {
         self.reconcile_active_drags(cx);
         self.track_window_activation(window, cx);
         self.track_fullscreen_hint(window, cx);
-        self.track_chart_corner_notices(cx);
+        self.update_toasts(window, cx);
         self.track_chart_fullscreen(window);
         self.absorb_render_requests(window, cx);
         self.synchronize_linked_charts(cx);
@@ -702,7 +702,7 @@ impl TerminalApp {
                     },
                 ),
                 watchlist,
-                fills: &self.fill_notifications,
+                toaster: &self.toaster,
                 theme: &self.theme,
             },
             cx,
@@ -866,13 +866,7 @@ impl TerminalApp {
             // Every chart in the workspace layout fills the screen; a pane maximized with
             // Alt+click stays the only one shown, exactly as in the docked workspace.
             let workspace = &self.workspaces[self.active];
-            let charts = workspace_pane_grid(
-                &terminal,
-                workspace,
-                &self.fill_notifications,
-                &self.theme,
-                cx,
-            );
+            let charts = workspace_pane_grid(&terminal, workspace, &self.toaster, &self.theme, cx);
             keep_trading_pnl_fresh(&active, workspace, cx);
             return self
                 .page_root()

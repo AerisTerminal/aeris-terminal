@@ -1,21 +1,20 @@
 //! Chart pane host and chart-surface notices.
 
-use super::notifications::{chart_notice_accent, corner_notice_stack, notice_card};
+use super::toaster::chart_status_card;
 use super::{
     AerisChartView, AerisTheme, AnyElement, ChartNoticePlacement, ChartState, ChartSurfaceNotice,
     Div, Entity, HugeIcon, InteractiveElement, IntoElement, Loader, ParentElement, Role,
-    SharedString, StatefulInteractiveElement, Styled, div, gpui_color, px,
+    StatefulInteractiveElement, Styled, div, gpui_color, px,
 };
 
 pub(super) struct MarketWorkspaceState<'a> {
     pub(super) pane_id: u64,
     pub(super) chart: Option<&'a Entity<AerisChartView>>,
-    /// The chart's notice when it covers or centres on the surface; corner notices arrive in
-    /// `corner_notices`.
+    /// The chart's notice when it covers or centres on the surface; corner conditions are
+    /// toasts in `toasts`.
     pub(super) notice: Option<ChartSurfaceNotice>,
-    /// Cards for the top-right stack, top first.
-    pub(super) corner_notices: Vec<AnyElement>,
-    pub(super) price_axis_width: f32,
+    /// The pane's toast stack, top right.
+    pub(super) toasts: Option<AnyElement>,
     pub(super) theme: &'a AerisTheme,
 }
 
@@ -24,8 +23,7 @@ pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElem
         pane_id,
         chart,
         notice,
-        corner_notices,
-        price_axis_width,
+        toasts,
         theme,
     } = state;
     let chart_surface = chart_pane_host(chart)
@@ -36,7 +34,7 @@ pub(super) fn market_workspace(state: MarketWorkspaceState<'_>) -> impl IntoElem
                 .filter(|notice| notice.placement == ChartNoticePlacement::Center)
                 .map(|notice| chart_notice(notice, theme)),
         )
-        .children(corner_notice_stack(corner_notices, price_axis_width));
+        .children(toasts);
     div().size_full().overflow_hidden().child(chart_surface)
 }
 
@@ -105,12 +103,7 @@ fn chart_notice(notice: ChartSurfaceNotice, theme: &AerisTheme) -> AnyElement {
         return opaque_status_overlay("chart_awaiting_data_status", notice, None, theme)
             .into_any_element();
     }
-    let card = notice_card(
-        chart_notice_accent(notice.tone, theme),
-        notice.label,
-        notice.detail.map(SharedString::from),
-        theme,
-    );
+    let card = chart_status_card(notice, theme);
     div()
         .absolute()
         .inset_0()

@@ -46,8 +46,6 @@ mod market_screener;
 mod market_screener_view;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
-#[path = "components/notifications.rs"]
-mod notifications;
 #[path = "components/order_book_panel.rs"]
 mod order_book_panel;
 #[path = "components/order_ticket.rs"]
@@ -75,6 +73,8 @@ mod terminal_chrome;
 mod terminal_view;
 #[path = "components/time_sales_panel.rs"]
 mod time_sales_panel;
+#[path = "components/toaster.rs"]
+mod toaster;
 #[path = "components/trading_hotkeys.rs"]
 mod trading_hotkeys;
 #[path = "update.rs"]
@@ -218,7 +218,6 @@ use native_ui::{
     theme::{base_theme, gpui_color, platform_border_width},
     tooltip::{TooltipSpec, with_tooltip},
 };
-use notifications::{ChartCornerNotice, FillNotifications};
 use num_traits::ToPrimitive;
 use order_book_panel::OrderBookPanelState;
 use order_ticket::TradingOrderControlsState;
@@ -261,13 +260,14 @@ use terminal_view::{
     TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
 };
 use time_sales_panel::TimeSalesPanelState;
+use toaster::Toaster;
 use update::{DesktopUpdater, UpdatePresentation, UpdateState};
 use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
 use workspace_layout::{
     WorkspaceMarketArea, WorkspaceMaximizeTransition, keep_trading_pnl_fresh, pane_chart_notice,
-    workspace_market_area, workspace_maximize_transition, workspace_pane_grid,
+    toast_host, workspace_market_area, workspace_maximize_transition, workspace_pane_grid,
 };
 
 fn install_platform_http_client(cx: &mut App) {
@@ -780,7 +780,6 @@ struct WorkspaceSurface {
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
     chart_state_message: String,
-    chart_corner_notice: ChartCornerNotice,
     theme: AerisTheme,
     replay_label: String,
     worker_label: String,
@@ -4519,7 +4518,7 @@ struct TerminalApp {
     pages: app_navigation::AppPages,
     frameless_title_bar: FramelessTitleBar,
     fullscreen_hint: FullscreenHint,
-    fill_notifications: FillNotifications,
+    toaster: Toaster,
     /// Shift+F chart-only fullscreen: only the workspace's charts show. Holds whether entering it
     /// also put the window into fullscreen, so leaving restores the window as it was.
     chart_fullscreen: Option<ChartFullscreen>,
