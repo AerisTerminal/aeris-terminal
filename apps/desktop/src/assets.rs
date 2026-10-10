@@ -364,10 +364,16 @@ pub enum ExchangeLogo {
     #[default]
     Rithmic,
     Hyperliquid,
+    Tastytrade,
 }
 
 impl ExchangeLogo {
-    pub const ALL: [Self; 3] = [Self::Rithmic, Self::Hyperliquid, Self::Binance];
+    pub const ALL: [Self; 4] = [
+        Self::Rithmic,
+        Self::Hyperliquid,
+        Self::Tastytrade,
+        Self::Binance,
+    ];
 
     /// The logo a provider presentation descriptor names through its `logo_key`.
     #[must_use]
@@ -375,6 +381,7 @@ impl ExchangeLogo {
         match logo_key {
             "rithmic" => Some(Self::Rithmic),
             "hyperliquid" => Some(Self::Hyperliquid),
+            "tastytrade" => Some(Self::Tastytrade),
             _ => None,
         }
     }
@@ -385,6 +392,7 @@ impl ExchangeLogo {
             Self::Binance => "binance.svg",
             Self::Rithmic => "rithmic.svg",
             Self::Hyperliquid => "hyperliquid.svg",
+            Self::Tastytrade => "tastytrade.svg",
         };
         format!("{EXCHANGE_ASSET_PREFIX}{name}").into()
     }
@@ -620,6 +628,9 @@ fn exchange_asset(path: &str) -> Option<&'static [u8]> {
         "rithmic.svg" => include_bytes!("../assets/exchange_assets/exchange_logo/rithmic.svg"),
         "hyperliquid.svg" => {
             include_bytes!("../assets/exchange_assets/exchange_logo/hyperliquid.svg")
+        }
+        "tastytrade.svg" => {
+            include_bytes!("../assets/exchange_assets/exchange_logo/tastytrade.svg")
         }
         _ => return None,
     })
@@ -1021,6 +1032,7 @@ mod tests {
         };
         assert_eq!(logo_for("hyperliquid"), Some(ExchangeLogo::Hyperliquid));
         assert_eq!(logo_for("rithmic"), Some(ExchangeLogo::Rithmic));
+        assert_eq!(logo_for("tastytrade"), Some(ExchangeLogo::Tastytrade));
         assert_eq!(ExchangeLogo::for_logo_key("unknown"), None);
     }
 }
