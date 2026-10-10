@@ -271,6 +271,12 @@ fn symbol_by_id_frame(ctid: u64, symbols: &[(u64, i32)]) -> ProtoMessage {
         field_varint(&mut body, 10, 100);
         field_varint(&mut body, 11, 100);
         field_varint(&mut body, 30, 10_000_000);
+        // Sunday 17:00 to Friday 17:00 New York time, as one interval.
+        let mut interval = Vec::new();
+        field_varint(&mut interval, 3, 17 * 3_600);
+        field_varint(&mut interval, 4, 5 * 86_400 + 17 * 3_600);
+        field_bytes(&mut body, 13, &interval);
+        field_string(&mut body, 26, "America/New_York");
         field_bytes(&mut payload, 3, &body);
     }
     frame(2117, payload)
@@ -1986,6 +1992,41 @@ fn search_and_select_cover_demo_and_live_catalogs() {
             "stale selection rejects"
         );
     }
+}
+
+#[test]
+fn a_selected_symbol_carries_its_weekly_trading_hours() {
+    let mut harness = harness(catalog_script(), Duration::ZERO);
+    drive_search(&mut harness, 1, "XAU");
+    let instrument = drive_select(&mut harness, select(1, 1, "live:2002:41", ENTITLEMENT));
+    let terms = instrument
+        .contract_metadata
+        .as_deref()
+        .expect("contract terms");
+    // The weekly schedule becomes one segment per trading day, Sunday through Friday.
+    let segments = terms
+        .session_hours
+        .iter()
+        .map(|segment| {
+            assert_eq!(segment.timezone, "America/New_York");
+            (segment.weekday, segment.open_seconds, segment.close_seconds)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        segments,
+        [
+            (7, 17 * 3_600, 86_400),
+            (1, 0, 86_400),
+            (2, 0, 86_400),
+            (3, 0, 86_400),
+            (4, 0, 86_400),
+            (5, 0, 17 * 3_600),
+        ]
+    );
+    assert!(
+        session_hours(None).is_empty(),
+        "no published schedule leaves the hours unknown"
+    );
 }
 
 #[test]

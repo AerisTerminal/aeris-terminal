@@ -22,6 +22,7 @@ use super::{
 };
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
+    ProviderSessionHours,
 };
 use aeris_ctrader_open_api_adapter::accounts::DemoAccount;
 use aeris_ctrader_open_api_adapter::{
@@ -32,8 +33,9 @@ use aeris_ctrader_open_api_adapter::{
     market::{
         DepthUpdate, EventStamp, LightSymbol, MAXIMUM_STREAM_SYMBOLS, MAXIMUM_TRENDBARS_PER_PAGE,
         MarketDecodeError, MarketRequest, MarketStreams, PriceScale, SymbolStream, TrendbarPage,
-        TrendbarPeriod, decode_asset_classes, decode_asset_list, decode_subscription_ack,
-        decode_symbol_by_id, decode_symbol_categories, decode_symbol_list, decode_trendbar_page,
+        TrendbarPeriod, WeeklySchedule, decode_asset_classes, decode_asset_list,
+        decode_subscription_ack, decode_symbol_by_id, decode_symbol_categories, decode_symbol_list,
+        decode_trendbar_page,
     },
     session::{AccessToken, CtraderSession, SessionFault},
 };
@@ -411,6 +413,37 @@ fn classify(fault: &SessionFault) -> Failure {
 }
 fn request_error(error: &MarketDecodeError) -> Failure {
     Failure::Request(error.to_string())
+}
+
+/// Splits cTrader's week-relative intervals into the per-day segments an instrument
+/// carries. A schedule needing more segments than a contract holds is left out
+/// whole, since a partial week would misreport when the market is open.
+fn session_hours(schedule: Option<&WeeklySchedule>) -> Vec<ProviderSessionHours> {
+    const SECONDS_PER_DAY: u32 = 86_400;
+    let Some(schedule) = schedule else {
+        return Vec::new();
+    };
+    let mut hours = Vec::new();
+    for interval in &schedule.intervals {
+        let mut start = interval.start_second;
+        while start < interval.end_second {
+            // Day 0 is Sunday; instruments count ISO weekdays, where Sunday is 7.
+            let day = start / SECONDS_PER_DAY;
+            let midnight = day * SECONDS_PER_DAY;
+            let end = interval.end_second.min(midnight + SECONDS_PER_DAY);
+            hours.push(ProviderSessionHours {
+                weekday: if day == 0 { 7 } else { day },
+                open_seconds: start - midnight,
+                close_seconds: end - midnight,
+                timezone: schedule.time_zone.clone(),
+            });
+            start = end;
+        }
+    }
+    if hours.len() > aeris_instruments::MAXIMUM_SESSION_SEGMENTS {
+        return Vec::new();
+    }
+    hours
 }
 
 /// One authenticated cTrader host connection. Production uses the hosted
@@ -2033,6 +2066,7 @@ impl Worker {
                     point_value_scale: Some(0),
                     currency: Some(currency),
                     order_quantity_increment: Some(spec.step_volume),
+                    session_hours: session_hours(spec.schedule.as_ref()),
                     ..ProviderContractMetadata::default()
                 })),
             },

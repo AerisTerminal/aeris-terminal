@@ -351,6 +351,7 @@ dependencies = [
  "aeris_tastytrade_market_adapter",
  "aeris_trading",
  "chrono",
+ "chrono-tz",
  "serde_json",
  "zeroize",
 ]

@@ -17,8 +17,8 @@ pub(crate) mod fixtures;
 
 pub use catalog::{
     Asset, AssetClassName, LightSymbol, MAXIMUM_CATALOG_SYMBOLS, SymbolCategory, SymbolSpec,
-    decode_asset_classes, decode_asset_list, decode_symbol_by_id, decode_symbol_categories,
-    decode_symbol_list,
+    TradingInterval, WeeklySchedule, decode_asset_classes, decode_asset_list, decode_symbol_by_id,
+    decode_symbol_categories, decode_symbol_list,
 };
 pub use price::{PriceScale, WIRE_PRICE_DIGITS};
 pub use requests::{MarketRequest, QuoteSide, decode_subscription_ack};

@@ -21,6 +21,7 @@ aeris_ctrader_open_api_adapter = { path = "../adapters/ctrader_open_api" }
 aeris_instruments = { path = "../domain/instruments" }
 aeris_trading = { path = "../domain/trading" }
 chrono.workspace = true
+chrono-tz.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
 

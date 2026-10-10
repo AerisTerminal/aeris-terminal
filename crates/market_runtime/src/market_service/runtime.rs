@@ -1144,6 +1144,19 @@ impl MarketService {
                 now_unix_nanos,
             );
         }
+        if let Some(status) = instrument
+            .contract_metadata
+            .as_deref()
+            .and_then(|metadata| {
+                super::session_hours::weekly_hours_status(
+                    &instrument.instrument_id,
+                    &metadata.session_hours,
+                    now_unix_nanos,
+                )
+            })
+        {
+            return status;
+        }
         let (phase, source) = if instrument.provider == "hyperliquid" {
             (
                 aeris_contracts::MarketSessionPhase::AlwaysOpen,

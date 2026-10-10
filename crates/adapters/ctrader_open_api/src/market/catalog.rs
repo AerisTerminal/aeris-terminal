@@ -3,7 +3,7 @@ use crate::{
     ProtoMessage,
     codec::{self, require_nested_fields},
     generated::{
-        ProtoOaAssetClassListRes, ProtoOaAssetListRes, ProtoOaSymbolByIdRes,
+        ProtoOaAssetClassListRes, ProtoOaAssetListRes, ProtoOaInterval, ProtoOaSymbolByIdRes,
         ProtoOaSymbolCategoryListRes, ProtoOaSymbolsListRes,
     },
 };
@@ -52,6 +52,29 @@ pub struct SymbolSpec {
     pub min_volume: i64,
     pub step_volume: i64,
     pub max_volume: Option<i64>,
+    /// The broker's weekly trading hours, absent when it publishes none.
+    pub schedule: Option<WeeklySchedule>,
+}
+
+/// Seconds in the week that `ProtoOAInterval` offsets count from Sunday 00:00.
+const SECONDS_PER_WEEK: u32 = 7 * 86_400;
+/// Bounds a malformed list; a weekly schedule needs a handful of intervals.
+const MAXIMUM_SCHEDULE_INTERVALS: usize = 64;
+
+/// A symbol's weekly trading hours (`ProtoOASymbol.schedule` and `scheduleTimeZone`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WeeklySchedule {
+    /// The time zone the intervals are written in, as the broker names it.
+    pub time_zone: String,
+    pub intervals: Vec<TradingInterval>,
+}
+
+/// One trading interval in seconds from Sunday 00:00 in the schedule's time zone;
+/// the start is inclusive and the end exclusive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TradingInterval {
+    pub start_second: u32,
+    pub end_second: u32,
 }
 
 impl SymbolSpec {
@@ -291,6 +314,7 @@ pub fn decode_symbol_by_id(
             if max_volume.is_some_and(|max| max < min_volume) {
                 return Err(MarketDecodeError::InvalidField("maxVolume"));
             }
+            let schedule = decode_schedule(&symbol.schedule, symbol.schedule_time_zone)?;
             Ok(SymbolSpec {
                 symbol_id: positive_id(symbol.symbol_id)?,
                 price_scale,
@@ -299,16 +323,54 @@ pub fn decode_symbol_by_id(
                 min_volume,
                 step_volume,
                 max_volume,
+                schedule,
             })
         })
         .collect()
+}
+
+/// An empty schedule means the broker published no hours; intervals without a
+/// time zone, or outside the week, cannot be placed in time and are rejected.
+fn decode_schedule(
+    intervals: &[ProtoOaInterval],
+    time_zone: Option<String>,
+) -> Result<Option<WeeklySchedule>, MarketDecodeError> {
+    if intervals.is_empty() {
+        return Ok(None);
+    }
+    if intervals.len() > MAXIMUM_SCHEDULE_INTERVALS {
+        return Err(MarketDecodeError::LimitExceeded("symbol schedule"));
+    }
+    let time_zone = bounded_text(
+        time_zone.ok_or(MarketDecodeError::MissingField("scheduleTimeZone"))?,
+        "scheduleTimeZone",
+    )?;
+    let intervals = intervals
+        .iter()
+        .map(|interval| {
+            if interval.start_second < interval.end_second
+                && interval.end_second <= SECONDS_PER_WEEK
+            {
+                Ok(TradingInterval {
+                    start_second: interval.start_second,
+                    end_second: interval.end_second,
+                })
+            } else {
+                Err(MarketDecodeError::InvalidField("schedule"))
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Some(WeeklySchedule {
+        time_zone,
+        intervals,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        generated::{ProtoOaLightSymbol, ProtoOaSymbol},
+        generated::{ProtoOaInterval, ProtoOaLightSymbol, ProtoOaSymbol},
         market::fixtures::{
             CTID, CTID_WIRE, EURUSD, USDJPY, XAUUSD, bytes_frame, frame, strip, strip_nested,
         },
@@ -540,6 +602,53 @@ mod tests {
         let fine = decode_symbol_by_id(&frame(2117, &fine), CTID).expect("seven digits");
         // The wire cannot carry the sixth and seventh decimals.
         assert_eq!((fine[0].tick_units(), fine[0].pip_units()), (100, 1_000));
+    }
+
+    #[test]
+    fn symbol_details_carry_the_weekly_schedule() {
+        let mut response = by_id();
+        // Sunday 22:00 to Friday 22:00, written as two intervals.
+        response.symbol[0].schedule = vec![
+            ProtoOaInterval {
+                start_second: 79_200,
+                end_second: 345_600,
+            },
+            ProtoOaInterval {
+                start_second: 345_600,
+                end_second: 511_200,
+            },
+        ];
+        let specs = decode_symbol_by_id(&frame(2117, &response), CTID).expect("details");
+        assert_eq!(
+            specs[0].schedule,
+            Some(WeeklySchedule {
+                time_zone: "America/New_York".into(),
+                intervals: vec![
+                    TradingInterval {
+                        start_second: 79_200,
+                        end_second: 345_600,
+                    },
+                    TradingInterval {
+                        start_second: 345_600,
+                        end_second: 511_200,
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            specs[1].schedule, None,
+            "no intervals means no published hours"
+        );
+
+        let mut outside = response.clone();
+        outside.symbol[0].schedule[1].end_second = SECONDS_PER_WEEK + 1;
+        assert!(decode_symbol_by_id(&frame(2117, &outside), CTID).is_err());
+        let mut reversed = response.clone();
+        reversed.symbol[0].schedule[0].end_second = 79_200;
+        assert!(decode_symbol_by_id(&frame(2117, &reversed), CTID).is_err());
+        let mut no_zone = response;
+        no_zone.symbol[0].schedule_time_zone = None;
+        assert!(decode_symbol_by_id(&frame(2117, &no_zone), CTID).is_err());
     }
 
     #[test]

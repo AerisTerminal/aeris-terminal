@@ -1733,6 +1733,7 @@ impl std::fmt::Display for LoggedInstrument<'_> {
 mod broker_authorization;
 mod ctrader;
 mod runtime;
+mod session_hours;
 mod tastytrade;
 pub use ctrader::{
     CtraderStreamStatistics, VenueEventSink as CtraderVenueEventSink, VenueLink as CtraderVenueLink,

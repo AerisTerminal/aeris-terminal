@@ -4,7 +4,8 @@ use core::fmt;
 use std::error::Error;
 
 const MAX_DECIMAL_SCALE: u8 = 18;
-const MAXIMUM_SESSION_SEGMENTS: usize = 32;
+/// Most weekly session segments one contract may carry.
+pub const MAXIMUM_SESSION_SEGMENTS: usize = 32;
 
 /// A stable `Aeris` instrument identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
