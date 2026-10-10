@@ -55,7 +55,7 @@ dependency and may start at once. TB5 lands last so its guards pass on the clean
   layer survives except the persisted-document reader in [section 5](#5-persistence-compatibility).
 - Hosts receive behavior, not mechanisms: if Terminal would call a sequence of engine methods in a
   fixed order, that sequence is one engine operation.
-- Keep `docs/Architecture.md` in Aeris Charts synchronized with any new public operation.
+- Keep `docs/architecture.md` in Aeris Charts synchronized with any new public operation.
 
 ---
 
@@ -265,7 +265,7 @@ suffix `e` is the Aeris Charts half, `t` is the Terminal half.
     instead of the full price history;
   - an engine-owned empty-pane state ("Waiting for trades") while the footprint has no bars;
   - remove the candle hand-off through `render_before_time` and its "candles before a live
-    footprint" documentation, and update `docs/Architecture.md`.
+    footprint" documentation, and update `docs/architecture.md`.
 - **CB15t (Terminal):**
   - request the footprint-owned pane; delete the candle hand-off comment and the Candlestick
     mapping intent for `ChartType::Footprint`;
@@ -290,7 +290,7 @@ suffix `e` is the Aeris Charts half, `t` is the Terminal half.
 
 Aeris Charts. CB1e, CB2e, CB3e. Engine tests: cross-timeframe anchor round trip (1m, 5m, 1h, 1D),
 anchors outside loaded history, lock persistence, kind conversion round trip, visible-range round
-trip with projections. Update `docs/Architecture.md`.
+trip with projections. Update `docs/architecture.md`.
 
 ### AC2 — Missing engine operations
 

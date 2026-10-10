@@ -3162,6 +3162,45 @@ fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
 }
 
 #[test]
+fn resetting_chart_settings_preserves_mixed_volume_column_colors() {
+    let replay = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
+        .expect("embedded replay validates");
+    let mut chart = AerisChartView::with_replay(&replay);
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume histogram is available");
+    chart
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    chart.engine.fit_content();
+
+    let volume_colors = |chart: &mut AerisChartView| {
+        chart.engine.build_frame().panes[0]
+            .main
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Prim::Rect { color, .. } if color.a() == 128 => Some(color.0),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = volume_colors(&mut chart);
+    assert!(
+        before.len() >= 2 && before.iter().copied().collect::<HashSet<_>>().len() == 2,
+        "the replay must include visible rising and falling volume columns"
+    );
+
+    chart.reset_appearance_settings();
+    assert!(series_entry(&chart, chart.volume_series).histogram_updown);
+    assert_eq!(
+        volume_colors(&mut chart),
+        before,
+        "settings reset must retain the actual rendered volume direction colors"
+    );
+}
+
+#[test]
 fn indicator_api_rejects_an_empty_chart_without_inventing_series() {
     let mut chart = AerisChartView::empty();
     let initial_series = chart.engine.series.len();

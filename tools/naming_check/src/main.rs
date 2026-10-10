@@ -24,6 +24,8 @@ const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     "Readme",
     "rust-toolchain.toml",
 ];
+/// Legal and OS-owned filenames must keep their exact spelling, but only at these paths.
+const PLATFORM_PATH_EXCEPTIONS: &[&str] = &["LICENSE", "apps/desktop/packaging/macos/Info.plist"];
 
 fn main() -> ExitCode {
     let root = match env::current_dir() {
@@ -71,7 +73,7 @@ fn inspect_directory(
                 violations.push(relative_to(root, &path));
             }
             inspect_directory(root, &path, violations)?;
-        } else if file_type.is_file() && !is_valid_file_name(&name) {
+        } else if file_type.is_file() && !is_valid_file_name(&name, &relative_to(root, &path)) {
             violations.push(relative_to(root, &path));
         }
     }
@@ -83,11 +85,14 @@ fn should_skip_directory(name: &OsStr) -> bool {
     name.starts_with('.') || SKIPPED_DIRECTORIES.contains(&name.as_ref())
 }
 
-fn is_valid_file_name(name: &OsStr) -> bool {
+fn is_valid_file_name(name: &OsStr, relative: &Path) -> bool {
     let name = name.to_string_lossy();
     if name.starts_with('.')
         || PLATFORM_FILE_EXCEPTIONS.contains(&name.as_ref())
         || REPOSITORY_MARKDOWN_FILES.contains(&name.as_ref())
+        || PLATFORM_PATH_EXCEPTIONS
+            .iter()
+            .any(|exception| relative == Path::new(exception))
     {
         return true;
     }
@@ -119,6 +124,28 @@ mod tests {
         fs,
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn required_platform_filenames_are_scoped_to_their_real_paths() {
+        use super::is_valid_file_name;
+
+        assert!(is_valid_file_name(
+            std::ffi::OsStr::new("Info.plist"),
+            Path::new("apps/desktop/packaging/macos/Info.plist")
+        ));
+        assert!(is_valid_file_name(
+            std::ffi::OsStr::new("LICENSE"),
+            Path::new("LICENSE")
+        ));
+        assert!(!is_valid_file_name(
+            std::ffi::OsStr::new("Info.plist"),
+            Path::new("docs/Info.plist")
+        ));
+        assert!(!is_valid_file_name(
+            std::ffi::OsStr::new("LICENSE"),
+            Path::new("docs/LICENSE")
+        ));
+    }
 
     fn repository_root() -> &'static Path {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -391,7 +418,7 @@ mod tests {
 
         let root_manifest = manifest("Cargo.toml");
         let expected_source = "https://github.com/AerisTerminal/aeris-charts.git";
-        let expected_revision = "7f8244b";
+        let expected_revision = "5caf8cceb595331d1cc2ba11f7ca93dee1543c3a";
         for dependency in [
             "aeris_charts_engine",
             "aeris_charts_indicators",
