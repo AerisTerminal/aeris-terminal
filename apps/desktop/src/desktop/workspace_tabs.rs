@@ -205,6 +205,7 @@ impl TerminalApp {
             command_palette_selection: 0,
             command_palette_message: None,
             keyboard_trading: trading_hotkeys::KeyboardTrading::default(),
+            keyboard_shortcuts_open: false,
             broker_connection_task: None,
             broker_connections: HostedBrokerConnections::default(),
             linked_sync_revisions: BTreeMap::new(),
@@ -2852,6 +2853,14 @@ impl TerminalApp {
             }
             window.prevent_default();
             cx.stop_propagation();
+            return;
+        }
+        if self.keyboard_shortcuts_open {
+            if event.keystroke.key.as_str() == "escape" {
+                self.close_keyboard_shortcuts(window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
             return;
         }
         if self.keyboard_trading.confirming() {

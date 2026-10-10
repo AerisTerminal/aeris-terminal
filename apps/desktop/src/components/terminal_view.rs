@@ -804,6 +804,7 @@ impl TerminalApp {
             .children(frameless_reveal_zone)
             .children(self.platform_menu_overlay(terminal, window.viewport_size()))
             .children(self.app_navigation_overlay(terminal, window.viewport_size()))
+            .children(self.keyboard_shortcuts_layer(terminal))
             .children(self.rendered_command_palette(terminal, cx))
             .children(self.trading_confirmation_layer(terminal))
     }
@@ -846,6 +847,7 @@ impl TerminalApp {
         };
         let drawing_favorites = self.drawing_favorites_overlay(&terminal, chart_top, window, cx);
         let command_palette = self.rendered_command_palette(&terminal, cx);
+        let keyboard_shortcuts = self.keyboard_shortcuts_layer(&terminal);
         let trading_confirmation = self.trading_confirmation_layer(&terminal);
         let (title_bar, frameless_reveal_zone) =
             self.rendered_title_bars(&terminal, window, placement, now, cx);
@@ -875,6 +877,7 @@ impl TerminalApp {
                 .children(context_menu)
                 .children(settings_menu)
                 .children(drawing_tool_menu)
+                .children(keyboard_shortcuts)
                 .children(command_palette)
                 .children(trading_confirmation);
         }
@@ -899,6 +902,7 @@ impl TerminalApp {
             .children(drawing_tool_menu)
             .children(platform_menu)
             .children(app_navigation)
+            .children(keyboard_shortcuts)
             .children(command_palette)
             .children(trading_confirmation)
     }
@@ -907,6 +911,7 @@ impl TerminalApp {
 impl TerminalApp {
     pub(super) fn trading_hotkeys_enabled(&self, window: &Window, cx: &App) -> bool {
         self.pages.view == market_screener::AppView::Terminal
+            && !self.keyboard_shortcuts_open
             && self.workspace_keyboard_focused(window, cx)
     }
 

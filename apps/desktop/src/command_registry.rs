@@ -83,6 +83,95 @@ impl CommandId {
         Self::FlattenAccount,
         Self::KillSwitch,
     ];
+
+    #[must_use]
+    pub const fn group(self) -> CommandGroup {
+        match self {
+            Self::OpenPalette
+            | Self::ToggleFullscreen
+            | Self::MinimizeWindow
+            | Self::ZoomWindow
+            | Self::CloseWindow => CommandGroup::General,
+            Self::ToggleContext
+            | Self::ToggleOrderBook
+            | Self::ToggleTimeSales
+            | Self::ToggleWatchlist => CommandGroup::Panels,
+            Self::ChartCandles
+            | Self::ChartBars
+            | Self::ChartLine
+            | Self::ChartArea
+            | Self::ChartBaseline
+            | Self::ChartFootprint
+            | Self::Interval1Minute
+            | Self::Interval5Minutes
+            | Self::Interval15Minutes
+            | Self::Interval1Hour
+            | Self::Interval1Day => CommandGroup::Chart,
+            Self::NewWorkspace
+            | Self::SelectNextWorkspace
+            | Self::SelectPreviousWorkspace
+            | Self::MoveWorkspaceLeft
+            | Self::MoveWorkspaceRight
+            | Self::CloseWorkspace => CommandGroup::Workspaces,
+            Self::SplitHorizontal | Self::SplitVertical | Self::ClosePane => CommandGroup::Panes,
+            Self::ToggleOneClickTrading
+            | Self::BuyMarket
+            | Self::SellMarket
+            | Self::CancelAll
+            | Self::FlattenAccount
+            | Self::KillSwitch => CommandGroup::Trading,
+        }
+    }
+}
+
+/// The heading a command is listed under, in display order.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum CommandGroup {
+    Trading,
+    General,
+    Workspaces,
+    Panes,
+    Panels,
+    Chart,
+}
+
+impl CommandGroup {
+    pub const ALL: [Self; 6] = [
+        Self::Trading,
+        Self::General,
+        Self::Workspaces,
+        Self::Panes,
+        Self::Panels,
+        Self::Chart,
+    ];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Trading => "Trading",
+            Self::General => "General",
+            Self::Workspaces => "Workspaces",
+            Self::Panes => "Panes",
+            Self::Panels => "Panels",
+            Self::Chart => "Chart",
+        }
+    }
+}
+
+/// Every command that has a shortcut, grouped under its heading in registry order. Groups
+/// without a shortcut are left out.
+#[must_use]
+pub fn shortcut_sections() -> Vec<(CommandGroup, Vec<&'static CommandSpec>)> {
+    CommandGroup::ALL
+        .into_iter()
+        .filter_map(|group| {
+            let commands = COMMANDS
+                .iter()
+                .filter(|spec| spec.id.group() == group && !spec.chords.is_empty())
+                .collect::<Vec<_>>();
+            (!commands.is_empty()).then_some((group, commands))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +184,17 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
+    /// The title without its group prefix, for lists that already show the group as a heading
+    /// (`Buy market` under Trading).
+    #[must_use]
+    pub fn short_title(&self) -> &'static str {
+        let title = self.title;
+        title
+            .strip_prefix(self.id.group().label())
+            .and_then(|rest| rest.strip_prefix(": "))
+            .unwrap_or(title)
+    }
+
     /// The shortcut shown next to the command, written for people (`Ctrl+Shift+K`).
     #[must_use]
     pub fn shortcut_label(&self) -> Option<String> {
@@ -105,6 +205,13 @@ impl CommandSpec {
 /// Writes a GPUI chord such as `ctrl-shift-pageup` as `Ctrl+Shift+Page Up`.
 #[must_use]
 pub fn chord_label(chord: &str) -> String {
+    chord_keys(chord).join("+")
+}
+
+/// The keys of a GPUI chord as people write them: `ctrl-shift-pageup` is `Ctrl`, `Shift`,
+/// `Page Up`.
+#[must_use]
+pub fn chord_keys(chord: &str) -> Vec<String> {
     chord
         .split('-')
         .map(|part| match part {
@@ -120,8 +227,7 @@ pub fn chord_label(chord: &str) -> String {
                 })
             }
         })
-        .collect::<Vec<_>>()
-        .join("+")
+        .collect()
 }
 
 const fn spec(
@@ -507,8 +613,47 @@ mod tests {
             Some("Ctrl+Shift+K")
         );
         assert_eq!(chord_label("ctrl-shift-pageup"), "Ctrl+Shift+Page Up");
+        assert_eq!(chord_keys("alt-enter"), ["Alt", "Enter"]);
         assert_eq!(chord_label("f11"), "F11");
         assert_eq!(command(CommandId::ToggleContext).shortcut_label(), None);
+    }
+
+    #[test]
+    fn shortcut_sections_list_every_bound_command_once_trading_first() {
+        let sections = shortcut_sections();
+        let (group, trading) = &sections[0];
+        assert_eq!(*group, CommandGroup::Trading);
+        assert_eq!(
+            trading
+                .iter()
+                .map(|spec| (spec.short_title(), spec.shortcut_label()))
+                .collect::<Vec<_>>(),
+            [
+                ("Buy market", Some("Ctrl+B".to_string())),
+                ("Sell market", Some("Ctrl+S".to_string())),
+                ("Cancel all", Some("Ctrl+Shift+X".to_string())),
+                ("Flatten account", Some("Ctrl+Shift+F".to_string())),
+                ("Kill switch", Some("Ctrl+Shift+K".to_string())),
+            ]
+        );
+        let listed = sections
+            .iter()
+            .flat_map(|(_, commands)| commands.iter().map(|spec| spec.id))
+            .collect::<Vec<_>>();
+        let bound = COMMANDS
+            .iter()
+            .filter(|spec| !spec.chords.is_empty())
+            .count();
+        assert_eq!(listed.len(), bound);
+        assert!(
+            sections
+                .iter()
+                .all(|(group, commands)| commands.iter().all(|spec| spec.id.group() == *group))
+        );
+        assert_eq!(
+            command(CommandId::NewWorkspace).short_title(),
+            "New workspace"
+        );
     }
 
     #[test]

@@ -918,6 +918,39 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn keyboard_shortcuts_dialog_blocks_trading_keys_and_closes_on_escape(cx: &mut TestAppContext) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
+        publish_snapshot(&surface, cx);
+        let shortcuts_open =
+            |cx: &mut VisualTestContext| cx.read(|cx| terminal.read(cx).keyboard_shortcuts_open);
+        let confirming = |cx: &mut VisualTestContext| {
+            cx.read(|cx| terminal.read(cx).keyboard_trading.confirming())
+        };
+
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.open_keyboard_shortcuts(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(shortcuts_open(cx));
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(
+            !confirming(cx),
+            "trading keys do nothing behind the shortcuts list"
+        );
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("x").expect("key"),
+        });
+
+        cx.simulate_keystrokes("escape");
+        assert!(!shortcuts_open(cx), "Escape closes the shortcuts list");
+        cx.simulate_keystrokes("ctrl-shift-x");
+        assert!(confirming(cx), "trading keys work again once it closes");
+    }
+
+    #[gpui::test]
     fn trading_shortcuts_ask_first_and_send_once_per_press(cx: &mut TestAppContext) {
         let (terminal, cx) = terminal_harness(cx);
         let surface = cx.read(|cx| terminal.read(cx).active_surface());

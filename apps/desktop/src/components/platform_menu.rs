@@ -1,7 +1,7 @@
 //! The platform menu: the one dropdown under the header avatar. It stacks every
 //! application-level section in a single panel: account (only while sign-in exists), Theme
-//! with a preview card per mode, Window with frameless mode, and About with version, system,
-//! build mode and updates.
+//! with a preview card per mode, Window with frameless mode, the keyboard shortcuts list, and
+//! About with version, system, build mode and updates.
 
 use aeris_observability::diagnostic;
 use std::rc::Rc;
@@ -229,6 +229,8 @@ pub(super) fn platform_menu_layer(
             theme,
         ))
         .separator()
+        .child(keyboard_shortcuts_row(terminal, theme))
+        .separator()
         .child(about_section(
             details,
             &about_update_view(update, theme),
@@ -320,6 +322,8 @@ impl PlatformMenuLayout {
             + THEME_SECTION_HEIGHT
             + separator
             + WINDOW_SECTION_HEIGHT
+            + separator
+            + CHART_CONTEXT_MENU_ROW_HEIGHT
             + separator
             + about_section_height(self.about_details)
     }
@@ -711,6 +715,22 @@ fn window_section(frameless: bool, on_toggle: &FramelessToggle, theme: &AerisThe
         )
 }
 
+fn keyboard_shortcuts_row(terminal: &Entity<TerminalApp>, theme: &AerisTheme) -> AnyElement {
+    let open = terminal.clone();
+    MenuRow::compact(
+        "platform_menu_keyboard_shortcuts",
+        "Keyboard shortcuts",
+        theme,
+    )
+    .leading_icon(header_icon(HugeIcon::Keyboard).with_size(px(16.0)))
+    .on_click(move |_, window, cx| {
+        open.update(cx, |terminal, terminal_cx| {
+            terminal.open_keyboard_shortcuts(window, terminal_cx);
+        });
+    })
+    .into_any_element()
+}
+
 /// Label and value rows under About. The build mode appears only while no
 /// sign-in backend exists, in place of a separate account panel.
 fn about_details(
@@ -1047,7 +1067,8 @@ mod tests {
         let expected = panel_chrome
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
-            + 2.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
+            + CHART_CONTEXT_MENU_ROW_HEIGHT
+            + 3.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT
             + about_section_height(2);
         assert!((development.height(panel_chrome) - expected).abs() < f32::EPSILON);
         let signed_in = PlatformMenuLayout {
@@ -1058,12 +1079,12 @@ mod tests {
         };
         let expected = panel_chrome
             + IDENTITY_HEIGHT
-            + 2.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
+            + 3.0 * CHART_CONTEXT_MENU_ROW_HEIGHT
             + ACCOUNT_ERROR_HEIGHT
             + THEME_SECTION_HEIGHT
             + WINDOW_SECTION_HEIGHT
             + about_section_height(1)
-            + 4.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
+            + 5.0 * CHART_CONTEXT_MENU_SEPARATOR_HEIGHT;
         assert!((signed_in.height(panel_chrome) - expected).abs() < f32::EPSILON);
     }
 

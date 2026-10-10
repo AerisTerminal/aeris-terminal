@@ -36,6 +36,8 @@ mod frameless_title_bar;
 mod fullscreen_hint;
 #[path = "components/indicator_menu.rs"]
 mod indicator_menu;
+#[path = "components/keyboard_shortcuts.rs"]
+mod keyboard_shortcuts;
 #[path = "desktop/local_state.rs"]
 mod local_state;
 #[path = "desktop/market_screener.rs"]
@@ -4523,6 +4525,7 @@ struct TerminalApp {
     command_palette_selection: usize,
     command_palette_message: Option<String>,
     keyboard_trading: trading_hotkeys::KeyboardTrading,
+    keyboard_shortcuts_open: bool,
     broker_connection_task: Option<gpui::Task<()>>,
     broker_connections: HostedBrokerConnections,
     linked_sync_revisions: BTreeMap<String, u64>,

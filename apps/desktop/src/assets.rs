@@ -50,6 +50,7 @@ pub enum UiIcon {
     WindowRestore,
     Loader,
     Info,
+    Keyboard,
     SignOut,
     User,
     Star,
@@ -57,7 +58,7 @@ pub enum UiIcon {
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -96,6 +97,7 @@ impl UiIcon {
         Self::WindowRestore,
         Self::Loader,
         Self::Info,
+        Self::Keyboard,
         Self::SignOut,
         Self::User,
         Self::Star,
@@ -143,6 +145,7 @@ impl UiIcon {
             Self::WindowRestore => "window-restore.svg",
             Self::Loader => "loader.svg",
             Self::Info => "info.svg",
+            Self::Keyboard => "keyboard.svg",
             Self::SignOut => "signout.svg",
             Self::User => "user.svg",
             Self::Star => "star.svg",
@@ -573,6 +576,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "window-restore.svg" => include_bytes!("../assets/icons/ui/window-restore.svg"),
         "loader.svg" => include_bytes!("../assets/icons/ui/loader.svg"),
         "info.svg" => include_bytes!("../assets/icons/ui/info.svg"),
+        "keyboard.svg" => include_bytes!("../assets/icons/ui/keyboard.svg"),
         "signout.svg" => include_bytes!("../assets/icons/ui/signout.svg"),
         "user.svg" => include_bytes!("../assets/icons/ui/user.svg"),
         "star.svg" => include_bytes!("../assets/icons/ui/star.svg"),
