@@ -418,9 +418,12 @@ fn replay_timeframe_label(replay: &ReplaySnapshot) -> String {
     }
 }
 
+/// cTrader venues name the account environment too; the legend shows only the provider.
 fn replay_venue_label(venue: &str) -> &str {
     if venue.eq_ignore_ascii_case("rithmic") {
         "Rithmic"
+    } else if matches!(venue, "cTrader Demo" | "cTrader Live") {
+        "cTrader"
     } else {
         venue
     }
@@ -443,6 +446,7 @@ fn fixed_value(value: i64, divisor: f64) -> f64 {
 mod tests {
     use super::{
         ProductPriceBars, fixed_value, increment_display_precision, price_display_precision,
+        replay_venue_label,
     };
 
     #[test]
@@ -482,6 +486,14 @@ mod tests {
         assert_eq!(increment_display_precision(25_000_000, 8), 2);
         assert_eq!(increment_display_precision(1, 8), 8);
         assert_eq!(price_display_precision([33_105_250_000], 8), 4);
+    }
+
+    #[test]
+    fn legend_venues_name_the_provider_not_the_account_environment() {
+        assert_eq!(replay_venue_label("cTrader Demo"), "cTrader");
+        assert_eq!(replay_venue_label("cTrader Live"), "cTrader");
+        assert_eq!(replay_venue_label("rithmic"), "Rithmic");
+        assert_eq!(replay_venue_label("CME"), "CME");
     }
 
     #[test]
