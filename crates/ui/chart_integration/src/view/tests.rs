@@ -1866,6 +1866,36 @@ fn price_axis_menu_controls_aeris_charts_series_chrome_and_scale() {
 }
 
 #[test]
+fn restored_price_axis_state_keeps_a_fresh_chart_auto_scaled() {
+    let mut source = interactive_chart();
+    assert!(source.apply_price_axis_menu_action(0, false, PriceAxisMenuAction::ToggleAutoScale));
+    let saved = source
+        .price_axis_menu_state(0, false)
+        .expect("right price scale");
+    assert!(!saved.enabled(PriceAxisMenuState::AUTO_SCALE));
+
+    let mut fresh = AerisChartView::new();
+    assert!(fresh.restore_price_axis_menu_state(saved));
+    fresh
+        .engine
+        .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    assert!(
+        fresh
+            .price_axis_menu_state(0, false)
+            .expect("right price scale")
+            .enabled(PriceAxisMenuState::AUTO_SCALE),
+        "a manual price range is not persisted, so a new chart must keep fitting its own data"
+    );
+    assert!(
+        fresh
+            .engine
+            .price_scale_visible_range_for(0, PriceScaleTarget::Right)
+            .is_some(),
+        "a restored chart must have a price range to draw its candles"
+    );
+}
+
+#[test]
 fn indicator_label_preference_applies_to_every_indicator_and_later_additions() {
     let mut chart = interactive_chart();
     assert!(chart.apply_price_axis_menu_action(

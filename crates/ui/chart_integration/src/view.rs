@@ -1381,10 +1381,8 @@ impl AerisChartView {
                 PriceAxisMenuState::INDICATOR_PRICE_LINES,
                 PriceAxisMenuAction::ToggleIndicatorPriceLines,
             ),
-            (
-                PriceAxisMenuState::AUTO_SCALE,
-                PriceAxisMenuAction::ToggleAutoScale,
-            ),
+            // AUTO_SCALE is deliberately not replayed: the manual price range it implies is
+            // not part of this state, so disabling it on a new chart leaves no range to draw.
             (
                 PriceAxisMenuState::INVERT_SCALE,
                 PriceAxisMenuAction::ToggleInvertScale,
