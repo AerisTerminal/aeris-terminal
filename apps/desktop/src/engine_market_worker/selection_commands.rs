@@ -6,8 +6,8 @@ use super::{
     MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
     RITHMIC_CATALOG_READY_MESSAGE, ReplayRecoveryCommand, STARTUP_CATALOG_COMMAND_GENERATION,
     SearchProviderInstruments, SelectProviderInstrument, StartupResolution, StreamRequirements,
-    WorkerEndpoint, cancel_pending_recovery, chart_streams, provider_display_name, retire_endpoint,
-    send_recovery, series_key,
+    WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams,
+    provider_display_name, retire_endpoint, send_recovery, series_key,
 };
 use aeris_observability::diagnostic;
 
@@ -122,9 +122,10 @@ fn begin_endpoint_demand(
         record.endpoint.consumer_id,
         record.endpoint.active_generation,
         &series,
-        market.available_streams(
+        chart_demand_streams(
+            market,
             &record.product.provider,
-            chart_streams(record.endpoint.depth_visible),
+            record.endpoint.depth_visible,
         )?,
     ) {
         let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
@@ -472,10 +473,7 @@ fn process_engine_select(
         endpoint.consumer_id,
         request.sequence,
         &series,
-        market.available_streams(
-            &request.product.provider,
-            chart_streams(endpoint.depth_visible),
-        )?,
+        chart_demand_streams(market, &request.product.provider, endpoint.depth_visible)?,
     )
 }
 

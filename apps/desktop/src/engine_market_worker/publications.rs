@@ -6,7 +6,7 @@ use super::{
     MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
     MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
     ProviderConnectionState, ProviderState, PushedEventContext, ReplayRecoveryCommand,
-    ReplayStreamUpdate, SeriesLoadState, WorkerEndpoint, chart_streams, demand_error,
+    ReplayStreamUpdate, SeriesLoadState, WorkerEndpoint, chart_demand_streams, demand_error,
     provider_display_name, replay_runtime_snapshot, replay_runtime_tail_update,
     runtime_generation_from_snapshot, runtime_order_book_frame, series_key, worker_identity,
 };
@@ -434,13 +434,18 @@ pub(super) fn send_recovery(
             .map_err(|error| error.to_string())?;
     }
     let series = series_key(product, interval)?;
-    if let Err(error) = market.set_demand(
-        client_id,
-        endpoint.consumer_id,
-        endpoint.active_generation,
-        &series,
-        chart_streams(endpoint.depth_visible),
-    ) {
+    let demand = chart_demand_streams(market, &product.provider, endpoint.depth_visible).and_then(
+        |streams| {
+            market.set_demand(
+                client_id,
+                endpoint.consumer_id,
+                endpoint.active_generation,
+                &series,
+                streams,
+            )
+        },
+    );
+    if let Err(error) = demand {
         let pending = endpoint
             .pending_recovery
             .take()

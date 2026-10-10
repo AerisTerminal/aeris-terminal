@@ -78,7 +78,17 @@ pub(crate) fn started_market_runtime() -> Option<MarketService> {
         .and_then(|runtime| runtime.as_ref().ok().cloned())
 }
 
-pub(super) fn chart_streams(depth_visible: bool) -> StreamRequirements {
+/// The streams a chart demands from `provider`, limited to the ones that
+/// provider publishes; the runtime rejects demand for any other stream.
+pub(super) fn chart_demand_streams(
+    market: &MarketService,
+    provider: &str,
+    depth_visible: bool,
+) -> Result<StreamRequirements, String> {
+    market.available_streams(provider, chart_streams(depth_visible))
+}
+
+fn chart_streams(depth_visible: bool) -> StreamRequirements {
     let streams = StreamRequirements::BARS
         .with(MarketStream::Trades)
         .with(MarketStream::Quotes);
