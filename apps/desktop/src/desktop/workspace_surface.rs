@@ -2796,6 +2796,11 @@ impl WorkspaceSurface {
         }
         self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
         self.last_chart_clock_revision = chart.read(cx).clock_revision();
+        if let Some(replaced) = self.chart.clone() {
+            chart.update(cx, |chart, cx| {
+                chart.inherit_keyboard_focus(replaced.read(cx));
+            });
+        }
         observe_chart(Some(&chart), cx);
         self.chart = Some(chart);
         // Interval switches keep the instrument's tape; project it into the new chart now

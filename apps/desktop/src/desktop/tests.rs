@@ -420,6 +420,7 @@ mod timeframe_input {
                         &AerisTheme::dark(),
                     ))
             });
+            let chart = surface.chart.clone();
             div()
                 .size_full()
                 .track_focus(&surface.chrome_focus)
@@ -431,6 +432,7 @@ mod timeframe_input {
                         cx.stop_propagation();
                     }
                 }))
+                .children(chart)
                 .when(quick, |root| root.child(Input::new(&input)))
                 .when_some(practice_name, |root, input| root.child(Input::new(&input)))
                 .children(big_trades_dialog)
@@ -782,6 +784,68 @@ mod timeframe_input {
                 .minimum_volume
                 .clone()
         })
+    }
+
+    fn publish_snapshot(surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext) {
+        let snapshot = aeris_application::EmbeddedReplaySource
+            .load_snapshot(aeris_application::LoadEmbeddedReplay { bar_count: 8 })
+            .expect("embedded replay");
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.apply_publication(
+                    aeris_desktop::market_worker::MarketWorkerPublication {
+                        update: aeris_application::ReplayStreamUpdate::Snapshot(snapshot),
+                        generation:
+                            aeris_desktop::market_worker::MarketPublicationGeneration::from_tail(
+                                1, 8, 1, 8,
+                            ),
+                        subscription_id: "timeframe_test".into(),
+                        worker_label: "timeframe_test".into(),
+                        ui_diagnostics: None,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn series_swap_keeps_keyboard_focus_on_the_chart(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        publish_snapshot(&surface, cx);
+        let shortcuts_ready = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| surface.read(cx).chart_shortcuts_ready(window, cx))
+        };
+        assert!(
+            !shortcuts_ready(cx),
+            "the chart starts without keyboard focus"
+        );
+        cx.simulate_click(
+            gpui::point(gpui::px(200.0), gpui::px(200.0)),
+            gpui::Modifiers::default(),
+        );
+        assert!(
+            shortcuts_ready(cx),
+            "clicking the chart gives it keyboard focus"
+        );
+        let first = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
+
+        // A symbol or interval switch swaps in a chart built from the replacement's snapshot.
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, _| {
+                surface.rithmic_switch = RithmicSwitchState::Swapping;
+            });
+        });
+        publish_snapshot(&surface, cx);
+        let second = cx.read(|cx| surface.read(cx).chart.clone().expect("replacement chart"));
+        assert_ne!(first.entity_id(), second.entity_id());
+        drop(first);
+        cx.run_until_parked();
+        assert!(
+            shortcuts_ready(cx),
+            "the replacement chart keeps keyboard focus, so shortcuts work without another click"
+        );
     }
 
     #[gpui::test]
