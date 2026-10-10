@@ -420,7 +420,6 @@ mod timeframe_input {
                         &AerisTheme::dark(),
                     ))
             });
-            let chart = surface.chart.clone();
             div()
                 .size_full()
                 .track_focus(&surface.chrome_focus)
@@ -432,7 +431,6 @@ mod timeframe_input {
                         cx.stop_propagation();
                     }
                 }))
-                .children(chart)
                 .when(quick, |root| root.child(Input::new(&input)))
                 .when_some(practice_name, |root, input| root.child(Input::new(&input)))
                 .children(big_trades_dialog)
@@ -810,28 +808,91 @@ mod timeframe_input {
         cx.run_until_parked();
     }
 
+    struct TerminalHarness(Entity<TerminalApp>);
+
+    impl Render for TerminalHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    fn terminal_harness(cx: &mut TestAppContext) -> (Entity<TerminalApp>, &mut VisualTestContext) {
+        let product = local_state::default_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default instrument");
+        let (commands, _requests) = mpsc::sync_channel(64);
+        let (_publications, messages) = market_worker_channel(NonZeroUsize::MIN);
+        let (_, shutdown) = mpsc::sync_channel(1);
+        let worker = MarketDataWorker::from_channels(
+            commands,
+            messages,
+            shutdown,
+            None,
+            Some(Arc::new(AtomicU64::new(1))),
+        );
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            gpui_base::init(cx);
+            bind_desktop_keys(cx);
+            let terminal = terminal_root(
+                MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
+                    product,
+                    interval: ChartInterval::Minute1,
+                    restored_viewport: None,
+                    subscription_id: "timeframe_test".into(),
+                    worker_label: "timeframe_test".into(),
+                })),
+                worker,
+                None,
+                &DesktopLifecycle::new_for_test(),
+                chart_chrome::ChartChromePreferences::default(),
+                window,
+                cx,
+            );
+            cx.observe(&terminal, |_, _, cx| cx.notify()).detach();
+            TerminalHarness(terminal)
+        });
+        let terminal = cx.read(|cx| view.read(cx).0.clone());
+        cx.run_until_parked();
+        (terminal, cx)
+    }
+
     #[gpui::test]
-    fn series_swap_keeps_keyboard_focus_on_the_chart(cx: &mut TestAppContext) {
-        let (surface, _requests, _publications, cx) = harness(cx);
+    fn keyboard_focus_returns_to_the_workspace_when_its_target_leaves_the_screen(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, cx) = terminal_harness(cx);
+        let surface = cx.read(|cx| terminal.read(cx).active_surface());
         publish_snapshot(&surface, cx);
-        let shortcuts_ready = |cx: &mut VisualTestContext| {
-            cx.update(|window, cx| surface.read(cx).chart_shortcuts_ready(window, cx))
+        let workspace_focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| terminal.read(cx).workspace_keyboard_focused(window, cx))
         };
-        assert!(
-            !shortcuts_ready(cx),
-            "the chart starts without keyboard focus"
-        );
-        cx.simulate_click(
-            gpui::point(gpui::px(200.0), gpui::px(200.0)),
-            gpui::Modifiers::default(),
-        );
-        assert!(
-            shortcuts_ready(cx),
-            "clicking the chart gives it keyboard focus"
-        );
-        let first = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
+        let chart_focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                surface
+                    .read(cx)
+                    .chart
+                    .as_ref()
+                    .is_some_and(|chart| chart.read(cx).has_keyboard_focus(window))
+            })
+        };
+        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.run_until_parked();
+        assert!(workspace_focused(cx), "the shell counts as workspace focus");
+
+        // Any focus target that is not drawn (a tab strip a frameless window hides, a closed
+        // pane or dialog) would leave keys with no workspace handler to reach.
+        let _off_screen = cx.update(|window, cx| {
+            let handle = cx.focus_handle();
+            handle.focus(window, cx);
+            handle
+        });
+        cx.run_until_parked();
+        assert!(chart_focused(cx), "lost focus returns to the active chart");
+        assert!(workspace_focused(cx));
 
         // A symbol or interval switch swaps in a chart built from the replacement's snapshot.
+        let first = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
         cx.update(|_, cx| {
             surface.update(cx, |surface, _| {
                 surface.rithmic_switch = RithmicSwitchState::Swapping;
@@ -843,9 +904,17 @@ mod timeframe_input {
         drop(first);
         cx.run_until_parked();
         assert!(
-            shortcuts_ready(cx),
-            "the replacement chart keeps keyboard focus, so shortcuts work without another click"
+            chart_focused(cx),
+            "the replacement chart takes keyboard focus without another click"
         );
+        assert!(workspace_focused(cx));
+
+        // Ctrl+Tab lands in the selected workspace, as a browser lands in the selected page.
+        cx.update(|window, cx| terminal.read(cx).chrome_focus.clone().focus(window, cx));
+        cx.run_until_parked();
+        assert!(!chart_focused(cx));
+        cx.simulate_keystrokes("ctrl-tab");
+        assert!(chart_focused(cx), "Ctrl+Tab focuses the workspace's chart");
     }
 
     #[gpui::test]

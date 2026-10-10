@@ -545,6 +545,29 @@ impl TerminalApp {
 
     /// Applies a chart shortcut when the active chart is ready for one. A held key acts once,
     /// so holding Space never streams symbol switches.
+    /// Whether keyboard focus rests on the workspace itself (the shell, the active workspace's
+    /// tab, or the active pane's chrome or chart) rather than on a text field, so workspace
+    /// shortcuts may act.
+    pub(super) fn workspace_keyboard_focused(&self, window: &Window, cx: &App) -> bool {
+        self.chrome_focus.is_focused(window)
+            || self.workspaces[self.active].focus.is_focused(window)
+            || self
+                .active_surface()
+                .read(cx)
+                .holds_keyboard_focus(window, cx)
+    }
+
+    /// Returns keyboard focus to the visible workspace: the active pane's chart on the terminal
+    /// page, otherwise the shell.
+    pub(super) fn focus_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pages.view != market_screener::AppView::Terminal {
+            self.chrome_focus.focus(window, cx);
+            return;
+        }
+        self.active_surface()
+            .update(cx, |surface, cx| surface.focus_keyboard(window, cx));
+    }
+
     fn apply_chart_shortcut(
         &mut self,
         event: &KeyDownEvent,
@@ -554,10 +577,8 @@ impl TerminalApp {
         let Some(shortcut) = chart_shortcut(&event.keystroke.key, event.keystroke.modifiers) else {
             return false;
         };
-        if !self
-            .active_surface()
-            .read(cx)
-            .chart_shortcuts_ready(window, cx)
+        if !self.workspace_keyboard_focused(window, cx)
+            || !self.active_surface().read(cx).chart_shortcuts_unblocked()
         {
             return false;
         }
@@ -2166,13 +2187,22 @@ impl TerminalApp {
         }
     }
 
+    /// Ctrl+Tab moves between workspaces the way a browser moves between tabs: keyboard focus
+    /// lands in the selected workspace, not on its tab, which a frameless window may not show.
+    fn cycle_workspace(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(next) = wrapped_workspace_index(self.active, self.workspaces.len(), direction) {
+            self.select_workspace(next, cx);
+            self.focus_workspace(window, cx);
+        }
+    }
+
     pub(super) fn select_next_workspace(
         &mut self,
         _: &SelectNextWorkspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_relative_workspace(self.active, 1, window, cx);
+        self.cycle_workspace(1, window, cx);
     }
 
     pub(super) fn select_previous_workspace(
@@ -2181,15 +2211,12 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_relative_workspace(self.active, -1, window, cx);
+        self.cycle_workspace(-1, window, cx);
     }
 
-    fn move_active_workspace(
-        &mut self,
-        direction: isize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Reordering leaves keyboard focus where it was; tab handles are keyed by workspace, so a
+    /// focused tab stays focused as it moves.
+    fn move_active_workspace(&mut self, direction: isize, cx: &mut Context<Self>) {
         let Some(destination) = self.active.checked_add_signed(direction) else {
             return;
         };
@@ -2197,27 +2224,25 @@ impl TerminalApp {
             return;
         }
         let active_id = self.workspaces[self.active].id;
-        if self.reorder_workspace(active_id, destination, cx) {
-            self.workspaces[self.active].focus.focus(window, cx);
-        }
+        self.reorder_workspace(active_id, destination, cx);
     }
 
     pub(super) fn move_workspace_left(
         &mut self,
         _: &MoveWorkspaceLeft,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_active_workspace(-1, window, cx);
+        self.move_active_workspace(-1, cx);
     }
 
     pub(super) fn move_workspace_right(
         &mut self,
         _: &MoveWorkspaceRight,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_active_workspace(1, window, cx);
+        self.move_active_workspace(1, cx);
     }
 
     pub(super) fn close_active_workspace(
@@ -2352,7 +2377,8 @@ impl TerminalApp {
             return;
         };
         let removed = self.workspaces.remove(index);
-        let focus_next_tab = active_id == tab_id || removed.focus.is_focused(window);
+        let focus_next_tab = removed.focus.is_focused(window);
+        let focus_next_workspace = !focus_next_tab && active_id == tab_id;
         if self
             .workspace_drag
             .is_some_and(|drag| drag.tab_id == tab_id)
@@ -2376,6 +2402,8 @@ impl TerminalApp {
         self.sync_market_summaries(cx);
         if focus_next_tab {
             self.workspaces[self.active].focus.focus(window, cx);
+        } else if focus_next_workspace {
+            self.focus_workspace(window, cx);
         }
         self.workspace_error = None;
         self.persist_workspace_layout_if_changed(cx);
@@ -2454,7 +2482,6 @@ impl TerminalApp {
                 id: pane_id,
                 consumer_id,
                 surface,
-                focus: cx.focus_handle(),
             }],
             active_pane: 0,
             layout,
@@ -2576,7 +2603,6 @@ impl TerminalApp {
                 id: pane.pane_id,
                 consumer_id: pane.consumer_id,
                 surface,
-                focus: cx.focus_handle(),
             },
         );
         workspace.active_pane = insertion_index;
@@ -2661,7 +2687,7 @@ impl TerminalApp {
                 surface.side_panel_split_basis_points = removed_side_panel_split;
                 surface.apply_side_panels(removed_side_panels, surface_cx);
             });
-        workspace.panes[recipient].focus.focus(window, cx);
+        self.focus_workspace(window, cx);
         self.workspace_error = None;
         self.persist_workspace_layout_if_changed(cx);
         cx.notify();

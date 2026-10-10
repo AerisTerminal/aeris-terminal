@@ -2475,16 +2475,31 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Whether chart shortcuts may act: the chart holds keyboard focus, no chrome overlay or
-    /// modal is open, and no drawing text is being edited.
-    pub(super) fn chart_shortcuts_ready(&self, window: &Window, cx: &App) -> bool {
+    /// Whether the surface lets chart shortcuts act: it has a chart and no chrome overlay or
+    /// modal is open. Keyboard focus is the workspace's to judge.
+    pub(super) fn chart_shortcuts_unblocked(&self) -> bool {
         self.chrome_overlay.is_none()
             && self.trading_pnl.account_creator.is_none()
             && self.trading_pnl.account_delete_confirmation.is_none()
-            && self.chart.as_ref().is_some_and(|chart| {
+            && self.chart.is_some()
+    }
+
+    /// Whether keyboard focus rests on this surface itself, its chrome or its chart, rather
+    /// than on one of its text fields or on drawing text being edited.
+    pub(super) fn holds_keyboard_focus(&self, window: &Window, cx: &App) -> bool {
+        self.chrome_focus.is_focused(window)
+            || self.chart.as_ref().is_some_and(|chart| {
                 let chart = chart.read(cx);
                 chart.has_keyboard_focus(window) && !chart.is_editing_text()
             })
+    }
+
+    /// Returns keyboard focus to the surface: its chart, or its chrome before a chart exists.
+    pub(super) fn focus_keyboard(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.chart.clone() {
+            Some(chart) => chart.update(cx, |chart, cx| chart.focus_keyboard(window, cx)),
+            None => self.chrome_focus.focus(window, cx),
+        }
     }
 
     pub(super) fn on_terminal_key_down(
@@ -2796,11 +2811,6 @@ impl WorkspaceSurface {
         }
         self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
         self.last_chart_clock_revision = chart.read(cx).clock_revision();
-        if let Some(replaced) = self.chart.clone() {
-            chart.update(cx, |chart, cx| {
-                chart.inherit_keyboard_focus(replaced.read(cx));
-            });
-        }
         observe_chart(Some(&chart), cx);
         self.chart = Some(chart);
         // Interval switches keep the instrument's tape; project it into the new chart now

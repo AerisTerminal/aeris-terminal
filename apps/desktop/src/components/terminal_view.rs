@@ -874,9 +874,9 @@ impl TerminalApp {
 }
 
 impl TerminalApp {
-    fn trading_hotkeys_enabled(&self, window: &Window) -> bool {
+    fn trading_hotkeys_enabled(&self, window: &Window, cx: &App) -> bool {
         self.pages.view == market_screener::AppView::Terminal
-            && self.chrome_focus.is_focused(window)
+            && self.workspace_keyboard_focused(window, cx)
     }
 
     fn trading_order_frame(&self, cx: &App) -> Option<aeris_market_data::OrderBookFrame> {
@@ -919,7 +919,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window) || self.trading_order_entry_locked(cx) {
+        if !self.trading_hotkeys_enabled(window, cx) || self.trading_order_entry_locked(cx) {
             return;
         }
         let Some(frame) = self.trading_order_frame(cx) else {
@@ -943,7 +943,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window) || self.trading_order_entry_locked(cx) {
+        if !self.trading_hotkeys_enabled(window, cx) || self.trading_order_entry_locked(cx) {
             return;
         }
         let Some(frame) = self.trading_order_frame(cx) else {
@@ -967,7 +967,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window) {
+        if !self.trading_hotkeys_enabled(window, cx) {
             return;
         }
         aeris_desktop::trading::cancel_simulated_accounts(cx);
@@ -979,7 +979,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.trading_hotkeys_enabled(window)
+        if self.trading_hotkeys_enabled(window, cx)
             && let Some(frame) = self.trading_order_frame(cx)
         {
             aeris_desktop::trading::flatten_simulated_account_for(
@@ -996,7 +996,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.trading_hotkeys_enabled(window) {
+        if !self.trading_hotkeys_enabled(window, cx) {
             return;
         }
         aeris_desktop::trading::kill_simulated_accounts(cx);
@@ -1465,7 +1465,6 @@ pub(super) fn terminal_root(
                     id: 1,
                     consumer_id: 1,
                     surface,
-                    focus: cx.focus_handle(),
                 }],
                 active_pane: 0,
                 layout: AerisChartWorkspace::new(1, CHART_PANE_CAPACITY)
@@ -1537,6 +1536,18 @@ fn terminal_shell_root(
         });
         true
     });
+    // A focused element that leaves the screen (a replaced chart, a hidden tab strip, a closed
+    // pane or dialog) would otherwise route every key to the bare window root, where no
+    // workspace shortcut is registered.
+    terminal.update(cx, |_, cx| {
+        cx.on_focus_lost(window, |terminal, window, cx| {
+            terminal.focus_workspace(window, cx);
+            // GPUI does not redraw for focus a focus-lost listener moves. Draw the restored
+            // focus, so the next focused element to leave the screen is reported again.
+            cx.defer_in(window, |_, window, _| window.refresh());
+        })
+        .detach();
+    });
     let focus_terminal = terminal.clone();
     window.on_next_frame(move |window, cx| {
         focus_terminal.update(cx, |terminal, cx| {
@@ -1603,7 +1614,6 @@ pub(super) fn workspace_tabs_root(
                     window,
                     cx,
                 ),
-                focus: cx.focus_handle(),
             });
         }
         if panes.is_empty() {

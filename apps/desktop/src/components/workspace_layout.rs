@@ -246,7 +246,6 @@ pub(super) fn workspace_pane_element(
         .as_ref()
         .map(|dialog| big_trades_dialog_layer(&pane.surface, dialog, theme));
     let workspace_id = workspace.id;
-    let pane_focus = pane.focus.clone();
     let select_terminal = terminal.clone();
     let context_terminal = terminal.clone();
     let maximize_terminal = terminal.clone();
@@ -288,8 +287,8 @@ pub(super) fn workspace_pane_element(
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             select_terminal.update(cx, |terminal, terminal_cx| {
                 terminal.select_pane(workspace_id, pane_id, terminal_cx);
+                terminal.focus_workspace(window, terminal_cx);
             });
-            pane_focus.focus(window, cx);
         })
         .on_mouse_down(MouseButton::Right, move |event, _, cx| {
             context_terminal.update(cx, |terminal, terminal_cx| {

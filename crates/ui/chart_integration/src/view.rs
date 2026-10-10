@@ -1565,12 +1565,10 @@ impl AerisChartView {
             .is_some_and(|handle| handle.is_focused(window))
     }
 
-    /// Continues the keyboard focus identity of the chart this view replaces, so a series swap
-    /// (symbol or interval) leaves keyboard focus where the user put it.
-    pub fn inherit_keyboard_focus(&mut self, replaced: &Self) {
-        if let Some(handle) = &replaced.focus_handle {
-            self.focus_handle = Some(handle.clone());
-        }
+    /// Gives the chart keyboard focus, as a click on it would.
+    pub fn focus_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.focus_handle.get_or_insert_with(|| cx.focus_handle());
+        window.focus(handle, cx);
     }
 
     /// Returns whether the newest bar is at the platform's real-time presentation edge, including

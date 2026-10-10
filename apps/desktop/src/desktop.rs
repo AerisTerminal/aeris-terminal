@@ -4201,7 +4201,6 @@ struct WorkspacePane {
     id: u64,
     consumer_id: u64,
     surface: Entity<WorkspaceSurface>,
-    focus: FocusHandle,
 }
 
 struct WorkspaceTab {
