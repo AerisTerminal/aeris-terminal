@@ -4532,18 +4532,20 @@ struct ChartCopyFeedback {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ChartSettingsSection {
     #[default]
-    Series,
+    Symbol,
     Canvas,
+    Legend,
     Trading,
 }
 
 impl ChartSettingsSection {
-    const ALL: [Self; 3] = [Self::Series, Self::Canvas, Self::Trading];
+    const ALL: [Self; 4] = [Self::Symbol, Self::Canvas, Self::Legend, Self::Trading];
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Series => "Series",
+            Self::Symbol => "Symbol",
             Self::Canvas => "Canvas",
+            Self::Legend => "Legend",
             Self::Trading => "Trading",
         }
     }

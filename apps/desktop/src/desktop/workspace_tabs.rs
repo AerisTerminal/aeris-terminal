@@ -186,7 +186,7 @@ impl TerminalApp {
             chart_context_copy_feedback_generation: 0,
             chart_settings_menu: None,
             chart_settings_placement: chart_context_menus::ChartSettingsPlacement::default(),
-            chart_settings_section: ChartSettingsSection::Series,
+            chart_settings_section: ChartSettingsSection::Symbol,
             chart_settings_color_picker: None,
             chart_settings_template_overlay: ChartSettingsTemplateOverlay::Closed,
             chart_settings_template_name: None,
@@ -1926,7 +1926,7 @@ impl TerminalApp {
             ChartContextAction::Settings => {
                 self.chart_context_menu = None;
                 self.set_workspace_chart_pointers_suspended(menu.workspace_id, true, cx);
-                self.chart_settings_section = ChartSettingsSection::Series;
+                self.chart_settings_section = ChartSettingsSection::Symbol;
                 self.chart_settings_color_picker = None;
                 self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
                 self.chart_settings_template_name = None;

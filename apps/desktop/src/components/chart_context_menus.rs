@@ -915,16 +915,17 @@ pub(super) fn chart_settings_menu_layer(
     let dismiss = terminal.clone();
     let dismiss_right = terminal.clone();
     let move_terminal = terminal.clone();
+    let ui = SettingsUi {
+        terminal,
+        menu,
+        color_picker: view.color_picker,
+        theme,
+    };
     let content = match view.section {
-        ChartSettingsSection::Series => {
-            chart_series_settings(terminal, menu, view.snapshot, view.color_picker, theme)
-        }
-        ChartSettingsSection::Canvas => {
-            chart_canvas_settings(terminal, menu, view.snapshot, view.color_picker, theme)
-        }
-        ChartSettingsSection::Trading => {
-            chart_trading_settings(terminal, menu, view.snapshot, theme)
-        }
+        ChartSettingsSection::Symbol => chart_symbol_settings(ui, view.snapshot),
+        ChartSettingsSection::Canvas => chart_canvas_settings(ui, view.snapshot),
+        ChartSettingsSection::Legend => chart_legend_settings(ui, view.snapshot),
+        ChartSettingsSection::Trading => chart_trading_settings(ui, view.snapshot),
     };
     div()
         .id("chart_settings_menu_scrim")
@@ -1409,270 +1410,196 @@ fn chart_settings_template_save_dialog(
     .into_any_element()
 }
 
-fn chart_series_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    snapshot: &ChartSettingsSnapshot,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let body = match snapshot.chart_type {
+/// Height of one settings row.
+const SETTINGS_ROW_HEIGHT: f32 = 40.0;
+/// Width of one color column in a paired row (up and down, above and below).
+const SETTINGS_PAIR_COLUMN_WIDTH: f32 = 136.0;
+/// Width of the trailing switch column of paired rows. Rows without a switch keep it empty so
+/// every row's colors line up under their captions.
+const SETTINGS_SWITCH_COLUMN_WIDTH: f32 = 44.0;
+/// The engine's hidden crosshair mode.
+const CROSSHAIR_HIDDEN: u8 = 2;
+
+/// What every settings row needs: the app that applies changes, the chart they target, the
+/// open color picker and the theme.
+#[derive(Clone, Copy)]
+struct SettingsUi<'a> {
+    terminal: &'a Entity<TerminalApp>,
+    menu: &'a ChartContextMenu,
+    color_picker: Option<&'a ChartColorPickerState>,
+    theme: &'a AerisTheme,
+}
+
+impl SettingsUi<'_> {
+    fn apply_on_change(
+        self,
+        action: ChartSettingsAction,
+    ) -> impl Fn(bool, &gpui::ClickEvent, &mut Window, &mut App) + 'static {
+        let terminal = self.terminal.clone();
+        let menu = self.menu.clone();
+        move |_, _, _, cx| {
+            terminal.update(cx, |terminal, terminal_cx| {
+                terminal.apply_chart_settings_action(&menu, action, terminal_cx);
+            });
+        }
+    }
+}
+
+/// The trailing switch of a paired color row.
+#[derive(Clone, Copy)]
+enum PairSwitch {
+    /// The group has no switch column.
+    Absent,
+    /// The group has a switch column, but this part is always drawn.
+    Empty,
+    /// Shows or hides the part; its colors lock while it is hidden.
+    Toggle(bool, ChartSettingsAction),
+}
+
+impl PairSwitch {
+    const fn has_column(self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+
+    const fn part_visible(self) -> bool {
+        match self {
+            Self::Toggle(visible, _) => visible,
+            Self::Absent | Self::Empty => true,
+        }
+    }
+}
+
+/// One color of a settings row: which setting it edits and the color the chart paints.
+#[derive(Clone, Copy)]
+struct ColorCell<'a> {
+    setting: ChartColorSetting,
+    value: &'a str,
+}
+
+/// A single-choice setting: the options, which is selected, and the action each applies.
+type Choices<'a> = &'a [(&'static str, bool, ChartSettingsAction)];
+
+/// Identity and text of a single-choice row. `id` keeps rows that share a label (two "Style"
+/// rows on one page) distinct.
+#[derive(Clone, Copy)]
+struct ChoiceRow {
+    id: &'static str,
+    label: &'static str,
+    hint: Option<&'static str>,
+    enabled: bool,
+}
+
+impl ChoiceRow {
+    const fn new(id: &'static str, label: &'static str) -> Self {
+        Self {
+            id,
+            label,
+            hint: None,
+            enabled: true,
+        }
+    }
+
+    const fn hint(mut self, hint: &'static str) -> Self {
+        self.hint = Some(hint);
+        self
+    }
+
+    const fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+}
+
+/// A switch and the one option that refines it.
+#[derive(Clone, Copy)]
+struct SwitchWithOption {
+    label: &'static str,
+    hint: Option<&'static str>,
+    enabled: bool,
+    action: ChartSettingsAction,
+    option: &'static str,
+    option_checked: bool,
+    option_action: ChartSettingsAction,
+}
+
+fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    let title = snapshot.chart_type.label();
+    let appearance = &snapshot.appearance;
+    let groups = match snapshot.chart_type {
         ChartType::Candles
         | ChartType::HollowCandles
         | ChartType::HollowCandlesBullish
-        | ChartType::HollowCandlesBearish => {
-            candle_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
-        }
-        ChartType::Footprint => {
-            footprint_series_settings(terminal, menu, snapshot.order_flow, theme)
-        }
-        ChartType::Bars => {
-            bar_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
-        }
+        | ChartType::HollowCandlesBearish => vec![candle_group(ui, title, appearance)],
+        ChartType::Footprint => footprint_groups(ui, title, snapshot.order_flow),
+        ChartType::Bars => vec![bar_group(ui, title, appearance)],
         ChartType::Line | ChartType::LineWithMarkers | ChartType::BrushableArea => {
-            line_series_settings(
-                terminal,
-                menu,
-                &snapshot.appearance,
-                color_picker,
-                snapshot.chart_type == ChartType::BrushableArea,
-                theme,
-            )
+            vec![line_group(ui, title, appearance)]
         }
-        ChartType::Area => {
-            area_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
-        }
-        ChartType::Baseline => {
-            baseline_series_settings(terminal, menu, &snapshot.appearance, color_picker, theme)
-        }
+        ChartType::Area => vec![
+            line_group(ui, "Line", appearance),
+            settings_group(
+                "Fill",
+                [settings_color_row(
+                    ui,
+                    "Color",
+                    ColorCell {
+                        setting: ChartColorSetting::AreaTop,
+                        value: &appearance.area_top_color,
+                    },
+                    true,
+                )],
+                ui.theme,
+            ),
+        ],
+        ChartType::Baseline => vec![baseline_group(ui, title, appearance)],
     };
-    settings_content_header(
-        snapshot.chart_type.label(),
-        "Appearance controls adapt to the active price-series type.",
-        theme,
-    )
-    .child(body)
-    .into_any_element()
+    settings_section(groups)
 }
 
-fn footprint_series_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    settings: OrderFlowSettings,
-    theme: &AerisTheme,
-) -> AnyElement {
-    div()
-        .child(settings_group_heading(
-            "Numbers bars",
-            "Tick-derived cell presentation",
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Cells",
-            &[
-                (
-                    "Bid × Ask",
-                    settings.display_mode == FootprintDisplayMode::BidAsk,
-                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::BidAsk),
-                ),
-                (
-                    "Total",
-                    settings.display_mode == FootprintDisplayMode::Total,
-                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::Total),
-                ),
-                (
-                    "Delta",
-                    settings.display_mode == FootprintDisplayMode::Delta,
-                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::Delta),
-                ),
-            ],
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Profile",
-            &[
-                (
-                    "Profile",
-                    settings.display_mode == FootprintDisplayMode::ProfileInBar,
-                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::ProfileInBar),
-                ),
-                (
-                    "Ladder",
-                    settings.display_mode == FootprintDisplayMode::VolumeLadder,
-                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::VolumeLadder),
-                ),
-                (
-                    "Imbalance",
-                    settings.display_mode == FootprintDisplayMode::HorizontalImbalance,
-                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::HorizontalImbalance),
-                ),
-                (
-                    "Histogram",
-                    settings.display_mode == FootprintDisplayMode::BidAskHistogram,
-                    ChartSettingsAction::FootprintMode(FootprintDisplayMode::BidAskHistogram),
-                ),
-            ],
-            theme,
-        ))
-        .child(footprint_row_size_settings(terminal, menu, settings, theme))
-        .child(settings_group_heading(
-            "Order-flow studies",
-            "One shared retained trade stream",
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Cumulative delta",
-            settings.show_cumulative_delta,
-            ChartSettingsAction::ToggleCumulativeDelta,
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Delta histogram",
-            settings.show_delta_histogram,
-            ChartSettingsAction::ToggleDeltaHistogram,
-            theme,
-        ))
-        .into_any_element()
-}
-
-fn footprint_row_size_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    settings: OrderFlowSettings,
-    theme: &AerisTheme,
-) -> AnyElement {
-    let choice = |label: &'static str, ticks: u32| {
-        (
-            label,
-            settings.ticks_per_row == ticks,
-            ChartSettingsAction::FootprintTicksPerRow(ticks),
-        )
-    };
-    div()
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Row size",
-            &[
-                choice("Auto", 0),
-                choice("1 tick", 1),
-                choice("2", 2),
-                choice("5", 5),
-            ],
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "",
-            &[
-                choice("10", 10),
-                choice("25", 25),
-                choice("50", 50),
-                choice("100 ticks", 100),
-            ],
-            theme,
-        ))
-        .into_any_element()
-}
-
-fn candle_series_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
+fn candle_group(
+    ui: SettingsUi<'_>,
+    title: &'static str,
     appearance: &ChartAppearanceSettings,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
 ) -> AnyElement {
-    let candle = effective_candle_colors(appearance, theme);
-    div()
-        .child(settings_group_heading(
-            "Body",
-            "Directional candle colors",
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Up,
-            &candle.up,
-            color_picker,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Down,
-            &candle.down,
-            color_picker,
-            theme,
-        ))
-        .child(settings_group_heading(
-            "Wicks",
-            "Independent wick colors and visibility",
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Show wicks",
-            appearance.wick_visible,
-            ChartSettingsAction::ToggleWicks,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::WickUp,
-            &candle.wick_up,
-            color_picker,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::WickDown,
-            &candle.wick_down,
-            color_picker,
-            theme,
-        ))
-        .child(settings_group_heading(
-            "Borders",
-            "Candle outline styling",
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Show borders",
-            appearance.border_visible,
-            ChartSettingsAction::ToggleBorders,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::BorderUp,
-            &candle.border_up,
-            color_picker,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::BorderDown,
-            &candle.border_down,
-            color_picker,
-            theme,
-        ))
-        .into_any_element()
+    let candle = effective_candle_colors(appearance, ui.theme);
+    let cell = |setting, value| ColorCell { setting, value };
+    settings_group(
+        title,
+        [
+            settings_pair_captions("Up", "Down", true, ui.theme),
+            settings_color_pair_row(
+                ui,
+                "Body",
+                [
+                    cell(ChartColorSetting::Up, &candle.up),
+                    cell(ChartColorSetting::Down, &candle.down),
+                ],
+                PairSwitch::Empty,
+            ),
+            settings_color_pair_row(
+                ui,
+                "Borders",
+                [
+                    cell(ChartColorSetting::BorderUp, &candle.border_up),
+                    cell(ChartColorSetting::BorderDown, &candle.border_down),
+                ],
+                PairSwitch::Toggle(
+                    appearance.border_visible,
+                    ChartSettingsAction::ToggleBorders,
+                ),
+            ),
+            settings_color_pair_row(
+                ui,
+                "Wicks",
+                [
+                    cell(ChartColorSetting::WickUp, &candle.wick_up),
+                    cell(ChartColorSetting::WickDown, &candle.wick_down),
+                ],
+                PairSwitch::Toggle(appearance.wick_visible, ChartSettingsAction::ToggleWicks),
+            ),
+        ],
+        ui.theme,
+    )
 }
 
 /// The candle colors Aeris Charts paints. Bodies use the engine's own theme resolution; an
@@ -1709,571 +1636,586 @@ fn effective_candle_colors(
     }
 }
 
-fn bar_series_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    appearance: &ChartAppearanceSettings,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> AnyElement {
-    div()
-        .child(settings_group_heading(
-            "OHLC bars",
-            "Directional colors and bar geometry",
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Up,
-            &effective_appearance_color(&appearance.up_color, |colors| colors.bullish, theme),
-            color_picker,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Down,
-            &effective_appearance_color(&appearance.down_color, |colors| colors.bearish, theme),
-            color_picker,
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Show open tick",
-            appearance.open_visible,
-            ChartSettingsAction::ToggleOpen,
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Thin bars",
-            appearance.thin_bars,
-            ChartSettingsAction::ToggleThinBars,
-            theme,
-        ))
-        .into_any_element()
-}
-
-fn line_series_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    appearance: &ChartAppearanceSettings,
-    color_picker: Option<&ChartColorPickerState>,
-    brushable: bool,
-    theme: &AerisTheme,
-) -> AnyElement {
-    div()
-        .child(settings_group_heading(
-            "Line",
-            "Stroke color, width and pattern",
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Line,
-            &appearance.line_color,
-            color_picker,
-            theme,
-        ))
-        .child(settings_line_controls(terminal, menu, appearance, theme))
-        .when(brushable, |content| {
-            content.child(
-                div()
-                    .mt_3()
-                    .text_xs()
-                    .text_color(gpui_color(theme.colors.text_muted))
-                    .child("Brush selections retain their own transient range styling."),
-            )
-        })
-        .into_any_element()
-}
-
-fn area_series_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    appearance: &ChartAppearanceSettings,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> AnyElement {
-    div()
-        .child(settings_group_heading(
-            "Line",
-            "Area boundary stroke",
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Line,
-            &appearance.line_color,
-            color_picker,
-            theme,
-        ))
-        .child(settings_line_controls(terminal, menu, appearance, theme))
-        .child(settings_group_heading("Fill", "Area fill color", theme))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::AreaTop,
-            &appearance.area_top_color,
-            color_picker,
-            theme,
-        ))
-        .into_any_element()
-}
-
-fn baseline_series_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    appearance: &ChartAppearanceSettings,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> AnyElement {
-    div()
-        .child(settings_group_heading(
-            "Baseline",
-            "Independent colors above and below the base",
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::BaselineTop,
-            &appearance.baseline_top_color,
-            color_picker,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::BaselineBottom,
-            &appearance.baseline_bottom_color,
-            color_picker,
-            theme,
-        ))
-        .child(settings_group_heading(
-            "Stroke",
-            "Shared line width and pattern",
-            theme,
-        ))
-        .child(settings_line_controls(terminal, menu, appearance, theme))
-        .into_any_element()
-}
-
-fn chart_canvas_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    snapshot: &ChartSettingsSnapshot,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> AnyElement {
-    settings_content_header(
-        "Canvas",
-        "Customize chart guides without changing market data or scale state.",
-        theme,
-    )
-    .child(canvas_surface_settings(
-        terminal,
-        menu,
-        &snapshot.appearance,
-        color_picker,
-        theme,
-    ))
-    .child(canvas_grid_settings(
-        terminal,
-        menu,
-        &snapshot.appearance,
-        color_picker,
-        theme,
-    ))
-    .child(canvas_crosshair_settings(
-        terminal,
-        menu,
-        snapshot,
-        color_picker,
-        theme,
-    ))
-    .child(canvas_legend_settings(
-        terminal,
-        menu,
-        snapshot.legend,
-        theme,
-    ))
-    .into_any_element()
-}
-
-fn canvas_legend_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    legend: ChartLegendOptions,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    div()
-        .child(settings_group_heading(
-            "Legend",
-            "Symbol and indicator labels on the chart",
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Symbol legend",
-            legend.symbol,
-            ChartSettingsAction::ToggleSymbolLegend,
-            theme,
-        ))
-        .child(settings_checkbox_row(
-            terminal,
-            menu,
-            "OHLC values",
-            legend.symbol_values,
-            legend.symbol,
-            ChartSettingsAction::ToggleSymbolLegendValues,
-            theme,
-        ))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Indicator legend",
-            legend.indicators,
-            ChartSettingsAction::ToggleIndicatorLegend,
-            theme,
-        ))
-        .child(settings_checkbox_row(
-            terminal,
-            menu,
-            "Indicator values",
-            legend.indicator_values,
-            legend.indicators,
-            ChartSettingsAction::ToggleIndicatorLegendValues,
-            theme,
-        ))
-}
-
-fn chart_trading_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    snapshot: &ChartSettingsSnapshot,
-    theme: &AerisTheme,
-) -> AnyElement {
-    settings_content_header(
-        "Trading",
-        "Control chart trading overlays without changing account or order state.",
-        theme,
-    )
-    .child(settings_group_heading(
-        "Chart overlays",
-        "Practice and execution presentation",
-        theme,
-    ))
-    .child(settings_toggle_row(
-        terminal,
-        menu,
-        "Order management lines",
-        snapshot.trading_visibility.show_order_management_lines,
-        ChartSettingsAction::ToggleOrderManagementLines,
-        theme,
-    ))
-    .child(settings_toggle_row(
-        terminal,
-        menu,
-        "Extend order lines left",
-        snapshot.trading_visibility.extend_order_lines_left,
-        ChartSettingsAction::ToggleExtendOrderLinesLeft,
-        theme,
-    ))
-    .child(settings_toggle_row(
-        terminal,
-        menu,
-        "Execution marks",
-        snapshot.trading_visibility.show_execution_marks,
-        ChartSettingsAction::ToggleExecutionMarks,
-        theme,
-    ))
-    .into_any_element()
-}
-
-fn canvas_surface_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    appearance: &ChartAppearanceSettings,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    div()
-        .child(settings_group_heading(
-            "Surface",
-            "Chart background and label text",
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Background,
-            &effective_appearance_color(
-                &appearance.background_color,
-                |colors| colors.background,
-                theme,
-            ),
-            color_picker,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Text,
-            &effective_appearance_color(&appearance.text_color, |colors| colors.text, theme),
-            color_picker,
-            theme,
-        ))
-}
-
-fn canvas_grid_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    appearance: &ChartAppearanceSettings,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    div()
-        .child(settings_group_heading("Grid", "Pane grid lines", theme))
-        .child(settings_toggle_row(
-            terminal,
-            menu,
-            "Show grid lines",
-            appearance.grid_visible,
-            ChartSettingsAction::ToggleGrid,
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Grid,
-            &effective_appearance_color(&appearance.grid_color, |colors| colors.grid, theme),
-            color_picker,
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Grid style",
-            &[
-                (
-                    "Solid",
-                    appearance.grid_style == 0,
-                    ChartSettingsAction::GridStyle(0),
-                ),
-                (
-                    "Dotted",
-                    appearance.grid_style == 1,
-                    ChartSettingsAction::GridStyle(1),
-                ),
-                (
-                    "Dashed",
-                    appearance.grid_style == 2,
-                    ChartSettingsAction::GridStyle(2),
-                ),
-            ],
-            theme,
-        ))
-}
-
-fn canvas_crosshair_settings(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    snapshot: &ChartSettingsSnapshot,
-    color_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let appearance = &snapshot.appearance;
-    div()
-        .child(settings_group_heading(
-            "Crosshair",
-            "Pointer guides and snapping",
-            theme,
-        ))
-        .child(settings_color_row(
-            terminal,
-            menu,
-            ChartColorSetting::Crosshair,
-            &effective_appearance_color(
-                &appearance.crosshair_color,
-                |colors| colors.crosshair,
-                theme,
-            ),
-            color_picker,
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Mode",
-            &[
-                (
-                    "Normal",
-                    snapshot.crosshair_mode == 0,
-                    ChartSettingsAction::CrosshairMode(0),
-                ),
-                (
-                    "Magnet",
-                    snapshot.crosshair_mode == 1,
-                    ChartSettingsAction::CrosshairMode(1),
-                ),
-                (
-                    "Hidden",
-                    snapshot.crosshair_mode == 2,
-                    ChartSettingsAction::CrosshairMode(2),
-                ),
-                (
-                    "OHLC",
-                    snapshot.crosshair_mode == 3,
-                    ChartSettingsAction::CrosshairMode(3),
-                ),
-            ],
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Width",
-            &[
-                (
-                    "1",
-                    appearance.crosshair_width == 1,
-                    ChartSettingsAction::CrosshairWidth(1),
-                ),
-                (
-                    "2",
-                    appearance.crosshair_width == 2,
-                    ChartSettingsAction::CrosshairWidth(2),
-                ),
-                (
-                    "3",
-                    appearance.crosshair_width == 3,
-                    ChartSettingsAction::CrosshairWidth(3),
-                ),
-            ],
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Style",
-            &[
-                (
-                    "Solid",
-                    appearance.crosshair_style == 0,
-                    ChartSettingsAction::CrosshairStyle(0),
-                ),
-                (
-                    "Dotted",
-                    appearance.crosshair_style == 1,
-                    ChartSettingsAction::CrosshairStyle(1),
-                ),
-                (
-                    "Dashed",
-                    appearance.crosshair_style == 2,
-                    ChartSettingsAction::CrosshairStyle(2),
-                ),
-            ],
-            theme,
-        ))
-}
-
-fn settings_content_header(
+fn footprint_groups(
+    ui: SettingsUi<'_>,
     title: &'static str,
-    description: &'static str,
-    theme: &AerisTheme,
-) -> Div {
+    settings: OrderFlowSettings,
+) -> Vec<AnyElement> {
+    let mode = |label, mode| {
+        (
+            label,
+            settings.display_mode == mode,
+            ChartSettingsAction::FootprintMode(mode),
+        )
+    };
+    let rows = |label, ticks| {
+        (
+            label,
+            settings.ticks_per_row == ticks,
+            ChartSettingsAction::FootprintTicksPerRow(ticks),
+        )
+    };
+    vec![
+        settings_group(
+            title,
+            [
+                settings_stacked_choice_row(
+                    ui,
+                    ChoiceRow::new("footprint_display", "Display"),
+                    &[
+                        mode("Bid × Ask", FootprintDisplayMode::BidAsk),
+                        mode("Total", FootprintDisplayMode::Total),
+                        mode("Delta", FootprintDisplayMode::Delta),
+                        mode("Profile", FootprintDisplayMode::ProfileInBar),
+                        mode("Ladder", FootprintDisplayMode::VolumeLadder),
+                        mode("Imbalance", FootprintDisplayMode::HorizontalImbalance),
+                        mode("Histogram", FootprintDisplayMode::BidAskHistogram),
+                    ],
+                ),
+                settings_choice_row(
+                    ui,
+                    ChoiceRow::new("footprint_row_size", "Row size").hint("Ticks per row"),
+                    &[
+                        rows("Auto", 0),
+                        rows("1", 1),
+                        rows("2", 2),
+                        rows("5", 5),
+                        rows("10", 10),
+                        rows("25", 25),
+                        rows("50", 50),
+                        rows("100", 100),
+                    ],
+                ),
+            ],
+            ui.theme,
+        ),
+        settings_group(
+            "Order flow",
+            [
+                settings_switch_row(
+                    ui,
+                    "Cumulative delta",
+                    None,
+                    settings.show_cumulative_delta,
+                    ChartSettingsAction::ToggleCumulativeDelta,
+                ),
+                settings_switch_row(
+                    ui,
+                    "Delta histogram",
+                    None,
+                    settings.show_delta_histogram,
+                    ChartSettingsAction::ToggleDeltaHistogram,
+                ),
+            ],
+            ui.theme,
+        ),
+    ]
+}
+
+fn bar_group(
+    ui: SettingsUi<'_>,
+    title: &'static str,
+    appearance: &ChartAppearanceSettings,
+) -> AnyElement {
+    let up = effective_appearance_color(&appearance.up_color, |colors| colors.bullish, ui.theme);
+    let down =
+        effective_appearance_color(&appearance.down_color, |colors| colors.bearish, ui.theme);
+    settings_group(
+        title,
+        [
+            settings_pair_captions("Up", "Down", false, ui.theme),
+            settings_color_pair_row(
+                ui,
+                "Bars",
+                [
+                    ColorCell {
+                        setting: ChartColorSetting::Up,
+                        value: &up,
+                    },
+                    ColorCell {
+                        setting: ChartColorSetting::Down,
+                        value: &down,
+                    },
+                ],
+                PairSwitch::Absent,
+            ),
+            settings_switch_row(
+                ui,
+                "Open tick",
+                Some("The left tick at each bar's open"),
+                appearance.open_visible,
+                ChartSettingsAction::ToggleOpen,
+            ),
+            settings_switch_row(
+                ui,
+                "Thin bars",
+                Some("One pixel wide at every zoom"),
+                appearance.thin_bars,
+                ChartSettingsAction::ToggleThinBars,
+            ),
+        ],
+        ui.theme,
+    )
+}
+
+fn line_group(
+    ui: SettingsUi<'_>,
+    title: &'static str,
+    appearance: &ChartAppearanceSettings,
+) -> AnyElement {
+    settings_group(
+        title,
+        [
+            settings_color_row(
+                ui,
+                "Color",
+                ColorCell {
+                    setting: ChartColorSetting::Line,
+                    value: &appearance.line_color,
+                },
+                true,
+            ),
+            line_width_row(ui, appearance),
+            line_style_row(ui, appearance),
+        ],
+        ui.theme,
+    )
+}
+
+fn baseline_group(
+    ui: SettingsUi<'_>,
+    title: &'static str,
+    appearance: &ChartAppearanceSettings,
+) -> AnyElement {
+    settings_group(
+        title,
+        [
+            settings_pair_captions("Above", "Below", false, ui.theme),
+            settings_color_pair_row(
+                ui,
+                "Colors",
+                [
+                    ColorCell {
+                        setting: ChartColorSetting::BaselineTop,
+                        value: &appearance.baseline_top_color,
+                    },
+                    ColorCell {
+                        setting: ChartColorSetting::BaselineBottom,
+                        value: &appearance.baseline_bottom_color,
+                    },
+                ],
+                PairSwitch::Absent,
+            ),
+            line_width_row(ui, appearance),
+            line_style_row(ui, appearance),
+        ],
+        ui.theme,
+    )
+}
+
+fn line_width_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> AnyElement {
+    let width = |label, width| {
+        (
+            label,
+            appearance.line_width == width,
+            ChartSettingsAction::LineWidth(width),
+        )
+    };
+    settings_choice_row(
+        ui,
+        ChoiceRow::new("line_width", "Width"),
+        &[width("1", 1), width("2", 2), width("3", 3), width("4", 4)],
+    )
+}
+
+fn line_style_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> AnyElement {
+    let style = |label, style| {
+        (
+            label,
+            appearance.line_style == style,
+            ChartSettingsAction::LineStyle(style),
+        )
+    };
+    settings_choice_row(
+        ui,
+        ChoiceRow::new("line_style", "Style"),
+        &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
+    )
+}
+
+fn chart_canvas_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    settings_section(vec![
+        canvas_surface_group(ui, &snapshot.appearance),
+        canvas_grid_group(ui, &snapshot.appearance),
+        canvas_crosshair_group(ui, snapshot),
+    ])
+}
+
+fn canvas_surface_group(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> AnyElement {
+    let background = effective_appearance_color(
+        &appearance.background_color,
+        |colors| colors.background,
+        ui.theme,
+    );
+    let text = effective_appearance_color(&appearance.text_color, |colors| colors.text, ui.theme);
+    settings_group(
+        "Chart",
+        [
+            settings_color_row(
+                ui,
+                "Background",
+                ColorCell {
+                    setting: ChartColorSetting::Background,
+                    value: &background,
+                },
+                true,
+            ),
+            settings_color_row(
+                ui,
+                "Text",
+                ColorCell {
+                    setting: ChartColorSetting::Text,
+                    value: &text,
+                },
+                true,
+            ),
+        ],
+        ui.theme,
+    )
+}
+
+fn canvas_grid_group(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> AnyElement {
+    let visible = appearance.grid_visible;
+    let color = effective_appearance_color(&appearance.grid_color, |colors| colors.grid, ui.theme);
+    let style = |label, style| {
+        (
+            label,
+            appearance.grid_style == style,
+            ChartSettingsAction::GridStyle(style),
+        )
+    };
+    settings_group(
+        "Grid lines",
+        [
+            settings_switch_row(
+                ui,
+                "Show grid lines",
+                None,
+                visible,
+                ChartSettingsAction::ToggleGrid,
+            ),
+            settings_color_row(
+                ui,
+                "Color",
+                ColorCell {
+                    setting: ChartColorSetting::Grid,
+                    value: &color,
+                },
+                visible,
+            ),
+            settings_choice_row(
+                ui,
+                ChoiceRow::new("grid_style", "Style").enabled(visible),
+                &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
+            ),
+        ],
+        ui.theme,
+    )
+}
+
+fn crosshair_mode_hint(mode: u8) -> &'static str {
+    match mode {
+        1 => "Snaps to each bar's close",
+        CROSSHAIR_HIDDEN => "No crosshair lines or labels",
+        3 => "Snaps to the nearest open, high, low or close",
+        _ => "Follows the pointer freely",
+    }
+}
+
+fn canvas_crosshair_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    let appearance = &snapshot.appearance;
+    let visible = snapshot.crosshair_mode != CROSSHAIR_HIDDEN;
+    let color = effective_appearance_color(
+        &appearance.crosshair_color,
+        |colors| colors.crosshair,
+        ui.theme,
+    );
+    let mode = |label, mode| {
+        (
+            label,
+            snapshot.crosshair_mode == mode,
+            ChartSettingsAction::CrosshairMode(mode),
+        )
+    };
+    let width = |label, width| {
+        (
+            label,
+            appearance.crosshair_width == width,
+            ChartSettingsAction::CrosshairWidth(width),
+        )
+    };
+    let style = |label, style| {
+        (
+            label,
+            appearance.crosshair_style == style,
+            ChartSettingsAction::CrosshairStyle(style),
+        )
+    };
+    settings_group(
+        "Crosshair",
+        [
+            settings_choice_row(
+                ui,
+                ChoiceRow::new("crosshair_mode", "Mode")
+                    .hint(crosshair_mode_hint(snapshot.crosshair_mode)),
+                &[
+                    mode("Normal", 0),
+                    mode("Magnet", 1),
+                    mode("OHLC", 3),
+                    mode("Hidden", CROSSHAIR_HIDDEN),
+                ],
+            ),
+            settings_color_row(
+                ui,
+                "Color",
+                ColorCell {
+                    setting: ChartColorSetting::Crosshair,
+                    value: &color,
+                },
+                visible,
+            ),
+            settings_choice_row(
+                ui,
+                ChoiceRow::new("crosshair_width", "Width").enabled(visible),
+                &[width("1", 1), width("2", 2), width("3", 3)],
+            ),
+            settings_choice_row(
+                ui,
+                ChoiceRow::new("crosshair_style", "Style").enabled(visible),
+                &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
+            ),
+        ],
+        ui.theme,
+    )
+}
+
+fn chart_legend_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    let legend = snapshot.legend;
+    settings_section(vec![
+        settings_group(
+            "Symbol",
+            [settings_switch_with_option(
+                ui,
+                SwitchWithOption {
+                    label: "Symbol legend",
+                    hint: None,
+                    enabled: legend.symbol,
+                    action: ChartSettingsAction::ToggleSymbolLegend,
+                    option: "OHLC values",
+                    option_checked: legend.symbol_values,
+                    option_action: ChartSettingsAction::ToggleSymbolLegendValues,
+                },
+            )],
+            ui.theme,
+        ),
+        settings_group(
+            "Indicators",
+            [settings_switch_with_option(
+                ui,
+                SwitchWithOption {
+                    label: "Indicator legend",
+                    hint: None,
+                    enabled: legend.indicators,
+                    action: ChartSettingsAction::ToggleIndicatorLegend,
+                    option: "Indicator values",
+                    option_checked: legend.indicator_values,
+                    option_action: ChartSettingsAction::ToggleIndicatorLegendValues,
+                },
+            )],
+            ui.theme,
+        ),
+    ])
+}
+
+fn chart_trading_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
+    let visibility = snapshot.trading_visibility;
+    settings_section(vec![
+        settings_group(
+            "Orders and positions",
+            [settings_switch_with_option(
+                ui,
+                SwitchWithOption {
+                    label: "Order and position lines",
+                    hint: Some("Working orders, open positions and their TP/SL"),
+                    enabled: visibility.show_order_management_lines,
+                    action: ChartSettingsAction::ToggleOrderManagementLines,
+                    option: "Extend lines to the left edge",
+                    option_checked: visibility.extend_order_lines_left,
+                    option_action: ChartSettingsAction::ToggleExtendOrderLinesLeft,
+                },
+            )],
+            ui.theme,
+        ),
+        settings_group(
+            "Executions",
+            [settings_switch_row(
+                ui,
+                "Execution marks",
+                Some("Marks where your orders filled"),
+                visibility.show_execution_marks,
+                ChartSettingsAction::ToggleExecutionMarks,
+            )],
+            ui.theme,
+        ),
+    ])
+}
+
+/// A settings section: its groups stacked with even spacing.
+fn settings_section(groups: Vec<AnyElement>) -> AnyElement {
     div()
         .flex()
         .flex_col()
-        .gap_1()
-        .pb_3()
-        .child(
+        .gap_5()
+        .children(groups)
+        .into_any_element()
+}
+
+/// A titled group of related rows in one bordered block, rows divided by hairlines.
+fn settings_group(
+    title: &'static str,
+    rows: impl IntoIterator<Item = AnyElement>,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .px_3()
+        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+        .border(platform_border_width(theme))
+        .border_color(gpui_color(colors.border_secondary));
+    for (index, row) in rows.into_iter().enumerate() {
+        block = block.child(
             div()
-                .text_base()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(theme.colors.text_primary))
-                .child(title),
-        )
+                .when(index > 0, |divided| {
+                    divided
+                        .border_t(platform_border_width(theme))
+                        .border_color(gpui_color(colors.border_subtle))
+                })
+                .child(row),
+        );
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
         .child(
             div()
                 .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child(description),
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(colors.text_secondary))
+                .child(title),
         )
+        .child(block)
+        .into_any_element()
 }
 
-fn settings_group_heading(
-    title: &'static str,
-    description: &'static str,
+/// A row's label, with an optional muted hint below it. A locked row mutes its label too.
+fn settings_label(
+    label: &'static str,
+    hint: Option<&'static str>,
+    enabled: bool,
     theme: &AerisTheme,
-) -> impl IntoElement {
+) -> Div {
+    let colors = theme.colors;
     div()
-        .mt_3()
-        .mb_2()
+        .flex_1()
+        .min_w_0()
         .flex()
         .flex_col()
-        .gap_0p5()
         .child(
             div()
                 .text_sm()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(theme.colors.text_primary))
-                .child(title),
+                .text_color(gpui_color(if enabled {
+                    colors.text_primary
+                } else {
+                    colors.text_muted
+                }))
+                .child(label),
         )
-        .child(
+        .children(hint.map(|hint| {
             div()
+                .truncate()
                 .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child(description),
-        )
+                .text_color(gpui_color(colors.text_muted))
+                .child(hint)
+        }))
 }
 
-fn settings_toggle_row(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
+/// One setting: label and hint on the left, its control on the right.
+fn settings_row(
+    label: &'static str,
+    hint: Option<&'static str>,
+    enabled: bool,
+    control: impl IntoElement,
+    theme: &AerisTheme,
+) -> AnyElement {
+    div()
+        .min_h(design_rems(SETTINGS_ROW_HEIGHT))
+        .py_1()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .child(settings_label(label, hint, enabled, theme))
+        .child(control)
+        .into_any_element()
+}
+
+fn settings_switch(
+    ui: SettingsUi<'_>,
     label: &'static str,
     enabled: bool,
     action: ChartSettingsAction,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let terminal = terminal.clone();
-    let menu = menu.clone();
-    SwitchRow::new(label, label, enabled, theme).on_change(move |_, _, _, cx| {
-        terminal.update(cx, |terminal, terminal_cx| {
-            terminal.apply_chart_settings_action(&menu, action, terminal_cx);
-        });
-    })
+) -> Switch {
+    Switch::new(label, label, enabled, ui.theme).on_change(ui.apply_on_change(action))
 }
 
-/// An option that refines the setting above it; it stays visible but locked while that setting
-/// is off, so turning the setting back on restores the earlier choice.
-fn settings_checkbox_row(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
+fn settings_switch_row(
+    ui: SettingsUi<'_>,
     label: &'static str,
-    checked: bool,
-    available: bool,
+    hint: Option<&'static str>,
+    enabled: bool,
     action: ChartSettingsAction,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let terminal = terminal.clone();
-    let menu = menu.clone();
-    div().pl(design_rems(12.0)).child(
-        CheckboxRow::new(label, label, checked, theme)
-            .disabled(!available)
-            .on_change(move |_, _, _, cx| {
-                terminal.update(cx, |terminal, terminal_cx| {
-                    terminal.apply_chart_settings_action(&menu, action, terminal_cx);
-                });
-            }),
+) -> AnyElement {
+    settings_row(
+        label,
+        hint,
+        true,
+        settings_switch(ui, label, enabled, action),
+        ui.theme,
     )
+}
+
+/// A switch with its refining option as a checkbox right below it, in the same row block. The
+/// option stays visible but locked while the switch is off, so turning the switch back on
+/// restores the earlier choice.
+fn settings_switch_with_option(ui: SettingsUi<'_>, row: SwitchWithOption) -> AnyElement {
+    div()
+        .pb_2()
+        .child(settings_switch_row(
+            ui,
+            row.label,
+            row.hint,
+            row.enabled,
+            row.action,
+        ))
+        .child(
+            CheckboxRow::new(row.option, row.option, row.option_checked, ui.theme)
+                .disabled(!row.enabled)
+                .on_change(ui.apply_on_change(row.option_action)),
+        )
+        .into_any_element()
 }
 
 /// Effective CSS color of a theme-following appearance field under the active theme.
@@ -2329,45 +2271,38 @@ pub(super) fn color_swatch_button(
         )
 }
 
-fn settings_color_row(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    setting: ChartColorSetting,
-    value: &str,
-    open_picker: Option<&ChartColorPickerState>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    let terminal_for_toggle = terminal.clone();
-    let current_for_toggle = value.to_string();
-    let open = open_picker.is_some_and(|picker| picker.setting == setting);
+/// A color's swatch button and, while open, its picker. A locked color cannot open.
+fn settings_color_control(ui: SettingsUi<'_>, cell: ColorCell<'_>, enabled: bool) -> Div {
+    let setting = cell.setting;
+    let theme = ui.theme;
+    let toggle = ui.terminal.clone();
+    let current = cell.value.to_string();
+    let open_picker = ui
+        .color_picker
+        .filter(|picker| enabled && picker.setting == setting);
     let mut control = div().relative().flex().child(
         color_swatch_button(
             ("chart_color_picker", setting as usize),
             setting.label(),
-            value,
-            open,
+            cell.value,
+            open_picker.is_some(),
             theme,
         )
+        .disabled(!enabled)
         .on_press(move |_, window, cx| {
-            terminal_for_toggle.update(cx, |terminal, terminal_cx| {
-                terminal.toggle_chart_color_picker(
-                    setting,
-                    &current_for_toggle,
-                    window,
-                    terminal_cx,
-                );
+            toggle.update(cx, |terminal, terminal_cx| {
+                terminal.toggle_chart_color_picker(setting, &current, window, terminal_cx);
             });
         }),
     );
-    if open && let Some(picker) = open_picker {
-        let apply = terminal.clone();
-        let apply_menu = menu.clone();
-        let dismiss = terminal.clone();
+    if let Some(picker) = open_picker {
+        let apply = ui.terminal.clone();
+        let apply_menu = ui.menu.clone();
+        let dismiss = ui.terminal.clone();
         control = control.child(gpui::deferred(
             ColorPicker::new(
                 ("chart_color_popover", setting as usize),
-                value,
+                cell.value,
                 &picker.input,
                 theme,
             )
@@ -2382,98 +2317,113 @@ fn settings_color_row(
             }),
         ));
     }
+    control
+}
+
+fn settings_color_row(
+    ui: SettingsUi<'_>,
+    label: &'static str,
+    cell: ColorCell<'_>,
+    enabled: bool,
+) -> AnyElement {
+    settings_row(
+        label,
+        None,
+        enabled,
+        settings_color_control(ui, cell, enabled),
+        ui.theme,
+    )
+}
+
+/// Column captions above paired color rows, aligned with their color columns.
+fn settings_pair_captions(
+    first: &'static str,
+    second: &'static str,
+    switch_column: bool,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let caption = |text: &'static str| {
+        div()
+            .w(design_rems(SETTINGS_PAIR_COLUMN_WIDTH))
+            .flex_none()
+            .text_center()
+            .text_xs()
+            .text_color(gpui_color(theme.colors.text_muted))
+            .child(text)
+    };
     div()
-        .w_full()
-        .h(design_rems(38.0))
+        .h(design_rems(28.0))
         .flex()
         .items_center()
-        .justify_between()
-        .child(
-            div()
-                .text_sm()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(setting.label()),
-        )
-        .child(control)
+        .gap_3()
+        .child(div().flex_1())
+        .child(caption(first))
+        .child(caption(second))
+        .when(switch_column, |captions| {
+            captions.child(
+                div()
+                    .w(design_rems(SETTINGS_SWITCH_COLUMN_WIDTH))
+                    .flex_none(),
+            )
+        })
+        .into_any_element()
 }
 
-fn settings_line_controls(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    appearance: &ChartAppearanceSettings,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Width",
-            &[
-                (
-                    "1",
-                    appearance.line_width == 1,
-                    ChartSettingsAction::LineWidth(1),
-                ),
-                (
-                    "2",
-                    appearance.line_width == 2,
-                    ChartSettingsAction::LineWidth(2),
-                ),
-                (
-                    "3",
-                    appearance.line_width == 3,
-                    ChartSettingsAction::LineWidth(3),
-                ),
-                (
-                    "4",
-                    appearance.line_width == 4,
-                    ChartSettingsAction::LineWidth(4),
-                ),
-            ],
-            theme,
-        ))
-        .child(settings_choice_row(
-            terminal,
-            menu,
-            "Style",
-            &[
-                (
-                    "Solid",
-                    appearance.line_style == 0,
-                    ChartSettingsAction::LineStyle(0),
-                ),
-                (
-                    "Dotted",
-                    appearance.line_style == 1,
-                    ChartSettingsAction::LineStyle(1),
-                ),
-                (
-                    "Dashed",
-                    appearance.line_style == 2,
-                    ChartSettingsAction::LineStyle(2),
-                ),
-            ],
-            theme,
-        ))
-}
-
-fn settings_choice_row(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
+/// Two related colors side by side (up and down, above and below), with an optional switch that
+/// shows or hides the part they paint.
+fn settings_color_pair_row(
+    ui: SettingsUi<'_>,
     label: &'static str,
-    choices: &[(&'static str, bool, ChartSettingsAction)],
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let colors = theme.colors;
-    let mut controls = TabList::new(label, label, theme);
+    cells: [ColorCell<'_>; 2],
+    switch: PairSwitch,
+) -> AnyElement {
+    let visible = switch.part_visible();
+    let column = |cell| {
+        div()
+            .w(design_rems(SETTINGS_PAIR_COLUMN_WIDTH))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .child(settings_color_control(ui, cell, visible))
+    };
+    let [first, second] = cells;
+    div()
+        .min_h(design_rems(SETTINGS_ROW_HEIGHT))
+        .py_1()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(settings_label(label, None, true, ui.theme))
+        .child(column(first))
+        .child(column(second))
+        .when(switch.has_column(), |row| {
+            row.child(
+                div()
+                    .w(design_rems(SETTINGS_SWITCH_COLUMN_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .children(match switch {
+                        PairSwitch::Toggle(enabled, action) => {
+                            Some(settings_switch(ui, label, enabled, action))
+                        }
+                        PairSwitch::Absent | PairSwitch::Empty => None,
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+/// The single-choice tabs of one setting.
+fn settings_choice_tabs(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> TabList {
+    let mut tabs = TabList::new(row.id, row.label, ui.theme);
     for (index, (choice, selected, action)) in choices.iter().copied().enumerate() {
-        let terminal = terminal.clone();
-        let menu = menu.clone();
-        controls = controls.child(
-            Tab::new((label, index), theme)
+        let terminal = ui.terminal.clone();
+        let menu = ui.menu.clone();
+        tabs = tabs.child(
+            Tab::new((row.id, index), ui.theme)
                 .selected(selected)
+                .disabled(!row.enabled)
                 .aria_label(choice)
                 .on_click(move |_, _, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
@@ -2484,19 +2434,38 @@ fn settings_choice_row(
                 .child(choice),
         );
     }
+    tabs
+}
+
+fn settings_choice_row(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> AnyElement {
+    settings_row(
+        row.label,
+        row.hint,
+        row.enabled,
+        settings_choice_tabs(ui, row, choices),
+        ui.theme,
+    )
+}
+
+/// A choice with too many options to share a line with its label: the label above, the options
+/// below, wrapping when the panel is narrow.
+fn settings_stacked_choice_row(
+    ui: SettingsUi<'_>,
+    row: ChoiceRow,
+    choices: Choices<'_>,
+) -> AnyElement {
     div()
-        .min_h(design_rems(42.0))
+        .py_3()
         .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
+        .flex_col()
+        .gap_2()
+        .child(settings_label(row.label, row.hint, row.enabled, ui.theme))
         .child(
             div()
-                .text_sm()
-                .text_color(gpui_color(colors.text_secondary))
-                .child(label),
+                .flex()
+                .child(settings_choice_tabs(ui, row, choices).wrap()),
         )
-        .child(controls)
+        .into_any_element()
 }
 
 fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
