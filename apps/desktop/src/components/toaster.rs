@@ -1050,7 +1050,9 @@ fn toast_card<H: ToastHost>(
         .h(px(frame.height))
         .opacity(frame.opacity)
         .overflow_hidden()
-        .cursor_pointer()
+        // A swipe surface, not a click target; the arrow also keeps the chart's crosshair from
+        // showing through.
+        .cursor_default()
         .debug_selector(|| "toast".into())
         .when(toast.is_live(), |card| {
             card.on_mouse_down(MouseButton::Left, move |event, _, cx| {

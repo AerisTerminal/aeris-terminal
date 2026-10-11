@@ -169,7 +169,8 @@ impl AerisChartView {
                 series_id: self.volume_series,
                 title: "Volume",
                 settings_available: false,
-                tone_from_primary: true,
+                // Volume values carry their own column hue; the price bars' colors never apply.
+                tone_from_primary: false,
             })
             .into_iter()
             .collect::<Vec<_>>();

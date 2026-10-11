@@ -2942,7 +2942,27 @@ fn legend_values_follow_volume_direction_and_indicator_series_colors() {
         .find(|row| row.item == LegendItem::Volume)
         .expect("volume legend");
     assert_ne!(asset.values_tone, LegendValueTone::Neutral);
-    assert_eq!(volume.values_tone, asset.values_tone);
+    assert_eq!(
+        volume.values_tone,
+        LegendValueTone::Neutral,
+        "volume never takes the price bars' tone"
+    );
+    let volume_color = volume.values[0].color.clone();
+    assert!(volume_color.is_some(), "volume reads in its column hue");
+
+    let mut edited = chart.appearance_settings();
+    edited.up_color = aeris_charts_engine::AppearanceColor::Custom("#ffffff".into());
+    edited.down_color = aeris_charts_engine::AppearanceColor::Custom("#808080".into());
+    assert!(chart.set_series_appearance_settings(&edited));
+    let volume_after = chart
+        .legend_rows()
+        .into_iter()
+        .find(|row| row.item == LegendItem::Volume)
+        .expect("volume legend");
+    assert_eq!(
+        volume_after.values[0].color, volume_color,
+        "custom candle colors leave the volume legend on the volume colors"
+    );
 
     let ribbon_row = rows
         .iter()
