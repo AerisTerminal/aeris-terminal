@@ -907,7 +907,6 @@ struct LegendRow {
     /// One entry per readout (`O 77,876.69`, `%K 36.95`, …) so a legend that outgrows its pane
     /// wraps value by value instead of spilling over the price axis.
     values: Vec<LegendValue>,
-    values_tone: LegendValueTone,
     visible: bool,
     settings_available: bool,
 }
@@ -916,6 +915,8 @@ struct LegendRow {
 struct LegendValue {
     text: String,
     color: Option<String>,
+    /// Bar direction for a readout without its own series color.
+    tone: LegendValueTone,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2899,22 +2900,22 @@ fn chart_legend_row(
 ) -> AnyElement {
     let group: SharedString = format!("chart-legend-row-{}", row.item.key()).into();
     let controls = legend_row_controls(chart, row, palette, &group);
-    let values_color = match row.values_tone {
-        LegendValueTone::Neutral => palette.muted,
-        LegendValueTone::Bullish => palette.bullish,
-        LegendValueTone::Bearish => palette.bearish,
-    };
     let values = if row.visible {
         row.values.clone()
     } else {
         Vec::new()
     };
     let values = values.into_iter().map(|value| {
+        let tone_color = match value.tone {
+            LegendValueTone::Neutral => palette.muted,
+            LegendValueTone::Bullish => palette.bullish,
+            LegendValueTone::Bearish => palette.bearish,
+        };
         let color = value
             .color
             .as_deref()
             .and_then(Color::parse_css)
-            .map_or(values_color, |color| rgba(color.0));
+            .map_or(tone_color, |color| rgba(color.0));
         // A wrapping text element shapes at whatever width the row's flex-wrap pass offers it,
         // so a labelled value such as "C 6812.25" could break at its space and jump inside the
         // fixed-height cell as its digits change. Each value moves to a new row line as a whole.

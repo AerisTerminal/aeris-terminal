@@ -3002,10 +3002,23 @@ fn legend_values_follow_volume_direction_and_indicator_series_colors() {
         .iter()
         .find(|row| row.item == LegendItem::Volume)
         .expect("volume legend");
-    assert_ne!(asset.values_tone, LegendValueTone::Neutral);
-    assert_eq!(
-        volume.values_tone,
-        LegendValueTone::Neutral,
+    let (close, open_high_low) = asset.values.split_last().expect("asset readouts");
+    assert!(
+        close.text.starts_with("C "),
+        "the close is the last readout"
+    );
+    assert_ne!(close.tone, LegendValueTone::Neutral);
+    assert!(
+        open_high_low
+            .iter()
+            .all(|value| value.tone == LegendValueTone::Neutral),
+        "only the close follows the bar direction"
+    );
+    assert!(
+        volume
+            .values
+            .iter()
+            .all(|value| value.tone == LegendValueTone::Neutral),
         "volume never takes the price bars' tone"
     );
     let volume_color = volume.values[0].color.clone();

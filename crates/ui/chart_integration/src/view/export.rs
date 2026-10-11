@@ -310,17 +310,17 @@ fn export_legend_rows(rows: Vec<LegendRow>, palette: ExportPalette) -> Vec<Expor
     rows.into_iter()
         .filter(|row| row.visible)
         .map(|row| {
-            let tone = match row.values_tone {
-                LegendValueTone::Neutral => palette.muted,
-                LegendValueTone::Bullish => palette.bullish,
-                LegendValueTone::Bearish => palette.bearish,
-            };
             let mut runs = vec![ExportTextRun {
                 text: row.title,
                 color: palette.text,
                 weight: typography.weight(TypographyRole::Normal),
             }];
             runs.extend(row.values.into_iter().map(|value| {
+                let tone = match value.tone {
+                    LegendValueTone::Neutral => palette.muted,
+                    LegendValueTone::Bullish => palette.bullish,
+                    LegendValueTone::Bearish => palette.bearish,
+                };
                 ExportTextRun {
                     color: value
                         .color
