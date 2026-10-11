@@ -12,9 +12,6 @@ use super::{
     theme::{gpui_color, input_appearance, platform_border_width},
 };
 
-/// The shared focus outline, `outline: 2px solid var(--ring-primary)` at offset 0. GPUI has no
-/// outline, so it is drawn as a spread shadow hugging the border.
-const FOCUS_RING_WIDTH: f32 = 2.0;
 /// The invalid halo, Theme System `Input` `aria-invalid:ring-[3px]` in `danger-ring`.
 const INVALID_RING_WIDTH: f32 = 3.0;
 
@@ -119,20 +116,17 @@ impl RenderOnce for Input {
         let invalid = self.has_presentation(Self::INVALID);
         let focus_shown = focused && self.has_presentation(Self::FOCUS_BORDERED);
         let resting_border = self.border_color.unwrap_or_else(|| color.opacity(0.25));
-        // Focus keeps the resting border and adds the ring; only an invalid value recolours it.
+        // Focus recolours the border itself, so the focus outline is exactly `--border-width`.
         let border_color = if invalid {
             self.invalid_border_color.unwrap_or(resting_border)
+        } else if focus_shown {
+            self.focus_ring_color.unwrap_or_else(|| color.opacity(0.65))
         } else {
             resting_border
         };
         let ring = if invalid {
             self.invalid_ring_color
                 .map(|ring_color| (ring_color, INVALID_RING_WIDTH))
-        } else if focus_shown {
-            Some((
-                self.focus_ring_color.unwrap_or_else(|| color.opacity(0.65)),
-                FOCUS_RING_WIDTH,
-            ))
         } else {
             None
         };

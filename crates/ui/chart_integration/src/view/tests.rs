@@ -1797,7 +1797,8 @@ fn price_axis_menu_controls_aeris_charts_series_chrome_and_scale() {
     assert_eq!(state.precision, None);
     assert!(state.enabled(PriceAxisMenuState::INDICATOR_NAMES));
     assert!(state.enabled(PriceAxisMenuState::INDICATOR_VALUES));
-    assert!(state.enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES));
+    assert!(!state.enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES));
+    assert!(!series_entry(&chart, sma[0]).price_line_visible);
     assert!(state.enabled(PriceAxisMenuState::ALIGN_LABELS));
     assert!(!state.enabled(PriceAxisMenuState::BID_ASK));
 
@@ -1898,6 +1899,11 @@ fn restored_price_axis_state_keeps_a_fresh_chart_auto_scaled() {
 #[test]
 fn indicator_label_preference_applies_to_every_indicator_and_later_additions() {
     let mut chart = interactive_chart();
+    assert!(chart.apply_price_axis_menu_action(
+        0,
+        false,
+        PriceAxisMenuAction::ToggleIndicatorPriceLines
+    ));
     assert!(chart.apply_price_axis_menu_action(
         0,
         false,
@@ -2027,6 +2033,25 @@ fn indicator_price_line_preference_applies_to_every_plot() {
         .chain(macd.iter())
         .copied()
         .collect();
+    assert!(!chart.indicator_price_lines_visible());
+    for id in &indicator_ids {
+        assert!(
+            !series_entry(&chart, *id).price_line_visible,
+            "indicator price lines ship hidden, but {id} drew one"
+        );
+    }
+
+    assert!(chart.apply_price_axis_menu_action(
+        0,
+        false,
+        PriceAxisMenuAction::ToggleIndicatorPriceLines
+    ));
+    assert!(
+        chart
+            .price_axis_menu_state(0, false)
+            .unwrap()
+            .enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES)
+    );
     for id in &indicator_ids {
         assert!(
             series_entry(&chart, *id).price_line_visible,
@@ -2092,6 +2117,36 @@ fn indicator_price_line_preference_applies_to_every_plot() {
             "indicator plot {id} stayed hidden"
         );
     }
+}
+
+#[test]
+fn appearance_reset_keeps_indicator_chrome_matching_the_price_axis_menu() {
+    let mut chart = interactive_chart();
+    let sma = chart
+        .add_indicator(ChartIndicator::Sma)
+        .expect("sma is available");
+    assert!(chart.apply_price_axis_menu_action(
+        0,
+        false,
+        PriceAxisMenuAction::ToggleIndicatorNameLabels
+    ));
+
+    chart.reset_appearance_settings();
+
+    let state = chart
+        .price_axis_menu_state(0, false)
+        .expect("right price scale");
+    assert!(!state.enabled(PriceAxisMenuState::INDICATOR_PRICE_LINES));
+    assert!(!state.enabled(PriceAxisMenuState::INDICATOR_NAMES));
+    let series = series_entry(&chart, sma[0]);
+    assert!(
+        !series.price_line_visible,
+        "reset redrew a price line the menu shows as off"
+    );
+    assert!(
+        !series.title_visible,
+        "reset redrew a name label the menu shows as off"
+    );
 }
 
 #[test]

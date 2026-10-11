@@ -1,4 +1,6 @@
-use aeris_chart_integration::{ChartDrawingKind, ChartDrawingStamp, ChartType};
+use aeris_chart_integration::{
+    ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
+};
 use aeris_contracts::InstrumentSearchCategories;
 use std::{
     fs::{self, OpenOptions},
@@ -435,10 +437,11 @@ impl TradingShortcutMode {
 
 impl Default for ChartChromePreferences {
     fn default() -> Self {
+        let indicator_chrome = ChartIndicatorChrome::default();
         Self {
-            indicator_name_labels_visible: true,
-            indicator_value_labels_visible: true,
-            indicator_price_lines_visible: true,
+            indicator_name_labels_visible: indicator_chrome.name_labels_visible,
+            indicator_value_labels_visible: indicator_chrome.value_labels_visible,
+            indicator_price_lines_visible: indicator_chrome.price_lines_visible,
             chart_type: ChartType::Candles,
             symbol_search_categories: InstrumentSearchCategories::ALL,
             window_frame: WindowFrame::Framed,
@@ -984,12 +987,15 @@ mod tests {
         let defaults = parse_chart_chrome_preferences("");
         assert!(defaults.indicator_name_labels_visible);
         assert!(defaults.indicator_value_labels_visible);
-        assert!(defaults.indicator_price_lines_visible);
+        assert!(
+            !defaults.indicator_price_lines_visible,
+            "indicator price lines follow the Aeris Charts default and start hidden"
+        );
         assert_eq!(defaults.chart_type, ChartType::Candles);
         let legacy = parse_chart_chrome_preferences("indicator_labels=0\n");
         assert!(!legacy.indicator_name_labels_visible);
         assert!(!legacy.indicator_value_labels_visible);
-        assert!(legacy.indicator_price_lines_visible);
+        assert!(!legacy.indicator_price_lines_visible);
         assert_eq!(legacy.chart_type, ChartType::Candles);
         let mixed = parse_chart_chrome_preferences(
             "indicator_labels=0\nindicator_name_labels=1\nindicator_value_labels=0\nindicator_price_lines=0\nchart_type=line\n",

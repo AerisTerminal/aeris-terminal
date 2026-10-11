@@ -459,6 +459,7 @@ impl RenderOnce for MenuRow {
             .child(self.label.clone());
 
         let radius = px(f32::from(RadiusToken::Sm.logical_pixels()));
+        let focus_border = platform_border_width(&self.theme);
         // The visible pill: inset inside the row so neighbouring fills and dividers never touch.
         let fill = div()
             .size_full()
@@ -515,7 +516,10 @@ impl RenderOnce for MenuRow {
             .text_color(gpui_color(label_ink))
             .when(presentation.enabled, gpui::Styled::cursor_pointer)
             .when(!presentation.enabled, gpui::Styled::cursor_not_allowed)
-            .focus_visible(move |row| row.border_2().border_color(gpui_color(colors.ring_primary)))
+            .focus_visible(move |row| {
+                row.border(focus_border)
+                    .border_color(gpui_color(colors.ring_primary))
+            })
             .when_some(
                 self.activation.filter(|_| presentation.enabled),
                 |row, activation| {
@@ -578,6 +582,8 @@ pub(crate) struct MenuPanel {
     header: Option<AnyElement>,
     scroll: Option<ScrollHandle>,
     animation: Option<PopupAnimationOrigin>,
+    /// Set by [`MenuAnchor`]: closes an anchored menu on a press outside it and its trigger.
+    on_dismiss: Option<Dismiss>,
     children: Vec<AnyElement>,
 }
 
@@ -597,6 +603,7 @@ impl MenuPanel {
             header: None,
             scroll: None,
             animation: None,
+            on_dismiss: None,
             children: Vec::new(),
         }
     }
@@ -735,9 +742,12 @@ impl RenderOnce for MenuPanel {
             .into_any_element(),
             None => panel.into_any_element(),
         };
-        match self.placement {
-            MenuPlacement::Anchored { .. } => fit_to_window(panel).into_any_element(),
-            MenuPlacement::At(_) | MenuPlacement::InFlow => panel,
+        match (self.placement, self.on_dismiss) {
+            (MenuPlacement::Anchored { .. }, Some(dismiss)) => fit_to_window(panel)
+                .on_dismiss(move |window, cx| dismiss(window, cx))
+                .into_any_element(),
+            (MenuPlacement::Anchored { .. }, None) => fit_to_window(panel).into_any_element(),
+            (MenuPlacement::At(_) | MenuPlacement::InFlow, _) => panel,
         }
     }
 }
@@ -785,17 +795,17 @@ impl MenuAnchor {
 
 impl RenderOnce for MenuAnchor {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let open = self.menu.is_some();
+        let on_dismiss = self.on_dismiss;
         div()
             .id(self.id)
             .relative()
             .flex_none()
             .when(self.full_width, Styled::w_full)
             .child(self.trigger)
-            .when_some(self.on_dismiss.filter(|_| open), |anchor, dismiss| {
-                anchor.on_mouse_down_out(move |_, window, cx| dismiss(window, cx))
-            })
-            .children(self.menu.map(gpui::deferred))
+            .children(self.menu.map(|mut menu| {
+                menu.on_dismiss = on_dismiss;
+                gpui::deferred(menu)
+            }))
     }
 }
 

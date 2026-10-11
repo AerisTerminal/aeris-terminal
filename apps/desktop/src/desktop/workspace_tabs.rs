@@ -1019,6 +1019,12 @@ impl TerminalApp {
         cx.notify();
     }
 
+    pub(super) fn close_chart_color_picker(&mut self, cx: &mut Context<Self>) {
+        if self.chart_settings_color_picker.take().is_some() {
+            cx.notify();
+        }
+    }
+
     pub(super) fn apply_chart_color(
         &mut self,
         menu: &ChartContextMenu,
@@ -3217,7 +3223,6 @@ impl TerminalApp {
                             | PriceAxisMenuState::COUNTDOWN
                             | PriceAxisMenuState::INDICATOR_NAMES
                             | PriceAxisMenuState::INDICATOR_VALUES
-                            | PriceAxisMenuState::INDICATOR_PRICE_LINES
                             | PriceAxisMenuState::AUTO_SCALE
                             | PriceAxisMenuState::ALIGN_LABELS,
                         mode: 0,

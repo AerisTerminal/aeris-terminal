@@ -2363,6 +2363,7 @@ fn settings_color_row(
     if open && let Some(picker) = open_picker {
         let apply = terminal.clone();
         let apply_menu = menu.clone();
+        let dismiss = terminal.clone();
         control = control.child(gpui::deferred(
             ColorPicker::new(
                 ("chart_color_popover", setting as usize),
@@ -2375,6 +2376,9 @@ fn settings_color_row(
                 apply.update(cx, |terminal, terminal_cx| {
                     terminal.apply_chart_color(&apply_menu, setting, &value, terminal_cx);
                 });
+            })
+            .on_dismiss(move |_, cx| {
+                dismiss.update(cx, TerminalApp::close_chart_color_picker);
             }),
         ));
     }

@@ -5,25 +5,44 @@
 //! popup that opened below (or above) its trigger without room on that side flips to the other
 //! side, keeping the same gap, when that side fits or has more room; then it slides inside the
 //! window edges.
+//!
+//! With [`FitToWindow::on_dismiss`], any press outside both the trigger and the popup closes
+//! it. Presses on the trigger are left to the trigger, so pressing it again toggles the popup
+//! closed instead of closing and reopening it.
+
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, Edges, Element, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, Length, Pixels, Point, Position, Size, Style, Window, point, px,
+    AnyElement, App, Bounds, DispatchPhase, Edges, Element, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, Length, MouseDownEvent, Pixels, Point, Position, Size, Style, Window,
+    point, px,
 };
 
 /// Space a fitted popup keeps from the window edges.
 const WINDOW_MARGIN: Pixels = px(8.0);
+
+type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// Wraps `popup`, which positions itself against the trigger with absolute insets, so it stays
 /// inside the window. Place it in the trigger's positioned wrapper, usually through `deferred`.
 pub(crate) fn fit_to_window(popup: impl IntoElement) -> FitToWindow {
     FitToWindow {
         popup: popup.into_any_element(),
+        on_dismiss: None,
     }
 }
 
 pub(crate) struct FitToWindow {
     popup: AnyElement,
+    on_dismiss: Option<Dismiss>,
+}
+
+impl FitToWindow {
+    /// Runs `handler` when a press lands outside both the trigger and the popup.
+    pub(crate) fn on_dismiss(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_dismiss = Some(Rc::new(handler));
+        self
+    }
 }
 
 pub(crate) struct FitToWindowLayout {
@@ -32,7 +51,8 @@ pub(crate) struct FitToWindowLayout {
 
 impl Element for FitToWindow {
     type RequestLayoutState = FitToWindowLayout;
-    type PrepaintState = ();
+    /// Where the popup painted, after any move into the window.
+    type PrepaintState = Bounds<Pixels>;
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -69,22 +89,35 @@ impl Element for FitToWindow {
         layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> Self::PrepaintState {
         let popup = window.layout_bounds(layout.popup);
         let offset = popup_offset_in_window(trigger, popup, window.viewport_size());
         window.with_element_offset(offset, |window| self.popup.prepaint(window, cx));
+        Bounds::new(popup.origin + offset, popup.size)
     }
 
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        trigger: Bounds<Pixels>,
         _layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
+        popup: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        if let Some(dismiss) = self.on_dismiss.clone() {
+            let popup = *popup;
+            // Capture phase, so surfaces that stop a press from bubbling still close the popup.
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture
+                    && !trigger.contains(&event.position)
+                    && !popup.contains(&event.position)
+                {
+                    dismiss(window, cx);
+                }
+            });
+        }
         self.popup.paint(window, cx);
     }
 }
@@ -138,9 +171,11 @@ fn popup_offset_in_window(
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use gpui::{
-        Bounds, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Render, Styled,
-        TestAppContext, Window, deferred, div, point, px, size,
+        Bounds, Context, InteractiveElement, IntoElement, Modifiers, ParentElement, Pixels, Render,
+        Styled, TestAppContext, VisualTestContext, Window, deferred, div, point, px, size,
     };
 
     use super::{WINDOW_MARGIN, fit_to_window, popup_offset_in_window};
@@ -196,10 +231,14 @@ mod tests {
         assert_eq!(moved.y, px(0.0));
     }
 
-    struct BottomTriggerHarness;
+    /// A trigger near the bottom-left of the window with an open popup that counts dismissals.
+    struct BottomTriggerHarness {
+        dismissals: Rc<Cell<usize>>,
+    }
 
     impl Render for BottomTriggerHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let dismissals = self.dismissals.clone();
             div().size_full().relative().child(
                 div()
                     .absolute()
@@ -208,29 +247,65 @@ mod tests {
                     .w(px(80.0))
                     .h(px(32.0))
                     .debug_selector(|| "trigger".into())
-                    .child(deferred(fit_to_window(
-                        div()
-                            .absolute()
-                            .top_full()
-                            .mt(px(4.0))
-                            .left_0()
-                            .w(px(320.0))
-                            .h(px(300.0))
-                            .debug_selector(|| "popup".into()),
-                    ))),
+                    .child(deferred(
+                        fit_to_window(
+                            div()
+                                .id("popup")
+                                .absolute()
+                                .top_full()
+                                .mt(px(4.0))
+                                .left_0()
+                                .w(px(320.0))
+                                .h(px(300.0))
+                                .occlude()
+                                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                                .debug_selector(|| "popup".into()),
+                        )
+                        .on_dismiss(move |_, _| dismissals.set(dismissals.get() + 1)),
+                    )),
             )
         }
+    }
+
+    fn open_harness(cx: &mut TestAppContext) -> (Rc<Cell<usize>>, &mut VisualTestContext) {
+        let dismissals = Rc::new(Cell::new(0));
+        let harness_dismissals = dismissals.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| BottomTriggerHarness {
+            dismissals: harness_dismissals,
+        });
+        cx.run_until_parked();
+        (dismissals, cx)
     }
 
     #[gpui::test]
     fn a_popup_opened_near_the_bottom_of_the_window_renders_above_its_trigger(
         cx: &mut TestAppContext,
     ) {
-        let (_, cx) = cx.add_window_view(|_, _| BottomTriggerHarness);
-        cx.run_until_parked();
+        let (_, cx) = open_harness(cx);
         let trigger = cx.debug_bounds("trigger").expect("trigger bounds");
         let popup = cx.debug_bounds("popup").expect("popup bounds");
         assert_eq!(popup.bottom(), trigger.top() - px(4.0));
         assert_eq!(popup.left(), trigger.left());
+    }
+
+    #[gpui::test]
+    fn only_a_press_outside_the_trigger_and_the_popup_dismisses_it(cx: &mut TestAppContext) {
+        let (dismissals, cx) = open_harness(cx);
+        let trigger = cx.debug_bounds("trigger").expect("trigger bounds");
+        let popup = cx.debug_bounds("popup").expect("popup bounds");
+
+        cx.simulate_click(popup.center(), Modifiers::none());
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        assert_eq!(
+            dismissals.get(),
+            0,
+            "presses on the popup or trigger keep it open"
+        );
+
+        cx.simulate_click(
+            point(popup.right() + px(40.0), popup.top() + px(10.0)),
+            Modifiers::none(),
+        );
+        assert_eq!(dismissals.get(), 1, "a press on empty space closes it");
     }
 }

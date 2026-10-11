@@ -5936,6 +5936,14 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    pub(super) fn close_volume_dialog_color_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.volume_dialog_mut()
+            && dialog.color_picker.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
     pub(super) fn set_volume_dialog_color(
         &mut self,
         target: VolumeColorTarget,

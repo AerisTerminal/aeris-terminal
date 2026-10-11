@@ -769,8 +769,9 @@ fn paint_states(
                 }
             })
         })
-        // The Theme System focus style for every variant: a 2px `ring-primary` outline.
-        .focus_visible(move |style| style.border_2().border_color(gpui_color(focus_ring)))
+        // The Theme System focus style for every variant: the `--border-width` border in
+        // `ring-primary`.
+        .focus_visible(move |style| style.border_color(gpui_color(focus_ring)))
 }
 
 /// Registers the button's single activation path.

@@ -40,6 +40,7 @@ fn color_control(
     );
     if let Some(picker) = open_picker {
         let select = app.clone();
+        let dismiss = app.clone();
         control = control.child(gpui::deferred(
             ColorPicker::new(
                 ("volume_color_popover", target as usize),
@@ -52,6 +53,9 @@ fn color_control(
                 select.update(cx, |surface, surface_cx| {
                     surface.set_volume_dialog_color(target, &value, surface_cx);
                 });
+            })
+            .on_dismiss(move |_, cx| {
+                dismiss.update(cx, WorkspaceSurface::close_volume_dialog_color_picker);
             }),
         ));
     }

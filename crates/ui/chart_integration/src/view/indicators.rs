@@ -55,7 +55,6 @@ impl AerisChartView {
         if ids.is_empty() {
             return Err(ChartIndicatorError::CreationRejected(indicator));
         }
-        self.apply_indicator_chrome_options();
         self.invalidate_series_layout();
         self.mark_user_state_changed();
         Ok(ids)
@@ -343,7 +342,6 @@ impl AerisChartView {
         if self.install_volume(settings, visible).is_none() {
             return false;
         }
-        self.apply_indicator_chrome_options();
         self.invalidate_series_layout();
         self.mark_user_state_changed();
         true
@@ -359,7 +357,6 @@ impl AerisChartView {
                 ChartIndicator::Volume,
             ));
         }
-        self.apply_indicator_chrome_options();
         self.invalidate_series_layout();
         self.mark_user_state_changed();
         Ok(())
@@ -448,28 +445,20 @@ impl AerisChartView {
             .is_some_and(|volume| self.engine.remove_indicator_binding(volume.columns))
     }
 
-    pub(super) fn apply_indicator_chrome_options(&mut self) {
-        let options = IndicatorChromeOptions {
-            name_labels_visible: self.indicator_name_labels.visible(),
-            value_labels_visible: self.indicator_value_labels.visible(),
-            price_lines_visible: self.indicator_price_lines.visible(),
-        };
-        let _ = self.engine.set_indicator_chrome_options(options);
-    }
-    /// Host-owned indicator name-chip chrome for every native indicator on this chart.
+    /// Indicator name-chip chrome for every indicator on this chart, owned by Aeris Charts.
     #[must_use]
     pub const fn indicator_name_labels_visible(&self) -> bool {
-        self.indicator_name_labels.visible()
+        self.engine.indicator_chrome_options().name_labels_visible
     }
-    /// Host-owned indicator last-value chrome for every native indicator on this chart.
+    /// Indicator last-value chrome for every indicator on this chart, owned by Aeris Charts.
     #[must_use]
     pub const fn indicator_value_labels_visible(&self) -> bool {
-        self.indicator_value_labels.visible()
+        self.engine.indicator_chrome_options().value_labels_visible
     }
-    /// Host-owned last-value line chrome for every native indicator plot on this chart.
+    /// Last-value line chrome for every indicator plot on this chart, owned by Aeris Charts.
     #[must_use]
     pub const fn indicator_price_lines_visible(&self) -> bool {
-        self.indicator_price_lines.visible()
+        self.engine.indicator_chrome_options().price_lines_visible
     }
     /// Applies indicator name, value, and price-line preferences to current and later indicators.
     pub fn apply_indicator_chrome_preferences(
@@ -478,39 +467,42 @@ impl AerisChartView {
         values: bool,
         price_lines: bool,
     ) {
-        let changed = self.indicator_name_labels.visible() != names
-            || self.indicator_value_labels.visible() != values
-            || self.indicator_price_lines.visible() != price_lines;
-        self.indicator_name_labels = IndicatorLabels::from_visible(names);
-        self.indicator_value_labels = IndicatorLabels::from_visible(values);
-        self.indicator_price_lines = IndicatorLabels::from_visible(price_lines);
-        self.apply_indicator_chrome_options();
+        let changed = self
+            .engine
+            .set_indicator_chrome_options(IndicatorChromeOptions {
+                name_labels_visible: names,
+                value_labels_visible: values,
+                price_lines_visible: price_lines,
+            });
         self.invalidate_series_layout();
         if changed {
             self.mark_user_state_changed();
         }
     }
     pub(super) fn toggle_indicator_name_labels(&mut self) -> bool {
+        let chrome = self.engine.indicator_chrome_options();
         self.apply_indicator_chrome_preferences(
-            !self.indicator_name_labels.visible(),
-            self.indicator_value_labels.visible(),
-            self.indicator_price_lines.visible(),
+            !chrome.name_labels_visible,
+            chrome.value_labels_visible,
+            chrome.price_lines_visible,
         );
         true
     }
     pub(super) fn toggle_indicator_value_labels(&mut self) -> bool {
+        let chrome = self.engine.indicator_chrome_options();
         self.apply_indicator_chrome_preferences(
-            self.indicator_name_labels.visible(),
-            !self.indicator_value_labels.visible(),
-            self.indicator_price_lines.visible(),
+            chrome.name_labels_visible,
+            !chrome.value_labels_visible,
+            chrome.price_lines_visible,
         );
         true
     }
     pub(super) fn toggle_indicator_price_lines(&mut self) -> bool {
+        let chrome = self.engine.indicator_chrome_options();
         self.apply_indicator_chrome_preferences(
-            self.indicator_name_labels.visible(),
-            self.indicator_value_labels.visible(),
-            !self.indicator_price_lines.visible(),
+            chrome.name_labels_visible,
+            chrome.value_labels_visible,
+            !chrome.price_lines_visible,
         );
         true
     }

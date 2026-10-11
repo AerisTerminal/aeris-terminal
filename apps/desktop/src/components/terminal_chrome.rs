@@ -332,6 +332,7 @@ fn workspace_caption_control(
         close,
     } = spec;
     let colors = theme.colors;
+    let focus_border = platform_border_width(theme);
     let control = div()
         .id(id)
         .w(px(46.0))
@@ -365,7 +366,7 @@ fn workspace_caption_control(
                 .tab_index(0)
                 .focus_visible(move |control| {
                     control
-                        .border_2()
+                        .border(focus_border)
                         .border_color(gpui_color(colors.ring_primary))
                 })
                 .on_key_down(move |event, window, cx| {

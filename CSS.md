@@ -20,7 +20,8 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Menus, dialogs and popovers never dim, tint or blur what is behind them: their dismiss scrims
   paint nothing. A popover stays inside the window, flipping to the other side of its trigger
   when there is no room.
-- Focus is one style everywhere: a 2px `ring-primary` outline (no glow, no background change).
+- Focus is one style everywhere: the control's `--border-width` border turns `ring-primary` (no
+  thicker ring, glow or background change).
 - Typography uses the bundled Inter Regular face for platform text and the bundled Faculty Glyphic
   Regular face only for brand/display text. There is no HK Grotesk dependency. The CSS `--font-sans`
   and native `platform_font_family()` both resolve to Inter; keep the web mirror in sync.

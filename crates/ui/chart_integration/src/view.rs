@@ -800,23 +800,6 @@ pub enum PriceAxisMenuAction {
 
 const PRICE_AXIS_PRECISION_CHOICES: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 8];
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum IndicatorLabels {
-    #[default]
-    Shown,
-    Hidden,
-}
-
-impl IndicatorLabels {
-    const fn visible(self) -> bool {
-        matches!(self, Self::Shown)
-    }
-
-    const fn from_visible(visible: bool) -> Self {
-        if visible { Self::Shown } else { Self::Hidden }
-    }
-}
-
 fn price_axis_target(left: bool) -> PriceScaleTarget {
     if left {
         PriceScaleTarget::Left
@@ -1041,9 +1024,6 @@ pub struct AerisChartView {
     order_flow_settings: OrderFlowSettings,
     order_flow_state: Option<OrderFlowChartState>,
     product_bars: ProductPriceBars,
-    indicator_name_labels: IndicatorLabels,
-    indicator_value_labels: IndicatorLabels,
-    indicator_price_lines: IndicatorLabels,
     legend_options: ChartLegendOptions,
     /// Transient host-projected plan levels. These are deliberately separate
     /// from Aeris Charts-owned user drawings and are reinstalled with price series.
@@ -1144,9 +1124,6 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars: ProductPriceBars::default(),
-            indicator_name_labels: IndicatorLabels::Shown,
-            indicator_value_labels: IndicatorLabels::Shown,
-            indicator_price_lines: IndicatorLabels::Shown,
             legend_options: ChartLegendOptions::default(),
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
@@ -1251,9 +1228,6 @@ impl AerisChartView {
             order_flow_settings: OrderFlowSettings::default(),
             order_flow_state: None,
             product_bars,
-            indicator_name_labels: IndicatorLabels::Shown,
-            indicator_value_labels: IndicatorLabels::Shown,
-            indicator_price_lines: IndicatorLabels::Shown,
             legend_options: ChartLegendOptions::default(),
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
@@ -1366,13 +1340,14 @@ impl AerisChartView {
         if primary.countdown_visible {
             flags |= PriceAxisMenuState::COUNTDOWN;
         }
-        if self.indicator_name_labels.visible() {
+        let chrome = self.engine.indicator_chrome_options();
+        if chrome.name_labels_visible {
             flags |= PriceAxisMenuState::INDICATOR_NAMES;
         }
-        if self.indicator_value_labels.visible() {
+        if chrome.value_labels_visible {
             flags |= PriceAxisMenuState::INDICATOR_VALUES;
         }
-        if self.indicator_price_lines.visible() {
+        if chrome.price_lines_visible {
             flags |= PriceAxisMenuState::INDICATOR_PRICE_LINES;
         }
         if self.engine.price_scale_auto_scale_for(pane, target)? {

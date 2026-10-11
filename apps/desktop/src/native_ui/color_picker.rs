@@ -1,29 +1,32 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
-use aeris_design_system::{AerisTheme, RadiusToken, TypographyRole};
+use aeris_design_system::{AerisTheme, RadiusToken};
 use gpui::{
-    App, ElementId, Entity, Hsla, IntoElement, MouseButton, RenderOnce, Rgba, SharedString, Window,
-    checkerboard, div, hsla, linear_color_stop, linear_gradient, prelude::*, px,
+    App, Bounds, CursorStyle, DispatchPhase, ElementId, Entity, HitboxBehavior, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderOnce, Rgba,
+    SharedString, Window, canvas, checkerboard, div, hsla, linear_color_stop, linear_gradient,
+    prelude::*, px, relative,
 };
 use num_traits::ToPrimitive;
 
 use super::{
+    button::{Button, ButtonSize, ButtonVariant},
     input::{Input, InputState},
     menu::{ANCHOR_GAP, PopupAnimationOrigin, animate_popup_from_origin},
-    platform_font_weight,
     popup_fit::fit_to_window,
     theme::{gpui_color, platform_border_width},
 };
 
 type SelectionHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
+type DismissHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
-const FIELD_WIDTH: f32 = 280.0;
-const FIELD_HEIGHT: f32 = 190.0;
-const FIELD_COLUMNS: u16 = 20;
-const FIELD_ROWS: u16 = 14;
-const SLIDER_STEPS: u16 = 36;
-/// The hex field matches the platform's 32 px control height.
-const HEX_ROW_HEIGHT: f32 = 32.0;
+const PANEL_WIDTH: f32 = 232.0;
+const PANEL_PADDING: f32 = 12.0;
+const FIELD_HEIGHT: f32 = 132.0;
+const SLIDER_HEIGHT: f32 = 10.0;
+/// The hex row matches the 28 px `Default` button height.
+const HEX_ROW_HEIGHT: f32 = 28.0;
+const SWATCH_SIZE: f32 = 20.0;
 const RECOMMENDED_COLORS: [&str; 8] = [
     "#6B7280", "#335CFF", "#FF7A45", "#FB3748", "#18B66A", "#F5A623", "#7C4DFF", "#45B8F2",
 ];
@@ -36,11 +39,76 @@ struct Hsva {
     alpha: f32,
 }
 
+/// The picker control a press started on; it keeps following the pointer until release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PointerTarget {
+    Field,
+    Hue,
+    Alpha,
+}
+
+impl PointerTarget {
+    /// The color the pointer at `position` picks on this control, changing only its channels.
+    fn pick(self, base: Hsva, bounds: Bounds<Pixels>, position: Point<Pixels>) -> Hsva {
+        let x = fraction(position.x - bounds.left(), bounds.size.width);
+        match self {
+            Self::Field => Hsva {
+                saturation: x,
+                value: 1.0 - fraction(position.y - bounds.top(), bounds.size.height),
+                ..base
+            },
+            Self::Hue => Hsva { hue: x, ..base },
+            Self::Alpha => Hsva { alpha: x, ..base },
+        }
+    }
+
+    const fn cursor(self) -> CursorStyle {
+        match self {
+            Self::Field => CursorStyle::Crosshair,
+            Self::Hue | Self::Alpha => CursorStyle::PointingHand,
+        }
+    }
+}
+
+fn fraction(offset: Pixels, length: Pixels) -> f32 {
+    let length = f32::from(length);
+    if length <= 0.0 {
+        0.0
+    } else {
+        (f32::from(offset) / length).clamp(0.0, 1.0)
+    }
+}
+
+/// Pointer state that outlives a frame: the control being dragged, and the last color picked,
+/// which keeps the hue and the exact handle positions that a hex value rounds away.
+#[derive(Default)]
+struct PickerPointer {
+    drag: Option<PointerTarget>,
+    picked: Option<Hsva>,
+}
+
+/// What a pointer surface needs to turn a press or drag into a selection.
+#[derive(Clone)]
+struct Picking {
+    base: Hsva,
+    pointer: Entity<PickerPointer>,
+    input: Entity<InputState>,
+    handler: Option<SelectionHandler>,
+}
+
+impl Picking {
+    fn pick(&self, color: Hsva, window: &mut Window, cx: &mut App) {
+        self.pointer
+            .update(cx, |pointer, _| pointer.picked = Some(color));
+        emit_selection(color, &self.input, self.handler.as_ref(), window, cx);
+    }
+}
+
 /// Reusable native color picker with continuous color fields and exact hex entry.
 ///
-/// The hit targets are an invisible regular lattice over smooth GPUI gradients. This keeps the
-/// control crisp at every scale while avoiding a custom renderer or a collection of bordered color
-/// buttons. All selection paths emit the same normalized CSS hex value.
+/// The field and sliders are smooth GPUI gradients under one pointer surface each, which maps
+/// the pointer straight to the color while pressed. All selection paths emit the same
+/// normalized CSS hex value.
 #[derive(IntoElement)]
 pub(crate) struct ColorPicker {
     id: ElementId,
@@ -49,6 +117,7 @@ pub(crate) struct ColorPicker {
     error: Option<SharedString>,
     theme: AerisTheme,
     on_select: Option<SelectionHandler>,
+    on_dismiss: Option<DismissHandler>,
 }
 
 impl ColorPicker {
@@ -65,6 +134,7 @@ impl ColorPicker {
             error: None,
             theme: *theme,
             on_select: None,
+            on_dismiss: None,
         }
     }
 
@@ -80,20 +150,44 @@ impl ColorPicker {
         self.on_select = Some(Rc::new(handler));
         self
     }
+
+    /// Closes the picker when a press lands outside it and its swatch trigger.
+    pub(crate) fn on_dismiss(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_dismiss = Some(Rc::new(handler));
+        self
+    }
 }
 
 impl RenderOnce for ColorPicker {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
+        let theme = self.theme;
         let animation_id = self.id.clone();
+        let pointer = window.use_keyed_state(
+            ElementId::NamedChild(Arc::new(self.id.clone()), "pointer".into()),
+            cx,
+            |_, _| PickerPointer::default(),
+        );
         let normalized = normalize_hex_color(&self.current).unwrap_or_else(|| "#335CFF".into());
-        let selected = parse_hex_color(&normalized).unwrap_or(Hsva {
-            hue: 0.63,
-            saturation: 0.8,
-            value: 1.0,
-            alpha: 1.0,
-        });
-        let handler = self.on_select;
+        // The last picked color is exact while it is still the current value; a hex value alone
+        // loses the hue of greys and rounds the handles to 8-bit steps.
+        let selected = pointer
+            .read(cx)
+            .picked
+            .filter(|picked| same_hex_color(&hsva_hex(*picked), &normalized))
+            .or_else(|| parse_hex_color(&normalized))
+            .unwrap_or(Hsva {
+                hue: 0.63,
+                saturation: 0.8,
+                value: 1.0,
+                alpha: 1.0,
+            });
+        let picking = Picking {
+            base: selected,
+            pointer,
+            input: self.input.clone(),
+            handler: self.on_select,
+        };
 
         let panel = div()
             .id(self.id)
@@ -101,148 +195,102 @@ impl RenderOnce for ColorPicker {
             .top_full()
             .mt(ANCHOR_GAP)
             .right_0()
-            .w(px(320.0))
+            .w(px(PANEL_WIDTH))
+            .p(px(PANEL_PADDING))
             .flex()
             .flex_col()
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels()) + 4.0))
-            .border(platform_border_width(&self.theme))
+            .gap_2p5()
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+            .border(platform_border_width(&theme))
             .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface))
-            .shadow_lg()
+            .bg(gpui_color(colors.surface_secondary))
             .occlude()
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .child(saturation_value_field(&picking, &theme))
+            .child(hue_slider(&picking, &theme))
+            .child(alpha_slider(&picking, &theme))
+            .child(hex_input_row(&picking, &theme))
+            .children(self.error.map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(gpui_color(colors.danger))
+                    .child(error)
+            }))
             .child(
                 div()
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(saturation_value_field(
-                        selected,
-                        &self.input,
-                        handler.as_ref(),
-                        &self.theme,
-                    ))
-                    .child(hue_slider(
-                        selected,
-                        &self.input,
-                        handler.as_ref(),
-                        &self.theme,
-                    ))
-                    .child(alpha_slider(
-                        selected,
-                        &self.input,
-                        handler.as_ref(),
-                        &self.theme,
-                    ))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(platform_font_weight(TypographyRole::Emphasis))
-                            .text_color(gpui_color(colors.text_primary))
-                            .child("HEX"),
-                    )
-                    .child(hex_input_row(
-                        &self.input,
-                        selected,
-                        handler.as_ref(),
-                        &self.theme,
-                    ))
-                    .children(self.error.map(|error| {
-                        div()
-                            .text_xs()
-                            .text_color(gpui_color(colors.danger))
-                            .child(error)
-                    })),
+                    .mx(px(-PANEL_PADDING))
+                    .h(platform_border_width(&theme))
+                    .bg(gpui_color(colors.border_secondary)),
             )
-            .child(
-                div()
-                    .border_t(platform_border_width(&self.theme))
-                    .border_color(gpui_color(colors.border_secondary))
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(gpui_color(colors.text_secondary))
-                            .child("Recommended colors"),
-                    )
-                    .child(recommended_colors(
-                        &normalized,
-                        &self.input,
-                        handler.as_ref(),
-                        &self.theme,
-                    )),
-            );
-        fit_to_window(animate_popup_from_origin(
+            .child(recommended_colors(&normalized, &picking, &theme));
+        let popup = fit_to_window(animate_popup_from_origin(
             panel,
             (animation_id, "enter"),
             PopupAnimationOrigin::TOP_RIGHT,
-        ))
+        ));
+        match self.on_dismiss {
+            Some(dismiss) => popup.on_dismiss(move |window, cx| dismiss(window, cx)),
+            None => popup,
+        }
     }
 }
 
-fn saturation_value_field(
-    selected: Hsva,
-    input: &Entity<InputState>,
-    handler: Option<&SelectionHandler>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
+/// An invisible layer over a control that picks a color from the pointer: the press picks at
+/// once, and the drag keeps picking, clamped to the control, wherever the pointer moves until
+/// the button is released.
+fn pointer_surface(target: PointerTarget, picking: &Picking) -> impl IntoElement {
+    let picking = picking.clone();
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |bounds, hitbox, window, _| {
+            window.set_cursor_style(target.cursor(), &hitbox);
+            let press = picking.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.button == MouseButton::Left
+                    && hitbox.is_hovered(window)
+                {
+                    press
+                        .pointer
+                        .update(cx, |pointer, _| pointer.drag = Some(target));
+                    press.pick(target.pick(press.base, bounds, event.position), window, cx);
+                }
+            });
+            let drag = picking.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture
+                    && event.pressed_button == Some(MouseButton::Left)
+                    && drag.pointer.read(cx).drag == Some(target)
+                {
+                    drag.pick(target.pick(drag.base, bounds, event.position), window, cx);
+                }
+            });
+            let release = picking.pointer.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture && release.read(cx).drag == Some(target) {
+                    release.update(cx, |pointer, _| pointer.drag = None);
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
+fn saturation_value_field(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
+    let selected = picking.base;
     let pure_hue = hsla(selected.hue, 1.0, 0.5, 1.0);
     let transparent_white = hsla(0.0, 0.0, 1.0, 0.0);
     let transparent_black = hsla(0.0, 0.0, 0.0, 0.0);
-    let mut hits = div().absolute().inset_0().flex().flex_col();
-    for row in 0..FIELD_ROWS {
-        let mut hit_row = div().flex().flex_1();
-        for column in 0..FIELD_COLUMNS {
-            let saturation = (f32::from(column) + 0.5) / f32::from(FIELD_COLUMNS);
-            let value = 1.0 - (f32::from(row) + 0.5) / f32::from(FIELD_ROWS);
-            let input = input.clone();
-            let handler = handler.cloned();
-            let drag_input = input.clone();
-            let drag_handler = handler.clone();
-            let selection = Hsva {
-                saturation,
-                value,
-                ..selected
-            };
-            hit_row = hit_row.child(
-                div()
-                    .id((
-                        "native_color_field",
-                        usize::from(row * FIELD_COLUMNS + column),
-                    ))
-                    .flex_1()
-                    .h_full()
-                    .cursor_crosshair()
-                    .on_mouse_move(move |event, window, cx| {
-                        if event.pressed_button == Some(MouseButton::Left) {
-                            emit_selection(
-                                selection,
-                                &drag_input,
-                                drag_handler.as_ref(),
-                                window,
-                                cx,
-                            );
-                        }
-                    })
-                    .on_click(move |_, window, cx| {
-                        emit_selection(selection, &input, handler.as_ref(), window, cx);
-                    }),
-            );
-        }
-        hits = hits.child(hit_row);
-    }
 
     // GPUI clips children to a rectangle, not a rounded one, so every layer carries the
     // field's radius itself.
     let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
     div()
         .relative()
-        .w(px(FIELD_WIDTH))
+        .w_full()
         .h(px(FIELD_HEIGHT))
+        .debug_selector(|| "color_picker_field".into())
         .child(
             div()
                 .absolute()
@@ -265,21 +313,12 @@ fn saturation_value_field(
                         ))),
                 ),
         )
-        .child(hits)
-        .child(selection_handle(
-            selected.saturation * FIELD_WIDTH,
-            (1.0 - selected.value) * FIELD_HEIGHT,
-            selected_color(selected),
-            theme,
-        ))
+        .child(pointer_surface(PointerTarget::Field, picking))
+        .child(selection_handle(selected, theme))
 }
 
-fn hue_slider(
-    selected: Hsva,
-    input: &Entity<InputState>,
-    handler: Option<&SelectionHandler>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
+fn hue_slider(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
+    let selected = picking.base;
     let stops = [
         hsla(0.0, 1.0, 0.5, 1.0),
         hsla(1.0 / 6.0, 1.0, 0.5, 1.0),
@@ -307,80 +346,20 @@ fn hue_slider(
                 )),
         );
     }
-    let mut hits = div().absolute().inset_0().flex();
-    for step in 0..SLIDER_STEPS {
-        let input = input.clone();
-        let handler = handler.cloned();
-        let drag_input = input.clone();
-        let drag_handler = handler.clone();
-        let selection = Hsva {
-            hue: (f32::from(step) + 0.5) / f32::from(SLIDER_STEPS),
-            ..selected
-        };
-        hits = hits.child(
-            div()
-                .id(("native_color_hue", usize::from(step)))
-                .flex_1()
-                .h_full()
-                .cursor_pointer()
-                .on_mouse_move(move |event, window, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        emit_selection(selection, &drag_input, drag_handler.as_ref(), window, cx);
-                    }
-                })
-                .on_click(move |_, window, cx| {
-                    emit_selection(selection, &input, handler.as_ref(), window, cx);
-                }),
-        );
-    }
     slider_shell()
         .child(gradient)
         .child(slider_outline(theme))
-        .child(hits)
-        .child(slider_handle(
-            selected.hue * FIELD_WIDTH,
-            selected_color(selected),
-            theme,
-        ))
+        .child(pointer_surface(PointerTarget::Hue, picking))
+        .child(slider_handle(selected.hue, selected, theme))
 }
 
-fn alpha_slider(
-    selected: Hsva,
-    input: &Entity<InputState>,
-    handler: Option<&SelectionHandler>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
+fn alpha_slider(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
+    let selected = picking.base;
     let opaque = selected_color(Hsva {
         alpha: 1.0,
         ..selected
     });
     let transparent = Hsla { a: 0.0, ..opaque };
-    let mut hits = div().absolute().inset_0().flex();
-    for step in 0..SLIDER_STEPS {
-        let input = input.clone();
-        let handler = handler.cloned();
-        let drag_input = input.clone();
-        let drag_handler = handler.clone();
-        let selection = Hsva {
-            alpha: (f32::from(step) + 0.5) / f32::from(SLIDER_STEPS),
-            ..selected
-        };
-        hits = hits.child(
-            div()
-                .id(("native_color_alpha", usize::from(step)))
-                .flex_1()
-                .h_full()
-                .cursor_pointer()
-                .on_mouse_move(move |event, window, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        emit_selection(selection, &drag_input, drag_handler.as_ref(), window, cx);
-                    }
-                })
-                .on_click(move |_, window, cx| {
-                    emit_selection(selection, &input, handler.as_ref(), window, cx);
-                }),
-        );
-    }
     slider_shell()
         .child(
             div()
@@ -401,12 +380,8 @@ fn alpha_slider(
                 )),
         )
         .child(slider_outline(theme))
-        .child(hits)
-        .child(slider_handle(
-            selected.alpha * FIELD_WIDTH,
-            selected_color(selected),
-            theme,
-        ))
+        .child(pointer_surface(PointerTarget::Alpha, picking))
+        .child(slider_handle(selected.alpha, selected, theme))
 }
 
 /// The checkerboard every color preview sits on, so a translucent color reads as translucent.
@@ -417,8 +392,8 @@ pub(crate) fn transparency_backdrop(theme: &AerisTheme) -> gpui::Background {
 fn slider_shell() -> gpui::Div {
     div()
         .relative()
-        .w(px(FIELD_WIDTH))
-        .h(px(12.0))
+        .w_full()
+        .h(px(SLIDER_HEIGHT))
         .rounded_full()
 }
 
@@ -450,51 +425,46 @@ fn handle_disc(color: Hsla, theme: &AerisTheme) -> gpui::Div {
         .child(div().size(px(HANDLE_HOLE)).rounded_full().bg(color))
 }
 
-fn selection_handle(x: f32, y: f32, color: Hsla, theme: &AerisTheme) -> impl IntoElement {
-    let half = HANDLE_SIZE / 2.0;
-    handle_disc(color, theme)
-        .left(px((x - half).clamp(-1.0, FIELD_WIDTH - HANDLE_SIZE + 1.0)))
-        .top(px((y - half).clamp(-1.0, FIELD_HEIGHT - HANDLE_SIZE + 1.0)))
+/// Centered on the selected saturation and value.
+fn selection_handle(color: Hsva, theme: &AerisTheme) -> impl IntoElement {
+    handle_disc(selected_color(color), theme)
+        .left(relative(color.saturation))
+        .top(relative(1.0 - color.value))
+        .ml(px(-HANDLE_SIZE / 2.0))
+        .mt(px(-HANDLE_SIZE / 2.0))
 }
 
-fn slider_handle(x: f32, color: Hsla, theme: &AerisTheme) -> impl IntoElement {
-    handle_disc(color, theme)
-        .left(px(
-            (x - HANDLE_SIZE / 2.0).clamp(-1.0, FIELD_WIDTH - HANDLE_SIZE + 1.0)
-        ))
-        .top(px(-2.0))
+/// Centered on `position`, a fraction of the slider's width.
+fn slider_handle(position: f32, color: Hsva, theme: &AerisTheme) -> impl IntoElement {
+    handle_disc(selected_color(color), theme)
+        .left(relative(position))
+        .ml(px(-HANDLE_SIZE / 2.0))
+        .top(px((SLIDER_HEIGHT - HANDLE_SIZE) / 2.0))
 }
 
-fn hex_input_row(
-    input: &Entity<InputState>,
-    selected: Hsva,
-    handler: Option<&SelectionHandler>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
+fn hex_input_row(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
+    let selected = picking.base;
+    let input = &picking.input;
     let submit_input = input.clone();
-    let submit_handler = handler.cloned();
-    // GPUI clips children to a rectangle, so the Set segment rounds its own outer corners to
-    // the field's inner radius; its hover fill then never paints past the field's corner.
-    let outer_radius = f32::from(RadiusToken::Default.logical_pixels());
-    let inner_radius = px((outer_radius - f32::from(platform_border_width(theme))).max(0.0));
+    let submit_handler = picking.handler.clone();
     div()
         .h(px(HEX_ROW_HEIGHT))
         .flex()
         .items_center()
+        .gap_2()
         // The input shapes its text from the inherited style; pin it so typed text stays the
         // size it opened at, whatever the picker is drawn over.
         .text_sm()
-        .rounded(px(outer_radius))
-        .border(platform_border_width(theme))
-        .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface_secondary))
         .child(
             div()
-                .w(px(34.0))
-                .h_full()
+                .size(px(HEX_ROW_HEIGHT))
+                .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .border(platform_border_width(theme))
+                .border_color(gpui_color(theme.colors.border_secondary))
                 .child(
                     div()
                         .size(px(14.0))
@@ -506,57 +476,42 @@ fn hex_input_row(
             div()
                 .h_full()
                 .flex_1()
-                .child(Input::new(input).platform(theme).bordered(false).flex_1()),
+                .min_w_0()
+                .flex()
+                .child(Input::new(input).platform(theme).flex_1()),
         )
         .child(
-            div()
-                .id("native_color_apply")
-                .h_full()
-                .w(px(48.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .border_l(platform_border_width(theme))
-                .border_color(gpui_color(theme.colors.border_secondary))
-                .rounded_tr(inner_radius)
-                .rounded_br(inner_radius)
-                .text_xs()
-                .font_weight(platform_font_weight(TypographyRole::Emphasis))
-                .text_color(gpui_color(theme.colors.text_secondary))
-                .cursor_pointer()
-                .hover(|button| button.bg(gpui_color(theme.colors.hover_bg)))
+            Button::new("native_color_apply", theme)
+                .variant(ButtonVariant::Outline)
+                .button_size(ButtonSize::Default)
+                .label("Set")
                 .on_click(move |_, window, cx| {
                     if let Some(handler) = &submit_handler {
                         handler(submit_input.read(cx).value().to_string(), window, cx);
                     }
-                })
-                .child("Set"),
+                }),
         )
 }
 
-fn recommended_colors(
-    current: &str,
-    input: &Entity<InputState>,
-    handler: Option<&SelectionHandler>,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let mut row = div().flex().items_center().gap_3();
+fn recommended_colors(current: &str, picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
+    let mut row = div().flex().items_center().justify_between();
     for (index, value) in RECOMMENDED_COLORS.into_iter().enumerate() {
         let selected = same_hex_color(current, value);
         let fill = parse_hex_hsla(value).unwrap_or_else(|| gpui_color(theme.colors.text_muted));
-        let input = input.clone();
-        let handler = handler.cloned();
+        let input = picking.input.clone();
+        let handler = picking.handler.clone();
         let value = value.to_string();
         row = row.child(
             div()
                 .id(("native_color_recommended", index))
-                .size(px(22.0))
-                .p(px(if selected { 3.0 } else { 1.0 }))
+                .size(px(SWATCH_SIZE))
+                .p(px(2.0))
                 .rounded_full()
-                .when(selected, |swatch| {
-                    swatch
-                        .border(px(2.0))
-                        .border_color(gpui_color(theme.colors.primary))
+                .border(platform_border_width(theme))
+                .border_color(if selected {
+                    gpui_color(theme.colors.primary)
+                } else {
+                    gpui::transparent_black()
                 })
                 .cursor_pointer()
                 .hover(|swatch| swatch.bg(gpui_color(theme.colors.hover_bg)))
@@ -703,7 +658,15 @@ fn same_hex_color(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hsva, hsva_hex, normalize_hex_color, parse_hex_color};
+    use std::{cell::RefCell, rc::Rc};
+
+    use aeris_design_system::AerisTheme;
+    use gpui::{
+        AppContext, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement,
+        Pixels, Point, Render, Styled, TestAppContext, Window, deferred, div, point, px,
+    };
+
+    use super::{ColorPicker, Hsva, InputState, hsva_hex, normalize_hex_color, parse_hex_color};
 
     #[test]
     fn hex_input_accepts_rgb_and_rgba_long_and_shorthand_forms() {
@@ -732,6 +695,109 @@ mod tests {
                 alpha: 1.0,
             }),
             "#FFFFFF"
+        );
+    }
+
+    /// A picker opened under a swatch-sized trigger that feeds every pick back as its value,
+    /// like the dialogs that host it.
+    struct PickerHarness {
+        current: String,
+        input: Entity<InputState>,
+        picks: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Render for PickerHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let view = cx.entity();
+            let picks = self.picks.clone();
+            div().size_full().relative().child(
+                div()
+                    .absolute()
+                    .top(px(20.0))
+                    .right(px(20.0))
+                    .w(px(80.0))
+                    .h(px(28.0))
+                    .child(deferred(
+                        ColorPicker::new(
+                            "picker",
+                            self.current.clone(),
+                            &self.input,
+                            &AerisTheme::dark(),
+                        )
+                        .on_select(move |value, _, cx| {
+                            picks.borrow_mut().push(value.clone());
+                            view.update(cx, |harness, cx| {
+                                harness.current = value;
+                                cx.notify();
+                            });
+                        }),
+                    )),
+            )
+        }
+    }
+
+    fn field_point(field: Bounds<Pixels>, x: f32, y: f32) -> Point<Pixels> {
+        point(
+            field.left() + field.size.width * x,
+            field.top() + field.size.height * y,
+        )
+    }
+
+    #[gpui::test]
+    fn dragging_on_the_color_field_follows_the_pointer_continuously(cx: &mut TestAppContext) {
+        let picks = Rc::new(RefCell::new(Vec::new()));
+        let harness_picks = picks.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            gpui_base::init(cx);
+            PickerHarness {
+                current: "#335CFF".into(),
+                input: cx.new(|cx| InputState::new(window, cx)),
+                picks: harness_picks,
+            }
+        });
+        cx.run_until_parked();
+        let field = cx.debug_bounds("color_picker_field").expect("field bounds");
+        let base = parse_hex_color("#335CFF").expect("base color");
+        let at = |saturation: f32, value: f32| {
+            hsva_hex(Hsva {
+                saturation,
+                value,
+                ..base
+            })
+        };
+
+        cx.simulate_mouse_down(
+            field_point(field, 0.25, 0.5),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            field_point(field, 0.75, 0.25),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        // Leaving the field keeps the drag, clamped to its edge.
+        cx.simulate_mouse_move(
+            point(field.right() + px(60.0), field.top() - px(60.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(field.center(), MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(field.center(), None, Modifiers::none());
+
+        let picks = picks.borrow();
+        assert_eq!(picks.len(), 3, "moves after release pick nothing");
+        // Within a hundredth of the pointer position: far finer than any grid of hit cells.
+        for (pick, (saturation, value)) in picks.iter().zip([(0.25, 0.5), (0.75, 0.75)]) {
+            let picked = parse_hex_color(pick).expect("picked color");
+            assert!((picked.saturation - saturation).abs() < 0.01, "{pick}");
+            assert!((picked.value - value).abs() < 0.01, "{pick}");
+            assert!((picked.hue - base.hue).abs() < 0.01, "{pick} keeps the hue");
+        }
+        assert_eq!(
+            picks[2],
+            at(1.0, 1.0),
+            "a drag past the field clamps to its edge"
         );
     }
 }

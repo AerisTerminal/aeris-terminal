@@ -157,7 +157,7 @@ impl RenderOnce for CheckboxRow {
             .rounded(radius)
             .border(platform_border_width(&self.theme))
             .border_color(gpui::transparent_black())
-            .focus_visible(move |style| style.border_2().border_color(gpui_color(focus_ring)))
+            .focus_visible(move |style| style.border_color(gpui_color(focus_ring)))
             .map(|row| {
                 if disabled {
                     row.cursor_not_allowed()

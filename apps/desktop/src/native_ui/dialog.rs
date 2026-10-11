@@ -55,6 +55,9 @@ pub(crate) enum DialogAlign {
 
 /// Space above a top-aligned dialog.
 const TOP_ALIGNED_OFFSET: Pixels = px(96.0);
+/// One compact row for the title, its subtitle and the close control, matching the chart
+/// settings title bar.
+const HEADER_HEIGHT: Pixels = px(36.0);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum DialogBody {
@@ -177,22 +180,25 @@ fn title_header(
 ) -> Div {
     let colors = theme.colors;
     div()
+        .h(HEADER_HEIGHT)
         .flex()
         .flex_none()
         .items_center()
         .justify_between()
         .gap_2()
-        .px_4()
-        .py_3()
+        .pl_4()
+        .pr_2()
         .border_b(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .child(
             div()
                 .min_w_0()
                 .flex()
-                .flex_col()
+                .items_baseline()
+                .gap_2()
                 .child(
                     div()
+                        .flex_none()
                         .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
                         .text_color(gpui_color(colors.text_primary))
@@ -200,6 +206,8 @@ fn title_header(
                 )
                 .children(subtitle.map(|subtitle| {
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_xs()
                         .text_color(gpui_color(colors.text_muted))
                         .child(subtitle)
