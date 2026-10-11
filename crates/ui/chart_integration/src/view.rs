@@ -2915,11 +2915,15 @@ fn chart_legend_row(
             .as_deref()
             .and_then(Color::parse_css)
             .map_or(values_color, |color| rgba(color.0));
+        // A wrapping text element shapes at whatever width the row's flex-wrap pass offers it,
+        // so a labelled value such as "C 6812.25" could break at its space and jump inside the
+        // fixed-height cell as its digits change. Each value moves to a new row line as a whole.
         div()
             .flex_none()
             .h(px(LEGEND_ROW_HEIGHT))
             .flex()
             .items_center()
+            .whitespace_nowrap()
             .font_features(platform_tabular_numerals())
             .text_color(color)
             .child(value.text)
@@ -2953,6 +2957,7 @@ fn chart_legend_row(
                 .h(px(LEGEND_ROW_HEIGHT))
                 .flex()
                 .items_center()
+                .whitespace_nowrap()
                 .font_weight(gpui::FontWeight(f32::from(
                     platform_typography().weight(TypographyRole::Normal),
                 )))
