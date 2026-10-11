@@ -14,9 +14,12 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Borders use `theme.dimensions.border_width` (`--border-width`), never `border_1()` or `px(1.0)`.
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
   `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `buy-bubble` /
-  `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `surface-overlay`
-  for scrims, `hover-bg` for hover and `active-bg` for a selected or open state. Press paints
-  nothing of its own. Hover changes the fill only, no shadows.
+  `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
+  hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
+  changes the fill only, no shadows.
+- Menus, dialogs and popovers never dim, tint or blur what is behind them: their dismiss scrims
+  paint nothing. A popover stays inside the window, flipping to the other side of its trigger
+  when there is no room.
 - Focus is one style everywhere: a 2px `ring-primary` outline (no glow, no background change).
 - Typography uses the bundled Inter Regular face for platform text and the bundled Faculty Glyphic
   Regular face only for brand/display text. There is no HK Grotesk dependency. The CSS `--font-sans`

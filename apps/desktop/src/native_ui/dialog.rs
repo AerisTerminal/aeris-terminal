@@ -1,6 +1,6 @@
 //! `Aeris`'s one modal dialog.
 //!
-//! A dialog covers the nearest positioned ancestor with the `surface-overlay` scrim and holds one
+//! A dialog covers the nearest positioned ancestor with a transparent scrim and holds one
 //! panel: an optional header (a title with the shared close control, or a custom header such as
 //! a search field), a body, and an optional footer with a leading slot and right-aligned actions.
 //! Pressing the scrim or the close control runs the dismiss handler; presses inside the panel
@@ -273,7 +273,6 @@ impl RenderOnce for Dialog {
                 DialogAlign::Center => scrim.items_center(),
                 DialogAlign::Top => scrim.items_start().pt(TOP_ALIGNED_OFFSET),
             })
-            .bg(gpui_color(colors.surface_overlay))
             .on_any_mouse_down(move |_, window, cx| {
                 dismiss(window, cx);
                 cx.stop_propagation();

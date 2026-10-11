@@ -2341,42 +2341,29 @@ fn settings_color_row(
     let terminal_for_toggle = terminal.clone();
     let current_for_toggle = value.to_string();
     let open = open_picker.is_some_and(|picker| picker.setting == setting);
-    let mut row = div().relative().w_full().flex().flex_col().child(
-        div()
-            .h(design_rems(38.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(gpui_color(colors.text_secondary))
-                    .child(setting.label()),
-            )
-            .child(
-                color_swatch_button(
-                    ("chart_color_picker", setting as usize),
-                    setting.label(),
-                    value,
-                    open,
-                    theme,
-                )
-                .on_press(move |_, window, cx| {
-                    terminal_for_toggle.update(cx, |terminal, terminal_cx| {
-                        terminal.toggle_chart_color_picker(
-                            setting,
-                            &current_for_toggle,
-                            window,
-                            terminal_cx,
-                        );
-                    });
-                }),
-            ),
+    let mut control = div().relative().flex().child(
+        color_swatch_button(
+            ("chart_color_picker", setting as usize),
+            setting.label(),
+            value,
+            open,
+            theme,
+        )
+        .on_press(move |_, window, cx| {
+            terminal_for_toggle.update(cx, |terminal, terminal_cx| {
+                terminal.toggle_chart_color_picker(
+                    setting,
+                    &current_for_toggle,
+                    window,
+                    terminal_cx,
+                );
+            });
+        }),
     );
     if open && let Some(picker) = open_picker {
         let apply = terminal.clone();
         let apply_menu = menu.clone();
-        row = row.child(gpui::deferred(
+        control = control.child(gpui::deferred(
             ColorPicker::new(
                 ("chart_color_popover", setting as usize),
                 value,
@@ -2391,7 +2378,19 @@ fn settings_color_row(
             }),
         ));
     }
-    row
+    div()
+        .w_full()
+        .h(design_rems(38.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_sm()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(setting.label()),
+        )
+        .child(control)
 }
 
 fn settings_line_controls(

@@ -6,6 +6,7 @@ pub(crate) mod icon;
 pub(crate) mod input;
 pub(crate) mod loader;
 pub(crate) mod menu;
+pub(crate) mod popup_fit;
 pub(crate) mod rem_scale;
 pub(crate) mod scroll;
 pub(crate) mod switch;

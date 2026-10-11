@@ -9,8 +9,9 @@ use num_traits::ToPrimitive;
 
 use super::{
     input::{Input, InputState},
-    menu::{PopupAnimationOrigin, animate_popup_from_origin},
+    menu::{ANCHOR_GAP, PopupAnimationOrigin, animate_popup_from_origin},
     platform_font_weight,
+    popup_fit::fit_to_window,
     theme::{gpui_color, platform_border_width},
 };
 
@@ -97,7 +98,8 @@ impl RenderOnce for ColorPicker {
         let panel = div()
             .id(self.id)
             .absolute()
-            .top(px(34.0))
+            .top_full()
+            .mt(ANCHOR_GAP)
             .right_0()
             .w(px(320.0))
             .flex()
@@ -174,11 +176,11 @@ impl RenderOnce for ColorPicker {
                         &self.theme,
                     )),
             );
-        animate_popup_from_origin(
+        fit_to_window(animate_popup_from_origin(
             panel,
             (animation_id, "enter"),
             PopupAnimationOrigin::TOP_RIGHT,
-        )
+        ))
     }
 }
 

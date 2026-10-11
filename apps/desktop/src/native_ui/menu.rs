@@ -15,6 +15,7 @@ use crate::desktop::assets::UiIcon;
 use super::{
     icon::Icon,
     platform_font_weight,
+    popup_fit::fit_to_window,
     rem_scale::ROOT_REM_PX,
     theme::{gpui_color, platform_border_width},
 };
@@ -557,7 +558,7 @@ pub(crate) enum MenuAlign {
 }
 
 /// Space between a trigger and the menu it opens.
-const ANCHOR_GAP: Pixels = px(4.0);
+pub(crate) const ANCHOR_GAP: Pixels = px(4.0);
 
 /// `Aeris`'s one menu surface: dropdowns, context menus, flyouts and select menus.
 ///
@@ -725,7 +726,7 @@ impl RenderOnce for MenuPanel {
             })
             .children(self.header)
             .child(body);
-        match self.animation {
+        let panel = match self.animation {
             Some(origin) => animate_popup_from_origin(
                 panel,
                 ElementId::NamedChild(Arc::new(self.id), "enter".into()),
@@ -733,6 +734,10 @@ impl RenderOnce for MenuPanel {
             )
             .into_any_element(),
             None => panel.into_any_element(),
+        };
+        match self.placement {
+            MenuPlacement::Anchored { .. } => fit_to_window(panel).into_any_element(),
+            MenuPlacement::At(_) | MenuPlacement::InFlow => panel,
         }
     }
 }
