@@ -860,6 +860,9 @@ impl TerminalApp {
                 LegendSettingsRequest::BigTrades => {
                     surface.open_big_trades_dialog(window, surface_cx);
                 }
+                LegendSettingsRequest::Volume => {
+                    surface.open_volume_dialog(window, surface_cx);
+                }
             });
         }
     }

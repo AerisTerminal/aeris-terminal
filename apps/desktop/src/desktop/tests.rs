@@ -434,7 +434,7 @@ mod timeframe_input {
                 .account_creator
                 .as_ref()
                 .map(|creator| creator.name.clone());
-            let big_trades_dialog = surface.big_trades_dialog.as_ref().map(|dialog| {
+            let big_trades_dialog = surface.big_trades_dialog().map(|dialog| {
                 div()
                     .size_full()
                     .debug_selector(|| "big_trades_dialog".into())
@@ -443,6 +443,12 @@ mod timeframe_input {
                         dialog,
                         &AerisTheme::dark(),
                     ))
+            });
+            let volume_dialog = surface.volume_dialog().map(|dialog| {
+                div()
+                    .size_full()
+                    .debug_selector(|| "volume_dialog".into())
+                    .child(volume_dialog_layer(&self.0, dialog, &AerisTheme::dark()))
             });
             div()
                 .size_full()
@@ -458,6 +464,7 @@ mod timeframe_input {
                 .when(quick, |root| root.child(Input::new(&input)))
                 .when_some(practice_name, |root, input| root.child(Input::new(&input)))
                 .children(big_trades_dialog)
+                .children(volume_dialog)
         }
     }
 
@@ -800,8 +807,7 @@ mod timeframe_input {
         cx.read(|cx| {
             surface
                 .read(cx)
-                .big_trades_dialog
-                .as_ref()
+                .big_trades_dialog()
                 .expect("big trades dialog is open")
                 .minimum_volume
                 .clone()
@@ -1024,7 +1030,7 @@ mod timeframe_input {
         cx.update(|window, cx| {
             surface.update(cx, |surface, cx| {
                 surface.open_big_trades_dialog(window, cx);
-                assert!(surface.big_trades_dialog.is_none());
+                assert!(surface.big_trades_dialog().is_none());
                 assert!(
                     surface.indicator_message.is_some(),
                     "a settings request for a removed indicator is reported"
@@ -1034,7 +1040,7 @@ mod timeframe_input {
                         .add_order_flow_study(workspace_surface::OrderFlowMenuStudy::BigTrades, cx)
                 );
                 surface.open_big_trades_dialog(window, cx);
-                assert!(surface.big_trades_dialog.is_some());
+                assert!(surface.big_trades_dialog().is_some());
                 assert!(surface.indicator_message.is_none());
             });
         });
@@ -1059,7 +1065,7 @@ mod timeframe_input {
         assert!(cx.debug_bounds("big_trades_dialog").is_some());
         let input = big_trades_minimum_input(&surface, cx);
         cx.read(|cx| {
-            let dialog = surface.read(cx).big_trades_dialog.as_ref().expect("dialog");
+            let dialog = surface.read(cx).big_trades_dialog().expect("dialog");
             assert_eq!(
                 dialog
                     .intensity
@@ -1088,8 +1094,7 @@ mod timeframe_input {
         cx.read(|cx| {
             let surface = surface.read(cx);
             let message = surface
-                .big_trades_dialog
-                .as_ref()
+                .big_trades_dialog()
                 .and_then(|dialog| dialog.message.as_deref());
             assert!(
                 message.is_some_and(|message| message.contains("greater than zero")),
@@ -1109,7 +1114,7 @@ mod timeframe_input {
         });
         cx.read(|cx| {
             let surface = surface.read(cx);
-            assert!(surface.big_trades_dialog.is_none());
+            assert!(surface.big_trades_dialog().is_none());
             assert!(surface.chart_persistence_dirty);
         });
         assert!(cx.debug_bounds("big_trades_dialog").is_none());
@@ -1146,7 +1151,7 @@ mod timeframe_input {
         });
         let input = big_trades_minimum_input(&surface, cx);
         cx.read(|cx| {
-            let dialog = surface.read(cx).big_trades_dialog.as_ref().expect("dialog");
+            let dialog = surface.read(cx).big_trades_dialog().expect("dialog");
             assert_eq!(dialog.intensity, None);
             assert_eq!(dialog.size, BigTradesSize::Small);
             assert!(!dialog.show_volume);
@@ -1164,7 +1169,7 @@ mod timeframe_input {
         });
         cx.read(|cx| {
             let defaults = BigTradesSettings::default();
-            let dialog = surface.read(cx).big_trades_dialog.as_ref().expect("dialog");
+            let dialog = surface.read(cx).big_trades_dialog().expect("dialog");
             assert_eq!(
                 dialog
                     .intensity
@@ -1180,6 +1185,186 @@ mod timeframe_input {
         assert_eq!(
             chart_big_trades(&surface, cx),
             Some(fixed),
+            "only Apply changes the chart"
+        );
+    }
+
+    fn chart_volume(
+        surface: &Entity<WorkspaceSurface>,
+        cx: &VisualTestContext,
+    ) -> Option<VolumeSettings> {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .chart
+                .as_ref()
+                .and_then(|chart| chart.read(cx).volume_settings())
+        })
+    }
+
+    fn volume_length_input(
+        surface: &Entity<WorkspaceSurface>,
+        cx: &VisualTestContext,
+    ) -> Entity<InputState> {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .volume_dialog()
+                .expect("volume dialog is open")
+                .average_length
+                .clone()
+        })
+    }
+
+    fn open_volume_dialog_on_a_volume_chart(
+        surface: &Entity<WorkspaceSurface>,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                let chart = cx.new(|_| AerisChartView::new());
+                chart.update(cx, |chart, _| {
+                    chart
+                        .add_indicator(ChartIndicator::Volume)
+                        .expect("volume is available");
+                });
+                surface.chart = Some(chart);
+                surface.open_volume_dialog(window, cx);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn volume_dialog_keeps_an_invalid_draft_open_without_changing_the_chart(
+        cx: &mut TestAppContext,
+    ) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.chart = Some(cx.new(|_| AerisChartView::new()));
+                surface.open_volume_dialog(window, cx);
+                assert!(surface.volume_dialog().is_none());
+                assert!(
+                    surface.indicator_message.is_some(),
+                    "a settings request for a removed indicator is reported"
+                );
+            });
+        });
+        open_volume_dialog_on_a_volume_chart(&surface, cx);
+        assert!(cx.read(|cx| surface.read(cx).indicator_message.is_none()));
+        assert!(cx.debug_bounds("volume_dialog").is_some());
+        let input = volume_length_input(&surface, cx);
+        cx.read(|cx| {
+            let dialog = surface.read(cx).volume_dialog().expect("dialog");
+            assert_eq!(dialog.draft, VolumeSettings::default());
+            assert!(!dialog.draft.average.enabled, "the average starts off");
+            assert_eq!(input.read(cx).value(), "20");
+        });
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.set_volume_dialog_average_enabled(true, cx);
+                surface.toggle_volume_dialog_color_picker(VolumeColorTarget::Up, window, cx);
+                surface.set_volume_dialog_color(VolumeColorTarget::Up, "not a color", cx);
+                let dialog = surface.volume_dialog().expect("dialog");
+                assert!(
+                    dialog
+                        .color_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.error.is_some()),
+                    "an invalid color is reported in its picker"
+                );
+                assert_eq!(dialog.draft.up_color, None);
+                surface.set_volume_dialog_color(VolumeColorTarget::Up, "#123456", cx);
+            });
+            input.update(cx, |input, cx| input.set_value("0", window, cx));
+            surface.update(cx, |surface, cx| {
+                surface.chart_persistence_dirty = false;
+                surface.apply_volume_dialog(cx);
+            });
+        });
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            let dialog = surface.volume_dialog().expect("dialog stays open");
+            assert!(
+                dialog
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("1 to 500")),
+                "an invalid length keeps the dialog open: {:?}",
+                dialog.message
+            );
+            assert!(
+                dialog
+                    .color_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.error.is_none())
+            );
+            assert!(!surface.chart_persistence_dirty);
+        });
+        assert!(
+            cx.debug_bounds("volume_dialog").is_some(),
+            "the enabled average renders its settings and the open picker"
+        );
+        assert_eq!(chart_volume(&surface, cx), Some(VolumeSettings::default()));
+    }
+
+    #[gpui::test]
+    fn volume_dialog_applies_a_valid_draft_and_reset_waits_for_apply(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        open_volume_dialog_on_a_volume_chart(&surface, cx);
+        let input = volume_length_input(&surface, cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.set_volume_dialog_average_enabled(true, cx);
+                surface.set_volume_dialog_average_kind(VolumeAverageKind::Exponential, cx);
+                surface.set_volume_dialog_placement(VolumePlacement::OwnPane, cx);
+                surface.set_volume_dialog_color(VolumeColorTarget::Up, "#123456", cx);
+                surface.set_volume_dialog_color(VolumeColorTarget::Average, "#ff9800", cx);
+                surface.chart_persistence_dirty = false;
+            });
+            input.update(cx, |input, cx| input.set_value(" 50 ", window, cx));
+            surface.update(cx, WorkspaceSurface::apply_volume_dialog);
+        });
+        let applied = VolumeSettings {
+            up_color: Some("#123456".to_string()),
+            down_color: None,
+            average: VolumeAverageSettings {
+                enabled: true,
+                kind: VolumeAverageKind::Exponential,
+                length: 50,
+                color: Some("#FF9800".to_string()),
+            },
+            placement: VolumePlacement::OwnPane,
+        };
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert!(surface.volume_dialog().is_none());
+            assert!(surface.chart_persistence_dirty);
+        });
+        assert!(cx.debug_bounds("volume_dialog").is_none());
+        assert_eq!(chart_volume(&surface, cx), Some(applied.clone()));
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_volume_dialog(window, cx);
+                assert_eq!(
+                    surface.volume_dialog().map(|dialog| &dialog.draft),
+                    Some(&applied)
+                );
+                surface.reset_volume_dialog(window, cx);
+                assert_eq!(
+                    surface.volume_dialog().map(|dialog| &dialog.draft),
+                    Some(&VolumeSettings::default())
+                );
+            });
+        });
+        let input = volume_length_input(&surface, cx);
+        cx.read(|cx| assert_eq!(input.read(cx).value(), "20"));
+        cx.update(|_, cx| surface.update(cx, WorkspaceSurface::close_volume_dialog));
+        assert_eq!(
+            chart_volume(&surface, cx),
+            Some(applied),
             "only Apply changes the chart"
         );
     }

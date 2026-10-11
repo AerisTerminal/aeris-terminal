@@ -2472,7 +2472,7 @@ fn settings_choice_row(
         .child(controls)
 }
 
-fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
+pub(super) fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
     let Some(hex) = value.strip_prefix('#') else {
         return gpui_color(fallback);
     };

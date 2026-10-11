@@ -79,6 +79,8 @@ mod toaster;
 mod trading_hotkeys;
 #[path = "update.rs"]
 mod update;
+#[path = "components/volume_dialog.rs"]
+mod volume_dialog;
 #[path = "components/watchlist_panel.rs"]
 mod watchlist_panel;
 #[path = "components/workspace_layout.rs"]
@@ -103,7 +105,8 @@ use aeris_chart_integration::{
     ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
     ChartWorkingOrder, ChartWorkspaceLayout, DEFAULT_STUDY_LINE_WIDTH, FootprintDisplayMode,
     MAXIMUM_STUDY_LINE_WIDTH, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
-    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, classify_order_flow_sweeps,
+    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind,
+    VolumeAverageSettings, VolumePlacement, VolumeSettings, classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
@@ -117,7 +120,8 @@ use aeris_contracts::{
     WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
     WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
     WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
@@ -150,8 +154,8 @@ use big_trades_dialog::big_trades_dialog_layer;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, FLOATING_PANEL_MOVE_CURSOR,
-    chart_context_menu_layer, chart_settings_menu_layer, clamp_panel_origin_within, overlay_height,
-    price_axis_menu_layer,
+    chart_context_menu_layer, chart_css_color, chart_settings_menu_layer,
+    clamp_panel_origin_within, overlay_height, price_axis_menu_layer,
 };
 #[cfg(test)]
 use chart_context_menus::{
@@ -263,6 +267,7 @@ use terminal_view::{
 use time_sales_panel::TimeSalesPanelState;
 use toaster::Toaster;
 use update::{DesktopUpdater, UpdatePresentation, UpdateState};
+use volume_dialog::volume_dialog_layer;
 use watchlist_panel::{WATCHLIST_ROW_HEIGHT, WatchlistPanelState};
 #[cfg(test)]
 use workspace_layout::workspace_split_ratio;
@@ -812,8 +817,7 @@ struct WorkspaceSurface {
     time_zone_input: Entity<InputState>,
     indicator_message: Option<String>,
     studies: RuntimeStudiesState,
-    study_settings_dialog: Option<StudySettingsDialogState>,
-    big_trades_dialog: Option<BigTradesDialogState>,
+    indicator_settings_dialog: Option<IndicatorSettingsDialog>,
     chrome_overlay: Option<ChromeOverlay>,
     chrome_overlay_phase: ChromeOverlayPhase,
     chrome_overlay_generation: u64,
@@ -1239,6 +1243,55 @@ struct PendingStudyReinitialization {
 enum LegendSettingsRequest {
     Study(StudyInstanceId),
     BigTrades,
+    Volume,
+}
+
+/// The one indicator settings dialog a surface can have open.
+enum IndicatorSettingsDialog {
+    Study(StudySettingsDialogState),
+    BigTrades(BigTradesDialogState),
+    Volume(VolumeDialogState),
+}
+
+/// Draft volume settings; the chart changes only when the draft is applied.
+struct VolumeDialogState {
+    draft: VolumeSettings,
+    average_length: Entity<InputState>,
+    color_picker: Option<VolumeColorPickerState>,
+    message: Option<String>,
+}
+
+/// The volume color a dialog swatch edits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VolumeColorTarget {
+    Up,
+    Down,
+    Average,
+}
+
+impl VolumeColorTarget {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Up => "Up volume",
+            Self::Down => "Down volume",
+            Self::Average => "Average line",
+        }
+    }
+
+    /// The color as drawn for `settings`.
+    fn color(self, settings: &VolumeSettings) -> String {
+        match self {
+            Self::Up => settings.effective_up_color(),
+            Self::Down => settings.effective_down_color(),
+            Self::Average => settings.effective_average_color(),
+        }
+    }
+}
+
+struct VolumeColorPickerState {
+    target: VolumeColorTarget,
+    input: Entity<InputState>,
+    error: Option<String>,
 }
 
 /// Draft big-trades settings; the chart changes only when the draft is applied.
@@ -2835,6 +2888,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                     StudyInstanceId::try_from_u64(study_id).map(LegendSettingsRequest::Study)
                 }
                 ChartSettingsRequest::BigTrades => Some(LegendSettingsRequest::BigTrades),
+                ChartSettingsRequest::Volume => Some(LegendSettingsRequest::Volume),
             });
             if let Some(request) = settings_request {
                 app.pending_settings_request = Some(request);

@@ -21,8 +21,8 @@ use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
     DrawingId, EMA_RIBBON_DEFAULT_PERIODS, FinancialAppearance, FinancialLegendIdentity,
     FinancialLegendRequest, FinancialLegendTone, HostLegendSeries, IndicatorChromeOptions,
-    IndicatorKind, InteractionOptions, PriceScaleMode, PriceScaleTarget, SeriesChromeFlag,
-    TradingIntent, TradingSnapshot,
+    IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleMode, PriceScaleTarget,
+    SeriesChromeFlag, TradingIntent, TradingSnapshot,
 };
 pub use aeris_charts_engine::{BigTradesFilter, BigTradesIntensity, BigTradesSize};
 pub use aeris_charts_engine::{
@@ -164,10 +164,13 @@ pub enum ChartIndicator {
 }
 
 /// Host-portable state for one indicator instance on a chart surface.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChartIndicatorState {
     pub indicator: ChartIndicator,
     pub visible: bool,
+    /// The volume indicator's settings; `None` for every other indicator, and restores the
+    /// volume defaults.
+    pub volume: Option<VolumeSettings>,
 }
 
 impl ChartIndicator {
@@ -249,7 +252,7 @@ impl ChartIndicator {
     #[must_use]
     pub const fn parameters(self) -> &'static str {
         match self {
-            Self::Volume => "Up/down volume",
+            Self::Volume => "Up/down volume · optional moving average",
             Self::Vwap => "Session anchored",
             Self::Sma | Self::Ema | Self::Wma => "Period 20",
             Self::EmaRibbon => "Periods 5 · 10 · 20 · 50 · 200",
@@ -412,12 +415,104 @@ impl Default for BigTradesSettings {
     }
 }
 
+/// Durable volume indicator settings. Aeris Charts computes and draws the columns and their
+/// moving average; a color left at `None` follows the Aeris Charts default.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VolumeSettings {
+    pub up_color: Option<String>,
+    pub down_color: Option<String>,
+    pub average: VolumeAverageSettings,
+    pub placement: VolumePlacement,
+}
+
+/// The moving average drawn over the volume columns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeAverageSettings {
+    pub enabled: bool,
+    pub kind: VolumeAverageKind,
+    pub length: u16,
+    pub color: Option<String>,
+}
+
+impl Default for VolumeAverageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kind: VolumeAverageKind::Simple,
+            length: 20,
+            color: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VolumeAverageKind {
+    #[default]
+    Simple,
+    Exponential,
+}
+
+/// Where the volume columns draw.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VolumePlacement {
+    /// Along the bottom of the price pane, without a scale of their own.
+    #[default]
+    PricePane,
+    /// In a pane of their own below the price pane.
+    OwnPane,
+}
+
+impl VolumeSettings {
+    /// Average lengths the settings accept, in bars.
+    pub const AVERAGE_LENGTHS: std::ops::RangeInclusive<u16> = 1..=500;
+
+    /// The rising-bar column color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
+    #[must_use]
+    pub fn effective_up_color(&self) -> String {
+        self.up_color
+            .clone()
+            .unwrap_or_else(|| css_hex(aeris_charts_engine::DEFAULT_VOLUME_UP_COLOR))
+    }
+
+    /// The falling-bar column color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
+    #[must_use]
+    pub fn effective_down_color(&self) -> String {
+        self.down_color
+            .clone()
+            .unwrap_or_else(|| css_hex(aeris_charts_engine::DEFAULT_VOLUME_DOWN_COLOR))
+    }
+
+    /// The moving-average line color as drawn, as `#RRGGBB` or `#RRGGBBAA`.
+    #[must_use]
+    pub fn effective_average_color(&self) -> String {
+        self.average
+            .color
+            .clone()
+            .unwrap_or_else(|| css_hex(aeris_charts_engine::DEFAULT_LINE_COLOR))
+    }
+}
+
+fn css_hex(color: Color) -> String {
+    if color.a() == u8::MAX {
+        format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
+    } else {
+        format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            color.r(),
+            color.g(),
+            color.b(),
+            color.a()
+        )
+    }
+}
+
 /// A legend settings control the host answers by opening that item's settings dialog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChartSettingsRequest {
     /// One runtime-managed study, by its runtime study identity.
     Study(u64),
     BigTrades,
+    Volume,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -771,6 +866,15 @@ enum LegendItem {
     BigTrades,
 }
 
+/// The volume indicator on a chart: the outputs of the Aeris Charts binding drawing it and the
+/// settings it was built from. The columns output is also the binding identity.
+#[derive(Clone, Debug)]
+struct VolumeIndicator {
+    columns: u32,
+    average: u32,
+    settings: VolumeSettings,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum LegendPresence {
     #[default]
@@ -893,8 +997,10 @@ pub struct AerisChartView {
     displayed_provenance: DisplayedProvenance,
     price_divisor: f64,
     quantity_divisor: f64,
+    /// Product volume weights, always allocated and never drawn: the volume indicator, volume
+    /// profile and data-bound drawings read it.
     volume_series: u32,
-    volume_legend: LegendPresence,
+    volume: Option<VolumeIndicator>,
     /// Engine handle of the visible-range volume profile drawn on the price series.
     volume_profile: Option<aeris_charts_engine::NativePrimitiveId>,
     asset_legend_title: String,
@@ -1008,7 +1114,7 @@ impl AerisChartView {
             price_divisor: 1.0,
             quantity_divisor: 1.0,
             volume_series,
-            volume_legend: LegendPresence::Absent,
+            volume: None,
             asset_legend_title: String::new(),
             asset_symbol: String::new(),
             asset_loading: LegendPresence::Absent,
@@ -1115,7 +1221,7 @@ impl AerisChartView {
             price_divisor: replay_price_divisor(replay),
             quantity_divisor: replay_quantity_divisor(replay),
             volume_series,
-            volume_legend: LegendPresence::Absent,
+            volume: None,
             asset_legend_title: replay_legend_title(replay),
             asset_symbol: replay.instrument().symbol.clone(),
             asset_loading: LegendPresence::Absent,
@@ -1538,10 +1644,9 @@ impl AerisChartView {
                 .is_some_and(|series| series != 0)
     }
 
-    /// Removes the selected drawing or native Aeris Charts indicator/volume series.
+    /// Removes the selected drawing or native Aeris Charts indicator.
     ///
-    /// The price series is product-owned and cannot be deleted. Volume is hidden rather than
-    /// tombstoned so selecting it again from the indicator catalog can reuse its live data.
+    /// The price series is product-owned and cannot be deleted.
     pub fn remove_selected_chart_object(&mut self) -> bool {
         if self.remove_selected_drawing() {
             self.cancel_drawing();
@@ -1558,10 +1663,10 @@ impl AerisChartView {
     }
 
     /// Removes one selected product series. Studies are runtime-owned and become a host request;
-    /// the price series and the footprint presentation are protected; volume is hidden rather than
-    /// tombstoned so the catalog can show it again with its live data.
+    /// the price series, the footprint presentation and the volume weights are protected.
     fn remove_series_selection(&mut self, series: u32) -> bool {
-        if series == 0 || self.footprint_series_id() == Some(series) {
+        if series == 0 || series == self.volume_series || self.footprint_series_id() == Some(series)
+        {
             return false;
         }
         if let Some(study_id) = self.engine.external_study_for_series(series) {
@@ -1571,9 +1676,8 @@ impl AerisChartView {
         if let Some(study) = self.order_flow_study_for_series(series) {
             return self.remove_order_flow_study(study);
         }
-        if series == self.volume_series {
-            self.engine.set_series_visible(series, false);
-            self.volume_legend = LegendPresence::Absent;
+        if self.is_volume_output(series) {
+            self.remove_volume();
         } else if !self.engine.remove_indicator_for_series(series)
             && !self.engine.remove_series(series)
         {
@@ -2025,11 +2129,14 @@ impl AerisChartView {
     /// Market data, viewport state, drawings, indicators, and other semantic state
     /// remain owned and preserved by Aeris Charts.
     pub fn reset_appearance_settings(&mut self) {
+        let volume_visible = self.volume_visible();
         self.engine.reset_style_to_defaults();
         self.hollow_base = None;
         self.sync_hollow_candles();
         apply_product_series_markers(&mut self.engine, self.chart_type);
         self.reapply_study_line_widths();
+        // Volume colors are indicator settings, not chart appearance.
+        self.apply_volume_style(volume_visible);
         self.invalidate_series_layout();
         self.mark_user_state_changed();
     }
@@ -2899,7 +3006,10 @@ fn legend_row_controls(
         .gap_1()
         .child(visibility);
     if row.settings_available
-        && matches!(row.item, LegendItem::Study { .. } | LegendItem::BigTrades)
+        && matches!(
+            row.item,
+            LegendItem::Study { .. } | LegendItem::BigTrades | LegendItem::Volume
+        )
     {
         controls = controls.child(
             legend_control(chart, row.item, LegendControl::Settings, palette)
@@ -2989,6 +3099,7 @@ fn legend_control(
                             Some(ChartSettingsRequest::Study(study_id))
                         }
                         LegendItem::BigTrades => Some(ChartSettingsRequest::BigTrades),
+                        LegendItem::Volume => Some(ChartSettingsRequest::Volume),
                         _ => None,
                     };
                     if let Some(request) = request {

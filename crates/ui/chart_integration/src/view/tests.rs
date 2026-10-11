@@ -1968,6 +1968,7 @@ fn volume_profile_indicator_round_trips_through_state_legend_and_removal() {
     assert!(chart.indicator_states().contains(&ChartIndicatorState {
         indicator: ChartIndicator::VolumeProfile,
         visible: true,
+        volume: None,
     }));
     assert!(
         chart
@@ -1981,6 +1982,7 @@ fn volume_profile_indicator_round_trips_through_state_legend_and_removal() {
     assert!(chart.indicator_states().contains(&ChartIndicatorState {
         indicator: ChartIndicator::VolumeProfile,
         visible: false,
+        volume: None,
     }));
 
     let mut restored = interactive_chart();
@@ -2158,8 +2160,12 @@ fn aeris_charts_theme_switch_is_atomic_for_data_viewport_drawings_and_indicators
     assert_eq!(chart.engine.drawings_json(), drawings);
     assert_eq!(chart.engine.panes.len(), pane_count);
     assert_eq!(chart.engine.series.len(), series_count);
-    assert_eq!(volume, vec![chart.volume_series]);
-    assert!(series_entry(&chart, chart.volume_series).visible);
+    assert_eq!(volume.len(), 2, "volume columns and their average");
+    assert!(series_entry(&chart, volume[0]).visible);
+    assert!(
+        !series_entry(&chart, volume[1]).visible,
+        "the average stays off until enabled"
+    );
     assert_eq!(
         chart
             .engine
@@ -3087,6 +3093,132 @@ fn hidden_volume_keeps_its_legend_until_removed() {
     );
 }
 
+fn custom_volume_settings() -> VolumeSettings {
+    VolumeSettings {
+        up_color: Some("#123456".to_string()),
+        down_color: Some("#65432180".to_string()),
+        average: VolumeAverageSettings {
+            enabled: true,
+            kind: VolumeAverageKind::Exponential,
+            length: 9,
+            color: Some("#FF9800".to_string()),
+        },
+        placement: VolumePlacement::OwnPane,
+    }
+}
+
+fn volume_binding(chart: &AerisChartView) -> aeris_charts_engine::IndicatorBindingInfo {
+    chart
+        .engine
+        .indicator_bindings()
+        .into_iter()
+        .find(|binding| matches!(binding.kind, IndicatorKind::Volume { .. }))
+        .expect("one engine volume binding")
+}
+
+#[test]
+fn volume_settings_rebuild_the_engine_indicator_and_keep_its_legend_state() {
+    let mut chart = interactive_chart();
+    assert!(!chart.set_volume_settings(VolumeSettings::default()));
+    let defaults = chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    assert_eq!(chart.volume_settings(), Some(VolumeSettings::default()));
+    assert!(
+        !series_entry(&chart, defaults[1]).visible,
+        "the average starts off"
+    );
+    assert_eq!(
+        chart.engine.indicator_binding_pane(defaults[0]),
+        Some(IndicatorPane::Source)
+    );
+    let price_panes = chart.engine.panes.len();
+
+    let settings = custom_volume_settings();
+    assert!(chart.set_legend_item_visible(LegendItem::Volume, false));
+    assert!(chart.set_volume_settings(settings.clone()));
+    assert!(
+        !chart.set_volume_settings(settings.clone()),
+        "unchanged settings are a no-op"
+    );
+    let mut invalid = settings.clone();
+    invalid.average.length = 0;
+    assert!(!chart.set_volume_settings(invalid));
+    assert_eq!(chart.volume_settings(), Some(settings.clone()));
+
+    let binding = volume_binding(&chart);
+    assert_eq!(
+        binding.kind,
+        IndicatorKind::Volume {
+            period: 9,
+            exponential: true
+        }
+    );
+    let [columns, average] = binding.outputs[..] else {
+        panic!("volume has columns and an average");
+    };
+    assert_eq!(
+        chart.engine.indicator_binding_pane(columns),
+        Some(IndicatorPane::Separate)
+    );
+    assert_eq!(chart.engine.panes.len(), price_panes + 1);
+    assert!(
+        !series_entry(&chart, columns).visible && !series_entry(&chart, average).visible,
+        "new settings keep the legend's hidden state"
+    );
+    assert_eq!(series_entry(&chart, columns).up_color, settings.up_color);
+    assert_eq!(
+        series_entry(&chart, columns).down_color,
+        settings.down_color
+    );
+    assert_eq!(
+        series_entry(&chart, average).line_color,
+        settings.average.color
+    );
+    assert!(chart.set_legend_item_visible(LegendItem::Volume, true));
+    assert!(series_entry(&chart, columns).visible && series_entry(&chart, average).visible);
+}
+
+#[test]
+fn volume_settings_restore_with_the_chart_and_release_their_own_pane() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    let price_panes = chart.engine.panes.len();
+    let settings = custom_volume_settings();
+    assert!(chart.set_volume_settings(settings.clone()));
+
+    let states = chart.indicator_states();
+    assert_eq!(
+        states,
+        vec![ChartIndicatorState {
+            indicator: ChartIndicator::Volume,
+            visible: true,
+            volume: Some(settings.clone()),
+        }]
+    );
+    let mut restored = interactive_chart();
+    restored
+        .restore_indicator_states(&states)
+        .expect("persisted volume restores");
+    assert_eq!(restored.indicator_states(), states);
+    assert_eq!(restored.engine.panes.len(), price_panes + 1);
+
+    let mut disabled = settings;
+    disabled.average.enabled = false;
+    disabled.placement = VolumePlacement::PricePane;
+    assert!(chart.set_volume_settings(disabled));
+    let outputs = volume_binding(&chart).outputs;
+    assert!(series_entry(&chart, outputs[0]).visible);
+    assert!(!series_entry(&chart, outputs[1]).visible);
+    assert_eq!(
+        chart.engine.panes.len(),
+        price_panes,
+        "its own pane collapses"
+    );
+}
+
 #[test]
 fn native_indicator_hover_selection_and_delete_reach_aeris_charts() {
     let mut chart = interactive_chart();
@@ -3138,12 +3270,12 @@ fn grouped_indicator_delete_removes_every_native_output() {
 }
 
 #[test]
-fn clear_indicators_removes_every_native_output_and_hides_volume() {
+fn clear_indicators_removes_every_native_output_including_volume() {
     let mut chart = interactive_chart();
     assert!(!chart.has_indicators());
     let volume = chart
         .add_indicator(ChartIndicator::Volume)
-        .expect("volume is shown")[0];
+        .expect("volume is shown");
     let macd = chart
         .add_indicator(ChartIndicator::Macd)
         .expect("MACD is created");
@@ -3151,8 +3283,8 @@ fn clear_indicators_removes_every_native_output_and_hides_volume() {
 
     assert!(chart.clear_indicators());
     assert!(!chart.has_indicators());
-    assert!(!series_entry(&chart, volume).visible);
-    for output in macd {
+    assert_eq!(chart.volume_settings(), None);
+    for output in volume.into_iter().chain(macd) {
         assert!(
             chart
                 .engine
@@ -3162,11 +3294,20 @@ fn clear_indicators_removes_every_native_output_and_hides_volume() {
         );
     }
     assert!(!chart.clear_indicators());
+    assert!(
+        chart
+            .engine
+            .data_layer()
+            .series_data(chart.volume_series)
+            .is_some_and(|(times, _)| !times.is_empty()),
+        "the product volume weights stay for the other readers"
+    );
     assert_eq!(
         chart
             .add_indicator(ChartIndicator::Volume)
-            .expect("volume can be shown again"),
-        vec![volume]
+            .expect("volume can be shown again")
+            .len(),
+        2
     );
     assert!(chart.has_indicators());
 }
@@ -3179,20 +3320,26 @@ fn product_series_are_protected_and_volume_remains_reusable() {
     assert!(!chart.remove_selected_chart_object());
     assert!(series_entry(&chart, 0).visible);
 
+    chart.engine.set_selected_series(Some(chart.volume_series));
+    assert!(!chart.remove_selected_chart_object());
+
     let volume = chart
         .add_indicator(ChartIndicator::Volume)
-        .expect("volume is shown")[0];
-    chart.engine.set_selected_series(Some(volume));
+        .expect("volume is shown");
+    chart.engine.set_selected_series(Some(volume[1]));
     assert!(chart.has_deletable_selection());
     assert!(chart.remove_selected_chart_object());
-    assert!(!series_entry(&chart, volume).visible);
-    assert_eq!(
-        chart
-            .add_indicator(ChartIndicator::Volume)
-            .expect("volume can be shown again"),
-        vec![volume]
+    assert_eq!(chart.volume_settings(), None);
+    assert!(
+        volume
+            .iter()
+            .all(|&output| chart.engine.indicator_info(output).is_none()),
+        "removing either output removes the whole volume indicator"
     );
-    assert!(series_entry(&chart, volume).visible);
+    let again = chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume can be shown again");
+    assert!(series_entry(&chart, again[0]).visible);
 }
 
 #[test]
@@ -3224,13 +3371,17 @@ fn replay_volume_drives_histogram_and_vwap_with_real_weights() {
         PriceScaleTarget::Overlay
     );
 
-    assert_eq!(
-        chart
-            .add_indicator(ChartIndicator::Volume)
-            .expect("volume histogram"),
-        vec![chart.volume_series]
-    );
-    assert!(series_entry(&chart, chart.volume_series).visible);
+    let volume = chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume histogram");
+    assert!(!series_entry(&chart, chart.volume_series).visible);
+    let (_, columns) = chart
+        .engine
+        .data_layer()
+        .series_data(volume[0])
+        .expect("volume columns");
+    assert_eq!(columns[3], expected_volume);
+    assert!(series_entry(&chart, volume[0]).visible);
 
     let vwap = chart
         .add_indicator(ChartIndicator::Vwap)
@@ -3258,7 +3409,7 @@ fn resetting_chart_settings_preserves_mixed_volume_column_colors() {
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
     let mut chart = AerisChartView::with_replay(&replay);
-    chart
+    let volume = chart
         .add_indicator(ChartIndicator::Volume)
         .expect("volume histogram is available");
     chart
@@ -3283,7 +3434,7 @@ fn resetting_chart_settings_preserves_mixed_volume_column_colors() {
     );
 
     chart.reset_appearance_settings();
-    assert!(series_entry(&chart, chart.volume_series).histogram_updown);
+    assert!(series_entry(&chart, volume[0]).histogram_updown);
     assert_eq!(
         volume_colors(&mut chart),
         before,

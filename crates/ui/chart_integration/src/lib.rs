@@ -46,8 +46,8 @@ pub use view::{
     ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind,
     ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType,
     DrawingsLockSummary, FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings,
-    OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState,
-    classify_order_flow_sweeps,
+    OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind,
+    VolumeAverageSettings, VolumePlacement, VolumeSettings, classify_order_flow_sweeps,
 };
 pub use view::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};
 pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

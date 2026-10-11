@@ -293,14 +293,21 @@ pub(super) fn workspace_pane_element(
         toasts,
         theme,
     });
-    let study_settings_dialog = surface
-        .study_settings_dialog
-        .as_ref()
-        .map(|dialog| study_settings_dialog_layer(&pane.surface, dialog, theme, cx));
-    let big_trades_dialog = surface
-        .big_trades_dialog
-        .as_ref()
-        .map(|dialog| big_trades_dialog_layer(&pane.surface, dialog, theme));
+    let indicator_settings_dialog =
+        surface
+            .indicator_settings_dialog
+            .as_ref()
+            .map(|dialog| match dialog {
+                IndicatorSettingsDialog::Study(dialog) => {
+                    study_settings_dialog_layer(&pane.surface, dialog, theme, cx)
+                }
+                IndicatorSettingsDialog::BigTrades(dialog) => {
+                    big_trades_dialog_layer(&pane.surface, dialog, theme)
+                }
+                IndicatorSettingsDialog::Volume(dialog) => {
+                    volume_dialog_layer(&pane.surface, dialog, theme)
+                }
+            });
     let workspace_id = workspace.id;
     let select_terminal = terminal.clone();
     let context_terminal = terminal.clone();
@@ -366,8 +373,7 @@ pub(super) fn workspace_pane_element(
             cx.stop_propagation();
         })
         .child(content)
-        .children(study_settings_dialog)
-        .children(big_trades_dialog)
+        .children(indicator_settings_dialog)
         .into_any_element()
 }
 

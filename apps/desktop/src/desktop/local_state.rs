@@ -686,7 +686,8 @@ mod tests {
         WorkspaceChartState, WorkspaceChartStudyState, WorkspaceInstrumentDrawingsState,
         WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState, WorkspacePriceAxisState,
         WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-        WorkspaceStudyMarketStream, WorkspaceStudySettingState, workspace_study_setting_state,
+        WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceVolumeSettingsState,
+        workspace_study_setting_state,
     };
 
     fn temporary_workspace_path() -> PathBuf {
@@ -788,10 +789,26 @@ mod tests {
         WorkspaceChartState {
             chart_type: "bars".to_string(),
             chart_state_json: r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":0.0,"price":42000.0}]}]"#.to_string(),
-            indicators: vec![WorkspaceChartIndicatorState {
-                kind: "rsi".to_string(),
-                visible: true,
-            }],
+            indicators: vec![
+                WorkspaceChartIndicatorState {
+                    kind: "rsi".to_string(),
+                    visible: true,
+                    volume: None,
+                },
+                WorkspaceChartIndicatorState {
+                    kind: "volume".to_string(),
+                    visible: true,
+                    volume: Some(WorkspaceVolumeSettingsState {
+                        up_color: "#26A69A80".to_string(),
+                        down_color: String::new(),
+                        average_enabled: true,
+                        average_kind: 1,
+                        average_length: 50,
+                        average_color: "#FF9800".to_string(),
+                        placement: 1,
+                    }),
+                },
+            ],
             price_axis: Some(WorkspacePriceAxisState {
                 flags: 1 | 2 | 64,
                 mode: 0,

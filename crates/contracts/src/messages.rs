@@ -598,6 +598,30 @@ pub struct WorkspaceChartIndicatorState {
     pub kind: String,
     #[prost(bool, tag = "2")]
     pub visible: bool,
+    /// Present only for the volume indicator; absent restores its defaults.
+    #[prost(message, optional, tag = "3")]
+    pub volume: Option<WorkspaceVolumeSettingsState>,
+}
+
+/// Durable volume indicator presentation. Empty colors follow the Aeris Charts defaults.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceVolumeSettingsState {
+    #[prost(string, tag = "1")]
+    pub up_color: String,
+    #[prost(string, tag = "2")]
+    pub down_color: String,
+    #[prost(bool, tag = "3")]
+    pub average_enabled: bool,
+    /// 0 simple, 1 exponential moving average.
+    #[prost(uint32, tag = "4")]
+    pub average_kind: u32,
+    #[prost(uint32, tag = "5")]
+    pub average_length: u32,
+    #[prost(string, tag = "6")]
+    pub average_color: String,
+    /// 0 over the price pane, 1 in a pane of its own.
+    #[prost(uint32, tag = "7")]
+    pub placement: u32,
 }
 
 /// Durable product price-axis customization for one chart pane.

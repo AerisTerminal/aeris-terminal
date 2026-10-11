@@ -27,6 +27,6 @@ pub use messages::{
     WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
     WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
     WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 pub use provider::{ProviderCatalogSymbol, ProviderConnectionKind, ProviderPresentationDescriptor};

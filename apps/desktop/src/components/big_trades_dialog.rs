@@ -13,7 +13,7 @@ const SIZE_CHOICES: [(&str, BigTradesSize); 3] = [
     ("Large", BigTradesSize::Large),
 ];
 
-fn setting_row(
+pub(super) fn setting_row(
     label: &'static str,
     description: &'static str,
     control: AnyElement,
@@ -51,7 +51,7 @@ fn setting_row(
         .into_any_element()
 }
 
-fn choice_tab(
+pub(super) fn choice_tab(
     id: (&'static str, usize),
     label: &'static str,
     selected: bool,

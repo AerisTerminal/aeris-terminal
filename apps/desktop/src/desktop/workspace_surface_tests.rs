@@ -792,42 +792,52 @@ fn persisted_runtime_managed_indicators_are_restored_by_the_runtime_owner_only()
             WorkspaceChartIndicatorState {
                 kind: "sma".to_string(),
                 visible: false,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "ema".to_string(),
                 visible: true,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "ema_ribbon".to_string(),
                 visible: false,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "wma".to_string(),
                 visible: true,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "bollinger".to_string(),
                 visible: false,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "vwap".to_string(),
                 visible: true,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "atr".to_string(),
                 visible: false,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "rsi".to_string(),
                 visible: true,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "macd".to_string(),
                 visible: false,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "stochastic".to_string(),
                 visible: true,
+                volume: None,
             },
         ],
         ..WorkspaceChartState::default()
@@ -884,18 +894,22 @@ fn durable_study_graph_merges_missing_legacy_runtime_indicators_without_duplicat
             WorkspaceChartIndicatorState {
                 kind: "wma".to_string(),
                 visible: false,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "rsi".to_string(),
                 visible: true,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "rsi".to_string(),
                 visible: false,
+                volume: None,
             },
             WorkspaceChartIndicatorState {
                 kind: "bollinger".to_string(),
                 visible: false,
+                volume: None,
             },
         ],
         ..WorkspaceChartState::default()
@@ -941,46 +955,57 @@ fn runtime_managed_indicators_are_not_written_to_the_legacy_indicator_field() {
         ChartIndicatorState {
             indicator: ChartIndicator::Sma,
             visible: true,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Ema,
             visible: true,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::EmaRibbon,
             visible: true,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Wma,
             visible: false,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Bollinger,
             visible: true,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Vwap,
             visible: true,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Atr,
             visible: true,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Rsi,
             visible: false,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Macd,
             visible: true,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Stochastic,
             visible: false,
+            volume: None,
         },
         ChartIndicatorState {
             indicator: ChartIndicator::Volume,
             visible: true,
+            volume: None,
         },
     ]);
 
@@ -989,8 +1014,55 @@ fn runtime_managed_indicators_are_not_written_to_the_legacy_indicator_field() {
         vec![WorkspaceChartIndicatorState {
             kind: "volume".to_string(),
             visible: true,
+            volume: None,
         }]
     );
+}
+
+#[test]
+fn volume_settings_round_trip_through_the_layout_and_reject_damaged_values() {
+    let settings = VolumeSettings {
+        up_color: Some("#26A69A80".to_string()),
+        down_color: None,
+        average: VolumeAverageSettings {
+            enabled: true,
+            kind: VolumeAverageKind::Exponential,
+            length: 50,
+            color: Some("#FF9800".to_string()),
+        },
+        placement: VolumePlacement::OwnPane,
+    };
+    let persisted = persisted_volume_settings(&settings);
+    assert_eq!(
+        persisted.down_color, "",
+        "a default color stays theme-neutral"
+    );
+    assert_eq!(restored_volume_settings(&persisted), Some(settings));
+    assert_eq!(
+        restored_volume_settings(&persisted_volume_settings(&VolumeSettings::default())),
+        Some(VolumeSettings::default())
+    );
+
+    for damaged in [
+        WorkspaceVolumeSettingsState {
+            average_length: 0,
+            ..persisted.clone()
+        },
+        WorkspaceVolumeSettingsState {
+            average_length: 501,
+            ..persisted.clone()
+        },
+        WorkspaceVolumeSettingsState {
+            average_kind: 2,
+            ..persisted.clone()
+        },
+        WorkspaceVolumeSettingsState {
+            placement: 2,
+            ..persisted
+        },
+    ] {
+        assert_eq!(restored_volume_settings(&damaged), None);
+    }
 }
 
 #[test]

@@ -2,12 +2,12 @@
 
 use super::*;
 
-const VOLUME_LEGEND_IDENTITY: u64 = 1;
 const CVD_LEGEND_IDENTITY: u64 = 2;
 const DELTA_LEGEND_IDENTITY: u64 = 3;
 
 impl AerisChartView {
-    /// Adds an indicator with the defaults shown by the legacy native catalog.
+    /// Adds an indicator with the defaults shown by the legacy native catalog. Volume already on
+    /// the chart is shown again with its settings.
     ///
     /// # Errors
     ///
@@ -21,9 +21,9 @@ impl AerisChartView {
             return Err(ChartIndicatorError::MarketDataUnavailable);
         }
         let ids = if indicator == ChartIndicator::Volume {
-            self.volume_legend = LegendPresence::Present;
-            self.engine.set_series_visible(self.volume_series, true);
-            vec![self.volume_series]
+            let settings = self.volume_settings().unwrap_or_default();
+            self.install_volume(settings, true)
+                .ok_or(ChartIndicatorError::CreationRejected(indicator))?
         } else if indicator == ChartIndicator::VolumeProfile {
             if self.volume_profile.is_some() {
                 return Err(ChartIndicatorError::CreationRejected(indicator));
@@ -64,17 +64,18 @@ impl AerisChartView {
     #[must_use]
     pub fn indicator_states(&self) -> Vec<ChartIndicatorState> {
         let mut states = Vec::new();
-        if self.volume_legend.is_present() {
-            let visible = self.engine.series_visible(self.volume_series) == Some(true);
+        if let Some(volume) = &self.volume {
             states.push(ChartIndicatorState {
                 indicator: ChartIndicator::Volume,
-                visible,
+                visible: self.volume_visible(),
+                volume: Some(volume.settings.clone()),
             });
         }
         if let Some(visible) = self.volume_profile_visible() {
             states.push(ChartIndicatorState {
                 indicator: ChartIndicator::VolumeProfile,
                 visible,
+                volume: None,
             });
         }
         for binding in self.engine.indicator_bindings() {
@@ -82,7 +83,11 @@ impl AerisChartView {
                 continue;
             };
             let visible = binding.styles.iter().any(|style| style.visible);
-            states.push(ChartIndicatorState { indicator, visible });
+            states.push(ChartIndicatorState {
+                indicator,
+                visible,
+                volume: None,
+            });
         }
         states
     }
@@ -96,13 +101,15 @@ impl AerisChartView {
         states: &[ChartIndicatorState],
     ) -> Result<(), ChartIndicatorError> {
         for state in states {
+            if state.indicator == ChartIndicator::Volume {
+                self.restore_volume(state)?;
+                continue;
+            }
             let ids = self.add_indicator(state.indicator)?;
             if state.visible {
                 continue;
             }
-            let item = if state.indicator == ChartIndicator::Volume {
-                LegendItem::Volume
-            } else if state.indicator == ChartIndicator::VolumeProfile {
+            let item = if state.indicator == ChartIndicator::VolumeProfile {
                 LegendItem::VolumeProfile
             } else {
                 let Some(binding_id) = ids.first().copied() else {
@@ -114,10 +121,10 @@ impl AerisChartView {
         }
         Ok(())
     }
-    /// Returns whether any native indicator or the reusable volume series is currently shown.
+    /// Returns whether any indicator is on the chart.
     #[must_use]
     pub fn has_indicators(&self) -> bool {
-        self.volume_legend.is_present()
+        self.volume.is_some()
             || self.volume_profile.is_some()
             || self.engine.has_indicator_bindings()
             || self.engine.has_external_studies()
@@ -126,17 +133,11 @@ impl AerisChartView {
                 .any(|study| self.has_order_flow_study(study))
             || self.order_flow_settings.big_trades.is_some()
     }
-    /// Removes every native indicator and hides the reusable volume series.
-    ///
-    /// The product-owned price series is left in place. Volume stays allocated so the catalog can
-    /// show it again without rebuilding live weights.
+    /// Removes every indicator. The product-owned price and volume series stay in place.
     pub fn clear_indicators(&mut self) -> bool {
         let mut cleared = self.engine.clear_indicator_bindings();
-        if self.volume_legend.is_present() {
-            self.engine.set_series_visible(self.volume_series, false);
-            self.volume_legend = LegendPresence::Absent;
-            cleared = true;
-        }
+        // Clearing the bindings above already removed the volume outputs.
+        cleared |= self.volume.take().is_some();
         cleared |= self.remove_volume_profile();
         for study in [OrderFlowStudy::CumulativeDelta, OrderFlowStudy::Delta] {
             if self.has_order_flow_study(study) {
@@ -161,19 +162,6 @@ impl AerisChartView {
 
     /// Legend rows reading out `logical_index`, or the latest bar when `None`.
     pub(super) fn legend_rows_at(&self, logical_index: Option<i64>) -> Vec<LegendRow> {
-        let leading = self
-            .volume_legend
-            .is_present()
-            .then_some(HostLegendSeries {
-                identity: VOLUME_LEGEND_IDENTITY,
-                series_id: self.volume_series,
-                title: "Volume",
-                settings_available: false,
-                // Volume values carry their own column hue; the price bars' colors never apply.
-                tone_from_primary: false,
-            })
-            .into_iter()
-            .collect::<Vec<_>>();
         let trailing = self
             .order_flow_state
             .iter()
@@ -202,11 +190,11 @@ impl AerisChartView {
                 show_primary_ohlc: self.chart_type.shows_ohlc_legend(),
                 // The footprint carries the bar values over its whitespace price series.
                 primary_values_series: self.footprint_series_id(),
-                leading_series: &leading,
+                leading_series: &[],
                 trailing_series: &trailing,
             })
             .into_iter()
-            .filter_map(legend_row)
+            .filter_map(|row| legend_row(row, self.volume.as_ref().map(|volume| volume.columns)))
             .collect::<Vec<_>>();
         if self.chart_type == ChartType::Footprint
             && !self.has_footprint_bars()
@@ -261,8 +249,15 @@ impl AerisChartView {
             LegendItem::Asset => std::iter::once(0)
                 .chain(self.footprint_series_id())
                 .collect(),
-            LegendItem::Volume if self.volume_legend.is_present() => vec![self.volume_series],
-            LegendItem::Volume => return false,
+            LegendItem::Volume => {
+                let changed = self.volume.is_some() && self.volume_visible() != visible;
+                if changed {
+                    self.apply_volume_style(visible);
+                    self.invalidate_series_layout();
+                    self.mark_user_state_changed();
+                }
+                return changed;
+            }
             LegendItem::VolumeProfile => {
                 let Some(id) = self.volume_profile else {
                     return false;
@@ -315,15 +310,11 @@ impl AerisChartView {
     }
     pub(super) fn remove_legend_indicator(&mut self, item: LegendItem) -> bool {
         let removed = match item {
-            LegendItem::Volume if self.volume_legend.is_present() => {
-                self.volume_legend = LegendPresence::Absent;
-                self.engine.set_series_visible(self.volume_series, false);
-                true
-            }
+            LegendItem::Volume => self.remove_volume(),
             LegendItem::OrderFlow(study) => return self.remove_order_flow_study(study),
             LegendItem::BigTrades => return self.remove_big_trades(),
             LegendItem::VolumeProfile => self.remove_volume_profile(),
-            LegendItem::Asset | LegendItem::Volume | LegendItem::Study { .. } => false,
+            LegendItem::Asset | LegendItem::Study { .. } => false,
             LegendItem::Indicator(binding) => self.engine.remove_indicator_binding(binding),
         };
         if removed {
@@ -332,20 +323,131 @@ impl AerisChartView {
         }
         removed
     }
-    fn apply_volume_chrome(&mut self) {
-        if !self.volume_legend.is_present() {
-            return;
-        }
-        let names = self.indicator_name_labels.visible();
-        let values = self.indicator_value_labels.visible();
-        let price_lines = self.indicator_price_lines.visible();
-        let json = format!(
-            r#"{{"last_value_visible":{values},"title_visible":{names},"price_line_visible":{price_lines}}}"#
-        );
-        let _ = self
-            .engine
-            .series_apply_options_json(self.volume_series, &json);
+    /// The volume indicator's settings while it is on the chart.
+    #[must_use]
+    pub fn volume_settings(&self) -> Option<VolumeSettings> {
+        self.volume.as_ref().map(|volume| volume.settings.clone())
     }
+
+    /// Rebuilds the volume indicator from new settings, keeping whether it is shown. Returns
+    /// whether the chart changed: `false` when volume is not on the chart, the settings are
+    /// unchanged, or Aeris Charts rejects them.
+    pub fn set_volume_settings(&mut self, settings: VolumeSettings) -> bool {
+        let Some(volume) = &self.volume else {
+            return false;
+        };
+        if volume.settings == settings {
+            return false;
+        }
+        let visible = self.volume_visible();
+        if self.install_volume(settings, visible).is_none() {
+            return false;
+        }
+        self.apply_indicator_chrome_options();
+        self.invalidate_series_layout();
+        self.mark_user_state_changed();
+        true
+    }
+
+    fn restore_volume(&mut self, state: &ChartIndicatorState) -> Result<(), ChartIndicatorError> {
+        if !self.has_market_data() {
+            return Err(ChartIndicatorError::MarketDataUnavailable);
+        }
+        let settings = state.volume.clone().unwrap_or_default();
+        if self.install_volume(settings, state.visible).is_none() {
+            return Err(ChartIndicatorError::CreationRejected(
+                ChartIndicator::Volume,
+            ));
+        }
+        self.apply_indicator_chrome_options();
+        self.invalidate_series_layout();
+        self.mark_user_state_changed();
+        Ok(())
+    }
+
+    /// Replaces the volume indicator with one Aeris Charts builds from `settings` and returns its
+    /// outputs. The engine computes, places and draws the columns and their average; the host
+    /// supplies only the product volume weights and the durable settings.
+    fn install_volume(&mut self, settings: VolumeSettings, visible: bool) -> Option<Vec<u32>> {
+        if !VolumeSettings::AVERAGE_LENGTHS.contains(&settings.average.length) {
+            return None;
+        }
+        if let Some(previous) = self.volume.take() {
+            let _ = self.engine.remove_indicator_binding(previous.columns);
+        }
+        // The weights are both the source and the volume input, so the columns follow traded
+        // volume even where a footprint leaves the price row as whitespace.
+        let outputs = self.engine.add_indicator_kind(
+            self.volume_series,
+            IndicatorKind::Volume {
+                period: usize::from(settings.average.length),
+                exponential: settings.average.kind == VolumeAverageKind::Exponential,
+            },
+            Some(self.volume_series),
+        );
+        let [columns, average] = outputs[..] else {
+            if let Some(&binding) = outputs.first() {
+                let _ = self.engine.remove_indicator_binding(binding);
+            }
+            return None;
+        };
+        let pane = match settings.placement {
+            VolumePlacement::PricePane => IndicatorPane::Source,
+            VolumePlacement::OwnPane => IndicatorPane::Separate,
+        };
+        let _ = self.engine.set_indicator_binding_pane(columns, pane);
+        self.volume = Some(VolumeIndicator {
+            columns,
+            average,
+            settings,
+        });
+        self.apply_volume_style(visible);
+        Some(outputs)
+    }
+
+    /// Applies the durable colors and visibility to the volume outputs; the average shows only
+    /// while enabled.
+    pub(super) fn apply_volume_style(&mut self, visible: bool) {
+        let Some(VolumeIndicator {
+            columns,
+            average,
+            settings,
+        }) = self.volume.clone()
+        else {
+            return;
+        };
+        if let Some(mut style) = self.engine.indicator_info(columns).map(|info| info.style) {
+            style.visible = visible;
+            style.up_color = settings.up_color;
+            style.down_color = settings.down_color;
+            let _ = self.engine.set_indicator_output_style(columns, style);
+        }
+        if let Some(mut style) = self.engine.indicator_info(average).map(|info| info.style) {
+            style.visible = visible && settings.average.enabled;
+            style.line_color = settings.average.color;
+            let _ = self.engine.set_indicator_output_style(average, style);
+        }
+    }
+
+    pub(super) fn volume_visible(&self) -> bool {
+        self.volume
+            .as_ref()
+            .is_some_and(|volume| self.engine.series_visible(volume.columns) == Some(true))
+    }
+
+    pub(super) fn is_volume_output(&self, series: u32) -> bool {
+        self.volume
+            .as_ref()
+            .is_some_and(|volume| series == volume.columns || series == volume.average)
+    }
+
+    /// Removes the volume indicator; the product volume weights stay for the other readers.
+    pub(super) fn remove_volume(&mut self) -> bool {
+        self.volume
+            .take()
+            .is_some_and(|volume| self.engine.remove_indicator_binding(volume.columns))
+    }
+
     pub(super) fn apply_indicator_chrome_options(&mut self) {
         let options = IndicatorChromeOptions {
             name_labels_visible: self.indicator_name_labels.visible(),
@@ -353,9 +455,6 @@ impl AerisChartView {
             price_lines_visible: self.indicator_price_lines.visible(),
         };
         let _ = self.engine.set_indicator_chrome_options(options);
-        // Volume is a Terminal product series; native indicators, external studies, and order-flow
-        // studies receive this policy from the engine-owned transaction above.
-        self.apply_volume_chrome();
     }
     /// Host-owned indicator name-chip chrome for every native indicator on this chart.
     #[must_use]
@@ -437,10 +536,17 @@ impl AerisChartView {
     }
 }
 
-fn legend_row(row: aeris_charts_engine::FinancialLegendRow) -> Option<LegendRow> {
+/// Maps one engine legend row to its host control. The volume binding is a native indicator the
+/// host gives its own settings dialog.
+fn legend_row(
+    row: aeris_charts_engine::FinancialLegendRow,
+    volume_binding: Option<u32>,
+) -> Option<LegendRow> {
     let item = match row.identity {
         FinancialLegendIdentity::Primary => LegendItem::Asset,
-        FinancialLegendIdentity::Host(VOLUME_LEGEND_IDENTITY) => LegendItem::Volume,
+        FinancialLegendIdentity::Indicator(binding) if Some(binding) == volume_binding => {
+            LegendItem::Volume
+        }
         FinancialLegendIdentity::Host(CVD_LEGEND_IDENTITY) => {
             LegendItem::OrderFlow(OrderFlowStudy::CumulativeDelta)
         }
@@ -472,7 +578,7 @@ fn legend_row(row: aeris_charts_engine::FinancialLegendRow) -> Option<LegendRow>
             FinancialLegendTone::Bearish => LegendValueTone::Bearish,
         },
         visible: row.visible,
-        settings_available: row.settings_available,
+        settings_available: row.settings_available || item == LegendItem::Volume,
     })
 }
 

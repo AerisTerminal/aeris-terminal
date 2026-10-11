@@ -141,8 +141,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         time_zone_input: init.time_zone_input,
         indicator_message: None,
         studies: init.studies,
-        study_settings_dialog: None,
-        big_trades_dialog: None,
+        indicator_settings_dialog: None,
         chrome_overlay: None,
         chrome_overlay_phase: ChromeOverlayPhase::Opening,
         chrome_overlay_generation: 0,
@@ -567,6 +566,20 @@ fn parse_big_trades_minimum_volume(text: &str) -> Result<f64, String> {
         .ok_or_else(|| "Minimum volume must be a number greater than zero".to_string())
 }
 
+fn parse_volume_average_length(text: &str) -> Result<u16, String> {
+    text.trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|length| VolumeSettings::AVERAGE_LENGTHS.contains(length))
+        .ok_or_else(|| {
+            format!(
+                "Length must be a whole number from {} to {}",
+                VolumeSettings::AVERAGE_LENGTHS.start(),
+                VolumeSettings::AVERAGE_LENGTHS.end()
+            )
+        })
+}
+
 /// Editable text for an order volume. Sums of fractional prints carry binary rounding noise, so
 /// the text is rounded unless that would erase a tiny but valid volume.
 fn big_trades_volume_text(volume: f64) -> String {
@@ -711,8 +724,57 @@ fn persisted_legacy_indicator_states(
         .map(|state| WorkspaceChartIndicatorState {
             kind: state.indicator.identifier().to_string(),
             visible: state.visible,
+            volume: state.volume.as_ref().map(persisted_volume_settings),
         })
         .collect()
+}
+
+fn persisted_volume_settings(settings: &VolumeSettings) -> WorkspaceVolumeSettingsState {
+    WorkspaceVolumeSettingsState {
+        up_color: settings.up_color.clone().unwrap_or_default(),
+        down_color: settings.down_color.clone().unwrap_or_default(),
+        average_enabled: settings.average.enabled,
+        average_kind: match settings.average.kind {
+            VolumeAverageKind::Simple => 0,
+            VolumeAverageKind::Exponential => 1,
+        },
+        average_length: u32::from(settings.average.length),
+        average_color: settings.average.color.clone().unwrap_or_default(),
+        placement: match settings.placement {
+            VolumePlacement::PricePane => 0,
+            VolumePlacement::OwnPane => 1,
+        },
+    }
+}
+
+/// An empty color follows the Aeris Charts default. A value outside the accepted range is
+/// rejected so a damaged layout restores the volume defaults instead of a partial guess.
+fn restored_volume_settings(state: &WorkspaceVolumeSettingsState) -> Option<VolumeSettings> {
+    let color = |value: &str| (!value.is_empty()).then(|| value.to_string());
+    let kind = match state.average_kind {
+        0 => VolumeAverageKind::Simple,
+        1 => VolumeAverageKind::Exponential,
+        _ => return None,
+    };
+    let placement = match state.placement {
+        0 => VolumePlacement::PricePane,
+        1 => VolumePlacement::OwnPane,
+        _ => return None,
+    };
+    let length = u16::try_from(state.average_length)
+        .ok()
+        .filter(|length| VolumeSettings::AVERAGE_LENGTHS.contains(length))?;
+    Some(VolumeSettings {
+        up_color: color(&state.up_color),
+        down_color: color(&state.down_color),
+        average: VolumeAverageSettings {
+            enabled: state.average_enabled,
+            kind,
+            length,
+            color: color(&state.average_color),
+        },
+        placement,
+    })
 }
 
 fn runtime_study_count(studies: &RuntimeStudiesState) -> usize {
@@ -1585,6 +1647,11 @@ impl WorkspaceSurface {
                 ChartIndicator::from_identifier(&item.kind).map(|indicator| ChartIndicatorState {
                     indicator,
                     visible: item.visible,
+                    volume: item
+                        .volume
+                        .as_ref()
+                        .filter(|_| indicator == ChartIndicator::Volume)
+                        .and_then(restored_volume_settings),
                 })
             })
             .filter(|state| !runtime_managed_indicator(state.indicator))
@@ -3219,7 +3286,7 @@ impl WorkspaceSurface {
             } => self.apply_study_registration_failed(request_sequence, message, cx),
             MarketWorkerMessage::StudyReinitializationFailed { study_id, message } => {
                 self.studies.cancel_reinitialization(study_id);
-                if let Some(dialog) = &mut self.study_settings_dialog
+                if let Some(dialog) = self.study_settings_dialog_mut()
                     && dialog.study_id == study_id
                 {
                     dialog.message = Some(message.clone());
@@ -3555,11 +3622,10 @@ impl WorkspaceSurface {
             self.chart_persistence_dirty = true;
         }
         if self
-            .study_settings_dialog
-            .as_ref()
+            .study_settings_dialog()
             .is_some_and(|dialog| dialog.study_id == study_id)
         {
-            self.study_settings_dialog = None;
+            self.indicator_settings_dialog = None;
         }
         self.indicator_message = None;
         cx.notify();
@@ -3648,11 +3714,10 @@ impl WorkspaceSurface {
             self.chart_persistence_dirty = true;
         }
         if self
-            .study_settings_dialog
-            .as_ref()
+            .study_settings_dialog()
             .is_some_and(|dialog| removed.study_ids.contains(&dialog.study_id))
         {
-            self.study_settings_dialog = None;
+            self.indicator_settings_dialog = None;
         }
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
@@ -5309,17 +5374,28 @@ impl WorkspaceSurface {
             }
             draft_values.insert(spec.identifier.clone(), value);
         }
-        self.study_settings_dialog = Some(StudySettingsDialogState {
-            study_id,
-            title: study_display_name(&active.persisted.identifier),
-            specs: registration.definition.settings,
-            draft_values,
-            line_width: persisted_study_line_width(&active.persisted),
-            inputs,
-            _subscriptions: subscriptions,
-            message: None,
-        });
-        self.big_trades_dialog = None;
+        self.open_indicator_settings_dialog(
+            IndicatorSettingsDialog::Study(StudySettingsDialogState {
+                study_id,
+                title: study_display_name(&active.persisted.identifier),
+                specs: registration.definition.settings,
+                draft_values,
+                line_width: persisted_study_line_width(&active.persisted),
+                inputs,
+                _subscriptions: subscriptions,
+                message: None,
+            }),
+            cx,
+        );
+    }
+
+    /// Replaces any open indicator settings dialog and dismisses the chrome menus.
+    fn open_indicator_settings_dialog(
+        &mut self,
+        dialog: IndicatorSettingsDialog,
+        cx: &mut Context<Self>,
+    ) {
+        self.indicator_settings_dialog = Some(dialog);
         self.indicator_message = None;
         self.chrome_overlay = None;
         self.timeframe_menu_flyout = None;
@@ -5327,8 +5403,50 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
+    pub(super) const fn study_settings_dialog(&self) -> Option<&StudySettingsDialogState> {
+        match &self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::Study(dialog)) => Some(dialog),
+            _ => None,
+        }
+    }
+
+    const fn study_settings_dialog_mut(&mut self) -> Option<&mut StudySettingsDialogState> {
+        match &mut self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::Study(dialog)) => Some(dialog),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn big_trades_dialog(&self) -> Option<&BigTradesDialogState> {
+        match &self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::BigTrades(dialog)) => Some(dialog),
+            _ => None,
+        }
+    }
+
+    const fn big_trades_dialog_mut(&mut self) -> Option<&mut BigTradesDialogState> {
+        match &mut self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::BigTrades(dialog)) => Some(dialog),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn volume_dialog(&self) -> Option<&VolumeDialogState> {
+        match &self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::Volume(dialog)) => Some(dialog),
+            _ => None,
+        }
+    }
+
+    const fn volume_dialog_mut(&mut self) -> Option<&mut VolumeDialogState> {
+        match &mut self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::Volume(dialog)) => Some(dialog),
+            _ => None,
+        }
+    }
+
     pub(super) fn set_study_settings_line_width(&mut self, width: u8, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.study_settings_dialog
+        if let Some(dialog) = self.study_settings_dialog_mut()
             && dialog.line_width != width
         {
             dialog.line_width = width;
@@ -5363,7 +5481,8 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn close_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.study_settings_dialog.take().is_some() {
+        if self.study_settings_dialog().is_some() {
+            self.indicator_settings_dialog = None;
             cx.notify();
         }
     }
@@ -5390,11 +5509,10 @@ impl WorkspaceSurface {
             Ok(()) => {
                 self.studies.removing.insert(study_id);
                 if self
-                    .study_settings_dialog
-                    .as_ref()
+                    .study_settings_dialog()
                     .is_some_and(|dialog| dialog.study_id == study_id)
                 {
-                    self.study_settings_dialog = None;
+                    self.indicator_settings_dialog = None;
                 }
                 self.indicator_message = None;
             }
@@ -5412,7 +5530,7 @@ impl WorkspaceSurface {
         value: bool,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.study_settings_dialog {
+        if let Some(dialog) = self.study_settings_dialog_mut() {
             dialog
                 .draft_values
                 .insert(identifier.to_string(), StudySettingValue::Boolean(value));
@@ -5427,7 +5545,7 @@ impl WorkspaceSurface {
         value: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.study_settings_dialog {
+        if let Some(dialog) = self.study_settings_dialog_mut() {
             dialog.draft_values.insert(
                 identifier.to_string(),
                 StudySettingValue::Choice(value.to_string()),
@@ -5442,7 +5560,8 @@ impl WorkspaceSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dialog) = &mut self.study_settings_dialog else {
+        let Some(IndicatorSettingsDialog::Study(dialog)) = &mut self.indicator_settings_dialog
+        else {
             return;
         };
         let default_line_width = self
@@ -5470,7 +5589,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn save_study_settings_dialog(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.study_settings_dialog.as_ref() else {
+        let Some(dialog) = self.study_settings_dialog() else {
             return;
         };
         let study_id = dialog.study_id;
@@ -5513,7 +5632,7 @@ impl WorkspaceSurface {
             .collect();
         if replacement.settings == active_settings {
             // Only presentation changed; the runtime computation stays as it is.
-            self.study_settings_dialog = None;
+            self.indicator_settings_dialog = None;
             cx.notify();
             return;
         }
@@ -5552,7 +5671,7 @@ impl WorkspaceSurface {
     }
 
     fn show_study_settings_message(&mut self, message: Option<String>, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.study_settings_dialog {
+        if let Some(dialog) = self.study_settings_dialog_mut() {
             dialog.message = message;
         }
         cx.notify();
@@ -5583,23 +5702,21 @@ impl WorkspaceSurface {
                 input.set_value(big_trades_volume_text(volume), window, input_cx);
             });
         }
-        self.big_trades_dialog = Some(BigTradesDialogState {
-            intensity,
-            size: settings.size,
-            show_volume: settings.show_volume,
-            minimum_volume,
-            message: None,
-        });
-        self.study_settings_dialog = None;
-        self.indicator_message = None;
-        self.chrome_overlay = None;
-        self.timeframe_menu_flyout = None;
-        self.chrome_selection = 0;
-        cx.notify();
+        self.open_indicator_settings_dialog(
+            IndicatorSettingsDialog::BigTrades(BigTradesDialogState {
+                intensity,
+                size: settings.size,
+                show_volume: settings.show_volume,
+                minimum_volume,
+                message: None,
+            }),
+            cx,
+        );
     }
 
     pub(super) fn close_big_trades_dialog(&mut self, cx: &mut Context<Self>) {
-        if self.big_trades_dialog.take().is_some() {
+        if self.big_trades_dialog().is_some() {
+            self.indicator_settings_dialog = None;
             cx.notify();
         }
     }
@@ -5609,7 +5726,7 @@ impl WorkspaceSurface {
         intensity: Option<BigTradesIntensity>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.big_trades_dialog
+        if let Some(dialog) = self.big_trades_dialog_mut()
             && dialog.intensity != intensity
         {
             dialog.intensity = intensity;
@@ -5623,7 +5740,7 @@ impl WorkspaceSurface {
         size: BigTradesSize,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.big_trades_dialog
+        if let Some(dialog) = self.big_trades_dialog_mut()
             && dialog.size != size
         {
             dialog.size = size;
@@ -5636,7 +5753,7 @@ impl WorkspaceSurface {
         show_volume: bool,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = &mut self.big_trades_dialog
+        if let Some(dialog) = self.big_trades_dialog_mut()
             && dialog.show_volume != show_volume
         {
             dialog.show_volume = show_volume;
@@ -5645,7 +5762,7 @@ impl WorkspaceSurface {
     }
 
     pub(super) fn reset_big_trades_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.big_trades_dialog else {
+        let Some(dialog) = self.big_trades_dialog_mut() else {
             return;
         };
         let defaults = BigTradesSettings::default();
@@ -5664,7 +5781,7 @@ impl WorkspaceSurface {
 
     /// Applies the draft through the order-flow settings owner. Visibility stays with the legend.
     pub(super) fn apply_big_trades_dialog(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = &self.big_trades_dialog else {
+        let Some(dialog) = self.big_trades_dialog() else {
             return;
         };
         let filter = match dialog.intensity {
@@ -5692,13 +5809,219 @@ impl WorkspaceSurface {
             show_volume,
             visible: current.visible,
         });
-        self.big_trades_dialog = None;
+        self.indicator_settings_dialog = None;
         self.set_chart_order_flow_settings(settings, cx);
         cx.notify();
     }
 
     fn show_big_trades_message(&mut self, message: String, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.big_trades_dialog {
+        if let Some(dialog) = self.big_trades_dialog_mut() {
+            dialog.message = Some(message);
+        }
+        cx.notify();
+    }
+
+    /// Opens a draft of the chart's volume settings.
+    pub(super) fn open_volume_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(settings) = self
+            .chart
+            .as_ref()
+            .map(|chart| chart.read(cx).volume_settings())
+        else {
+            return;
+        };
+        let Some(settings) = settings else {
+            self.indicator_message = Some("Volume is no longer on this chart".to_string());
+            cx.notify();
+            return;
+        };
+        let average_length =
+            cx.new(|input_cx| InputState::new(window, input_cx).placeholder("Bars"));
+        average_length.update(cx, |input, input_cx| {
+            input.set_value(settings.average.length.to_string(), window, input_cx);
+        });
+        self.open_indicator_settings_dialog(
+            IndicatorSettingsDialog::Volume(VolumeDialogState {
+                draft: settings,
+                average_length,
+                color_picker: None,
+                message: None,
+            }),
+            cx,
+        );
+    }
+
+    pub(super) fn close_volume_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.volume_dialog().is_some() {
+            self.indicator_settings_dialog = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_volume_dialog_average_enabled(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.volume_dialog_mut()
+            && dialog.draft.average.enabled != enabled
+        {
+            dialog.draft.average.enabled = enabled;
+            dialog.message = None;
+            if !enabled
+                && dialog
+                    .color_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.target == VolumeColorTarget::Average)
+            {
+                dialog.color_picker = None;
+            }
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_volume_dialog_average_kind(
+        &mut self,
+        kind: VolumeAverageKind,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.volume_dialog_mut()
+            && dialog.draft.average.kind != kind
+        {
+            dialog.draft.average.kind = kind;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_volume_dialog_placement(
+        &mut self,
+        placement: VolumePlacement,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = self.volume_dialog_mut()
+            && dialog.draft.placement != placement
+        {
+            dialog.draft.placement = placement;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_volume_dialog_color_picker(
+        &mut self,
+        target: VolumeColorTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.volume_dialog_mut() else {
+            return;
+        };
+        if dialog
+            .color_picker
+            .as_ref()
+            .is_some_and(|picker| picker.target == target)
+        {
+            dialog.color_picker = None;
+        } else {
+            let current = target.color(&dialog.draft);
+            let input = cx.new(|input_cx| InputState::new(window, input_cx));
+            input.update(cx, |input, input_cx| {
+                input.set_value(current.to_ascii_uppercase(), window, input_cx);
+            });
+            dialog.color_picker = Some(VolumeColorPickerState {
+                target,
+                input,
+                error: None,
+            });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_volume_dialog_color(
+        &mut self,
+        target: VolumeColorTarget,
+        color: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.volume_dialog_mut() else {
+            return;
+        };
+        let normalized = normalize_hex_color(color);
+        if let Some(picker) = &mut dialog.color_picker
+            && picker.target == target
+        {
+            picker.error = normalized
+                .is_none()
+                .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
+        }
+        if let Some(color) = normalized {
+            let slot = match target {
+                VolumeColorTarget::Up => &mut dialog.draft.up_color,
+                VolumeColorTarget::Down => &mut dialog.draft.down_color,
+                VolumeColorTarget::Average => &mut dialog.draft.average.color,
+            };
+            *slot = Some(color);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn reset_volume_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.volume_dialog_mut() else {
+            return;
+        };
+        dialog.draft = VolumeSettings::default();
+        dialog.average_length.update(cx, |input, input_cx| {
+            input.set_value(
+                VolumeSettings::default().average.length.to_string(),
+                window,
+                input_cx,
+            );
+        });
+        dialog.color_picker = None;
+        dialog.message = None;
+        cx.notify();
+    }
+
+    /// Applies the draft through the chart, which rebuilds the Aeris Charts volume indicator.
+    /// Visibility stays with the legend.
+    pub(super) fn apply_volume_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.volume_dialog() else {
+            return;
+        };
+        let length =
+            match parse_volume_average_length(dialog.average_length.read(cx).value().as_ref()) {
+                Ok(length) => length,
+                Err(message) => return self.show_volume_message(message, cx),
+            };
+        let mut settings = dialog.draft.clone();
+        settings.average.length = length;
+        let Some(chart) = &self.chart else {
+            return self.show_volume_message("The chart is unavailable".to_string(), cx);
+        };
+        let applied = chart.update(cx, |chart, chart_cx| {
+            if chart.volume_settings().is_none() {
+                return Err("Volume is no longer on this chart".to_string());
+            }
+            if chart.volume_settings().as_ref() == Some(&settings) {
+                return Ok(());
+            }
+            if !chart.set_volume_settings(settings) {
+                return Err("The chart could not apply these settings".to_string());
+            }
+            chart_cx.notify();
+            Ok(())
+        });
+        match applied {
+            Ok(()) => {
+                self.indicator_settings_dialog = None;
+                self.chart_persistence_dirty = true;
+                cx.notify();
+            }
+            Err(message) => self.show_volume_message(message, cx),
+        }
+    }
+
+    fn show_volume_message(&mut self, message: String, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.volume_dialog_mut() {
             dialog.message = Some(message);
         }
         cx.notify();
