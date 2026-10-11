@@ -579,6 +579,7 @@ impl TerminalApp {
         self.track_chart_fullscreen(window);
         self.absorb_render_requests(window, cx);
         self.synchronize_linked_charts(cx);
+        self.share_workspace_drawings(cx);
         self.dispatch_due_economic_event_rules(cx);
         self.sync_market_summaries(cx);
     }

@@ -2415,7 +2415,14 @@ impl AerisChartView {
     #[must_use]
     pub fn user_state_revision(&self) -> u64 {
         self.user_state_revision
-            .wrapping_add(self.engine.drawing_revision())
+            .wrapping_add(self.drawing_revision())
+    }
+
+    /// Monotonic revision of committed Aeris Charts drawings alone: creates, edits, locks,
+    /// clears, imports, undo and redo.
+    #[must_use]
+    pub fn drawing_revision(&self) -> u64 {
+        self.engine.drawing_revision()
     }
 
     fn mark_user_state_changed(&mut self) {

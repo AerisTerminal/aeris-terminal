@@ -322,6 +322,56 @@ fn import_drawings(chart: &mut AerisChartView, drawings: &WorkspaceInstrumentDra
     }
 }
 
+/// Keeps the charts of one workspace that show the same instrument on one drawing set. Each
+/// committed edit reaches every sibling pane, and a chart that opened without drawings adopts a
+/// sibling's: a chart showing the instrument first, then the set a pane remembers.
+pub(super) fn share_workspace_drawings<'a>(
+    panes: &(impl Iterator<Item = &'a Entity<WorkspaceSurface>> + Clone),
+    cx: &mut App,
+) {
+    let siblings = |index: usize| {
+        panes
+            .clone()
+            .enumerate()
+            .filter(move |(sibling, _)| *sibling != index)
+            .map(|(_, pane)| pane)
+    };
+    for (index, pane) in panes.clone().enumerate() {
+        let Some(shared) = pane.update(cx, |surface, cx| surface.take_drawings_publication(cx))
+        else {
+            continue;
+        };
+        for sibling in siblings(index) {
+            sibling.update(cx, |surface, cx| {
+                surface.receive_shared_drawings(&shared, cx);
+            });
+        }
+    }
+    for (index, pane) in panes.clone().enumerate() {
+        let Some(instrument) =
+            pane.update(cx, |surface, cx| surface.take_drawings_peer_request(cx))
+        else {
+            continue;
+        };
+        let shared = siblings(index)
+            .find_map(|sibling| sibling.read(cx).live_drawings(&instrument, cx))
+            .or_else(|| {
+                siblings(index).find_map(|sibling| {
+                    sibling
+                        .read(cx)
+                        .retained_chart_presentation
+                        .drawings
+                        .remembered_for(&instrument)
+                })
+            });
+        if let Some(shared) = shared {
+            pane.update(cx, |surface, cx| {
+                surface.receive_shared_drawings(&shared, cx);
+            });
+        }
+    }
+}
+
 fn restored_market_selection(
     startup: &MarketWorkerStartup,
 ) -> Option<(ChartInterval, Option<(i64, i64)>)> {
@@ -2937,6 +2987,9 @@ impl WorkspaceSurface {
         }
         self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
         self.last_chart_clock_revision = chart.read(cx).clock_revision();
+        self.retained_chart_presentation
+            .drawings
+            .settle_chart(chart.read(cx));
         observe_chart(Some(&chart), cx);
         self.chart = Some(chart);
         // Interval switches keep the instrument's tape; project it into the new chart now
@@ -4168,6 +4221,56 @@ impl WorkspaceSurface {
             self.remember_chart_drawings(cx);
             self.retained_chart_presentation.chart_state = self.workspace_chart_state(cx);
         }
+    }
+
+    fn take_drawings_publication(&mut self, cx: &App) -> Option<SharedDrawings> {
+        let chart = self.chart.as_ref()?.read(cx);
+        self.retained_chart_presentation
+            .drawings
+            .take_publication(chart)
+            .unwrap_or_else(|error| {
+                diagnostic!("Aeris drawings could not be shared: {error}");
+                None
+            })
+    }
+
+    fn take_drawings_peer_request(&mut self, cx: &App) -> Option<DrawingInstrument> {
+        let chart = self.chart.as_ref()?.read(cx);
+        self.retained_chart_presentation
+            .drawings
+            .take_peer_request(chart)
+    }
+
+    fn live_drawings(&self, instrument: &DrawingInstrument, cx: &App) -> Option<SharedDrawings> {
+        let chart = self.chart.as_ref()?.read(cx);
+        self.retained_chart_presentation
+            .drawings
+            .live(instrument, chart)
+            .unwrap_or_else(|error| {
+                diagnostic!("Aeris drawings could not be shared: {error}");
+                None
+            })
+    }
+
+    fn receive_shared_drawings(&mut self, shared: &SharedDrawings, cx: &mut Context<Self>) {
+        let drawings = &mut self.retained_chart_presentation.drawings;
+        let received = match self.chart.clone() {
+            Some(chart) => chart.update(cx, |chart, chart_cx| {
+                let received = drawings.receive(shared, Some(chart));
+                if !matches!(received, Ok(false)) {
+                    chart_cx.notify();
+                }
+                received
+            }),
+            None => drawings.receive(shared, None),
+        };
+        match received {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => diagnostic!("Aeris shared drawings could not be applied: {error}"),
+        }
+        self.chart_persistence_dirty = true;
+        cx.notify();
     }
 
     fn remember_chart_drawings(&mut self, cx: &App) {

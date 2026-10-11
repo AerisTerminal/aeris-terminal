@@ -211,9 +211,9 @@ use native_ui::{
     input::{Input, InputEvent, InputState},
     loader::Loader,
     menu::{
-        MENU_PANEL_INSET, MENU_SEPARATOR_HEIGHT, MenuAlign, MenuAnchor, MenuPanel, MenuPlacement,
-        MenuRow, MenuScale, MenuSide, PopupAnimationOrigin, animate_popup_from_origin,
-        menu_panel_chrome_height, menu_panel_height,
+        ANCHOR_GAP, MENU_PANEL_INSET, MENU_SEPARATOR_HEIGHT, MenuAlign, MenuAnchor, MenuPanel,
+        MenuPlacement, MenuRow, MenuScale, MenuSide, PopupAnimationOrigin,
+        animate_popup_from_origin, menu_panel_chrome_height, menu_panel_height,
     },
     platform_font_weight, platform_tabular_numerals,
     rem_scale::{ROOT_REM_PX, design_rems, rem_scaled},
@@ -512,7 +512,7 @@ mod workspace_persistence;
 use workspace_persistence::{WorkspaceLayoutPersistence, WorkspaceLayoutShutdownWait};
 
 mod chart_drawings;
-use chart_drawings::PaneDrawings;
+use chart_drawings::{DrawingInstrument, PaneDrawings, SharedDrawings};
 
 actions!(
     aeris,
@@ -4656,7 +4656,17 @@ enum ChartSettingsTemplateOverlay {
     #[default]
     Closed,
     Menu,
+    /// The menu with its saved-templates flyout beside it.
+    TemplatesFlyout,
     SaveDialog,
+    /// Confirming deletion of the saved template at this index.
+    DeleteDialog(usize),
+}
+
+impl ChartSettingsTemplateOverlay {
+    const fn menu_open(self) -> bool {
+        matches!(self, Self::Menu | Self::TemplatesFlyout)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

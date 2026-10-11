@@ -5,7 +5,7 @@ use super::*;
 use gpui::Stateful;
 use std::cell::RefCell;
 
-/// The visible rows and history label derived from one tape publication and filter, so
+/// The visible rows derived from one tape publication and filter, so
 /// renders between publications (chart, book, and pointer repaints) never rescan the
 /// retained tape. Holding the projected tape's `Arc` makes its identity check exact.
 #[derive(Default)]
@@ -17,7 +17,6 @@ struct TimeSalesRows {
     filter: super::TimeSalesFilter,
     range: Option<(i128, i128)>,
     indices: Vec<usize>,
-    history_label: String,
 }
 
 impl TimeSalesRowsCache {
@@ -27,7 +26,7 @@ impl TimeSalesRowsCache {
         product: Option<&InstallProviderInstrument>,
         book: Option<&aeris_market_data::OrderBookFrame>,
         filter: super::TimeSalesFilter,
-    ) -> (Vec<usize>, String) {
+    ) -> Vec<usize> {
         // The book mid only matters while the price-range filter is active.
         let range = filter.price_range_ticks.and(
             book.and_then(|frame| frame.best_bid.as_ref().zip(frame.best_ask.as_ref()))
@@ -46,24 +45,17 @@ impl TimeSalesRowsCache {
                 && rows.range == range
         });
         if !current {
-            let history_label = match cached.as_mut() {
-                Some(rows) if Arc::ptr_eq(&rows.trades, &snapshot.trades) => {
-                    std::mem::take(&mut rows.history_label)
-                }
-                _ => tick_history_label(snapshot),
-            };
             *cached = Some(TimeSalesRows {
                 trades: Arc::clone(&snapshot.trades),
                 quantity_scale: snapshot.quantity_scale,
                 filter,
                 range,
                 indices: filtered_time_sales_rows(snapshot, filter, range),
-                history_label,
             });
         }
-        cached.as_ref().map_or_else(Default::default, |rows| {
-            (rows.indices.clone(), rows.history_label.clone())
-        })
+        cached
+            .as_ref()
+            .map_or_else(Vec::new, |rows| rows.indices.clone())
     }
 }
 
@@ -135,16 +127,10 @@ fn trade_tape_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> State
         scroll,
         trades_unavailable_from: _,
     } = state;
-    let (history_header, rows) = tape.map_or_else(
-        || (None, Vec::new()),
-        |snapshot| {
-            let (indices, history_label) = rows_cache.rows(snapshot, product, book, filter);
-            (
-                Some(tick_history_header(history_label, theme)),
-                time_sales_rows(snapshot, &indices, sweeps, theme),
-            )
-        },
-    );
+    let rows = tape.map_or_else(Vec::new, |snapshot| {
+        let indices = rows_cache.rows(snapshot, product, book, filter);
+        time_sales_rows(snapshot, &indices, sweeps, theme)
+    });
     let symbol = div()
         .pr_1()
         .text_color(gpui_color(theme.colors.text_muted))
@@ -165,7 +151,6 @@ fn trade_tape_panel(state: TimeSalesPanelState<'_>, theme: &AerisTheme) -> State
             [symbol],
             theme,
         ))
-        .children(history_header)
         .child(filters)
         .child(
             div()
@@ -224,14 +209,17 @@ fn time_sales_filters(
             },
             theme,
         ))
-        .child(time_sales_filter_button(
-            "time_sales_reset",
-            "Reset",
-            move |cx| {
-                reset_app.update(cx, WorkspaceSurface::reset_time_sales_filter);
-            },
-            theme,
-        ))
+        .child(
+            Button::new("time_sales_reset", theme)
+                .variant(ButtonVariant::Outline)
+                .button_size(ButtonSize::Sm)
+                .icon(header_icon(HugeIcon::Refresh))
+                .aria_label("Reset Time & Sales filters")
+                .tooltip(TooltipSpec::new("Reset filters", theme).show_delay(TOOLTIP_OPEN_DELAY))
+                .on_click(move |_, _, cx| {
+                    reset_app.update(cx, WorkspaceSurface::reset_time_sales_filter);
+                }),
+        )
 }
 
 fn time_sales_rows(
@@ -247,32 +235,6 @@ fn time_sales_rows(
         .filter_map(|&index| snapshot.trades.get(index))
         .map(|retained| time_sales_row(retained, sweeps, price_scale, quantity_scale, theme))
         .collect()
-}
-
-fn tick_history_header(label: String, theme: &AerisTheme) -> Div {
-    div()
-        .px_2()
-        .py_1()
-        .text_color(gpui_color(theme.colors.text_secondary))
-        .child(label)
-}
-
-fn tick_history_label(snapshot: &aeris_market_runtime::MarketTradeTapeSnapshot) -> String {
-    let oldest = snapshot
-        .trades
-        .iter()
-        .filter_map(|trade| trade.trade.metadata.timestamps.exchange_unix_nanos)
-        .min();
-    oldest.map_or_else(
-        || "Waiting for available tick history".to_string(),
-        |time| {
-            let time = chrono::DateTime::from_timestamp(time.div_euclid(1_000_000_000), 0)
-                .map_or_else(String::new, |time| {
-                    time.format("%m-%d %H:%M:%S UTC").to_string()
-                });
-            format!("{} ticks · from {time}", snapshot.trades.len())
-        },
-    )
 }
 
 /// Indices into the tape of the newest matching trades, newest exchange time first.
@@ -475,17 +437,15 @@ mod tests {
         let snapshot = tape(vec![trade(1, 10, 1), trade(2, 20, 5), trade(3, 5, 5)]);
         let cache = TimeSalesRowsCache::default();
         let filter = super::super::TimeSalesFilter::default();
-        let (rows, label) = cache.rows(&snapshot, None, None, filter);
-        assert_eq!(rows, vec![1, 0, 2]);
-        assert!(label.starts_with("3 ticks"));
+        assert_eq!(cache.rows(&snapshot, None, None, filter), vec![1, 0, 2]);
 
         let large = super::super::TimeSalesFilter {
             minimum_quantity: 2.0,
             ..filter
         };
-        assert_eq!(cache.rows(&snapshot, None, None, large).0, vec![1, 2]);
+        assert_eq!(cache.rows(&snapshot, None, None, large), vec![1, 2]);
 
         let next = tape(vec![trade(1, 10, 1), trade(2, 20, 5), trade(4, 30, 9)]);
-        assert_eq!(cache.rows(&next, None, None, large).0, vec![2, 1]);
+        assert_eq!(cache.rows(&next, None, None, large), vec![2, 1]);
     }
 }

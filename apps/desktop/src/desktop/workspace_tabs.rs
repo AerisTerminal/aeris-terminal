@@ -296,6 +296,15 @@ impl TerminalApp {
         }
     }
 
+    pub(super) fn share_workspace_drawings(&self, cx: &mut Context<Self>) {
+        for workspace in &self.workspaces {
+            workspace_surface::share_workspace_drawings(
+                &workspace.panes.iter().map(|pane| &pane.surface),
+                cx,
+            );
+        }
+    }
+
     fn watchlist_entries(&self) -> Vec<WorkspaceWatchlistEntryState> {
         self.watchlist
             .iter()
@@ -982,8 +991,7 @@ impl TerminalApp {
 
     pub(super) fn dismiss_chart_settings_overlays(&mut self, cx: &mut Context<Self>) {
         let color_was_open = self.chart_settings_color_picker.take().is_some();
-        let template_was_open =
-            self.chart_settings_template_overlay == ChartSettingsTemplateOverlay::Menu;
+        let template_was_open = self.chart_settings_template_overlay.menu_open();
         if template_was_open {
             self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
         }
@@ -1372,12 +1380,63 @@ impl TerminalApp {
 
     pub(super) fn toggle_chart_settings_template_menu(&mut self, cx: &mut Context<Self>) {
         self.chart_settings_color_picker = None;
-        self.chart_settings_template_overlay =
-            if self.chart_settings_template_overlay == ChartSettingsTemplateOverlay::Menu {
-                ChartSettingsTemplateOverlay::Closed
-            } else {
-                ChartSettingsTemplateOverlay::Menu
-            };
+        self.chart_settings_template_overlay = if self.chart_settings_template_overlay.menu_open() {
+            ChartSettingsTemplateOverlay::Closed
+        } else {
+            ChartSettingsTemplateOverlay::Menu
+        };
+        cx.notify();
+    }
+
+    /// Shows the saved-templates flyout while its row is hovered; other rows hide it.
+    pub(super) fn set_chart_settings_templates_flyout(
+        &mut self,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.chart_settings_template_overlay.menu_open() {
+            return;
+        }
+        let next = if open {
+            ChartSettingsTemplateOverlay::TemplatesFlyout
+        } else {
+            ChartSettingsTemplateOverlay::Menu
+        };
+        if self.chart_settings_template_overlay != next {
+            self.chart_settings_template_overlay = next;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn confirm_chart_settings_template_delete(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if index < self.chart_settings_templates.len() {
+            self.chart_settings_template_overlay =
+                ChartSettingsTemplateOverlay::DeleteDialog(index);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn cancel_chart_settings_template_delete(&mut self, cx: &mut Context<Self>) {
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::TemplatesFlyout;
+        cx.notify();
+    }
+
+    pub(super) fn delete_chart_settings_template(&mut self, cx: &mut Context<Self>) {
+        let ChartSettingsTemplateOverlay::DeleteDialog(index) =
+            self.chart_settings_template_overlay
+        else {
+            return;
+        };
+        if index < self.chart_settings_templates.len() {
+            self.chart_settings_templates.remove(index);
+            self.chart_settings_persistence_dirty = true;
+            self.persist_workspace_layout_if_changed(cx);
+        }
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::TemplatesFlyout;
         cx.notify();
     }
 

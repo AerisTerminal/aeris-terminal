@@ -1465,4 +1465,90 @@ mod instrument_drawings {
         show(&surface, "B", cx);
         assert_eq!(drawing_count(&surface, cx), 0);
     }
+
+    const TWO_LINES: &str = r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":10.0,"price":100.0}]},{"id":2,"kind":"horizontal_line","pane_index":0,"points":[{"logical":20.0,"price":110.0}]}]"#;
+
+    /// A committed drawing edit on the surface's chart.
+    fn draw(surface: &Entity<WorkspaceSurface>, json: &str, cx: &mut VisualTestContext) {
+        surface.update(cx, |surface, cx| {
+            let chart = surface.chart.clone().expect("chart");
+            chart.update(cx, |chart, _| {
+                chart
+                    .import_semantic_state_json(json, &[])
+                    .expect("drawing imports");
+            });
+        });
+    }
+
+    fn share(panes: &[Entity<WorkspaceSurface>], cx: &mut VisualTestContext) {
+        cx.update(|_, cx| share_workspace_drawings(&panes.iter(), cx));
+    }
+
+    fn drawing_revision(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> u64 {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .chart
+                .as_ref()
+                .map_or(0, |chart| chart.read(cx).drawing_revision())
+        })
+    }
+
+    #[gpui::test]
+    fn panes_showing_one_instrument_share_its_drawings(cx: &mut TestAppContext) {
+        let (first, _first_requests, cx) = open_surface(cx, instrument("A"), None);
+        let (second, _second_requests, cx) = open_surface(cx, instrument("A"), None);
+        let panes = [first.clone(), second.clone()];
+        show(&first, "A", cx);
+        draw(&first, LINE, cx);
+        share(&panes, cx);
+
+        show(&second, "A", cx);
+        assert_eq!(drawing_count(&second, cx), 0);
+        share(&panes, cx);
+        assert_eq!(drawing_count(&second, cx), 1, "a new pane adopts them");
+
+        draw(&second, TWO_LINES, cx);
+        share(&panes, cx);
+        assert_eq!(drawing_count(&first, cx), 2, "edits reach the other pane");
+        let settled = drawing_revision(&first, cx);
+        share(&panes, cx);
+        assert_eq!(drawing_revision(&first, cx), settled, "nothing echoes back");
+
+        first.update(cx, |surface, cx| {
+            surface
+                .chart
+                .clone()
+                .expect("chart")
+                .update(cx, |chart, _| chart.clear_drawings());
+        });
+        share(&panes, cx);
+        assert_eq!(
+            drawing_count(&second, cx),
+            0,
+            "a clear reaches the other pane"
+        );
+
+        show(&second, "B", cx);
+        draw(&first, LINE, cx);
+        share(&panes, cx);
+        assert_eq!(
+            drawing_count(&second, cx),
+            0,
+            "drawings stay on their market"
+        );
+        show(&second, "A", cx);
+        share(&panes, cx);
+        assert_eq!(drawing_count(&second, cx), 1, "switching back adopts them");
+
+        show(&first, "B", cx);
+        draw(&second, TWO_LINES, cx);
+        share(&panes, cx);
+        show(&first, "A", cx);
+        assert_eq!(
+            drawing_count(&first, cx),
+            2,
+            "a pane showing another market remembers the current set"
+        );
+    }
 }

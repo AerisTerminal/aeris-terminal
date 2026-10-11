@@ -4,6 +4,11 @@
 //! that instrument's prices, so a symbol switch replaces the chart with an empty one; the pane
 //! keeps what it drew on every other instrument so switching back restores it, within and
 //! across sessions.
+//!
+//! Panes of one workspace that show the same instrument share one drawing set: a committed edit
+//! is published to the sibling panes, which apply it to their chart or to the entry they
+//! remember, and a chart that opens without drawings adopts a sibling's. The exchanged document
+//! anchors drawings by exchange time, so panes on different timeframes stay aligned.
 
 use aeris_chart_integration::AerisChartView;
 use aeris_contracts::{InstallProviderInstrument, WorkspaceInstrumentDrawingsState};
@@ -18,7 +23,7 @@ pub(super) const MAXIMUM_REMEMBERED_DRAWING_BYTES_PER_PANE: usize = 1_048_576;
 /// Stable identity drawings are keyed by. Session and selection generations are deliberately
 /// excluded: they fence one runtime process, not the market the drawings belong to.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DrawingInstrument {
+pub(super) struct DrawingInstrument {
     provider: String,
     instrument_id: String,
 }
@@ -49,6 +54,14 @@ impl DrawingInstrument {
     }
 }
 
+/// The complete drawing set of one instrument as exchanged between the panes of a workspace;
+/// `None` drawings means the instrument has none.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct SharedDrawings {
+    instrument: DrawingInstrument,
+    drawings: Option<WorkspaceInstrumentDrawingsState>,
+}
+
 /// The drawings of every instrument one pane has shown.
 #[derive(Debug, Default)]
 pub(super) struct PaneDrawings {
@@ -57,14 +70,135 @@ pub(super) struct PaneDrawings {
     chart_instrument: Option<DrawingInstrument>,
     /// Most recently used first.
     remembered: Vec<WorkspaceInstrumentDrawingsState>,
+    /// The shown chart's drawing revision last published or applied, so drawings applied from a
+    /// sibling pane are never published back.
+    shared_revision: u64,
+    /// The shown chart opened without drawings and may adopt a sibling pane's.
+    awaiting_peer: bool,
 }
 
 impl PaneDrawings {
     pub(super) fn restored(remembered: &[WorkspaceInstrumentDrawingsState]) -> Self {
         Self {
-            chart_instrument: None,
             remembered: bounded_instrument_drawings(remembered.to_vec()),
+            ..Self::default()
         }
+    }
+
+    /// Records the drawings a newly built chart was restored with, after `begin_chart`.
+    pub(super) fn settle_chart(&mut self, chart: &AerisChartView) {
+        self.shared_revision = chart.drawing_revision();
+        self.awaiting_peer = self.chart_instrument.is_some() && chart.drawing_count() == 0;
+    }
+
+    fn shows(&self, instrument: &DrawingInstrument, chart: &AerisChartView) -> bool {
+        self.chart_instrument.as_ref() == Some(instrument) && chart.has_market_data()
+    }
+
+    /// The shown chart's drawings when they changed since last shared.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Aeris Charts cannot serialize the drawings.
+    pub(super) fn take_publication(
+        &mut self,
+        chart: &AerisChartView,
+    ) -> Result<Option<SharedDrawings>, String> {
+        let revision = chart.drawing_revision();
+        if revision == self.shared_revision {
+            return Ok(None);
+        }
+        self.shared_revision = revision;
+        self.awaiting_peer = false;
+        let Some(instrument) = &self.chart_instrument else {
+            return Ok(None);
+        };
+        self.live(instrument, chart)
+    }
+
+    /// The instrument whose drawings the shown chart should adopt from a sibling pane, once.
+    pub(super) fn take_peer_request(
+        &mut self,
+        chart: &AerisChartView,
+    ) -> Option<DrawingInstrument> {
+        if !self.awaiting_peer || !chart.has_market_data() {
+            return None;
+        }
+        self.awaiting_peer = false;
+        self.chart_instrument.clone()
+    }
+
+    /// The shown chart's drawings when it shows `instrument`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Aeris Charts cannot serialize the drawings.
+    pub(super) fn live(
+        &self,
+        instrument: &DrawingInstrument,
+        chart: &AerisChartView,
+    ) -> Result<Option<SharedDrawings>, String> {
+        if !self.shows(instrument, chart) {
+            return Ok(None);
+        }
+        Ok(Some(SharedDrawings {
+            instrument: instrument.clone(),
+            drawings: Self::chart_drawings(instrument, chart)?,
+        }))
+    }
+
+    /// The drawings remembered for `instrument` while another one is shown.
+    pub(super) fn remembered_for(&self, instrument: &DrawingInstrument) -> Option<SharedDrawings> {
+        self.remembered
+            .iter()
+            .find(|entry| instrument.keys(entry))
+            .map(|entry| SharedDrawings {
+                instrument: instrument.clone(),
+                drawings: Some(entry.clone()),
+            })
+    }
+
+    /// Applies a sibling pane's drawings onto the shown chart when it shows their instrument,
+    /// otherwise onto the remembered entry, so a later switch back restores the current set.
+    /// Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Aeris Charts rejects the drawings.
+    pub(super) fn receive(
+        &mut self,
+        shared: &SharedDrawings,
+        chart: Option<&mut AerisChartView>,
+    ) -> Result<bool, String> {
+        if let Some(chart) = chart.filter(|chart| self.shows(&shared.instrument, chart)) {
+            let imported = if let Some(drawings) = &shared.drawings {
+                chart.import_semantic_state_json(
+                    &drawings.chart_state_json,
+                    &drawings.locked_drawing_ids,
+                )
+            } else {
+                chart.clear_drawings();
+                Ok(())
+            };
+            self.shared_revision = chart.drawing_revision();
+            self.awaiting_peer = false;
+            return imported.map(|()| true);
+        }
+        let Some(index) = self
+            .remembered
+            .iter()
+            .position(|entry| shared.instrument.keys(entry))
+        else {
+            return Ok(false);
+        };
+        match &shared.drawings {
+            Some(drawings) => self.remembered[index] = drawings.clone(),
+            None => {
+                self.remembered.remove(index);
+            }
+        }
+        self.remembered = bounded_instrument_drawings(std::mem::take(&mut self.remembered));
+        Ok(true)
     }
 
     /// Records the shown chart's drawings before the chart is replaced.

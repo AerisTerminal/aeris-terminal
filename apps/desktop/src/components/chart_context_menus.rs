@@ -1016,12 +1016,7 @@ fn chart_settings_panel(
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(chart_settings_title_bar(
-                    terminal,
-                    menu,
-                    bounds.origin,
-                    theme,
-                ))
+                .child(chart_settings_title_bar(terminal, bounds.origin, theme))
                 .child(div().flex_1().min_h_0().child(chart_settings_panel_body(
                     terminal, menu, content, view, theme,
                 ))),
@@ -1031,12 +1026,12 @@ fn chart_settings_panel(
 /// Title bar of the settings panel. Dragging it moves the panel anywhere in the window.
 fn chart_settings_title_bar(
     terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
     origin: gpui::Point<Pixels>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     let grab_terminal = terminal.clone();
+    let close_terminal = terminal.clone();
     div()
         .id("chart_settings_title_bar")
         .relative()
@@ -1066,7 +1061,11 @@ fn chart_settings_title_bar(
                 .child("Chart settings"),
         )
         .child(chart_settings_drag_grip(theme))
-        .child(chart_settings_actions(terminal, menu, theme))
+        .child(close_button("chart_settings_close", theme, move |_, cx| {
+            close_terminal.update(cx, |terminal, terminal_cx| {
+                terminal.close_chart_settings_menu(terminal_cx);
+            });
+        }))
 }
 
 fn chart_settings_drag_grip(theme: &AerisTheme) -> Div {
@@ -1127,56 +1126,23 @@ fn chart_settings_panel_body(
                 .py_4()
                 .child(content),
         )
-        .children(
-            (view.templates.overlay == ChartSettingsTemplateOverlay::SaveDialog).then(|| {
-                chart_settings_template_save_dialog(
-                    terminal,
-                    menu,
-                    view.templates.name_input,
-                    view.templates.error,
-                    theme,
-                )
-            }),
-        )
-}
-
-fn chart_settings_actions(
-    terminal: &Entity<TerminalApp>,
-    menu: &ChartContextMenu,
-    theme: &AerisTheme,
-) -> impl IntoElement {
-    let close_terminal = terminal.clone();
-    let reset_terminal = terminal.clone();
-    let reset_menu = menu.clone();
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .child(
-            Button::new("chart_settings_reset", theme)
-                .variant(ButtonVariant::Ghost)
-                .button_size(ButtonSize::Sm)
-                .round()
-                .icon(header_icon(HugeIcon::Refresh))
-                .aria_label("Reset settings")
-                .tooltip(
-                    TooltipSpec::new(
-                        "Reset this chart's appearance and trading overlays to defaults",
-                        theme,
-                    )
-                    .show_delay(TOOLTIP_OPEN_DELAY),
-                )
-                .on_press(move |_, _, cx| {
-                    reset_terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.reset_chart_settings(&reset_menu, terminal_cx);
-                    });
-                }),
-        )
-        .child(close_button("chart_settings_close", theme, move |_, cx| {
-            close_terminal.update(cx, |terminal, terminal_cx| {
-                terminal.close_chart_settings_menu(terminal_cx);
-            });
-        }))
+        .children(match view.templates.overlay {
+            ChartSettingsTemplateOverlay::SaveDialog => Some(chart_settings_template_save_dialog(
+                terminal,
+                menu,
+                view.templates.name_input,
+                view.templates.error,
+                theme,
+            )),
+            ChartSettingsTemplateOverlay::DeleteDialog(index) => {
+                view.templates.templates.get(index).map(|template| {
+                    chart_settings_template_delete_dialog(terminal, template, theme)
+                })
+            }
+            ChartSettingsTemplateOverlay::Closed
+            | ChartSettingsTemplateOverlay::Menu
+            | ChartSettingsTemplateOverlay::TemplatesFlyout => None,
+        })
 }
 
 fn chart_settings_centered_origin(
@@ -1285,12 +1251,13 @@ fn chart_settings_template_control(
 ) -> impl IntoElement {
     let colors = theme.colors;
     let toggle = terminal.clone();
-    let trigger = Button::new("chart_settings_templates", theme)
+    let open = state.overlay.menu_open();
+    let button = Button::new("chart_settings_templates", theme)
         .variant(ButtonVariant::Outline)
         .button_size(ButtonSize::Lg)
         .trigger()
         .full_width()
-        .open(state.overlay == ChartSettingsTemplateOverlay::Menu)
+        .open(open)
         .label("Template")
         .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |_, _, cx| {
@@ -1298,10 +1265,27 @@ fn chart_settings_template_control(
                 terminal.toggle_chart_settings_template_menu(terminal_cx);
             });
         });
-    let menu = (state.overlay == ChartSettingsTemplateOverlay::Menu)
-        .then(|| chart_settings_template_menu(terminal, menu, state, theme));
+    // The flyout hangs off the trigger, beside the menu that opens above it, so its last row
+    // lines up with the menu's last row, the one that opens it.
+    let trigger = div().relative().w_full().child(button).children(
+        (state.overlay == ChartSettingsTemplateOverlay::TemplatesFlyout).then(|| {
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .bottom_full()
+                    .mb(ANCHOR_GAP)
+                    .left(design_rems(
+                        CHART_SETTINGS_TEMPLATE_MENU_WIDTH + TIMEFRAME_FLYOUT_GAP,
+                    ))
+                    .child(chart_settings_templates_flyout(
+                        terminal, menu, state, theme,
+                    )),
+            )
+        }),
+    );
+    let menu = open.then(|| chart_settings_template_menu(terminal, menu, state, theme));
     // The settings panel closes its popovers on any press inside it; presses on this control
-    // belong to the trigger and its menu.
+    // belong to the trigger and its menus.
     div()
         .w_full()
         .pt_3()
@@ -1321,29 +1305,29 @@ fn chart_settings_template_menu(
     state: ChartSettingsTemplateView<'_>,
     theme: &AerisTheme,
 ) -> MenuPanel {
+    let reset = terminal.clone();
+    let reset_menu = menu.clone();
     let save = terminal.clone();
     let apply_all = terminal.clone();
     let apply_all_menu = menu.clone();
-    let mut popup = MenuPanel::new(
-        "chart_settings_template_menu",
-        MenuPlacement::Anchored {
-            side: MenuSide::Above,
-            align: MenuAlign::Start,
-        },
-        theme,
-    )
-    .width(design_rems(240.0))
-    .max_height(design_rems(360.0))
-    .animate_from(PopupAnimationOrigin::BOTTOM_LEFT)
-    .child(
-        MenuRow::compact("chart_template_save", "Save…", theme).on_click(move |_, window, cx| {
-            save.update(cx, |terminal, terminal_cx| {
-                terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
-            });
-        }),
-    );
+    let mut actions = vec![
+        MenuRow::compact("chart_template_reset", "Reset to defaults", theme).on_click(
+            move |_, _, cx| {
+                reset.update(cx, |terminal, terminal_cx| {
+                    terminal.reset_chart_settings(&reset_menu, terminal_cx);
+                });
+            },
+        ),
+        MenuRow::compact("chart_template_save", "Save as template…", theme).on_click(
+            move |_, window, cx| {
+                save.update(cx, |terminal, terminal_cx| {
+                    terminal.open_chart_settings_template_save_dialog(window, terminal_cx);
+                });
+            },
+        ),
+    ];
     if state.apply_to_all {
-        popup = popup.child(
+        actions.push(
             MenuRow::compact("chart_template_apply_all", "Apply to all charts", theme).on_click(
                 move |_, _, cx| {
                     apply_all.update(cx, |terminal, terminal_cx| {
@@ -1353,24 +1337,133 @@ fn chart_settings_template_menu(
             ),
         );
     }
-    for (index, template) in state.templates.iter().enumerate() {
+    let actions = actions.into_iter().map(|row| {
+        let hover = terminal.clone();
+        row.on_hover(move |hovered, _, cx| {
+            if *hovered {
+                hover.update(cx, |terminal, terminal_cx| {
+                    terminal.set_chart_settings_templates_flyout(false, terminal_cx);
+                });
+            }
+        })
+    });
+    let flyout_open = state.overlay == ChartSettingsTemplateOverlay::TemplatesFlyout;
+    let hover = terminal.clone();
+    let open_flyout = terminal.clone();
+    let templates_row = MenuRow::compact("chart_template_saved", "Templates", theme)
+        .highlighted(flyout_open)
+        .trailing(
+            header_icon(HugeIcon::ArrowRight)
+                .with_size(px(16.0))
+                .color(gpui_color(theme.colors.icon)),
+        )
+        .on_hover(move |hovered, _, cx| {
+            if *hovered {
+                hover.update(cx, |terminal, terminal_cx| {
+                    terminal.set_chart_settings_templates_flyout(true, terminal_cx);
+                });
+            }
+        })
+        .on_click(move |_, _, cx| {
+            open_flyout.update(cx, |terminal, terminal_cx| {
+                terminal.set_chart_settings_templates_flyout(true, terminal_cx);
+            });
+        });
+    MenuPanel::new(
+        "chart_settings_template_menu",
+        MenuPlacement::Anchored {
+            side: MenuSide::Above,
+            align: MenuAlign::Start,
+        },
+        theme,
+    )
+    .width(design_rems(CHART_SETTINGS_TEMPLATE_MENU_WIDTH))
+    .animate_from(PopupAnimationOrigin::BOTTOM_LEFT)
+    .children(actions)
+    .separator()
+    .child(templates_row)
+}
+
+/// Width of the template menu and of its saved-templates flyout.
+const CHART_SETTINGS_TEMPLATE_MENU_WIDTH: f32 = 240.0;
+
+/// The saved templates: a row applies its template, its trash button asks to delete it.
+fn chart_settings_templates_flyout(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    state: ChartSettingsTemplateView<'_>,
+    theme: &AerisTheme,
+) -> MenuPanel {
+    let rows = state.templates.iter().enumerate().map(|(index, template)| {
         let apply = terminal.clone();
         let apply_menu = menu.clone();
-        popup = popup.child(
-            MenuRow::compact(("chart_template", index), template.name.clone(), theme).on_click(
-                move |_, _, cx| {
-                    apply.update(cx, |terminal, terminal_cx| {
-                        terminal.apply_named_chart_settings_template(
-                            &apply_menu,
-                            index,
-                            terminal_cx,
-                        );
-                    });
-                },
-            ),
-        );
-    }
-    popup
+        let delete = terminal.clone();
+        MenuRow::compact(("chart_template", index), template.name.clone(), theme)
+            .trailing(
+                Button::new(("chart_template_delete", index), theme)
+                    .variant(ButtonVariant::Ghost)
+                    .button_size(ButtonSize::Sm)
+                    .icon(header_icon(HugeIcon::Trash))
+                    .aria_label(format!("Delete template {}", template.name))
+                    .danger_on_hover()
+                    .tab_stop(false)
+                    .on_click(move |_, _, cx| {
+                        delete.update(cx, |terminal, terminal_cx| {
+                            terminal.confirm_chart_settings_template_delete(index, terminal_cx);
+                        });
+                        cx.stop_propagation();
+                    }),
+            )
+            .on_click(move |_, _, cx| {
+                apply.update(cx, |terminal, terminal_cx| {
+                    terminal.apply_named_chart_settings_template(&apply_menu, index, terminal_cx);
+                });
+            })
+    });
+    let empty = state.templates.is_empty().then(|| {
+        MenuRow::compact("chart_template_none", "No saved templates", theme).disabled(true)
+    });
+    MenuPanel::new(
+        "chart_settings_templates_flyout",
+        MenuPlacement::InFlow,
+        theme,
+    )
+    .width(design_rems(CHART_SETTINGS_TEMPLATE_MENU_WIDTH))
+    .max_height(design_rems(360.0))
+    .animate_from(PopupAnimationOrigin::new(0.0, 1.0))
+    .children(rows)
+    .children(empty)
+}
+
+fn chart_settings_template_delete_dialog(
+    terminal: &Entity<TerminalApp>,
+    template: &WorkspaceChartSettingsTemplateState,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let cancel = terminal.clone();
+    let confirm = terminal.clone();
+    ConfirmationDialog::new(
+        "chart_template_delete_dialog",
+        "Delete chart template?",
+        ConfirmationTone::Destructive,
+        theme,
+        move |_, cx| {
+            cancel.update(cx, |terminal, terminal_cx| {
+                terminal.cancel_chart_settings_template_delete(terminal_cx);
+            });
+        },
+        move |_, cx| {
+            confirm.update(cx, |terminal, terminal_cx| {
+                terminal.delete_chart_settings_template(terminal_cx);
+            });
+        },
+    )
+    .confirm_label("Delete")
+    .message(format!(
+        "Delete the \u{201c}{}\u{201d} template? Charts that already use it keep their settings.",
+        template.name
+    ))
+    .into_any_element()
 }
 
 fn chart_settings_template_save_dialog(
