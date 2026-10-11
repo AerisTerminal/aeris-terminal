@@ -1,10 +1,13 @@
-//! Round-trip projection of the bounded fill history. One round trip spans a position cycle:
-//! from the fill that opens a flat position to the fill that flattens or reverses it, with every
-//! scale-in and partial exit in between. A reversing fill closes one trade and opens the next.
+//! Round-trip projection of the bounded fill history. One simulated round trip spans a net
+//! position cycle: from the fill that opens a flat position to the fill that flattens or
+//! reverses it, with every scale-in and partial exit in between. A reversing fill closes one
+//! trade and opens the next. One broker round trip spans one broker-identified position.
 
 use super::weighted_average_entry_price;
 use aeris_instruments::InstrumentId;
-use aeris_trading::{Fill, FillId, FixedPoint, OrderSide, Position, TradingAccountId};
+use aeris_trading::{
+    BrokerPosition, Fill, FillId, FixedPoint, OrderSide, Position, TradingAccountId,
+};
 use std::collections::BTreeMap;
 
 type PositionKey = (TradingAccountId, InstrumentId);
@@ -297,6 +300,65 @@ pub(super) fn project_round_trips<'a>(
         let open_pnl = trade.open_pnl(&key, positions, trade_pnl_cycles)?;
         round_trips.push(trade.finish(&key, false, None, open_pnl));
     }
+    round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
+    Ok(round_trips)
+}
+
+/// Projects closed broker trades, newest activity first, from broker fills ordered newest first.
+///
+/// A broker trade is one broker position: hedged positions are identified by the broker, not
+/// netted per instrument. Its first retained fill sets the trade side unless the opening fill
+/// is older than the retained history, in which case only the exits are known. A position the
+/// broker still reports open is shown with open positions, never here.
+pub(super) fn project_closed_broker_round_trips<'a>(
+    fills_newest_first: impl DoubleEndedIterator<Item = &'a Fill>,
+    fill_positions: &BTreeMap<FillId, String>,
+    open_positions: &BTreeMap<(TradingAccountId, String), BrokerPosition>,
+    fill_realized_pnl: &BTreeMap<FillId, FixedPoint>,
+) -> Result<Vec<TradeRoundTrip>, String> {
+    let mut trades = BTreeMap::<(TradingAccountId, String), (InstrumentId, OpenTrade)>::new();
+    for fill in fills_newest_first.rev() {
+        let Some(position_id) = fill_positions.get(&fill.id) else {
+            continue;
+        };
+        let key = (fill.account_id.clone(), position_id.clone());
+        if open_positions.contains_key(&key) {
+            continue;
+        }
+        let Some((_, trade)) = trades.get_mut(&key) else {
+            // A closing fill opens nothing; seen first, the opening fill was not retained.
+            let trade = if fill_realized_pnl.contains_key(&fill.id) {
+                let mut trade = OpenTrade::already_open(-fill.side.sign());
+                trade.add_exit(
+                    fill,
+                    fill.quantity,
+                    fill_realized_pnl.get(&fill.id).copied(),
+                )?;
+                trade
+            } else {
+                OpenTrade::opened(fill, fill.quantity)
+            };
+            trades.insert(key, (fill.instrument_id.clone(), trade));
+            continue;
+        };
+        if fill.side == trade.side {
+            trade.add_entry(fill, fill.quantity)?;
+        } else {
+            trade.add_exit(
+                fill,
+                fill.quantity,
+                fill_realized_pnl.get(&fill.id).copied(),
+            )?;
+        }
+    }
+    let mut round_trips = trades
+        .into_iter()
+        .filter(|(_, (_, trade))| trade.exit.is_some())
+        .map(|((account_id, _), (instrument_id, trade))| {
+            let pnl = trade.exit_realized_pnl.filter(|_| trade.exits_recorded);
+            trade.finish(&(account_id, instrument_id), true, pnl, None)
+        })
+        .collect::<Vec<_>>();
     round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
     Ok(round_trips)
 }

@@ -765,6 +765,9 @@ impl Coordinator {
         if let Some(pnl) = realized_pnl {
             self.state.fill_realized_pnl.insert(fill.id.clone(), pnl);
         }
+        self.state
+            .broker_fill_positions
+            .insert(fill.id.clone(), report.broker_position_id.clone());
         self.state.next_sequence = sequence + 1;
         self.state.orders.insert(updated.id.clone(), updated);
         self.state.order_events.push_back(event);

@@ -321,7 +321,8 @@ pub struct TradingSnapshot {
     pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
     /// Realized P&L of each fill that reduced or closed a position, partial exits included.
     pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
-    /// Trades grouped from `fills`, entry to exit, newest activity first.
+    /// Trades grouped from `fills`, entry to exit, newest activity first: simulated trades
+    /// open and closed, and closed broker trades (open ones are `broker_positions`).
     pub round_trips: Vec<TradeRoundTrip>,
     pub positions: Vec<Position>,
     pub broker_positions: Vec<BrokerPosition>,
@@ -1512,6 +1513,7 @@ impl Coordinator {
         {
             self.state.completed_trade_pnl.remove(&fill.id);
             self.state.fill_realized_pnl.remove(&fill.id);
+            self.state.broker_fill_positions.remove(&fill.id);
         }
         self.state
             .fills
@@ -4381,6 +4383,33 @@ impl Coordinator {
             .collect()
     }
 
+    /// Simulated round trips, open and closed, merged with closed broker round trips.
+    fn round_trips(&self) -> Result<Vec<TradeRoundTrip>, String> {
+        let broker_fills = self
+            .state
+            .fills
+            .iter()
+            .rev()
+            .filter(|fill| self.state.broker_fill_positions.contains_key(&fill.id))
+            .take(MAXIMUM_SNAPSHOT_ITEMS)
+            .collect::<Vec<_>>();
+        let mut round_trips = round_trip::project_round_trips(
+            self.simulated_fills_newest_first().into_iter(),
+            &self.state.positions,
+            &self.state.completed_trade_pnl,
+            &self.state.fill_realized_pnl,
+            &self.state.trade_pnl_cycles,
+        )?;
+        round_trips.extend(round_trip::project_closed_broker_round_trips(
+            broker_fills.into_iter(),
+            &self.state.broker_fill_positions,
+            &self.state.broker_positions,
+            &self.state.fill_realized_pnl,
+        )?);
+        round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
+        Ok(round_trips)
+    }
+
     fn snapshot(&self) -> Result<TradingSnapshot, String> {
         if self.state.accounts.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.instruments.len() > MAXIMUM_SNAPSHOT_ITEMS
@@ -4439,15 +4468,7 @@ impl Coordinator {
                         .map(|pnl| (fill.id.clone(), *pnl))
                 })
                 .collect(),
-            // Round trips are projected from simulated net positions; broker positions are
-            // hedged per broker id and are not paired this way.
-            round_trips: round_trip::project_round_trips(
-                self.simulated_fills_newest_first().into_iter(),
-                &self.state.positions,
-                &self.state.completed_trade_pnl,
-                &self.state.fill_realized_pnl,
-                &self.state.trade_pnl_cycles,
-            )?,
+            round_trips: self.round_trips()?,
             positions: self.state.positions.values().cloned().collect(),
             broker_positions: self.state.broker_positions.values().cloned().collect(),
             broker_balances: self.state.broker_balances.clone(),
@@ -4743,6 +4764,7 @@ impl Coordinator {
             if let Some(fill) = self.state.fills.pop_front() {
                 self.state.completed_trade_pnl.remove(&fill.id);
                 self.state.fill_realized_pnl.remove(&fill.id);
+                self.state.broker_fill_positions.remove(&fill.id);
             }
         }
         while self.state.orders.len() > self.retention.maximum_orders {

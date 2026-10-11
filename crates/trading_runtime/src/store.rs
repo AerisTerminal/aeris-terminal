@@ -231,6 +231,8 @@ pub(super) struct StoredState {
     pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
     /// Broker order id to owner order, for every broker order the venue has accepted.
     pub broker_order_ids: BTreeMap<String, OrderId>,
+    /// The broker position each retained broker fill belongs to.
+    pub broker_fill_positions: BTreeMap<FillId, String>,
     /// The latest relay session generation ever attached.
     pub venue_generation: u64,
     /// The last balance each broker account reported.
@@ -561,6 +563,7 @@ impl TradingStore {
         let positions = self.load_positions()?;
         let broker_positions = self.load_broker_positions()?;
         let broker_order_ids = self.load_broker_order_ids()?;
+        let broker_fill_positions = self.load_broker_fill_positions()?;
         let venue_generation = self.metadata("venue_generation")?;
         let broker_balances = self.load_broker_balances()?;
         let risk_profiles = self.load_risk_profiles()?;
@@ -587,6 +590,7 @@ impl TradingStore {
             positions,
             broker_positions,
             broker_order_ids,
+            broker_fill_positions,
             venue_generation,
             broker_balances,
             risk_profiles,
@@ -2629,6 +2633,29 @@ impl TradingStore {
             Ok((
                 broker_order_id,
                 OrderId::try_new(order_id).map_err(|error| error.to_string())?,
+            ))
+        })
+        .collect()
+    }
+
+    fn load_broker_fill_positions(&self) -> Result<BTreeMap<FillId, String>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT fill_id, broker_position_id FROM broker_deals
+                 WHERE broker_position_id IS NOT NULL",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?;
+        rows.map(|row| {
+            let (fill_id, broker_position_id) = row.map_err(database_error)?;
+            Ok((
+                FillId::try_new(fill_id).map_err(|error| error.to_string())?,
+                broker_position_id,
             ))
         })
         .collect()

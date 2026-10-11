@@ -1,11 +1,13 @@
-//! Bottom panel with trade-history and open-position tabs. Its header stays docked at the window
+//! Bottom panel with open-position and trade-history tabs. Its header stays docked at the window
 //! bottom while collapsed and rides the top edge of the panel while open; the open panel resizes
 //! from that edge.
 //!
-//! The trading owner stays authoritative for fills, the round trips grouped from them and broker
-//! positions. This module keeps one shared presentation copy of its bounded, newest-first
-//! round-trip projection and open broker positions, replaced only when the owner's snapshot
-//! revision changes, plus the viewer's tab, open, height and account-filter choices.
+//! The trading owner stays authoritative for fills, the round trips grouped from them and every
+//! position. This module keeps one shared presentation copy of the open positions of every
+//! account, practice and broker alike, and of the closed round trips, replaced only when the
+//! owner's snapshot revision changes, plus the viewer's tab, open, height and account-filter
+//! choices. A position leaves the positions tab when it closes and its round trip then appears
+//! in the trade history.
 
 use super::side_panel_dock::SIDE_PANEL_HEADER_HEIGHT;
 use super::*;
@@ -57,11 +59,12 @@ pub(super) enum TradeHistoryAccountFilter {
 #[derive(Clone, Default)]
 pub(super) struct TradeHistory {
     revision: Option<u64>,
-    /// Newest activity first, exactly as the owner's bounded snapshot orders them.
+    /// Newest activity first, exactly as the owner's bounded snapshot orders them. Open trades
+    /// are included here but never listed: they are the positions tab's rows.
     round_trips: Arc<[aeris_trading_runtime::TradeRoundTrip]>,
     accounts: Arc<[aeris_trading::TradingAccount]>,
     symbols: Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
-    /// Indices into `round_trips` that pass the current account filter.
+    /// Indices into `round_trips` of the closed trades that pass the current account filter.
     rows: Arc<[usize]>,
 }
 
@@ -95,17 +98,45 @@ impl TradeHistory {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum BottomPanelTab {
     #[default]
-    TradeHistory,
     Positions,
+    TradeHistory,
 }
 
-/// Shared presentation copy of the trading owner's open broker positions.
+/// How a position closes: a broker closes its own position by identity, while a practice
+/// position closes at its instrument's current quote.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PositionCloser {
+    Broker {
+        broker_position_id: String,
+        /// Only a broker account the venue reaches now can close a position or report a
+        /// current open P&L.
+        connected: bool,
+    },
+    Simulated,
+}
+
+/// One open position of any account, as the positions tab lists it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OpenPosition {
+    account_id: aeris_trading::TradingAccountId,
+    instrument_id: aeris_instruments::InstrumentId,
+    side: aeris_trading::OrderSide,
+    quantity: aeris_trading::FixedPoint,
+    entry_price: Option<aeris_trading::FixedPoint>,
+    stop_loss: Option<aeris_trading::FixedPoint>,
+    take_profit: Option<aeris_trading::FixedPoint>,
+    /// `None` while a broker account is unreachable, so its last reported value is stale.
+    open_pnl: Option<aeris_trading::FixedPoint>,
+    /// `None` when a practice position opened before the retained fill history.
+    opened_unix_nanos: Option<i64>,
+    closer: PositionCloser,
+}
+
+/// Shared presentation copy of every account's open positions.
 #[derive(Clone, Default)]
 struct OpenPositions {
     /// Newest opened first.
-    positions: Arc<[aeris_trading::BrokerPosition]>,
-    /// Broker accounts the venue reaches now; only their open P&L is current.
-    connected: Arc<BTreeSet<aeris_trading::TradingAccountId>>,
+    positions: Arc<[OpenPosition]>,
     /// Indices into `positions` that pass the current account filter.
     rows: Arc<[usize]>,
 }
@@ -128,7 +159,7 @@ impl Default for BottomPanelState {
     fn default() -> Self {
         Self {
             open: false,
-            tab: BottomPanelTab::TradeHistory,
+            tab: BottomPanelTab::Positions,
             account_menu_open: false,
             height: TRADE_HISTORY_INITIAL_HEIGHT,
             filter: TradeHistoryAccountFilter::All,
@@ -164,23 +195,18 @@ impl BottomPanelState {
                 })
                 .collect(),
         );
-        self.adopt_positions(
+        self.adopt_positions(open_positions(
+            &snapshot.positions,
             &snapshot.broker_positions,
+            &snapshot.round_trips,
             &snapshot.connected_broker_accounts,
-        );
+        ));
         true
     }
 
-    /// Replaces the open-position copy, newest opened first, and re-filters both lists.
-    fn adopt_positions(
-        &mut self,
-        positions: &[aeris_trading::BrokerPosition],
-        connected: &BTreeSet<aeris_trading::TradingAccountId>,
-    ) {
-        let mut positions = positions.to_vec();
-        positions.sort_by_key(|position| std::cmp::Reverse(position.opened_unix_nanos));
+    /// Replaces the open-position copy and re-filters both lists.
+    fn adopt_positions(&mut self, positions: Vec<OpenPosition>) {
         self.positions.positions = positions.into();
-        self.positions.connected = Arc::new(connected.clone());
         self.refresh_rows();
     }
 
@@ -237,6 +263,69 @@ impl BottomPanelState {
     }
 }
 
+/// Every open position, newest opened first: practice positions from the owner's net
+/// positions, dated by their open trade, and broker positions exactly as the broker reports
+/// them.
+fn open_positions(
+    simulated: &[aeris_trading::Position],
+    broker: &[aeris_trading::BrokerPosition],
+    round_trips: &[aeris_trading_runtime::TradeRoundTrip],
+    connected: &BTreeSet<aeris_trading::TradingAccountId>,
+) -> Vec<OpenPosition> {
+    let simulated = simulated.iter().filter_map(|position| {
+        let net = position.net_quantity;
+        let side = match net.units().signum() {
+            1 => aeris_trading::OrderSide::Buy,
+            -1 => aeris_trading::OrderSide::Sell,
+            _ => return None,
+        };
+        let opened_unix_nanos = round_trips
+            .iter()
+            .find(|trip| {
+                !trip.closed
+                    && trip.account_id == position.account_id
+                    && trip.instrument_id == position.instrument_id
+            })
+            .and_then(|trip| trip.entry)
+            .map(|entry| entry.first_unix_nanos);
+        Some(OpenPosition {
+            account_id: position.account_id.clone(),
+            instrument_id: position.instrument_id.clone(),
+            side,
+            quantity: aeris_trading::FixedPoint::try_new(net.units().checked_abs()?, net.scale())
+                .ok()?,
+            entry_price: position.average_entry_price,
+            stop_loss: None,
+            take_profit: None,
+            open_pnl: Some(position.unrealized_pnl),
+            opened_unix_nanos,
+            closer: PositionCloser::Simulated,
+        })
+    });
+    let broker = broker.iter().map(|position| {
+        let connected = connected.contains(&position.account_id);
+        OpenPosition {
+            account_id: position.account_id.clone(),
+            instrument_id: position.instrument_id.clone(),
+            side: position.side,
+            quantity: position.quantity,
+            entry_price: Some(position.entry_price),
+            stop_loss: position.stop_loss,
+            take_profit: position.take_profit,
+            open_pnl: connected.then_some(position.net_unrealized),
+            opened_unix_nanos: Some(position.opened_unix_nanos),
+            closer: PositionCloser::Broker {
+                broker_position_id: position.broker_position_id.clone(),
+                connected,
+            },
+        }
+    });
+    let mut positions = simulated.chain(broker).collect::<Vec<_>>();
+    positions.sort_by_key(|position| std::cmp::Reverse(position.opened_unix_nanos));
+    positions
+}
+
+/// Closed trades only; an open trade is listed as a position until it closes.
 fn trade_history_rows(
     round_trips: &[aeris_trading_runtime::TradeRoundTrip],
     filter: &TradeHistoryAccountFilter,
@@ -244,20 +333,20 @@ fn trade_history_rows(
     round_trips
         .iter()
         .enumerate()
-        .filter(|(_, trip)| match filter {
-            TradeHistoryAccountFilter::All => true,
-            TradeHistoryAccountFilter::Account(account_key) => {
-                trip.account_id.as_str() == account_key
-            }
+        .filter(|(_, trip)| {
+            trip.closed
+                && match filter {
+                    TradeHistoryAccountFilter::All => true,
+                    TradeHistoryAccountFilter::Account(account_key) => {
+                        trip.account_id.as_str() == account_key
+                    }
+                }
         })
         .map(|(index, _)| index)
         .collect()
 }
 
-fn position_rows(
-    positions: &[aeris_trading::BrokerPosition],
-    filter: &TradeHistoryAccountFilter,
-) -> Vec<usize> {
+fn position_rows(positions: &[OpenPosition], filter: &TradeHistoryAccountFilter) -> Vec<usize> {
     positions
         .iter()
         .enumerate()
@@ -307,6 +396,42 @@ impl TerminalApp {
         cx: &mut Context<Self>,
     ) {
         self.bottom_panel.set_filter(filter);
+        cx.notify();
+    }
+
+    /// Closes a practice position at the current quote of any open chart of its instrument;
+    /// the practice venue fills only against a live bid and ask.
+    fn close_simulated_position(
+        &mut self,
+        account_key: String,
+        instrument_id: &aeris_instruments::InstrumentId,
+        cx: &mut Context<Self>,
+    ) {
+        let frame = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.panes)
+            .find_map(|pane| {
+                pane.surface
+                    .read(cx)
+                    .order_book
+                    .read(cx)
+                    .frame()
+                    .filter(|frame| {
+                        frame.instrument_id == instrument_id.as_str()
+                            && frame.best_bid.is_some()
+                            && frame.best_ask.is_some()
+                    })
+                    .cloned()
+            });
+        if let Some(frame) = frame {
+            aeris_desktop::trading::flatten_simulated_account_for(&frame, Some(account_key), cx);
+        } else {
+            aeris_desktop::trading::record_notice(Err(format!(
+                "Open a {} chart with a live quote to close this practice position",
+                self.bottom_panel.history.symbol(instrument_id)
+            )));
+        }
         cx.notify();
     }
 }
@@ -361,7 +486,7 @@ pub(super) fn bottom_panel(
                 .child(trade_history_resize_handle()),
             BottomPanelTab::Positions => panel
                 .child(position_column_header(state.shows_account_column(), theme))
-                .child(position_list(state, chart, theme))
+                .child(position_list(terminal, state, chart, theme))
                 .child(trade_history_resize_handle()),
         })
         .on_drag_move::<TradeHistoryHeightDrag>(move |event, window, cx| {
@@ -452,7 +577,7 @@ fn bottom_panel_tabs(
     TabList::new("bottom_panel_tabs", "Bottom panel", theme)
         .compact()
         .children(
-            [BottomPanelTab::TradeHistory, BottomPanelTab::Positions].map(|tab| {
+            [BottomPanelTab::Positions, BottomPanelTab::TradeHistory].map(|tab| {
                 let select_terminal = terminal.clone();
                 let active = state.open && state.tab == tab;
                 let (id, label, show, hide) = match tab {
@@ -631,10 +756,10 @@ fn trade_history_list(
 ) -> AnyElement {
     let colors = theme.colors;
     if state.history.rows.is_empty() {
-        let message = if state.history.round_trips.is_empty() {
-            "No executed trades yet"
+        let message = if state.history.round_trips.iter().any(|trip| trip.closed) {
+            "No closed trades for this account"
         } else {
-            "No executed trades for this account"
+            "No closed trades yet"
         };
         return div()
             .flex_1()
@@ -689,12 +814,9 @@ fn trade_history_row(
     let opened = trip
         .entry
         .map(|entry| trade_history_time(chart, entry.first_unix_nanos));
-    let closed = if trip.closed {
-        trip.exit
-            .map(|exit| trade_history_time(chart, exit.last_unix_nanos))
-    } else {
-        Some("Open".to_string())
-    };
+    let closed = trip
+        .exit
+        .map(|exit| trade_history_time(chart, exit.last_unix_nanos));
     let (side, side_color) = match trip.side {
         aeris_trading::OrderSide::Buy => ("Long", colors.text_positive),
         aeris_trading::OrderSide::Sell => ("Short", colors.text_negative),
@@ -747,7 +869,7 @@ fn trade_history_row(
                 .text_right()
                 .child(trade_history_text(exit_price)),
         )
-        .child(trade_history_pnl_cell(trip.current_pnl(), currency, theme))
+        .child(trade_history_pnl_cell(trip.final_pnl, currency, theme))
 }
 
 fn position_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoElement {
@@ -773,6 +895,7 @@ fn position_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoEl
 }
 
 fn position_list(
+    terminal: &Entity<TerminalApp>,
     state: &BottomPanelState,
     chart: Option<Entity<AerisChartView>>,
     theme: &AerisTheme,
@@ -780,9 +903,9 @@ fn position_list(
     let colors = theme.colors;
     if state.positions.rows.is_empty() {
         let message = if state.positions.positions.is_empty() {
-            "No open broker positions"
+            "No open positions"
         } else {
-            "No open broker positions for this account"
+            "No open positions for this account"
         };
         return div()
             .flex_1()
@@ -795,6 +918,7 @@ fn position_list(
             .child(message)
             .into_any_element();
     }
+    let terminal = terminal.clone();
     let positions = state.positions.clone();
     let history = state.history.clone();
     let show_account = state.shows_account_column();
@@ -810,7 +934,7 @@ fn position_list(
                     Some(position_row(
                         index,
                         position,
-                        positions.connected.contains(&position.account_id),
+                        &terminal,
                         &history,
                         chart,
                         show_account,
@@ -827,13 +951,13 @@ fn position_list(
     .into_any_element()
 }
 
-/// One open broker position. Its open P&L is the broker's own value and shows only while the
-/// venue reaches the account; closing it is asynchronous, so the row stays until the broker
-/// reports the position closed.
+/// One open position. A broker position's open P&L is the broker's own value and shows only
+/// while the venue reaches the account; closing it is asynchronous, so the row stays until the
+/// broker reports the position closed.
 fn position_row(
     index: usize,
-    position: &aeris_trading::BrokerPosition,
-    connected: bool,
+    position: &OpenPosition,
+    terminal: &Entity<TerminalApp>,
     history: &TradeHistory,
     chart: Option<&AerisChartView>,
     show_account: bool,
@@ -848,16 +972,14 @@ fn position_row(
         trade_history_text(value.map(trade_history_decimal))
     };
     let right = |width: f32, text: String| trade_history_cell(width).text_right().child(text);
-    let account_key = position.account_id.as_str().to_string();
-    let broker_position_id = position.broker_position_id.clone();
+    let opened = position
+        .opened_unix_nanos
+        .map(|opened| trade_history_time(chart, opened));
     trade_history_row_frame()
         .id(("position_row", index))
         .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
         .text_color(gpui_color(colors.text_default))
-        .child(
-            trade_history_cell(TRADE_HISTORY_TIME_WIDTH)
-                .child(trade_history_time(chart, position.opened_unix_nanos)),
-        )
+        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(trade_history_text(opened)))
         .when(show_account, |row| {
             row.child(
                 trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH)
@@ -877,33 +999,61 @@ fn position_row(
             TRADE_HISTORY_QUANTITY_WIDTH,
             trade_history_decimal(position.quantity),
         ))
-        .child(right(
-            POSITION_PRICE_WIDTH,
-            trade_history_decimal(position.entry_price),
-        ))
+        .child(right(POSITION_PRICE_WIDTH, price(position.entry_price)))
         .child(right(POSITION_PRICE_WIDTH, price(position.stop_loss)))
         .child(right(POSITION_PRICE_WIDTH, price(position.take_profit)))
         .child(trade_history_pnl_cell(
-            connected.then_some(position.net_unrealized),
+            position.open_pnl,
             history.account_currency(position.account_id.as_str()),
             theme,
         ))
         .child(
-            div().w(px(POSITION_ACTION_WIDTH)).flex_none().child(
-                Button::new(("position_close", index), theme)
-                    .variant(ButtonVariant::Outline)
-                    .button_size(ButtonSize::Sm)
-                    .label("Close")
-                    .disabled(!connected)
-                    .on_click(move |_, _, cx| {
-                        aeris_desktop::trading::close_broker_position(
-                            account_key.clone(),
-                            broker_position_id.clone(),
-                            cx,
-                        );
-                    }),
-            ),
+            div()
+                .w(px(POSITION_ACTION_WIDTH))
+                .flex_none()
+                .child(position_close_button(index, position, terminal, theme)),
         )
+}
+
+fn position_close_button(
+    index: usize,
+    position: &OpenPosition,
+    terminal: &Entity<TerminalApp>,
+    theme: &AerisTheme,
+) -> Button {
+    let account_key = position.account_id.as_str().to_string();
+    let button = Button::new(("position_close", index), theme)
+        .variant(ButtonVariant::Outline)
+        .button_size(ButtonSize::Sm)
+        .label("Close");
+    match &position.closer {
+        PositionCloser::Broker {
+            broker_position_id,
+            connected,
+        } => {
+            let broker_position_id = broker_position_id.clone();
+            button.disabled(!connected).on_click(move |_, _, cx| {
+                aeris_desktop::trading::close_broker_position(
+                    account_key.clone(),
+                    broker_position_id.clone(),
+                    cx,
+                );
+            })
+        }
+        PositionCloser::Simulated => {
+            let terminal = terminal.clone();
+            let instrument_id = position.instrument_id.clone();
+            button.on_click(move |_, _, cx| {
+                terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.close_simulated_position(
+                        account_key.clone(),
+                        &instrument_id,
+                        terminal_cx,
+                    );
+                });
+            })
+        }
+    }
 }
 
 fn trade_history_time(chart: Option<&AerisChartView>, unix_nanos: i64) -> String {
@@ -993,6 +1143,15 @@ mod tests {
         }
     }
 
+    fn open_round_trip(account: &str) -> aeris_trading_runtime::TradeRoundTrip {
+        aeris_trading_runtime::TradeRoundTrip {
+            exit: None,
+            closed: false,
+            final_pnl: None,
+            ..round_trip(account)
+        }
+    }
+
     #[test]
     fn account_filter_keeps_newest_first_order_and_selects_one_account() {
         let trips = [round_trip("b"), round_trip("a"), round_trip("b")];
@@ -1002,6 +1161,19 @@ mod tests {
         );
         let only_b = TradeHistoryAccountFilter::Account("b".to_string());
         assert_eq!(trade_history_rows(&trips, &only_b), vec![0, 2]);
+    }
+
+    #[test]
+    fn trade_history_lists_closed_trades_only() {
+        let trips = [open_round_trip("a"), round_trip("a"), open_round_trip("b")];
+        assert_eq!(
+            trade_history_rows(&trips, &TradeHistoryAccountFilter::All),
+            vec![1]
+        );
+        assert_eq!(
+            trade_history_rows(&trips, &TradeHistoryAccountFilter::Account("b".to_string())),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -1034,17 +1206,6 @@ mod tests {
         assert_eq!(trade_history_pnl_text(Some(loss), "USD"), "USD -2525.00");
         assert_eq!(trade_history_pnl_text(Some(gain), "USD"), "USD 7350.00");
         assert_eq!(trade_history_pnl_text(None, "USD"), "—");
-
-        let mut open = round_trip("a");
-        open.closed = false;
-        open.final_pnl = None;
-        open.open_pnl = Some(loss);
-        assert_eq!(
-            trade_history_pnl_text(open.current_pnl(), "USD"),
-            "USD -2525.00"
-        );
-        open.closed = true;
-        assert_eq!(trade_history_pnl_text(open.current_pnl(), "USD"), "—");
     }
 
     fn broker_position(account: &str, id: &str, opened: i64) -> aeris_trading::BrokerPosition {
@@ -1067,26 +1228,50 @@ mod tests {
         }
     }
 
+    fn simulated_position(account: &str, net_units: i64) -> aeris_trading::Position {
+        let money = |units| aeris_trading::FixedPoint::try_new(units, 2).expect("money");
+        aeris_trading::Position {
+            account_id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
+            instrument_id: aeris_instruments::InstrumentId::try_new("hyperliquid:perp:BTC")
+                .expect("instrument"),
+            net_quantity: aeris_trading::FixedPoint::try_new(net_units, 8).expect("quantity"),
+            average_entry_price: Some(
+                aeris_trading::FixedPoint::try_new(8_309_000_000_000, 8).expect("price"),
+            ),
+            realized_pnl: money(0),
+            unrealized_pnl: money(-1_250),
+            last_fill_unix_nanos: 40,
+        }
+    }
+
+    fn broker_ids(state: &BottomPanelState) -> Vec<String> {
+        state
+            .positions
+            .rows
+            .iter()
+            .filter_map(|row| match &state.positions.positions[*row].closer {
+                PositionCloser::Broker {
+                    broker_position_id, ..
+                } => Some(broker_position_id.clone()),
+                PositionCloser::Simulated => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn positions_follow_the_account_filter_newest_opened_first() {
         let mut state = BottomPanelState::default();
-        state.adopt_positions(
+        state.adopt_positions(open_positions(
+            &[],
             &[
                 broker_position("a", "1", 10),
                 broker_position("b", "2", 30),
                 broker_position("a", "3", 20),
             ],
+            &[],
             &BTreeSet::new(),
-        );
-        let ids = |state: &BottomPanelState| {
-            state
-                .positions
-                .rows
-                .iter()
-                .map(|row| state.positions.positions[*row].broker_position_id.clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(ids(&state), ["2", "3", "1"]);
+        ));
+        assert_eq!(broker_ids(&state), ["2", "3", "1"]);
         assert_eq!(
             position_rows(
                 &state.positions.positions,
@@ -1094,6 +1279,64 @@ mod tests {
             ),
             vec![1, 2]
         );
+        assert!(
+            state
+                .positions
+                .positions
+                .iter()
+                .all(|position| position.open_pnl.is_none()),
+            "an unreachable broker account has no current open P&L"
+        );
+    }
+
+    #[test]
+    fn positions_list_practice_and_broker_accounts_together() {
+        let connected =
+            BTreeSet::from([aeris_trading::TradingAccountId::try_new("broker").expect("account")]);
+        let positions = open_positions(
+            &[
+                simulated_position("practice", -200_000_000),
+                simulated_position("flat", 0),
+            ],
+            &[broker_position("broker", "7", 10)],
+            &[open_round_trip("practice"), round_trip("flat")],
+            &connected,
+        );
+        assert_eq!(positions.len(), 2, "a flat practice position is not open");
+
+        let practice = &positions[0];
+        assert_eq!(practice.closer, PositionCloser::Simulated);
+        assert_eq!(practice.side, aeris_trading::OrderSide::Sell);
+        assert_eq!(practice.quantity.units(), 200_000_000);
+        assert_eq!(
+            practice.opened_unix_nanos,
+            Some(1_790_704_166_986_188_900),
+            "a practice position is dated by its open trade"
+        );
+        assert_eq!(
+            practice.open_pnl.map(aeris_trading::FixedPoint::units),
+            Some(-1_250)
+        );
+
+        let broker = &positions[1];
+        assert_eq!(
+            broker.closer,
+            PositionCloser::Broker {
+                broker_position_id: "7".to_string(),
+                connected: true,
+            }
+        );
+        assert_eq!(
+            broker.open_pnl.map(aeris_trading::FixedPoint::units),
+            Some(-6)
+        );
+    }
+
+    #[test]
+    fn positions_is_the_first_and_default_tab() {
+        let state = BottomPanelState::default();
+        assert_eq!(state.tab, BottomPanelTab::Positions);
+        assert_eq!(BottomPanelTab::default(), BottomPanelTab::Positions);
     }
 
     #[test]

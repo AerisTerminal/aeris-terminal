@@ -572,10 +572,68 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
         .find(|candidate| candidate.order_id == mirror.id)
         .expect("closing fill");
     assert_eq!(snapshot.fill_realized_pnl[&closing.id], point(1_203, 2));
-    assert!(
-        snapshot.round_trips.is_empty(),
-        "broker fills are not paired as simulated round trips"
+    assert_eq!(snapshot.round_trips.len(), 1, "the position is closed");
+}
+
+#[test]
+fn a_closed_broker_position_becomes_one_round_trip_that_survives_a_restart() {
+    let (directory, service, _receiver) = setup("venue-round-trips");
+    let inbox = service.demo_venue_inbox();
+    inbox
+        .push(venue(1, VenueUpdate::Position(position("77", 3))))
+        .expect("open position");
+    for (deal, quantity) in [("d1", 1), ("d2", 2)] {
+        inbox
+            .push(venue(1, VenueUpdate::Fill(fill(deal, "801", quantity))))
+            .expect("entry");
+    }
+    let mut close = fill("d3", "802", 3);
+    close.side = OrderSide::Sell;
+    close.price = point(9_500, 2);
+    close.executed_unix_nanos = 3_000;
+    close.realized = Some(RealizedClose {
+        gross_profit: point(1_500, 2),
+        swap: point(0, 2),
+        commission: point(-35, 2),
+        balance: point(1_001_465, 2),
+    });
+    inbox
+        .push(venue(1, VenueUpdate::Fill(close)))
+        .expect("closing deal");
+    assert_eq!(
+        service.snapshot().expect("snapshot").round_trips,
+        [],
+        "a position the broker still reports open is not history"
     );
+
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::PositionClosed {
+                broker_position_id: "77".into(),
+            },
+        ))
+        .expect("closed");
+    let expected = |trips: &[crate::TradeRoundTrip]| {
+        assert_eq!(trips.len(), 1);
+        let trip = &trips[0];
+        assert!(trip.closed);
+        assert_eq!(trip.side, OrderSide::Buy);
+        assert_eq!(
+            trip.entry.map(|leg| (leg.quantity, leg.average_price)),
+            Some((point(3, 0), point(9_000, 2)))
+        );
+        assert_eq!(
+            trip.exit.map(|leg| (leg.quantity, leg.average_price)),
+            Some((point(3, 0), point(9_500, 2)))
+        );
+        assert_eq!(trip.final_pnl, Some(point(1_465, 2)));
+    };
+    expected(&service.snapshot().expect("snapshot").round_trips);
+
+    drop(service);
+    let restarted = start_service(&directory);
+    expected(&restarted.snapshot().expect("snapshot").round_trips);
 }
 
 #[test]
