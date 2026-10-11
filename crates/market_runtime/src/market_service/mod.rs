@@ -1076,6 +1076,7 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     chart_interval_labels: &[
         "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "1W", "1M",
     ],
+    daily_bars: aeris_contracts::ProviderDailyBarCadence::TradingSession,
     default_listing: "MNQ",
     search_hint: "Search Rithmic symbols",
     logo_key: "rithmic",
@@ -1133,6 +1134,7 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
     chart_interval_labels: &[
         "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "3D", "1W", "1M",
     ],
+    daily_bars: aeris_contracts::ProviderDailyBarCadence::FixedDay,
     default_listing: "",
     search_hint: "Search Hyperliquid markets",
     logo_key: "hyperliquid",

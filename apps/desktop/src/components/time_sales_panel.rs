@@ -326,12 +326,20 @@ fn time_sales_row(
         aeris_market_data::AggressorSide::Sell => theme.colors.danger,
         aeris_market_data::AggressorSide::Unknown => theme.colors.text_muted,
     };
-    let time = if trade_ordinal_is_in_sweep(sweeps, retained.ingestion_ordinal) {
-        format!("{time} S")
-    } else {
-        time
-    };
+    let sweep_fill = trade_ordinal_is_in_sweep(sweeps, retained.ingestion_ordinal)
+        .then_some(trade.aggressor)
+        .and_then(|aggressor| match aggressor {
+            aeris_market_data::AggressorSide::Buy => {
+                Some((theme.colors.positive_subtle, theme.colors.text_positive))
+            }
+            aeris_market_data::AggressorSide::Sell => {
+                Some((theme.colors.negative_subtle, theme.colors.text_negative))
+            }
+            aeris_market_data::AggressorSide::Unknown => None,
+        });
+    let tone = sweep_fill.map_or(tone, |(_, text)| text);
     div()
+        .when_some(sweep_fill, |row, (fill, _)| row.bg(gpui_color(fill)))
         .h(px(22.0))
         .px_2()
         .flex()

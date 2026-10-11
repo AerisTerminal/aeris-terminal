@@ -57,6 +57,8 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         id: PROVIDER,
         display_name: "cTrader",
         chart_interval_labels: &["1m", "3m", "5m", "15m", "30m", "1h", "1D", "1W", "1M"],
+        // Daily bars open at 17:00 New York, so they span 23 to 25 hours.
+        daily_bars: aeris_contracts::ProviderDailyBarCadence::TradingSession,
         default_listing: "",
         search_hint: "Search cTrader symbols",
         logo_key: PROVIDER,

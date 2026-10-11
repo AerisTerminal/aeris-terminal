@@ -18,6 +18,15 @@ pub enum ProviderCatalogSymbol {
     DisplaySymbol,
 }
 
+/// How a provider's one-day chart bars are bucketed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderDailyBarCadence {
+    /// Fixed 24-hour buckets.
+    FixedDay,
+    /// One trading session per bar; the provider serves no fixed 24-hour daily series.
+    TradingSession,
+}
+
 /// Stable provider metadata for catalog and chart presentation.
 // Each flag is an independent, static provider capability, not encoded state.
 #[allow(clippy::struct_excessive_bools)]
@@ -26,6 +35,7 @@ pub struct ProviderPresentationDescriptor {
     pub id: &'static str,
     pub display_name: &'static str,
     pub chart_interval_labels: &'static [&'static str],
+    pub daily_bars: ProviderDailyBarCadence,
     pub default_listing: &'static str,
     pub search_hint: &'static str,
     pub logo_key: &'static str,

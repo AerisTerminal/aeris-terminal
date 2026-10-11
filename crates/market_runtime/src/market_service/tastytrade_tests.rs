@@ -346,6 +346,23 @@ fn future_install_preserves_provider_multiplier_tick_and_available_currency() {
 }
 
 #[test]
+fn daily_candles_request_session_days_not_fixed_24_hours() {
+    assert_eq!(
+        PRESENTATION.daily_bars,
+        aeris_contracts::ProviderDailyBarCadence::TradingSession
+    );
+    assert_eq!(
+        candle_period(BarPeriod::session(1).unwrap()).as_deref(),
+        Ok("d")
+    );
+    assert_eq!(
+        candle_period(BarPeriod::time(43_200).unwrap()).as_deref(),
+        Ok("12h")
+    );
+    assert!(candle_period(BarPeriod::time(86_400).unwrap()).is_err());
+}
+
+#[test]
 fn late_candle_subscription_starts_at_demand_time() {
     let mut starts = BTreeMap::new();
     assert_eq!(candle_start_ms(&mut starts, "ES{=1m}".into(), 100), 100);

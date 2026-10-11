@@ -8,6 +8,7 @@ use super::{
     ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation, now_unix_nanos,
     provider_display_name,
 };
+use aeris_contracts::ProviderDailyBarCadence;
 use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
 pub(crate) fn replay_runtime_snapshot(
@@ -361,10 +362,18 @@ pub(crate) fn series_key(
         ChartInterval::Hour4 => BarPeriod::time(14_400),
         ChartInterval::Hour8 => BarPeriod::time(28_800),
         ChartInterval::Hour12 => BarPeriod::time(43_200),
-        // cTrader daily bars open at 17:00 New York, so they are session
-        // days of 23 to 25 hours rather than fixed 24-hour buckets.
-        ChartInterval::Day1 if product.provider == "ctrader" => BarPeriod::session(1),
-        ChartInterval::Day1 => BarPeriod::time(86_400),
+        ChartInterval::Day1 => match super::provider_presentation(product.provider.as_str())
+            .map(|descriptor| descriptor.daily_bars)
+        {
+            Some(ProviderDailyBarCadence::TradingSession) => BarPeriod::session(1),
+            Some(ProviderDailyBarCadence::FixedDay) => BarPeriod::time(86_400),
+            None => {
+                return Err(format!(
+                    "{} chart interval is unsupported",
+                    provider_display_name(product.provider.as_str())
+                ));
+            }
+        },
         ChartInterval::Week1 => BarPeriod::week(1),
         ChartInterval::Month1 => BarPeriod::month(1),
         // Hyperliquid serves a native 3-day candle; Rithmic has no Day3

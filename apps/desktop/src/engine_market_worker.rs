@@ -654,22 +654,24 @@ fn spawn_group(
 
 /// User-visible provider name for worker status and error messages.
 fn provider_display_name(provider: &str) -> &str {
+    provider_presentation(provider).map_or(provider, |descriptor| descriptor.display_name)
+}
+
+fn provider_presentation(
+    provider: &str,
+) -> Option<&'static aeris_contracts::ProviderPresentationDescriptor> {
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == provider)
-        .map_or(provider, |descriptor| descriptor.display_name)
 }
 
 fn provider_supports_interval(provider: &str, interval: ChartInterval) -> bool {
-    aeris_market_runtime::built_in_provider_presentations()
-        .iter()
-        .find(|descriptor| descriptor.id == provider)
-        .is_some_and(|descriptor| {
-            descriptor
-                .chart_interval_labels
-                .iter()
-                .any(|label| *label == interval.label())
-        })
+    provider_presentation(provider).is_some_and(|descriptor| {
+        descriptor
+            .chart_interval_labels
+            .iter()
+            .any(|label| *label == interval.label())
+    })
 }
 
 /// Identity every pushed engine event is checked against.
@@ -2055,7 +2057,6 @@ mod tests {
                 (ChartInterval::Hour4, 14_400),
                 (ChartInterval::Hour8, 28_800),
                 (ChartInterval::Hour12, 43_200),
-                (ChartInterval::Day1, 86_400),
             ] {
                 let series = series_key(product, interval).expect("phase-four series validates");
                 assert_eq!(
@@ -2065,6 +2066,10 @@ mod tests {
                 assert_eq!(series.instrument_id, product.instrument_id);
             }
             for (interval, period) in [
+                (
+                    ChartInterval::Day1,
+                    BarPeriod::session(1).expect("session day validates"),
+                ),
                 (
                     ChartInterval::Week1,
                     BarPeriod::week(1).expect("week period validates"),
@@ -2504,6 +2509,34 @@ mod tests {
         assert!(series_key(&product, ChartInterval::Tick100).is_err());
         // Rithmic intervals stay Rithmic-only.
         assert!(series_key(&default_product("MNQ"), ChartInterval::Day3).is_err());
+    }
+
+    #[test]
+    fn tastytrade_daily_charts_key_session_days() {
+        let product = InstallProviderInstrument {
+            provider: "tastytrade".to_string(),
+            instrument_id: "tastytrade:future:/ESZ26".to_string(),
+            provider_symbol: "/ESZ26:XCME".to_string(),
+            display_symbol: "/ESZ26".to_string(),
+            venue_id: "XCME".to_string(),
+            price_scale: 2,
+            entitlement_id: "tastytrade-authorized".to_string(),
+            ..Default::default()
+        };
+        // Watchlist closes and 1D charts both read this series; a fixed 24-hour
+        // period is never answered by tastytrade.
+        assert_eq!(
+            series_key(&product, ChartInterval::Day1)
+                .expect("daily series")
+                .period,
+            BarPeriod::session(1).expect("session day")
+        );
+        assert_eq!(
+            series_key(&product, ChartInterval::Hour12)
+                .expect("twelve-hour series")
+                .period,
+            BarPeriod::time(43_200).expect("twelve-hour period")
+        );
     }
 
     #[test]
