@@ -346,6 +346,87 @@ pub struct TradingSnapshot {
     pub protective_orders: Vec<ProtectiveOrder>,
 }
 
+/// Trigger prices of the open orders protecting one practice position.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PositionProtection {
+    pub stop_loss: Option<FixedPoint>,
+    pub take_profit: Option<FixedPoint>,
+}
+
+impl TradingSnapshot {
+    /// The protective role of an order: a managed bracket's stop or target, or a standalone
+    /// stop loss or take profit.
+    #[must_use]
+    pub fn protective_role(&self, client_order_id: &ClientOrderId) -> Option<ProtectiveOrderRole> {
+        self.managed_brackets
+            .iter()
+            .find_map(|bracket| {
+                if bracket.stop_client_order_id.as_ref() == Some(client_order_id) {
+                    Some(ProtectiveOrderRole::StopLoss)
+                } else if bracket.target_client_order_ids.contains(client_order_id) {
+                    Some(ProtectiveOrderRole::TakeProfit)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                self.protective_orders
+                    .iter()
+                    .find(|protective| &protective.client_order_id == client_order_id)
+                    .map(|protective| protective.role)
+            })
+    }
+
+    /// The open stop loss and take profit on an account's position in an instrument. With
+    /// several of one role, such as scaled targets, the one that triggers first is reported.
+    #[must_use]
+    pub fn position_protection(
+        &self,
+        account_id: &TradingAccountId,
+        instrument_id: &InstrumentId,
+    ) -> PositionProtection {
+        let mut protection = PositionProtection::default();
+        for order in self.orders.iter().filter(|order| {
+            order.status.is_open()
+                && &order.account_id == account_id
+                && &order.instrument_id == instrument_id
+        }) {
+            let Some(role) = self.protective_role(&order.client_order_id) else {
+                continue;
+            };
+            // A sell protects a long position: its stop sits below the market and its target
+            // above, so the highest stop and the lowest target trigger first.
+            let protects_long = order.side == OrderSide::Sell;
+            let (slot, price, first_wins_high) = match role {
+                ProtectiveOrderRole::StopLoss => (
+                    &mut protection.stop_loss,
+                    order.stop_price.or(order.limit_price),
+                    protects_long,
+                ),
+                ProtectiveOrderRole::TakeProfit => (
+                    &mut protection.take_profit,
+                    order.limit_price.or(order.stop_price),
+                    !protects_long,
+                ),
+            };
+            let Some(price) = price else {
+                continue;
+            };
+            let triggers_first = slot.is_none_or(|current| {
+                if first_wins_high {
+                    price.units() > current.units()
+                } else {
+                    price.units() < current.units()
+                }
+            });
+            if triggers_first {
+                *slot = Some(price);
+            }
+        }
+        protection
+    }
+}
+
 /// User-authored definition for one durable local practice account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatePracticeAccount {

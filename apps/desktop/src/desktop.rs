@@ -1796,36 +1796,17 @@ fn chart_order_semantics(
                 .target_client_order_ids
                 .contains(&order.client_order_id)
     });
-    let protective = snapshot
-        .protective_orders
-        .iter()
-        .find(|protective| protective.client_order_id == order.client_order_id);
-    let role = managed.map_or_else(
-        || {
-            protective.map_or(ChartOrderRole::Working, |protective| {
-                match protective.role {
-                    aeris_trading_runtime::ProtectiveOrderRole::StopLoss => {
-                        ChartOrderRole::StopLoss
-                    }
-                    aeris_trading_runtime::ProtectiveOrderRole::TakeProfit => {
-                        ChartOrderRole::TakeProfit
-                    }
-                }
-            })
-        },
-        |bracket| {
-            if bracket.stop_client_order_id.as_ref() == Some(&order.client_order_id) {
-                ChartOrderRole::StopLoss
-            } else {
-                ChartOrderRole::TakeProfit
-            }
-        },
-    );
+    let protective_role = snapshot.protective_role(&order.client_order_id);
+    let role = match protective_role {
+        Some(aeris_trading_runtime::ProtectiveOrderRole::StopLoss) => ChartOrderRole::StopLoss,
+        Some(aeris_trading_runtime::ProtectiveOrderRole::TakeProfit) => ChartOrderRole::TakeProfit,
+        None => ChartOrderRole::Working,
+    };
     let bracket_id =
         managed.and_then(|bracket| ChartTradingGroupId::new(bracket.bracket_id.clone()).ok());
     let parent_order_id =
         managed.and_then(|bracket| ChartOrderId::new(bracket.entry_client_order_id.as_str()).ok());
-    let is_protection = managed.is_some() || protective.is_some();
+    let is_protection = protective_role.is_some();
     let position_id = is_protection
         .then(|| chart_position_id(&order.account_id, order.instrument_id.as_str()))
         .flatten();

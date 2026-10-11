@@ -954,6 +954,60 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
 }
 
 #[test]
+fn position_protection_reports_the_stop_and_target_that_trigger_first() {
+    let directory = TestDirectory::new("position-protection");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut entry = market_order("protected-long", OrderSide::Buy, 1, 1_000);
+    entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    service.place_order(entry).expect("entry accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills");
+    let protect = |client_id: &str, sequence, role, price_units| {
+        let mut order = market_order(client_id, OrderSide::Sell, sequence, 3_000);
+        order.quantity = FixedPoint::try_new(1, 0).expect("quantity");
+        let price = Some(FixedPoint::try_new(price_units, 2).expect("price"));
+        match role {
+            ProtectiveOrderRole::StopLoss => {
+                order.order_type = OrderType::Stop;
+                order.stop_price = price;
+            }
+            ProtectiveOrderRole::TakeProfit => {
+                order.order_type = OrderType::Limit;
+                order.limit_price = price;
+            }
+        }
+        service
+            .place_protective_order(PlaceProtectiveOrder { order, role })
+            .expect("protection accepted");
+    };
+    protect("stop", 3, ProtectiveOrderRole::StopLoss, 9_800);
+    protect("far-target", 4, ProtectiveOrderRole::TakeProfit, 10_300);
+    protect("near-target", 5, ProtectiveOrderRole::TakeProfit, 10_200);
+
+    let snapshot = service.snapshot().expect("snapshot");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let protection = snapshot.position_protection(&account, &instrument().instrument_id);
+    assert_eq!(protection.stop_loss.map(FixedPoint::units), Some(9_800));
+    assert_eq!(
+        protection.take_profit.map(FixedPoint::units),
+        Some(10_200),
+        "the nearer of two targets on a long triggers first"
+    );
+    let other = TradingAccountId::try_new("aeris-sim-2").expect("account");
+    assert_eq!(
+        snapshot.position_protection(&other, &instrument().instrument_id),
+        PositionProtection::default()
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
 fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
     let directory = TestDirectory::new("intraday-drawdown");
     let service = start_service(&directory);

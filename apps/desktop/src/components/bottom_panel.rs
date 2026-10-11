@@ -200,6 +200,7 @@ impl BottomPanelState {
             &snapshot.broker_positions,
             &snapshot.round_trips,
             &snapshot.connected_broker_accounts,
+            |account_id, instrument_id| snapshot.position_protection(account_id, instrument_id),
         ));
         true
     }
@@ -264,13 +265,17 @@ impl BottomPanelState {
 }
 
 /// Every open position, newest opened first: practice positions from the owner's net
-/// positions, dated by their open trade, and broker positions exactly as the broker reports
-/// them.
+/// positions, dated by their open trade and protected by the owner's working stop loss and
+/// take profit orders, and broker positions exactly as the broker reports them.
 fn open_positions(
     simulated: &[aeris_trading::Position],
     broker: &[aeris_trading::BrokerPosition],
     round_trips: &[aeris_trading_runtime::TradeRoundTrip],
     connected: &BTreeSet<aeris_trading::TradingAccountId>,
+    protection: impl Fn(
+        &aeris_trading::TradingAccountId,
+        &aeris_instruments::InstrumentId,
+    ) -> aeris_trading_runtime::PositionProtection,
 ) -> Vec<OpenPosition> {
     let simulated = simulated.iter().filter_map(|position| {
         let net = position.net_quantity;
@@ -288,6 +293,7 @@ fn open_positions(
             })
             .and_then(|trip| trip.entry)
             .map(|entry| entry.first_unix_nanos);
+        let protection = protection(&position.account_id, &position.instrument_id);
         Some(OpenPosition {
             account_id: position.account_id.clone(),
             instrument_id: position.instrument_id.clone(),
@@ -295,8 +301,8 @@ fn open_positions(
             quantity: aeris_trading::FixedPoint::try_new(net.units().checked_abs()?, net.scale())
                 .ok()?,
             entry_price: position.average_entry_price,
-            stop_loss: None,
-            take_profit: None,
+            stop_loss: protection.stop_loss,
+            take_profit: protection.take_profit,
             open_pnl: Some(position.unrealized_pnl),
             opened_unix_nanos,
             closer: PositionCloser::Simulated,
@@ -1270,6 +1276,7 @@ mod tests {
             ],
             &[],
             &BTreeSet::new(),
+            |_, _| aeris_trading_runtime::PositionProtection::default(),
         ));
         assert_eq!(broker_ids(&state), ["2", "3", "1"]);
         assert_eq!(
@@ -1301,11 +1308,22 @@ mod tests {
             &[broker_position("broker", "7", 10)],
             &[open_round_trip("practice"), round_trip("flat")],
             &connected,
+            |account_id, _| aeris_trading_runtime::PositionProtection {
+                stop_loss: (account_id.as_str() == "practice")
+                    .then(|| aeris_trading::FixedPoint::try_new(1_920, 0).expect("stop")),
+                take_profit: None,
+            },
         );
         assert_eq!(positions.len(), 2, "a flat practice position is not open");
 
         let practice = &positions[0];
         assert_eq!(practice.closer, PositionCloser::Simulated);
+        assert_eq!(
+            practice.stop_loss.map(aeris_trading::FixedPoint::units),
+            Some(1_920),
+            "a practice position shows the owner's working stop loss"
+        );
+        assert_eq!(practice.take_profit, None);
         assert_eq!(practice.side, aeris_trading::OrderSide::Sell);
         assert_eq!(practice.quantity.units(), 200_000_000);
         assert_eq!(
