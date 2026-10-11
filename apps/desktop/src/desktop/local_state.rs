@@ -679,11 +679,11 @@ fn valid_study_series(series: &SeriesKey) -> bool {
 mod tests {
     use super::*;
     use aeris_contracts::{
-        WorkspaceBigTradesState, WorkspaceChartIndicatorState, WorkspaceChartState,
-        WorkspaceChartStudyState, WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState,
-        WorkspacePriceAxisState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-        WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-        workspace_study_setting_state,
+        WorkspaceBigTradesState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
+        WorkspaceChartState, WorkspaceChartStudyState, WorkspaceOrderFlowSettingsState,
+        WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceStudyDecimalState,
+        WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
+        WorkspaceStudySettingState, workspace_study_setting_state,
     };
 
     fn temporary_workspace_path() -> PathBuf {
@@ -851,6 +851,12 @@ mod tests {
             show_order_management_lines: Some(false),
             show_execution_marks: Some(true),
             extend_order_lines_left: Some(false),
+            legend: Some(WorkspaceChartLegendState {
+                show_symbol: Some(true),
+                show_symbol_values: Some(false),
+                show_indicators: Some(false),
+                show_indicator_values: Some(true),
+            }),
         }
     }
 
@@ -864,6 +870,7 @@ mod tests {
             show_order_management_lines: Some(false),
             show_execution_marks: Some(true),
             extend_order_lines_left: Some(false),
+            legend: round_trip_chart_state().legend,
         }
     }
 

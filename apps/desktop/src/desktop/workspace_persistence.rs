@@ -394,6 +394,7 @@ mod tests {
             show_order_management_lines: Some(true),
             show_execution_marks: Some(false),
             extend_order_lines_left: Some(false),
+            legend: None,
         };
 
         let watchlist_entry = WorkspaceWatchlistEntryState {

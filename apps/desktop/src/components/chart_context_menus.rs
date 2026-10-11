@@ -1897,7 +1897,61 @@ fn chart_canvas_settings(
         color_picker,
         theme,
     ))
+    .child(canvas_legend_settings(
+        terminal,
+        menu,
+        snapshot.legend,
+        theme,
+    ))
     .into_any_element()
+}
+
+fn canvas_legend_settings(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    legend: ChartLegendOptions,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    div()
+        .child(settings_group_heading(
+            "Legend",
+            "Symbol and indicator labels on the chart",
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Symbol legend",
+            legend.symbol,
+            ChartSettingsAction::ToggleSymbolLegend,
+            theme,
+        ))
+        .child(settings_checkbox_row(
+            terminal,
+            menu,
+            "OHLC values",
+            legend.symbol_values,
+            legend.symbol,
+            ChartSettingsAction::ToggleSymbolLegendValues,
+            theme,
+        ))
+        .child(settings_toggle_row(
+            terminal,
+            menu,
+            "Indicator legend",
+            legend.indicators,
+            ChartSettingsAction::ToggleIndicatorLegend,
+            theme,
+        ))
+        .child(settings_checkbox_row(
+            terminal,
+            menu,
+            "Indicator values",
+            legend.indicator_values,
+            legend.indicators,
+            ChartSettingsAction::ToggleIndicatorLegendValues,
+            theme,
+        ))
 }
 
 fn chart_trading_settings(
@@ -2196,6 +2250,30 @@ fn settings_toggle_row(
             terminal.apply_chart_settings_action(&menu, action, terminal_cx);
         });
     })
+}
+
+/// An option that refines the setting above it; it stays visible but locked while that setting
+/// is off, so turning the setting back on restores the earlier choice.
+fn settings_checkbox_row(
+    terminal: &Entity<TerminalApp>,
+    menu: &ChartContextMenu,
+    label: &'static str,
+    checked: bool,
+    available: bool,
+    action: ChartSettingsAction,
+    theme: &AerisTheme,
+) -> impl IntoElement {
+    let terminal = terminal.clone();
+    let menu = menu.clone();
+    div().pl(design_rems(12.0)).child(
+        CheckboxRow::new(label, label, checked, theme)
+            .disabled(!available)
+            .on_change(move |_, _, _, cx| {
+                terminal.update(cx, |terminal, terminal_cx| {
+                    terminal.apply_chart_settings_action(&menu, action, terminal_cx);
+                });
+            }),
+    )
 }
 
 /// Effective CSS color of a theme-following appearance field under the active theme.

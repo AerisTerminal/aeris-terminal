@@ -72,6 +72,12 @@ list and its tabs in dense panel headers (bottom panel, side panels); `wrap()` f
 
 **`Switch`** / **`SwitchRow`** (`switch.rs`): every on/off setting, never an "On" / "Off" button.
 
+**`CheckboxRow`** (`checkbox.rs`): an option that refines the setting above it (a legend's values
+under its switch), never a setting of its own. A 16px `--radius-small` box: `surface` with a
+`border-strong` outline when clear, `primary` with a `primary-foreground` tick when checked; hover
+fills `hover-bg` / `primary-hover`; disabled uses `disabled-bg` / `primary-disabled` and `text-muted`.
+The whole row toggles, and focus uses the shared ring.
+
 **`Input`** (`input.rs`), the Theme System `Input`: a `border` field on `surface` (`surface-secondary` in
 dark), `hover-bg` on hover, the shared focus ring, and a `danger` border with a 3px `danger-ring` halo
 while invalid.

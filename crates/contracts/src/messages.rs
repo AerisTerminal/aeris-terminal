@@ -234,6 +234,9 @@ pub struct WorkspaceChartSettingsTemplateState {
     /// Whether order and position lines extend to the pane's left edge. Absent means enabled.
     #[prost(bool, optional, tag = "8")]
     pub extend_order_lines_left: Option<bool>,
+    /// Which parts of the chart legend show. Absent in legacy templates means all shown.
+    #[prost(message, optional, tag = "9")]
+    pub legend: Option<WorkspaceChartLegendState>,
 }
 
 /// Persisted presentation state for one pane.
@@ -339,6 +342,26 @@ pub struct WorkspaceChartState {
     /// Chart order and position line extension. Absent in legacy workspaces means enabled.
     #[prost(bool, optional, tag = "19")]
     pub extend_order_lines_left: Option<bool>,
+    /// Which parts of the chart legend show. Absent in legacy workspaces means all shown.
+    #[prost(message, optional, tag = "20")]
+    pub legend: Option<WorkspaceChartLegendState>,
+}
+
+/// Chart legend presentation. Every absent field means shown.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceChartLegendState {
+    /// The symbol row.
+    #[prost(bool, optional, tag = "1")]
+    pub show_symbol: Option<bool>,
+    /// The symbol row's open, high, low and close readouts.
+    #[prost(bool, optional, tag = "2")]
+    pub show_symbol_values: Option<bool>,
+    /// The rows of indicators, studies and order-flow tools.
+    #[prost(bool, optional, tag = "3")]
+    pub show_indicators: Option<bool>,
+    /// The readouts on those rows.
+    #[prost(bool, optional, tag = "4")]
+    pub show_indicator_values: Option<bool>,
 }
 
 /// Tags 4 and 5 held the retired footprint trade-bubble toggle and threshold; never reuse them.

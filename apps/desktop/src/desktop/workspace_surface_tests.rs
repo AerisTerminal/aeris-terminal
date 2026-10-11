@@ -121,6 +121,24 @@ fn legacy_chart_trading_visibility_defaults_to_visible_and_explicit_choices_rest
 }
 
 #[test]
+fn legacy_chart_legend_shows_everything_and_explicit_choices_round_trip() {
+    assert_eq!(restored_chart_legend(None), ChartLegendOptions::default());
+    assert_eq!(
+        restored_chart_legend(Some(WorkspaceChartLegendState::default())),
+        ChartLegendOptions::default()
+    );
+    let names_only = ChartLegendOptions {
+        symbol_values: false,
+        indicators: false,
+        ..ChartLegendOptions::default()
+    };
+    assert_eq!(
+        restored_chart_legend(Some(persisted_chart_legend(names_only))),
+        names_only
+    );
+}
+
+#[test]
 fn legacy_default_on_order_flow_studies_migrate_to_opt_in() {
     let legacy = WorkspaceOrderFlowSettingsState {
         display_mode: 0,

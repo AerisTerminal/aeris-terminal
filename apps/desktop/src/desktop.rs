@@ -93,17 +93,17 @@ use aeris_chart_integration::{
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
     ChartDrawingKind, ChartDrawingStamp, ChartExecutionId, ChartExecutionKind,
     ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow,
-    ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata, ChartOrderId, ChartOrderKind,
-    ChartOrderRole, ChartOrderSide, ChartOrderStatus, ChartPositionId, ChartPositionSide,
-    ChartSettingsRequest, ChartSplitDirection, ChartStudyInputRequirements, ChartStudyInputStream,
-    ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind, ChartStudyPointStyle,
-    ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors, ChartTradingAnnotation,
-    ChartTradingAnnotationPlacement, ChartTradingAnnotationTone, ChartTradingExecution,
-    ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction, ChartTradingPosition,
-    ChartTradingPriceScale, ChartTradingSnapshot, ChartType, ChartWorkingOrder,
-    ChartWorkspaceLayout, DEFAULT_STUDY_LINE_WIDTH, FootprintDisplayMode, MAXIMUM_STUDY_LINE_WIDTH,
-    OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction,
-    PriceAxisMenuState, classify_order_flow_sweeps,
+    ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata, ChartLegendOptions, ChartOrderId,
+    ChartOrderKind, ChartOrderRole, ChartOrderSide, ChartOrderStatus, ChartPositionId,
+    ChartPositionSide, ChartSettingsRequest, ChartSplitDirection, ChartStudyInputRequirements,
+    ChartStudyInputStream, ChartStudyOutputDescriptor, ChartStudyPaneTarget, ChartStudyPlotKind,
+    ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartThemeColors,
+    ChartTradingAnnotation, ChartTradingAnnotationPlacement, ChartTradingAnnotationTone,
+    ChartTradingExecution, ChartTradingGroupId, ChartTradingIntent, ChartTradingIntentAction,
+    ChartTradingPosition, ChartTradingPriceScale, ChartTradingSnapshot, ChartType,
+    ChartWorkingOrder, ChartWorkspaceLayout, DEFAULT_STUDY_LINE_WIDTH, FootprintDisplayMode,
+    MAXIMUM_STUDY_LINE_WIDTH, OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep,
+    OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, classify_order_flow_sweeps,
 };
 use aeris_context_runtime::{ContextSnapshot, ContextSource, ContextView};
 use aeris_contracts::{
@@ -111,7 +111,7 @@ use aeris_contracts::{
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionKind,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
     SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceBigTradesState,
-    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
+    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
     WorkspaceLayoutState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
     WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
@@ -200,6 +200,7 @@ use indicator_menu::{
 };
 use native_ui::{
     button::{Button, ButtonSize, ButtonVariant, close_button},
+    checkbox::CheckboxRow,
     color_picker::{ColorPicker, normalize_hex_color, transparency_backdrop},
     dialog::{ConfirmationDialog, ConfirmationTone, Dialog, DialogAlign, DialogSize},
     icon::Icon,
@@ -4423,6 +4424,10 @@ enum ChartSettingsAction {
     ToggleOrderManagementLines,
     ToggleExecutionMarks,
     ToggleExtendOrderLinesLeft,
+    ToggleSymbolLegend,
+    ToggleSymbolLegendValues,
+    ToggleIndicatorLegend,
+    ToggleIndicatorLegendValues,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4450,6 +4455,7 @@ struct ChartSettingsSnapshot {
     order_flow: OrderFlowSettings,
     time_zone: String,
     trading_visibility: ChartTradingVisibilitySettings,
+    legend: ChartLegendOptions,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

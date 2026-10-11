@@ -55,10 +55,11 @@ pub enum UiIcon {
     User,
     Star,
     StarFilled,
+    Tick,
 }
 
 impl UiIcon {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 44] = [
         Self::Add,
         Self::ArrowLeft,
         Self::ArrowRightDouble,
@@ -102,6 +103,7 @@ impl UiIcon {
         Self::User,
         Self::Star,
         Self::StarFilled,
+        Self::Tick,
     ];
 
     #[must_use]
@@ -150,6 +152,7 @@ impl UiIcon {
             Self::User => "user.svg",
             Self::Star => "star.svg",
             Self::StarFilled => "star-filled.svg",
+            Self::Tick => "tick.svg",
         };
         format!("{UI_ASSET_PREFIX}{name}").into()
     }
@@ -589,6 +592,7 @@ fn ui_asset(path: &str) -> Option<&'static [u8]> {
         "user.svg" => include_bytes!("../assets/icons/ui/user.svg"),
         "star.svg" => include_bytes!("../assets/icons/ui/star.svg"),
         "star-filled.svg" => include_bytes!("../assets/icons/ui/star-filled.svg"),
+        "tick.svg" => include_bytes!("../assets/icons/ui/tick.svg"),
         _ => return None,
     })
 }

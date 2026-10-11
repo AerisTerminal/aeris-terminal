@@ -958,6 +958,7 @@ impl TerminalApp {
             order_flow: surface.chart_order_flow_settings(cx)?,
             time_zone: surface.chart_time_zone_id().to_string(),
             trading_visibility: surface.chart_trading_visibility(),
+            legend: surface.chart_legend_options(cx)?,
         })
     }
 
@@ -1092,6 +1093,68 @@ impl TerminalApp {
         cx.notify();
     }
 
+    /// Applies chart trading overlay actions through the surface that owns them.
+    /// Returns whether `action` was a trading overlay action.
+    fn apply_trading_visibility_action(
+        surface: &Entity<WorkspaceSurface>,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut visibility = surface.read(cx).chart_trading_visibility();
+        match action {
+            ChartSettingsAction::ToggleOrderManagementLines => {
+                visibility.show_order_management_lines = !visibility.show_order_management_lines;
+            }
+            ChartSettingsAction::ToggleExecutionMarks => {
+                visibility.show_execution_marks = !visibility.show_execution_marks;
+            }
+            ChartSettingsAction::ToggleExtendOrderLinesLeft => {
+                visibility.extend_order_lines_left = !visibility.extend_order_lines_left;
+            }
+            _ => return false,
+        }
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_trading_visibility(visibility, surface_cx);
+        });
+        true
+    }
+
+    /// Applies legend actions through the chart, which owns the legend.
+    /// Returns whether `action` was a legend action.
+    fn apply_legend_settings_action(
+        surface: &Entity<WorkspaceSurface>,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(
+            action,
+            ChartSettingsAction::ToggleSymbolLegend
+                | ChartSettingsAction::ToggleSymbolLegendValues
+                | ChartSettingsAction::ToggleIndicatorLegend
+                | ChartSettingsAction::ToggleIndicatorLegendValues
+        ) {
+            return false;
+        }
+        let Some(mut legend) = surface.read(cx).chart_legend_options(cx) else {
+            return true;
+        };
+        match action {
+            ChartSettingsAction::ToggleSymbolLegend => legend.symbol = !legend.symbol,
+            ChartSettingsAction::ToggleSymbolLegendValues => {
+                legend.symbol_values = !legend.symbol_values;
+            }
+            ChartSettingsAction::ToggleIndicatorLegend => legend.indicators = !legend.indicators,
+            ChartSettingsAction::ToggleIndicatorLegendValues => {
+                legend.indicator_values = !legend.indicator_values;
+            }
+            _ => unreachable!(),
+        }
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_chart_legend_options(legend, surface_cx);
+        });
+        true
+    }
+
     /// Applies footprint order-flow actions through the chart's order-flow settings owner.
     /// Returns whether `action` was an order-flow action.
     fn apply_order_flow_settings_action(
@@ -1144,33 +1207,10 @@ impl TerminalApp {
             cx.notify();
             return;
         }
-        if matches!(
-            action,
-            ChartSettingsAction::ToggleOrderManagementLines
-                | ChartSettingsAction::ToggleExecutionMarks
-                | ChartSettingsAction::ToggleExtendOrderLinesLeft
-        ) {
-            let mut visibility = surface.read(cx).chart_trading_visibility();
-            match action {
-                ChartSettingsAction::ToggleOrderManagementLines => {
-                    visibility.show_order_management_lines =
-                        !visibility.show_order_management_lines;
-                }
-                ChartSettingsAction::ToggleExecutionMarks => {
-                    visibility.show_execution_marks = !visibility.show_execution_marks;
-                }
-                ChartSettingsAction::ToggleExtendOrderLinesLeft => {
-                    visibility.extend_order_lines_left = !visibility.extend_order_lines_left;
-                }
-                _ => unreachable!(),
-            }
-            surface.update(cx, |surface, surface_cx| {
-                surface.set_chart_trading_visibility(visibility, surface_cx);
-            });
-            cx.notify();
-            return;
-        }
-        if Self::apply_order_flow_settings_action(&surface, action, cx) {
+        if Self::apply_trading_visibility_action(&surface, action, cx)
+            || Self::apply_legend_settings_action(&surface, action, cx)
+            || Self::apply_order_flow_settings_action(&surface, action, cx)
+        {
             cx.notify();
             return;
         }
@@ -1187,7 +1227,11 @@ impl TerminalApp {
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks
-            | ChartSettingsAction::ToggleExtendOrderLinesLeft => unreachable!(),
+            | ChartSettingsAction::ToggleExtendOrderLinesLeft
+            | ChartSettingsAction::ToggleSymbolLegend
+            | ChartSettingsAction::ToggleSymbolLegendValues
+            | ChartSettingsAction::ToggleIndicatorLegend
+            | ChartSettingsAction::ToggleIndicatorLegendValues => unreachable!(),
             ChartSettingsAction::CrosshairWidth(width) => {
                 appearance.crosshair_width = width.clamp(1, 4);
             }
@@ -1225,7 +1269,11 @@ impl TerminalApp {
             | ChartSettingsAction::FootprintTicksPerRow(_)
             | ChartSettingsAction::ToggleOrderManagementLines
             | ChartSettingsAction::ToggleExecutionMarks
-            | ChartSettingsAction::ToggleExtendOrderLinesLeft => unreachable!(),
+            | ChartSettingsAction::ToggleExtendOrderLinesLeft
+            | ChartSettingsAction::ToggleSymbolLegend
+            | ChartSettingsAction::ToggleSymbolLegendValues
+            | ChartSettingsAction::ToggleIndicatorLegend
+            | ChartSettingsAction::ToggleIndicatorLegendValues => unreachable!(),
         });
         cx.notify();
     }
@@ -1238,6 +1286,7 @@ impl TerminalApp {
                     ChartTradingVisibilitySettings::default(),
                     surface_cx,
                 );
+                surface.set_chart_legend_options(ChartLegendOptions::default(), surface_cx);
             });
         }
         self.chart_settings_color_picker = None;
@@ -1265,6 +1314,7 @@ impl TerminalApp {
             ),
             show_execution_marks: Some(snapshot.trading_visibility.show_execution_marks),
             extend_order_lines_left: Some(snapshot.trading_visibility.extend_order_lines_left),
+            legend: Some(workspace_surface::persisted_chart_legend(snapshot.legend)),
         })
     }
 
@@ -1298,12 +1348,14 @@ impl TerminalApp {
             show_execution_marks: template.show_execution_marks.unwrap_or(true),
             extend_order_lines_left: template.extend_order_lines_left.unwrap_or(true),
         };
+        let legend = workspace_surface::restored_chart_legend(template.legend);
         surface.update(cx, |surface, surface_cx| {
             surface.set_chart_type(chart_type, surface_cx);
             surface.set_chart_appearance(&appearance, surface_cx);
             surface.set_chart_crosshair_mode(crosshair_mode, surface_cx);
             surface.set_chart_time_zone(time_zone, surface_cx);
             surface.set_chart_trading_visibility(trading_visibility, surface_cx);
+            surface.set_chart_legend_options(legend, surface_cx);
         });
     }
 

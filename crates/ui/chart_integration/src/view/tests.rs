@@ -2958,6 +2958,47 @@ fn legend_values_follow_volume_direction_and_indicator_series_colors() {
 }
 
 #[test]
+fn legend_options_hide_rows_or_their_values_without_hiding_series() {
+    let mut chart = interactive_chart();
+    let ema = chart
+        .add_indicator(ChartIndicator::Ema)
+        .expect("EMA is created");
+    let row = |chart: &AerisChartView, item: LegendItem| {
+        chart.legend_rows().into_iter().find(|row| row.item == item)
+    };
+    let ema_item = LegendItem::Indicator(ema[0]);
+    assert_eq!(chart.legend_options(), ChartLegendOptions::default());
+    let symbol = row(&chart, LegendItem::Asset).expect("symbol row");
+    assert_ne!(symbol.values, [] as [LegendValue; 0]);
+    let symbol_title = symbol.title;
+    assert_ne!(
+        row(&chart, ema_item).expect("EMA row").values,
+        [] as [LegendValue; 0]
+    );
+
+    let values_hidden = ChartLegendOptions {
+        symbol_values: false,
+        indicator_values: false,
+        ..ChartLegendOptions::default()
+    };
+    assert!(chart.set_legend_options(values_hidden));
+    assert!(!chart.set_legend_options(values_hidden));
+    let symbol = row(&chart, LegendItem::Asset).expect("symbol name stays");
+    assert_eq!(symbol.title, symbol_title);
+    assert_eq!(symbol.values, [] as [LegendValue; 0]);
+    let indicator = row(&chart, ema_item).expect("EMA name stays");
+    assert_eq!(indicator.values, [] as [LegendValue; 0]);
+
+    assert!(chart.set_legend_options(ChartLegendOptions {
+        symbol: false,
+        indicators: false,
+        ..ChartLegendOptions::default()
+    }));
+    assert_eq!(chart.legend_rows().len(), 0);
+    assert!(series_entry(&chart, ema[0]).visible);
+}
+
+#[test]
 fn legend_visibility_preserves_rows_and_indicator_removal_clears_bindings() {
     let mut chart = interactive_chart();
     let sma = chart

@@ -453,6 +453,32 @@ pub struct OrderFlowSweep {
 /// Aeris Charts-owned typed financial appearance, re-exported under the Terminal API name.
 pub type ChartAppearanceSettings = FinancialAppearance;
 
+/// Which parts of the chart legend show. Presentation only: hiding a legend never hides the
+/// series or indicator it describes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // Four independent legend toggles.
+pub struct ChartLegendOptions {
+    /// The symbol row.
+    pub symbol: bool,
+    /// The symbol row's open, high, low and close readouts.
+    pub symbol_values: bool,
+    /// The rows of indicators, studies and order-flow tools.
+    pub indicators: bool,
+    /// The readouts on those rows.
+    pub indicator_values: bool,
+}
+
+impl Default for ChartLegendOptions {
+    fn default() -> Self {
+        Self {
+            symbol: true,
+            symbol_values: true,
+            indicators: true,
+            indicator_values: true,
+        }
+    }
+}
+
 /// The CSS keyword Aeris Charts reads as "no fill"; a candle body set to it is hollow.
 const HOLLOW_BODY: &str = "transparent";
 
@@ -912,6 +938,7 @@ pub struct AerisChartView {
     indicator_name_labels: IndicatorLabels,
     indicator_value_labels: IndicatorLabels,
     indicator_price_lines: IndicatorLabels,
+    legend_options: ChartLegendOptions,
     /// Transient host-projected plan levels. These are deliberately separate
     /// from Aeris Charts-owned user drawings and are reinstalled with price series.
     session_plan_levels: Vec<(f64, String)>,
@@ -1014,6 +1041,7 @@ impl AerisChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            legend_options: ChartLegendOptions::default(),
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
@@ -1120,6 +1148,7 @@ impl AerisChartView {
             indicator_name_labels: IndicatorLabels::Shown,
             indicator_value_labels: IndicatorLabels::Shown,
             indicator_price_lines: IndicatorLabels::Shown,
+            legend_options: ChartLegendOptions::default(),
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
@@ -2185,6 +2214,22 @@ impl AerisChartView {
         if !self.engine.set_configured_crosshair_mode(mode) {
             return false;
         }
+        self.mark_user_state_changed();
+        true
+    }
+
+    /// Which parts of the legend show.
+    #[must_use]
+    pub const fn legend_options(&self) -> ChartLegendOptions {
+        self.legend_options
+    }
+
+    /// Shows or hides parts of the legend. Returns whether anything changed.
+    pub fn set_legend_options(&mut self, options: ChartLegendOptions) -> bool {
+        if self.legend_options == options {
+            return false;
+        }
+        self.legend_options = options;
         self.mark_user_state_changed();
         true
     }

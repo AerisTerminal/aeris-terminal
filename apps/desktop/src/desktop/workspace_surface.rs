@@ -325,6 +325,30 @@ fn restored_market_selection(
     }
 }
 
+pub(super) const fn persisted_chart_legend(
+    legend: ChartLegendOptions,
+) -> WorkspaceChartLegendState {
+    WorkspaceChartLegendState {
+        show_symbol: Some(legend.symbol),
+        show_symbol_values: Some(legend.symbol_values),
+        show_indicators: Some(legend.indicators),
+        show_indicator_values: Some(legend.indicator_values),
+    }
+}
+
+/// The persisted legend, with every part absent from a legacy workspace or template shown.
+pub(super) fn restored_chart_legend(
+    legend: Option<WorkspaceChartLegendState>,
+) -> ChartLegendOptions {
+    let legend = legend.unwrap_or_default();
+    ChartLegendOptions {
+        symbol: legend.show_symbol.unwrap_or(true),
+        symbol_values: legend.show_symbol_values.unwrap_or(true),
+        indicators: legend.show_indicators.unwrap_or(true),
+        indicator_values: legend.show_indicator_values.unwrap_or(true),
+    }
+}
+
 pub(super) fn persisted_chart_appearance(
     appearance: &ChartAppearanceSettings,
 ) -> WorkspaceChartAppearanceState {
@@ -1533,6 +1557,7 @@ impl WorkspaceSurface {
             ),
             show_execution_marks: Some(self.chart_trading_visibility.show_execution_marks),
             extend_order_lines_left: Some(self.chart_trading_visibility.extend_order_lines_left),
+            legend: Some(persisted_chart_legend(chart.legend_options())),
         })
     }
 
@@ -1581,7 +1606,9 @@ impl WorkspaceSurface {
         } else {
             state.time_zone.as_str()
         };
+        let legend = restored_chart_legend(state.legend);
         chart.update(cx, |chart, _| {
+            let _ = chart.set_legend_options(legend);
             if let Err(error) = chart.set_time_zone(time_zone) {
                 diagnostic!("Aeris persisted chart time zone could not be restored: {error}");
             }
@@ -4102,6 +4129,12 @@ impl WorkspaceSurface {
             .map(|chart| chart.read(cx).crosshair_mode())
     }
 
+    pub(super) fn chart_legend_options(&self, cx: &App) -> Option<ChartLegendOptions> {
+        self.chart
+            .as_ref()
+            .map(|chart| chart.read(cx).legend_options())
+    }
+
     pub(super) fn chart_order_flow_settings(&self, cx: &App) -> Option<OrderFlowSettings> {
         self.chart
             .as_ref()
@@ -4331,6 +4364,26 @@ impl WorkspaceSurface {
         };
         if chart.update(cx, |chart, chart_cx| {
             let changed = chart.set_crosshair_mode(mode);
+            if changed {
+                chart_cx.notify();
+            }
+            changed
+        }) {
+            self.chart_persistence_dirty = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_chart_legend_options(
+        &mut self,
+        options: ChartLegendOptions,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chart) = &self.chart else {
+            return;
+        };
+        if chart.update(cx, |chart, chart_cx| {
+            let changed = chart.set_legend_options(options);
             if changed {
                 chart_cx.notify();
             }

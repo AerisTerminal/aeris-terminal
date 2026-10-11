@@ -42,7 +42,7 @@ pub use view::{
     AerisChartView, BigTradesFilter, BigTradesIntensity, BigTradesSettings, BigTradesSize,
     ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingKind,
     ChartDrawingStamp, ChartIndicator, ChartIndicatorError, ChartIndicatorState,
-    ChartSettingsRequest, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartLegendOptions, ChartSettingsRequest, ChartStudyInputRequirements, ChartStudyInputStream,
     ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind,
     ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType,
     DrawingsLockSummary, FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings,

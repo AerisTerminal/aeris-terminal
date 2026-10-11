@@ -21,11 +21,11 @@ pub use messages::{
     ProviderSessionHours, ProviderState, STARTUP_CATALOG_COMMAND_GENERATION, ScreenProviderMarkets,
     SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState,
     WorkspaceBigTradesState, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
-    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceLayoutState, WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceChartLegendState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
+    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 pub use provider::{ProviderCatalogSymbol, ProviderConnectionKind, ProviderPresentationDescriptor};

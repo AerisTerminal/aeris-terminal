@@ -227,6 +227,7 @@ impl AerisChartView {
             let item = LegendItem::BigTrades;
             insert_price_pane_legend_row(&mut rows, item, "Big Trades", big_trades.visible, true);
         }
+        apply_legend_options(&mut rows, self.legend_options);
         rows
     }
     fn volume_profile_visible(&self) -> Option<bool> {
@@ -472,6 +473,26 @@ fn legend_row(row: aeris_charts_engine::FinancialLegendRow) -> Option<LegendRow>
         visible: row.visible,
         settings_available: row.settings_available,
     })
+}
+
+fn apply_legend_options(rows: &mut Vec<LegendRow>, options: ChartLegendOptions) {
+    rows.retain(|row| {
+        if row.item == LegendItem::Asset {
+            options.symbol
+        } else {
+            options.indicators
+        }
+    });
+    for row in rows {
+        let values_shown = if row.item == LegendItem::Asset {
+            options.symbol_values
+        } else {
+            options.indicator_values
+        };
+        if !values_shown {
+            row.values.clear();
+        }
+    }
 }
 
 /// The volume profile and big trades are engine-owned price-pane primitives, not series, so the
