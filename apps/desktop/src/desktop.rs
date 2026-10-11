@@ -154,8 +154,8 @@ use big_trades_dialog::big_trades_dialog_layer;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
     ChartSettingsTemplateView, ChartSettingsView, FLOATING_PANEL_MOVE_CURSOR,
-    chart_context_menu_layer, chart_css_color, chart_settings_menu_layer,
-    clamp_panel_origin_within, overlay_height, price_axis_menu_layer,
+    chart_context_menu_layer, chart_settings_menu_layer, clamp_panel_origin_within,
+    color_swatch_button, overlay_height, price_axis_menu_layer,
 };
 #[cfg(test)]
 use chart_context_menus::{

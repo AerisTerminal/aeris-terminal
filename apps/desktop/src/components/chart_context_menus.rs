@@ -2290,6 +2290,45 @@ fn effective_appearance_color(
     }
 }
 
+/// The outline button that shows a color's swatch and hex code and opens its picker.
+pub(super) fn color_swatch_button(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    value: &str,
+    open: bool,
+    theme: &AerisTheme,
+) -> Button {
+    let colors = theme.colors;
+    Button::new(id, theme)
+        .variant(ButtonVariant::Outline)
+        .open(open)
+        .aria_label(label)
+        .leading(
+            div()
+                .size(design_rems(16.0))
+                .flex_none()
+                .rounded_full()
+                .border(platform_border_width(theme))
+                .border_color(gpui_color(colors.border_secondary))
+                .bg(transparency_backdrop(theme))
+                .child(
+                    div()
+                        .size_full()
+                        .rounded_full()
+                        .bg(chart_css_color(value, colors.text_secondary)),
+                ),
+        )
+        .child(
+            // Sized for `#RRGGBBAA` so translucent colors fit on one line like opaque ones.
+            div()
+                .w(design_rems(72.0))
+                .whitespace_nowrap()
+                .text_xs()
+                .text_color(gpui_color(colors.text_muted))
+                .child(value.to_ascii_uppercase()),
+        )
+}
+
 fn settings_color_row(
     terminal: &Entity<TerminalApp>,
     menu: &ChartContextMenu,
@@ -2301,7 +2340,6 @@ fn settings_color_row(
     let colors = theme.colors;
     let terminal_for_toggle = terminal.clone();
     let current_for_toggle = value.to_string();
-    let color = chart_css_color(value, colors.text_secondary);
     let open = open_picker.is_some_and(|picker| picker.setting == setting);
     let mut row = div().relative().w_full().flex().flex_col().child(
         div()
@@ -2316,37 +2354,23 @@ fn settings_color_row(
                     .child(setting.label()),
             )
             .child(
-                Button::new(("chart_color_picker", setting as usize), theme)
-                    .variant(ButtonVariant::Outline)
-                    .open(open)
-                    .aria_label(setting.label())
-                    .leading(
-                        div()
-                            .size(design_rems(16.0))
-                            .flex_none()
-                            .rounded_full()
-                            .border(platform_border_width(theme))
-                            .border_color(gpui_color(colors.border_secondary))
-                            .bg(transparency_backdrop(theme))
-                            .child(div().size_full().rounded_full().bg(color)),
-                    )
-                    .child(
-                        div()
-                            .w(design_rems(62.0))
-                            .text_xs()
-                            .text_color(gpui_color(colors.text_muted))
-                            .child(value.to_ascii_uppercase()),
-                    )
-                    .on_press(move |_, window, cx| {
-                        terminal_for_toggle.update(cx, |terminal, terminal_cx| {
-                            terminal.toggle_chart_color_picker(
-                                setting,
-                                &current_for_toggle,
-                                window,
-                                terminal_cx,
-                            );
-                        });
-                    }),
+                color_swatch_button(
+                    ("chart_color_picker", setting as usize),
+                    setting.label(),
+                    value,
+                    open,
+                    theme,
+                )
+                .on_press(move |_, window, cx| {
+                    terminal_for_toggle.update(cx, |terminal, terminal_cx| {
+                        terminal.toggle_chart_color_picker(
+                            setting,
+                            &current_for_toggle,
+                            window,
+                            terminal_cx,
+                        );
+                    });
+                }),
             ),
     );
     if open && let Some(picker) = open_picker {
@@ -2472,7 +2496,7 @@ fn settings_choice_row(
         .child(controls)
 }
 
-pub(super) fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
+fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
     let Some(hex) = value.strip_prefix('#') else {
         return gpui_color(fallback);
     };

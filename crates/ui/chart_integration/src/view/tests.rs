@@ -3175,6 +3175,11 @@ fn volume_settings_rebuild_the_engine_indicator_and_keep_its_legend_state() {
         series_entry(&chart, average).line_color,
         settings.average.color
     );
+    assert_eq!(
+        series_entry(&chart, average).line_width,
+        Some(1.0),
+        "the average keeps the engine's thin default"
+    );
     assert!(chart.set_legend_item_visible(LegendItem::Volume, true));
     assert!(series_entry(&chart, columns).visible && series_entry(&chart, average).visible);
 }
@@ -3216,6 +3221,39 @@ fn volume_settings_restore_with_the_chart_and_release_their_own_pane() {
         chart.engine.panes.len(),
         price_panes,
         "its own pane collapses"
+    );
+}
+
+#[test]
+fn volume_in_its_own_pane_keeps_its_height_when_settings_change_after_a_resize() {
+    let mut chart = interactive_chart();
+    chart
+        .add_indicator(ChartIndicator::Volume)
+        .expect("volume is created");
+    let mut settings = VolumeSettings {
+        placement: VolumePlacement::OwnPane,
+        ..VolumeSettings::default()
+    };
+    assert!(chart.set_volume_settings(settings.clone()));
+    let layout = |chart: &mut AerisChartView| {
+        chart
+            .engine
+            .recompute_layout_with_measure(true, |_, _| 48.0, |_, _| 48.0);
+    };
+    layout(&mut chart);
+    let volume_pane = chart.engine.panes.len() - 1;
+    chart.engine.drag_pane_separator(volume_pane - 1, -20.0);
+    layout(&mut chart);
+    let resized = chart.engine.panes[volume_pane].height;
+
+    settings.average.enabled = true;
+    assert!(chart.set_volume_settings(settings));
+    layout(&mut chart);
+    let volume_pane = chart.engine.panes.len() - 1;
+    assert!(
+        chart.engine.panes[volume_pane].height > resized * 0.5,
+        "enabling the average keeps the volume pane open: {} after {resized}",
+        chart.engine.panes[volume_pane].height
     );
 }
 

@@ -18,7 +18,6 @@ fn color_control(
     target: VolumeColorTarget,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     let value = target.color(&dialog.draft);
     let open_picker = dialog
         .color_picker
@@ -26,37 +25,18 @@ fn color_control(
         .filter(|picker| picker.target == target);
     let toggle = app.clone();
     let mut control = div().relative().flex().child(
-        Button::new(("volume_color", target as usize), theme)
-            .variant(ButtonVariant::Outline)
-            .open(open_picker.is_some())
-            .aria_label(target.label())
-            .leading(
-                div()
-                    .size(design_rems(16.0))
-                    .flex_none()
-                    .rounded_full()
-                    .border(platform_border_width(theme))
-                    .border_color(gpui_color(colors.border_secondary))
-                    .bg(transparency_backdrop(theme))
-                    .child(
-                        div()
-                            .size_full()
-                            .rounded_full()
-                            .bg(chart_css_color(&value, colors.text_secondary)),
-                    ),
-            )
-            .child(
-                div()
-                    .w(design_rems(62.0))
-                    .text_xs()
-                    .text_color(gpui_color(colors.text_muted))
-                    .child(value.to_ascii_uppercase()),
-            )
-            .on_press(move |_, window, cx| {
-                toggle.update(cx, |surface, surface_cx| {
-                    surface.toggle_volume_dialog_color_picker(target, window, surface_cx);
-                });
-            }),
+        color_swatch_button(
+            ("volume_color", target as usize),
+            target.label(),
+            &value,
+            open_picker.is_some(),
+            theme,
+        )
+        .on_press(move |_, window, cx| {
+            toggle.update(cx, |surface, surface_cx| {
+                surface.toggle_volume_dialog_color_picker(target, window, surface_cx);
+            });
+        }),
     );
     if let Some(picker) = open_picker {
         let select = app.clone();
