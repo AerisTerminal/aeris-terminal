@@ -1681,25 +1681,17 @@ fn aeris_charts_theme_owns_chart_cosmetics_and_series_defaults() {
 }
 
 #[test]
-fn chart_legend_text_colors_project_platform_chrome_and_aeris_charts_market_colors() {
+fn chart_legend_text_colors_project_platform_chrome() {
     for (theme, platform) in [
         (ChartTheme::Light, AerisTheme::light()),
         (ChartTheme::Dark, AerisTheme::dark()),
     ] {
-        let palette = legend_palette(theme, "#089981", "#f7525f");
+        let palette = legend_palette(theme);
         let colors = platform.colors;
         assert_eq!(palette.text, gpui_theme_color(colors.text_primary));
         assert_eq!(palette.muted, gpui_theme_color(colors.text_secondary));
         assert_eq!(palette.hover, gpui_theme_color(colors.hover_bg));
         assert_eq!(palette.danger, gpui_theme_color(colors.danger));
-        assert_eq!(
-            palette.bullish,
-            rgba(Color::parse_css("#089981").expect("valid color").0)
-        );
-        assert_eq!(
-            palette.bearish,
-            rgba(Color::parse_css("#f7525f").expect("valid color").0)
-        );
     }
 }
 
@@ -2869,24 +2861,13 @@ fn persisted_light_aeris_charts_market_defaults_stay_unpinned_on_a_dark_chart() 
     assert_eq!(effective.border_up_color, AppearanceColor::Theme);
     assert_eq!(effective.border_down_color, AppearanceColor::Theme);
 
-    let bullish = effective.effective_up_color(dark.theme);
-    let bearish = effective.effective_down_color(dark.theme);
-    let palette = legend_palette(dark.theme, &bullish, &bearish);
     assert_eq!(
-        palette.bullish,
-        rgba(
-            Color::parse_css(dark_defaults.bullish)
-                .expect("Aeris Charts bullish color is valid CSS")
-                .0
-        )
+        effective.effective_up_color(dark.theme),
+        dark_defaults.bullish
     );
     assert_eq!(
-        palette.bearish,
-        rgba(
-            Color::parse_css(dark_defaults.bearish)
-                .expect("Aeris Charts bearish color is valid CSS")
-                .0
-        )
+        effective.effective_down_color(dark.theme),
+        dark_defaults.bearish
     );
 }
 
@@ -3002,24 +2983,10 @@ fn legend_values_follow_volume_direction_and_indicator_series_colors() {
         .iter()
         .find(|row| row.item == LegendItem::Volume)
         .expect("volume legend");
-    let (close, open_high_low) = asset.values.split_last().expect("asset readouts");
+    assert_eq!(asset.values.len(), 4, "O, H, L and C readouts");
     assert!(
-        close.text.starts_with("C "),
-        "the close is the last readout"
-    );
-    assert_ne!(close.tone, LegendValueTone::Neutral);
-    assert!(
-        open_high_low
-            .iter()
-            .all(|value| value.tone == LegendValueTone::Neutral),
-        "only the close follows the bar direction"
-    );
-    assert!(
-        volume
-            .values
-            .iter()
-            .all(|value| value.tone == LegendValueTone::Neutral),
-        "volume never takes the price bars' tone"
+        asset.values.iter().all(|value| value.color.is_none()),
+        "the symbol's OHLC reads neutral whatever the bar direction"
     );
     let volume_color = volume.values[0].color.clone();
     assert!(volume_color.is_some(), "volume reads in its column hue");

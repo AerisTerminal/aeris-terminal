@@ -20,9 +20,9 @@ use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
     DrawingId, EMA_RIBBON_DEFAULT_PERIODS, FinancialAppearance, FinancialLegendIdentity,
-    FinancialLegendRequest, FinancialLegendTone, HostLegendSeries, IndicatorChromeOptions,
-    IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleMode, PriceScaleTarget,
-    SeriesChromeFlag, TradingIntent, TradingSnapshot,
+    FinancialLegendRequest, HostLegendSeries, IndicatorChromeOptions, IndicatorKind, IndicatorPane,
+    InteractionOptions, PriceScaleMode, PriceScaleTarget, SeriesChromeFlag, TradingIntent,
+    TradingSnapshot,
 };
 pub use aeris_charts_engine::{BigTradesFilter, BigTradesIntensity, BigTradesSize};
 pub use aeris_charts_engine::{
@@ -911,20 +911,12 @@ struct LegendRow {
     settings_available: bool,
 }
 
+/// A readout without its own series color reads neutral. The symbol's OHLC never takes the bar
+/// direction: flipping the values between the up and down colors reads as the text jumping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LegendValue {
     text: String,
     color: Option<String>,
-    /// Bar direction for a readout without its own series color.
-    tone: LegendValueTone,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum LegendValueTone {
-    #[default]
-    Neutral,
-    Bullish,
-    Bearish,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -939,8 +931,6 @@ struct LegendPaneLayout {
 struct LegendPalette {
     text: Rgba,
     muted: Rgba,
-    bullish: Rgba,
-    bearish: Rgba,
     hover: Rgba,
     danger: Rgba,
 }
@@ -2833,19 +2823,11 @@ impl Default for AerisChartView {
     }
 }
 
-fn legend_palette(theme: ChartTheme, bullish: &str, bearish: &str) -> LegendPalette {
+fn legend_palette(theme: ChartTheme) -> LegendPalette {
     let colors = platform_theme(theme).colors;
-    let chart_color = |value: &str| {
-        Color::parse_css(value).map_or_else(
-            || gpui_theme_color(colors.text_secondary),
-            |color| rgba(color.0),
-        )
-    };
     LegendPalette {
         text: gpui_theme_color(colors.text_primary),
         muted: gpui_theme_color(colors.text_secondary),
-        bullish: chart_color(bullish),
-        bearish: chart_color(bearish),
         hover: gpui_theme_color(colors.hover_bg),
         danger: gpui_theme_color(colors.danger),
     }
@@ -2856,11 +2838,9 @@ fn chart_legend_layers(
     rows: &[LegendRow],
     panes: &[LegendPaneLayout],
     theme: ChartTheme,
-    bullish: &str,
-    bearish: &str,
     loading: bool,
 ) -> Vec<AnyElement> {
-    let palette = legend_palette(theme, bullish, bearish);
+    let palette = legend_palette(theme);
     panes
         .iter()
         .copied()
@@ -2906,16 +2886,11 @@ fn chart_legend_row(
         Vec::new()
     };
     let values = values.into_iter().map(|value| {
-        let tone_color = match value.tone {
-            LegendValueTone::Neutral => palette.muted,
-            LegendValueTone::Bullish => palette.bullish,
-            LegendValueTone::Bearish => palette.bearish,
-        };
         let color = value
             .color
             .as_deref()
             .and_then(Color::parse_css)
-            .map_or(tone_color, |color| rgba(color.0));
+            .map_or(palette.muted, |color| rgba(color.0));
         // A wrapping text element shapes at whatever width the row's flex-wrap pass offers it,
         // so a labelled value such as "C 6812.25" could break at its space and jump inside the
         // fixed-height cell as its digits change. Each value moves to a new row line as a whole.
@@ -3142,16 +3117,11 @@ impl Render for AerisChartView {
             .focus_handle
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
-        let appearance = self.appearance_settings();
-        let bullish = appearance.effective_up_color(self.theme);
-        let bearish = appearance.effective_down_color(self.theme);
         let legends = chart_legend_layers(
             &entity,
             &self.legend_rows(),
             &self.legend_panes,
             self.theme,
-            &bullish,
-            &bearish,
             self.asset_loading.is_present(),
         );
 

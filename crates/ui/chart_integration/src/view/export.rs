@@ -6,7 +6,7 @@
 //! screen and the brand mark, both laid out with the same bundled faces the window uses.
 
 use super::{
-    AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendRow, LegendValueTone,
+    AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendRow,
     format_utc_offset, platform_theme,
 };
 use aeris_charts_native::{
@@ -109,8 +109,6 @@ struct ExportTextRun {
 struct ExportPalette {
     text: Color,
     muted: Color,
-    bullish: Color,
-    bearish: Color,
 }
 
 impl ChartCapture {
@@ -316,17 +314,12 @@ fn export_legend_rows(rows: Vec<LegendRow>, palette: ExportPalette) -> Vec<Expor
                 weight: typography.weight(TypographyRole::Normal),
             }];
             runs.extend(row.values.into_iter().map(|value| {
-                let tone = match value.tone {
-                    LegendValueTone::Neutral => palette.muted,
-                    LegendValueTone::Bullish => palette.bullish,
-                    LegendValueTone::Bearish => palette.bearish,
-                };
                 ExportTextRun {
                     color: value
                         .color
                         .as_deref()
                         .and_then(Color::parse_css)
-                        .unwrap_or(tone),
+                        .unwrap_or(palette.muted),
                     text: value.text,
                     weight: typography.weight(TypographyRole::Normal),
                 }
@@ -363,21 +356,9 @@ impl AerisChartView {
             },
         );
         let colors = platform_theme(self.theme).colors;
-        let appearance = self.appearance_settings();
-        let tone = |value: String, fallback: ThemeColor| {
-            Color::parse_css(&value).unwrap_or_else(|| chart_color(fallback))
-        };
         let palette = ExportPalette {
             text: chart_color(colors.text_primary),
             muted: chart_color(colors.text_secondary),
-            bullish: tone(
-                appearance.effective_up_color(self.theme),
-                colors.text_secondary,
-            ),
-            bearish: tone(
-                appearance.effective_down_color(self.theme),
-                colors.text_secondary,
-            ),
         };
         let (caption, file_name) =
             capture_labels(&self.asset_symbol, self.time_zone_id(), utc_seconds);

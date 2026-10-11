@@ -202,7 +202,6 @@ impl AerisChartView {
             asset.values = vec![LegendValue {
                 text: "Waiting for order flow".to_string(),
                 color: None,
-                tone: LegendValueTone::Neutral,
             }];
         }
         if let Some(visible) = self.volume_profile_visible() {
@@ -552,15 +551,6 @@ fn legend_row(
             series_id: row.first_series_id,
         },
     };
-    let tone = match row.tone {
-        FinancialLegendTone::Neutral => LegendValueTone::Neutral,
-        FinancialLegendTone::Bullish => LegendValueTone::Bullish,
-        FinancialLegendTone::Bearish => LegendValueTone::Bearish,
-    };
-    // The bar direction colors only the last readout: the close of the engine's O, H, L, C
-    // sequence, or a single direction-following value. Recoloring the whole group whenever the
-    // bar flips between up and down reads as the text jumping, though no glyph moves.
-    let toned_index = row.values.len().checked_sub(1);
     Some(LegendRow {
         item,
         pane: row.pane,
@@ -568,15 +558,9 @@ fn legend_row(
         values: row
             .values
             .into_iter()
-            .enumerate()
-            .map(|(index, value)| LegendValue {
+            .map(|value| LegendValue {
                 text: value.text,
                 color: value.color,
-                tone: if Some(index) == toned_index {
-                    tone
-                } else {
-                    LegendValueTone::Neutral
-                },
             })
             .collect(),
         visible: row.visible,
