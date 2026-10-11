@@ -282,9 +282,8 @@ pub struct WorkspaceChartState {
     /// Stable `Aeris` chart-type identifier.
     #[prost(string, tag = "1")]
     pub chart_type: String,
-    /// Bounded Aeris Charts semantic drawing document. It contains committed
-    /// drawings only, never market history, series, indicator definitions, or
-    /// renderer/runtime caches.
+    /// Drawings of the pane's instrument in workspaces saved before
+    /// `instrument_drawings` existed. New saves leave it empty.
     #[prost(string, tag = "2")]
     pub chart_state_json: String,
     /// Host-owned native indicators in stable creation order.
@@ -293,7 +292,7 @@ pub struct WorkspaceChartState {
     /// Stable product price-axis customization.
     #[prost(message, optional, tag = "4")]
     pub price_axis: Option<WorkspacePriceAxisState>,
-    /// Drawing locks are host interaction state keyed by Aeris Charts drawing id.
+    /// Locks of the legacy `chart_state_json` drawings, keyed by their saved id.
     #[prost(uint32, repeated, tag = "5")]
     pub locked_drawing_ids: Vec<u32>,
     /// Stable Aeris Charts crosshair mode (normal, magnet, hidden, or OHLC magnet).
@@ -345,6 +344,27 @@ pub struct WorkspaceChartState {
     /// Which parts of the chart legend show. Absent in legacy workspaces means all shown.
     #[prost(message, optional, tag = "20")]
     pub legend: Option<WorkspaceChartLegendState>,
+    /// Drawings of each instrument the pane has shown, most recently used first.
+    #[prost(message, repeated, tag = "21")]
+    pub instrument_drawings: Vec<WorkspaceInstrumentDrawingsState>,
+}
+
+/// Committed drawings of one instrument, keyed by its stable provider identity so
+/// price-anchored drawings never follow a symbol switch onto another market.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceInstrumentDrawingsState {
+    #[prost(string, tag = "1")]
+    pub provider: String,
+    #[prost(string, tag = "2")]
+    pub instrument_id: String,
+    /// Bounded Aeris Charts semantic drawing document. It contains committed
+    /// drawings only, never market history, series, indicator definitions, or
+    /// renderer/runtime caches.
+    #[prost(string, tag = "3")]
+    pub chart_state_json: String,
+    /// Locks of workspaces saved before locks were drawing state, keyed by saved drawing id.
+    #[prost(uint32, repeated, tag = "4")]
+    pub locked_drawing_ids: Vec<u32>,
 }
 
 /// Chart legend presentation. Every absent field means shown.

@@ -215,10 +215,18 @@ fn watchlist_asset_cell(row: &WatchlistRow, theme: &AerisTheme) -> Div {
         .child(
             div()
                 .min_w_0()
-                .flex_1()
                 .text_ellipsis()
                 .child(row.instrument.display_symbol.clone()),
         )
+        .when(row.trading_activity, |cell| {
+            cell.child(
+                div()
+                    .flex_none()
+                    .size(px(6.0))
+                    .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
+                    .bg(gpui_color(colors.primary)),
+            )
+        })
 }
 
 fn watchlist_row_content(row: &WatchlistRow, theme: &AerisTheme) -> Stateful<Div> {

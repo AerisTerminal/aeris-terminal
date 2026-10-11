@@ -14,9 +14,9 @@ use super::{
     WindowMoveGestureTransition, WorkspaceDragState, WorkspaceMaximizeTransition,
     active_workspace_after_close, aeris_chart_theme, bounded_status_detail,
     caption_keyboard_activates, caption_pointer_owner, catalog_rejection_message,
-    chart_position_id, chart_status_detail, chart_surface_notice,
-    chart_time_seconds_from_unix_nanos, chrome_menu_extent, chrome_overlay_progress,
-    chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
+    chart_position_id, chart_price_fixed_point, chart_quantity_fixed_point, chart_status_detail,
+    chart_surface_notice, chart_time_seconds_from_unix_nanos, chrome_menu_extent,
+    chrome_overlay_progress, chrome_typeahead_char_from, claim_once, clamp_anchored_menu_left,
     clamp_chart_context_menu_origin, clamp_price_axis_menu_origin, clamped_side_panel_width,
     connection_presentation, connectivity_chart_state, current_instrument_menu_index,
     default_rithmic_contract_index, desktop_key_bindings, durable_workspace_viewport,
@@ -64,6 +64,30 @@ fn chart_position_identity_is_shared_by_projection_and_intent_validation() {
             .as_str(),
         "position:aeris-sim-1:instrument:test:ES"
     );
+}
+
+#[test]
+fn chart_prices_convert_at_eight_places_despite_float_representation() {
+    // 1224.37 has no exact f64; scaled to eight places it lands a few ulps off a whole unit,
+    // which a fixed 1e-6 tolerance rejected and so blocked TP/SL drags on the chart.
+    for (price, units) in [
+        (1224.37, 122_437_000_000),
+        (43.123_4, 4_312_340_000),
+        (98_765.43, 9_876_543_000_000),
+    ] {
+        assert_eq!(
+            chart_price_fixed_point(price, 8).map(aeris_trading::FixedPoint::units),
+            Some(units),
+            "{price}"
+        );
+    }
+    assert_eq!(
+        chart_price_fixed_point(1224.37, 2).map(aeris_trading::FixedPoint::units),
+        Some(122_437)
+    );
+    assert_eq!(chart_price_fixed_point(1224.375, 2), None);
+    assert_eq!(chart_price_fixed_point(f64::NAN, 8), None);
+    assert_eq!(chart_quantity_fixed_point(0.0, 8), None);
 }
 
 #[test]
@@ -3261,6 +3285,87 @@ fn every_built_in_provider_maps_to_a_desktop_provider_or_is_hidden() {
             "{provider:?} has no runtime descriptor"
         );
     }
+}
+
+#[test]
+fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_only() {
+    use aeris_trading::{
+        ClientOrderId, FixedPoint, Order, OrderId, OrderSide, OrderStatus, OrderType, TimeInForce,
+        TradingAccountId, TradingProvenance,
+    };
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let other = TradingAccountId::try_new("aeris-sim-2").expect("account");
+    let point = |units, scale| FixedPoint::try_new(units, scale).expect("point");
+    let instrument = |id: &str| aeris_instruments::InstrumentId::try_new(id).expect("id");
+    let order = |id: &str, account: &TradingAccountId, instrument_id: &str, status| Order {
+        id: OrderId::try_new(id).expect("order id"),
+        client_order_id: ClientOrderId::try_new(id).expect("client id"),
+        account_id: account.clone(),
+        instrument_id: instrument(instrument_id),
+        side: OrderSide::Buy,
+        order_type: OrderType::Limit,
+        time_in_force: TimeInForce::Day,
+        quantity: point(1, 0),
+        filled_quantity: point(0, 0),
+        limit_price: Some(point(10_000, 2)),
+        stop_price: None,
+        status,
+        submitted_unix_nanos: 1,
+        provenance: TradingProvenance {
+            venue_id: "aeris-sim".to_string(),
+            provider_id: "fixture".to_string(),
+            session_generation: 1,
+            source_sequence: 1,
+            observed_unix_nanos: 1,
+        },
+    };
+    let mut state = super::TradingPnlState {
+        orders: vec![
+            order(
+                "working",
+                &account,
+                "instrument:fixture:A",
+                OrderStatus::Working,
+            ),
+            order(
+                "cancelled",
+                &account,
+                "instrument:fixture:B",
+                OrderStatus::Cancelled,
+            ),
+            order(
+                "elsewhere",
+                &other,
+                "instrument:fixture:C",
+                OrderStatus::Working,
+            ),
+        ],
+        broker_positions: vec![aeris_trading::BrokerPosition {
+            account_id: account.clone(),
+            instrument_id: instrument("instrument:fixture:D"),
+            broker_position_id: "77".into(),
+            side: OrderSide::Sell,
+            quantity: point(100, 2),
+            entry_price: point(108_250, 5),
+            stop_loss: None,
+            take_profit: None,
+            swap: point(0, 2),
+            commission: point(0, 2),
+            gross_unrealized: point(0, 2),
+            net_unrealized: point(0, 2),
+            opened_unix_nanos: 1,
+        }],
+        ..super::TradingPnlState::default()
+    };
+    assert!(state.instruments_with_activity().is_empty());
+
+    state.order_entry.selected_account_id = Some(account);
+    let mut active = state
+        .instruments_with_activity()
+        .into_iter()
+        .collect::<Vec<_>>();
+    active.sort_unstable();
+    assert_eq!(active, ["instrument:fixture:A", "instrument:fixture:D"]);
 }
 
 #[test]

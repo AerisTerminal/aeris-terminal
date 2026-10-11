@@ -63,6 +63,7 @@ struct WorkspaceSurfaceInitialization {
     time_zone_input: Entity<InputState>,
     chart_chrome: chart_chrome::ChartChromePreferences,
     restored_chart_state: Option<WorkspaceChartState>,
+    retained_chart_presentation: RetainedChartPresentation,
     restored_rithmic: Option<(ChartInterval, Option<(i64, i64)>)>,
     interval: ChartInterval,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
@@ -172,7 +173,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         pending_study_remove_request: None,
         resource_class: ConsumerResourceClass::Foreground,
         chart_chrome: init.chart_chrome,
-        retained_chart_presentation: RetainedChartPresentation::default(),
+        retained_chart_presentation: init.retained_chart_presentation,
         restored_chart_state: init.restored_chart_state,
         chart_persistence_dirty: false,
         last_chart_user_state_revision: 0,
@@ -312,6 +313,14 @@ fn demand_startup_symbol_browser() -> rithmic_shell::RithmicSymbolBrowser {
         std::num::NonZeroUsize::MIN,
         "",
     )
+}
+
+fn import_drawings(chart: &mut AerisChartView, drawings: &WorkspaceInstrumentDrawingsState) {
+    if let Err(error) =
+        chart.import_semantic_state_json(&drawings.chart_state_json, &drawings.locked_drawing_ids)
+    {
+        diagnostic!("Aeris persisted drawings could not be restored: {error}");
+    }
 }
 
 fn restored_market_selection(
@@ -1503,6 +1512,7 @@ impl WorkspaceSurface {
             .or_else(|| self.retained_chart_presentation.chart_state.clone())
             .map(|mut state| {
                 state.time_zone.clone_from(&self.chart_time_zone);
+                state.instrument_drawings = self.retained_chart_presentation.drawings.remembered();
                 state
             })
     }
@@ -1515,8 +1525,8 @@ impl WorkspaceSurface {
         if !chart.has_market_data() {
             return self.unloaded_chart_state();
         }
-        let chart_state_json = match chart.export_semantic_state_json() {
-            Ok(state) => state,
+        let instrument_drawings = match self.retained_chart_presentation.drawings.persisted(chart) {
+            Ok(drawings) => drawings,
             Err(error) => {
                 diagnostic!("Aeris drawings could not be serialized: {error}");
                 return self.unloaded_chart_state();
@@ -1537,10 +1547,10 @@ impl WorkspaceSurface {
         });
         Some(WorkspaceChartState {
             chart_type: chart.chart_type().identifier().to_string(),
-            chart_state_json,
+            chart_state_json: String::new(),
             indicators,
             price_axis,
-            locked_drawing_ids: chart.locked_drawing_ids(),
+            locked_drawing_ids: Vec::new(),
             crosshair_mode: u32::from(chart.crosshair_mode()),
             price_alerts: self.price_alerts.clone(),
             studies,
@@ -1558,13 +1568,14 @@ impl WorkspaceSurface {
             show_execution_marks: Some(self.chart_trading_visibility.show_execution_marks),
             extend_order_lines_left: Some(self.chart_trading_visibility.extend_order_lines_left),
             legend: Some(persisted_chart_legend(chart.legend_options())),
+            instrument_drawings,
         })
     }
 
     fn apply_restored_chart_state(
         chart: &Entity<AerisChartView>,
         state: &WorkspaceChartState,
-        restore_drawings: bool,
+        drawings: Option<&WorkspaceInstrumentDrawingsState>,
         cx: &mut Context<Self>,
     ) {
         let indicators = state
@@ -1588,8 +1599,6 @@ impl WorkspaceSurface {
                 precision: axis.precision.and_then(|value| u8::try_from(value).ok()),
             })
         });
-        let drawing_json = state.chart_state_json.clone();
-        let locked = state.locked_drawing_ids.clone();
         let crosshair_mode = u8::try_from(state.crosshair_mode)
             .ok()
             .filter(|mode| *mode <= 3);
@@ -1624,11 +1633,8 @@ impl WorkspaceSurface {
             if let Err(error) = chart.restore_indicator_states(&indicators) {
                 diagnostic!("Aeris persisted indicators could not be restored: {error}");
             }
-            if restore_drawings
-                && !drawing_json.is_empty()
-                && let Err(error) = chart.import_semantic_state_json(&drawing_json, &locked)
-            {
-                diagnostic!("Aeris persisted drawings could not be restored: {error}");
+            if let Some(drawings) = drawings {
+                import_drawings(chart, drawings);
             }
             if let Some(price_axis) = price_axis {
                 let _ = chart.restore_price_axis_menu_state(price_axis);
@@ -1701,6 +1707,14 @@ impl WorkspaceSurface {
             timeframe_input,
             time_zone_input,
             chart_chrome,
+            retained_chart_presentation: RetainedChartPresentation {
+                drawings: PaneDrawings::restored(
+                    restored_chart_state
+                        .as_ref()
+                        .map_or(&[], |state| state.instrument_drawings.as_slice()),
+                ),
+                ..RetainedChartPresentation::default()
+            },
             restored_chart_state,
             restored_rithmic,
             interval,
@@ -2812,10 +2826,27 @@ impl WorkspaceSurface {
         let chart_theme = aeris_chart_theme(self.theme.mode);
         let chart = cx.new(move |_| AerisChartView::with_replay_and_theme(snapshot, chart_theme));
         self.apply_chart_chrome_to_chart(&chart, cx);
+        self.remember_chart_drawings(cx);
+        let drawings = self
+            .retained_chart_presentation
+            .drawings
+            .begin_chart(self.product.as_ref());
         if let Some(restored) = self.restored_chart_state.take() {
-            Self::apply_restored_chart_state(&chart, &restored, true, cx);
+            let drawings = drawings.or_else(|| {
+                chart_drawings::legacy_pane_drawings(
+                    &restored.chart_state_json,
+                    &restored.locked_drawing_ids,
+                    self.product.as_ref(),
+                )
+            });
+            Self::apply_restored_chart_state(&chart, &restored, drawings.as_ref(), cx);
+        } else if let Some(state) = &self.retained_chart_presentation.chart_state {
+            Self::apply_restored_chart_state(&chart, state, drawings.as_ref(), cx);
         } else {
-            self.apply_retained_chart_state_to_chart(&chart, cx);
+            self.apply_retained_indicators_to_chart(&chart, cx);
+            if let Some(drawings) = drawings {
+                chart.update(cx, |chart, _| import_drawings(chart, &drawings));
+            }
         }
         let extend_order_lines_left = self.chart_trading_visibility.extend_order_lines_left;
         chart.update(cx, |chart, _| {
@@ -4069,29 +4100,22 @@ impl WorkspaceSurface {
             self.retained_chart_presentation.indicators = chart.read(cx).indicator_states();
             self.retained_chart_presentation.price_precision =
                 chart.read(cx).selected_price_precision();
+            self.remember_chart_drawings(cx);
             self.retained_chart_presentation.chart_state = self.workspace_chart_state(cx);
-            self.retained_chart_presentation.instrument_id = self
-                .product
-                .as_ref()
-                .map(|product| product.instrument_id.clone());
         }
     }
 
-    fn apply_retained_chart_state_to_chart(
-        &self,
-        chart: &Entity<AerisChartView>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(state) = &self.retained_chart_presentation.chart_state {
-            let same_instrument = self
-                .product
-                .as_ref()
-                .map(|product| product.instrument_id.as_str())
-                == self.retained_chart_presentation.instrument_id.as_deref();
-            Self::apply_restored_chart_state(chart, state, same_instrument, cx);
+    fn remember_chart_drawings(&mut self, cx: &App) {
+        let Some(chart) = &self.chart else {
             return;
+        };
+        if let Err(error) = self
+            .retained_chart_presentation
+            .drawings
+            .remember(chart.read(cx))
+        {
+            diagnostic!("Aeris drawings could not be serialized: {error}");
         }
-        self.apply_retained_indicators_to_chart(chart, cx);
     }
 
     fn apply_retained_indicators_to_chart(

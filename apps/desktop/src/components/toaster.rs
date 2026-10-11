@@ -898,7 +898,6 @@ fn toast_surface(theme: &AerisTheme) -> Div {
         .border(platform_border_width(theme))
         .border_color(gpui_color(colors.border_secondary))
         .bg(gpui_color(colors.surface_secondary))
-        .shadow_md()
 }
 
 /// A toast's content: its icon, title and description.

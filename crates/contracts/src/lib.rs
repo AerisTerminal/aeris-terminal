@@ -22,10 +22,11 @@ pub use messages::{
     SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState,
     WorkspaceBigTradesState, WorkspaceChartAppearanceState, WorkspaceChartIndicatorState,
     WorkspaceChartLegendState, WorkspaceChartSettingsTemplateState, WorkspaceChartState,
-    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceChartStudyState, WorkspaceInstrumentDrawingsState, WorkspaceLayoutState,
+    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 pub use provider::{ProviderCatalogSymbol, ProviderConnectionKind, ProviderPresentationDescriptor};

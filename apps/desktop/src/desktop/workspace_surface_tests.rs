@@ -1234,3 +1234,163 @@ fn order_flow_projection_keeps_one_applied_trade_and_the_sweep_window() {
     assert_eq!(order_flow_projection_start(&trades, Some(3), 2), 0);
     assert_eq!(order_flow_projection_start(&[], Some(3), 2), 0);
 }
+
+mod instrument_drawings {
+    use super::*;
+    use aeris_application::{EmbeddedReplaySource, LoadEmbeddedReplay};
+    use aeris_desktop::market_worker::{
+        EngineWorkerStartup, MarketWorkerCommand, market_worker_channel,
+    };
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::num::NonZeroUsize;
+    use std::sync::{atomic::AtomicU64, mpsc};
+
+    const LINE: &str = r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":10.0,"price":100.0}]}]"#;
+
+    struct SurfaceHarness(Entity<WorkspaceSurface>);
+
+    impl Render for SurfaceHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    fn instrument(instrument_id: &str) -> InstallProviderInstrument {
+        let mut instrument = local_state::default_workspace().watchlist_entries[0]
+            .instrument
+            .clone()
+            .expect("default instrument");
+        instrument.instrument_id = instrument_id.to_string();
+        instrument
+    }
+
+    fn open_surface(
+        cx: &mut TestAppContext,
+        product: InstallProviderInstrument,
+        restored: Option<WorkspaceChartState>,
+    ) -> (
+        Entity<WorkspaceSurface>,
+        mpsc::Receiver<MarketWorkerCommand>,
+        &mut VisualTestContext,
+    ) {
+        let (commands, requests) = mpsc::sync_channel(8);
+        let (_publications, messages) = market_worker_channel(NonZeroUsize::MIN);
+        let (_, shutdown) = mpsc::sync_channel(1);
+        let worker = MarketDataWorker::from_channels(
+            commands,
+            messages,
+            shutdown,
+            None,
+            Some(Arc::new(AtomicU64::new(1))),
+        );
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            gpui_base::init(cx);
+            SurfaceHarness(workspace_surface_entity(
+                MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
+                    product,
+                    interval: ChartInterval::Minute1,
+                    restored_viewport: None,
+                    subscription_id: "drawings_test".into(),
+                    worker_label: "drawings_test".into(),
+                })),
+                worker,
+                &DesktopLifecycle::new_for_test(),
+                chart_chrome::ChartChromePreferences::default(),
+                WorkspaceSurfaceRestore {
+                    chart: restored,
+                    side_panel: None,
+                },
+                window,
+                cx,
+            ))
+        });
+        let surface = cx.read(|cx| view.read(cx).0.clone());
+        (surface, requests, cx)
+    }
+
+    /// Installs the covering snapshot of `product`, as a completed symbol switch does.
+    fn show(surface: &Entity<WorkspaceSurface>, product: &str, cx: &mut VisualTestContext) {
+        let snapshot = EmbeddedReplaySource
+            .load_snapshot(LoadEmbeddedReplay { bar_count: 64 })
+            .expect("embedded replay validates");
+        surface.update(cx, |surface, cx| {
+            surface.product = Some(instrument(product));
+            surface.install_snapshot_chart(&snapshot, cx);
+        });
+    }
+
+    fn drawing_count(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> usize {
+        cx.read(|cx| {
+            surface
+                .read(cx)
+                .chart
+                .as_ref()
+                .map_or(0, |chart| chart.read(cx).drawing_count())
+        })
+    }
+
+    fn saved(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> WorkspaceChartState {
+        cx.read(|cx| surface.read(cx).workspace_chart_state(cx))
+            .expect("loaded chart state")
+    }
+
+    fn saved_instruments(state: &WorkspaceChartState) -> Vec<&str> {
+        state
+            .instrument_drawings
+            .iter()
+            .map(|drawings| drawings.instrument_id.as_str())
+            .collect()
+    }
+
+    #[gpui::test]
+    fn drawings_return_when_switching_back_and_after_a_restart(cx: &mut TestAppContext) {
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), None);
+        show(&surface, "A", cx);
+        surface.update(cx, |surface, cx| {
+            let chart = surface.chart.clone().expect("chart");
+            chart.update(cx, |chart, _| {
+                chart
+                    .import_semantic_state_json(LINE, &[1])
+                    .expect("drawing imports");
+            });
+        });
+        assert_eq!(drawing_count(&surface, cx), 1);
+
+        show(&surface, "B", cx);
+        assert_eq!(
+            drawing_count(&surface, cx),
+            0,
+            "drawings stay on their market"
+        );
+        let on_b = saved(&surface, cx);
+        assert_eq!(saved_instruments(&on_b), ["A"]);
+        assert_eq!(on_b.chart_state_json, "");
+
+        show(&surface, "A", cx);
+        assert_eq!(drawing_count(&surface, cx), 1);
+        let on_a = saved(&surface, cx);
+        assert_eq!(saved_instruments(&on_a), ["A"]);
+        assert_eq!(on_a.instrument_drawings[0].locked_drawing_ids.len(), 1);
+
+        let (reopened, _reopened_requests, cx) = open_surface(cx, instrument("B"), Some(on_b));
+        show(&reopened, "B", cx);
+        assert_eq!(drawing_count(&reopened, cx), 0);
+        show(&reopened, "A", cx);
+        assert_eq!(drawing_count(&reopened, cx), 1);
+    }
+
+    #[gpui::test]
+    fn legacy_drawings_restore_onto_the_panes_instrument_only(cx: &mut TestAppContext) {
+        let legacy = WorkspaceChartState {
+            chart_state_json: LINE.to_string(),
+            ..WorkspaceChartState::default()
+        };
+        let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(legacy));
+        show(&surface, "A", cx);
+        assert_eq!(drawing_count(&surface, cx), 1);
+        assert_eq!(saved_instruments(&saved(&surface, cx)), ["A"]);
+
+        show(&surface, "B", cx);
+        assert_eq!(drawing_count(&surface, cx), 0);
+    }
+}

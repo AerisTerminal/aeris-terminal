@@ -394,6 +394,9 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
             .price_alerts
             .truncate(aeris_market_runtime::MAXIMUM_PRICE_ALERTS_PER_CONSUMER);
         chart.studies = sanitize_studies(std::mem::take(&mut chart.studies));
+        chart.instrument_drawings = super::chart_drawings::bounded_instrument_drawings(
+            std::mem::take(&mut chart.instrument_drawings),
+        );
         if chart
             .appearance
             .as_ref()
@@ -680,10 +683,10 @@ mod tests {
     use super::*;
     use aeris_contracts::{
         WorkspaceBigTradesState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
-        WorkspaceChartState, WorkspaceChartStudyState, WorkspaceOrderFlowSettingsState,
-        WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceStudyDecimalState,
-        WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState, WorkspaceStudyMarketStream,
-        WorkspaceStudySettingState, workspace_study_setting_state,
+        WorkspaceChartState, WorkspaceChartStudyState, WorkspaceInstrumentDrawingsState,
+        WorkspaceOrderFlowSettingsState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+        WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+        WorkspaceStudyMarketStream, WorkspaceStudySettingState, workspace_study_setting_state,
     };
 
     fn temporary_workspace_path() -> PathBuf {
@@ -857,6 +860,12 @@ mod tests {
                 show_indicators: Some(false),
                 show_indicator_values: Some(true),
             }),
+            instrument_drawings: vec![WorkspaceInstrumentDrawingsState {
+                provider: "hyperliquid".to_string(),
+                instrument_id: "ETH".to_string(),
+                chart_state_json: r#"[{"id":4,"kind":"trend_line","pane_index":0,"points":[{"logical":1.0,"price":3000.0},{"logical":5.0,"price":3100.0}]}]"#.to_string(),
+                locked_drawing_ids: vec![4],
+            }],
         }
     }
 

@@ -312,6 +312,7 @@ impl TerminalApp {
             .rithmic_pending_product
             .as_ref()
             .or(surface.product.as_ref());
+        let trading_activity = surface.trading_pnl.instruments_with_activity();
         self.watchlist
             .iter()
             .map(|instrument| {
@@ -333,6 +334,7 @@ impl TerminalApp {
                         active.provider == instrument.provider
                             && active.instrument_id == instrument.instrument_id
                     }),
+                    trading_activity: trading_activity.contains(instrument.instrument_id.as_str()),
                 }
             })
             .collect()
