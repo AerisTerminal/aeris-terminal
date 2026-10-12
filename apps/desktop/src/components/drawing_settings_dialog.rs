@@ -1,6 +1,10 @@
 //! The drawing settings dialog: one form for every Aeris Charts drawing kind, built from the
 //! kind's property schema. Edits preview live inside an Aeris Charts settings session; Ok keeps
 //! them as one undo step and Cancel restores the drawing as it was.
+//!
+//! Related properties share one labelled row (the stroke, the font, paired alignments), choices
+//! are dropdowns and switches are checkboxes, so every kind gets the same compact form. The
+//! dialog moves anywhere in the window by its title bar.
 
 use super::*;
 use aeris_chart_integration::{
@@ -8,6 +12,8 @@ use aeris_chart_integration::{
     ChartDrawingProperty, ChartDrawingPropertyGroup as Group, ChartDrawingPropertyType as Type,
     ChartDrawingSettings, MAX_DRAWING_LEVELS,
 };
+use chart_context_menus::{clamp_floating_panel_origin, color_swatch_dot};
+use drawing_context_toolbar::{choice_glyph, width_choices, width_glyph, width_label};
 use drawing_toolbar::drawing_kind_label;
 use serde_json::{Value, json};
 
@@ -32,6 +38,40 @@ const INTERVAL_UNITS: [(ChartDrawingIntervalUnit, &str, f64, f64); 7] = [
     (ChartDrawingIntervalUnit::Months, "Months", 1.0, 12.0),
 ];
 
+/// The font sizes the font menu offers, within the property's own bounds.
+const FONT_SIZES: [f64; 10] = [10.0, 11.0, 12.0, 14.0, 16.0, 20.0, 24.0, 28.0, 32.0, 40.0];
+/// The stroke row: its color, width and style.
+const LINE_PARTS: [&str; 3] = ["color", "width", "style"];
+/// The font row that opens the Text tab.
+const FONT_PARTS: [&str; 4] = ["text_color", "text_size", "text_bold", "text_italic"];
+/// Two choices that read as one setting, shown side by side under one label.
+const PAIRED_CHOICES: [(&str, &str, &str); 3] = [
+    ("stroke_start", "stroke_end", "Line ends"),
+    ("text_v_align", "text_h_align", "Text alignment"),
+    ("level_label_align", "level_label_v_align", "Labels"),
+];
+/// A checkbox and the color it turns on, shown on one row.
+const TOGGLED_COLORS: [(&str, &str); 1] = [("fill_enabled", "fill_color")];
+/// The Extend choices over `extend_left` and `extend_right`.
+const EXTEND_CHOICES: [(&str, bool, bool); 4] = [
+    ("Don't extend", false, false),
+    ("Left", true, false),
+    ("Right", false, true),
+    ("Both", true, true),
+];
+/// The menu key of the combined Extend choice; every other menu is keyed by its property.
+const EXTEND_MENU: &str = "extend";
+
+const LABEL_WIDTH: f32 = 112.0;
+const SELECT_WIDTH: f32 = 128.0;
+const COMPACT_SELECT_WIDTH: f32 = 84.0;
+const NUMBER_FIELD_WIDTH: f32 = 96.0;
+const LEVEL_FIELD_WIDTH: f32 = 72.0;
+const INTERVAL_FIELD_WIDTH: f32 = 64.0;
+const FIELD_HEIGHT: f32 = 28.0;
+const TEXT_BODY_HEIGHT: f32 = 96.0;
+const DIALOG_MAX_HEIGHT: f32 = 640.0;
+
 /// An open drawing settings dialog. The drawing itself is the draft: every control writes to
 /// Aeris Charts inside the session `chart` began, and the form reads the drawing back.
 pub(super) struct DrawingSettingsDialogState {
@@ -39,8 +79,18 @@ pub(super) struct DrawingSettingsDialogState {
     drawing: ChartDrawingId,
     title: &'static str,
     tab: Group,
+    /// Held by the panel while none of its fields has focus, so keys never reach the chart.
+    focus: FocusHandle,
+    /// Window position once the title bar has dragged it; centered over the pane until then.
+    origin: Option<gpui::Point<Pixels>>,
+    /// Pointer offset from the panel corner captured when a title-bar drag begins.
+    grab: gpui::Point<Pixels>,
+    /// The dropdown that is open: a property name or [`EXTEND_MENU`].
+    menu: Option<String>,
     /// Text fields of number and string properties, by property name.
     inputs: HashMap<String, Entity<InputState>>,
+    /// The drawing's own text, when its kind carries one.
+    text_body: Option<Entity<TextareaState>>,
     /// Value fields of each levels property's rows, by property name.
     levels: HashMap<String, Vec<Entity<InputState>>>,
     anchors: Vec<AnchorInputs>,
@@ -92,8 +142,107 @@ enum DrawingInputTarget {
     Interval,
 }
 
-fn property_shown(property: &ChartDrawingProperty) -> bool {
-    property.group != Group::General
+/// Numbers chosen from a menu rather than typed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NumberMenu {
+    Width,
+    FontSize,
+}
+
+fn number_menu(property: &ChartDrawingProperty) -> Option<NumberMenu> {
+    if !matches!(property.property_type, Type::Number | Type::Integer) {
+        return None;
+    }
+    if property.name == "text_size" {
+        Some(NumberMenu::FontSize)
+    } else if property.name.ends_with("width") {
+        Some(NumberMenu::Width)
+    } else {
+        None
+    }
+}
+
+/// One row of a tab, in schema order. Grouped rows take the place of their first member.
+#[derive(Debug, PartialEq)]
+enum Row<'a> {
+    /// The stroke's color, width and style.
+    Line(Vec<&'a ChartDrawingProperty>),
+    /// `extend_left` and `extend_right` as one choice.
+    Extend,
+    /// The text color, size, weight and slant.
+    Font(Vec<&'a ChartDrawingProperty>),
+    /// The drawing's own text.
+    TextBody,
+    /// Two choices under one label.
+    Pair(
+        &'static str,
+        &'a ChartDrawingProperty,
+        &'a ChartDrawingProperty,
+    ),
+    /// A checkbox and the color it turns on.
+    ToggledColor(&'a ChartDrawingProperty, &'a ChartDrawingProperty),
+    Property(&'a ChartDrawingProperty),
+}
+
+/// The rows of one tab: the tab's properties in schema order, with related ones merged.
+fn dialog_rows(properties: &[ChartDrawingProperty], tab: Group) -> Vec<Row<'_>> {
+    let properties: Vec<&ChartDrawingProperty> = properties
+        .iter()
+        .filter(|property| property.group == tab)
+        .collect();
+    let find = |name: &str| {
+        properties
+            .iter()
+            .copied()
+            .find(|property| property.name == name)
+    };
+    let members = |names: &[&str]| -> Vec<&ChartDrawingProperty> {
+        names.iter().filter_map(|name| find(name)).collect()
+    };
+    let mut grouped: Vec<&str> = Vec::new();
+    let mut rows = Vec::new();
+    for property in &properties {
+        let name = property.name.as_str();
+        if grouped.contains(&name) {
+            continue;
+        }
+        let pair = PAIRED_CHOICES
+            .iter()
+            .find(|(first, second, _)| name == *first || name == *second)
+            .and_then(|&(first, second, label)| Some((label, find(first)?, find(second)?)));
+        let toggled = TOGGLED_COLORS
+            .iter()
+            .find(|(flag, color)| name == *flag || name == *color)
+            .and_then(|&(flag, color)| Some((find(flag)?, find(color)?)));
+        let (row, taken): (Row<'_>, Vec<&str>) =
+            if LINE_PARTS.contains(&name) && members(&LINE_PARTS).len() > 1 {
+                (Row::Line(members(&LINE_PARTS)), LINE_PARTS.to_vec())
+            } else if FONT_PARTS.contains(&name) {
+                (Row::Font(members(&FONT_PARTS)), FONT_PARTS.to_vec())
+            } else if matches!(name, "extend_left" | "extend_right")
+                && find("extend_left").is_some()
+                && find("extend_right").is_some()
+            {
+                (Row::Extend, vec!["extend_left", "extend_right"])
+            } else if let Some((label, first, second)) = pair {
+                (
+                    Row::Pair(label, first, second),
+                    vec![first.name.as_str(), second.name.as_str()],
+                )
+            } else if let Some((flag, color)) = toggled {
+                (
+                    Row::ToggledColor(flag, color),
+                    vec![flag.name.as_str(), color.name.as_str()],
+                )
+            } else if name == "text" && property.property_type == Type::String {
+                (Row::TextBody, vec![name])
+            } else {
+                (Row::Property(property), vec![name])
+            };
+        grouped.extend(taken);
+        rows.push(row);
+    }
+    rows
 }
 
 fn group_has_content(settings: &ChartDrawingSettings, group: Group) -> bool {
@@ -106,7 +255,7 @@ fn group_has_content(settings: &ChartDrawingSettings, group: Group) -> bool {
 }
 
 /// `snake_case` engine identifiers as sentence-case labels.
-fn humanize(identifier: &str) -> String {
+pub(super) fn humanize(identifier: &str) -> String {
     let text = identifier.replace('_', " ");
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| {
@@ -129,6 +278,20 @@ fn bounded_number(text: &str, property: &ChartDrawingProperty) -> Option<f64> {
         property.min.is_none_or(|min| value >= min) && property.max.is_none_or(|max| value <= max);
     let whole = property.property_type != Type::Integer || value.fract() == 0.0;
     (in_bounds && whole).then_some(value)
+}
+
+fn font_size_choices(property: &ChartDrawingProperty) -> impl Iterator<Item = f64> + '_ {
+    FONT_SIZES.into_iter().filter(|size| {
+        property.min.is_none_or(|min| *size >= min) && property.max.is_none_or(|max| *size <= max)
+    })
+}
+
+/// Drawing text is one line, as the chart's own text editor keeps it: line breaks and other
+/// control characters become spaces.
+fn single_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn unit_checked(
@@ -177,6 +340,44 @@ fn watch_input(
     })
 }
 
+/// The drawing's text field. Enter does not break the line, since drawing text is one line.
+fn text_body_input(
+    text: &str,
+    subscriptions: &mut Vec<gpui::Subscription>,
+    window: &mut Window,
+    cx: &mut Context<WorkspaceSurface>,
+) -> Entity<TextareaState> {
+    let input = cx.new(|input_cx| {
+        TextareaState::new(window, input_cx)
+            .submit_on_enter(true)
+            .placeholder("Add text")
+    });
+    input.update(cx, |input, input_cx| {
+        input.set_value(text.to_string(), window, input_cx);
+    });
+    let surface = cx.entity().downgrade();
+    subscriptions.push(window.subscribe(
+        &input,
+        cx,
+        move |input, event: &InputEvent, window, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            let typed = input.read(cx).value().to_string();
+            let text = single_line(&typed);
+            if text != typed {
+                input.update(cx, |input, input_cx| {
+                    input.set_value(text.clone(), window, input_cx);
+                });
+            }
+            let _ = surface.update(cx, |surface, surface_cx| {
+                surface.set_drawing_settings_value("text", Value::String(text), surface_cx);
+            });
+        },
+    ));
+    input
+}
+
 /// Commits or cancels the Aeris Charts session a dialog began.
 fn end_drawing_settings_session(dialog: &DrawingSettingsDialogState, keep: bool, cx: &mut App) {
     dialog.chart.update(cx, |chart, chart_cx| {
@@ -200,18 +401,28 @@ impl DrawingSettingsDialogState {
     ) -> Self {
         let mut subscriptions = Vec::new();
         let mut inputs = HashMap::new();
+        let mut text_body = None;
         let mut levels = HashMap::new();
         let mut level_subscriptions = HashMap::new();
         for property in settings
             .schema
             .properties
             .iter()
-            .filter(|p| property_shown(p))
+            .filter(|property| property.group != Group::General)
         {
             let name = property.name.clone();
             let text = match property.property_type {
-                Type::Number | Type::Integer => {
+                Type::Number | Type::Integer if number_menu(property).is_none() => {
                     settings.number(&name).map(number_text).unwrap_or_default()
+                }
+                Type::String if name == "text" => {
+                    text_body = Some(text_body_input(
+                        settings.text(&name),
+                        &mut subscriptions,
+                        window,
+                        cx,
+                    ));
+                    continue;
                 }
                 Type::String => settings.text(&name).to_string(),
                 Type::Levels => {
@@ -243,7 +454,12 @@ impl DrawingSettingsDialogState {
             drawing: settings.id,
             title: drawing_kind_label(settings.kind()),
             tab,
+            focus: cx.focus_handle(),
+            origin: None,
+            grab: gpui::Point::default(),
+            menu: None,
             inputs,
+            text_body,
             levels,
             anchors,
             intervals,
@@ -350,14 +566,14 @@ fn level_inputs(
 }
 
 impl WorkspaceSurface {
-    const fn drawing_settings_dialog(&self) -> Option<&DrawingSettingsDialogState> {
+    fn drawing_settings_dialog(&self) -> Option<&DrawingSettingsDialogState> {
         match &self.indicator_settings_dialog {
             Some(IndicatorSettingsDialog::Drawing(dialog)) => Some(dialog),
             _ => None,
         }
     }
 
-    const fn drawing_settings_dialog_mut(&mut self) -> Option<&mut DrawingSettingsDialogState> {
+    fn drawing_settings_dialog_mut(&mut self) -> Option<&mut DrawingSettingsDialogState> {
         match &mut self.indicator_settings_dialog {
             Some(IndicatorSettingsDialog::Drawing(dialog)) => Some(dialog),
             _ => None,
@@ -403,7 +619,10 @@ impl WorkspaceSurface {
             return;
         }
         let dialog = DrawingSettingsDialogState::new(chart, &settings, window, cx);
-        self.open_indicator_settings_dialog(IndicatorSettingsDialog::Drawing(dialog), cx);
+        // The chart keeps keyboard focus otherwise, and Delete or an arrow key would edit the
+        // drawing underneath the open dialog.
+        dialog.focus.focus(window, cx);
+        self.open_indicator_settings_dialog(IndicatorSettingsDialog::Drawing(Box::new(dialog)), cx);
     }
 
     /// Closes the drawing dialog, keeping its edits as one undo step or restoring the drawing.
@@ -417,6 +636,29 @@ impl WorkspaceSurface {
             end_drawing_settings_session(&dialog, keep, cx);
         }
         cx.notify();
+    }
+
+    /// Cancel, the close control and Escape: restores the drawing and gives the keyboard back
+    /// to the chart.
+    fn cancel_drawing_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_drawing_settings_dialog(false, cx);
+        self.focus_keyboard(window, cx);
+    }
+
+    /// Escape closes the open dropdown or color picker first, then the dialog.
+    pub(super) fn escape_drawing_settings_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.drawing_settings_dialog_mut() else {
+            return;
+        };
+        if dialog.menu.take().is_some() || dialog.color_picker.take().is_some() {
+            cx.notify();
+            return;
+        }
+        self.cancel_drawing_settings_dialog(window, cx);
     }
 
     /// Closes the dialog once its drawing is gone or its chart was replaced.
@@ -435,7 +677,7 @@ impl WorkspaceSurface {
     }
 
     /// Ok: applies typed coordinates still pending in their fields, then keeps every edit.
-    pub(super) fn confirm_drawing_settings_dialog(&mut self, cx: &mut Context<Self>) {
+    fn confirm_drawing_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let anchors = self
             .drawing_settings_dialog()
             .map_or(0, |dialog| dialog.anchors.len());
@@ -449,16 +691,64 @@ impl WorkspaceSurface {
             }
         }
         self.close_drawing_settings_dialog(true, cx);
+        self.focus_keyboard(window, cx);
     }
 
-    pub(super) fn select_drawing_settings_tab(&mut self, tab: Group, cx: &mut Context<Self>) {
+    fn move_drawing_settings_dialog(&mut self, step: DialogMove, cx: &mut Context<Self>) {
+        let Some(dialog) = self.drawing_settings_dialog_mut() else {
+            return;
+        };
+        match step {
+            DialogMove::Grab(offset) => dialog.grab = offset,
+            DialogMove::Drag {
+                pointer,
+                panel,
+                viewport,
+            } => {
+                let origin = clamp_floating_panel_origin(pointer - dialog.grab, viewport, panel);
+                if dialog.origin != Some(origin) {
+                    dialog.origin = Some(origin);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn select_drawing_settings_tab(&mut self, tab: Group, cx: &mut Context<Self>) {
         if let Some(dialog) = self.drawing_settings_dialog_mut()
             && dialog.tab != tab
         {
             dialog.tab = tab;
+            dialog.menu = None;
             dialog.color_picker = None;
             cx.notify();
         }
+    }
+
+    fn toggle_drawing_settings_menu(&mut self, menu: &str, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.drawing_settings_dialog_mut() {
+            dialog.menu = if dialog.menu.as_deref() == Some(menu) {
+                None
+            } else {
+                Some(menu.to_string())
+            };
+            dialog.color_picker = None;
+            cx.notify();
+        }
+    }
+
+    fn close_drawing_settings_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.drawing_settings_dialog_mut()
+            && dialog.menu.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    /// A dropdown choice: applies its patch and closes the dropdown.
+    fn choose_drawing_settings_option(&mut self, patch: &Value, cx: &mut Context<Self>) {
+        self.apply_drawing_settings_patch(patch, cx);
+        self.close_drawing_settings_menu(cx);
     }
 
     fn apply_drawing_settings_patch(&mut self, patch: &Value, cx: &mut Context<Self>) {
@@ -474,12 +764,7 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    pub(super) fn set_drawing_settings_value(
-        &mut self,
-        name: &str,
-        value: Value,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_drawing_settings_value(&mut self, name: &str, value: Value, cx: &mut Context<Self>) {
         let mut patch = serde_json::Map::new();
         patch.insert(name.to_string(), value);
         self.apply_drawing_settings_patch(&Value::Object(patch), cx);
@@ -581,7 +866,7 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn set_drawing_level_visible(
+    fn set_drawing_level_visible(
         &mut self,
         property: &str,
         index: usize,
@@ -599,12 +884,7 @@ impl WorkspaceSurface {
     }
 
     /// Adds a level after the last, styled like it, and rebuilds the rows' fields.
-    pub(super) fn add_drawing_level(
-        &mut self,
-        property: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn add_drawing_level(&mut self, property: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(settings) = self.drawing_settings_dialog_settings(cx) else {
             return;
         };
@@ -617,7 +897,7 @@ impl WorkspaceSurface {
                 value: 0.0,
                 color: settings.text("color").to_string(),
                 visible: true,
-                style: "solid".to_string(),
+                style: settings.text("style").to_string(),
                 fill_between: false,
                 fill_color: None,
                 label_visible: true,
@@ -632,7 +912,7 @@ impl WorkspaceSurface {
         self.rebuild_drawing_level_inputs(property, window, cx);
     }
 
-    pub(super) fn remove_drawing_level(
+    fn remove_drawing_level(
         &mut self,
         property: &str,
         index: usize,
@@ -672,12 +952,7 @@ impl WorkspaceSurface {
     }
 
     /// Shows or hides one statistic of the kind's stats card.
-    pub(super) fn set_drawing_label_visible(
-        &mut self,
-        metric: &str,
-        visible: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_drawing_label_visible(&mut self, metric: &str, visible: bool, cx: &mut Context<Self>) {
         let Some(settings) = self.drawing_settings_dialog_settings(cx) else {
             return;
         };
@@ -703,7 +978,7 @@ impl WorkspaceSurface {
 
     /// Rewrites the interval visibility from the unit checkboxes and range fields. Every unit
     /// on its full span means every interval, which Aeris Charts stores as disabled.
-    pub(super) fn apply_drawing_interval_visibility(
+    fn apply_drawing_interval_visibility(
         &mut self,
         toggled: Option<usize>,
         cx: &mut Context<Self>,
@@ -807,6 +1082,7 @@ impl WorkspaceSurface {
         let Some(dialog) = self.drawing_settings_dialog_mut() else {
             return;
         };
+        dialog.menu = None;
         if dialog
             .color_picker
             .as_ref()
@@ -882,32 +1158,240 @@ struct DialogUi<'a> {
     theme: &'a AerisTheme,
 }
 
+impl DialogUi<'_> {
+    fn menu_open(&self, menu: &str) -> bool {
+        self.dialog.menu.as_deref() == Some(menu)
+    }
+
+    /// A stable element id for the control of `property` within its kind's schema.
+    fn slot(&self, property: &ChartDrawingProperty) -> usize {
+        self.settings
+            .schema
+            .properties
+            .iter()
+            .position(|candidate| candidate.name == property.name)
+            .unwrap_or_default()
+    }
+}
+
+/// A labelled row: the label in a fixed column so every control starts on one edge.
 fn field_row(label: impl Into<SharedString>, control: impl IntoElement, theme: &AerisTheme) -> Div {
     div()
         .flex()
         .items_center()
-        .justify_between()
         .gap_3()
-        .min_h(px(32.0))
+        .min_h(px(FIELD_HEIGHT + 4.0))
         .child(
             div()
+                .w(px(LABEL_WIDTH))
                 .flex_none()
                 .text_sm()
                 .text_color(gpui_color(theme.colors.text_secondary))
                 .child(label.into()),
         )
-        .child(control)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(control),
+        )
+}
+
+fn controls() -> Div {
+    div().flex().items_center().gap_2()
 }
 
 fn section_title(title: impl Into<SharedString>, theme: &AerisTheme) -> Div {
     div()
-        .pt_1()
+        .pt_2()
         .text_xs()
         .font_weight(platform_font_weight(TypographyRole::Strong))
         .text_color(gpui_color(theme.colors.text_muted))
-        .child(title.into())
+        .child(title.into().to_uppercase())
 }
 
+fn sized(width: f32, control: impl IntoElement) -> Div {
+    div()
+        .w(px(width))
+        .h(px(FIELD_HEIGHT))
+        .flex_none()
+        .flex()
+        .child(control)
+}
+
+fn input_control(input: &Entity<InputState>, width: f32, theme: &AerisTheme) -> Div {
+    sized(width, Input::new(input).platform(theme).flex_1())
+}
+
+/// One dropdown choice and the options patch it applies.
+struct SelectOption {
+    label: String,
+    glyph: Option<AnyElement>,
+    checked: bool,
+    patch: Value,
+}
+
+fn single_option(name: &str, value: Value) -> Value {
+    let mut patch = serde_json::Map::new();
+    patch.insert(name.to_string(), value);
+    Value::Object(patch)
+}
+
+/// A dropdown: an outline trigger showing the current choice and, while open, its menu.
+fn select_control(
+    ui: DialogUi<'_>,
+    id: (&'static str, usize),
+    menu: &str,
+    width: f32,
+    label: &str,
+    shown: AnyElement,
+    options: Vec<SelectOption>,
+) -> Div {
+    let theme = ui.theme;
+    let open = ui.menu_open(menu);
+    let toggle = ui.surface.clone();
+    let toggle_menu = menu.to_string();
+    let trigger = Button::new(id, theme)
+        .variant(ButtonVariant::Outline)
+        .trigger()
+        .full_width()
+        .open(open)
+        .aria_label(label.to_string())
+        .leading(shown)
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_press(move |_, _, cx| {
+            toggle.update(cx, |surface, surface_cx| {
+                surface.toggle_drawing_settings_menu(&toggle_menu, surface_cx);
+            });
+        });
+    let panel = open.then(|| {
+        MenuPanel::new(
+            ("drawing_setting_menu", id.1),
+            MenuPlacement::Anchored {
+                side: MenuSide::Below,
+                align: MenuAlign::Stretch,
+            },
+            theme,
+        )
+        .animate_from(PopupAnimationOrigin::TOP_LEFT)
+        .children(options.into_iter().enumerate().map(|(index, option)| {
+            let choose = ui.surface.clone();
+            let patch = option.patch;
+            MenuRow::compact(("drawing_setting_option", index), option.label, theme)
+                .when_some(option.glyph, MenuRow::leading)
+                .checked(option.checked)
+                .on_click(move |_, _, cx| {
+                    choose.update(cx, |surface, surface_cx| {
+                        surface.choose_drawing_settings_option(&patch, surface_cx);
+                    });
+                })
+        }))
+    });
+    let dismiss = ui.surface.clone();
+    sized(
+        width,
+        MenuAnchor::new(("drawing_setting_select", id.1), trigger)
+            .full_width()
+            .menu(panel)
+            .on_dismiss(move |_, cx| {
+                dismiss.update(cx, WorkspaceSurface::close_drawing_settings_menu);
+            }),
+    )
+}
+
+fn select_text(text: impl Into<SharedString>, theme: &AerisTheme) -> AnyElement {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_sm()
+        .text_color(gpui_color(theme.colors.text_primary))
+        .child(text.into())
+        .into_any_element()
+}
+
+/// An enum property as a dropdown; line styles show their stroke.
+fn enum_select(ui: DialogUi<'_>, property: &ChartDrawingProperty, width: f32) -> Div {
+    let current = ui.settings.text(&property.name).to_string();
+    let strokes = property.name == "style";
+    let shown = if strokes {
+        choice_glyph(&current, ui.theme)
+    } else {
+        select_text(humanize(&current), ui.theme)
+    };
+    let options = property
+        .enum_values
+        .iter()
+        .map(|choice| SelectOption {
+            label: humanize(choice),
+            glyph: strokes.then(|| choice_glyph(choice, ui.theme)),
+            checked: current == *choice,
+            patch: single_option(&property.name, Value::String(choice.clone())),
+        })
+        .collect();
+    select_control(
+        ui,
+        ("drawing_setting_enum", ui.slot(property)),
+        &property.name,
+        width,
+        &property.label,
+        shown,
+        options,
+    )
+}
+
+/// A width or font-size property as a dropdown of the sizes inside its bounds.
+fn number_select(
+    ui: DialogUi<'_>,
+    property: &ChartDrawingProperty,
+    menu: NumberMenu,
+    width: f32,
+) -> Div {
+    let theme = ui.theme;
+    let current = ui.settings.number(&property.name);
+    let (shown, options): (String, Vec<SelectOption>) = match menu {
+        NumberMenu::Width => (
+            current.map_or_else(|| property.label.clone(), width_label),
+            width_choices(property)
+                .map(|size| SelectOption {
+                    label: width_label(size),
+                    glyph: Some(width_glyph(size, theme).into_any_element()),
+                    checked: current == Some(size),
+                    patch: single_option(&property.name, json!(size)),
+                })
+                .collect(),
+        ),
+        NumberMenu::FontSize => (
+            current.map_or_else(|| "Auto".to_string(), number_text),
+            std::iter::once(SelectOption {
+                label: "Auto".to_string(),
+                glyph: None,
+                checked: current.is_none(),
+                patch: single_option(&property.name, Value::Null),
+            })
+            .chain(font_size_choices(property).map(|size| SelectOption {
+                label: number_text(size),
+                glyph: None,
+                checked: current == Some(size),
+                patch: single_option(&property.name, json!(size)),
+            }))
+            .collect(),
+        ),
+    };
+    select_control(
+        ui,
+        ("drawing_setting_number", ui.slot(property)),
+        &property.name,
+        width,
+        &property.label,
+        select_text(shown, theme),
+        options,
+    )
+}
+
+/// A color's swatch button and, while open, its picker.
 fn color_control(
     ui: DialogUi<'_>,
     id: (&'static str, usize),
@@ -924,9 +1408,13 @@ fn color_control(
     let shown = value.clone().unwrap_or_else(|| "Auto".to_string());
     let toggle = ui.surface.clone();
     let toggle_target = target.clone();
-    let mut control = div().relative().flex().child(
-        color_swatch_button(id, label, &shown, open_picker.is_some(), theme).on_press(
-            move |_, window, cx| {
+    let mut control = div().relative().flex_none().flex().child(
+        Button::new(id, theme)
+            .variant(ButtonVariant::Outline)
+            .open(open_picker.is_some())
+            .aria_label(label)
+            .leading(color_swatch_dot(&shown, theme))
+            .on_press(move |_, window, cx| {
                 toggle.update(cx, |surface, surface_cx| {
                     surface.toggle_drawing_settings_color_picker(
                         toggle_target.clone(),
@@ -935,8 +1423,7 @@ fn color_control(
                         surface_cx,
                     );
                 });
-            },
-        ),
+            }),
     );
     if let Some(picker) = open_picker {
         let select = ui.surface.clone();
@@ -957,130 +1444,191 @@ fn color_control(
     control.into_any_element()
 }
 
-fn input_control(input: &Entity<InputState>, width: f32, theme: &AerisTheme) -> Div {
-    div()
-        .w(px(width))
-        .h(px(32.0))
-        .flex()
-        .child(Input::new(input).platform(theme).flex_1())
+fn property_color(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElement {
+    color_control(
+        ui,
+        ("drawing_setting_color", ui.slot(property)),
+        property.label.clone().into(),
+        DrawingColorTarget::Property(property.name.clone()),
+        ui.settings.color(&property.name),
+    )
 }
 
-fn enum_control(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty) -> AnyElement {
-    let current = ui.settings.text(&property.name).to_string();
-    let tabs = property
-        .enum_values
-        .iter()
-        .enumerate()
-        .map(|(index, choice)| {
-            let update = ui.surface.clone();
-            let name = property.name.clone();
-            let value = choice.clone();
-            Tab::new(
-                (
-                    "drawing_setting_choice",
-                    slot.saturating_mul(32).saturating_add(index),
-                ),
-                ui.theme,
-            )
-            .selected(current == *choice)
-            .child(humanize(choice))
-            .on_click(move |_, _, cx| {
-                update.update(cx, |surface, surface_cx| {
-                    surface.set_drawing_settings_value(
-                        &name,
-                        Value::String(value.clone()),
-                        surface_cx,
-                    );
-                });
-            })
-        });
-    div()
-        .flex()
-        .child(
-            TabList::new(
-                ("drawing_setting_choices", slot),
-                property.label.clone(),
-                ui.theme,
-            )
-            .wrap()
-            .children(tabs),
-        )
-        .into_any_element()
-}
-
-fn property_control(
-    ui: DialogUi<'_>,
-    slot: usize,
-    property: &ChartDrawingProperty,
-) -> Option<AnyElement> {
-    let theme = ui.theme;
+fn checkbox(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> CheckboxRow {
+    let update = ui.surface.clone();
     let name = property.name.clone();
+    CheckboxRow::new(
+        ("drawing_setting_check", ui.slot(property)),
+        property.label.clone(),
+        ui.settings.flag(&property.name),
+        ui.theme,
+    )
+    .on_change(move |checked, _, _, cx| {
+        update.update(cx, |surface, surface_cx| {
+            surface.set_drawing_settings_value(&name, Value::Bool(checked), surface_cx);
+        });
+    })
+}
+
+/// A Bold or Italic switch drawn as its letter.
+fn font_toggle(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> Button {
+    let theme = ui.theme;
+    let on = ui.settings.flag(&property.name);
+    let italic = property.name == "text_italic";
+    let glyph = div()
+        .w(px(14.0))
+        .flex()
+        .justify_center()
+        .text_sm()
+        .font_weight(platform_font_weight(if italic {
+            TypographyRole::Normal
+        } else {
+            TypographyRole::Strong
+        }))
+        .when(italic, Styled::italic)
+        .child(if italic { "I" } else { "B" });
+    let update = ui.surface.clone();
+    let name = property.name.clone();
+    Button::new(("drawing_setting_font_toggle", ui.slot(property)), theme)
+        .variant(ButtonVariant::Outline)
+        .selected(on)
+        .aria_label(property.label.clone())
+        .tooltip(TooltipSpec::new(property.label.clone(), theme).show_delay(TOOLTIP_OPEN_DELAY))
+        .leading(glyph)
+        .on_press(move |_, _, cx| {
+            update.update(cx, |surface, surface_cx| {
+                surface.set_drawing_settings_value(&name, Value::Bool(!on), surface_cx);
+            });
+        })
+}
+
+fn extend_select(ui: DialogUi<'_>) -> Div {
+    let left = ui.settings.flag("extend_left");
+    let right = ui.settings.flag("extend_right");
+    let current = EXTEND_CHOICES
+        .iter()
+        .find(|(_, l, r)| (*l, *r) == (left, right))
+        .map_or("Don't extend", |(label, _, _)| label);
+    let options = EXTEND_CHOICES
+        .iter()
+        .map(|&(label, l, r)| SelectOption {
+            label: label.to_string(),
+            glyph: None,
+            checked: (l, r) == (left, right),
+            patch: json!({ "extend_left": l, "extend_right": r }),
+        })
+        .collect();
+    select_control(
+        ui,
+        ("drawing_setting_extend", 0),
+        EXTEND_MENU,
+        SELECT_WIDTH,
+        "Extend",
+        select_text(current, ui.theme),
+        options,
+    )
+}
+
+/// The control of one property that has a row of its own.
+fn property_row(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> Option<AnyElement> {
+    let theme = ui.theme;
     let label = property.label.clone();
     Some(match property.property_type {
-        Type::Boolean => {
-            let update = ui.surface.clone();
-            Switch::new(
-                ("drawing_setting_switch", slot),
-                label,
-                ui.settings.flag(&name),
-                theme,
-            )
-            .on_change(move |checked, _, _, cx| {
-                update.update(cx, |surface, surface_cx| {
-                    surface.set_drawing_settings_value(&name, Value::Bool(checked), surface_cx);
-                });
-            })
-            .into_any_element()
+        Type::Boolean => checkbox(ui, property).into_any_element(),
+        Type::Color => field_row(label, property_color(ui, property), theme).into_any_element(),
+        Type::Enum => {
+            field_row(label, enum_select(ui, property, SELECT_WIDTH), theme).into_any_element()
         }
         Type::Number | Type::Integer => {
-            let input = ui.dialog.inputs.get(&name)?;
-            field_row(label, input_control(input, 120.0, theme), theme).into_any_element()
+            let control = match number_menu(property) {
+                Some(menu) => number_select(ui, property, menu, COMPACT_SELECT_WIDTH),
+                None => input_control(
+                    ui.dialog.inputs.get(&property.name)?,
+                    NUMBER_FIELD_WIDTH,
+                    theme,
+                ),
+            };
+            field_row(label, control, theme).into_any_element()
         }
         Type::String => {
-            let input = ui.dialog.inputs.get(&name)?;
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(gpui_color(theme.colors.text_secondary))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .h(px(32.0))
-                        .flex()
-                        .child(Input::new(input).platform(theme).flex_1()),
-                )
-                .into_any_element()
+            let input = ui.dialog.inputs.get(&property.name)?;
+            field_row(
+                label,
+                div()
+                    .flex_1()
+                    .h(px(FIELD_HEIGHT))
+                    .flex()
+                    .child(Input::new(input).platform(theme).flex_1()),
+                theme,
+            )
+            .into_any_element()
         }
-        Type::Color => field_row(
-            label.clone(),
-            color_control(
-                ui,
-                ("drawing_setting_color", slot),
-                label.into(),
-                DrawingColorTarget::Property(name.clone()),
-                ui.settings.color(&name),
-            ),
-            theme,
-        )
-        .into_any_element(),
-        Type::Enum => field_row(label, enum_control(ui, slot, property), theme).into_any_element(),
-        Type::Levels => levels_editor(ui, slot, property),
-        Type::Labels => labels_editor(ui, slot, property),
+        Type::Levels => levels_editor(ui, property),
+        Type::Labels => labels_editor(ui, property),
         Type::IntervalSet => intervals_editor(ui),
     })
 }
 
-fn levels_editor(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty) -> AnyElement {
+fn row_element(ui: DialogUi<'_>, row: &Row<'_>) -> Option<AnyElement> {
     let theme = ui.theme;
+    Some(match row {
+        Row::Line(parts) => field_row(
+            "Line",
+            controls().children(parts.iter().map(|part| {
+                match part.property_type {
+                    Type::Color => property_color(ui, part),
+                    Type::Enum => enum_select(ui, part, COMPACT_SELECT_WIDTH).into_any_element(),
+                    _ => number_select(ui, part, NumberMenu::Width, COMPACT_SELECT_WIDTH)
+                        .into_any_element(),
+                }
+            })),
+            theme,
+        )
+        .into_any_element(),
+        Row::Extend => field_row("Extend", extend_select(ui), theme).into_any_element(),
+        Row::Font(parts) => controls()
+            .min_h(px(FIELD_HEIGHT + 4.0))
+            .children(parts.iter().map(|part| {
+                match part.property_type {
+                    Type::Color => property_color(ui, part),
+                    Type::Boolean => font_toggle(ui, part).into_any_element(),
+                    _ => number_select(ui, part, NumberMenu::FontSize, COMPACT_SELECT_WIDTH)
+                        .into_any_element(),
+                }
+            }))
+            .into_any_element(),
+        Row::TextBody => TextArea::new(ui.dialog.text_body.as_ref()?, px(TEXT_BODY_HEIGHT), theme)
+            .into_any_element(),
+        Row::Pair(label, first, second) => field_row(
+            *label,
+            controls()
+                .child(enum_select(ui, first, SELECT_WIDTH))
+                .child(enum_select(ui, second, SELECT_WIDTH)),
+            theme,
+        )
+        .into_any_element(),
+        Row::ToggledColor(flag, color) => controls()
+            .min_h(px(FIELD_HEIGHT + 4.0))
+            .child(
+                div()
+                    .w(px(LABEL_WIDTH))
+                    .flex_none()
+                    .child(checkbox(ui, flag)),
+            )
+            .child(property_color(ui, color))
+            .into_any_element(),
+        Row::Property(property) => property_row(ui, property)?,
+    })
+}
+
+/// Fib-style levels: a two-column grid of a checkbox, the value and the color per level.
+fn levels_editor(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElement {
+    let theme = ui.theme;
+    let slot = ui.slot(property);
     let name = property.name.clone();
     let levels = ui.settings.levels(&name);
     let inputs = ui.dialog.levels.get(&name);
-    let rows = levels.iter().enumerate().map(|(index, level)| {
+    let cells = levels.iter().enumerate().map(|(index, level)| {
         let row_id = slot
             .saturating_mul(MAX_DRAWING_LEVELS + 1)
             .saturating_add(index);
@@ -1089,9 +1637,11 @@ fn levels_editor(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty)
         let toggle_name = name.clone();
         let remove_name = name.clone();
         div()
+            .w_1_2()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1p5()
+            .py_0p5()
             .child(
                 CheckboxRow::new(("drawing_level_visible", row_id), "", level.visible, theme)
                     .on_change(move |checked, _, _, cx| {
@@ -1108,7 +1658,7 @@ fn levels_editor(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty)
             .children(
                 inputs
                     .and_then(|inputs| inputs.get(index))
-                    .map(|input| input_control(input, 96.0, theme)),
+                    .map(|input| input_control(input, LEVEL_FIELD_WIDTH, theme)),
             )
             .child(color_control(
                 ui,
@@ -1139,13 +1689,13 @@ fn levels_editor(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty)
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
         .child(section_title(property.label.clone(), theme))
-        .children(rows)
+        .child(div().flex().flex_wrap().children(cells))
         .child(
             div().flex().child(
                 Button::new(("drawing_level_add", slot), theme)
-                    .variant(ButtonVariant::Outline)
+                    .variant(ButtonVariant::Ghost)
                     .button_size(ButtonSize::Sm)
                     .icon(Icon::new(HugeIcon::Add.path()))
                     .label("Add level")
@@ -1160,14 +1710,16 @@ fn levels_editor(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty)
         .into_any_element()
 }
 
-fn labels_editor(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty) -> AnyElement {
+/// The stats a kind can show on its card, as a two-column checklist.
+fn labels_editor(ui: DialogUi<'_>, property: &ChartDrawingProperty) -> AnyElement {
+    let slot = ui.slot(property);
     let labels = ui
         .settings
         .value("labels")
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let rows = property
+    let cells = property
         .enum_values
         .iter()
         .enumerate()
@@ -1178,27 +1730,29 @@ fn labels_editor(ui: DialogUi<'_>, slot: usize, property: &ChartDrawingProperty)
             });
             let update = ui.surface.clone();
             let metric = metric.clone();
-            CheckboxRow::new(
-                (
-                    "drawing_label_metric",
-                    slot.saturating_mul(32).saturating_add(index),
-                ),
-                humanize(&metric),
-                visible,
-                ui.theme,
+            div().w_1_2().py_0p5().child(
+                CheckboxRow::new(
+                    (
+                        "drawing_label_metric",
+                        slot.saturating_mul(32).saturating_add(index),
+                    ),
+                    humanize(&metric),
+                    visible,
+                    ui.theme,
+                )
+                .on_change(move |checked, _, _, cx| {
+                    update.update(cx, |surface, surface_cx| {
+                        surface.set_drawing_label_visible(&metric, checked, surface_cx);
+                    });
+                }),
             )
-            .on_change(move |checked, _, _, cx| {
-                update.update(cx, |surface, surface_cx| {
-                    surface.set_drawing_label_visible(&metric, checked, surface_cx);
-                });
-            })
         });
     div()
         .flex()
         .flex_col()
         .gap_1()
-        .child(section_title(property.label.clone(), ui.theme))
-        .children(rows)
+        .child(section_title("Info", ui.theme))
+        .child(div().flex().flex_wrap().children(cells))
         .into_any_element()
 }
 
@@ -1211,49 +1765,36 @@ fn intervals_editor(ui: DialogUi<'_>) -> AnyElement {
         .zip(&ui.dialog.intervals)
         .map(|((slot, &(unit, label, _, _)), inputs)| {
             let toggle = ui.surface.clone();
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
+            controls()
+                .min_h(px(FIELD_HEIGHT + 4.0))
                 .child(
-                    CheckboxRow::new(
-                        ("drawing_interval_unit", slot),
-                        label,
-                        unit_checked(&visibility, unit),
-                        theme,
-                    )
-                    .on_change(move |_, _, _, cx| {
-                        toggle.update(cx, |surface, surface_cx| {
-                            surface.apply_drawing_interval_visibility(Some(slot), surface_cx);
-                        });
-                    }),
+                    div().w(px(LABEL_WIDTH)).flex_none().child(
+                        CheckboxRow::new(
+                            ("drawing_interval_unit", slot),
+                            label,
+                            unit_checked(&visibility, unit),
+                            theme,
+                        )
+                        .on_change(move |_, _, _, cx| {
+                            toggle.update(cx, |surface, surface_cx| {
+                                surface.apply_drawing_interval_visibility(Some(slot), surface_cx);
+                            });
+                        }),
+                    ),
                 )
+                .child(input_control(&inputs.min, INTERVAL_FIELD_WIDTH, theme))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(input_control(&inputs.min, 72.0, theme))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(gpui_color(theme.colors.text_muted))
-                                .child("to"),
-                        )
-                        .child(input_control(&inputs.max, 72.0, theme)),
+                        .text_sm()
+                        .text_color(gpui_color(theme.colors.text_muted))
+                        .child("to"),
                 )
+                .child(input_control(&inputs.max, INTERVAL_FIELD_WIDTH, theme))
         });
     div()
         .flex()
         .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .text_color(gpui_color(theme.colors.text_muted))
-                .child("Show the drawing only on the checked intervals and ranges."),
-        )
+        .gap_1()
         .children(rows)
         .into_any_element()
 }
@@ -1265,37 +1806,23 @@ fn anchors_editor(ui: DialogUi<'_>) -> impl IntoElement + use<> {
             .flex()
             .flex_col()
             .gap_1()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_sm()
-                            .text_color(gpui_color(theme.colors.text_secondary))
-                            .child(anchor.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .when(anchor.show_price, |row| {
-                                row.child(input_control(&anchor.price, 120.0, theme))
-                            })
-                            .children(
-                                anchor
-                                    .time
-                                    .as_ref()
-                                    .map(|time| input_control(time, 160.0, theme)),
-                            ),
+            .child(field_row(
+                anchor.label.clone(),
+                controls()
+                    .when(anchor.show_price, |row| {
+                        row.child(input_control(&anchor.price, NUMBER_FIELD_WIDTH, theme))
+                    })
+                    .children(
+                        anchor
+                            .time
+                            .as_ref()
+                            .map(|time| input_control(time, 148.0, theme)),
                     ),
-            )
+                theme,
+            ))
             .children(anchor.error.clone().map(|error| {
                 div()
+                    .pl(px(LABEL_WIDTH + 12.0))
                     .text_xs()
                     .text_color(gpui_color(theme.colors.danger))
                     .child(error)
@@ -1304,11 +1831,12 @@ fn anchors_editor(ui: DialogUi<'_>) -> impl IntoElement + use<> {
     div()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
         .children(rows)
         .when(!ui.dialog.anchors.is_empty(), |editor| {
             editor.child(
                 div()
+                    .pt_1()
                     .text_xs()
                     .text_color(gpui_color(theme.colors.text_muted))
                     .child("Times are YYYY-MM-DD HH:MM in the chart's time zone. Press Enter to move a point."),
@@ -1334,6 +1862,7 @@ fn tab_strip(ui: DialogUi<'_>) -> impl IntoElement + use<> {
         });
     div()
         .flex()
+        .pb_1()
         .child(TabList::new("drawing_settings_tabs", "Drawing settings", ui.theme).children(tabs))
 }
 
@@ -1350,42 +1879,45 @@ pub(super) fn drawing_settings_dialog_layer(
         settings: &settings,
         theme,
     };
-    let controls = settings
-        .schema
-        .properties
+    let rows: Vec<AnyElement> = dialog_rows(&settings.schema.properties, dialog.tab)
         .iter()
-        .enumerate()
-        .filter(|(_, property)| property.group == dialog.tab)
-        .filter_map(|(slot, property)| property_control(ui, slot, property));
+        .filter_map(|row| row_element(ui, row))
+        .collect();
     let dismiss = surface.clone();
     let cancel = surface.clone();
     let confirm = surface.clone();
+    let mover = surface.clone();
     Some(
         Dialog::new(
-            "drawing_settings_dialog",
-            DialogSize::Md,
+            ("drawing_settings_dialog", surface.entity_id().as_u64()),
+            DialogSize::Sm,
             theme,
-            move |_, cx| {
+            move |window, cx| {
                 dismiss.update(cx, |surface, surface_cx| {
-                    surface.close_drawing_settings_dialog(false, surface_cx);
+                    surface.cancel_drawing_settings_dialog(window, surface_cx);
                 });
             },
         )
         .title(dialog.title)
-        .subtitle("Drawing settings")
-        .max_height(px(680.0))
+        .movable(dialog.origin, move |step, cx| {
+            mover.update(cx, |surface, surface_cx| {
+                surface.move_drawing_settings_dialog(step, surface_cx);
+            });
+        })
+        .track_focus(&dialog.focus)
+        .max_height(px(DIALOG_MAX_HEIGHT))
         .child(tab_strip(ui))
         .when(dialog.tab == Group::Coordinates, |body| {
             body.child(anchors_editor(ui))
         })
-        .children(controls)
+        .children(rows)
         .action(
             Button::new("drawing_settings_cancel", theme)
                 .variant(ButtonVariant::Outline)
                 .label("Cancel")
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     cancel.update(cx, |surface, surface_cx| {
-                        surface.close_drawing_settings_dialog(false, surface_cx);
+                        surface.cancel_drawing_settings_dialog(window, surface_cx);
                     });
                 }),
         )
@@ -1393,8 +1925,10 @@ pub(super) fn drawing_settings_dialog_layer(
             Button::new("drawing_settings_ok", theme)
                 .variant(ButtonVariant::Secondary)
                 .label("Ok")
-                .on_click(move |_, _, cx| {
-                    confirm.update(cx, WorkspaceSurface::confirm_drawing_settings_dialog);
+                .on_click(move |_, window, cx| {
+                    confirm.update(cx, |surface, surface_cx| {
+                        surface.confirm_drawing_settings_dialog(window, surface_cx);
+                    });
                 }),
         )
         .into_any_element(),
@@ -1406,11 +1940,21 @@ mod tests {
     use super::*;
 
     fn property(property_type: Type, min: Option<f64>, max: Option<f64>) -> ChartDrawingProperty {
+        named("width", Group::Style, property_type, min, max)
+    }
+
+    fn named(
+        name: &str,
+        group: Group,
+        property_type: Type,
+        min: Option<f64>,
+        max: Option<f64>,
+    ) -> ChartDrawingProperty {
         ChartDrawingProperty {
-            name: "width".to_string(),
-            label: "Width".to_string(),
-            group: Group::Style,
-            toolbar: true,
+            name: name.to_string(),
+            label: humanize(name),
+            group,
+            toolbar: false,
             property_type,
             default: Value::Null,
             min,
@@ -1437,6 +1981,122 @@ mod tests {
         assert_eq!(humanize("line_open"), "Line open");
         assert_eq!(humanize("solid"), "Solid");
         assert_eq!(humanize(""), "");
+    }
+
+    #[test]
+    fn widths_and_font_sizes_are_menus_and_other_numbers_are_typed() {
+        let font = named(
+            "text_size",
+            Group::Text,
+            Type::Number,
+            Some(6.0),
+            Some(96.0),
+        );
+        assert_eq!(number_menu(&font), Some(NumberMenu::FontSize));
+        assert_eq!(
+            font_size_choices(&font).collect::<Vec<_>>(),
+            FONT_SIZES.to_vec()
+        );
+        let small = named(
+            "text_size",
+            Group::Text,
+            Type::Number,
+            Some(11.0),
+            Some(20.0),
+        );
+        assert_eq!(
+            font_size_choices(&small).collect::<Vec<_>>(),
+            vec![11.0, 12.0, 14.0, 16.0, 20.0]
+        );
+        let border = named("box_border_width", Group::Text, Type::Number, None, None);
+        assert_eq!(number_menu(&border), Some(NumberMenu::Width));
+        let risk = named(
+            "position_risk_percent",
+            Group::Inputs,
+            Type::Number,
+            None,
+            None,
+        );
+        assert_eq!(number_menu(&risk), None);
+        let style = named("style", Group::Style, Type::Enum, None, None);
+        assert_eq!(number_menu(&style), None);
+    }
+
+    #[test]
+    fn drawing_text_stays_on_one_line() {
+        assert_eq!(single_line("Break\nout\r\tnow"), "Break out  now");
+        assert_eq!(single_line("plain"), "plain");
+    }
+
+    #[test]
+    fn related_properties_share_one_row_in_schema_order() {
+        let properties = vec![
+            named("color", Group::Style, Type::Color, None, None),
+            named("width", Group::Style, Type::Number, Some(1.0), Some(4.0)),
+            named("style", Group::Style, Type::Enum, None, None),
+            named("stroke_start", Group::Style, Type::Enum, None, None),
+            named("stroke_end", Group::Style, Type::Enum, None, None),
+            named("extend_left", Group::Style, Type::Boolean, None, None),
+            named("extend_right", Group::Style, Type::Boolean, None, None),
+            named(
+                "middle_point_visible",
+                Group::Style,
+                Type::Boolean,
+                None,
+                None,
+            ),
+            named("fill_enabled", Group::Style, Type::Boolean, None, None),
+            named("fill_color", Group::Style, Type::Color, None, None),
+            named("text_color", Group::Text, Type::Color, None, None),
+            named("text_size", Group::Text, Type::Number, None, None),
+            named("text_bold", Group::Text, Type::Boolean, None, None),
+            named("text_italic", Group::Text, Type::Boolean, None, None),
+            named("text", Group::Text, Type::String, None, None),
+            named("text_v_align", Group::Text, Type::Enum, None, None),
+            named("text_h_align", Group::Text, Type::Enum, None, None),
+            named("name", Group::General, Type::String, None, None),
+        ];
+        let names = |rows: Vec<Row<'_>>| -> Vec<String> {
+            rows.iter()
+                .map(|row| match row {
+                    Row::Line(parts) => format!("line:{}", parts.len()),
+                    Row::Extend => "extend".to_string(),
+                    Row::Font(parts) => format!("font:{}", parts.len()),
+                    Row::TextBody => "text".to_string(),
+                    Row::Pair(label, _, _) => format!("pair:{label}"),
+                    Row::ToggledColor(flag, _) => format!("toggle:{}", flag.name),
+                    Row::Property(property) => property.name.clone(),
+                })
+                .collect()
+        };
+        assert_eq!(
+            names(dialog_rows(&properties, Group::Style)),
+            [
+                "line:3",
+                "pair:Line ends",
+                "extend",
+                "middle_point_visible",
+                "toggle:fill_enabled"
+            ]
+        );
+        assert_eq!(
+            names(dialog_rows(&properties, Group::Text)),
+            ["font:4", "text", "pair:Text alignment"]
+        );
+        assert_eq!(dialog_rows(&properties, Group::General).len(), 1);
+    }
+
+    #[test]
+    fn a_lone_member_of_a_group_keeps_its_own_row() {
+        let properties = vec![
+            named("color", Group::Style, Type::Color, None, None),
+            named("extend_right", Group::Style, Type::Boolean, None, None),
+            named("level_label_align", Group::Style, Type::Enum, None, None),
+            named("fill_enabled", Group::Style, Type::Boolean, None, None),
+        ];
+        let rows = dialog_rows(&properties, Group::Style);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| matches!(row, Row::Property(_))));
     }
 
     #[test]

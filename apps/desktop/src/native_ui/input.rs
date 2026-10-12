@@ -3,9 +3,9 @@ use gpui::{
     App, BoxShadow, Entity, Focusable, Hsla, IntoElement, Pixels, RenderOnce, Window, div,
     prelude::*, px,
 };
-use gpui_base::input::{Input as BaseInput, InputEditorStyle};
+use gpui_base::input::{Input as BaseInput, InputEditorStyle, Textarea as BaseTextarea};
 
-pub(crate) use gpui_base::input::{InputEvent, InputState};
+pub(crate) use gpui_base::input::{InputEvent, InputState, TextareaState};
 
 use super::{
     platform_font_weight,
@@ -170,5 +170,62 @@ impl RenderOnce for Input {
                 ])
             })
             .child(BaseInput::new(&self.state))
+    }
+}
+
+/// The multi-line text field: the Theme System text-field tokens of [`Input`] around
+/// `gpui-base`'s textarea engine, `height` tall with the text starting at the top.
+#[derive(IntoElement)]
+pub(crate) struct TextArea {
+    state: Entity<TextareaState>,
+    theme: AerisTheme,
+    height: Pixels,
+}
+
+impl TextArea {
+    pub(crate) fn new(state: &Entity<TextareaState>, height: Pixels, theme: &AerisTheme) -> Self {
+        Self {
+            state: state.clone(),
+            theme: *theme,
+            height,
+        }
+    }
+}
+
+impl RenderOnce for TextArea {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let appearance = input_appearance(&self.theme);
+        let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
+        let color = window.text_style().color;
+        let border = gpui_color(if focused {
+            appearance.focus_ring
+        } else {
+            appearance.border
+        });
+        let hover_fill = gpui_color(appearance.hover_fill);
+        self.state.update(cx, |state, _| {
+            state.set_editor_style(InputEditorStyle {
+                foreground: color,
+                muted_foreground: gpui_color(self.theme.colors.text_secondary),
+                border,
+                selection: color.opacity(0.22),
+                caret: color,
+                ..InputEditorStyle::default()
+            });
+        });
+        div()
+            .w_full()
+            .h(self.height)
+            .flex()
+            .px_2()
+            .py_1p5()
+            .font_family(platform_font_family())
+            .font_weight(platform_font_weight(TypographyRole::Normal))
+            .bg(gpui_color(appearance.fill))
+            .hover(move |style| style.bg(hover_fill))
+            .border(platform_border_width(&self.theme))
+            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+            .border_color(border)
+            .child(BaseTextarea::new(&self.state))
     }
 }

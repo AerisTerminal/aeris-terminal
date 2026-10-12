@@ -6,13 +6,19 @@
 //! Pressing the scrim or the close control runs the dismiss handler; presses inside the panel
 //! never reach the surfaces underneath. Callers fill the slots; they never restyle the scrim,
 //! panel, header or footer.
+//!
+//! A [`Dialog::movable`] dialog is a settings panel the user drags by its title bar anywhere in
+//! the window, so it can sit beside what it edits. Its scrim still blocks the surface under it
+//! but never dismisses, since a stray press would throw away the edits; the close control,
+//! Cancel and Escape do.
 
 use std::rc::Rc;
 
 use aeris_design_system::{AerisTheme, RadiusToken, TypographyRole};
 use gpui::{
-    AnyElement, App, Div, ElementId, IntoElement, ParentElement, Pixels, RenderOnce, SharedString,
-    Window, div, prelude::*, px, relative,
+    AnyElement, App, CursorStyle, Div, ElementId, FocusHandle, IntoElement, ParentElement, Pixels,
+    Point, RenderOnce, SharedString, Size, Window, anchored, deferred, div, prelude::*, px,
+    relative,
 };
 
 use super::{
@@ -22,6 +28,45 @@ use super::{
 };
 
 type DialogHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+type DialogMoveHandler = Rc<dyn Fn(DialogMove, &mut App)>;
+
+/// Cursor of a floating panel's move handle, kept for the whole move because GPUI shows the drag
+/// source's cursor while a drag is active. GPUI's Windows backend maps the open/closed hand
+/// styles to the arrow (Windows has no grab cursor), so Windows uses its hand cursor instead.
+#[cfg(target_os = "windows")]
+pub(crate) const FLOATING_PANEL_MOVE_CURSOR: CursorStyle = CursorStyle::PointingHand;
+#[cfg(not(target_os = "windows"))]
+pub(crate) const FLOATING_PANEL_MOVE_CURSOR: CursorStyle = CursorStyle::OpenHand;
+
+/// One step of moving a [`Dialog::movable`] panel. The caller owns the placement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DialogMove {
+    /// The title bar was grabbed this far from the panel's top-left corner.
+    Grab(Point<Pixels>),
+    /// The grabbed panel follows the pointer, all in window coordinates.
+    Drag {
+        pointer: Point<Pixels>,
+        panel: Size<Pixels>,
+        viewport: Size<Pixels>,
+    },
+}
+
+/// Drag payload of a movable dialog's title bar. It names its dialog, so moving one pane's
+/// dialog never moves another's.
+#[derive(Clone)]
+struct DialogMoveDrag(ElementId);
+
+impl Render for DialogMoveDrag {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div().size(px(1.0)).opacity(0.0)
+    }
+}
+
+struct DialogMovable {
+    /// The panel's window position; `None` centers it in the scrim.
+    origin: Option<Point<Pixels>>,
+    on_move: DialogMoveHandler,
+}
 
 /// The three dialog widths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,6 +103,8 @@ const TOP_ALIGNED_OFFSET: Pixels = px(96.0);
 /// One compact row for the title, its subtitle and the close control, matching the chart
 /// settings title bar.
 const HEADER_HEIGHT: Pixels = px(36.0);
+/// Height cap of a movable panel without its own [`Dialog::max_height`].
+const MOVABLE_MAX_HEIGHT: Pixels = px(640.0);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum DialogBody {
@@ -89,6 +136,8 @@ pub(crate) struct Dialog {
     children: Vec<AnyElement>,
     footer_leading: Option<AnyElement>,
     actions: Vec<AnyElement>,
+    movable: Option<DialogMovable>,
+    focus: Option<FocusHandle>,
 }
 
 impl Dialog {
@@ -110,7 +159,31 @@ impl Dialog {
             children: Vec::new(),
             footer_leading: None,
             actions: Vec::new(),
+            movable: None,
+            focus: None,
         }
+    }
+
+    /// Lets the title bar drag the panel anywhere in the window. The panel sits at `origin`
+    /// (window coordinates) or, before its first move, centered in the scrim; `on_move`
+    /// reports each grab and pointer move so the caller can store the new origin.
+    pub(crate) fn movable(
+        mut self,
+        origin: Option<Point<Pixels>>,
+        on_move: impl Fn(DialogMove, &mut App) + 'static,
+    ) -> Self {
+        self.movable = Some(DialogMovable {
+            origin,
+            on_move: Rc::new(on_move),
+        });
+        self
+    }
+
+    /// The focus the panel holds while no field inside it has focus, so keys pressed in the
+    /// dialog never reach the surface underneath.
+    pub(crate) fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
+        self
     }
 
     /// The standard header: this title, a muted subtitle and the close control.
@@ -177,9 +250,20 @@ fn title_header(
     subtitle: Option<AnyElement>,
     theme: &AerisTheme,
     on_close: DialogHandler,
-) -> Div {
+    grab: Option<(ElementId, DialogMoveHandler)>,
+) -> gpui::Stateful<Div> {
     let colors = theme.colors;
     div()
+        .id("dialog_title_bar")
+        .when_some(grab, |header, (dialog, on_move)| {
+            header.cursor(FLOATING_PANEL_MOVE_CURSOR).on_drag(
+                DialogMoveDrag(dialog),
+                move |drag, offset, _, cx| {
+                    on_move(DialogMove::Grab(offset), cx);
+                    cx.new(|_| drag.clone())
+                },
+            )
+        })
         .h(HEADER_HEIGHT)
         .flex()
         .flex_none()
@@ -249,11 +333,16 @@ impl RenderOnce for Dialog {
         let colors = self.theme.colors;
         let theme = self.theme;
         let dismiss = self.on_dismiss.clone();
+        let grab = self
+            .movable
+            .as_ref()
+            .map(|movable| (self.id.clone(), movable.on_move.clone()));
         let header = self.header.map(|header| match header {
             DialogHeader::Title { title, subtitle } => {
-                title_header(title, subtitle, &theme, self.on_dismiss.clone())
+                title_header(title, subtitle, &theme, self.on_dismiss.clone(), grab)
+                    .into_any_element()
             }
-            DialogHeader::Custom(header) => custom_header(header, &theme),
+            DialogHeader::Custom(header) => custom_header(header, &theme).into_any_element(),
         });
         let has_footer = self.footer_leading.is_some() || !self.actions.is_empty();
         let footer = has_footer.then(|| footer(self.footer_leading, self.actions, &theme));
@@ -269,8 +358,32 @@ impl RenderOnce for Dialog {
                 DialogBody::List => body.gap_px().p_2(),
             })
             .children(self.children);
-        div()
-            .id(self.id)
+        let movable = self.movable;
+        let panel = div()
+            .id("dialog_panel")
+            .w(self.size.width())
+            .map(|panel| match (self.max_height, movable.is_some()) {
+                (Some(height), _) => panel.max_h(height),
+                // A moved panel is laid out outside the scrim, so it caps itself.
+                (None, true) => panel.max_h(MOVABLE_MAX_HEIGHT),
+                (None, false) => panel.max_h(relative(1.0)),
+            })
+            .when(movable.is_none(), |panel| panel.max_w(relative(1.0)))
+            .flex()
+            .flex_col()
+            .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
+            .border(platform_border_width(&theme))
+            .border_color(gpui_color(colors.border_secondary))
+            .bg(gpui_color(colors.surface))
+            .shadow_lg()
+            .occlude()
+            .when_some(self.focus, |panel, focus| panel.track_focus(&focus))
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .children(header)
+            .child(body)
+            .children(footer);
+        let scrim = div()
+            .id(self.id.clone())
             .absolute()
             .inset_0()
             .occlude()
@@ -280,32 +393,38 @@ impl RenderOnce for Dialog {
             .map(|scrim| match self.align {
                 DialogAlign::Center => scrim.items_center(),
                 DialogAlign::Top => scrim.items_start().pt(TOP_ALIGNED_OFFSET),
-            })
-            .on_any_mouse_down(move |_, window, cx| {
-                dismiss(window, cx);
-                cx.stop_propagation();
-            })
-            .child(
-                div()
-                    .id("dialog_panel")
-                    .w(self.size.width())
-                    .max_w(relative(1.0))
-                    .map(|panel| match self.max_height {
-                        Some(height) => panel.max_h(height),
-                        None => panel.max_h(relative(1.0)),
-                    })
-                    .flex()
-                    .flex_col()
-                    .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
-                    .border(platform_border_width(&theme))
-                    .border_color(gpui_color(colors.border_secondary))
-                    .bg(gpui_color(colors.surface))
-                    .shadow_lg()
-                    .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                    .children(header)
-                    .child(body)
-                    .children(footer),
-            )
+            });
+        let Some(movable) = movable else {
+            return scrim
+                .on_any_mouse_down(move |_, window, cx| {
+                    dismiss(window, cx);
+                    cx.stop_propagation();
+                })
+                .child(panel);
+        };
+        let dialog = self.id;
+        let on_move = movable.on_move;
+        let panel = panel.on_drag_move::<DialogMoveDrag>(move |event, window, cx| {
+            if event.drag(cx).0 == dialog {
+                on_move(
+                    DialogMove::Drag {
+                        pointer: event.event.position,
+                        panel: event.bounds.size,
+                        viewport: window.viewport_size(),
+                    },
+                    cx,
+                );
+            }
+        });
+        // Deferred so the panel paints above every pane and toolbar it is moved over.
+        let panel = match movable.origin {
+            Some(origin) => deferred(anchored().position(origin).snap_to_window().child(panel))
+                .into_any_element(),
+            None => deferred(panel).into_any_element(),
+        };
+        scrim
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .child(panel)
     }
 }
 

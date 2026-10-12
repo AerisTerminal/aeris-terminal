@@ -7,7 +7,8 @@ use aeris_chart_integration::{
     ChartDrawingProperty, ChartDrawingPropertyType as Type, ChartDrawingSettings,
     MAX_DRAWING_TEMPLATE_BYTES,
 };
-use chart_context_menus::chart_css_color;
+use chart_context_menus::{chart_css_color, color_swatch_dot};
+use drawing_settings_dialog::humanize;
 use drawing_toolbar::{
     FLOATING_TOOLBAR_BUTTON_SIZE, FLOATING_TOOLBAR_DEFAULT_INSET, FLOATING_TOOLBAR_GAP,
     clamp_floating_toolbar_origin, floating_toolbar_grip, floating_toolbar_panel,
@@ -21,6 +22,8 @@ const LINE_WIDTHS: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
 const ORDER_BUTTON_WIDTH: f32 = 128.0;
 const TOOLBAR_MENU_WIDTH: f32 = 200.0;
 const TEMPLATE_MENU_WIDTH: f32 = 240.0;
+/// The Text tool glyph above its color bar, sized so both fit one toolbar button.
+const TEXT_GLYPH_SIZE: f32 = 15.0;
 
 /// The drawing the toolbar is showing, so a new selection closes what the old one had open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,13 +127,13 @@ fn default_origin(
     )
 }
 
-fn width_choices(property: &ChartDrawingProperty) -> impl Iterator<Item = f64> + '_ {
+pub(super) fn width_choices(property: &ChartDrawingProperty) -> impl Iterator<Item = f64> + '_ {
     LINE_WIDTHS.into_iter().filter(|width| {
         property.min.is_none_or(|min| *width >= min) && property.max.is_none_or(|max| *width <= max)
     })
 }
 
-fn width_label(width: f64) -> String {
+pub(super) fn width_label(width: f64) -> String {
     format!("{width}px")
 }
 
@@ -724,32 +727,25 @@ fn menu_trigger(ui: ToolbarUi<'_>, id: &'static str, label: &str, menu: ToolbarM
         })
 }
 
-/// A color's swatch on the transparency backdrop; text colors read as a letter over the color.
+/// A color's swatch on the transparency backdrop; a text color is the drawing sidebar's Text
+/// tool glyph over a bar of the color.
 fn color_glyph(property: &ChartDrawingProperty, color: &str, theme: &AerisTheme) -> Div {
-    let colors = theme.colors;
-    let fill = chart_css_color(color, colors.text_secondary);
-    if property.group == aeris_chart_integration::ChartDrawingPropertyGroup::Text {
-        return div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(platform_font_weight(TypographyRole::Strong))
-                    .text_color(gpui_color(colors.text_secondary))
-                    .child("T"),
-            )
-            .child(div().w(px(14.0)).h(px(3.0)).rounded_full().bg(fill));
+    if property.group != aeris_chart_integration::ChartDrawingPropertyGroup::Text {
+        return color_swatch_dot(color, theme);
     }
     div()
-        .size(px(16.0))
-        .flex_none()
-        .rounded_full()
-        .border(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(transparency_backdrop(theme))
-        .child(div().size_full().rounded_full().bg(fill))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(1.0))
+        .child(Icon::new(assets::DrawingIcon::Text.path()).with_size(px(TEXT_GLYPH_SIZE)))
+        .child(
+            div()
+                .w(px(14.0))
+                .h(px(3.0))
+                .rounded_full()
+                .bg(chart_css_color(color, theme.colors.text_secondary)),
+        )
 }
 
 fn color_control(ui: ToolbarUi<'_>, slot: usize, property: &ChartDrawingProperty) -> AnyElement {
@@ -799,7 +795,7 @@ fn color_control(ui: ToolbarUi<'_>, slot: usize, property: &ChartDrawingProperty
 }
 
 /// A horizontal stroke of `width` logical pixels, the glyph of a width choice.
-fn width_glyph(width: f64, theme: &AerisTheme) -> Div {
+pub(super) fn width_glyph(width: f64, theme: &AerisTheme) -> Div {
     let height = [4.0_f32, 3.0, 2.0]
         .into_iter()
         .find(|height| f64::from(*height) <= width)
@@ -849,7 +845,7 @@ fn width_control(ui: ToolbarUi<'_>, property: &ChartDrawingProperty) -> AnyEleme
 }
 
 /// Line styles read as a stroke preview; other choices as their label.
-fn choice_glyph(choice: &str, theme: &AerisTheme) -> AnyElement {
+pub(super) fn choice_glyph(choice: &str, theme: &AerisTheme) -> AnyElement {
     let ink = gpui_color(theme.colors.text_secondary);
     let segments = |count: usize, length: f32, gap: f32| {
         div()
@@ -867,17 +863,9 @@ fn choice_glyph(choice: &str, theme: &AerisTheme) -> AnyElement {
         _ => div()
             .text_xs()
             .text_color(ink)
-            .child(humanize_choice(choice))
+            .child(humanize(choice))
             .into_any_element(),
     }
-}
-
-fn humanize_choice(choice: &str) -> String {
-    let text = choice.replace('_', " ");
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 fn choice_control(ui: ToolbarUi<'_>, property: &ChartDrawingProperty) -> AnyElement {
@@ -898,7 +886,7 @@ fn choice_control(ui: ToolbarUi<'_>, property: &ChartDrawingProperty) -> AnyElem
                     let value = choice.clone();
                     MenuRow::compact(
                         ("drawing_context_choice_option", index),
-                        humanize_choice(choice),
+                        humanize(choice),
                         theme,
                     )
                     .leading(choice_glyph(choice, theme))

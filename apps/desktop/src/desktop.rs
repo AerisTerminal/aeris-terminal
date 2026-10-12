@@ -158,9 +158,9 @@ use assets::UiIcon as HugeIcon;
 use big_trades_dialog::big_trades_dialog_layer;
 use chart_chrome::SymbolSearchCategory;
 use chart_context_menus::{
-    ChartSettingsTemplateView, ChartSettingsView, FLOATING_PANEL_MOVE_CURSOR,
-    chart_context_menu_layer, chart_settings_menu_layer, clamp_panel_origin_within,
-    color_swatch_button, overlay_height, price_axis_menu_layer,
+    ChartSettingsTemplateView, ChartSettingsView, chart_context_menu_layer,
+    chart_settings_menu_layer, clamp_panel_origin_within, color_swatch_button, overlay_height,
+    price_axis_menu_layer,
 };
 #[cfg(test)]
 use chart_context_menus::{
@@ -213,9 +213,12 @@ use native_ui::{
     button::{Button, ButtonSize, ButtonVariant, close_button},
     checkbox::CheckboxRow,
     color_picker::{ColorPicker, normalize_hex_color, transparency_backdrop},
-    dialog::{ConfirmationDialog, ConfirmationTone, Dialog, DialogAlign, DialogSize},
+    dialog::{
+        ConfirmationDialog, ConfirmationTone, Dialog, DialogAlign, DialogMove, DialogSize,
+        FLOATING_PANEL_MOVE_CURSOR,
+    },
     icon::Icon,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, TextArea, TextareaState},
     loader::Loader,
     menu::{
         ANCHOR_GAP, MENU_PANEL_INSET, MENU_SEPARATOR_HEIGHT, MenuAlign, MenuAnchor, MenuPanel,
@@ -1289,7 +1292,7 @@ enum IndicatorSettingsDialog {
     Study(StudySettingsDialogState),
     BigTrades(BigTradesDialogState),
     Volume(VolumeDialogState),
-    Drawing(DrawingSettingsDialogState),
+    Drawing(Box<DrawingSettingsDialogState>),
 }
 
 /// Draft volume settings; the chart changes only when the draft is applied.

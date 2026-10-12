@@ -859,14 +859,6 @@ pub(super) struct ChartSettingsPlacement {
     grab: gpui::Point<Pixels>,
 }
 
-/// Cursor of a floating panel's move handle, kept for the whole move because GPUI shows the drag
-/// source's cursor while a drag is active. GPUI's Windows backend maps the open/closed hand
-/// styles to the arrow (Windows has no grab cursor), so Windows uses its hand cursor instead.
-#[cfg(target_os = "windows")]
-pub(super) const FLOATING_PANEL_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::PointingHand;
-#[cfg(not(target_os = "windows"))]
-pub(super) const FLOATING_PANEL_MOVE_CURSOR: gpui::CursorStyle = gpui::CursorStyle::OpenHand;
-
 /// Drag payload for moving the chart settings panel by its title bar.
 #[derive(Clone)]
 struct ChartSettingsMoveDrag;
@@ -2326,6 +2318,24 @@ fn effective_appearance_color(
 }
 
 /// The outline button that shows a color's swatch and hex code and opens its picker.
+/// A color as a round swatch over the transparency backdrop, so translucent colors read.
+pub(super) fn color_swatch_dot(value: &str, theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    div()
+        .size(design_rems(16.0))
+        .flex_none()
+        .rounded_full()
+        .border(platform_border_width(theme))
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(transparency_backdrop(theme))
+        .child(
+            div()
+                .size_full()
+                .rounded_full()
+                .bg(chart_css_color(value, colors.text_secondary)),
+        )
+}
+
 pub(super) fn color_swatch_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
@@ -2338,21 +2348,7 @@ pub(super) fn color_swatch_button(
         .variant(ButtonVariant::Outline)
         .open(open)
         .aria_label(label)
-        .leading(
-            div()
-                .size(design_rems(16.0))
-                .flex_none()
-                .rounded_full()
-                .border(platform_border_width(theme))
-                .border_color(gpui_color(colors.border_secondary))
-                .bg(transparency_backdrop(theme))
-                .child(
-                    div()
-                        .size_full()
-                        .rounded_full()
-                        .bg(chart_css_color(value, colors.text_secondary)),
-                ),
-        )
+        .leading(color_swatch_dot(value, theme))
         .child(
             // Sized for `#RRGGBBAA` so translucent colors fit on one line like opaque ones.
             div()

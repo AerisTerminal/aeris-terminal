@@ -2639,6 +2639,7 @@ impl WorkspaceSurface {
         self.chrome_overlay.is_none()
             && self.trading_pnl.account_creator.is_none()
             && self.trading_pnl.account_delete_confirmation.is_none()
+            && self.indicator_settings_dialog.is_none()
             && self.chart.is_some()
     }
 
@@ -2660,30 +2661,48 @@ impl WorkspaceSurface {
         }
     }
 
+    /// Keys while a modal is open: `None` when no modal is, otherwise whether the key was
+    /// consumed. Text editing inside a modal owns ordinary key input, so typed characters never
+    /// reach the workspace-wide symbol and timeframe typeahead as chart shortcuts.
+    fn modal_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let escape = event.keystroke.key.eq_ignore_ascii_case("escape");
+        if self.trading_pnl.account_creator.is_some() {
+            if escape {
+                self.trading_pnl.account_creator = None;
+                cx.notify();
+            }
+            return Some(escape);
+        }
+        if self.trading_pnl.account_delete_confirmation.is_some() {
+            if escape {
+                self.trading_pnl.account_delete_confirmation = None;
+                cx.notify();
+            }
+            return Some(escape);
+        }
+        if self.indicator_settings_dialog.is_some() {
+            let drawing = escape && self.drawing_settings_dialog_open();
+            if drawing {
+                self.escape_drawing_settings_dialog(window, cx);
+            }
+            return Some(drawing);
+        }
+        None
+    }
+
     pub(super) fn on_terminal_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.trading_pnl.account_creator.is_some() {
-            if event.keystroke.key.eq_ignore_ascii_case("escape") {
-                self.trading_pnl.account_creator = None;
-                cx.notify();
-                return true;
-            }
-            // Text editing inside the modal owns ordinary key input. In particular, do not let
-            // the workspace-wide symbol/timeframe typeahead treat account-name characters as
-            // chart shortcuts after the Input has received them.
-            return false;
-        }
-        if self.trading_pnl.account_delete_confirmation.is_some() {
-            if event.keystroke.key.eq_ignore_ascii_case("escape") {
-                self.trading_pnl.account_delete_confirmation = None;
-                cx.notify();
-                return true;
-            }
-            return false;
+        if let Some(handled) = self.modal_key_down(event, window, cx) {
+            return handled;
         }
         if let Some(command) =
             fullscreen_escape_command(event.keystroke.key.as_str(), window.is_fullscreen())
