@@ -77,5 +77,6 @@ pub use session_shutdown::{
 #[cfg(target_os = "windows")]
 pub use session_shutdown::{NativeSessionShutdownGuard, NativeSessionShutdownPermit};
 pub use user_notifications::{
-    NativeUserNotification, NativeUserNotificationError, try_send_user_notification,
+    APPLICATION_IDENTIFIER, APPLICATION_NAME, NativeUserNotification, NativeUserNotificationError,
+    try_send_user_notification,
 };

@@ -232,33 +232,14 @@ pub(super) fn apply_pushed_event(
 }
 
 fn dispatch_native_price_alert(trigger: &super::MarketPriceAlertTrigger) {
-    let scale = trigger.instrument.price_scale;
-    let threshold = crate::desktop::market_price_text(trigger.threshold_price, scale);
-    let observed = crate::desktop::market_price_text(trigger.observed_price, scale);
-    let body = format!(
-        "{} {} {}. Last trade: {}.",
-        trigger.instrument.display_symbol,
-        price_alert_condition_phrase(trigger.condition),
-        threshold,
-        observed
+    let (title, description) = crate::desktop::price_alert_trigger_text(trigger);
+    let notification = aeris_platform_runtime::NativeUserNotification::try_new(
+        "Aeris price alert",
+        format!("{title}. {description}."),
     );
-    let notification =
-        aeris_platform_runtime::NativeUserNotification::try_new("Aeris price alert", body);
     match notification.and_then(aeris_platform_runtime::try_send_user_notification) {
         Ok(()) => {}
         Err(error) => diagnostic!("Aeris price alert notification was not delivered: {error}"),
-    }
-}
-
-const fn price_alert_condition_phrase(
-    condition: aeris_contracts::PriceAlertCondition,
-) -> &'static str {
-    match condition {
-        aeris_contracts::PriceAlertCondition::Crossing => "crossed",
-        aeris_contracts::PriceAlertCondition::CrossingUp => "crossed up through",
-        aeris_contracts::PriceAlertCondition::CrossingDown => "crossed down through",
-        aeris_contracts::PriceAlertCondition::GreaterThan => "moved above",
-        aeris_contracts::PriceAlertCondition::LessThan => "moved below",
     }
 }
 

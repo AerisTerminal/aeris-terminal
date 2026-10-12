@@ -7,6 +7,11 @@ use std::{
     thread,
 };
 
+/// The identity the operating system attributes Aeris windows and notifications to.
+pub const APPLICATION_IDENTIFIER: &str = "com.aeris.desktop";
+/// The name the operating system shows for that identity.
+pub const APPLICATION_NAME: &str = "Aeris Terminal";
+
 const NOTIFICATION_CAPACITY: usize = 32;
 const MAXIMUM_TITLE_BYTES: usize = 128;
 const MAXIMUM_BODY_BYTES: usize = 1_024;
@@ -100,20 +105,37 @@ fn start_dispatcher() -> Result<NotificationDispatcher, NativeUserNotificationEr
 }
 
 fn notification_worker(receiver: &mpsc::Receiver<NativeUserNotification>) {
+    #[cfg(target_os = "windows")]
+    register_windows_application_identity();
     while let Ok(notification) = receiver.recv() {
         let mut native = notify_rust::Notification::new();
         native
-            .appname("Aeris Terminal")
+            .appname(APPLICATION_NAME)
             .summary(&notification.title)
             .body(&notification.body)
             .timeout(notify_rust::Timeout::Milliseconds(10_000));
         #[cfg(target_os = "windows")]
-        native.app_id("com.aeris.desktop").sound_name("Default");
+        native.app_id(APPLICATION_IDENTIFIER).sound_name("Default");
         #[cfg(target_os = "macos")]
         native.sound_name("Default");
         if let Err(error) = native.show() {
             diagnostic!("Aeris operating-system notification failed: {error}");
         }
+    }
+}
+
+/// Windows accepts, then silently discards, toasts from an unpackaged process whose
+/// `AppUserModelID` is unregistered. Only the installer's Start-menu shortcut registers it, so a
+/// directly launched build would never show an alert without this per-user registration.
+#[cfg(target_os = "windows")]
+fn register_windows_application_identity() {
+    let registered = windows_registry::CURRENT_USER
+        .create(format!(
+            r"Software\Classes\AppUserModelId\{APPLICATION_IDENTIFIER}"
+        ))
+        .and_then(|key| key.set_string("DisplayName", APPLICATION_NAME));
+    if let Err(error) = registered {
+        diagnostic!("Aeris notification identity could not be registered: {error}");
     }
 }
 

@@ -229,7 +229,8 @@ use order_book_panel::OrderBookPanelState;
 use order_ticket::TradingOrderControlsState;
 use platform_menu::platform_menu_layer;
 use price_alert_dialog::{
-    price_alert_dialog_layer, replace_chart_price_alert_lines, runtime_price_alerts,
+    price_alert_dialog_layer, price_alert_trigger_text, replace_chart_price_alert_lines,
+    runtime_price_alerts,
 };
 use reqwest_client::ReqwestClient;
 use side_panel_dock::{WorkspaceSidePanelState, workspace_side_panel};
@@ -872,6 +873,7 @@ struct WorkspaceSurface {
     price_alerts: Vec<WorkspacePriceAlertState>,
     price_alert_dialog: Option<PriceAlertDialogState>,
     price_alert_message: Option<String>,
+    pending_price_alert_announcements: VecDeque<PriceAlertAnnouncement>,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
     #[cfg(feature = "diagnostics")]
@@ -1221,6 +1223,13 @@ struct PriceAlertDialogState {
     condition: PriceAlertCondition,
     frequency: PriceAlertFrequency,
     open_dropdown: Option<PriceAlertDropdown>,
+}
+
+/// A triggered alert waiting to be shown as a toast.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PriceAlertAnnouncement {
+    title: String,
+    description: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5282,7 +5291,10 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             gpui_base::init(cx);
             cx.set_global(base_theme(&AerisTheme::dark()));
             install_platform_http_client(cx);
-            cx.set_app_identity("com.aeris.desktop", "Aeris Terminal");
+            cx.set_app_identity(
+                aeris_platform_runtime::APPLICATION_IDENTIFIER,
+                aeris_platform_runtime::APPLICATION_NAME,
+            );
             if let Err(error) = cx.text_system().add_fonts(
                 PLATFORM_FONT_BYTES
                     .iter()

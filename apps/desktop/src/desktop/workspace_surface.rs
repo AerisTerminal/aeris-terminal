@@ -179,6 +179,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         price_alerts: init.price_alerts,
         price_alert_dialog: None,
         price_alert_message: init.price_alert_message,
+        pending_price_alert_announcements: VecDeque::new(),
         #[cfg(feature = "diagnostics")]
         foreground_interactions: ForegroundInteractionDiagnostics::default(),
         #[cfg(feature = "diagnostics")]

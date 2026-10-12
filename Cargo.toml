@@ -63,6 +63,8 @@ wayland-protocols = { version = "=0.32.13", default-features = false, features =
     "unstable",
 ] }
 windows-sys = { version = "=0.61.2", default-features = false }
+# Pinned to the version GPUI resolves; its safe API keeps registry access free of `unsafe`.
+windows-registry = "=0.6.1"
 tungstenite = { version = "=0.30.0", default-features = false, features = [
     "handshake",
     "rustls-tls-webpki-roots",

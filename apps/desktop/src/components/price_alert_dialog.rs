@@ -6,6 +6,35 @@ use super::*;
 const PRICE_SCALE_RIGHT: u32 = 0;
 const PRICE_SCALE_LEFT: u32 = 1;
 const PRICE_SCALE_OVERLAY: u32 = 2;
+/// Triggers a pane holds until the toaster takes them; older ones give way past this.
+const PENDING_ANNOUNCEMENTS: usize = 8;
+
+/// "NQZ6 crossed 31258.00" over "Last trade 31258.25", in the runtime's exact values.
+pub(super) fn price_alert_trigger_text(trigger: &MarketPriceAlertTrigger) -> (String, String) {
+    let scale = trigger.instrument.price_scale;
+    (
+        format!(
+            "{} {} {}",
+            trigger.instrument.display_symbol,
+            price_alert_condition_phrase(trigger.condition),
+            market_price_text(trigger.threshold_price, scale)
+        ),
+        format!(
+            "Last trade {}",
+            market_price_text(trigger.observed_price, scale)
+        ),
+    )
+}
+
+const fn price_alert_condition_phrase(condition: PriceAlertCondition) -> &'static str {
+    match condition {
+        PriceAlertCondition::Crossing => "crossed",
+        PriceAlertCondition::CrossingUp => "crossed up through",
+        PriceAlertCondition::CrossingDown => "crossed down through",
+        PriceAlertCondition::GreaterThan => "moved above",
+        PriceAlertCondition::LessThan => "moved below",
+    }
+}
 
 pub(super) fn runtime_price_alerts(alerts: &[WorkspacePriceAlertState]) -> Vec<MarketPriceAlert> {
     alerts.iter().filter_map(runtime_price_alert).collect()
@@ -335,11 +364,12 @@ impl WorkspaceSurface {
                 alert.status = PriceAlertStatus::Triggered as i32;
                 self.chart_persistence_dirty = true;
             }
-            self.price_alert_message = Some(format!(
-                "{} alert triggered at {}",
-                trigger.instrument.display_symbol,
-                market_price_text(trigger.observed_price, trigger.instrument.price_scale)
-            ));
+            let (title, description) = price_alert_trigger_text(trigger);
+            if self.pending_price_alert_announcements.len() == PENDING_ANNOUNCEMENTS {
+                self.pending_price_alert_announcements.pop_front();
+            }
+            self.pending_price_alert_announcements
+                .push_back(PriceAlertAnnouncement { title, description });
             replace_chart_price_alert_lines(
                 self.chart.as_ref(),
                 &self.price_alerts,
@@ -348,6 +378,10 @@ impl WorkspaceSurface {
             );
             cx.notify();
         }
+    }
+
+    pub(super) fn take_price_alert_announcements(&mut self) -> Vec<PriceAlertAnnouncement> {
+        self.pending_price_alert_announcements.drain(..).collect()
     }
 }
 
@@ -729,5 +763,27 @@ mod tests {
         for condition in CONDITIONS {
             assert_eq!(persisted_condition(chart_condition(condition)), condition);
         }
+    }
+
+    #[test]
+    fn a_triggered_alert_reads_as_a_sentence_in_the_runtimes_exact_values() {
+        let trigger = MarketPriceAlertTrigger {
+            consumer_id: aeris_market_runtime::MarketConsumerId(std::num::NonZeroU64::MIN),
+            alert_id: "alert".to_string(),
+            instrument: InstallProviderInstrument {
+                display_symbol: "NQZ6".to_string(),
+                price_scale: 8,
+                ..Default::default()
+            },
+            threshold_price: 3_125_800_000_000,
+            observed_price: 3_125_825_000_000,
+            condition: PriceAlertCondition::CrossingUp,
+            frequency: PriceAlertFrequency::OnlyOnce,
+            observed_unix_nanos: 1,
+            remains_active: false,
+        };
+        let (title, description) = price_alert_trigger_text(&trigger);
+        assert_eq!(title, "NQZ6 crossed up through 31258.00");
+        assert_eq!(description, "Last trade 31258.25");
     }
 }

@@ -41,6 +41,8 @@ const SPRING_BACK_DURATION: Duration = Duration::from_millis(200);
 /// height, while it fades.
 const TUCKED_EXIT_DRIFT: f32 = 0.4;
 const FILL_LIFETIME: Duration = Duration::from_secs(6);
+/// Matches the operating-system notification's timeout.
+const PRICE_ALERT_LIFETIME: Duration = Duration::from_secs(10);
 /// A swipe this far right dismisses however slowly it moved.
 const SWIPE_DISTANCE: f32 = 45.0;
 /// A swipe faster than this, in logical pixels per millisecond, dismisses however short it was.
@@ -168,6 +170,7 @@ impl From<ChartNoticeTone> for ToastTone {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToastKind {
     Fill,
+    PriceAlert,
     /// A chart condition, by its label. It has no timer: it leaves when the condition clears.
     ChartStatus(&'static str),
 }
@@ -736,6 +739,25 @@ impl Toaster {
         )
     }
 
+    fn push_price_alert(
+        &mut self,
+        stack: ToastStack,
+        announcement: PriceAlertAnnouncement,
+        now: Instant,
+    ) -> u64 {
+        self.push(
+            stack,
+            ToastContent {
+                kind: ToastKind::PriceAlert,
+                tone: ToastTone::Warning,
+                title: announcement.title.into(),
+                description: Some(announcement.description.into()),
+                lifetime: Some(PRICE_ALERT_LIFETIME),
+            },
+            now,
+        )
+    }
+
     /// Drops the toasts of panes that no longer exist.
     fn retain_stacks(&mut self, live: impl Fn(ToastStack) -> bool) {
         self.toasts.retain(|toast| live(toast.stack));
@@ -1159,6 +1181,30 @@ impl TerminalApp {
         }
     }
 
+    /// Shows every pane's triggered alerts. An alert from a chart in another workspace tab lands
+    /// on the visible workspace so it is not missed.
+    fn announce_price_alerts(&mut self, now: Instant, cx: &mut Context<Self>) {
+        let visible_host = toast_host(&self.workspaces[self.active]);
+        for (index, workspace) in self.workspaces.iter().enumerate() {
+            for pane in &workspace.panes {
+                let announcements = pane
+                    .surface
+                    .update(cx, |surface, _| surface.take_price_alert_announcements());
+                let host = if index == self.active {
+                    Some(ToastStack::of(&pane.surface))
+                } else {
+                    visible_host
+                };
+                let Some(host) = host else {
+                    continue;
+                };
+                for announcement in announcements {
+                    self.toaster.push_price_alert(host, announcement, now);
+                }
+            }
+        }
+    }
+
     /// Brings the toasts up to date for this frame: each visible pane's chart condition, timers,
     /// exits, the next frame while anything moves and a wake-up for the next expiry.
     pub(super) fn update_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1175,6 +1221,7 @@ impl TerminalApp {
             self.toaster
                 .show_chart_status(ToastStack::of(&pane.surface), notice, now);
         }
+        self.announce_price_alerts(now, cx);
         self.toaster
             .tick(now, self.window_active, cx.reduce_motion());
         if self.toaster.is_animating(now) {
@@ -1275,7 +1322,7 @@ mod tests {
                     toast.description.as_ref().map(ToString::to_string),
                     toast.is_live(),
                 )),
-                ToastKind::Fill => None,
+                ToastKind::Fill | ToastKind::PriceAlert => None,
             })
             .collect()
     }
@@ -1436,6 +1483,32 @@ mod tests {
             frame(&toaster, older, midway + MOVE_DURATION).y,
             COLLAPSED_PEEK
         ));
+    }
+
+    #[test]
+    fn a_triggered_price_alert_is_announced_for_its_full_lifetime() {
+        let start = Instant::now();
+        let mut toaster = Toaster::default();
+        toaster.push_price_alert(
+            stack(1),
+            PriceAlertAnnouncement {
+                title: "NQZ6 crossed 31258.00".to_string(),
+                description: "Last trade 31258.25".to_string(),
+            },
+            start,
+        );
+        toaster.tick(start, true, false);
+        let toast = &toaster.toasts[0];
+        assert_eq!(toast.kind, ToastKind::PriceAlert);
+        assert_eq!(toast.title.as_ref(), "NQZ6 crossed 31258.00");
+        assert_eq!(toaster.claim_wake(), Some(start + PRICE_ALERT_LIFETIME));
+        toaster.tick(start + PRICE_ALERT_LIFETIME / 2, true, false);
+        assert!(toaster.toasts[0].is_live());
+        toaster.tick(start + PRICE_ALERT_LIFETIME, true, false);
+        assert!(
+            !toaster.toasts[0].is_live(),
+            "it leaves once its time is up"
+        );
     }
 
     #[test]

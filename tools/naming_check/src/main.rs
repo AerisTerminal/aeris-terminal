@@ -1937,6 +1937,7 @@ mod tests {
             "DefaultDirName={localappdata}\\Programs\\Aeris",
             "UninstallDisplayIcon={app}\\aeris_launcher.exe",
             "AppUserModelID: \"com.aeris.desktop\"",
+            "Subkey: \"Software\\Classes\\AppUserModelId\\com.aeris.desktop\"; Flags: uninsdeletekey",
             "DestName: \"aeris_launcher.exe\"",
             "--install \"' + Manifest + '\" \"' + Bundle + '\"",
             "ValueName: \"Aeris Engine\"; Flags: deletevalue",
