@@ -907,6 +907,7 @@ struct TradingPnlState {
     current: Option<aeris_trading::AccountPnl>,
     accounts: Vec<aeris_trading::TradingAccount>,
     orders: Vec<aeris_trading::Order>,
+    planned_bracket_legs: Vec<aeris_trading_runtime::PlannedBracketLeg>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
     /// Broker positions, per broker position id, with the broker's own unrealized P&L in
     /// the account's deposit currency.
@@ -1080,6 +1081,7 @@ impl Default for TradingPnlState {
             current: None,
             accounts: Vec::new(),
             orders: Vec::new(),
+            planned_bracket_legs: Vec::new(),
             positions: Vec::new(),
             broker_positions: Vec::new(),
             connected_broker_accounts: std::collections::BTreeSet::new(),
@@ -1813,6 +1815,22 @@ fn chart_quantity(value: aeris_trading::FixedPoint) -> Option<f64> {
     chart_decimal(value.units().unsigned_abs().try_into().ok()?, value.scale())
 }
 
+const fn chart_order_side(side: aeris_trading::OrderSide) -> ChartOrderSide {
+    match side {
+        aeris_trading::OrderSide::Buy => ChartOrderSide::Buy,
+        aeris_trading::OrderSide::Sell => ChartOrderSide::Sell,
+    }
+}
+
+const fn chart_order_kind(order_type: aeris_trading::OrderType) -> ChartOrderKind {
+    match order_type {
+        aeris_trading::OrderType::Market => ChartOrderKind::Market,
+        aeris_trading::OrderType::Limit => ChartOrderKind::Limit,
+        aeris_trading::OrderType::Stop => ChartOrderKind::Stop,
+        aeris_trading::OrderType::StopLimit => ChartOrderKind::StopLimit,
+    }
+}
+
 fn chart_working_orders(
     snapshot: &aeris_trading_runtime::TradingSnapshot,
     account_id: &aeris_trading::TradingAccountId,
@@ -1832,16 +1850,8 @@ fn chart_working_orders(
         .filter_map(|order| {
             let price = chart_price(order.limit_price.or(order.stop_price))?;
             let id = ChartOrderId::new(order.client_order_id.as_str()).ok()?;
-            let side = match order.side {
-                aeris_trading::OrderSide::Buy => ChartOrderSide::Buy,
-                aeris_trading::OrderSide::Sell => ChartOrderSide::Sell,
-            };
-            let kind = match order.order_type {
-                aeris_trading::OrderType::Market => ChartOrderKind::Market,
-                aeris_trading::OrderType::Limit => ChartOrderKind::Limit,
-                aeris_trading::OrderType::Stop => ChartOrderKind::Stop,
-                aeris_trading::OrderType::StopLimit => ChartOrderKind::StopLimit,
-            };
+            let side = chart_order_side(order.side);
+            let kind = chart_order_kind(order.order_type);
             let status = match order.status {
                 aeris_trading::OrderStatus::Pending => ChartOrderStatus::PendingSubmit,
                 aeris_trading::OrderStatus::Working => ChartOrderStatus::Working,
@@ -1876,7 +1886,61 @@ fn chart_working_orders(
                 annotations: semantics.annotations,
             })
         })
+        .chain(chart_planned_bracket_legs(
+            snapshot,
+            account_id,
+            instrument_id,
+        ))
         .collect()
+}
+
+/// A pending bracket's stop and targets, drawn as its entry's legs so the entry shows the
+/// protection it carries and each leg can be dragged before the entry fills. A leg keeps the
+/// identity of the order it becomes, so arming leaves the line in place.
+fn chart_planned_bracket_legs<'a>(
+    snapshot: &'a aeris_trading_runtime::TradingSnapshot,
+    account_id: &'a aeris_trading::TradingAccountId,
+    instrument_id: &'a str,
+) -> impl Iterator<Item = ChartWorkingOrder> + 'a {
+    snapshot
+        .planned_bracket_legs
+        .iter()
+        .filter(move |leg| {
+            &leg.account_id == account_id && leg.instrument_id.as_str() == instrument_id
+        })
+        .filter_map(|leg| {
+            let price = chart_price(Some(leg.price))?;
+            let bracket_id = ChartTradingGroupId::new(leg.bracket_id.clone()).ok();
+            Some(ChartWorkingOrder {
+                id: ChartOrderId::new(leg.client_order_id.as_str()).ok()?,
+                account_id: None,
+                pane_index: 0,
+                price_scale: ChartTradingPriceScale::Right,
+                side: chart_order_side(leg.side),
+                kind: chart_order_kind(leg.order_type),
+                role: match leg.role {
+                    aeris_trading_runtime::ProtectiveOrderRole::StopLoss => {
+                        ChartOrderRole::StopLoss
+                    }
+                    aeris_trading_runtime::ProtectiveOrderRole::TakeProfit => {
+                        ChartOrderRole::TakeProfit
+                    }
+                },
+                status: ChartOrderStatus::Working,
+                price,
+                stop_price: (leg.order_type == aeris_trading::OrderType::Stop).then_some(price),
+                trailing_trigger_price: None,
+                break_even_trigger_price: None,
+                quantity: chart_quantity(leg.quantity)?,
+                filled_quantity: 0.0,
+                position_id: None,
+                parent_order_id: Some(ChartOrderId::new(leg.entry_client_order_id.as_str()).ok()?),
+                bracket_id: bracket_id.clone(),
+                oco_group_id: bracket_id,
+                revision: 0,
+                annotations: Vec::new(),
+            })
+        })
 }
 
 struct ChartOrderSemantics {
@@ -2056,10 +2120,7 @@ fn chart_executions(
                 .iter()
                 .find(|order| order.id == fill.order_id)
                 .and_then(|order| ChartOrderId::new(order.client_order_id.as_str()).ok());
-            let side = match fill.side {
-                aeris_trading::OrderSide::Buy => ChartOrderSide::Buy,
-                aeris_trading::OrderSide::Sell => ChartOrderSide::Sell,
-            };
+            let side = chart_order_side(fill.side);
             Some(ChartTradingExecution {
                 id,
                 account_id: None,
@@ -2242,6 +2303,7 @@ enum ChartIntentRejection {
     InvalidPrice,
     InvalidQuantity,
     InvalidBracket,
+    PlannedLegKept,
     Unsupported,
     TradingUnavailable,
 }
@@ -2259,6 +2321,9 @@ impl ChartIntentRejection {
             Self::InvalidQuantity => "That size isn't valid for this instrument.",
             Self::InvalidBracket => {
                 "Put the stop and the target on opposite sides of the entry, on whole ticks."
+            }
+            Self::PlannedLegKept => {
+                "A pending bracket keeps its stop and target. Drag them, or cancel the entry."
             }
             Self::Unsupported => "That chart action isn't available for this order.",
             Self::TradingUnavailable => "Practice trading isn't available right now.",
@@ -2846,6 +2911,14 @@ fn dispatch_chart_trading_intent(
         dispatch_chart_create_protection(chart, intent, app, cx);
         return;
     }
+    if let Some(leg) = chart_intent_planned_leg(intent, app) {
+        if action == ChartTradingIntentAction::ModifyOrder {
+            dispatch_chart_move_planned_leg(chart, intent, leg.client_order_id.clone(), app, cx);
+        } else {
+            reject_chart_intent(&chart, sequence, ChartIntentRejection::PlannedLegKept, cx);
+        }
+        return;
+    }
     let order = match chart_intent_order(intent, app) {
         Ok(order) => order,
         Err(reason) => {
@@ -2867,6 +2940,69 @@ fn dispatch_chart_trading_intent(
         return;
     };
     dispatch_chart_cancel(chart, sequence, order.client_order_id.clone(), service, cx);
+}
+
+/// The selected account's pending-bracket leg on the chart's instrument that `intent` acts on.
+fn chart_intent_planned_leg<'a>(
+    intent: &ChartTradingIntent,
+    app: &'a WorkspaceSurface,
+) -> Option<&'a aeris_trading_runtime::PlannedBracketLeg> {
+    let order_id = intent.order_id.as_ref()?;
+    let selected_account = app.trading_pnl.order_entry.selected_account_id.as_ref()?;
+    let product = app.product.as_ref()?;
+    app.trading_pnl.planned_bracket_legs.iter().find(|leg| {
+        leg.client_order_id.as_str() == order_id.as_str()
+            && &leg.account_id == selected_account
+            && leg.instrument_id.as_str() == product.instrument_id
+    })
+}
+
+fn dispatch_chart_move_planned_leg(
+    chart: Entity<AerisChartView>,
+    intent: &ChartTradingIntent,
+    client_order_id: aeris_trading::ClientOrderId,
+    app: &WorkspaceSurface,
+    cx: &mut Context<WorkspaceSurface>,
+) {
+    let sequence = intent.sequence;
+    let prepared = app
+        .product
+        .as_ref()
+        .ok_or(ChartIntentRejection::NoInstrument)
+        .and_then(|product| {
+            intent
+                .price
+                .and_then(|price| chart_price_fixed_point(price, product.price_scale))
+                .ok_or(ChartIntentRejection::InvalidPrice)
+        })
+        .and_then(|price| {
+            aeris_desktop::trading::handle()
+                .map(|service| (price, service))
+                .ok_or(ChartIntentRejection::TradingUnavailable)
+        });
+    let (price, service) = match prepared {
+        Ok(prepared) => prepared,
+        Err(reason) => {
+            reject_chart_intent(&chart, sequence, reason, cx);
+            return;
+        }
+    };
+    let task = cx.background_executor().spawn(async move {
+        aeris_desktop::trading::record_outcome(
+            service.move_planned_bracket_leg(aeris_trading_runtime::MovePlannedBracketLeg {
+                client_order_id,
+                price,
+            }),
+            "Bracket leg moved",
+        )
+    });
+    cx.spawn(async move |_, cx| {
+        let accepted = task.await;
+        chart.update(cx, |chart, _| {
+            chart.resolve_trading_intent(sequence, accepted);
+        });
+    })
+    .detach();
 }
 
 /// The selected account's working order on the chart's instrument that `intent` acts on.

@@ -3630,89 +3630,127 @@ fn simulated_chart_fixture(
     }
 }
 
+/// A practice service with one account and one instrument on a 0.01 tick, for chart order
+/// projection tests.
+struct ChartOrderFixture {
+    service: aeris_trading_runtime::TradingService,
+    account: aeris_trading::TradingAccountId,
+    instrument_id: aeris_instruments::InstrumentId,
+    directory: std::path::PathBuf,
+}
+
+impl ChartOrderFixture {
+    fn start(name: &str) -> Self {
+        use aeris_instruments::{
+            ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
+        };
+        use aeris_trading_runtime::{
+            TradingInstrument, TradingRetention, TradingService, TradingServiceConfig,
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "aeris-chart-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let service = TradingService::start(TradingServiceConfig {
+            database_path: directory.join("trading.sqlite3"),
+            retention: TradingRetention::default(),
+        })
+        .expect("trading service");
+        let instrument_id = InstrumentId::try_new("instrument:fixture:BTC").expect("instrument");
+        service
+            .register_instrument(TradingInstrument {
+                instrument_id: instrument_id.clone(),
+                price_scale: 2,
+                quantity_scale: 0,
+                contract: ContractMetadata {
+                    tick_size: Some(InstrumentDecimal::try_new(1, 2).expect("tick")),
+                    point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point value")),
+                    order_quantity_increment: None,
+                    currency: "USD".to_string(),
+                    expiry: None,
+                    first_notice: None,
+                    last_trade: None,
+                    session_hours: Vec::new(),
+                    provenance: InstrumentMetadataProvenance {
+                        provider_id: "fixture".to_string(),
+                        provider_symbol: "BTC".to_string(),
+                        display_symbol: "BTC".to_string(),
+                        session_generation: 1,
+                    },
+                },
+            })
+            .expect("register instrument");
+        let account = aeris_trading::TradingAccountId::try_new("aeris-sim-1").expect("account");
+        service
+            .register_account(simulated_chart_fixture(account.clone()))
+            .expect("register account");
+        Self {
+            service,
+            account,
+            instrument_id,
+            directory,
+        }
+    }
+
+    /// A one-lot buy limit at 100.00.
+    fn limit(&self, id: &str) -> aeris_trading_runtime::PlaceOrder {
+        use aeris_trading::{
+            ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingProvenance,
+        };
+        aeris_trading_runtime::PlaceOrder {
+            client_order_id: ClientOrderId::try_new(id).expect("client id"),
+            account_id: self.account.clone(),
+            instrument_id: self.instrument_id.clone(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::GoodTillCancelled,
+            quantity: FixedPoint::try_new(1, 0).expect("quantity"),
+            limit_price: Some(FixedPoint::try_new(10_000, 2).expect("price")),
+            stop_price: None,
+            submitted_unix_nanos: 1,
+            provenance: TradingProvenance {
+                venue_id: "aeris-sim".to_string(),
+                provider_id: "fixture".to_string(),
+                session_generation: 1,
+                source_sequence: 1,
+                observed_unix_nanos: 1,
+            },
+        }
+    }
+
+    fn chart_orders(&self) -> Vec<super::ChartWorkingOrder> {
+        let snapshot = self.service.snapshot().expect("snapshot");
+        super::chart_working_orders(&snapshot, &self.account, self.instrument_id.as_str(), None)
+    }
+
+    fn finish(self) {
+        self.service
+            .shutdown(std::time::Duration::from_secs(2))
+            .expect("shutdown");
+        let _ = std::fs::remove_dir_all(self.directory);
+    }
+}
+
 #[test]
 fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
-    use aeris_instruments::{
-        ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
-    };
-    use aeris_trading::{
-        ClientOrderId, FixedPoint, OrderSide, OrderType, TimeInForce, TradingAccountId,
-        TradingProvenance,
-    };
-    use aeris_trading_runtime::{
-        PlaceOrder, TradingInstrument, TradingRetention, TradingService, TradingServiceConfig,
-    };
-    let directory = std::env::temp_dir().join(format!(
-        "aeris-chart-open-orders-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
-    let service = TradingService::start(TradingServiceConfig {
-        database_path: directory.join("trading.sqlite3"),
-        retention: TradingRetention::default(),
-    })
-    .expect("trading service");
-    let instrument_id = InstrumentId::try_new("instrument:fixture:BTC").expect("instrument");
-    service
-        .register_instrument(TradingInstrument {
-            instrument_id: instrument_id.clone(),
-            price_scale: 2,
-            quantity_scale: 0,
-            contract: ContractMetadata {
-                tick_size: Some(InstrumentDecimal::try_new(1, 2).expect("tick")),
-                point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point value")),
-                order_quantity_increment: None,
-                currency: "USD".to_string(),
-                expiry: None,
-                first_notice: None,
-                last_trade: None,
-                session_hours: Vec::new(),
-                provenance: InstrumentMetadataProvenance {
-                    provider_id: "fixture".to_string(),
-                    provider_symbol: "BTC".to_string(),
-                    display_symbol: "BTC".to_string(),
-                    session_generation: 1,
-                },
-            },
-        })
-        .expect("register instrument");
-    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
-    service
-        .register_account(simulated_chart_fixture(account.clone()))
-        .expect("register account");
-    let limit = |id: &str| PlaceOrder {
-        client_order_id: ClientOrderId::try_new(id).expect("client id"),
-        account_id: account.clone(),
-        instrument_id: instrument_id.clone(),
-        side: OrderSide::Buy,
-        order_type: OrderType::Limit,
-        time_in_force: TimeInForce::GoodTillCancelled,
-        quantity: FixedPoint::try_new(1, 0).expect("quantity"),
-        limit_price: Some(FixedPoint::try_new(10_000, 2).expect("price")),
-        stop_price: None,
-        submitted_unix_nanos: 1,
-        provenance: TradingProvenance {
-            venue_id: "aeris-sim".to_string(),
-            provider_id: "fixture".to_string(),
-            session_generation: 1,
-            source_sequence: 1,
-            observed_unix_nanos: 1,
-        },
-    };
-    service
-        .place_order(limit("working"))
+    let fixture = ChartOrderFixture::start("open-orders");
+    fixture
+        .service
+        .place_order(fixture.limit("working"))
         .expect("working order");
-    service
-        .place_order(limit("cancelled"))
+    fixture
+        .service
+        .place_order(fixture.limit("cancelled"))
         .expect("second order");
-    service
-        .cancel_order(ClientOrderId::try_new("cancelled").expect("client id"))
+    fixture
+        .service
+        .cancel_order(aeris_trading::ClientOrderId::try_new("cancelled").expect("client id"))
         .expect("cancel");
-    let snapshot = service.snapshot().expect("snapshot");
-    let orders = super::chart_working_orders(&snapshot, &account, instrument_id.as_str(), None);
+    let orders = fixture.chart_orders();
     assert_eq!(
         orders
             .iter()
@@ -3721,10 +3759,59 @@ fn chart_receives_only_open_orders_so_cancelled_lines_leave_the_chart() {
         ["working"]
     );
     assert!(orders.iter().all(|order| order.annotations.is_empty()));
-    service
-        .shutdown(std::time::Duration::from_secs(2))
-        .expect("shutdown");
-    let _ = std::fs::remove_dir_all(directory);
+    fixture.finish();
+}
+
+#[test]
+fn a_pending_bracket_entry_carries_its_stop_and_target_on_the_chart() {
+    use super::{ChartOrderId, ChartOrderRole, ChartOrderSide, ChartOrderStatus};
+    let fixture = ChartOrderFixture::start("pending-bracket");
+    fixture
+        .service
+        .place_inline_bracket(aeris_trading_runtime::PlaceInlineBracket {
+            entry: fixture.limit("bracket-entry"),
+            template: aeris_trading_runtime::BracketStrategyTemplate {
+                template_id: "chart-bracket-entry".to_string(),
+                revision: 1,
+                name: "Chart bracket".to_string(),
+                stop_offset_ticks: 50,
+                targets: vec![aeris_trading_runtime::BracketTarget {
+                    offset_ticks: 100,
+                    quantity_percent: 100,
+                }],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("bracket");
+    let legs = fixture
+        .chart_orders()
+        .iter()
+        .filter(|order| {
+            order.parent_order_id.as_ref().map(ChartOrderId::as_str) == Some("bracket-entry")
+        })
+        .map(|order| (order.role, order.side, order.status, order.price))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        legs,
+        [
+            (
+                ChartOrderRole::StopLoss,
+                ChartOrderSide::Sell,
+                ChartOrderStatus::Working,
+                99.5
+            ),
+            (
+                ChartOrderRole::TakeProfit,
+                ChartOrderSide::Sell,
+                ChartOrderStatus::Working,
+                101.0
+            ),
+        ],
+        "a pending bracket entry carries its stop and target so the chart offers no TP/SL to add"
+    );
+    fixture.finish();
 }
 
 /// Runtime providers the desktop intentionally does not offer. Empty today; a new built-in

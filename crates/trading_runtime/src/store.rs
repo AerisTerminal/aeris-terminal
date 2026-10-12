@@ -2892,7 +2892,7 @@ fn upsert_managed_bracket(connection: &Connection, bracket: &ManagedBracket) -> 
                 entry_client_order_id, stop_client_order_id, target_client_order_ids_json,
                 status, entry_price_units, entry_price_scale)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(bracket_id) DO UPDATE SET
+             ON CONFLICT(bracket_id) DO UPDATE SET template_json=excluded.template_json,
                 stop_client_order_id=excluded.stop_client_order_id,
                 target_client_order_ids_json=excluded.target_client_order_ids_json,
                 status=excluded.status, entry_price_units=excluded.entry_price_units,

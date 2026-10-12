@@ -927,6 +927,108 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
         .expect("service stops");
 }
 
+#[test]
+fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_moved() {
+    let directory = TestDirectory::new("planned-bracket-legs");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut entry = market_order("planned-entry", OrderSide::Buy, 1, 1_000);
+    entry.order_type = OrderType::Stop;
+    entry.stop_price = Some(price(10_100));
+    entry.quantity = quantity(2);
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: fixed_stop_bracket_template(),
+        })
+        .expect("bracket accepted");
+
+    let pending = service.snapshot().expect("pending snapshot");
+    let legs = |snapshot: &TradingSnapshot| {
+        snapshot
+            .planned_bracket_legs
+            .iter()
+            .map(|leg| (leg.role, leg.side, leg.order_type, leg.price, leg.quantity))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        legs(&pending),
+        [
+            (
+                ProtectiveOrderRole::StopLoss,
+                OrderSide::Sell,
+                OrderType::Stop,
+                price(9_900),
+                quantity(2),
+            ),
+            (
+                ProtectiveOrderRole::TakeProfit,
+                OrderSide::Sell,
+                OrderType::Limit,
+                price(10_300),
+                quantity(1),
+            ),
+            (
+                ProtectiveOrderRole::TakeProfit,
+                OrderSide::Sell,
+                OrderType::Limit,
+                price(10_500),
+                quantity(1),
+            ),
+        ],
+        "the entry's stop and scale-out targets show before it fills"
+    );
+    let stop_id = pending.planned_bracket_legs[0].client_order_id.clone();
+    let move_stop = |units| {
+        service.move_planned_bracket_leg(MovePlannedBracketLeg {
+            client_order_id: stop_id.clone(),
+            price: price(units),
+        })
+    };
+    assert!(move_stop(10_150).is_err(), "a stop cannot cross its entry");
+    assert!(move_stop(9_960).is_err(), "a stop stays on whole ticks");
+    assert_eq!(move_stop(9_950).expect("stop moves").price, price(9_950));
+
+    service
+        .modify_order(ModifyOrder {
+            client_order_id: ClientOrderId::try_new("planned-entry").expect("client id"),
+            time_in_force: TimeInForce::GoodTillCancelled,
+            limit_price: None,
+            stop_price: Some(price(10_125)),
+            modified_unix_nanos: 2_000,
+            provenance: provenance(2, 2_000),
+        })
+        .expect("entry moves");
+    let moved = service.snapshot().expect("moved snapshot");
+    assert_eq!(
+        moved.planned_bracket_legs[0].price,
+        price(9_975),
+        "the legs keep their distance and follow the entry"
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = start_service(&directory);
+    let restored = restarted.snapshot().expect("restored snapshot");
+    assert_eq!(restored.planned_bracket_legs, moved.planned_bracket_legs);
+    restarted
+        .observe_market(observation(10_100, 10_125, 3, 3_000))
+        .expect("market reaches the entry");
+    let armed = restarted.snapshot().expect("armed snapshot");
+    assert_eq!(armed.planned_bracket_legs, []);
+    assert!(armed.orders.iter().any(|order| {
+        order.client_order_id == stop_id
+            && order.status.is_open()
+            && order.stop_price == Some(price(9_975))
+    }));
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
 fn fixed_stop_bracket_template() -> BracketStrategyTemplate {
     BracketStrategyTemplate {
         trailing_stop: None,

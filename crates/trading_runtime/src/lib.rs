@@ -6,6 +6,7 @@
 mod copier;
 mod discipline;
 mod plan;
+mod planned_leg;
 mod protection;
 mod risk;
 mod round_trip;
@@ -28,6 +29,7 @@ pub use plan::{
     MAXIMUM_ALLOWED_SETUPS, MAXIMUM_CHECKLIST_ITEMS, MAXIMUM_PLAN_LEVELS, SessionAdherenceReview,
     SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,
 };
+pub use planned_leg::{MovePlannedBracketLeg, PlannedBracketLeg};
 use risk::RiskTradeCycleState;
 pub use risk::{
     EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskOutcome,
@@ -345,6 +347,8 @@ pub struct TradingSnapshot {
     pub copy_dispatches: Vec<TradeCopyDispatch>,
     pub strategy_templates: Vec<BracketStrategyTemplate>,
     pub managed_brackets: Vec<ManagedBracket>,
+    /// The stop and targets each awaiting bracket places once its working entry fills.
+    pub planned_bracket_legs: Vec<PlannedBracketLeg>,
     pub protective_orders: Vec<ProtectiveOrder>,
 }
 
@@ -479,6 +483,7 @@ enum Command {
     PlaceProtective(PlaceProtectiveOrder, Reply<Order>),
     EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),
     Modify(ModifyOrder, Reply<Order>),
+    MovePlannedLeg(MovePlannedBracketLeg, Reply<PlannedBracketLeg>),
     Cancel(ClientOrderId, Reply<Order>),
     CancelAll(Option<TradingAccountId>, Reply<Vec<Order>>),
     CloseBrokerPosition(TradingAccountId, String, Reply<()>),
@@ -779,6 +784,18 @@ impl TradingService {
     /// Returns an error when the order is missing, not working, invalid, or the owner is busy.
     pub fn modify_order(&self, order: ModifyOrder) -> Result<Order, String> {
         self.request(|reply| Command::Modify(order, reply))
+    }
+
+    /// Moves the stop or a target a pending bracket places once its entry fills.
+    ///
+    /// # Errors
+    /// Returns an error when the order is not a planned leg, the price is on the wrong side of
+    /// the entry or off the tick grid, the stop would breach a risk limit, or storage fails.
+    pub fn move_planned_bracket_leg(
+        &self,
+        command: MovePlannedBracketLeg,
+    ) -> Result<PlannedBracketLeg, String> {
+        self.request(|reply| Command::MovePlannedLeg(command, reply))
     }
 
     /// Cancels one working order through the authoritative command path.
@@ -1247,6 +1264,7 @@ impl Coordinator {
                 | Command::PlaceProtective(..)
                 | Command::EvaluateRisk(..)
                 | Command::Modify(..)
+                | Command::MovePlannedLeg(..)
                 | Command::Cancel(..)
                 | Command::CancelAll(..)
                 | Command::CloseBrokerPosition(..)
@@ -1345,6 +1363,9 @@ impl Coordinator {
                 respond(&reply, self.evaluate_order_risk(&order));
             }
             Command::Modify(order, reply) => respond(&reply, self.modify_order(order)),
+            Command::MovePlannedLeg(command, reply) => {
+                respond(&reply, self.move_planned_bracket_leg(&command));
+            }
             Command::Cancel(client_order_id, reply) => {
                 respond(&reply, self.cancel_order(&client_order_id));
             }
@@ -2012,6 +2033,10 @@ impl Coordinator {
             ..order.clone()
         };
         modified.validate().map_err(|error| error.to_string())?;
+        // A pending bracket's legs keep their distances and follow the entry.
+        if let Some(bracket) = self.awaiting_bracket(&order.client_order_id) {
+            planned_leg::planned_legs(bracket, &modified, instrument)?;
+        }
         let sequence = self.state.next_sequence;
         let event = OrderEvent {
             id: OrderEventId::try_new(format!("sim-event-{sequence}"))
@@ -2177,7 +2202,12 @@ impl Coordinator {
                 return Err("managed break-even stops are unavailable for broker accounts".into());
             }
             template.validate()?;
-            self.check_bracket_stop_risk(entry_command, &template)?;
+            self.check_bracket_stop_risk(
+                &entry_command.account_id,
+                &entry_command.instrument_id,
+                entry_command.quantity,
+                &template,
+            )?;
             return self
                 .place_broker_bracket(entry_command, &template)
                 .map(BracketPlacement::BrokerProtected);
@@ -2198,7 +2228,12 @@ impl Coordinator {
             &template.targets,
             order_increment_units(instrument),
         )?;
-        self.check_bracket_stop_risk(entry_command, &template)?;
+        self.check_bracket_stop_risk(
+            &entry_command.account_id,
+            &entry_command.instrument_id,
+            entry_command.quantity,
+            &template,
+        )?;
         if self
             .state
             .orders
@@ -2221,6 +2256,12 @@ impl Coordinator {
             entry_price: None,
         };
         bracket.validate()?;
+        let instrument = self
+            .state
+            .instruments
+            .get(&entry.instrument_id)
+            .ok_or_else(|| "trading instrument is not registered".to_string())?;
+        planned_leg::planned_legs(&bracket, &entry, instrument)?;
         self.store
             .insert_order_and_managed_bracket(&entry, &event, &bracket, sequence + 1)?;
         self.state.next_sequence = sequence + 1;
@@ -2235,10 +2276,12 @@ impl Coordinator {
 
     fn check_bracket_stop_risk(
         &self,
-        entry: &PlaceOrder,
+        account_id: &TradingAccountId,
+        instrument_id: &InstrumentId,
+        quantity: FixedPoint,
         template: &BracketStrategyTemplate,
     ) -> Result<(), String> {
-        let Some(profile) = self.state.risk_profiles.get(&entry.account_id) else {
+        let Some(profile) = self.state.risk_profiles.get(account_id) else {
             return Ok(());
         };
         if !profile.enabled {
@@ -2247,17 +2290,17 @@ impl Coordinator {
         let instrument = self
             .state
             .instruments
-            .get(&entry.instrument_id)
+            .get(instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?;
         let account = self
             .state
             .accounts
-            .get(&entry.account_id)
+            .get(account_id)
             .ok_or_else(|| "trading account is not registered".to_string())?;
         let per_contract_tick = tick_value(instrument, account.currency_scale)?;
         let potential_loss = scale_currency_by_quantity_and_ticks(
             per_contract_tick,
-            entry.quantity,
+            quantity,
             template.stop_offset_ticks,
         )?
         .exact_rescale(profile.daily_loss_limit.scale())
@@ -2271,7 +2314,7 @@ impl Coordinator {
             let state = self
                 .state
                 .risk_rule_states
-                .get(&entry.account_id)
+                .get(account_id)
                 .ok_or_else(|| "risk rule state is unavailable".to_string())?;
             let floor = subtract_fixed(state.peak_session_pnl, drawdown)?;
             let trailing_remaining = nonnegative_difference(current, floor)?;
@@ -4621,6 +4664,7 @@ impl Coordinator {
             copy_dispatches: self.copy_dispatches.iter().cloned().collect(),
             strategy_templates: self.state.strategy_templates.values().cloned().collect(),
             managed_brackets: self.state.managed_brackets.values().cloned().collect(),
+            planned_bracket_legs: self.planned_bracket_legs(),
             protective_orders: self.state.protective_orders.values().cloned().collect(),
         })
     }
