@@ -878,6 +878,318 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         .expect("service stops");
 }
 
+fn fixed_stop_bracket_template() -> BracketStrategyTemplate {
+    BracketStrategyTemplate {
+        trailing_stop: None,
+        break_even: None,
+        ..bracket_template()
+    }
+}
+
+fn place_managed_bracket(service: &TradingService, entry: PlaceOrder) {
+    let placement = service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: fixed_stop_bracket_template(),
+        })
+        .expect("bracket accepted");
+    assert!(matches!(placement, BracketPlacement::Managed(_)));
+}
+
+fn quantity(units: i64) -> FixedPoint {
+    FixedPoint::try_new(units, 0).expect("quantity")
+}
+
+#[test]
+fn bracket_entry_that_reverses_a_position_protects_only_the_reversed_exposure() {
+    let directory = TestDirectory::new("bracket-reversal");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .place_order(market_order("existing-long", OrderSide::Buy, 1, 1_000))
+        .expect("long accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("long fills");
+    let mut entry = market_order("reversing-entry", OrderSide::Sell, 3, 3_000);
+    entry.quantity = quantity(3);
+    place_managed_bracket(&service, entry);
+
+    service
+        .observe_market(observation(9_975, 10_000, 4, 4_000))
+        .expect("reversing entry fills and arms its bracket");
+    let armed = service.snapshot().expect("armed snapshot");
+    assert_eq!(armed.market_observation_error, None);
+    assert_eq!(
+        armed.positions[0].net_quantity,
+        FixedPoint::try_new(-2, 0).expect("short")
+    );
+    assert_eq!(
+        armed.managed_brackets[0].status,
+        ManagedBracketStatus::Active
+    );
+    let working = armed
+        .orders
+        .iter()
+        .filter(|order| order.status.is_open())
+        .collect::<Vec<_>>();
+    assert!(working.iter().all(|order| order.side == OrderSide::Buy));
+    let stop = working
+        .iter()
+        .find(|order| order.order_type == OrderType::Stop)
+        .expect("protective stop");
+    assert_eq!(
+        stop.quantity,
+        quantity(2),
+        "the stop covers only the new short"
+    );
+    assert_eq!(
+        stop.stop_price,
+        Some(FixedPoint::try_new(10_175, 2).expect("stop"))
+    );
+    let targets = working
+        .iter()
+        .filter(|order| order.order_type == OrderType::Limit)
+        .map(|order| order.quantity)
+        .collect::<Vec<_>>();
+    assert_eq!(targets, vec![quantity(1), quantity(1)]);
+
+    assert_eq!(
+        service
+            .observe_market(observation(10_175, 10_200, 5, 5_000))
+            .expect("stop fills")
+            .len(),
+        1
+    );
+    let stopped = service.snapshot().expect("stopped snapshot");
+    assert_eq!(stopped.positions[0].net_quantity.units(), 0);
+    assert_eq!(
+        stopped.managed_brackets[0].status,
+        ManagedBracketStatus::Completed
+    );
+    assert!(stopped.orders.iter().all(|order| !order.status.is_open()));
+}
+
+#[test]
+fn bracket_entry_that_only_reduces_a_position_completes_without_children() {
+    let directory = TestDirectory::new("bracket-reduction");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut long = market_order("existing-long", OrderSide::Buy, 1, 1_000);
+    long.quantity = quantity(2);
+    service.place_order(long).expect("long accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("long fills");
+    place_managed_bracket(
+        &service,
+        market_order("reducing-entry", OrderSide::Sell, 3, 3_000),
+    );
+
+    service
+        .observe_market(observation(9_975, 10_000, 4, 4_000))
+        .expect("reducing entry fills");
+    let reduced = service.snapshot().expect("reduced snapshot");
+    assert_eq!(reduced.market_observation_error, None);
+    assert_eq!(reduced.positions[0].net_quantity, quantity(1));
+    let bracket = &reduced.managed_brackets[0];
+    assert_eq!(bracket.status, ManagedBracketStatus::Completed);
+    assert_eq!(bracket.stop_client_order_id, None);
+    assert_eq!(bracket.target_client_order_ids, []);
+    assert!(reduced.orders.iter().all(|order| !order.status.is_open()));
+}
+
+#[test]
+fn bracket_that_cannot_be_armed_is_rejected_once_and_other_orders_still_fill() {
+    let directory = TestDirectory::new("bracket-arming-failure");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    place_managed_bracket(
+        &service,
+        market_order("unprotectable-entry", OrderSide::Buy, 1, 1_000),
+    );
+    // Filled at 0.50, the 8-tick stop would sit at -1.50.
+    service
+        .observe_market(observation(25, 50, 2, 2_000))
+        .expect("entry fills even though its stop cannot be placed");
+    let rejected = service.snapshot().expect("rejected snapshot");
+    assert_eq!(rejected.market_observation_error, None);
+    assert_eq!(rejected.positions[0].net_quantity, quantity(1));
+    assert_eq!(
+        rejected.managed_brackets[0].status,
+        ManagedBracketStatus::Cancelled
+    );
+    let entry = rejected
+        .orders
+        .iter()
+        .find(|order| order.client_order_id.as_str() == "unprotectable-entry")
+        .expect("entry order");
+    assert!(rejected.order_events.iter().any(|event| {
+        event.order_id == entry.id
+            && event.kind == OrderEventKind::Rejected
+            && event.detail.as_deref()
+                == Some(
+                    "LOCAL-MANAGED bracket protection was not placed: \
+                     bracket price must remain positive",
+                )
+    }));
+
+    let mut stop = market_order("manual-stop", OrderSide::Sell, 3, 3_000);
+    stop.order_type = OrderType::Stop;
+    stop.time_in_force = TimeInForce::GoodTillCancelled;
+    stop.stop_price = Some(FixedPoint::try_new(40, 2).expect("stop"));
+    service.place_order(stop).expect("manual stop accepted");
+    assert_eq!(
+        service
+            .observe_market(observation(30, 55, 4, 4_000))
+            .expect("the rejected bracket is not retried")
+            .len(),
+        1,
+        "the manual stop fills"
+    );
+    let flat = service.snapshot().expect("flat snapshot");
+    assert_eq!(flat.market_observation_error, None);
+    assert_eq!(flat.positions[0].net_quantity.units(), 0);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let restarted = start_service(&directory);
+    assert_eq!(
+        restarted
+            .snapshot()
+            .expect("restored snapshot")
+            .managed_brackets,
+        flat.managed_brackets
+    );
+}
+
+#[test]
+fn bracket_targets_split_in_whole_order_increments() {
+    let targets = |percents: &[u8]| {
+        percents
+            .iter()
+            .zip(1..)
+            .map(|(&quantity_percent, offset_ticks)| BracketTarget {
+                offset_ticks,
+                quantity_percent,
+            })
+            .collect::<Vec<_>>()
+    };
+    let split = |units: i64, scale: u8, percents: &[u8], increment: i64| {
+        allocated_target_quantities(
+            FixedPoint::try_new(units, scale).expect("quantity"),
+            &targets(percents),
+            increment,
+        )
+        .map(|split| {
+            split
+                .into_iter()
+                .map(|(index, quantity)| (index, quantity.units()))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(split(5, 0, &[50, 50], 1), Ok(vec![(0, 2), (1, 3)]));
+    assert_eq!(split(1, 0, &[50, 50], 1), Ok(vec![(1, 1)]));
+    assert_eq!(
+        split(10, 0, &[33, 33, 34], 1),
+        Ok(vec![(0, 3), (1, 3), (2, 4)])
+    );
+    assert_eq!(
+        split(300_000_000, 8, &[50, 50], 100_000_000),
+        Ok(vec![(0, 100_000_000), (1, 200_000_000)])
+    );
+    assert!(split(150_000_000, 8, &[100], 100_000_000).is_err());
+}
+
+fn install_open_practice_calendar(service: &TradingService) {
+    service
+        .install_practice_market_session(Arc::new(
+            |_provider: &str, _instrument: &str, _symbol: &str, _now: i64| Ok(true),
+        ))
+        .expect("calendar installs");
+}
+
+#[test]
+fn orders_restored_from_an_earlier_process_fill_on_the_first_new_quote() {
+    let directory = TestDirectory::new("restored-order-fence");
+    let service = start_service(&directory);
+    install_open_practice_calendar(&service);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut long = market_order("existing-long", OrderSide::Buy, 1, 1_000);
+    long.quantity = quantity(2);
+    service.place_order(long).expect("long accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("long fills");
+    for client_id in ["restored-stop", "modified-stop"] {
+        let mut stop = market_order(client_id, OrderSide::Sell, 500, 3_000);
+        stop.order_type = OrderType::Stop;
+        stop.time_in_force = TimeInForce::GoodTillCancelled;
+        stop.stop_price = Some(FixedPoint::try_new(9_900, 2).expect("stop"));
+        service.place_order(stop).expect("stop accepted");
+    }
+    service
+        .observe_market(observation(9_975, 10_000, 501, 3_500))
+        .expect("quote above the stops");
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    // The restarted feed numbers its quotes from the beginning again.
+    let restarted = start_service(&directory);
+    install_open_practice_calendar(&restarted);
+    restarted
+        .modify_order(ModifyOrder {
+            client_order_id: ClientOrderId::try_new("modified-stop").expect("client id"),
+            time_in_force: TimeInForce::GoodTillCancelled,
+            limit_price: None,
+            stop_price: Some(FixedPoint::try_new(9_890, 2).expect("stop")),
+            modified_unix_nanos: 4_000,
+            provenance: provenance(3, 4_000),
+        })
+        .expect("stop modifies");
+    let filled_ids = |fills: Vec<aeris_trading::Fill>, service: &TradingService| {
+        let snapshot = service.snapshot().expect("snapshot");
+        fills
+            .iter()
+            .map(|fill| {
+                snapshot
+                    .orders
+                    .iter()
+                    .find(|order| order.id == fill.order_id)
+                    .expect("filled order")
+                    .client_order_id
+                    .as_str()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = restarted
+        .observe_market(observation(9_850, 9_875, 3, 4_000))
+        .expect("first quote after restart");
+    assert_eq!(filled_ids(first, &restarted), ["restored-stop"]);
+    let second = restarted
+        .observe_market(observation(9_850, 9_875, 4, 5_000))
+        .expect("next quote");
+    assert_eq!(
+        filled_ids(second, &restarted),
+        ["modified-stop"],
+        "a stop modified in this process waits for a quote newer than its modification"
+    );
+    let flat = restarted.snapshot().expect("flat snapshot");
+    assert_eq!(flat.market_observation_error, None);
+    assert_eq!(flat.positions[0].net_quantity.units(), 0);
+}
+
 #[test]
 fn protective_orders_reduce_locked_positions_without_reopening_risk() {
     let directory = TestDirectory::new("protective-order");

@@ -533,6 +533,12 @@ struct Coordinator {
     venue_error: Option<String>,
     observations: Arc<Mutex<PendingObservations>>,
     observation_cursors: BTreeMap<InstrumentId, ObservationCursor>,
+    /// Orders working when the store was opened that this owner has not since modified. Their
+    /// provenance revision was stamped by an earlier process's market feed, whose session
+    /// generations and sequences restart with every process, so it cannot be ordered against
+    /// the current feed: every quote this owner observes is newer than the one they were
+    /// priced from. Bounded by the open orders the store held at startup.
+    restored_orders: BTreeSet<OrderId>,
     practice_market_session: Option<Arc<PracticeMarketSession>>,
     venue_outbound: Option<SyncSender<VenueRequest>>,
     venue_inbox: Weak<VenueInbox>,
@@ -592,6 +598,12 @@ impl TradingService {
                 let coordinator =
                     TradingStore::open(&database_path, retention).and_then(|mut store| {
                         let state = store.load_state()?;
+                        let restored_orders = state
+                            .orders
+                            .values()
+                            .filter(|order| order.status.is_open())
+                            .map(|order| order.id.clone())
+                            .collect();
                         let mut coordinator = Coordinator {
                             store,
                             state,
@@ -601,6 +613,7 @@ impl TradingService {
                             venue_error: None,
                             observations: coordinator_observations,
                             observation_cursors: BTreeMap::new(),
+                            restored_orders,
                             practice_market_session: None,
                             venue_outbound: None,
                             venue_inbox: coordinator_venue_inbox,
@@ -2014,6 +2027,8 @@ impl Coordinator {
         self.store.modify_order(&modified, &event, sequence + 1)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
+        // The new provenance comes from this process's feed, so the order waits for a newer quote.
+        self.restored_orders.remove(&modified.id);
         self.state
             .orders
             .insert(modified.id.clone(), modified.clone());
@@ -2173,7 +2188,16 @@ impl Coordinator {
             return Ok(BracketPlacement::Managed(existing.clone()));
         }
         self.make_room_for_managed_bracket()?;
-        allocated_target_quantities(entry_command.quantity, &template.targets)?;
+        let instrument = self
+            .state
+            .instruments
+            .get(&entry_command.instrument_id)
+            .ok_or_else(|| "trading instrument is not registered".to_string())?;
+        allocated_target_quantities(
+            entry_command.quantity,
+            &template.targets,
+            order_increment_units(instrument),
+        )?;
         self.check_bracket_stop_risk(entry_command, &template)?;
         if self
             .state
@@ -3050,15 +3074,14 @@ impl Coordinator {
             market_fill_candidates(&self.state.orders, &self.state.accounts, observation);
         if require_new_quote {
             candidates.retain(|(order_id, _)| {
-                self.state.orders.get(order_id).is_some_and(|order| {
-                    (
-                        observation.provenance.session_generation,
-                        observation.provenance.source_sequence,
-                    ) > (
-                        order.provenance.session_generation,
-                        order.provenance.source_sequence,
-                    )
-                })
+                self.restored_orders.contains(order_id)
+                    || self.state.orders.get(order_id).is_some_and(|order| {
+                        observation_revision(observation)
+                            > (
+                                order.provenance.session_generation,
+                                order.provenance.source_sequence,
+                            )
+                    })
             });
         }
         let candidate_ids = candidates
@@ -3202,6 +3225,8 @@ impl Coordinator {
         observation: &SimulatedMarketObservation,
         instrument: &TradingInstrument,
     ) -> Result<(), String> {
+        // Only brackets on the observed instrument: arming prices the children from this quote
+        // and this instrument's ticks.
         let awaiting = self
             .state
             .managed_brackets
@@ -3211,19 +3236,21 @@ impl Coordinator {
                 let order = self
                     .order_by_client_id(&bracket.entry_client_order_id)
                     .ok()?;
-                (order.status == OrderStatus::Filled).then(|| {
-                    self.state
-                        .fills
-                        .iter()
-                        .rev()
-                        .find(|fill| fill.order_id == order.id)
-                        .cloned()
-                        .map(|fill| (id.clone(), fill))
-                })?
+                (order.status == OrderStatus::Filled
+                    && order.instrument_id == observation.instrument_id)
+                    .then(|| {
+                        self.state
+                            .fills
+                            .iter()
+                            .rev()
+                            .find(|fill| fill.order_id == order.id)
+                            .cloned()
+                            .map(|fill| (id.clone(), fill))
+                    })?
             })
             .collect::<Vec<_>>();
         for (bracket_id, fill) in awaiting {
-            self.activate_managed_bracket(&bracket_id, &fill, observation, instrument)?;
+            self.arm_managed_bracket(&bracket_id, &fill, observation, instrument)?;
         }
 
         let interrupted =
@@ -3641,7 +3668,7 @@ impl Coordinator {
                 continue;
             };
             if is_entry {
-                self.activate_managed_bracket(&bracket_id, fill, observation, instrument)?;
+                self.arm_managed_bracket(&bracket_id, fill, observation, instrument)?;
             } else {
                 self.complete_managed_bracket(&bracket_id, &filled_client_order_id)?;
             }
@@ -3649,14 +3676,18 @@ impl Coordinator {
         Ok(())
     }
 
-    fn activate_managed_bracket(
+    /// Arms a bracket whose entry filled. The entry has already executed, so a bracket whose
+    /// children cannot be placed is rejected on its entry order instead of being retried: a
+    /// retry fails the same way on every quote and keeps every other order on the instrument
+    /// from filling.
+    fn arm_managed_bracket(
         &mut self,
         bracket_id: &str,
         entry_fill: &Fill,
         observation: &SimulatedMarketObservation,
         instrument: &TradingInstrument,
     ) -> Result<(), String> {
-        let mut bracket = self
+        let bracket = self
             .state
             .managed_brackets
             .get(bracket_id)
@@ -3668,32 +3699,102 @@ impl Coordinator {
             .get(&entry_fill.order_id)
             .cloned()
             .ok_or_else(|| "managed bracket entry order disappeared".to_string())?;
-        let tick_units = instrument_tick_units(instrument)?;
-        let child_side = opposite_side(entry_order.side);
-        let mut sequence = self.state.next_sequence;
-        let mut prepared = Vec::with_capacity(bracket.template.targets.len() + 1);
-        let (stop_order, stop_event, stop_client_order_id) = self.prepare_initial_managed_stop(
+        match self.prepare_armed_bracket(
+            bracket.clone(),
             &entry_order,
             entry_fill,
             observation,
+            instrument,
+        ) {
+            Ok(armed) => self.commit_armed_bracket(armed),
+            Err(reason) => self.reject_managed_bracket(bracket, &entry_order, observation, &reason),
+        }
+    }
+
+    /// How much of an entry fill is still open in the entry's direction: all of it when it
+    /// opened or added to a position, the remainder when it reversed one, and nothing when it
+    /// only reduced or closed an opposite position.
+    fn opened_exposure(
+        &self,
+        entry_order: &Order,
+        entry_fill: &Fill,
+    ) -> Result<FixedPoint, String> {
+        let scale = entry_fill.quantity.scale();
+        let net = self
+            .state
+            .positions
+            .get(&(
+                entry_order.account_id.clone(),
+                entry_order.instrument_id.clone(),
+            ))
+            .map_or(Ok(0), |position| {
+                position
+                    .net_quantity
+                    .exact_rescale(scale)
+                    .map(FixedPoint::units)
+                    .map_err(|error| error.to_string())
+            })?;
+        let open_in_entry_direction = net
+            .checked_mul(entry_order.side.sign())
+            .ok_or_else(|| "position quantity overflowed".to_string())?
+            .max(0);
+        FixedPoint::try_new(
+            open_in_entry_direction.min(entry_fill.quantity.units()),
+            scale,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// The children and active state of a bracket whose entry filled, sized to the exposure the
+    /// entry opened: protection never opens a position of its own. A bracket whose entry opened
+    /// nothing has nothing to protect and completes without children.
+    fn prepare_armed_bracket(
+        &mut self,
+        mut bracket: ManagedBracket,
+        entry_order: &Order,
+        entry_fill: &Fill,
+        observation: &SimulatedMarketObservation,
+        instrument: &TradingInstrument,
+    ) -> Result<ArmedBracket, String> {
+        let opened = self.opened_exposure(entry_order, entry_fill)?;
+        let mut sequence = self.state.next_sequence;
+        bracket.entry_price = Some(entry_fill.price);
+        if opened.units() == 0 {
+            bracket.status = ManagedBracketStatus::Completed;
+            return Ok(ArmedBracket {
+                bracket,
+                children: Vec::new(),
+                next_sequence: sequence,
+            });
+        }
+        let tick_units = instrument_tick_units(instrument)?;
+        let child_side = opposite_side(entry_order.side);
+        let mut prepared = Vec::with_capacity(bracket.template.targets.len() + 1);
+        let stop_price = shifted_price(
+            entry_fill.price,
             bracket.template.stop_offset_ticks,
+            -entry_order.side.sign(),
             tick_units,
+        )?;
+        let (stop_order, stop_event, stop_client_order_id) = self.prepare_initial_managed_stop(
+            entry_order,
+            stop_price,
+            opened,
+            observation,
             sequence,
         )?;
         prepared.push((stop_order, stop_event));
         sequence = sequence
             .checked_add(1)
             .ok_or_else(|| "managed bracket sequence overflowed".to_string())?;
-        let target_quantities =
-            allocated_target_quantities(entry_fill.quantity, &bracket.template.targets)?;
-        let mut target_client_order_ids = Vec::with_capacity(bracket.template.targets.len());
-        for (index, (target, quantity)) in bracket
-            .template
-            .targets
-            .iter()
-            .zip(target_quantities)
-            .enumerate()
-        {
+        let target_quantities = allocated_target_quantities(
+            opened,
+            &bracket.template.targets,
+            order_increment_units(instrument),
+        )?;
+        let mut target_client_order_ids = Vec::with_capacity(target_quantities.len());
+        for (index, quantity) in target_quantities {
+            let target = bracket.template.targets[index];
             let client_order_id = managed_child_client_order_id(
                 &entry_order.client_order_id,
                 "target",
@@ -3738,36 +3839,74 @@ impl Coordinator {
         bracket.stop_client_order_id = Some(stop_client_order_id);
         bracket.target_client_order_ids = target_client_order_ids;
         bracket.status = ManagedBracketStatus::Active;
-        bracket.entry_price = Some(entry_fill.price);
         bracket.validate()?;
-        self.store
-            .insert_managed_child_orders(&prepared, &bracket, sequence)?;
-        self.state.next_sequence = sequence;
-        for (order, event) in prepared {
+        Ok(ArmedBracket {
+            bracket,
+            children: prepared,
+            next_sequence: sequence,
+        })
+    }
+
+    fn commit_armed_bracket(&mut self, armed: ArmedBracket) -> Result<(), String> {
+        self.store.insert_managed_child_orders(
+            &armed.children,
+            &armed.bracket,
+            armed.next_sequence,
+        )?;
+        self.state.next_sequence = armed.next_sequence;
+        for (order, event) in armed.children {
             self.state.order_events.push_back(event);
             self.state.orders.insert(order.id.clone(), order);
         }
         self.state
             .managed_brackets
-            .insert(bracket_id.to_string(), bracket);
+            .insert(armed.bracket.bracket_id.clone(), armed.bracket);
+        self.bump_revision()
+    }
+
+    /// Cancels a bracket that could not be armed and records why on its filled entry, so the
+    /// trader sees that the position the entry opened is unprotected.
+    fn reject_managed_bracket(
+        &mut self,
+        mut bracket: ManagedBracket,
+        entry_order: &Order,
+        observation: &SimulatedMarketObservation,
+        reason: &str,
+    ) -> Result<(), String> {
+        bracket.status = ManagedBracketStatus::Cancelled;
+        let sequence = self.state.next_sequence;
+        let event = OrderEvent {
+            id: OrderEventId::try_new(format!("sim-event-{sequence}"))
+                .map_err(|error| error.to_string())?,
+            order_id: entry_order.id.clone(),
+            sequence,
+            kind: OrderEventKind::Rejected,
+            event_unix_nanos: observation.provenance.observed_unix_nanos,
+            detail: Some(format!(
+                "{} bracket protection was not placed: {reason}",
+                ManagedBracket::MANAGEMENT_LABEL
+            )),
+            provenance: observation.provenance.clone(),
+        };
+        event.validate().map_err(|error| error.to_string())?;
+        self.store
+            .reject_managed_bracket(&bracket, &event, sequence + 1)?;
+        self.state.next_sequence = sequence + 1;
+        self.state.order_events.push_back(event);
+        self.state
+            .managed_brackets
+            .insert(bracket.bracket_id.clone(), bracket);
         self.bump_revision()
     }
 
     fn prepare_initial_managed_stop(
         &mut self,
         entry_order: &Order,
-        entry_fill: &Fill,
+        stop_price: FixedPoint,
+        quantity: FixedPoint,
         observation: &SimulatedMarketObservation,
-        stop_offset_ticks: u32,
-        tick_units: i64,
         sequence: u64,
     ) -> Result<(Order, OrderEvent, ClientOrderId), String> {
-        let stop_price = shifted_price(
-            entry_fill.price,
-            stop_offset_ticks,
-            -entry_order.side.sign(),
-            tick_units,
-        )?;
         let client_order_id =
             managed_child_client_order_id(&entry_order.client_order_id, "stop", 0)?;
         let (order, mut event) = self.prepare_single_order(
@@ -3778,7 +3917,7 @@ impl Coordinator {
                 side: opposite_side(entry_order.side),
                 order_type: OrderType::Stop,
                 time_in_force: TimeInForce::GoodTillCancelled,
-                quantity: entry_fill.quantity,
+                quantity,
                 limit_price: None,
                 stop_price: Some(stop_price),
                 submitted_unix_nanos: observation.provenance.observed_unix_nanos,
@@ -5261,29 +5400,57 @@ fn multiply_quantity(quantity: FixedPoint, multiplier: FixedPoint) -> Result<Fix
     .map_err(|error| format!("trade copier multiplier is inexact: {error}"))
 }
 
+/// A bracket whose entry filled, with its child orders prepared but not yet stored.
+struct ArmedBracket {
+    bracket: ManagedBracket,
+    children: Vec<(Order, OrderEvent)>,
+    next_sequence: u64,
+}
+
+/// The smallest orderable quantity step of an instrument, in quantity-scale units.
+fn order_increment_units(instrument: &TradingInstrument) -> i64 {
+    instrument
+        .contract
+        .order_quantity_increment
+        .map_or(1, aeris_instruments::InstrumentDecimal::units)
+}
+
+/// Splits a bracket quantity across its targets in whole order increments, paired with each
+/// target's template index. Each target receives its percentage rounded down; the remainder goes
+/// to the furthest target, and a target whose share rounds to nothing is omitted.
 fn allocated_target_quantities(
     quantity: FixedPoint,
     targets: &[BracketTarget],
-) -> Result<Vec<FixedPoint>, String> {
-    targets
-        .iter()
-        .map(|target| {
-            let scaled = i128::from(quantity.units())
-                .checked_mul(i128::from(target.quantity_percent))
-                .ok_or_else(|| "bracket target quantity overflowed".to_string())?;
-            if scaled % 100 != 0 {
-                return Err(
-                    "entry quantity cannot be divided exactly across bracket targets".to_string(),
-                );
-            }
-            let units = i64::try_from(scaled / 100)
-                .map_err(|_| "bracket target quantity overflowed".to_string())?;
-            if units <= 0 {
-                return Err("every bracket target requires positive quantity".to_string());
-            }
-            FixedPoint::try_new(units, quantity.scale()).map_err(|error| error.to_string())
-        })
-        .collect()
+    increment_units: i64,
+) -> Result<Vec<(usize, FixedPoint)>, String> {
+    if increment_units <= 0 || quantity.units() <= 0 || quantity.units() % increment_units != 0 {
+        return Err("bracket quantity must be a positive whole number of order units".to_string());
+    }
+    let last = targets
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| "bracket requires at least one target".to_string())?;
+    let increments = i128::from(quantity.units() / increment_units);
+    let mut allocated = 0_i128;
+    let mut quantities = Vec::with_capacity(targets.len());
+    for (index, target) in targets.iter().enumerate() {
+        let share = if index == last {
+            increments - allocated
+        } else {
+            increments * i128::from(target.quantity_percent) / 100
+        };
+        allocated += share;
+        if share == 0 {
+            continue;
+        }
+        let units = i64::try_from(share * i128::from(increment_units))
+            .map_err(|_| "bracket target quantity overflowed".to_string())?;
+        quantities.push((
+            index,
+            FixedPoint::try_new(units, quantity.scale()).map_err(|error| error.to_string())?,
+        ));
+    }
+    Ok(quantities)
 }
 
 fn instrument_tick_units(instrument: &TradingInstrument) -> Result<i64, String> {

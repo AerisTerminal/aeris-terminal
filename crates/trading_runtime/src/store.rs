@@ -1982,6 +1982,19 @@ impl TradingStore {
         transaction.commit().map_err(database_error)
     }
 
+    pub(super) fn reject_managed_bracket(
+        &mut self,
+        bracket: &ManagedBracket,
+        event: &OrderEvent,
+        next_sequence: u64,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        insert_event_row(&transaction, event)?;
+        upsert_managed_bracket(&transaction, bracket)?;
+        update_next_sequence(&transaction, next_sequence)?;
+        transaction.commit().map_err(database_error)
+    }
+
     pub(super) fn insert_fill(
         &mut self,
         order: &Order,
