@@ -1160,12 +1160,17 @@ impl Coordinator<'_> {
                 self.order_books.insert(identity, book);
             }
         }
+        // Like the canonical image, a display image stops being current once nothing
+        // subscribes to depth; keeping it would republish a stale book on resubscription.
         self.display_depth.retain(|identity, display| {
             self.engine
                 .provider_status(&identity.0)
                 .and_then(|status| status.generation)
                 .is_some_and(|generation| generation.0.get() == display.provider_generation)
-                && self.order_books.contains_key(identity)
+                && self
+                    .order_books
+                    .get(identity)
+                    .is_some_and(|book| !book.publishes_top_of_book_only())
         });
     }
 
@@ -1316,7 +1321,8 @@ mod tests {
         FormingBar, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
         HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistorySnapshot,
         INITIAL_HISTORY_BARS, LiveHistoryState, MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
-        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderRealtimeDispatch, SeriesLoadState,
+        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderDisplayDepthEvent,
+        ProviderRealtimeDispatch, SeriesLoadState,
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -4005,6 +4011,136 @@ mod tests {
         assert!(
             top_of_book_only(&coordinator),
             "the chart keeps receiving the live quote after the last depth consumer closes"
+        );
+    }
+
+    fn display_book(
+        display_generation: u64,
+        source_sequence: u64,
+        bid: i64,
+    ) -> ProviderDisplayDepthEvent {
+        let selected = hyperliquid_instrument();
+        ProviderDisplayDepthEvent::Snapshot {
+            provider_generation: 1,
+            display_generation,
+            snapshot: DepthSnapshot {
+                metadata: EventMetadata {
+                    provider_id: selected.provider,
+                    instrument_id: selected.instrument_id,
+                    entitlement_id: selected.entitlement_id,
+                    source_sequence,
+                    session_generation: 1,
+                    timestamps: QualifiedTimestamp {
+                        exchange_unix_nanos: Some(1),
+                        provider_unix_nanos: None,
+                        received_unix_nanos: 1,
+                    },
+                },
+                bids: vec![DepthLevel {
+                    price: bid,
+                    quantity: 1,
+                    order_count: Some(1),
+                }],
+                asks: vec![DepthLevel {
+                    price: bid + 1_000,
+                    quantity: 1,
+                    order_count: Some(1),
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn reopened_order_book_shows_the_new_display_session_instead_of_the_frozen_one() {
+        let mut coordinator = coordinator();
+        let selected = hyperliquid_instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("provider session installs");
+        coordinator
+            .engine
+            .set_provider_health(
+                "hyperliquid",
+                ProviderGeneration(nonzero(1)),
+                ProviderHealth::Online,
+            )
+            .expect("provider is online");
+        let chart = consumer(1);
+        let order_book_panel = consumer(2);
+        register(&mut coordinator, chart);
+        register(&mut coordinator, order_book_panel);
+        let quotes = StreamRequirements::BARS.with(MarketStream::Quotes);
+        coordinator
+            .engine
+            .set_series_demand_with_streams(chart, generation(3), &hyperliquid_series(), quotes)
+            .expect("chart demand installs");
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                order_book_panel,
+                generation(3),
+                &hyperliquid_series(),
+                quotes.with(MarketStream::Depth),
+            )
+            .expect("order book demand installs");
+        coordinator.reconcile_order_books();
+        let identity = (selected.provider.clone(), selected.instrument_id.clone());
+        let shown = |coordinator: &Coordinator<'_>| {
+            coordinator
+                .display_depth
+                .get(&identity)
+                .map(|display| (display.display_generation, display.source_sequence))
+        };
+
+        coordinator.handle_provider_display_depth(
+            "hyperliquid",
+            ProviderDisplayDepthEvent::Reset {
+                display_generation: 1,
+            },
+        );
+        coordinator.handle_provider_display_depth("hyperliquid", display_book(1, 500, 8_393_000));
+        assert_eq!(shown(&coordinator), Some((1, 500)));
+
+        assert!(
+            coordinator
+                .engine
+                .set_stream_requirements(order_book_panel, generation(3), quotes)
+                .expect("order book closes")
+        );
+        coordinator.reconcile_order_books();
+        assert_eq!(
+            shown(&coordinator),
+            None,
+            "the chart keeps the canonical book alive, but no one subscribes to the display image"
+        );
+
+        assert!(
+            coordinator
+                .engine
+                .set_stream_requirements(
+                    order_book_panel,
+                    generation(3),
+                    quotes.with(MarketStream::Depth),
+                )
+                .expect("order book reopens")
+        );
+        coordinator.reconcile_order_books();
+        assert_eq!(
+            shown(&coordinator),
+            None,
+            "no stale image while the new session warms up"
+        );
+        coordinator.handle_provider_display_depth(
+            "hyperliquid",
+            ProviderDisplayDepthEvent::Reset {
+                display_generation: 2,
+            },
+        );
+        coordinator.handle_provider_display_depth("hyperliquid", display_book(2, 1, 8_387_000));
+        assert_eq!(
+            shown(&coordinator),
+            Some((2, 1)),
+            "the new socket session's first book replaces nothing stale and is shown at once"
         );
     }
 

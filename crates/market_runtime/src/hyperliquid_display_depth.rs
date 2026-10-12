@@ -72,7 +72,9 @@ struct SessionState {
     pending_ping: Option<Instant>,
     active: BTreeMap<String, String>,
     instruments: BTreeMap<String, HyperliquidDisplayBookDemand>,
-    sequences: BTreeMap<String, u64>,
+    /// One counter for every coin, so a coin unsubscribed and subscribed again within a
+    /// session keeps rising past the book the coordinator already holds for it.
+    next_sequence: u64,
     decode_failures: u32,
     last_inbound: Instant,
     last_ping: Instant,
@@ -86,7 +88,7 @@ pub(crate) fn run(
     reconnect_delay: Duration,
 ) {
     let mut demand = HyperliquidDisplayDepthDemand::default();
-    let mut display_generation = 1u64;
+    let mut display_generation = 0u64;
     loop {
         if stop.load(Ordering::Acquire) {
             return;
@@ -102,6 +104,10 @@ pub(crate) fn run(
             continue;
         }
 
+        // Book sequences restart with every socket session, parked or reconnected, so each
+        // session publishes under a newer generation and the coordinator replaces any book
+        // an earlier session left behind instead of rejecting the restarted sequences as old.
+        display_generation = display_generation.saturating_add(1);
         if emit(
             events,
             HyperliquidDisplayDepthEvent::Reset { display_generation },
@@ -130,7 +136,6 @@ pub(crate) fn run(
         if stop.load(Ordering::Acquire) {
             return;
         }
-        display_generation = display_generation.saturating_add(1).max(1);
         sleep_cancellable(reconnect_delay, stop);
     }
 }
@@ -163,7 +168,7 @@ fn run_session(
         pending_ping: None,
         active: BTreeMap::new(),
         instruments: BTreeMap::new(),
-        sequences: BTreeMap::new(),
+        next_sequence: 1,
         decode_failures: 0,
         last_inbound: started,
         last_ping: started.checked_sub(PING_INTERVAL).unwrap_or(started),
@@ -272,7 +277,6 @@ fn reconcile_subscriptions(
                 .send_text(&build_unsubscribe(subscription))
                 .map_err(|error| error.to_string())?;
         }
-        state.sequences.remove(&coin);
     }
     for (coin, frame) in &desired {
         if !state.active.contains_key(coin) {
@@ -291,7 +295,7 @@ fn handle_frame(text: &str, display_generation: u64, state: &mut SessionState) -
     match parse_ws_frame(text).map_err(|_| ())? {
         WsClientEvent::Book { coin, book } => {
             let mapping = state.instruments.get(&coin).ok_or(())?;
-            let sequence = state.sequences.get(&coin).copied().unwrap_or(1);
+            let sequence = state.next_sequence;
             let decoded = decode_book_snapshot(
                 &book,
                 &coin,
@@ -302,9 +306,7 @@ fn handle_frame(text: &str, display_generation: u64, state: &mut SessionState) -
                 unix_nanos_now(),
             )
             .map_err(|_| ())?;
-            state
-                .sequences
-                .insert(coin.clone(), sequence.checked_add(1).ok_or(())?);
+            state.next_sequence = sequence.checked_add(1).ok_or(())?;
             state.pending.insert(
                 coin,
                 HyperliquidDisplayBookSnapshot {
