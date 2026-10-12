@@ -386,44 +386,13 @@ impl TastytradeBrokerClient {
         if query.len() > 128 || query.chars().any(char::is_control) {
             return Err("Tastytrade search query invalid".into());
         }
-        let mut page: catalog::SearchPage = self.get(
+        let page: catalog::SearchPage = self.get(
             capability,
             "/instruments/search",
             &[("query", query), ("limit", "100")],
             stop,
         )?;
-        if page.data.items.len() > 100 {
-            return Err("Tastytrade search exceeded its page bound".into());
-        }
-        // Future Product results describe a contract family, not a streamable instrument.
-        page.data
-            .items
-            .retain(|item| item.instrument_type != "Future Product");
-        if page.data.items.len() > 100
-            || page.data.items.iter().any(|item| {
-                !catalog::valid_identity(&item.symbol)
-                    || !matches!(
-                        item.instrument_type.as_str(),
-                        "Future"
-                            | "Equity"
-                            | "Index"
-                            | "Equity Option"
-                            | "Future Option"
-                            | "Cryptocurrency"
-                            | "Warrant"
-                    )
-            })
-        {
-            return Err(format!(
-                "Tastytrade search returned unsupported instrument types: {:?}",
-                page.data
-                    .items
-                    .iter()
-                    .map(|item| &item.instrument_type)
-                    .collect::<std::collections::BTreeSet<_>>()
-            ));
-        }
-        Ok(page.data.items)
+        page.validated()
     }
 
     /// Resolves an exact tradable identity to its own streamer symbol and tick schedule.
@@ -435,15 +404,8 @@ impl TastytradeBrokerClient {
         instrument: &SearchInstrument,
         stop: &Arc<AtomicBool>,
     ) -> Result<ResolvedInstrument, String> {
-        let collection = match instrument.instrument_type.as_str() {
-            "Future" => "futures",
-            "Equity" | "Index" => "equities",
-            "Equity Option" => "equity-options",
-            "Future Option" => "future-options",
-            "Cryptocurrency" => "cryptocurrencies",
-            "Warrant" => "warrants",
-            _ => return Err("Tastytrade instrument type is unsupported".into()),
-        };
+        let collection = catalog::instrument_collection(&instrument.instrument_type)
+            .ok_or("Tastytrade instrument type is unsupported")?;
         if !catalog::valid_identity(&instrument.symbol) {
             return Err("Tastytrade instrument identity is invalid".into());
         }
@@ -803,6 +765,72 @@ mod tests {
                 .is_ok()
         );
         server.join().expect("fixture server completes");
+    }
+
+    #[test]
+    fn search_keeps_streamable_results_beside_documented_partial_items() {
+        // `/instruments/search` marks no item field required and also returns
+        // products without a streamable identity, such as event contracts.
+        let body = serde_json::json!({
+            "data": {"items": [
+                {
+                    "symbol": "AAPL",
+                    "instrument-type": "Equity",
+                    "exchange": "XNAS",
+                    "description": "Apple Inc. - Common Stock",
+                    "underlying-streamer-symbol": "AAPL"
+                },
+                {
+                    "category": "Financials",
+                    "sub-category": "Index",
+                    "description": "Event contract",
+                    "event-product-external-id": "abc123",
+                    "external-id": "abc123",
+                    "stops-trading-at": "2026-12-18T21:00:00.000Z"
+                },
+                {"symbol": "/ES", "instrument-type": "Future Product", "description": "E-mini S&P 500"},
+                {"symbol": "/ESZ6", "instrument-type": "Future", "exchange": "CME"}
+            ]},
+            "context": "/instruments/search",
+            "pagination": {"per-page": 100, "page-offset": 0, "item-offset": 0,
+                "total-items": 4, "total-pages": 1, "current-item-count": 4}
+        })
+        .to_string();
+        let (origin, server) = fake_api(vec![("/instruments/search", 200, body)]);
+        let mut client = fixture_client(&origin, fixture_access(future_expiry()));
+        let items = client
+            .search(
+                &fixture_capability(),
+                "A",
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .expect("documented search page");
+        server.join().expect("fixture server completes");
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.symbol.as_str(), item.instrument_type.as_str()))
+                .collect::<Vec<_>>(),
+            [("AAPL", "Equity"), ("/ESZ6", "Future")]
+        );
+        assert_eq!(items[0].exchange.as_deref(), Some("XNAS"));
+    }
+
+    #[test]
+    fn search_rejects_a_streamable_result_without_its_symbol() {
+        let body = r#"{"data":{"items":[{"instrument-type":"Equity","description":"No identity"}]},"context":"/instruments/search"}"#;
+        let (origin, server) = fake_api(vec![("/instruments/search", 200, body.into())]);
+        let mut client = fixture_client(&origin, fixture_access(future_expiry()));
+        let result = client.search(
+            &fixture_capability(),
+            "A",
+            &Arc::new(AtomicBool::new(false)),
+        );
+        server.join().expect("fixture server completes");
+        assert_eq!(
+            result.expect_err("a streamable result needs its identity"),
+            "Tastytrade search result of type Equity has no valid symbol"
+        );
     }
 
     #[test]

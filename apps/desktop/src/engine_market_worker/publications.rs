@@ -2,13 +2,14 @@
 
 use super::{
     ChartInterval, ChartState, EngineFaultCode, FeedConnectionState, InstallProviderInstrument,
-    MarketDemandError, MarketOrderBookSnapshot, MarketPublicationGeneration, MarketRecoveryFailure,
-    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
-    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
-    ProviderConnectionState, ProviderState, PushedEventContext, ReplayRecoveryCommand,
-    ReplayStreamUpdate, SeriesLoadState, WorkerEndpoint, chart_demand_streams, demand_error,
-    provider_display_name, replay_runtime_snapshot, replay_runtime_tail_update,
-    runtime_generation_from_snapshot, runtime_order_book_frame, series_key, worker_identity,
+    MarketDemandError, MarketDemandErrorScope, MarketOrderBookSnapshot,
+    MarketPublicationGeneration, MarketRecoveryFailure, MarketRuntimeEvent, MarketSeriesSnapshot,
+    MarketSeriesState, MarketSeriesUpdate, MarketService, MarketWorkerBootstrap,
+    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender, ProviderConnectionState,
+    ProviderState, PushedEventContext, ReplayRecoveryCommand, ReplayStreamUpdate, SeriesLoadState,
+    WorkerEndpoint, chart_demand_streams, demand_error, provider_display_name,
+    replay_runtime_snapshot, replay_runtime_tail_update, runtime_generation_from_snapshot,
+    runtime_order_book_frame, series_key, worker_identity,
 };
 use aeris_observability::diagnostic;
 
@@ -330,6 +331,12 @@ pub(super) fn apply_realtime_demand_error(
         return Ok(());
     }
     let detail = demand_error(error);
+    if error.scope == MarketDemandErrorScope::OlderHistory {
+        // The published series and its live edge are still valid; only the
+        // scroll-back page is missing, and a later viewport demand retries it.
+        diagnostic!("Aeris chart older history is unavailable: {detail}");
+        return Ok(());
+    }
     if error.code == EngineFaultCode::Retryable {
         messages
             .send(MarketWorkerMessage::State {
@@ -489,7 +496,8 @@ pub(super) fn complete_pending_recovery(
             Ok(true)
         }
         MarketRuntimeEvent::DemandError(error)
-            if error.consumer_id.0.get() == endpoint.consumer_id
+            if error.scope == MarketDemandErrorScope::Series
+                && error.consumer_id.0.get() == endpoint.consumer_id
                 && error.generation.0.get() == endpoint.active_generation =>
         {
             endpoint.pending_recovery = None;

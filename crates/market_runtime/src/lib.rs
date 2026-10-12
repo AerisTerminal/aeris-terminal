@@ -187,11 +187,22 @@ pub struct MarketSeriesState {
     pub detail: Option<String>,
 }
 
+/// Part of a canonical series demand that a [`MarketDemandError`] invalidates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarketDemandErrorScope {
+    /// The current series could not be served; its published state is unusable.
+    Series,
+    /// Only history older than the published series could not be loaded. The
+    /// current series, its forming candle and live updates remain valid.
+    OlderHistory,
+}
+
 /// Direct structured failure for one canonical series demand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketDemandError {
     pub consumer_id: aeris_market_engine::ConsumerId,
     pub generation: aeris_market_engine::GenerationId,
+    pub scope: MarketDemandErrorScope,
     pub code: aeris_contracts::EngineFaultCode,
     pub stage: aeris_contracts::FailureStage,
     pub detail: String,

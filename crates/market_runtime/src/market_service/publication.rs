@@ -5,8 +5,8 @@ use super::{
     SeriesTailOperation, authorize_consumer,
 };
 use crate::{
-    MarketDemandError, MarketOrderBookSnapshot, MarketRuntimeEvent, MarketSeriesState,
-    MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
+    MarketDemandError, MarketDemandErrorScope, MarketOrderBookSnapshot, MarketRuntimeEvent,
+    MarketSeriesState, MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
 };
 use aeris_observability::diagnostic;
 use std::sync::Arc;
@@ -31,6 +31,7 @@ pub(super) fn fail_waiters(
             events.demand_error = Some(MarketRuntimeEvent::DemandError(MarketDemandError {
                 consumer_id: waiter.consumer_id,
                 generation: waiter.generation,
+                scope: MarketDemandErrorScope::Series,
                 code: EngineFaultCode::Retryable,
                 stage,
                 detail: detail.to_string(),
@@ -570,13 +571,12 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    pub(super) fn broadcast_demand_error_for(
+    pub(super) fn broadcast_older_history_error_for(
         &mut self,
         selected: &BarSeriesKey,
-        stage: FailureStage,
         detail: &str,
-        elapsed_millis: Option<u64>,
     ) {
+        let stage = FailureStage::ProviderHistory;
         for (consumer_id, events) in &mut self.events {
             let Some(demand) = self.engine.current_demand(*consumer_id) else {
                 continue;
@@ -589,12 +589,13 @@ impl Coordinator<'_> {
                 events.demand_error = Some(MarketRuntimeEvent::DemandError(MarketDemandError {
                     consumer_id: *consumer_id,
                     generation,
+                    scope: MarketDemandErrorScope::OlderHistory,
                     code: EngineFaultCode::Retryable,
                     stage,
                     detail: detail.to_string(),
                     series: Some(series.clone()),
                     cause: failure_stage_cause(stage).to_string(),
-                    elapsed_millis,
+                    elapsed_millis: None,
                 }));
             }
         }

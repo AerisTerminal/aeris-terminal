@@ -5,8 +5,7 @@ use aeris_market_data::parse_decimal_to_fixed;
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Debug)]
 pub struct SearchInstrument {
     pub symbol: String,
     pub instrument_type: String,
@@ -14,13 +13,67 @@ pub struct SearchInstrument {
     pub description: Option<String>,
 }
 
+/// One `/instruments/search` result. The provider schema requires none of
+/// these fields, and the searchable universe also holds products without a
+/// streamable instrument identity, such as event contracts.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct SearchItem {
+    symbol: Option<String>,
+    instrument_type: Option<String>,
+    exchange: Option<String>,
+    description: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub(super) struct SearchPage {
-    pub data: SearchData,
+    data: SearchData,
 }
 #[derive(Deserialize)]
-pub(super) struct SearchData {
-    pub items: Vec<SearchInstrument>,
+struct SearchData {
+    items: Vec<SearchItem>,
+}
+
+impl SearchPage {
+    /// Keeps the results Aeris can resolve and stream, in provider order.
+    pub(super) fn validated(self) -> Result<Vec<SearchInstrument>, String> {
+        if self.data.items.len() > 100 {
+            return Err("Tastytrade search exceeded its page bound".into());
+        }
+        self.data
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let instrument_type = item
+                    .instrument_type
+                    .filter(|kind| instrument_collection(kind).is_some())?;
+                let Some(symbol) = item.symbol.filter(|symbol| valid_identity(symbol)) else {
+                    return Some(Err(format!(
+                        "Tastytrade search result of type {instrument_type} has no valid symbol"
+                    )));
+                };
+                Some(Ok(SearchInstrument {
+                    symbol,
+                    instrument_type,
+                    exchange: item.exchange,
+                    description: item.description,
+                }))
+            })
+            .collect()
+    }
+}
+
+/// The `/instruments/{collection}` path for a streamable instrument type.
+pub(super) fn instrument_collection(instrument_type: &str) -> Option<&'static str> {
+    Some(match instrument_type {
+        "Future" => "futures",
+        "Equity" | "Index" => "equities",
+        "Equity Option" => "equity-options",
+        "Future Option" => "future-options",
+        "Cryptocurrency" => "cryptocurrencies",
+        "Warrant" => "warrants",
+        _ => return None,
+    })
 }
 
 #[derive(Clone, Debug)]

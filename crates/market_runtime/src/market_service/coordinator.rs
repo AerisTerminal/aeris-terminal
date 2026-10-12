@@ -3907,6 +3907,76 @@ mod tests {
         assert!(coordinator.events.is_empty());
     }
 
+    /// A chart scrolled into history the provider cannot serve must keep its
+    /// healthy live series. The failure is reported as older-history scoped so
+    /// the presentation does not treat it as a current-series recovery.
+    #[test]
+    fn exhausted_older_history_backfill_keeps_the_current_series_live() {
+        let mut coordinator = coordinator();
+        let consumer_id = consumer(1);
+        register(&mut coordinator, consumer_id);
+        coordinator
+            .events
+            .insert(consumer_id, ConsumerEvents::default());
+        let selected = series();
+        let provider_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", provider_generation)
+            .expect("provider session begins");
+        let current = minute_bars(10, 2);
+        let first_timestamp = current[0].exchange_timestamp_unix_nanos;
+        coordinator
+            .engine
+            .install_history(provider_generation, &selected, 2, 0, current)
+            .expect("current history installs");
+        coordinator
+            .engine
+            .set_series_demand(consumer_id, generation(1), &selected)
+            .expect("foreground demand subscribes");
+        let range = HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: first_timestamp,
+        };
+        let key = (selected.clone(), provider_generation);
+
+        for attempt in 0..=MAXIMUM_HISTORY_RETRIES {
+            coordinator
+                .history_inflight
+                .insert(key.clone(), Some(range));
+            coordinator.history_completed(
+                &selected,
+                provider_generation,
+                Some(range),
+                Err("candle history stopped before reaching the requested range".into()),
+            );
+            assert_eq!(
+                take_series_state(&mut coordinator, consumer_id),
+                None,
+                "older-history attempt {attempt} must not move the current series into recovery"
+            );
+        }
+
+        let events = coordinator
+            .events
+            .get_mut(&consumer_id)
+            .expect("consumer outbox");
+        let Some(MarketRuntimeEvent::DemandError(error)) = events.demand_error.take() else {
+            panic!("exhausted older-history backfill reports one demand error");
+        };
+        assert_eq!(error.scope, crate::MarketDemandErrorScope::OlderHistory);
+        assert_eq!(error.generation, generation(1));
+        assert_eq!(error.series.as_ref(), Some(&selected));
+        assert!(coordinator.engine.has_subscription(&selected));
+        assert!(
+            coordinator
+                .engine
+                .series_snapshot(&selected)
+                .is_some_and(|snapshot| snapshot.bars.len() == 2),
+            "the installed current history is retained"
+        );
+    }
+
     #[test]
     fn fresh_depth_demand_publishes_identified_awaiting_snapshot_frame() {
         let mut coordinator = coordinator();

@@ -32,9 +32,9 @@ use aeris_instruments::{
 use aeris_market_data::{BarDefinition, BarPeriod, BarSeriesKey, ChartInterval, MarketBar};
 pub(super) use aeris_market_runtime::{
     MarketConsumerResourceClass as ConsumerResourceClass, MarketDemandError,
-    MarketOrderBookSnapshot, MarketPriceAlert, MarketPriceAlertTrigger, MarketRuntimeEvent,
-    MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService, MarketStream,
-    SeriesTailOperation, StreamRequirements,
+    MarketDemandErrorScope, MarketOrderBookSnapshot, MarketPriceAlert, MarketPriceAlertTrigger,
+    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
+    MarketStream, SeriesTailOperation, StreamRequirements,
 };
 use aeris_observability::FeedConnectionState;
 
@@ -2288,6 +2288,7 @@ mod tests {
         let error = MarketDemandError {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::new(2).expect("generation validates")),
+            scope: MarketDemandErrorScope::Series,
             code: EngineFaultCode::Retryable,
             stage: FailureStage::Handoff,
             detail: "history/live handoff failed".to_string(),
@@ -2307,6 +2308,7 @@ mod tests {
         let retryable = MarketDemandError {
             consumer_id: MarketConsumerId(NonZeroU64::MIN),
             generation: MarketGenerationId(NonZeroU64::new(2).expect("generation validates")),
+            scope: MarketDemandErrorScope::Series,
             code: EngineFaultCode::Retryable,
             stage: FailureStage::ProviderHistory,
             detail: "covering history is retrying".to_string(),
@@ -2338,6 +2340,54 @@ mod tests {
             apply_realtime_demand_error(&permanent, 1, 2, &sender)
                 .is_err_and(|detail| detail.contains("permanent fixture failure"))
         );
+    }
+
+    /// A scroll-back page the provider could not serve froze the healthy live
+    /// chart: the backfill error was presented as a current-series recovery,
+    /// which invalidated the stream the live candle was still updating.
+    #[test]
+    fn older_history_demand_error_keeps_the_live_chart_and_its_pending_recovery() {
+        let product = default_hyperliquid_product();
+        let (mut pane, mut record) =
+            worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 3);
+        record.endpoint.pending_recovery = Some(ReplayRecoveryCommand {
+            request_id: 9,
+            reason: aeris_application::ResnapshotReason::QueueOverflow,
+        });
+        let error = MarketDemandError {
+            consumer_id: MarketConsumerId(NonZeroU64::new(41).expect("consumer validates")),
+            generation: MarketGenerationId(NonZeroU64::new(3).expect("generation validates")),
+            scope: MarketDemandErrorScope::OlderHistory,
+            code: EngineFaultCode::Retryable,
+            stage: FailureStage::ProviderHistory,
+            detail: "Visible history backfill is temporarily unavailable".to_string(),
+            series: Some(series_key(&product, ChartInterval::Minute1).expect("series")),
+            cause: "provider history did not produce usable canonical bars".to_string(),
+            elapsed_millis: None,
+        };
+        let event = MarketRuntimeEvent::DemandError(error.clone());
+
+        assert!(
+            !complete_pending_recovery(&event, &product, &mut record.endpoint)
+                .expect("older-history error is not a recovery outcome"),
+            "an older-history failure cannot fail the current-series recovery"
+        );
+        assert!(record.endpoint.pending_recovery.is_some());
+        assert_eq!(
+            apply_realtime_demand_error(&error, 41, 3, &record.endpoint.messages),
+            Ok(())
+        );
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        let states = messages
+            .iter()
+            .filter_map(|message| match message {
+                MarketWorkerMessage::State { state, message } => Some((*state, message.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(states, Vec::new(), "the live chart keeps its state");
+        assert!(messages.is_empty(), "the live chart keeps its stream");
     }
 
     /// The Rithmic Order Book panel stayed empty because the engine's order-book

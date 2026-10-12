@@ -384,11 +384,76 @@ fn second_candles_use_dxfeed_second_periods() {
 }
 
 #[test]
-fn late_candle_subscription_starts_at_demand_time() {
+fn late_candle_subscription_keeps_its_first_forming_candle_start() {
+    let minute = BarPeriod::time(60).unwrap();
     let mut starts = BTreeMap::new();
-    assert_eq!(candle_start_ms(&mut starts, "ES{=1m}".into(), 100), 100);
-    assert_eq!(candle_start_ms(&mut starts, "ES{=1m}".into(), 200), 100);
-    assert_eq!(candle_start_ms(&mut starts, "NQ{=1m}".into(), 200), 200);
+    let start = |starts: &mut BTreeMap<String, i64>, symbol: &str, now| {
+        candle_start_ms(starts, symbol.into(), minute, now).unwrap()
+    };
+    assert_eq!(start(&mut starts, "ES{=m}", 120_000), 60_001);
+    assert_eq!(
+        start(&mut starts, "ES{=m}", 300_000),
+        60_001,
+        "a reconcile keeps the subscribed start instead of re-subscribing"
+    );
+    assert_eq!(start(&mut starts, "NQ{=m}", 300_000), 240_001);
+}
+
+/// dxFeed delivers only candles whose open time is at or after `fromTime`, so a
+/// subscription starting at the demand instant never receives the candle that
+/// is already forming and leaves it stale until the next period opens.
+#[test]
+fn live_candle_subscription_includes_the_forming_candle() {
+    const MINUTE_MS: i64 = 60_000;
+    let five_minutes = BarPeriod::time(300).unwrap();
+    let forming_open = 1_767_225_600_000;
+    for elapsed in [0, 3 * MINUTE_MS + 20_000, 5 * MINUTE_MS - 1] {
+        let now = forming_open + elapsed;
+        let mut starts = BTreeMap::new();
+        let from =
+            candle_start_ms(&mut starts, "/NQZ26:XCME{=5m}".into(), five_minutes, now).unwrap();
+        assert!(
+            from <= forming_open,
+            "fromTime {from} must not pass the forming candle opened at {forming_open}"
+        );
+        assert!(
+            from > forming_open - 5 * MINUTE_MS,
+            "fromTime {from} must not replay the completed candle before it"
+        );
+    }
+}
+
+#[test]
+fn calendar_candle_subscription_includes_the_forming_session_week_and_month() {
+    const DAY: i64 = 86_400_000;
+    const HOUR: i64 = 3_600_000;
+    // Monday 2026-03-09 15:00 UTC. The session day and the week opened with
+    // the Sunday 23:00 UTC Globex open, a three-session candle with the
+    // Wednesday evening open, and the month on March 1.
+    let now = 1_773_068_400_000;
+    for (period, forming_open) in [
+        (BarPeriod::session(1).unwrap(), now - 16 * HOUR),
+        (BarPeriod::session(3).unwrap(), now - 4 * DAY - 16 * HOUR),
+        (BarPeriod::week(1).unwrap(), now - 16 * HOUR),
+        (BarPeriod::month(1).unwrap(), now - 8 * DAY - 15 * HOUR),
+    ] {
+        let mut starts = BTreeMap::new();
+        let from = candle_start_ms(&mut starts, "/ESH26:XCME".into(), period, now).unwrap();
+        assert!(
+            from <= forming_open,
+            "{period:?} fromTime {from} must not pass the forming candle at {forming_open}"
+        );
+    }
+    let mut starts = BTreeMap::new();
+    assert!(
+        candle_start_ms(
+            &mut starts,
+            "/ESH26:XCME".into(),
+            BarPeriod::tick(10).unwrap(),
+            now
+        )
+        .is_err()
+    );
 }
 fn instrument() -> InstallProviderInstrument {
     InstallProviderInstrument {
@@ -631,14 +696,13 @@ fn newer_only_dxlink_snapshot_marks_backwards_history_exhausted() {
     assert_eq!(snapshot.bars, [] as [MarketBar; 0]);
     assert!(snapshot.backwards_exhausted);
 }
-/// Daily bars delivered newest first, as dxFeed publishes a time-series
-/// snapshot, with the first one carrying `SNAPSHOT_BEGIN`.
-fn newest_first_daily_snapshot(task: &mut HistoryTask, days: i64) -> Vec<MarketBar> {
-    const DAY: i64 = 86_400_000_000_000;
+/// Bars delivered newest first, as dxFeed publishes a time-series snapshot,
+/// with the first one carrying `SNAPSHOT_BEGIN`.
+fn newest_first_snapshot(task: &mut HistoryTask, period_nanos: i64, bars: i64) -> Vec<MarketBar> {
     let newest = bar();
     let mut delivered = Vec::new();
-    for age in 0..days {
-        let time = newest.exchange_timestamp_unix_nanos - age * DAY;
+    for age in 0..bars {
+        let time = newest.exchange_timestamp_unix_nanos - age * period_nanos;
         let bar = MarketBar {
             exchange_timestamp_seconds: time / 1_000_000_000,
             exchange_timestamp_unix_nanos: time,
@@ -649,7 +713,7 @@ fn newest_first_daily_snapshot(task: &mut HistoryTask, days: i64) -> Vec<MarketB
                 channel: 7,
                 symbol: task.symbol.clone(),
                 flags: if age == 0 { SNAPSHOT_BEGIN } else { 0 },
-                index: (days - age).to_string(),
+                index: (bars - age).to_string(),
                 bar: Some(bar),
                 count: 1,
             },
@@ -672,7 +736,7 @@ fn a_snapshot_that_stops_without_its_end_marker_keeps_the_delivered_newest_range
     let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
     let started_at = Instant::now();
     let mut task = HistoryTask::collecting(request, symbol, started_at);
-    let delivered = newest_first_daily_snapshot(&mut task, 276);
+    let delivered = newest_first_snapshot(&mut task, 86_400_000_000_000, 276);
     let streaming = task.last_progress_at
         + CANDLE_SNAPSHOT_STALL
             .checked_sub(Duration::from_millis(1))
@@ -708,8 +772,62 @@ fn a_channel_that_never_begins_its_snapshot_still_fails() {
     assert_eq!(task.candle_state, CandleHistoryState::Collecting);
     assert!(task.expired(silent));
 }
+/// Mirrors the observed `/NQZ6` 5m sequence: the covering snapshot stops after
+/// 578 bars without an end marker, then the backfill for the range before its
+/// oldest bar receives the same newest-first bars and stops again.
 #[test]
-fn a_cut_off_snapshot_without_bars_in_range_is_not_reported_as_empty_history() {
+fn a_backfill_cut_off_above_its_range_exhausts_older_history() {
+    const FIVE_MINUTES: i64 = 300_000_000_000;
+    let mut covering = request();
+    covering.series.period = BarPeriod::time(300).unwrap();
+    let symbol = candle_symbol(&covering.series, covering.instrument.as_ref().unwrap()).unwrap();
+    let mut task = HistoryTask::collecting(covering.clone(), symbol.clone(), Instant::now());
+    let retained = newest_first_snapshot(&mut task, FIVE_MINUTES, 578);
+    assert!(task.close_stalled_snapshot(task.last_progress_at + CANDLE_SNAPSHOT_STALL));
+    let closed = retained[retained.len() - 1].exchange_timestamp_unix_nanos + FIVE_MINUTES;
+    assert_eq!(task.snapshot_at(closed, None).unwrap().bars, retained);
+
+    let oldest = retained[0].exchange_timestamp_unix_nanos;
+    let mut backfill = covering;
+    backfill.range = Some(super::super::HistoryRange {
+        start_unix_nanos: oldest - 7_680 * FIVE_MINUTES,
+        end_unix_nanos: oldest,
+    });
+    for end in [None, Some(SNAPSHOT_SNIP)] {
+        let mut task = HistoryTask::collecting(backfill.clone(), symbol.clone(), Instant::now());
+        newest_first_snapshot(&mut task, FIVE_MINUTES, 578);
+        match end {
+            None => {
+                assert!(task.close_stalled_snapshot(task.last_progress_at + CANDLE_SNAPSHOT_STALL));
+            }
+            Some(flags) => task
+                .accept(
+                    FeedEvent::Candle {
+                        channel: 7,
+                        symbol: symbol.clone(),
+                        flags,
+                        index: "0".into(),
+                        bar: None,
+                        count: 0,
+                    },
+                    1,
+                    &mut 1,
+                )
+                .unwrap(),
+        }
+        assert_eq!(task.candle_state, CandleHistoryState::Ready);
+        let snapshot = task
+            .snapshot_at(closed, None)
+            .expect("a newest-first snapshot cut off above the range answers it");
+        assert_eq!(snapshot.bars, [] as [MarketBar; 0]);
+        assert!(
+            snapshot.backwards_exhausted,
+            "retrying the subscription receives the same cut-off snapshot"
+        );
+    }
+}
+#[test]
+fn a_cut_off_snapshot_that_passes_its_range_reports_the_range_empty() {
     let mut request = request();
     let newest = bar();
     request.range = Some(super::super::HistoryRange {
@@ -717,29 +835,76 @@ fn a_cut_off_snapshot_without_bars_in_range_is_not_reported_as_empty_history() {
         end_unix_nanos: newest.exchange_timestamp_unix_nanos - 3_600_000_000_000,
     });
     let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
-    for end in [None, Some(SNAPSHOT_SNIP)] {
-        let mut task = HistoryTask::collecting(request.clone(), symbol.clone(), Instant::now());
+    let mut task = HistoryTask::collecting(request, symbol.clone(), Instant::now());
+    let older = newest.exchange_timestamp_unix_nanos - 10_800_000_000_000;
+    for (flags, index, bar) in [
+        (SNAPSHOT_BEGIN, "2", newest),
+        (
+            0,
+            "1",
+            MarketBar {
+                exchange_timestamp_seconds: older / 1_000_000_000,
+                exchange_timestamp_unix_nanos: older,
+                ..newest
+            },
+        ),
+    ] {
         task.accept(
             FeedEvent::Candle {
                 channel: 7,
                 symbol: symbol.clone(),
-                flags: SNAPSHOT_BEGIN | end.unwrap_or(0),
-                index: "2".into(),
-                bar: Some(newest),
+                flags,
+                index: index.into(),
+                bar: Some(bar),
                 count: 1,
             },
             1,
             &mut 1,
         )
         .unwrap();
-        if end.is_none() {
-            assert!(task.close_stalled_snapshot(task.last_progress_at + CANDLE_SNAPSHOT_STALL));
-        }
-        assert_eq!(task.candle_state, CandleHistoryState::Ready);
+    }
+    assert!(task.close_stalled_snapshot(task.last_progress_at + CANDLE_SNAPSHOT_STALL));
+    let snapshot = task
+        .snapshot_at(newest.exchange_timestamp_unix_nanos, None)
+        .expect("delivery passed through the whole range");
+    assert_eq!(snapshot.bars, [] as [MarketBar; 0]);
+    assert!(
+        !snapshot.backwards_exhausted,
+        "a bar older than the range proves older history exists"
+    );
+}
+#[test]
+fn a_cut_off_snapshot_without_any_candle_proves_nothing() {
+    let newest = bar();
+    for range in [
+        None,
+        Some(super::super::HistoryRange {
+            start_unix_nanos: newest.exchange_timestamp_unix_nanos - 7_200_000_000_000,
+            end_unix_nanos: newest.exchange_timestamp_unix_nanos - 3_600_000_000_000,
+        }),
+    ] {
+        let mut request = request();
+        request.range = range;
+        let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
+        let mut task = HistoryTask::collecting(request, symbol.clone(), Instant::now());
+        task.accept(
+            FeedEvent::Candle {
+                channel: 7,
+                symbol,
+                flags: SNAPSHOT_BEGIN | REMOVE_EVENT,
+                index: "2".into(),
+                bar: None,
+                count: 0,
+            },
+            1,
+            &mut 1,
+        )
+        .unwrap();
+        assert!(task.close_stalled_snapshot(task.last_progress_at + CANDLE_SNAPSHOT_STALL));
         assert!(
             task.snapshot_at(newest.exchange_timestamp_unix_nanos, None)
                 .is_err(),
-            "a truncated snapshot proves neither empty nor exhausted history"
+            "a truncated snapshot without a candle proves neither empty nor exhausted history"
         );
     }
 }

@@ -1183,8 +1183,48 @@ fn candle_symbol(
     ))
 }
 
-fn candle_start_ms(starts: &mut BTreeMap<String, i64>, symbol: String, now_ms: i64) -> i64 {
-    *starts.entry(symbol).or_insert(now_ms)
+/// Keeps one `fromTime` per live candle symbol so a demand reconcile never
+/// re-subscribes, and with it replays, an unchanged candle channel.
+fn candle_start_ms(
+    starts: &mut BTreeMap<String, i64>,
+    symbol: String,
+    period: BarPeriod,
+    now_ms: i64,
+) -> Result<i64, String> {
+    if let Some(start) = starts.get(&symbol) {
+        return Ok(*start);
+    }
+    let start = forming_candle_floor_ms(period, now_ms)?;
+    starts.insert(symbol, start);
+    Ok(start)
+}
+
+const DAY_MS: i64 = 86_400_000;
+/// Session-day, week and month candles open on provider trading calendars
+/// (weekends, holidays, daylight-saving shifts) that are not reproducible here.
+const CALENDAR_CANDLE_SLACK_MS: i64 = 7 * DAY_MS;
+
+/// Earliest open time the candle forming at `now_ms` can have.
+///
+/// A dxFeed time-series subscription delivers only candles whose open time is
+/// at or after `fromTime`, including later revisions of the forming candle. A
+/// fixed-period candle lasts at most its period whatever its alignment, so it
+/// opened after `now - period`. Calendar candles take a wider window; a
+/// completed candle inside it is already retained history and arrives as an
+/// unchanged correction of its retained bar.
+fn forming_candle_floor_ms(period: BarPeriod, now_ms: i64) -> Result<i64, String> {
+    let lookback_ms = match period {
+        BarPeriod::Time { seconds } => i64::from(seconds) * 1_000 - 1,
+        BarPeriod::Session { days } => i64::from(days) * DAY_MS + CALENDAR_CANDLE_SLACK_MS,
+        BarPeriod::Week { weeks } => i64::from(weeks) * 7 * DAY_MS + CALENDAR_CANDLE_SLACK_MS,
+        BarPeriod::Month { months } => i64::from(months) * 31 * DAY_MS + CALENDAR_CANDLE_SLACK_MS,
+        BarPeriod::Tick { .. } => {
+            return Err("Tick candles require distinct same-time bucket identities".into());
+        }
+    };
+    now_ms
+        .checked_sub(lookback_ms)
+        .ok_or_else(|| "Tastytrade candle subscription start is out of range".into())
 }
 pub(super) fn now_nanos() -> Result<i64, String> {
     let duration = SystemTime::now()
@@ -1263,7 +1303,9 @@ struct HistoryTask {
     deadline: Instant,
     last_progress_at: Instant,
     candles: BTreeMap<String, (MarketBar, u64)>,
-    saw_newer_candle: bool,
+    /// Oldest and newest open time of every bar the current snapshot
+    /// delivered, including bars outside the requested range.
+    delivered_span: Option<(i64, i64)>,
     snapshot_begun: bool,
     /// The snapshot ended without covering everything requested, by a
     /// `SNAPSHOT_SNIP` marker or by delivery stopping short of its end.
@@ -1280,7 +1322,7 @@ impl HistoryTask {
             deadline: started_at + Duration::from_secs(120),
             last_progress_at: started_at,
             candles: BTreeMap::new(),
-            saw_newer_candle: false,
+            delivered_span: None,
             snapshot_begun: false,
             truncated: false,
             candle_state: CandleHistoryState::Collecting,
@@ -1368,7 +1410,7 @@ impl HistoryTask {
                 }
                 if flags & SNAPSHOT_BEGIN != 0 {
                     self.candles.clear();
-                    self.saw_newer_candle = false;
+                    self.delivered_span = None;
                     self.snapshot_begun = true;
                     self.truncated = false;
                     self.candle_state = CandleHistoryState::Collecting;
@@ -1387,11 +1429,13 @@ impl HistoryTask {
                             bar.volume
                         )
                     })?;
-                    if self.request.range.is_some_and(|range| {
-                        bar.exchange_timestamp_unix_nanos >= range.end_unix_nanos
-                    }) {
-                        self.saw_newer_candle = true;
-                    }
+                    let time = bar.exchange_timestamp_unix_nanos;
+                    self.delivered_span = Some(
+                        self.delivered_span
+                            .map_or((time, time), |(oldest, newest)| {
+                                (oldest.min(time), newest.max(time))
+                            }),
+                    );
                     let in_range = self.request.range.is_none_or(|range| {
                         bar.exchange_timestamp_unix_nanos >= range.start_unix_nanos
                             && bar.exchange_timestamp_unix_nanos < range.end_unix_nanos
@@ -1436,13 +1480,24 @@ impl HistoryTask {
             .collect();
         candles.sort_unstable_by_key(|(bar, _)| bar.exchange_timestamp_unix_nanos);
         candles.dedup_by_key(|(bar, _)| bar.exchange_timestamp_unix_nanos);
-        // A truncated snapshot proves nothing about older or missing bars.
-        if self.truncated && candles.is_empty() {
-            return Err(
-                "Tastytrade candle history stopped before reaching the requested range".into(),
-            );
+        // dxFeed publishes a snapshot newest first, so one that ended or was
+        // cut off after only bars newer than the range holds nothing older the
+        // provider will deliver; resubscribing receives the same snapshot. A
+        // bar older than the range instead proves the range itself is empty.
+        let (delivered_newer, delivered_older) = self
+            .request
+            .range
+            .zip(self.delivered_span)
+            .map_or((false, false), |(range, (oldest, newest))| {
+                (
+                    newest >= range.end_unix_nanos,
+                    oldest < range.start_unix_nanos,
+                )
+            });
+        let backwards_exhausted = candles.is_empty() && delivered_newer && !delivered_older;
+        if self.truncated && candles.is_empty() && !delivered_newer && !delivered_older {
+            return Err("Tastytrade candle snapshot stopped before delivering a candle".into());
         }
-        let backwards_exhausted = !self.truncated && candles.is_empty() && self.saw_newer_candle;
         let mut forming = None;
         if self.request.range.is_none()
             && self
@@ -1929,8 +1984,12 @@ impl Worker {
             .iter()
             .map(|(series, instrument)| {
                 let symbol = candle_symbol(series, instrument)?;
-                let from_time_ms =
-                    candle_start_ms(&mut self.candle_from_ms, symbol.clone(), now_ms);
+                let from_time_ms = candle_start_ms(
+                    &mut self.candle_from_ms,
+                    symbol.clone(),
+                    series.period,
+                    now_ms,
+                )?;
                 Ok(Subscription {
                     kind: "Candle",
                     symbol,

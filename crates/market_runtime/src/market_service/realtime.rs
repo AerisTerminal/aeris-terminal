@@ -4782,6 +4782,72 @@ mod tests {
         assert!(live.take_publication().is_none());
     }
 
+    /// The live candle subscription replays the candle already forming at
+    /// subscription time. Its revisions update that one forming bar in place,
+    /// and the completed candle before it replays as an unchanged bar.
+    #[test]
+    fn subscribed_forming_candle_revisions_update_the_single_forming_bar() {
+        let minute = 60_000_000_000;
+        let symbol = "/ESZ26:XCME{=m}";
+        let mut live = TradeLiveHandoff::new(
+            &tastytrade_minute_series(),
+            generation(),
+            "CME",
+            Some((CandleGapPolicy::SessionGapsAllowed, symbol.into())),
+        )
+        .expect("handoff");
+        let completed = bar(1, 0, 10_000);
+        live.seed(
+            2,
+            0,
+            &[completed],
+            Some(FormingBar {
+                bar: candle(minute, 10_000, 10_000, 10_000, 10_000, 10),
+                trades: Some(10),
+            }),
+            Some(minute + 1),
+        )
+        .expect("seed");
+        live.connected = true;
+        let _ = live.take_publication();
+
+        live.accept_provider_candle(
+            symbol,
+            super::super::ProviderCandle {
+                bar: candle(0, 10_000, 10_000, 10_000, 10_000, 1),
+                trade_count: Some(1),
+                trade_watermark: Some(0),
+            },
+        )
+        .expect("replayed completed candle is retained history");
+        assert!(live.take_publication().is_none());
+
+        for (count, close) in [(11, 10_050), (13, 10_125)] {
+            live.accept_provider_candle(
+                symbol,
+                super::super::ProviderCandle {
+                    bar: candle(minute, 10_000, close, 10_000, close, 12),
+                    trade_count: Some(count),
+                    trade_watermark: Some(0),
+                },
+            )
+            .expect("forming revision");
+            let LiveSeriesPublication::Tails(tails) =
+                live.take_publication().expect("forming revision publishes")
+            else {
+                panic!("a forming revision is a tail update");
+            };
+            assert_eq!(tails.len(), 1);
+            assert_eq!(
+                (tails[0].exchange_timestamp_unix_nanos, tails[0].close),
+                (minute, close)
+            );
+        }
+        assert_eq!(live.bars.len(), 2, "one completed bar and one forming bar");
+        assert_eq!(live.bars[0], completed);
+        assert_eq!(live.history_state, LiveHistoryState::Ready);
+    }
+
     #[test]
     fn pending_append_precedes_correction_for_the_same_bucket() {
         let mut live = TradeLiveHandoff::new(

@@ -654,7 +654,11 @@ impl Coordinator<'_> {
         }
         self.history_retries
             .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts, range));
-        self.broadcast_series_recovery_for(series, "Current market history is retrying");
+        // An older-range page sits behind the published series; retrying it
+        // leaves the current series state untouched.
+        if range.is_none() {
+            self.broadcast_series_recovery_for(series, "Current market history is retrying");
+        }
         true
     }
 
@@ -684,11 +688,13 @@ impl Coordinator<'_> {
         }
         if let Err(error) = self.enqueue_history_request(series, *generation, range) {
             self.schedule_history_retry(series, *generation, range, error);
-            self.broadcast_series_resolution_for(
-                series,
-                SeriesLoadState::Partial,
-                Some("Current market history is unavailable; recovery will retry"),
-            );
+            if range.is_none() {
+                self.broadcast_series_resolution_for(
+                    series,
+                    SeriesLoadState::Partial,
+                    Some("Current market history is unavailable; recovery will retry"),
+                );
+            }
         } else if let Some((retry_at, _, _)) = self.history_retries.get_mut(&key) {
             *retry_at = now + HISTORY_RETRY_DELAY;
         }
@@ -1106,11 +1112,9 @@ impl Coordinator<'_> {
                         self.history_deferred.remove(&key);
                         self.history_failed(series, generation);
                     } else {
-                        self.broadcast_demand_error_for(
+                        self.broadcast_older_history_error_for(
                             series,
-                            FailureStage::ProviderHistory,
                             "Visible history backfill is temporarily unavailable",
-                            None,
                         );
                         self.dispatch_deferred_history(series, generation);
                     }
