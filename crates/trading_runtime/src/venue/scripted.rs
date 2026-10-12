@@ -576,7 +576,7 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
 }
 
 #[test]
-fn a_closed_broker_position_becomes_one_round_trip_that_survives_a_restart() {
+fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart() {
     let (directory, service, _receiver) = setup("venue-round-trips");
     let inbox = service.demo_venue_inbox();
     inbox
@@ -587,25 +587,52 @@ fn a_closed_broker_position_becomes_one_round_trip_that_survives_a_restart() {
             .push(venue(1, VenueUpdate::Fill(fill(deal, "801", quantity))))
             .expect("entry");
     }
-    let mut close = fill("d3", "802", 3);
-    close.side = OrderSide::Sell;
-    close.price = point(9_500, 2);
-    close.executed_unix_nanos = 3_000;
-    close.realized = Some(RealizedClose {
-        gross_profit: point(1_500, 2),
-        swap: point(0, 2),
-        commission: point(-35, 2),
-        balance: point(1_001_465, 2),
-    });
+    let closing_deal = |deal, quantity, price, executed_unix_nanos, gross_profit| {
+        let mut close = fill(deal, "802", quantity);
+        close.side = OrderSide::Sell;
+        close.price = point(price, 2);
+        close.executed_unix_nanos = executed_unix_nanos;
+        close.realized = Some(RealizedClose {
+            gross_profit: point(gross_profit, 2),
+            swap: point(0, 2),
+            commission: point(-35, 2),
+            balance: point(1_001_465, 2),
+        });
+        close
+    };
     inbox
-        .push(venue(1, VenueUpdate::Fill(close)))
-        .expect("closing deal");
+        .push(venue(
+            1,
+            VenueUpdate::Fill(closing_deal("d3", 1, 9_500, 3_000, 500)),
+        ))
+        .expect("partial closing deal");
+    let row = |trip: &crate::TradeRoundTrip| {
+        assert!(trip.closed);
+        assert_eq!(trip.side, OrderSide::Buy);
+        (
+            trip.entry.map(|leg| (leg.quantity, leg.average_price)),
+            trip.exit.map(|leg| (leg.quantity, leg.average_price)),
+            trip.final_pnl,
+        )
+    };
+    let partial = (
+        Some((point(1, 0), point(9_000, 2))),
+        Some((point(1, 0), point(9_500, 2))),
+        Some(point(465, 2)),
+    );
+    let trips = service.snapshot().expect("snapshot").round_trips;
     assert_eq!(
-        service.snapshot().expect("snapshot").round_trips,
-        [],
-        "a position the broker still reports open is not history"
+        trips.iter().map(row).collect::<Vec<_>>(),
+        [partial],
+        "a partial close is history while the broker still holds the rest"
     );
 
+    inbox
+        .push(venue(
+            1,
+            VenueUpdate::Fill(closing_deal("d4", 2, 9_600, 4_000, 1_200)),
+        ))
+        .expect("final closing deal");
     inbox
         .push(venue(
             1,
@@ -615,19 +642,17 @@ fn a_closed_broker_position_becomes_one_round_trip_that_survives_a_restart() {
         ))
         .expect("closed");
     let expected = |trips: &[crate::TradeRoundTrip]| {
-        assert_eq!(trips.len(), 1);
-        let trip = &trips[0];
-        assert!(trip.closed);
-        assert_eq!(trip.side, OrderSide::Buy);
         assert_eq!(
-            trip.entry.map(|leg| (leg.quantity, leg.average_price)),
-            Some((point(3, 0), point(9_000, 2)))
+            trips.iter().map(row).collect::<Vec<_>>(),
+            [
+                (
+                    Some((point(2, 0), point(9_000, 2))),
+                    Some((point(2, 0), point(9_600, 2))),
+                    Some(point(1_165, 2)),
+                ),
+                partial,
+            ]
         );
-        assert_eq!(
-            trip.exit.map(|leg| (leg.quantity, leg.average_price)),
-            Some((point(3, 0), point(9_500, 2)))
-        );
-        assert_eq!(trip.final_pnl, Some(point(1_465, 2)));
     };
     expected(&service.snapshot().expect("snapshot").round_trips);
 

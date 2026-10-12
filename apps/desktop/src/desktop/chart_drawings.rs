@@ -10,7 +10,7 @@
 //! remember, and a chart that opens without drawings adopts a sibling's. The exchanged document
 //! anchors drawings by exchange time, so panes on different timeframes stay aligned.
 
-use aeris_chart_integration::AerisChartView;
+use aeris_chart_integration::{AerisChartView, saved_drawings_document};
 use aeris_contracts::{InstallProviderInstrument, WorkspaceInstrumentDrawingsState};
 use aeris_observability::diagnostic;
 
@@ -40,16 +40,32 @@ impl DrawingInstrument {
         drawings.provider == self.provider && drawings.instrument_id == self.instrument_id
     }
 
-    fn drawings(
-        &self,
-        chart_state_json: String,
-        locked_drawing_ids: Vec<u32>,
-    ) -> WorkspaceInstrumentDrawingsState {
+    fn drawings(&self, document: String) -> WorkspaceInstrumentDrawingsState {
         WorkspaceInstrumentDrawingsState {
             provider: self.provider.clone(),
             instrument_id: self.instrument_id.clone(),
-            chart_state_json,
-            locked_drawing_ids,
+            chart_state_json: document,
+            locked_drawing_ids: Vec::new(),
+        }
+    }
+}
+
+/// Saved drawings as an Aeris Charts drawings document, or `None` when they are unreadable.
+fn upgraded(
+    mut drawings: WorkspaceInstrumentDrawingsState,
+) -> Option<WorkspaceInstrumentDrawingsState> {
+    match saved_drawings_document(&drawings.chart_state_json, &drawings.locked_drawing_ids) {
+        Ok(document) => {
+            drawings.chart_state_json = document;
+            drawings.locked_drawing_ids.clear();
+            Some(drawings)
+        }
+        Err(error) => {
+            diagnostic!(
+                "Aeris dropped unreadable saved drawings of {}: {error}",
+                drawings.instrument_id
+            );
+            None
         }
     }
 }
@@ -80,7 +96,9 @@ pub(super) struct PaneDrawings {
 impl PaneDrawings {
     pub(super) fn restored(remembered: &[WorkspaceInstrumentDrawingsState]) -> Self {
         Self {
-            remembered: bounded_instrument_drawings(remembered.to_vec()),
+            remembered: bounded_instrument_drawings(
+                remembered.iter().cloned().filter_map(upgraded).collect(),
+            ),
             ..Self::default()
         }
     }
@@ -172,10 +190,7 @@ impl PaneDrawings {
     ) -> Result<bool, String> {
         if let Some(chart) = chart.filter(|chart| self.shows(&shared.instrument, chart)) {
             let imported = if let Some(drawings) = &shared.drawings {
-                chart.import_semantic_state_json(
-                    &drawings.chart_state_json,
-                    &drawings.locked_drawing_ids,
-                )
+                chart.import_drawings_json(&drawings.chart_state_json)
             } else {
                 chart.clear_drawings();
                 Ok(())
@@ -275,8 +290,7 @@ impl PaneDrawings {
         if chart.drawing_count() == 0 {
             return Ok(None);
         }
-        let json = chart.export_semantic_state_json()?;
-        Ok(Some(instrument.drawings(json, chart.locked_drawing_ids())))
+        Ok(Some(instrument.drawings(chart.export_drawings_json()?)))
     }
 }
 
@@ -288,8 +302,13 @@ pub(super) fn legacy_pane_drawings(
     instrument: Option<&InstallProviderInstrument>,
 ) -> Option<WorkspaceInstrumentDrawingsState> {
     let instrument = DrawingInstrument::of(instrument?);
-    (!chart_state_json.is_empty())
-        .then(|| instrument.drawings(chart_state_json.to_string(), locked_drawing_ids.to_vec()))
+    if chart_state_json.is_empty() {
+        return None;
+    }
+    upgraded(WorkspaceInstrumentDrawingsState {
+        locked_drawing_ids: locked_drawing_ids.to_vec(),
+        ..instrument.drawings(chart_state_json.to_string())
+    })
 }
 
 /// Drops malformed and duplicate entries, then the least recently used ones past the pane's
@@ -351,15 +370,22 @@ mod tests {
             .collect()
     }
 
+    const DOCUMENT: &str = r#"{"schema":"aeris_charts-drawings","schema_version":1,"drawings":[]}"#;
+
     #[test]
     fn the_library_is_bounded_least_recently_used_first() {
-        let entries = (0..MAXIMUM_DRAWING_INSTRUMENTS_PER_PANE + 3)
-            .map(|index| drawings(&index.to_string(), "[x]"))
-            .chain([drawings("0", "[duplicate]"), drawings("", "[x]")])
+        let entries = [drawings("unreadable", "[x]")]
+            .into_iter()
+            .chain(
+                (0..MAXIMUM_DRAWING_INSTRUMENTS_PER_PANE + 3)
+                    .map(|index| drawings(&index.to_string(), DOCUMENT)),
+            )
+            .chain([drawings("0", "{}"), drawings("", DOCUMENT)])
             .collect::<Vec<_>>();
         let restored = PaneDrawings::restored(&entries).remembered();
         assert_eq!(restored.len(), MAXIMUM_DRAWING_INSTRUMENTS_PER_PANE);
-        assert_eq!(restored[0].chart_state_json, "[x]");
+        assert_eq!(restored[0].instrument_id, "0");
+        assert_eq!(restored[0].chart_state_json, DOCUMENT);
 
         let large = "x".repeat(MAXIMUM_REMEMBERED_DRAWING_BYTES_PER_PANE);
         let bounded = bounded_instrument_drawings(vec![
@@ -377,17 +403,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_drawings_need_the_panes_instrument() {
+    fn legacy_drawings_need_the_panes_instrument_and_become_a_document() {
         let instrument = InstallProviderInstrument {
             provider: "hyperliquid".to_string(),
             instrument_id: "BTC".to_string(),
             ..InstallProviderInstrument::default()
         };
-        assert_eq!(
-            legacy_pane_drawings("[x]", &[], Some(&instrument)),
-            Some(drawings("BTC", "[x]"))
-        );
-        assert_eq!(legacy_pane_drawings("[x]", &[], None), None);
+        let legacy = r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":1.0,"price":2.0}]}]"#;
+        let upgraded = legacy_pane_drawings(legacy, &[1], Some(&instrument))
+            .expect("legacy drawings belong to the pane's instrument");
+        assert_eq!(upgraded.instrument_id, "BTC");
+        assert_eq!(upgraded.locked_drawing_ids, Vec::<u32>::new());
+        let document: serde_json::Value =
+            serde_json::from_str(&upgraded.chart_state_json).expect("document is JSON");
+        assert_eq!(document["schema"], "aeris_charts-drawings");
+        assert_eq!(document["drawings"][0]["locked"], true);
+        assert_eq!(legacy_pane_drawings(legacy, &[], None), None);
         assert_eq!(legacy_pane_drawings("", &[], Some(&instrument)), None);
+        assert_eq!(legacy_pane_drawings("[x]", &[], Some(&instrument)), None);
     }
 }

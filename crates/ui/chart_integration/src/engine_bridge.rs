@@ -30,31 +30,6 @@ pub(crate) struct ProductPriceBars {
 }
 
 impl ProductPriceBars {
-    /// Resolve a fractional bar index to exchange time, including points between bars.
-    /// The edge segment also places offscreen anchors without pinning them to the
-    /// first or last loaded candle.
-    pub(crate) fn time_at_logical(&self, logical: f64) -> Option<f64> {
-        if !logical.is_finite() {
-            return None;
-        }
-        if self.times.len() == 1 && logical == 0.0 {
-            return self.times.first().copied();
-        }
-        if self.times.len() < 2 {
-            return None;
-        }
-        let segment = logical
-            .floor()
-            .max(0.0)
-            .to_usize()
-            .unwrap_or(usize::MAX)
-            .min(self.times.len() - 2);
-        let start = self.times[segment];
-        let end = self.times[segment + 1];
-        let time = (end - start).mul_add(logical - segment.to_f64()?, start);
-        time.is_finite().then_some(time)
-    }
-
     /// Project exchange time onto the current bar series, preserving fractional
     /// placement rather than snapping to a candle on a timeframe change.
     pub(crate) fn logical_at_time(&self, time: f64) -> Option<f64> {
@@ -450,7 +425,7 @@ mod tests {
     };
 
     #[test]
-    fn drawing_anchor_keeps_its_time_across_bar_intervals() {
+    fn exchange_time_projects_onto_any_bar_interval() {
         let minute = ProductPriceBars {
             times: vec![0.0, 60.0, 120.0, 180.0, 240.0, 300.0],
             ..ProductPriceBars::default()
@@ -459,10 +434,8 @@ mod tests {
             times: vec![0.0, 300.0, 600.0],
             ..ProductPriceBars::default()
         };
-        let time = minute.time_at_logical(2.5).expect("source anchor time");
-        assert!((time - 150.0).abs() < f64::EPSILON);
-        assert_eq!(five_minute.logical_at_time(time), Some(0.5));
-        assert_eq!(minute.logical_at_time(time), Some(2.5));
+        assert_eq!(five_minute.logical_at_time(150.0), Some(0.5));
+        assert_eq!(minute.logical_at_time(150.0), Some(2.5));
         assert_eq!(five_minute.logical_at_time(900.0), Some(3.0));
     }
 

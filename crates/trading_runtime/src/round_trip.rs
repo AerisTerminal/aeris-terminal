@@ -1,14 +1,17 @@
-//! Round-trip projection of the bounded fill history. One simulated round trip spans a net
-//! position cycle: from the fill that opens a flat position to the fill that flattens or
-//! reverses it, with every scale-in and partial exit in between. A reversing fill closes one
-//! trade and opens the next. One broker round trip spans one broker-identified position.
+//! Round-trip projection of the bounded fill history. One simulated trade spans a net position
+//! cycle: from the fill that opens a flat position to the fill that flattens or reverses it, with
+//! every scale-in and partial exit in between. A reversing fill closes one trade and opens the
+//! next. One broker trade spans one broker-identified position.
+//!
+//! Every exit fill, partial or final, is its own closed round trip: the quantity it closed, at
+//! the trade's average entry, with that fill's realized P&L. A trade still open is one more
+//! round trip that is not closed.
 
 use super::weighted_average_entry_price;
 use aeris_instruments::InstrumentId;
-use aeris_trading::{
-    BrokerPosition, Fill, FillId, FixedPoint, OrderSide, Position, TradingAccountId,
-};
+use aeris_trading::{Fill, FillId, FixedPoint, OrderSide, Position, TradingAccountId};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 type PositionKey = (TradingAccountId, InstrumentId);
 
@@ -48,21 +51,23 @@ impl TradeLeg {
     }
 }
 
-/// One executed trade from entry to exit, projected from the trading owner's fills.
+/// One executed trade, projected from the trading owner's fills: either the part of a trade one
+/// exit fill closed, or a trade that is still open.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TradeRoundTrip {
     pub account_id: TradingAccountId,
     pub instrument_id: InstrumentId,
     /// Opening side: buy for a long trade, sell for a short one.
     pub side: OrderSide,
-    /// Every fill that opened or added to the trade. `None` when the trade opened before the
-    /// retained fill history, so its entry price and size are unknown.
+    /// The fills that opened or added to the trade before this exit; a closed round trip carries
+    /// the quantity its exit closed. `None` when the trade opened before the retained fill
+    /// history, so its entry price is unknown.
     pub entry: Option<TradeLeg>,
-    /// Every fill that reduced or closed the trade; partial while the trade is still open.
+    /// The exit fill of a closed round trip, or every exit so far of an open trade.
     pub exit: Option<TradeLeg>,
     pub closed: bool,
-    /// Final realized P&L of a closed trade. `None` while open, or when no complete record of
-    /// the trade's realized P&L exists.
+    /// Realized P&L of a closed round trip's exit. `None` while open, or when the owner has no
+    /// record of it.
     pub final_pnl: Option<FixedPoint>,
     /// Realized exits in this cycle plus the current unrealized position P&L. `None` for a
     /// closed trade or when the owner's cycle baseline is unknown.
@@ -149,30 +154,42 @@ impl OpenTrade {
         Ok(())
     }
 
-    fn finish(
-        self,
+    /// The closed round trip of `fill`, an exit closing `closed` of this trade, recorded before
+    /// the exit is added to the trade.
+    fn closing(
+        &self,
         key: &PositionKey,
-        closed: bool,
-        completed_pnl: Option<FixedPoint>,
-        open_pnl: Option<FixedPoint>,
+        fill: &Fill,
+        closed: FixedPoint,
+        realized_pnl: Option<FixedPoint>,
     ) -> TradeRoundTrip {
-        // The owner records final P&L on the closing fill. When that record predates it, the
-        // exits' realized P&L is still exact, but only if every exit of the trade is retained.
-        let recovered_pnl = (self.entry_known && self.exits_recorded)
-            .then_some(self.exit_realized_pnl)
-            .flatten();
+        TradeRoundTrip {
+            account_id: key.0.clone(),
+            instrument_id: key.1.clone(),
+            side: self.side,
+            entry: self
+                .entry
+                .filter(|_| self.entry_known)
+                .map(|entry| TradeLeg {
+                    quantity: closed,
+                    ..entry
+                }),
+            exit: Some(TradeLeg::new(fill, closed)),
+            closed: true,
+            final_pnl: realized_pnl,
+            open_pnl: None,
+        }
+    }
+
+    fn still_open(self, key: &PositionKey, open_pnl: Option<FixedPoint>) -> TradeRoundTrip {
         TradeRoundTrip {
             account_id: key.0.clone(),
             instrument_id: key.1.clone(),
             side: self.side,
             entry: self.entry.filter(|_| self.entry_known),
             exit: self.exit,
-            closed,
-            final_pnl: if closed {
-                completed_pnl.or(recovered_pnl)
-            } else {
-                None
-            },
+            closed: false,
+            final_pnl: None,
             open_pnl,
         }
     }
@@ -277,18 +294,21 @@ pub(super) fn project_round_trips<'a>(
         }
         let closed_units = before.unsigned_abs().min(signed.units().unsigned_abs());
         let closed = quantity(closed_units, scale)?;
-        trade.add_exit(fill, closed, fill_realized_pnl.get(&fill.id).copied())?;
-        if after != 0 && after.signum() == before.signum() {
+        let closes_trade = after == 0 || after.signum() != before.signum();
+        let realized_pnl = fill_realized_pnl.get(&fill.id).copied();
+        // Fills recorded before per-fill P&L carry only the completed trade's P&L, which is
+        // this exit's own when it is the only exit of a fully retained trade.
+        let realized_pnl = realized_pnl.or_else(|| {
+            (closes_trade && trade.entry_known && trade.exit.is_none())
+                .then(|| completed_trade_pnl.get(&fill.id).copied())
+                .flatten()
+        });
+        round_trips.push(trade.closing(&key, fill, closed, realized_pnl));
+        trade.add_exit(fill, closed, realized_pnl)?;
+        if !closes_trade {
             continue;
         }
-        if let Some(trade) = open.remove(&key) {
-            round_trips.push(trade.finish(
-                &key,
-                true,
-                completed_trade_pnl.get(&fill.id).copied(),
-                None,
-            ));
-        }
+        open.remove(&key);
         if after != 0 {
             open.insert(
                 key,
@@ -298,67 +318,50 @@ pub(super) fn project_round_trips<'a>(
     }
     for (key, trade) in open {
         let open_pnl = trade.open_pnl(&key, positions, trade_pnl_cycles)?;
-        round_trips.push(trade.finish(&key, false, None, open_pnl));
+        round_trips.push(trade.still_open(&key, open_pnl));
     }
     round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
     Ok(round_trips)
 }
 
-/// Projects closed broker trades, newest activity first, from broker fills ordered newest first.
+/// Projects the closing fills of broker trades, newest activity first, from broker fills ordered
+/// newest first.
 ///
 /// A broker trade is one broker position: hedged positions are identified by the broker, not
 /// netted per instrument. Its first retained fill sets the trade side unless the opening fill
-/// is older than the retained history, in which case only the exits are known. A position the
-/// broker still reports open is shown with open positions, never here.
+/// is older than the retained history, in which case only the exits are known. A partial close
+/// of a position the broker still holds is listed as soon as it fills; the remaining position
+/// is shown with open positions.
 pub(super) fn project_closed_broker_round_trips<'a>(
     fills_newest_first: impl DoubleEndedIterator<Item = &'a Fill>,
     fill_positions: &BTreeMap<FillId, String>,
-    open_positions: &BTreeMap<(TradingAccountId, String), BrokerPosition>,
     fill_realized_pnl: &BTreeMap<FillId, FixedPoint>,
 ) -> Result<Vec<TradeRoundTrip>, String> {
-    let mut trades = BTreeMap::<(TradingAccountId, String), (InstrumentId, OpenTrade)>::new();
+    let mut trades = BTreeMap::<(TradingAccountId, String), OpenTrade>::new();
+    let mut round_trips = Vec::new();
     for fill in fills_newest_first.rev() {
         let Some(position_id) = fill_positions.get(&fill.id) else {
             continue;
         };
-        let key = (fill.account_id.clone(), position_id.clone());
-        if open_positions.contains_key(&key) {
-            continue;
-        }
-        let Some((_, trade)) = trades.get_mut(&key) else {
+        let realized_pnl = fill_realized_pnl.get(&fill.id).copied();
+        let trade = match trades.entry((fill.account_id.clone(), position_id.clone())) {
+            Entry::Occupied(trade) => trade.into_mut(),
             // A closing fill opens nothing; seen first, the opening fill was not retained.
-            let trade = if fill_realized_pnl.contains_key(&fill.id) {
-                let mut trade = OpenTrade::already_open(-fill.side.sign());
-                trade.add_exit(
-                    fill,
-                    fill.quantity,
-                    fill_realized_pnl.get(&fill.id).copied(),
-                )?;
-                trade
-            } else {
-                OpenTrade::opened(fill, fill.quantity)
-            };
-            trades.insert(key, (fill.instrument_id.clone(), trade));
-            continue;
+            Entry::Vacant(slot) if realized_pnl.is_some() => {
+                slot.insert(OpenTrade::already_open(-fill.side.sign()))
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(OpenTrade::opened(fill, fill.quantity));
+                continue;
+            }
         };
         if fill.side == trade.side {
             trade.add_entry(fill, fill.quantity)?;
-        } else {
-            trade.add_exit(
-                fill,
-                fill.quantity,
-                fill_realized_pnl.get(&fill.id).copied(),
-            )?;
+            continue;
         }
+        let key = (fill.account_id.clone(), fill.instrument_id.clone());
+        round_trips.push(trade.closing(&key, fill, fill.quantity, realized_pnl));
     }
-    let mut round_trips = trades
-        .into_iter()
-        .filter(|(_, (_, trade))| trade.exit.is_some())
-        .map(|((account_id, _), (instrument_id, trade))| {
-            let pnl = trade.exit_realized_pnl.filter(|_| trade.exits_recorded);
-            trade.finish(&(account_id, instrument_id), true, pnl, None)
-        })
-        .collect::<Vec<_>>();
     round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
     Ok(round_trips)
 }

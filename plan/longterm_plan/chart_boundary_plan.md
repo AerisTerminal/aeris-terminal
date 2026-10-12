@@ -32,7 +32,7 @@ Updated 2026-10-04. A batch is **Complete** only when it is exercised through th
 | [AC1](#ac1--time-and-drawing-ownership) Time and drawing ownership | Aeris Charts | CB1e, CB2e, CB3e | **Open** | — |
 | [AC2](#ac2--missing-engine-operations) Missing engine operations | Aeris Charts | CB4e, CB5e, CB6e, CB7e, CB8e, CB9e, CB10e, CB15e | **Open** | — |
 | [P1](#p1--pin-bump) Pin bump | Terminal | — | **Open** | AC1, AC2 pushed |
-| [TB1](#tb1--drawing-persistence-and-shadow-series-removal) Drawing persistence, shadow series removal | Terminal | CB1t, CB2t, CB3t | **Open** | P1 |
+| [TB1](#tb1--drawing-persistence-and-shadow-series-removal) Drawing persistence, shadow series removal | Terminal | CB1t, CB2t, CB3t | **Open**: CB1t and the section 5 reader landed on Aeris Charts `d4ed93b`; CB2t, CB3t open | P1 |
 | [TB2](#tb2--replace-host-patches-and-internal-access) Host patches and internal access | Terminal | CB4t, CB5t, CB6t, CB7t, CB8t, CB13, CB15t | **Open** | P1 |
 | [TB3](#tb3--single-catalog-and-typed-state) Single catalog and typed state | Terminal | CB9t, CB10 | **Open** | P1 |
 | [TB4](#tb4--misplaced-product-code) Misplaced product code | Terminal | CB11, CB12, CB13 | **Open** | — |

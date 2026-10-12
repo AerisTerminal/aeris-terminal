@@ -1317,7 +1317,10 @@ mod instrument_drawings {
     use std::num::NonZeroUsize;
     use std::sync::{atomic::AtomicU64, mpsc};
 
-    const LINE: &str = r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":10.0,"price":100.0}]}]"#;
+    const LINE: &str = r#"{"schema":"aeris_charts-drawings","schema_version":1,"drawings":[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":10.0,"price":100.0}]}]}"#;
+    const LOCKED_LINE: &str = r#"{"schema":"aeris_charts-drawings","schema_version":1,"drawings":[{"id":1,"kind":"horizontal_line","pane_index":0,"locked":true,"points":[{"logical":10.0,"price":100.0}]}]}"#;
+    /// The bare drawing array workspaces saved before Aeris Charts owned the drawings document.
+    const LEGACY_LINE: &str = r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":10.0,"price":100.0}]}]"#;
 
     struct SurfaceHarness(Entity<WorkspaceSurface>);
 
@@ -1422,7 +1425,7 @@ mod instrument_drawings {
             let chart = surface.chart.clone().expect("chart");
             chart.update(cx, |chart, _| {
                 chart
-                    .import_semantic_state_json(LINE, &[1])
+                    .import_drawings_json(LOCKED_LINE)
                     .expect("drawing imports");
             });
         });
@@ -1442,40 +1445,57 @@ mod instrument_drawings {
         assert_eq!(drawing_count(&surface, cx), 1);
         let on_a = saved(&surface, cx);
         assert_eq!(saved_instruments(&on_a), ["A"]);
-        assert_eq!(on_a.instrument_drawings[0].locked_drawing_ids.len(), 1);
+        assert_eq!(
+            on_a.instrument_drawings[0].locked_drawing_ids,
+            Vec::<u32>::new()
+        );
+        assert_eq!(
+            locked_count(&surface, cx),
+            1,
+            "the lock travels in the document"
+        );
 
         let (reopened, _reopened_requests, cx) = open_surface(cx, instrument("B"), Some(on_b));
         show(&reopened, "B", cx);
         assert_eq!(drawing_count(&reopened, cx), 0);
         show(&reopened, "A", cx);
         assert_eq!(drawing_count(&reopened, cx), 1);
+        assert_eq!(locked_count(&reopened, cx), 1);
+    }
+
+    fn locked_count(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) -> usize {
+        cx.read(|cx| {
+            surface.read(cx).chart.as_ref().map_or(0, |chart| {
+                chart.read(cx).drawings_lock_summary().locked_count
+            })
+        })
     }
 
     #[gpui::test]
     fn legacy_drawings_restore_onto_the_panes_instrument_only(cx: &mut TestAppContext) {
         let legacy = WorkspaceChartState {
-            chart_state_json: LINE.to_string(),
+            chart_state_json: LEGACY_LINE.to_string(),
+            locked_drawing_ids: vec![1],
             ..WorkspaceChartState::default()
         };
         let (surface, _requests, cx) = open_surface(cx, instrument("A"), Some(legacy));
         show(&surface, "A", cx);
         assert_eq!(drawing_count(&surface, cx), 1);
+        assert_eq!(locked_count(&surface, cx), 1);
         assert_eq!(saved_instruments(&saved(&surface, cx)), ["A"]);
 
         show(&surface, "B", cx);
         assert_eq!(drawing_count(&surface, cx), 0);
     }
 
-    const TWO_LINES: &str = r#"[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":10.0,"price":100.0}]},{"id":2,"kind":"horizontal_line","pane_index":0,"points":[{"logical":20.0,"price":110.0}]}]"#;
+    const TWO_LINES: &str = r#"{"schema":"aeris_charts-drawings","schema_version":1,"drawings":[{"id":1,"kind":"horizontal_line","pane_index":0,"points":[{"logical":10.0,"price":100.0}]},{"id":2,"kind":"horizontal_line","pane_index":0,"points":[{"logical":20.0,"price":110.0}]}]}"#;
 
     /// A committed drawing edit on the surface's chart.
     fn draw(surface: &Entity<WorkspaceSurface>, json: &str, cx: &mut VisualTestContext) {
         surface.update(cx, |surface, cx| {
             let chart = surface.chart.clone().expect("chart");
             chart.update(cx, |chart, _| {
-                chart
-                    .import_semantic_state_json(json, &[])
-                    .expect("drawing imports");
+                chart.import_drawings_json(json).expect("drawing imports");
             });
         });
     }

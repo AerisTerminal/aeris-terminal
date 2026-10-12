@@ -321,8 +321,9 @@ pub struct TradingSnapshot {
     pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
     /// Realized P&L of each fill that reduced or closed a position, partial exits included.
     pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
-    /// Trades grouped from `fills`, entry to exit, newest activity first: simulated trades
-    /// open and closed, and closed broker trades (open ones are `broker_positions`).
+    /// Trades grouped from `fills`, newest activity first: one closed round trip per exit fill,
+    /// partial or final, of simulated and broker trades, plus each open simulated trade (open
+    /// broker trades are `broker_positions`).
     pub round_trips: Vec<TradeRoundTrip>,
     pub positions: Vec<Position>,
     pub broker_positions: Vec<BrokerPosition>,
@@ -4464,7 +4465,8 @@ impl Coordinator {
             .collect()
     }
 
-    /// Simulated round trips, open and closed, merged with closed broker round trips.
+    /// Simulated round trips, open and closed, merged with closed broker round trips; every exit
+    /// fill, partial or final, is one closed round trip.
     fn round_trips(&self) -> Result<Vec<TradeRoundTrip>, String> {
         let broker_fills = self
             .state
@@ -4484,7 +4486,6 @@ impl Coordinator {
         round_trips.extend(round_trip::project_closed_broker_round_trips(
             broker_fills.into_iter(),
             &self.state.broker_fill_positions,
-            &self.state.broker_positions,
             &self.state.fill_realized_pnl,
         )?);
         round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));

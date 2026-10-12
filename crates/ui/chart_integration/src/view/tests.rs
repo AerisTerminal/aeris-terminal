@@ -4212,16 +4212,13 @@ fn icon_stamps_place_the_chosen_registered_stamp() {
 }
 
 #[test]
-fn semantic_drawing_state_round_trips_after_indicator_panes_are_recreated() {
+fn drawings_document_round_trips_after_indicator_panes_are_recreated() {
     let mut source = interactive_chart();
     source
         .add_indicator(ChartIndicator::Rsi)
         .expect("RSI creates its oscillator pane");
     source.set_drawing_tool(Some(DrawingKind::HorizontalLine));
     click(&mut source, 300.0, 180.0);
-    let main_id = source
-        .selected_drawing_id()
-        .expect("main drawing is selected");
     assert!(source.set_selected_drawing_locked(true));
     let oscillator_id = source
         .engine
@@ -4237,19 +4234,14 @@ fn semantic_drawing_state_round_trips_after_indicator_panes_are_recreated() {
         .expect("oscillator drawing creates");
     source.engine.set_selected_drawing(Some(oscillator_id));
     assert!(source.set_selected_drawing_locked(true));
-    let json = source
-        .export_semantic_state_json()
-        .expect("drawings export");
-    let locked = source.locked_drawing_ids();
-    assert!(locked.contains(&main_id));
-    assert!(locked.contains(&oscillator_id));
+    let json = source.export_drawings_json().expect("drawings export");
 
     let mut restored = interactive_chart();
     restored
         .add_indicator(ChartIndicator::Rsi)
         .expect("RSI recreates its oscillator pane");
     restored
-        .import_semantic_state_json(&json, &locked)
+        .import_drawings_json(&json)
         .expect("drawings restore");
 
     assert_eq!(restored.drawing_count(), 2);
@@ -4259,51 +4251,55 @@ fn semantic_drawing_state_round_trips_after_indicator_panes_are_recreated() {
 }
 
 #[test]
-fn semantic_drawing_restore_uses_saved_time_instead_of_old_bar_index() {
+fn legacy_drawings_restore_at_their_saved_exchange_time_with_their_locks() {
     let replay = EmbeddedReplaySource
         .load_snapshot(LoadEmbeddedReplay { bar_count: 16 })
         .expect("embedded replay validates");
+    let point = |logical| aeris_charts_engine::DrawingPoint {
+        logical,
+        price: 100.0,
+    };
     let mut source = AerisChartView::with_replay(&replay);
-    source
+    let id = source
         .engine
         .add_drawing(
             DrawingKind::TrendLine,
             0,
-            vec![
-                aeris_charts_engine::DrawingPoint {
-                    logical: 5.5,
-                    price: 100.0,
-                },
-                aeris_charts_engine::DrawingPoint {
-                    logical: 12.0,
-                    price: 110.0,
-                },
-            ],
+            vec![point(7.5), point(12.0)],
             None,
         )
         .expect("drawing creates");
-    let mut state: serde_json::Value = serde_json::from_str(
-        &source
-            .export_semantic_state_json()
-            .expect("drawings export"),
-    )
-    .expect("export is JSON");
-    let saved_time = state[0]["points"][0]["aeris_anchor_time"]
-        .as_f64()
-        .expect("first anchor has exchange time");
-    assert_eq!(source.product_bars.logical_at_time(saved_time), Some(5.5));
+    let document: serde_json::Value =
+        serde_json::from_str(&source.export_drawings_json().expect("drawings export"))
+            .expect("export is JSON");
+    let mut legacy = document["drawings"].clone();
+    let saved_time = legacy[0]["points"][0]["time"].take();
+    let saved_points = legacy[0]["points"]
+        .as_array_mut()
+        .expect("anchors are an array");
+    for anchor in saved_points.iter_mut() {
+        anchor
+            .as_object_mut()
+            .expect("anchor is an object")
+            .remove("time");
+    }
+    saved_points[0] = serde_json::json!({
+        "logical": 5.5,
+        "price": 100.0,
+        "aeris_anchor_time": saved_time,
+    });
 
-    let later_time = source
-        .product_bars
-        .time_at_logical(7.5)
-        .expect("later anchor time");
-    state[0]["points"][0]["aeris_anchor_time"] = serde_json::Value::from(later_time);
     let mut restored = AerisChartView::with_replay(&replay);
     restored
-        .import_semantic_state_json(&state.to_string(), &[])
+        .import_drawings_json(
+            &crate::saved_drawings_document(&legacy.to_string(), &[id])
+                .expect("legacy drawings upgrade"),
+        )
         .expect("drawings restore");
-    assert!((restored.engine.drawings()[0].points[0].logical - 7.5).abs() < f64::EPSILON);
-    assert!((restored.engine.drawings()[0].points[1].logical - 12.0).abs() < f64::EPSILON);
+    let drawing = &restored.engine.drawings()[0];
+    assert!((drawing.points[0].logical - 7.5).abs() < 1e-9);
+    assert!((drawing.points[1].logical - 12.0).abs() < 1e-9);
+    assert!(drawing.locked);
 }
 
 #[test]

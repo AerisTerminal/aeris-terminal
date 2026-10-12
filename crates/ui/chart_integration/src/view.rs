@@ -2447,126 +2447,30 @@ impl AerisChartView {
         self.user_state_revision = self.user_state_revision.saturating_add(1);
     }
 
-    /// Exports Aeris Charts-owned committed drawing semantics in z-order. Each anchor
-    /// also carries its exchange time so a replacement bar series can restore
-    /// the same position after a timeframe switch. Market data,
-    /// indicator definitions and renderer/runtime state are intentionally absent.
+    /// Every committed drawing as an Aeris Charts drawings document, whose anchors carry the
+    /// exchange time they denote so another interval or history window restores them in place.
     ///
     /// # Errors
     ///
     /// Returns an error if Aeris Charts cannot serialize its bounded drawing state.
-    pub fn export_semantic_state_json(&self) -> Result<String, String> {
-        let mut items =
-            serde_json::from_str::<Vec<serde_json::Value>>(&self.engine.drawings_json())
-                .map_err(|_| "chart drawing state is malformed".to_string())?;
-        for item in &mut items {
-            let Some(points) = item
-                .get_mut("points")
-                .and_then(serde_json::Value::as_array_mut)
-            else {
-                continue;
-            };
-            for point in points {
-                let Some(logical) = point.get("logical").and_then(serde_json::Value::as_f64) else {
-                    continue;
-                };
-                if let Some(time) = self.product_bars.time_at_logical(logical)
-                    && let Some(point) = point.as_object_mut()
-                {
-                    point.insert(
-                        "aeris_anchor_time".to_string(),
-                        serde_json::Value::from(time),
-                    );
-                }
-            }
-        }
-        serde_json::to_string(&items)
-            .map_err(|_| "chart drawing state could not be serialized".to_string())
+    pub fn export_drawings_json(&self) -> Result<String, String> {
+        self.engine
+            .export_drawings_json()
+            .map_err(|error| error.to_string())
     }
 
-    /// Restores committed drawings after indicator panes have been recreated.
-    /// Older saved drawings without exchange-time anchors retain their original
-    /// logical coordinates until they can be exported against loaded history.
-    /// Lock ids are remapped because Aeris Charts deliberately allocates fresh local
-    /// drawing handles instead of accepting persisted runtime handles.
+    /// Replaces every drawing with an Aeris Charts drawings document, after indicator panes
+    /// have been recreated. Aeris Charts treats this as a restore, not an undoable edit.
     ///
     /// # Errors
     ///
-    /// Returns an error when the persisted JSON is malformed, exceeds the
-    /// drawing bound, references an invalid pane/kind, or Aeris Charts rejects it.
-    pub fn import_semantic_state_json(
-        &mut self,
-        json: &str,
-        locked_ids: &[u32],
-    ) -> Result<(), String> {
-        const MAXIMUM_PERSISTED_DRAWINGS: usize = 10_000;
-        let items = serde_json::from_str::<Vec<serde_json::Value>>(json)
-            .map_err(|_| "persisted drawing state is malformed".to_string())?;
-        if items.len() > MAXIMUM_PERSISTED_DRAWINGS {
-            return Err("persisted drawing count exceeds the chart bound".to_string());
-        }
-        self.engine.clear_drawings();
-        for item in items {
-            let old_id = item
-                .get("id")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|id| u32::try_from(id).ok())
-                .ok_or_else(|| "persisted drawing id is invalid".to_string())?;
-            let kind = item
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                .and_then(aeris_charts_engine::DrawingKind::from_name)
-                .ok_or_else(|| "persisted drawing kind is invalid".to_string())?;
-            let pane_index = item
-                .get("pane_index")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|pane| usize::try_from(pane).ok())
-                .ok_or_else(|| "persisted drawing pane is invalid".to_string())?;
-            let points = item
-                .get("points")
-                .cloned()
-                .ok_or_else(|| "persisted drawing anchors are missing".to_string())?;
-            let mut drawing_points =
-                serde_json::from_value::<Vec<aeris_charts_engine::DrawingPoint>>(points.clone())
-                    .map_err(|_| "persisted drawing anchors are invalid".to_string())?;
-            if let Some(saved_points) = points.as_array() {
-                for (point, saved) in drawing_points.iter_mut().zip(saved_points) {
-                    if let Some(time) = saved
-                        .get("aeris_anchor_time")
-                        .and_then(serde_json::Value::as_f64)
-                        && let Some(logical) = self.product_bars.logical_at_time(time)
-                    {
-                        point.logical = logical;
-                    }
-                }
-            }
-            let options = serde_json::to_string(&item)
-                .map_err(|_| "persisted drawing options are invalid".to_string())?;
-            let new_id = self
-                .engine
-                .add_drawing(kind, pane_index, drawing_points, Some(&options))
-                .ok_or_else(|| "persisted drawing could not be restored".to_string())?;
-            // Workspaces saved before locks were drawing state carry them as a separate id list.
-            if locked_ids.contains(&old_id) {
-                self.engine.set_drawing_locked(new_id, true);
-            }
-        }
+    /// Returns an error, leaving the drawings untouched, when Aeris Charts rejects the document.
+    pub fn import_drawings_json(&mut self, json: &str) -> Result<(), String> {
+        self.engine
+            .import_drawings_json(json)
+            .map_err(|error| error.to_string())?;
         self.invalidate_series_layout();
         Ok(())
-    }
-
-    /// Returns locked drawings in deterministic id order.
-    #[must_use]
-    pub fn locked_drawing_ids(&self) -> Vec<u32> {
-        let mut ids = self
-            .engine
-            .drawings()
-            .iter()
-            .filter(|drawing| drawing.locked)
-            .map(|drawing| drawing.id)
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids
     }
 
     fn apply_price_series_kind(&mut self) {

@@ -315,9 +315,7 @@ fn demand_startup_symbol_browser() -> rithmic_shell::RithmicSymbolBrowser {
 }
 
 fn import_drawings(chart: &mut AerisChartView, drawings: &WorkspaceInstrumentDrawingsState) {
-    if let Err(error) =
-        chart.import_semantic_state_json(&drawings.chart_state_json, &drawings.locked_drawing_ids)
-    {
+    if let Err(error) = chart.import_drawings_json(&drawings.chart_state_json) {
         diagnostic!("Aeris persisted drawings could not be restored: {error}");
     }
 }
@@ -5248,6 +5246,9 @@ impl WorkspaceSurface {
             aeris_chart_integration::ChartSyncEventKind::VisibleTimeRange { .. } => {
                 self.chart_link_flags & 0b10 != 0
             }
+            // Terminal links financial charts only, which never publish general-chart events.
+            aeris_chart_integration::ChartSyncEventKind::GeneralAxisView { .. }
+            | aeris_chart_integration::ChartSyncEventKind::GeneralCrosshair { .. } => false,
         };
         if !allowed {
             return false;

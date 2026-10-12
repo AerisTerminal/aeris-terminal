@@ -1758,28 +1758,58 @@ fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
 
     execute_market_order(&service, 2, OrderSide::Sell, 1, (10_100, 10_125));
     let snapshot = service.snapshot().expect("partial exit snapshot");
-    assert!(!snapshot.round_trips[0].closed);
-    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(10_000)));
-    assert_eq!(snapshot.round_trips[0].final_pnl, None);
+    let open_trade = |trips: &[TradeRoundTrip]| {
+        let [open] = trips.iter().filter(|trip| !trip.closed).collect::<Vec<_>>()[..] else {
+            panic!("one open trade, got {trips:?}");
+        };
+        open.clone()
+    };
+    let closing_pnl = |trips: &[TradeRoundTrip]| {
+        trips
+            .iter()
+            .filter(|trip| trip.closed)
+            .map(|trip| (trip.exit.map(|exit| exit.quantity), trip.final_pnl))
+            .collect::<Vec<_>>()
+    };
+    let open = open_trade(&snapshot.round_trips);
+    assert_eq!(open.current_pnl(), Some(price(10_000)));
+    assert_eq!(open.final_pnl, None);
+    assert_eq!(
+        closing_pnl(&snapshot.round_trips),
+        [(Some(contracts(1)), Some(price(5_000)))],
+        "the partial exit is history as soon as it fills"
+    );
 
     service
         .observe_market(observation(10_200, 10_225, 7, 6_000))
         .expect("next live mark");
     let snapshot = service.snapshot().expect("updated mark snapshot");
-    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(15_000)));
+    assert_eq!(
+        open_trade(&snapshot.round_trips).current_pnl(),
+        Some(price(15_000))
+    );
 
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
     let restarted = start_service(&directory);
     let snapshot = restarted.snapshot().expect("restored open snapshot");
-    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(15_000)));
+    assert_eq!(
+        open_trade(&snapshot.round_trips).current_pnl(),
+        Some(price(15_000))
+    );
 
     execute_market_order(&restarted, 3, OrderSide::Sell, 1, (10_200, 10_225));
     let snapshot = restarted.snapshot().expect("closed snapshot");
-    assert!(snapshot.round_trips[0].closed);
-    assert_eq!(snapshot.round_trips[0].open_pnl, None);
-    assert_eq!(snapshot.round_trips[0].current_pnl(), Some(price(15_000)));
+    assert!(snapshot.round_trips.iter().all(|trip| trip.closed));
+    assert_eq!(
+        closing_pnl(&snapshot.round_trips),
+        [
+            (Some(contracts(1)), Some(price(10_000))),
+            (Some(contracts(1)), Some(price(5_000))),
+        ],
+        "each exit is its own closed trade, newest first"
+    );
 }
 
 #[test]
@@ -1834,7 +1864,7 @@ fn scale_ins_partial_exits_and_reversals_group_by_position_cycle() {
 }
 
 #[test]
-fn a_trade_opened_before_retained_history_keeps_its_final_pnl_without_a_guessed_entry() {
+fn a_trade_opened_before_retained_history_keeps_its_exit_pnl_without_a_guessed_entry() {
     let directory = TestDirectory::new("round-trip-retention");
     let service = start_service(&directory);
     service
@@ -1848,17 +1878,22 @@ fn a_trade_opened_before_retained_history_keeps_its_final_pnl_without_a_guessed_
     execute_market_order(&service, 10, OrderSide::Sell, 1, (9_975, 10_000));
     let snapshot = service.snapshot().expect("snapshot");
     assert!(snapshot.fills.len() < 10, "the opening fill was retired");
-    let [trip] = snapshot.round_trips.as_slice() else {
-        panic!("one round trip, got {:?}", snapshot.round_trips);
-    };
-    assert_eq!(trip.side, OrderSide::Buy);
-    assert!(trip.closed);
-    assert_eq!(trip.entry, None, "a partial entry would misstate the trade");
-    assert_eq!(
-        trip.final_pnl,
-        Some(snapshot.positions[0].realized_pnl),
-        "the owner's final P&L survives retirement of the opening fill"
-    );
+    let retained_exits = snapshot
+        .fills
+        .iter()
+        .filter(|fill| fill.side == OrderSide::Sell)
+        .count();
+    assert_eq!(snapshot.round_trips.len(), retained_exits);
+    for trip in &snapshot.round_trips {
+        assert_eq!(trip.side, OrderSide::Buy);
+        assert!(trip.closed);
+        assert_eq!(trip.entry, None, "a partial entry would misstate the trade");
+        assert_eq!(
+            trip.final_pnl,
+            Some(price(-1_250)),
+            "each exit keeps its own realized P&L after the opening fill retires"
+        );
+    }
 }
 
 #[test]
