@@ -31,7 +31,7 @@ const TRADE_HISTORY_PNL_WIDTH: f32 = 95.0;
 /// Entry, stop loss and take profit share one narrower width so the positions tab fits the
 /// same compact window as the trade history.
 const POSITION_PRICE_WIDTH: f32 = 64.0;
-const POSITION_ACTION_WIDTH: f32 = 56.0;
+const POSITION_ACTION_WIDTH: f32 = 28.0;
 const TRADE_HISTORY_CELL_GAP: f32 = 8.0;
 const TRADE_HISTORY_ACCOUNT_MENU_WIDTH: f32 = 220.0;
 const TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT: f32 = 180.0;
@@ -55,6 +55,25 @@ pub(super) enum TradeHistoryAccountFilter {
     Account(String),
 }
 
+impl TradeHistoryAccountFilter {
+    fn includes(&self, account_id: &aeris_trading::TradingAccountId) -> bool {
+        match self {
+            Self::All => true,
+            Self::Account(account_key) => account_id.as_str() == account_key,
+        }
+    }
+}
+
+/// Balance, all-time realized P&L and running open P&L of the shown accounts in one currency.
+/// A total is `None` when any of its accounts does not know its value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AccountSummary {
+    currency: String,
+    balance: Option<aeris_trading::FixedPoint>,
+    realized: Option<aeris_trading::FixedPoint>,
+    unrealized: Option<aeris_trading::FixedPoint>,
+}
+
 /// Shared presentation copy of the trading owner's executed round trips.
 #[derive(Clone, Default)]
 pub(super) struct TradeHistory {
@@ -63,9 +82,13 @@ pub(super) struct TradeHistory {
     /// are included here but never listed: they are the positions tab's rows.
     round_trips: Arc<[aeris_trading_runtime::TradeRoundTrip]>,
     accounts: Arc<[aeris_trading::TradingAccount]>,
+    /// The owner's balance and P&L of every account.
+    account_pnl: Arc<[aeris_trading::AccountPnl]>,
     symbols: Arc<BTreeMap<aeris_instruments::InstrumentId, String>>,
     /// Indices into `round_trips` of the closed trades that pass the current account filter.
     rows: Arc<[usize]>,
+    /// Totals per currency of the accounts that pass the current account filter.
+    summaries: Arc<[AccountSummary]>,
 }
 
 impl TradeHistory {
@@ -183,6 +206,7 @@ impl BottomPanelState {
         self.history.revision = Some(snapshot.revision);
         self.history.round_trips = snapshot.round_trips.clone().into();
         self.history.accounts = snapshot.accounts.clone().into();
+        self.history.account_pnl = snapshot.account_pnl.clone().into();
         self.history.symbols = Arc::new(
             snapshot
                 .instruments
@@ -247,6 +271,7 @@ impl BottomPanelState {
             self.filter = TradeHistoryAccountFilter::All;
         }
         self.history.rows = trade_history_rows(&self.history.round_trips, &self.filter).into();
+        self.history.summaries = account_summaries(&self.history.account_pnl, &self.filter).into();
         self.positions.rows = position_rows(&self.positions.positions, &self.filter).into();
     }
 
@@ -339,15 +364,7 @@ fn trade_history_rows(
     round_trips
         .iter()
         .enumerate()
-        .filter(|(_, trip)| {
-            trip.closed
-                && match filter {
-                    TradeHistoryAccountFilter::All => true,
-                    TradeHistoryAccountFilter::Account(account_key) => {
-                        trip.account_id.as_str() == account_key
-                    }
-                }
-        })
+        .filter(|(_, trip)| trip.closed && filter.includes(&trip.account_id))
         .map(|(index, _)| index)
         .collect()
 }
@@ -356,14 +373,43 @@ fn position_rows(positions: &[OpenPosition], filter: &TradeHistoryAccountFilter)
     positions
         .iter()
         .enumerate()
-        .filter(|(_, position)| match filter {
-            TradeHistoryAccountFilter::All => true,
-            TradeHistoryAccountFilter::Account(account_key) => {
-                position.account_id.as_str() == account_key
-            }
-        })
+        .filter(|(_, position)| filter.includes(&position.account_id))
         .map(|(index, _)| index)
         .collect()
+}
+
+/// Totals of the filtered accounts per currency, in the owner's account order.
+fn account_summaries(
+    account_pnl: &[aeris_trading::AccountPnl],
+    filter: &TradeHistoryAccountFilter,
+) -> Vec<AccountSummary> {
+    let total = |sum: Option<aeris_trading::FixedPoint>, value| {
+        sum.zip(value)
+            .and_then(|(sum, value)| sum.checked_add(value).ok())
+    };
+    let mut summaries = Vec::<AccountSummary>::new();
+    for pnl in account_pnl
+        .iter()
+        .filter(|pnl| filter.includes(&pnl.account_id))
+    {
+        match summaries
+            .iter_mut()
+            .find(|summary| summary.currency == pnl.currency)
+        {
+            Some(summary) => {
+                summary.balance = total(summary.balance, pnl.balance);
+                summary.realized = total(summary.realized, Some(pnl.realized));
+                summary.unrealized = total(summary.unrealized, pnl.unrealized);
+            }
+            None => summaries.push(AccountSummary {
+                currency: pnl.currency.clone(),
+                balance: pnl.balance,
+                realized: Some(pnl.realized),
+                unrealized: pnl.unrealized,
+            }),
+        }
+    }
+    summaries
 }
 
 impl TerminalApp {
@@ -563,6 +609,13 @@ fn trade_history_header(
         .child(bottom_panel_tabs(terminal, state, theme))
         .when(open, |header| header.child(count_label))
         .child(div().flex_1())
+        .children(
+            state
+                .history
+                .summaries
+                .iter()
+                .map(|summary| account_summary(summary, theme)),
+        )
         .when(rithmic_attribution, |header| {
             header.child(super::terminal_chrome::rithmic_attribution(theme))
         })
@@ -571,6 +624,39 @@ fn trade_history_header(
             header.child(trade_history_account_filter(terminal, state, theme))
         })
         .child(trade_history_expand_button(terminal, open, theme))
+}
+
+/// Balance, realized P&L and open P&L of the shown accounts in one currency. It stays in the
+/// header, so it is visible while the panel is collapsed.
+fn account_summary(summary: &AccountSummary, theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    let item = |label: &'static str, value: Div| {
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(label)
+            .child(value)
+    };
+    let pnl = |value| {
+        trade_history_pnl_value(value, &summary.currency, theme)
+            .font_features(platform_tabular_numerals())
+    };
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(item(
+            "Balance",
+            div()
+                .text_color(gpui_color(colors.text_default))
+                .font_features(platform_tabular_numerals())
+                .child(trade_history_money_text(summary.balance, &summary.currency)),
+        ))
+        .child(item("Realized P&L", pnl(summary.realized)))
+        .child(item("Unrealized P&L", pnl(summary.unrealized)))
 }
 
 /// The panel's tabs. While the panel is collapsed no tab is selected; choosing the open tab
@@ -1029,9 +1115,13 @@ fn position_close_button(
 ) -> Button {
     let account_key = position.account_id.as_str().to_string();
     let button = Button::new(("position_close", index), theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Sm)
-        .label("Close");
+        .round()
+        .danger_on_hover()
+        .icon(header_icon(HugeIcon::Close))
+        .aria_label("Close position")
+        .tooltip(TooltipSpec::new("Close position", theme).show_delay(TOOLTIP_OPEN_DELAY));
     match &position.closer {
         PositionCloser::Broker {
             broker_position_id,
@@ -1083,25 +1173,34 @@ fn trade_history_pnl_cell(
     currency: &str,
     theme: &AerisTheme,
 ) -> Div {
+    trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
+        .text_right()
+        .child(trade_history_pnl_value(pnl, currency, theme))
+}
+
+fn trade_history_pnl_value(
+    pnl: Option<aeris_trading::FixedPoint>,
+    currency: &str,
+    theme: &AerisTheme,
+) -> Div {
     let colors = theme.colors;
     let color = pnl.map_or(colors.text_secondary, |pnl| match pnl.units().cmp(&0) {
         std::cmp::Ordering::Less => colors.text_negative,
         std::cmp::Ordering::Equal => colors.text_secondary,
         std::cmp::Ordering::Greater => colors.text_positive,
     });
-    trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
-        .text_right()
+    div()
         .text_color(gpui_color(color))
-        .child(trade_history_pnl_text(pnl, currency))
+        .child(trade_history_money_text(pnl, currency))
 }
 
-fn trade_history_pnl_text(pnl: Option<aeris_trading::FixedPoint>, currency: &str) -> String {
-    pnl.map_or_else(
+fn trade_history_money_text(value: Option<aeris_trading::FixedPoint>, currency: &str) -> String {
+    value.map_or_else(
         || "—".to_string(),
-        |pnl| {
+        |value| {
             format!(
                 "{currency} {}",
-                market_price_text(pnl.units(), u32::from(pnl.scale()))
+                market_price_text(value.units(), u32::from(value.scale()))
             )
         },
     )
@@ -1209,9 +1308,68 @@ mod tests {
     fn final_pnl_shows_its_sign_and_an_unknown_result_a_dash() {
         let loss = aeris_trading::FixedPoint::try_new(-252_500, 2).expect("loss");
         let gain = aeris_trading::FixedPoint::try_new(735_000, 2).expect("gain");
-        assert_eq!(trade_history_pnl_text(Some(loss), "USD"), "USD -2525.00");
-        assert_eq!(trade_history_pnl_text(Some(gain), "USD"), "USD 7350.00");
-        assert_eq!(trade_history_pnl_text(None, "USD"), "—");
+        assert_eq!(trade_history_money_text(Some(loss), "USD"), "USD -2525.00");
+        assert_eq!(trade_history_money_text(Some(gain), "USD"), "USD 7350.00");
+        assert_eq!(trade_history_money_text(None, "USD"), "—");
+    }
+
+    fn account_pnl(
+        account: &str,
+        currency: &str,
+        balance: Option<i64>,
+        realized: i64,
+        unrealized: Option<i64>,
+    ) -> aeris_trading::AccountPnl {
+        let money = |units| aeris_trading::FixedPoint::try_new(units, 2).expect("money");
+        aeris_trading::AccountPnl {
+            account_id: aeris_trading::TradingAccountId::try_new(account).expect("account"),
+            currency: currency.to_string(),
+            realized: money(realized),
+            unrealized: unrealized.map(money),
+            balance: balance.map(money),
+            equity: None,
+        }
+    }
+
+    #[test]
+    fn account_summary_totals_the_shown_accounts_per_currency() {
+        let money = |units| Some(aeris_trading::FixedPoint::try_new(units, 2).expect("money"));
+        let accounts = [
+            account_pnl("a", "USD", Some(100_000), 50_00, Some(-5_00)),
+            account_pnl("b", "EUR", Some(200_000), -10_00, Some(3_00)),
+            account_pnl("c", "USD", Some(50_000), 20_00, Some(1_00)),
+            // A disconnected broker account knows only its realized P&L.
+            account_pnl("d", "EUR", None, 7_00, None),
+        ];
+        assert_eq!(
+            account_summaries(&accounts, &TradeHistoryAccountFilter::All),
+            [
+                AccountSummary {
+                    currency: "USD".to_string(),
+                    balance: money(150_000),
+                    realized: money(70_00),
+                    unrealized: money(-4_00),
+                },
+                AccountSummary {
+                    currency: "EUR".to_string(),
+                    balance: None,
+                    realized: money(-3_00),
+                    unrealized: None,
+                },
+            ]
+        );
+        assert_eq!(
+            account_summaries(
+                &accounts,
+                &TradeHistoryAccountFilter::Account("c".to_string())
+            ),
+            [AccountSummary {
+                currency: "USD".to_string(),
+                balance: money(50_000),
+                realized: money(20_00),
+                unrealized: money(1_00),
+            }]
+        );
     }
 
     fn broker_position(account: &str, id: &str, opened: i64) -> aeris_trading::BrokerPosition {

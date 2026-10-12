@@ -133,18 +133,21 @@ fn account_summary(
     theme: &AerisTheme,
 ) -> Option<impl IntoElement + use<>> {
     let pnl = pnl?;
-    let realized_and_open = pnl.realized.checked_add(pnl.unrealized).ok().map_or_else(
-        || "P/L unavailable".to_string(),
+    let realized_and_open = pnl
+        .unrealized
+        .and_then(|unrealized| pnl.realized.checked_add(unrealized).ok());
+    let realized_and_open_text = realized_and_open.map_or_else(
+        || "unavailable".to_string(),
         |value| format_money(&pnl.currency, value),
     );
     let equity = pnl.equity.map_or_else(
         || "Equity unavailable".to_string(),
         |value| format!("Equity {}", format_money(&pnl.currency, value)),
     );
-    let pnl_color = if pnl.realized.units().saturating_add(pnl.unrealized.units()) >= 0 {
-        theme.colors.text_positive
-    } else {
-        theme.colors.text_negative
+    let pnl_color = match realized_and_open {
+        None => theme.colors.text_secondary,
+        Some(value) if value.units() >= 0 => theme.colors.text_positive,
+        Some(_) => theme.colors.text_negative,
     };
     Some(
         div()
@@ -162,7 +165,7 @@ fn account_summary(
             .child(
                 div()
                     .text_color(gpui_color(pnl_color))
-                    .child(format!("P/L {realized_and_open}")),
+                    .child(format!("P/L {realized_and_open_text}")),
             ),
     )
 }

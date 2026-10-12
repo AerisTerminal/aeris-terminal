@@ -49,7 +49,7 @@ fn record(stage: &str, service: &TradingService, trace: &mut String) {
         "{stage} revision={} orders=[{orders}] events=[{events}] fills=[{fills}] pnl={}/{}/{}",
         snapshot.revision,
         point(pnl.realized),
-        point(pnl.unrealized),
+        optional_point(pnl.unrealized),
         optional_point(pnl.equity)
     )
     .expect("write stage");
@@ -128,7 +128,7 @@ fn ledger(snapshot: &TradingSnapshot) -> String {
             pnl.account_id.as_str(),
             pnl.currency,
             point(pnl.realized),
-            point(pnl.unrealized),
+            optional_point(pnl.unrealized),
             optional_point(pnl.equity)
         )
         .expect("write pnl");

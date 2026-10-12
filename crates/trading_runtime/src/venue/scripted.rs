@@ -654,7 +654,17 @@ fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart
             ]
         );
     };
-    expected(&service.snapshot().expect("snapshot").round_trips);
+    let snapshot = service.snapshot().expect("snapshot");
+    expected(&snapshot.round_trips);
+    assert_eq!(
+        snapshot
+            .account_pnl
+            .iter()
+            .find(|pnl| pnl.account_id == broker().id)
+            .map(|pnl| pnl.realized),
+        Some(point(1_630, 2)),
+        "every recorded closing deal counts toward the realized P&L"
+    );
 
     drop(service);
     let restarted = start_service(&directory);
@@ -1120,14 +1130,15 @@ fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
         .iter()
         .find(|pnl| pnl.account_id == broker().id)
         .expect("account pnl");
-    assert_eq!(pnl.unrealized, point(-160, 2));
+    assert_eq!(pnl.unrealized, Some(point(-160, 2)));
+    assert_eq!(pnl.balance, Some(point(100_000, 2)));
     assert_eq!(
         pnl.equity,
         Some(point(99_840, 2)),
         "balance plus net open P&L"
     );
 
-    // A new generation reaches no account yet: no open P&L or equity is claimed.
+    // A new generation reaches no account yet: no open P&L, balance or equity is claimed.
     let (_generation, next) = service.attach_demo_venue().expect("reattach");
     let snapshot = service.snapshot().expect("snapshot");
     let pnl = snapshot
@@ -1135,7 +1146,10 @@ fn connected_broker_positions_carry_the_broker_unrealized_pnl() {
         .iter()
         .find(|pnl| pnl.account_id == broker().id)
         .expect("account pnl");
-    assert_eq!((pnl.unrealized, pnl.equity), (point(0, 2), None));
+    assert_eq!(
+        (pnl.unrealized, pnl.balance, pnl.equity),
+        (None, None, None)
+    );
     assert!(matches!(
         next.try_recv(),
         Ok(VenueRequest::Reconcile { .. })

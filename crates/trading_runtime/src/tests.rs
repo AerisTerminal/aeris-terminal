@@ -392,10 +392,9 @@ fn practice_accounts_are_user_created_with_durable_opening_equity() {
         })
         .expect("account creates");
     assert_eq!(created.display_name, "SIM • Evaluation");
-    assert_eq!(
-        service.snapshot().expect("snapshot").account_pnl[0].equity,
-        created.starting_equity
-    );
+    let pnl = &service.snapshot().expect("snapshot").account_pnl[0];
+    assert_eq!(pnl.balance, created.starting_equity);
+    assert_eq!(pnl.equity, created.starting_equity);
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
@@ -1778,6 +1777,17 @@ fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
         closing_pnl(&snapshot.round_trips),
         [(Some(contracts(1)), Some(price(5_000)))],
         "the partial exit is history as soon as it fills"
+    );
+    let account = &snapshot.account_pnl[0];
+    assert_eq!(account.realized, price(5_000));
+    assert_eq!(account.unrealized, Some(price(5_000)));
+    assert_eq!(
+        account
+            .balance
+            .zip(account.unrealized)
+            .and_then(|(balance, unrealized)| balance.checked_add(unrealized).ok()),
+        account.equity,
+        "equity is the balance plus open P&L"
     );
 
     service

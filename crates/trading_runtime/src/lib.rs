@@ -4608,18 +4608,19 @@ impl Coordinator {
                 if account.broker_ref.is_some() {
                     return self.broker_account_pnl(account, realized, unrealized);
                 }
+                let balance = account
+                    .starting_equity
+                    .map(|starting| starting.checked_add(realized))
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
                 Ok(AccountPnl {
                     account_id: account.id.clone(),
                     currency: account.currency.clone(),
                     realized,
-                    unrealized,
-                    equity: account
-                        .starting_equity
-                        .map(|starting| {
-                            starting
-                                .checked_add(realized)
-                                .and_then(|value| value.checked_add(unrealized))
-                        })
+                    unrealized: Some(unrealized),
+                    balance,
+                    equity: balance
+                        .map(|balance| balance.checked_add(unrealized))
                         .transpose()
                         .map_err(|error| error.to_string())?,
                 })
@@ -4627,30 +4628,40 @@ impl Coordinator {
             .collect()
     }
 
-    /// A broker account adds the broker's net unrealized P&L of its open positions, and its
-    /// equity is the broker balance plus that amount. Both need the venue to reach the
-    /// account now, so a disconnected account shows no open P&L and no equity rather than
-    /// a stale value.
+    /// A broker account adds the broker-reported realized P&L of every deal Aeris recorded and
+    /// the broker's net unrealized P&L of its open positions. Its balance is the broker's and its
+    /// equity is that balance plus the open P&L. Open P&L, balance and equity need the venue to
+    /// reach the account now, so a disconnected account shows none of them rather than a stale
+    /// value.
     fn broker_account_pnl(
         &self,
         account: &TradingAccount,
         realized: FixedPoint,
         unrealized: FixedPoint,
     ) -> Result<AccountPnl, String> {
-        let broker_unrealized = self.broker_unrealized(&account.id, account.currency_scale)?;
-        let unrealized = broker_unrealized
-            .map_or(Ok(unrealized), |broker| unrealized.checked_add(broker))
+        let realized = realized
+            .checked_add(self.broker_realized_since(
+                &account.id,
+                i64::MIN,
+                account.currency_scale,
+            )?)
             .map_err(|error| error.to_string())?;
-        let equity = self
+        let unrealized = self
+            .broker_unrealized(&account.id, account.currency_scale)?
+            .map(|broker| unrealized.checked_add(broker))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let balance = self
             .state
             .broker_balances
             .get(&account.id)
-            .filter(|_| broker_unrealized.is_some())
-            .map(|balance| {
-                balance
-                    .exact_rescale(account.currency_scale)
-                    .and_then(|balance| balance.checked_add(unrealized))
-            })
+            .filter(|_| unrealized.is_some())
+            .map(|balance| balance.exact_rescale(account.currency_scale))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let equity = balance
+            .zip(unrealized)
+            .map(|(balance, unrealized)| balance.checked_add(unrealized))
             .transpose()
             .map_err(|error| error.to_string())?;
         Ok(AccountPnl {
@@ -4658,6 +4669,7 @@ impl Coordinator {
             currency: account.currency.clone(),
             realized,
             unrealized,
+            balance,
             equity,
         })
     }

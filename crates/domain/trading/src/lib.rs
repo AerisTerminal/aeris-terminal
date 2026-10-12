@@ -671,8 +671,14 @@ impl BrokerPosition {
 pub struct AccountPnl {
     pub account_id: TradingAccountId,
     pub currency: String,
+    /// All-time realized P&L of every closed trade the owner has recorded.
     pub realized: FixedPoint,
-    pub unrealized: FixedPoint,
+    /// Running P&L of the open positions. `None` while a broker account is unreachable, so its
+    /// open P&L is unknown.
+    pub unrealized: Option<FixedPoint>,
+    /// Cash balance: closed trades only, before open P&L. `None` when unknown.
+    pub balance: Option<FixedPoint>,
+    /// Balance plus open P&L. `None` when unknown.
     pub equity: Option<FixedPoint>,
 }
 
