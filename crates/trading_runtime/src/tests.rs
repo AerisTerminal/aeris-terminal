@@ -878,6 +878,55 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         .expect("service stops");
 }
 
+#[test]
+fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
+    let directory = TestDirectory::new("stop-entry-bracket");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut entry = market_order("stop-entry", OrderSide::Buy, 1, 1_000);
+    entry.order_type = OrderType::Stop;
+    entry.stop_price = Some(FixedPoint::try_new(10_100, 2).expect("entry"));
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: fixed_stop_bracket_template(),
+        })
+        .expect("bracket accepted");
+
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("market below the entry");
+    let resting = service.snapshot().expect("resting snapshot");
+    assert_eq!(
+        resting.managed_brackets[0].status,
+        ManagedBracketStatus::AwaitingEntry
+    );
+    assert!(resting.fills.is_empty(), "the entry waits for its price");
+
+    service
+        .observe_market(observation(10_075, 10_100, 3, 3_000))
+        .expect("market reaches the entry");
+    let armed = service.snapshot().expect("armed snapshot");
+    assert_eq!(
+        armed.managed_brackets[0].status,
+        ManagedBracketStatus::Active
+    );
+    assert_eq!(
+        armed.fills[0].price,
+        FixedPoint::try_new(10_100, 2).expect("fill")
+    );
+    assert!(armed.orders.iter().any(|order| {
+        order.status.is_open()
+            && order.order_type == OrderType::Stop
+            && order.stop_price == Some(FixedPoint::try_new(9_900, 2).expect("stop"))
+    }));
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
 fn fixed_stop_bracket_template() -> BracketStrategyTemplate {
     BracketStrategyTemplate {
         trailing_stop: None,

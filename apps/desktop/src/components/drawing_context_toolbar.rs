@@ -1051,7 +1051,7 @@ fn order_button(ui: ToolbarUi<'_>) -> AnyElement {
                 .variant(ButtonVariant::Ghost)
                 .button_size(ButtonSize::Default)
                 .full_width()
-                .label("Create limit order")
+                .label("Create order")
                 .on_press(move |_, window, cx| {
                     terminal.update(cx, |terminal, terminal_cx| {
                         terminal.request_selected_drawing_order(window, terminal_cx);

@@ -257,7 +257,7 @@ impl TerminalApp {
             .ok_or("No order book for this instrument yet")?;
         let side = if long { "Buy" } else { "Sell" };
         Ok(format!(
-            "{side} {} {} with the drawing's limit entry, stop and target on {account}.",
+            "{side} {} {} when price reaches the drawing's entry, with its stop and target, on {account}.",
             trading.order_entry.quantity, frame.instrument_id
         ))
     }

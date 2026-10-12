@@ -6,22 +6,35 @@ use super::{
     price_format_min_move,
 };
 use aeris_charts_engine::{
-    ChartTimeZone, DrawingIntervalVisibility, DrawingLabelOptions, DrawingLevel,
+    ChartEngine, ChartTimeZone, DrawingIntervalVisibility, DrawingLabelOptions, DrawingLevel,
     DrawingPropertySchema, ProfileDrawingOptions, ProfileSource, drawing_property_schema,
 };
 use aeris_charts_render::color::Color;
 use num_traits::ToPrimitive;
 
 /// One drawing as its toolbar and settings dialog edit it: the Aeris Charts property schema of
-/// its kind and its current options.
+/// its kind, its current options, and the colors it paints for them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChartDrawingSettings {
     pub id: DrawingId,
     pub schema: DrawingPropertySchema,
     options: serde_json::Value,
+    painted_colors: serde_json::Value,
 }
 
 impl ChartDrawingSettings {
+    fn read(engine: &ChartEngine, id: DrawingId) -> Option<Self> {
+        let kind = engine.drawing(id)?.kind;
+        let options = serde_json::from_str(&engine.drawing_options_json(id)?).ok()?;
+        let painted_colors = serde_json::from_str(&engine.drawing_painted_colors_json(id)?).ok()?;
+        Some(Self {
+            id,
+            schema: drawing_property_schema(kind),
+            options,
+            painted_colors,
+        })
+    }
+
     #[must_use]
     pub const fn kind(&self) -> ChartDrawingKind {
         self.schema.kind
@@ -48,11 +61,17 @@ impl ChartDrawingSettings {
         self.value(name).as_str().unwrap_or_default()
     }
 
-    /// The color as `#RRGGBB` or `#RRGGBBAA`; `None` while the option is unset and the engine
-    /// paints its fallback.
+    /// The color the drawing paints for the option, as `#RRGGBB` or `#RRGGBBAA`: the stored
+    /// color, else the theme or stroke default Aeris Charts resolves for an unset option. `None`
+    /// only when the drawing has no single painted color for it.
     #[must_use]
     pub fn color(&self, name: &str) -> Option<String> {
-        drawing_color_hex(self.text(name))
+        drawing_color_hex(self.text(name)).or_else(|| {
+            self.painted_colors
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .and_then(drawing_color_hex)
+        })
     }
 
     #[must_use]
@@ -340,16 +359,11 @@ impl AerisChartView {
         removed
     }
 
-    /// The drawing's property schema and current options, or `None` for an unknown id.
+    /// The drawing's property schema, current options and painted colors, or `None` for an
+    /// unknown id.
     #[must_use]
     pub fn drawing_settings(&self, id: DrawingId) -> Option<ChartDrawingSettings> {
-        let kind = self.engine.drawing(id)?.kind;
-        let options = serde_json::from_str(&self.engine.drawing_options_json(id)?).ok()?;
-        Some(ChartDrawingSettings {
-            id,
-            schema: drawing_property_schema(kind),
-            options,
-        })
+        ChartDrawingSettings::read(&self.engine, id)
     }
 
     #[must_use]
@@ -558,5 +572,50 @@ impl AerisChartView {
             self.invalidate_series_frame();
         }
         stepped
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aeris_charts_engine::DrawingPoint;
+
+    #[test]
+    fn unset_position_colors_show_the_colors_the_chart_paints() {
+        let mut engine = ChartEngine::new(800.0, 400.0, 1.0);
+        let times = (0..20)
+            .map(|index| 1_700_000_000.0 + f64::from(index) * 60.0)
+            .collect::<Vec<_>>();
+        let values = vec![100.0; 20];
+        assert!(
+            engine
+                .set_series_data(0, &times, &values, &values, &values, &values)
+                .is_ok()
+        );
+        let point = |logical, price| DrawingPoint { logical, price };
+        let id = engine
+            .add_drawing(
+                ChartDrawingKind::LongPosition,
+                0,
+                vec![point(2.0, 100.0), point(8.0, 102.0), point(2.0, 99.0)],
+                None,
+            )
+            .expect("position drawing");
+        let settings = ChartDrawingSettings::read(&engine, id).expect("settings");
+        assert_eq!(settings.text("position_profit_color"), "");
+        let profit = settings
+            .color("position_profit_color")
+            .expect("painted profit");
+        let stop = settings.color("position_loss_color").expect("painted stop");
+        assert_ne!(profit, stop);
+        assert_eq!(settings.color("text_color"), None);
+
+        assert!(engine.drawing_apply_options(id, r##"{"position_profit_color":"#112233"}"##));
+        let settings = ChartDrawingSettings::read(&engine, id).expect("settings");
+        assert_eq!(
+            settings.color("position_profit_color").as_deref(),
+            Some("#112233")
+        );
+        assert_eq!(settings.color("position_loss_color"), Some(stop));
     }
 }

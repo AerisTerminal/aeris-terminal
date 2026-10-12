@@ -2433,6 +2433,34 @@ fn chart_tick_offset(
         .flatten()
 }
 
+/// The entry order that rests at `entry` until the market reaches it: a limit on the passive
+/// side of the touch, a stop beyond it. A limit beyond the touch is marketable and would fill
+/// at once instead of waiting for the drawing's entry. `None` when the prices cannot be
+/// compared exactly.
+fn resting_entry_order_type(
+    side: aeris_trading::OrderSide,
+    entry: aeris_trading::FixedPoint,
+    bid: aeris_trading::FixedPoint,
+    ask: aeris_trading::FixedPoint,
+) -> Option<aeris_trading::OrderType> {
+    let touch = match side {
+        aeris_trading::OrderSide::Buy => ask,
+        aeris_trading::OrderSide::Sell => bid,
+    }
+    .exact_rescale(entry.scale())
+    .ok()?
+    .units();
+    let beyond_touch = match side {
+        aeris_trading::OrderSide::Buy => entry.units() > touch,
+        aeris_trading::OrderSide::Sell => entry.units() < touch,
+    };
+    Some(if beyond_touch {
+        aeris_trading::OrderType::Stop
+    } else {
+        aeris_trading::OrderType::Limit
+    })
+}
+
 fn dispatch_chart_place_bracket(
     chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
@@ -2497,6 +2525,15 @@ fn chart_bracket_from_intent(
     let entry_price = entry
         .limit_price
         .ok_or(ChartIntentRejection::InvalidPrice)?;
+    let order_type =
+        resting_entry_order_type(entry.side, entry_price, observation.bid, observation.ask)
+            .ok_or(ChartIntentRejection::InvalidPrice)?;
+    let entry = aeris_trading_runtime::PlaceOrder {
+        order_type,
+        limit_price: (order_type == aeris_trading::OrderType::Limit).then_some(entry_price),
+        stop_price: (order_type == aeris_trading::OrderType::Stop).then_some(entry_price),
+        ..entry
+    };
     let tick = product.price_increment.filter(|tick| *tick > 0);
     let valid_relation = match entry.side {
         aeris_trading::OrderSide::Buy => {
