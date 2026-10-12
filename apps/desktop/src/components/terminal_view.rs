@@ -580,6 +580,7 @@ impl TerminalApp {
         self.absorb_render_requests(window, cx);
         self.synchronize_linked_charts(cx);
         self.share_workspace_drawings(cx);
+        self.sync_drawing_context_toolbar(cx);
         self.dispatch_due_economic_event_rules(cx);
         self.sync_market_summaries(cx);
     }
@@ -754,6 +755,7 @@ impl Render for TerminalApp {
                     terminal.end_workspace_drag(window, cx);
                     terminal.end_watchlist_drag(cx);
                     terminal.end_drawing_favorites_move(cx);
+                    terminal.end_drawing_context_toolbar_move(cx);
                 }),
             )
             .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
@@ -853,6 +855,7 @@ impl TerminalApp {
             title_bar_row_height + chart_chrome::CHART_CHROME_HEIGHT
         };
         let drawing_favorites = self.drawing_favorites_overlay(&terminal, chart_top, window, cx);
+        let drawing_context = self.drawing_context_overlay(&terminal, chart_top, window, cx);
         let command_palette = self.rendered_command_palette(&terminal, cx);
         let keyboard_shortcuts = self.keyboard_shortcuts_layer(&terminal);
         let trading_confirmation = self.trading_confirmation_layer(&terminal);
@@ -879,6 +882,7 @@ impl TerminalApp {
                         .child(charts),
                 )
                 .children(drawing_favorites)
+                .children(drawing_context)
                 .children(fullscreen_hint)
                 .children(overlay)
                 .children(context_menu)
@@ -900,6 +904,7 @@ impl TerminalApp {
             )
             .child(bottom_panel)
             .children(drawing_favorites)
+            .children(drawing_context)
             .children(fullscreen_hint)
             .children(overlay)
             .children(frameless_reveal_zone)
@@ -1496,6 +1501,7 @@ pub(super) fn terminal_root(
             chart_chrome,
             chart_settings_templates: Vec::new(),
             watchlist_entries: Vec::new(),
+            drawing_templates: Vec::new(),
         },
         lifecycle,
         window,
@@ -1513,6 +1519,7 @@ pub(super) struct TerminalShellInit {
     pub(super) chart_chrome: chart_chrome::ChartChromePreferences,
     pub(super) chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     pub(super) watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
+    pub(super) drawing_templates: Vec<WorkspaceDrawingTemplateState>,
 }
 
 fn terminal_shell_root(
@@ -1673,6 +1680,7 @@ pub(super) fn workspace_tabs_root(
             chart_chrome,
             chart_settings_templates: restored.chart_settings_templates.clone(),
             watchlist_entries: restored.watchlist_entries.clone(),
+            drawing_templates: restored.drawing_templates.clone(),
         },
         lifecycle,
         window,

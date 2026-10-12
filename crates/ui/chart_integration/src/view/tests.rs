@@ -5377,3 +5377,45 @@ fn appearance_reset_keeps_host_study_line_widths() {
         "resetting chart styling must not revert a study to the engine's default stroke"
     );
 }
+
+#[test]
+fn bars_report_their_span_in_the_largest_whole_drawing_interval_unit() {
+    let interval = |trades, months, seconds| {
+        bar_drawing_interval(trades, months, seconds)
+            .map(|interval| (interval.unit, interval.value))
+    };
+    assert_eq!(
+        interval(Some(500), None, 0),
+        Some((DrawingIntervalUnit::Ticks, 500.0))
+    );
+    assert_eq!(
+        interval(None, Some(3), 0),
+        Some((DrawingIntervalUnit::Months, 3.0))
+    );
+    assert_eq!(
+        interval(None, None, 1_209_600),
+        Some((DrawingIntervalUnit::Weeks, 2.0))
+    );
+    assert_eq!(
+        interval(None, None, 86_400),
+        Some((DrawingIntervalUnit::Days, 1.0))
+    );
+    assert_eq!(
+        interval(None, None, 14_400),
+        Some((DrawingIntervalUnit::Hours, 4.0))
+    );
+    assert_eq!(
+        interval(None, None, 300),
+        Some((DrawingIntervalUnit::Minutes, 5.0))
+    );
+    assert_eq!(
+        interval(None, None, 90),
+        Some((DrawingIntervalUnit::Seconds, 90.0))
+    );
+    assert_eq!(
+        interval(Some(0), Some(0), 60),
+        Some((DrawingIntervalUnit::Minutes, 1.0)),
+        "an empty tick or month count falls back to the bar's seconds"
+    );
+    assert_eq!(interval(None, None, 0), None);
+}

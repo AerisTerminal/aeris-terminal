@@ -24,6 +24,10 @@ mod chrome_menu;
 mod command_palette;
 #[path = "components/context_panel.rs"]
 mod context_panel;
+#[path = "components/drawing_context_toolbar.rs"]
+mod drawing_context_toolbar;
+#[path = "components/drawing_settings_dialog.rs"]
+mod drawing_settings_dialog;
 #[path = "components/drawing_toolbar.rs"]
 mod drawing_toolbar;
 #[path = "engine_market_worker.rs"]
@@ -93,7 +97,7 @@ use aeris_chart_integration::{
     ChartAlertCreateRequest, ChartAlertFrequency, ChartAlertId, ChartAlertLine,
     ChartAlertLineStatus, ChartAlertPriceScale, ChartAlertSnapshot, ChartAppearanceColor,
     ChartAppearanceSettings, ChartBridgeMetrics, ChartContextKind, ChartContextRequest,
-    ChartDrawingKind, ChartDrawingStamp, ChartExecutionId, ChartExecutionKind,
+    ChartDrawingId, ChartDrawingKind, ChartDrawingStamp, ChartExecutionId, ChartExecutionKind,
     ChartExecutionMarkerShape, ChartHostEventMarker, ChartHostOverlaySnapshot, ChartHostTimeWindow,
     ChartIndicator, ChartIndicatorState, ChartInstrumentMetadata, ChartLegendOptions, ChartOrderId,
     ChartOrderKind, ChartOrderRole, ChartOrderSide, ChartOrderStatus, ChartPositionId,
@@ -116,12 +120,12 @@ use aeris_contracts::{
     SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceBigTradesState,
     WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
     WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
-    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
-    workspace_study_setting_state,
+    WorkspaceDrawingTemplateState, WorkspaceInstrumentDrawingsState, WorkspaceLayoutState,
+    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
@@ -182,6 +186,8 @@ use chrome_menu::{
 };
 use command_palette::command_palette_layer;
 use context_panel::{ContextPanelHeightDrag, ContextPanelState, context_panel};
+use drawing_context_toolbar::DrawingContextToolbar;
+use drawing_settings_dialog::{DrawingSettingsDialogState, drawing_settings_dialog_layer};
 use drawing_toolbar::{
     DrawingFavoritesToolbar, DrawingSidebar, DrawingToolChoice, DrawingToolMenu,
     DrawingToolbarState, drawing_favorites_default_origin, drawing_favorites_toolbar_layer,
@@ -775,6 +781,14 @@ fn elapsed_nanos(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
+/// The chart state a surface last observed, so only a change redraws the surface.
+#[derive(Clone, Copy, Debug, Default)]
+struct ObservedChart {
+    clock_revision: u64,
+    /// A selection change redraws the terminal's drawing toolbar.
+    selected_drawing: Option<ChartDrawingId>,
+}
+
 struct WorkspaceSurface {
     chart: Option<Entity<AerisChartView>>,
     order_book: Entity<ReadOnlyOrderBookView>,
@@ -859,7 +873,7 @@ struct WorkspaceSurface {
     rithmic_previous_selection: Option<(Option<InstallProviderInstrument>, ChartInterval)>,
     restored_viewport: Option<(i64, i64)>,
     last_persisted_viewport: Option<(i64, i64)>,
-    last_chart_clock_revision: u64,
+    observed_chart: ObservedChart,
     pending_chart_context_menu: Option<ChartContextRequest>,
     pending_pane_activate: PaneActivationRequest,
     pending_settings_request: Option<LegendSettingsRequest>,
@@ -1260,19 +1274,22 @@ struct PendingStudyReinitialization {
     replacement_persisted: Option<WorkspaceChartStudyState>,
 }
 
-/// A legend settings control waiting for the workspace to select its pane and open the dialog.
+/// A chart settings request waiting for the workspace to select its pane and open the dialog:
+/// a legend control, or a drawing the trader double-clicked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegendSettingsRequest {
     Study(StudyInstanceId),
     BigTrades,
     Volume,
+    Drawing(ChartDrawingId),
 }
 
-/// The one indicator settings dialog a surface can have open.
+/// The one settings dialog a surface can have open.
 enum IndicatorSettingsDialog {
     Study(StudySettingsDialogState),
     BigTrades(BigTradesDialogState),
     Volume(VolumeDialogState),
+    Drawing(DrawingSettingsDialogState),
 }
 
 /// Draft volume settings; the chart changes only when the draft is applied.
@@ -2876,10 +2893,16 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 cx.notify();
             }
             let clock_revision = chart.read(cx).clock_revision();
-            if clock_revision != app.last_chart_clock_revision {
-                app.last_chart_clock_revision = clock_revision;
+            if clock_revision != app.observed_chart.clock_revision {
+                app.observed_chart.clock_revision = clock_revision;
                 cx.notify();
             }
+            let selected_drawing = chart.read(cx).selected_drawing_id();
+            if selected_drawing != app.observed_chart.selected_drawing {
+                app.observed_chart.selected_drawing = selected_drawing;
+                cx.notify();
+            }
+            app.close_vanished_drawing_settings_dialog(cx);
             let (activate, request, settings_request, study_remove_request, intents, sync_events) =
                 chart.update(cx, |chart, _| {
                     (
@@ -2920,6 +2943,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 }
                 ChartSettingsRequest::BigTrades => Some(LegendSettingsRequest::BigTrades),
                 ChartSettingsRequest::Volume => Some(LegendSettingsRequest::Volume),
+                ChartSettingsRequest::Drawing(id) => Some(LegendSettingsRequest::Drawing(id)),
             });
             if let Some(request) = settings_request {
                 app.pending_settings_request = Some(request);
@@ -4753,6 +4777,10 @@ struct TerminalApp {
     chart_settings_template_error: Option<String>,
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     chart_settings_persistence_dirty: bool,
+    /// User-named drawing style templates of every kind, shared by every chart.
+    drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    drawing_templates_persistence_dirty: bool,
+    drawing_context_toolbar: DrawingContextToolbar,
     /// Avatar click point the open platform menu is anchored under.
     platform_menu_anchor: Option<gpui::Point<Pixels>>,
     pages: app_navigation::AppPages,

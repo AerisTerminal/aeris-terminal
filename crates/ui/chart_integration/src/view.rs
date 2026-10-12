@@ -19,10 +19,10 @@ pub use aeris_charts_engine::DrawingKind as ChartDrawingKind;
 use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
-    DrawingId, EMA_RIBBON_DEFAULT_PERIODS, FinancialAppearance, FinancialLegendIdentity,
-    FinancialLegendRequest, HostLegendSeries, IndicatorChromeOptions, IndicatorKind, IndicatorPane,
-    InteractionOptions, PriceScaleMode, PriceScaleTarget, SeriesChromeFlag, TradingIntent,
-    TradingSnapshot,
+    DrawingId, DrawingInterval, DrawingIntervalUnit, EMA_RIBBON_DEFAULT_PERIODS,
+    FinancialAppearance, FinancialLegendIdentity, FinancialLegendRequest, HostLegendSeries,
+    IndicatorChromeOptions, IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleMode,
+    PriceScaleTarget, SeriesChromeFlag, TradingIntent, TradingSnapshot,
 };
 pub use aeris_charts_engine::{BigTradesFilter, BigTradesIntensity, BigTradesSize};
 pub use aeris_charts_engine::{
@@ -146,6 +146,59 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine, labels: TimeAxisLabe
     engine
         .apply_options(&options)
         .expect("the platform text options derived from platform.css are valid");
+}
+
+/// The per-series engine contract a market snapshot implies: axis label precision and the
+/// interval drawings test their timeframe visibility against.
+fn apply_replay_contract(engine: &mut ChartEngine, replay: &ReplaySnapshot) {
+    apply_platform_chrome_contract(engine, TimeAxisLabels::for_replay(replay));
+    engine.set_drawing_interval(drawing_interval(replay));
+}
+
+/// The bar cadence in the largest whole unit, so a 60-minute series matches a drawing's
+/// "1 hour" visibility the way traders name the interval.
+fn drawing_interval(replay: &ReplaySnapshot) -> Option<DrawingInterval> {
+    let definition = replay.bar_definition();
+    bar_drawing_interval(
+        definition.trades_per_bar,
+        definition.calendar_months,
+        definition.interval_seconds,
+    )
+}
+
+/// A bar's span in the largest unit that divides it evenly, the form Aeris Charts matches
+/// against a drawing's interval visibility.
+fn bar_drawing_interval(
+    trades_per_bar: Option<u32>,
+    calendar_months: Option<u32>,
+    seconds: u32,
+) -> Option<DrawingInterval> {
+    let interval = |unit, value: u32| DrawingInterval {
+        unit,
+        value: f64::from(value),
+    };
+    if let Some(trades) = trades_per_bar.filter(|&trades| trades > 0) {
+        return Some(interval(DrawingIntervalUnit::Ticks, trades));
+    }
+    if let Some(months) = calendar_months.filter(|&months| months > 0) {
+        return Some(interval(DrawingIntervalUnit::Months, months));
+    }
+    if seconds == 0 {
+        return None;
+    }
+    let (unit, value) = [
+        (DrawingIntervalUnit::Weeks, 604_800),
+        (DrawingIntervalUnit::Days, 86_400),
+        (DrawingIntervalUnit::Hours, 3_600),
+        (DrawingIntervalUnit::Minutes, 60),
+    ]
+    .into_iter()
+    .find(|&(_, unit_seconds)| seconds.is_multiple_of(unit_seconds))
+    .map_or(
+        (DrawingIntervalUnit::Seconds, seconds),
+        |(unit, unit_seconds)| (unit, seconds / unit_seconds),
+    );
+    Some(interval(unit, value))
 }
 
 /// Terminal interaction policy: the reference defaults plus wheel zoom over a price axis, which
@@ -537,13 +590,16 @@ fn css_hex(color: Color) -> String {
     }
 }
 
-/// A legend settings control the host answers by opening that item's settings dialog.
+/// A chart settings request (a legend settings control or a drawing double-click) the host
+/// answers by opening that item's settings dialog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChartSettingsRequest {
     /// One runtime-managed study, by its runtime study identity.
     Study(u64),
     BigTrades,
     Volume,
+    /// One drawing, by its Aeris Charts identity.
+    Drawing(DrawingId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1197,7 +1253,7 @@ impl AerisChartView {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
         register_drawing_stamps(&mut engine, theme);
-        apply_platform_chrome_contract(&mut engine, TimeAxisLabels::for_replay(replay));
+        apply_replay_contract(&mut engine, replay);
         apply_platform_interaction(&mut engine);
         apply_replay_time_scale_defaults(&mut engine, replay);
         let volume_series = install_volume_series(&mut engine);
@@ -1292,7 +1348,7 @@ impl AerisChartView {
             self.chart_type,
             &mut self.product_bars,
         );
-        apply_platform_chrome_contract(&mut self.engine, TimeAxisLabels::for_replay(replay));
+        apply_replay_contract(&mut self.engine, replay);
         apply_replay_time_scale_defaults(&mut self.engine, replay);
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
@@ -1822,7 +1878,7 @@ impl AerisChartView {
             self.chart_type,
             &mut self.product_bars,
         );
-        apply_platform_chrome_contract(&mut self.engine, TimeAxisLabels::for_replay(replay));
+        apply_replay_contract(&mut self.engine, replay);
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
@@ -1919,10 +1975,7 @@ impl AerisChartView {
                     &update,
                 );
                 if let Some(snapshot) = update.snapshot() {
-                    apply_platform_chrome_contract(
-                        &mut self.engine,
-                        TimeAxisLabels::for_replay(snapshot),
-                    );
+                    apply_replay_contract(&mut self.engine, snapshot);
                 }
                 if mutation == SeriesMutation::Snapshot {
                     self.sync_brushable_interaction();
@@ -3131,6 +3184,9 @@ mod drawing_stamps;
 pub use drawing_stamps::ChartDrawingStamp;
 use drawing_stamps::register_drawing_stamps;
 mod drawings;
+pub use drawings::{
+    ChartDrawingAnchorError, ChartDrawingAnchorText, ChartDrawingSettings, drawing_color_hex,
+};
 mod export;
 mod indicators;
 mod input;

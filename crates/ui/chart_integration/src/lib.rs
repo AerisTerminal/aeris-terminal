@@ -37,20 +37,33 @@ pub use aeris_charts_engine::{
     AppearanceColor as ChartAppearanceColor, FinancialThemeColors as ChartThemeColors,
     IndicatorChromeOptions as ChartIndicatorChrome,
 };
+pub use aeris_charts_engine::{
+    DrawingAnchorDescriptor as ChartDrawingAnchorDescriptor, DrawingId as ChartDrawingId,
+    DrawingInterval as ChartDrawingInterval, DrawingIntervalUnit as ChartDrawingIntervalUnit,
+    DrawingIntervalVisibility as ChartDrawingIntervalVisibility,
+    DrawingLabelMetric as ChartDrawingLabelMetric, DrawingLabelOptions as ChartDrawingLabelOptions,
+    DrawingLevel as ChartDrawingLevel, DrawingPropertyDescriptor as ChartDrawingProperty,
+    DrawingPropertyGroup as ChartDrawingPropertyGroup,
+    DrawingPropertySchema as ChartDrawingPropertySchema,
+    DrawingPropertyType as ChartDrawingPropertyType, MAX_DRAWING_LEVELS, MAX_DRAWING_NAME_BYTES,
+    MAX_DRAWING_TEMPLATE_BYTES, MAX_DRAWING_TEMPLATES,
+};
 /// The keys a focused chart consumes; desktop shortcuts must stay off them.
 pub use aeris_charts_render_gpui::input::chart_keystrokes;
 pub use bridge::ChartBridgeMetrics;
 pub use saved_drawings::saved_drawings_document;
 pub use view::{
     AerisChartView, BigTradesFilter, BigTradesIntensity, BigTradesSettings, BigTradesSize,
-    ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingKind,
-    ChartDrawingStamp, ChartIndicator, ChartIndicatorError, ChartIndicatorState,
-    ChartLegendOptions, ChartSettingsRequest, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingAnchorError,
+    ChartDrawingAnchorText, ChartDrawingKind, ChartDrawingSettings, ChartDrawingStamp,
+    ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartLegendOptions,
+    ChartSettingsRequest, ChartStudyInputRequirements, ChartStudyInputStream,
     ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind,
     ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType,
     DrawingsLockSummary, FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings,
     OrderFlowSweep, OrderFlowTrade, PriceAxisMenuAction, PriceAxisMenuState, VolumeAverageKind,
     VolumeAverageSettings, VolumePlacement, VolumeSettings, classify_order_flow_sweeps,
+    drawing_color_hex,
 };
 pub use view::{DEFAULT_STUDY_LINE_WIDTH, MAXIMUM_STUDY_LINE_WIDTH};
 pub use workspace::{AerisChartWorkspace, ChartSplitDirection, ChartWorkspaceLayout};

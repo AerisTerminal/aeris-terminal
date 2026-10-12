@@ -193,6 +193,9 @@ impl TerminalApp {
             chart_settings_template_error: None,
             chart_settings_templates: init.chart_settings_templates,
             chart_settings_persistence_dirty: false,
+            drawing_templates: init.drawing_templates,
+            drawing_templates_persistence_dirty: false,
+            drawing_context_toolbar: DrawingContextToolbar::default(),
             platform_menu_anchor: None,
             pages: app_navigation::AppPages::default(),
             frameless_title_bar: FramelessTitleBar::default(),
@@ -871,6 +874,9 @@ impl TerminalApp {
                 }
                 LegendSettingsRequest::Volume => {
                     surface.open_volume_dialog(window, surface_cx);
+                }
+                LegendSettingsRequest::Drawing(drawing) => {
+                    surface.open_drawing_settings_dialog(drawing, window, surface_cx);
                 }
             });
         }
@@ -2250,7 +2256,7 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn persist_workspace_layout_if_changed(&mut self, cx: &App) {
+    pub(super) fn persist_workspace_layout_if_changed(&mut self, cx: &App) {
         if self.closing {
             return;
         }
@@ -2263,6 +2269,7 @@ impl TerminalApp {
         if layout == self.persisted_layout
             && active_workspace_id == self.persisted_active_workspace_id
             && !self.chart_settings_persistence_dirty
+            && !self.drawing_templates_persistence_dirty
             && !self.watchlist_persistence_dirty
             && watchlist == self.persisted_watchlist
         {
@@ -2273,6 +2280,7 @@ impl TerminalApp {
             layout.clone(),
             self.chart_settings_templates.clone(),
             watchlist.clone(),
+            self.drawing_templates.clone(),
         ) {
             self.workspace_error = Some(error);
             return;
@@ -2280,6 +2288,7 @@ impl TerminalApp {
         self.persisted_layout = layout;
         self.persisted_active_workspace_id = active_workspace_id;
         self.chart_settings_persistence_dirty = false;
+        self.drawing_templates_persistence_dirty = false;
         self.persisted_watchlist = watchlist;
         self.watchlist_persistence_dirty = false;
     }

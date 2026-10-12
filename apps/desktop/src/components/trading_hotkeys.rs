@@ -1,5 +1,6 @@
 //! Keyboard trading: the held-key guard and the order confirmation that one-click trading skips.
-//! Clicks on the order ticket are not keyboard trading and never pass through here.
+//! Orders from a position drawing's toolbar share the confirmation. Clicks on the order ticket
+//! never pass through here.
 
 use super::chart_chrome::TradingShortcutMode;
 use super::*;
@@ -83,8 +84,41 @@ impl KeyboardTrading {
     }
 }
 
+/// What an accepted confirmation sends.
+enum ConfirmedTrade {
+    Hotkey(TradingHotkey),
+    /// The bracket a long or short position drawing describes, at the ticket quantity.
+    DrawingBracket {
+        chart: Entity<AerisChartView>,
+        drawing: ChartDrawingId,
+    },
+}
+
+impl ConfirmedTrade {
+    const fn title(&self) -> &'static str {
+        match self {
+            Self::Hotkey(hotkey) => hotkey.title(),
+            Self::DrawingBracket { .. } => "Place bracket order?",
+        }
+    }
+
+    const fn confirm_label(&self) -> &'static str {
+        match self {
+            Self::Hotkey(hotkey) => hotkey.confirm_label(),
+            Self::DrawingBracket { .. } => "Place order",
+        }
+    }
+
+    const fn tone(&self) -> ConfirmationTone {
+        match self {
+            Self::Hotkey(hotkey) => hotkey.tone(),
+            Self::DrawingBracket { .. } => ConfirmationTone::Positive,
+        }
+    }
+}
+
 struct TradingConfirmation {
-    hotkey: TradingHotkey,
+    trade: ConfirmedTrade,
     message: String,
     skip_next_time: bool,
 }
@@ -146,11 +180,50 @@ impl TerminalApp {
                 return true;
             }
         };
+        self.confirm_or_send_trade(ConfirmedTrade::Hotkey(hotkey), message, window, cx);
+        true
+    }
+
+    /// Places the bracket of a long or short position drawing on the active chart at the
+    /// ticket quantity, after the same confirmation as keyboard orders.
+    pub(super) fn request_drawing_bracket_order(
+        &mut self,
+        chart: Entity<AerisChartView>,
+        drawing: ChartDrawingId,
+        long: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.keyboard_trading.confirming() {
+            return;
+        }
+        match self.drawing_bracket_summary(long, cx) {
+            Ok(message) => self.confirm_or_send_trade(
+                ConfirmedTrade::DrawingBracket { chart, drawing },
+                message,
+                window,
+                cx,
+            ),
+            Err(reason) => {
+                aeris_desktop::trading::record_notice(Err(reason));
+                cx.notify();
+            }
+        }
+    }
+
+    /// One-click trading sends at once; otherwise the confirmation opens.
+    fn confirm_or_send_trade(
+        &mut self,
+        trade: ConfirmedTrade,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.chart_chrome.trading_shortcuts.one_click() {
-            self.send_trading_hotkey(hotkey, cx);
+            self.send_confirmed_trade(&trade, cx);
         } else {
             self.keyboard_trading.confirmation = Some(TradingConfirmation {
-                hotkey,
+                trade,
                 message,
                 skip_next_time: false,
             });
@@ -158,19 +231,42 @@ impl TerminalApp {
             self.chrome_focus.focus(window, cx);
         }
         cx.notify();
-        true
+    }
+
+    fn selected_trading_account_name(&self, cx: &App) -> Option<String> {
+        let trading = &self.active_surface().read(cx).trading_pnl;
+        trading
+            .order_entry
+            .selected_account_id
+            .as_ref()
+            .and_then(|id| trading.accounts.iter().find(|account| &account.id == id))
+            .map(|account| account.display_name.clone())
+    }
+
+    fn drawing_bracket_summary(&self, long: bool, cx: &App) -> Result<String, String> {
+        let account = self
+            .selected_trading_account_name(cx)
+            .ok_or("Choose a trading account first")?;
+        let surface = self.active_surface();
+        let trading = &surface.read(cx).trading_pnl;
+        if let Some(reason) = super::selected_account_lock_reason(trading) {
+            return Err(format!("{account} is locked: {reason}"));
+        }
+        let frame = self
+            .trading_order_frame(cx)
+            .ok_or("No order book for this instrument yet")?;
+        let side = if long { "Buy" } else { "Sell" };
+        Ok(format!(
+            "{side} {} {} with the drawing's limit entry, stop and target on {account}.",
+            trading.order_entry.quantity, frame.instrument_id
+        ))
     }
 
     /// What the command will do, or why it cannot run now.
     fn trading_hotkey_summary(&self, hotkey: TradingHotkey, cx: &App) -> Result<String, String> {
         let surface = self.active_surface();
         let trading = &surface.read(cx).trading_pnl;
-        let account = trading
-            .order_entry
-            .selected_account_id
-            .as_ref()
-            .and_then(|id| trading.accounts.iter().find(|account| &account.id == id))
-            .map(|account| account.display_name.clone());
+        let account = self.selected_trading_account_name(cx);
         match hotkey {
             TradingHotkey::BuyMarket | TradingHotkey::SellMarket => {
                 let account = account.ok_or("Choose a trading account first")?;
@@ -203,6 +299,29 @@ impl TerminalApp {
                 "Lock every practice account and cancel its working orders. Accounts stay locked until you unlock them."
                     .to_string(),
             ),
+        }
+    }
+
+    fn send_confirmed_trade(&self, trade: &ConfirmedTrade, cx: &mut Context<Self>) {
+        match trade {
+            ConfirmedTrade::Hotkey(hotkey) => self.send_trading_hotkey(*hotkey, cx),
+            ConfirmedTrade::DrawingBracket { chart, drawing } => {
+                if self.trading_order_entry_locked(cx) {
+                    return;
+                }
+                let quantity = self.trading_order_entry(cx).1;
+                let quantity = f64::from(u32::try_from(quantity).unwrap_or(u32::MAX));
+                // Aeris Charts turns the drawing into a bracket intent, which the chart's pane
+                // dispatches like any other chart order.
+                let placed = chart.update(cx, |chart, chart_cx| {
+                    let placed = chart.place_bracket_order_from_drawing(*drawing, quantity);
+                    chart_cx.notify();
+                    placed
+                });
+                if let Err(reason) = placed {
+                    aeris_desktop::trading::record_notice(Err(reason));
+                }
+            }
         }
     }
 
@@ -251,7 +370,7 @@ impl TerminalApp {
         if confirmation.skip_next_time {
             self.set_trading_shortcut_mode(TradingShortcutMode::OneClick, cx);
         }
-        self.send_trading_hotkey(confirmation.hotkey, cx);
+        self.send_confirmed_trade(&confirmation.trade, cx);
         self.focus_workspace(window, cx);
         cx.notify();
     }
@@ -291,15 +410,15 @@ impl TerminalApp {
 
     pub(super) fn trading_confirmation_layer(&self, terminal: &Entity<Self>) -> Option<AnyElement> {
         let confirmation = self.keyboard_trading.confirmation.as_ref()?;
-        let hotkey = confirmation.hotkey;
+        let trade = &confirmation.trade;
         let cancel = terminal.clone();
         let confirm = terminal.clone();
         let skip = terminal.clone();
         Some(
             ConfirmationDialog::new(
                 "trading_hotkey_confirmation",
-                hotkey.title(),
-                hotkey.tone(),
+                trade.title(),
+                trade.tone(),
                 &self.theme,
                 move |window, cx| {
                     cancel.update(cx, |terminal, terminal_cx| {
@@ -313,7 +432,7 @@ impl TerminalApp {
                 },
             )
             .message(confirmation.message.clone())
-            .confirm_label(hotkey.confirm_label())
+            .confirm_label(trade.confirm_label())
             .child(
                 SwitchRow::new(
                     "trading_hotkey_skip_confirmation",
@@ -322,7 +441,7 @@ impl TerminalApp {
                     &self.theme,
                 )
                 .description(
-                    "Turns on one-click trading: shortcuts send at once. Turn it off from the command palette.",
+                    "Turns on one-click trading: shortcuts and drawing orders send at once. Turn it off from the command palette.",
                 )
                 .on_change(move |checked, _, _, cx| {
                     skip.update(cx, |terminal, terminal_cx| {

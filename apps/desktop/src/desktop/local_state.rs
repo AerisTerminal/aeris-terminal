@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     SeriesCadence, SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
-    WorkspaceChartStudyState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream,
-    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceChartStudyState, WorkspaceDrawingTemplateState, WorkspaceLayoutState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream, WorkspaceTabState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -22,6 +23,9 @@ const MAXIMUM_CHART_COLOR_BYTES: usize = 64;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATES: usize = 32;
 pub(super) const MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES: usize = 64;
 pub(super) const MAXIMUM_WATCHLIST_ENTRIES: usize = 64;
+/// Fewer than Aeris Charts accepts, so the largest templates cannot crowd the workspace file.
+pub(super) const MAXIMUM_DRAWING_TEMPLATES: usize = 64;
+pub(super) const MAXIMUM_DRAWING_TEMPLATE_NAME_BYTES: usize = 64;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct LegacyWorkspaceEnvelope {
@@ -317,6 +321,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         watchlist_entries: vec![WorkspaceWatchlistEntryState {
             instrument: Some(instrument),
         }],
+        drawing_templates: Vec::new(),
     }
 }
 
@@ -348,6 +353,17 @@ pub(super) fn sanitize_workspace(mut workspace: WorkspaceState) -> WorkspaceStat
     workspace
         .chart_settings_templates
         .truncate(MAXIMUM_CHART_SETTINGS_TEMPLATES);
+    let mut drawing_template_names = std::collections::BTreeSet::new();
+    workspace.drawing_templates.retain(|template| {
+        valid_drawing_template(template)
+            && drawing_template_names.insert((
+                template.kind.clone(),
+                template.name.trim().to_ascii_lowercase(),
+            ))
+    });
+    workspace
+        .drawing_templates
+        .truncate(MAXIMUM_DRAWING_TEMPLATES);
     // Aeris Charts owns the canonical style defaults. Retire the legacy host-side
     // default template so reset cannot be overwritten after the engine API runs.
     workspace.default_chart_settings = None;
@@ -507,6 +523,17 @@ fn valid_chart_settings_template(template: &WorkspaceChartSettingsTemplateState)
             .appearance
             .as_ref()
             .is_some_and(valid_chart_appearance)
+}
+
+/// Shape checks only; Aeris Charts validates the template document when it is applied.
+fn valid_drawing_template(template: &WorkspaceDrawingTemplateState) -> bool {
+    let name = template.name.trim();
+    !name.is_empty()
+        && name.len() <= MAXIMUM_DRAWING_TEMPLATE_NAME_BYTES
+        && !template.name.chars().any(char::is_control)
+        && aeris_chart_integration::ChartDrawingKind::from_name(&template.kind).is_some()
+        && !template.template_json.is_empty()
+        && template.template_json.len() <= aeris_chart_integration::MAX_DRAWING_TEMPLATE_BYTES
 }
 
 fn valid_chart_time_zone(time_zone: &str) -> bool {
@@ -1467,6 +1494,43 @@ mod tests {
         assert_eq!(sanitized.chart_settings_templates[0].name, "Template 0");
         assert_eq!(sanitized.chart_settings_templates[1].name, "Template 1");
         assert!(sanitized.default_chart_settings.is_none());
+    }
+
+    #[test]
+    fn sanitizer_bounds_drawing_templates_and_keeps_names_unique_per_kind() {
+        let template = |kind: &str, name: &str| WorkspaceDrawingTemplateState {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            template_json: format!(r#"{{"name":"{name}","kind":"{kind}","options":{{}}}}"#),
+        };
+        let mut workspace = default_workspace();
+        workspace.drawing_templates = vec![
+            template("trend_line", "Orange"),
+            template("trend_line", "orange"),
+            template("rectangle", "Orange"),
+            template("not_a_drawing", "Blue"),
+            template("trend_line", "\nhidden"),
+            WorkspaceDrawingTemplateState {
+                template_json: String::new(),
+                ..template("ray", "Empty")
+            },
+        ];
+        workspace.drawing_templates.extend(
+            (0..MAXIMUM_DRAWING_TEMPLATES).map(|index| template("ray", &format!("Ray {index}"))),
+        );
+
+        let sanitized = sanitize_workspace(workspace);
+
+        assert_eq!(sanitized.drawing_templates.len(), MAXIMUM_DRAWING_TEMPLATES);
+        assert_eq!(
+            sanitized.drawing_templates[0],
+            template("trend_line", "Orange")
+        );
+        assert_eq!(
+            sanitized.drawing_templates[1],
+            template("rectangle", "Orange")
+        );
+        assert_eq!(sanitized.drawing_templates[2].name, "Ray 0");
     }
 
     #[test]

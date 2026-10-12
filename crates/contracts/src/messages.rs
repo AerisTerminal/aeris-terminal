@@ -198,6 +198,22 @@ pub struct WorkspaceState {
     /// Durable provider-neutral instruments shown in the native watchlist.
     #[prost(message, repeated, tag = "19")]
     pub watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
+    /// Bounded user-named drawing style templates shared by every chart.
+    #[prost(message, repeated, tag = "20")]
+    pub drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+}
+
+/// One user-named drawing style template: the Aeris Charts template document of one drawing
+/// kind. Aeris Charts validates the document and applies only its style keys.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct WorkspaceDrawingTemplateState {
+    /// The Aeris Charts drawing kind wire name, for example `trend_line`.
+    #[prost(string, tag = "1")]
+    pub kind: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(string, tag = "3")]
+    pub template_json: String,
 }
 
 /// One durable native watchlist row. Live prices remain runtime-owned and are

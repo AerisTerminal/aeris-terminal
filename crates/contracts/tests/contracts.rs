@@ -1,10 +1,10 @@
 use aeris_contracts::{
     AccountSessionState, AccountView, InstallProviderInstrument, ProviderConnectionState,
     ProviderState, SeriesCadence, SeriesKey, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
-    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    WorkspaceDrawingTemplateState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -174,6 +174,11 @@ fn workspace_contract_round_trips_directly_as_protobuf() {
         default_chart_settings: None,
         watchlist_entries: vec![WorkspaceWatchlistEntryState {
             instrument: watchlist_instrument,
+        }],
+        drawing_templates: vec![WorkspaceDrawingTemplateState {
+            kind: "trend_line".into(),
+            name: "Orange".into(),
+            template_json: r#"{"name":"Orange","kind":"trend_line","options":{}}"#.into(),
         }],
     };
     let decoded =

@@ -559,6 +559,18 @@ static DRAWING_TOOL_GROUPS: [DrawingToolGroup; DRAWING_TOOL_GROUP_COUNT] = [
     },
 ];
 
+/// The sidebar's name for a drawing kind, so dialogs title a drawing as its tool reads.
+pub(super) fn drawing_kind_label(kind: ChartDrawingKind) -> &'static str {
+    if kind == Kind::IconStamp {
+        return "Icon";
+    }
+    DRAWING_TOOL_GROUPS
+        .iter()
+        .flat_map(DrawingToolGroup::entries)
+        .find(|entry| entry.choice == DrawingToolChoice::Kind(kind))
+        .map_or("Drawing", |entry| entry.label)
+}
+
 fn drawing_tool_group_of(choice: DrawingToolChoice) -> Option<usize> {
     DRAWING_TOOL_GROUPS
         .iter()
@@ -715,8 +727,8 @@ impl TerminalApp {
         };
         let favorites = &mut self.chart_chrome.drawing_favorites;
         let count = favorite_entries(favorites).count();
-        let toolbar = drawing_favorites_toolbar_size(count, self.theme.dimensions.border_width);
-        let origin = clamp_drawing_favorites_origin(pointer - grab, viewport, toolbar);
+        let toolbar = floating_toolbar_size(count, self.theme.dimensions.border_width);
+        let origin = clamp_floating_toolbar_origin(pointer - grab, viewport, toolbar);
         let origin = Some((f32::from(origin.x), f32::from(origin.y)));
         if favorites.toolbar_origin != origin {
             favorites.toolbar_origin = origin;
@@ -1022,29 +1034,30 @@ pub(super) fn drawing_tool_menu_layer(
     )
 }
 
-const DRAWING_FAVORITES_PADDING_X: f32 = 4.0;
-const DRAWING_FAVORITES_PADDING_Y: f32 = 2.0;
-const DRAWING_FAVORITES_BUTTON_SIZE: f32 = 28.0;
-const DRAWING_FAVORITES_GAP: f32 = 2.0;
-const DRAWING_FAVORITES_GRIP_WIDTH: f32 = 14.0;
-const DRAWING_FAVORITES_GRIP_DOT: f32 = 3.0;
-/// Where the favorites toolbar opens until it is first dragged: just inside the chart's top-left.
-const DRAWING_FAVORITES_DEFAULT_INSET: f32 = 12.0;
+const FLOATING_TOOLBAR_PADDING_X: f32 = 4.0;
+const FLOATING_TOOLBAR_PADDING_Y: f32 = 2.0;
+pub(super) const FLOATING_TOOLBAR_BUTTON_SIZE: f32 = 28.0;
+pub(super) const FLOATING_TOOLBAR_GAP: f32 = 2.0;
+const FLOATING_TOOLBAR_GRIP_WIDTH: f32 = 14.0;
+const FLOATING_TOOLBAR_GRIP_DOT: f32 = 3.0;
+/// How far inside the chart a floating toolbar opens until it is first dragged.
+pub(super) const FLOATING_TOOLBAR_DEFAULT_INSET: f32 = 12.0;
 
-/// Fixed geometry, so moves clamp the toolbar into the window without measuring a frame.
-fn drawing_favorites_toolbar_size(count: usize, border_width: f32) -> gpui::Size<Pixels> {
+/// The size of a floating toolbar of `count` buttons after its grip. The geometry is fixed, so
+/// moves clamp the toolbar into the window without measuring a frame.
+pub(super) fn floating_toolbar_size(count: usize, border_width: f32) -> gpui::Size<Pixels> {
     let count = f32::from(u16::try_from(count).unwrap_or(u16::MAX));
     size(
-        px(2.0 * (DRAWING_FAVORITES_PADDING_X + border_width)
-            + DRAWING_FAVORITES_GRIP_WIDTH
-            + count * (DRAWING_FAVORITES_GAP + DRAWING_FAVORITES_BUTTON_SIZE)),
-        px(2.0 * (DRAWING_FAVORITES_PADDING_Y + border_width) + DRAWING_FAVORITES_BUTTON_SIZE),
+        px(2.0 * (FLOATING_TOOLBAR_PADDING_X + border_width)
+            + FLOATING_TOOLBAR_GRIP_WIDTH
+            + count * (FLOATING_TOOLBAR_GAP + FLOATING_TOOLBAR_BUTTON_SIZE)),
+        px(2.0 * (FLOATING_TOOLBAR_PADDING_Y + border_width) + FLOATING_TOOLBAR_BUTTON_SIZE),
     )
 }
 
-/// The favorites toolbar may sit flush against any window edge, for example across the bottom
+/// A floating toolbar may sit flush against any window edge, for example across the bottom
 /// panel's header row, so it uses no overlay edge margin.
-fn clamp_drawing_favorites_origin(
+pub(super) fn clamp_floating_toolbar_origin(
     origin: gpui::Point<Pixels>,
     viewport: gpui::Size<Pixels>,
     toolbar: gpui::Size<Pixels>,
@@ -1052,11 +1065,90 @@ fn clamp_drawing_favorites_origin(
     clamp_panel_origin_within(origin, viewport, toolbar, px(0.0))
 }
 
+/// The panel of a floating toolbar at `origin`. It keeps presses to itself so the chart under
+/// it never sees them.
+pub(super) fn floating_toolbar_panel(
+    id: &'static str,
+    origin: gpui::Point<Pixels>,
+    panel_size: gpui::Size<Pixels>,
+    theme: &AerisTheme,
+) -> gpui::Stateful<Div> {
+    let colors = theme.colors;
+    div()
+        .id(id)
+        .absolute()
+        .left(origin.x)
+        .top(origin.y)
+        .w(panel_size.width)
+        .h(panel_size.height)
+        .flex()
+        .items_center()
+        .gap(px(FLOATING_TOOLBAR_GAP))
+        .px(px(FLOATING_TOOLBAR_PADDING_X))
+        .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
+        .border_1()
+        .border_color(gpui_color(colors.border_secondary))
+        .bg(gpui_color(colors.surface_secondary))
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+/// The dotted grip that moves a floating toolbar. `on_grab` receives the press position; the
+/// toolbar follows `drag` moves until the press ends.
+pub(super) fn floating_toolbar_grip<D, G>(
+    id: &'static str,
+    label: &'static str,
+    drag: D,
+    theme: &AerisTheme,
+    on_grab: G,
+) -> impl IntoElement + use<D, G>
+where
+    D: Render + Clone,
+    G: Fn(gpui::Point<Pixels>, &mut App) + 'static,
+{
+    let dot = || {
+        div()
+            .size(px(FLOATING_TOOLBAR_GRIP_DOT))
+            .rounded_full()
+            .bg(gpui_color(theme.colors.text_muted))
+    };
+    let column = || {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(FLOATING_TOOLBAR_GRIP_DOT))
+            .child(dot())
+            .child(dot())
+            .child(dot())
+    };
+    let spec = TooltipSpec::new(label, theme).show_delay(TOOLTIP_OPEN_DELAY);
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(FLOATING_TOOLBAR_GRIP_WIDTH))
+        .h(px(FLOATING_TOOLBAR_BUTTON_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(FLOATING_TOOLBAR_GRIP_DOT))
+        .cursor(FLOATING_PANEL_MOVE_CURSOR)
+        .role(Role::Button)
+        .aria_label(label)
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            on_grab(event.position, cx);
+        })
+        .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+        .tooltip(spec.builder())
+        .tooltip_show_delay(spec.delay())
+        .child(column())
+        .child(column())
+}
+
 /// The default spot beside the drawing sidebar and below the chart header.
 pub(super) fn drawing_favorites_default_origin(chart_top: f32) -> gpui::Point<Pixels> {
     point(
-        px(chart_chrome::CHART_CHROME_HEIGHT + DRAWING_FAVORITES_DEFAULT_INSET),
-        px(chart_top + DRAWING_FAVORITES_DEFAULT_INSET),
+        px(chart_chrome::CHART_CHROME_HEIGHT + FLOATING_TOOLBAR_DEFAULT_INSET),
+        px(chart_top + FLOATING_TOOLBAR_DEFAULT_INSET),
     )
 }
 
@@ -1087,12 +1179,11 @@ pub(super) fn drawing_favorites_toolbar_layer(
     }
     let armed = toolbar.menu.armed_choice(toolbar.state.active_tool);
     let enabled = toolbar.state.availability == DrawingToolbarAvailability::Available;
-    let colors = theme.colors;
-    let panel_size = drawing_favorites_toolbar_size(entries.len(), theme.dimensions.border_width);
+    let panel_size = floating_toolbar_size(entries.len(), theme.dimensions.border_width);
     let stored = favorites
         .toolbar_origin
         .map_or(toolbar.default_origin, |(x, y)| point(px(x), px(y)));
-    let origin = clamp_drawing_favorites_origin(stored, toolbar.viewport, panel_size);
+    let origin = clamp_floating_toolbar_origin(stored, toolbar.viewport, panel_size);
     let buttons = entries.into_iter().enumerate().map(|(index, entry)| {
         let arm = terminal.clone();
         let selected = entry.choice == armed;
@@ -1115,82 +1206,29 @@ pub(super) fn drawing_favorites_toolbar_layer(
         with_tooltip(("drawing_favorite_tooltip", index), button, &tooltip).into_any_element()
     });
     let move_terminal = terminal.clone();
+    let grab = terminal.clone();
     Some(
-        div()
-            .id("drawing_favorites_toolbar")
-            .absolute()
-            .left(origin.x)
-            .top(origin.y)
-            .w(panel_size.width)
-            .h(panel_size.height)
-            .flex()
-            .items_center()
-            .gap(px(DRAWING_FAVORITES_GAP))
-            .px(px(DRAWING_FAVORITES_PADDING_X))
-            .rounded(px(f32::from(RadiusToken::Compact.logical_pixels())))
-            .border_1()
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface_secondary))
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        floating_toolbar_panel("drawing_favorites_toolbar", origin, panel_size, theme)
             .on_drag_move::<DrawingFavoritesMoveDrag>(move |event, window, cx| {
                 let viewport = window.viewport_size();
                 move_terminal.update(cx, |terminal, terminal_cx| {
                     terminal.move_drawing_favorites(event.event.position, viewport, terminal_cx);
                 });
             })
-            .child(drawing_favorites_grip(terminal, origin, theme))
+            .child(floating_toolbar_grip(
+                "drawing_favorites_grip",
+                "Move favorites toolbar",
+                DrawingFavoritesMoveDrag,
+                theme,
+                move |pointer, cx| {
+                    grab.update(cx, |terminal, _| {
+                        terminal.begin_drawing_favorites_move(pointer, origin);
+                    });
+                },
+            ))
             .children(buttons)
             .into_any_element(),
     )
-}
-
-fn drawing_favorites_grip(
-    terminal: &Entity<TerminalApp>,
-    origin: gpui::Point<Pixels>,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    let dot = || {
-        div()
-            .size(px(DRAWING_FAVORITES_GRIP_DOT))
-            .rounded_full()
-            .bg(gpui_color(theme.colors.text_muted))
-    };
-    let column = || {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(DRAWING_FAVORITES_GRIP_DOT))
-            .child(dot())
-            .child(dot())
-            .child(dot())
-    };
-    let spec = TooltipSpec::new("Move favorites toolbar", theme).show_delay(TOOLTIP_OPEN_DELAY);
-    let grab = terminal.clone();
-    div()
-        .id("drawing_favorites_grip")
-        .flex_none()
-        .w(px(DRAWING_FAVORITES_GRIP_WIDTH))
-        .h(px(DRAWING_FAVORITES_BUTTON_SIZE))
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(DRAWING_FAVORITES_GRIP_DOT))
-        .cursor(FLOATING_PANEL_MOVE_CURSOR)
-        .role(Role::Button)
-        .aria_label("Move favorites toolbar")
-        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-            grab.update(cx, |terminal, _| {
-                terminal.begin_drawing_favorites_move(event.position, origin);
-            });
-        })
-        .on_drag(DrawingFavoritesMoveDrag, |drag, _, _, cx| {
-            cx.new(|_| drag.clone())
-        })
-        .tooltip(spec.builder())
-        .tooltip_show_delay(spec.delay())
-        .child(column())
-        .child(column())
 }
 
 /// The row's own star target. It handles the press itself so starring a tool neither arms it
@@ -1498,7 +1536,7 @@ fn drawing_toolbar_toggle_hit(
 
 /// A drawing-toolbar tool or action. Each glyph keeps its own optical size because the tool
 /// artwork is drawn on differently padded artboards.
-fn drawing_toolbar_button(
+pub(super) fn drawing_toolbar_button(
     id: impl Into<gpui::ElementId>,
     icon: Icon,
     label: &'static str,
@@ -1636,16 +1674,16 @@ mod tests {
     }
 
     #[test]
-    fn favorites_toolbar_grows_one_button_per_starred_tool() {
-        let one = drawing_favorites_toolbar_size(1, 1.0);
-        let three = drawing_favorites_toolbar_size(3, 1.0);
+    fn floating_toolbars_grow_one_button_at_a_time() {
+        let one = floating_toolbar_size(1, 1.0);
+        let three = floating_toolbar_size(3, 1.0);
         assert_eq!(
             one.height,
-            px(2.0 * (DRAWING_FAVORITES_PADDING_Y + 1.0) + DRAWING_FAVORITES_BUTTON_SIZE)
+            px(2.0 * (FLOATING_TOOLBAR_PADDING_Y + 1.0) + FLOATING_TOOLBAR_BUTTON_SIZE)
         );
         assert_eq!(
             three.width - one.width,
-            px(2.0 * (DRAWING_FAVORITES_GAP + DRAWING_FAVORITES_BUTTON_SIZE))
+            px(2.0 * (FLOATING_TOOLBAR_GAP + FLOATING_TOOLBAR_BUTTON_SIZE))
         );
         assert_eq!(three.height, one.height);
     }

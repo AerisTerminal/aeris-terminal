@@ -263,6 +263,27 @@ pub(super) fn workspace_split_ratio(
         .then(|| f64::from(ratio.clamp(0.05, 0.95)))
 }
 
+/// The settings dialog open on a pane, drawn over that pane only.
+fn pane_settings_dialog(
+    entity: &Entity<WorkspaceSurface>,
+    surface: &WorkspaceSurface,
+    theme: &AerisTheme,
+    cx: &App,
+) -> Option<AnyElement> {
+    match surface.indicator_settings_dialog.as_ref()? {
+        IndicatorSettingsDialog::Study(dialog) => {
+            Some(study_settings_dialog_layer(entity, dialog, theme, cx))
+        }
+        IndicatorSettingsDialog::BigTrades(dialog) => {
+            Some(big_trades_dialog_layer(entity, dialog, theme))
+        }
+        IndicatorSettingsDialog::Volume(dialog) => Some(volume_dialog_layer(entity, dialog, theme)),
+        IndicatorSettingsDialog::Drawing(dialog) => {
+            drawing_settings_dialog_layer(entity, dialog, theme, cx)
+        }
+    }
+}
+
 pub(super) fn workspace_pane_element(
     terminal: &Entity<TerminalApp>,
     workspace: &WorkspaceTab,
@@ -293,21 +314,7 @@ pub(super) fn workspace_pane_element(
         toasts,
         theme,
     });
-    let indicator_settings_dialog =
-        surface
-            .indicator_settings_dialog
-            .as_ref()
-            .map(|dialog| match dialog {
-                IndicatorSettingsDialog::Study(dialog) => {
-                    study_settings_dialog_layer(&pane.surface, dialog, theme, cx)
-                }
-                IndicatorSettingsDialog::BigTrades(dialog) => {
-                    big_trades_dialog_layer(&pane.surface, dialog, theme)
-                }
-                IndicatorSettingsDialog::Volume(dialog) => {
-                    volume_dialog_layer(&pane.surface, dialog, theme)
-                }
-            });
+    let indicator_settings_dialog = pane_settings_dialog(&pane.surface, surface, theme, cx);
     let workspace_id = workspace.id;
     let select_terminal = terminal.clone();
     let context_terminal = terminal.clone();

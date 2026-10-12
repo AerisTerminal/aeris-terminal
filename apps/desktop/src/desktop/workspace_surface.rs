@@ -165,7 +165,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         rithmic_previous_selection: None,
         restored_viewport: init.restored_rithmic.and_then(|restored| restored.1),
         last_persisted_viewport: None,
-        last_chart_clock_revision: 0,
+        observed_chart: ObservedChart::default(),
         pending_chart_context_menu: None,
         pending_pane_activate: PaneActivationRequest::None,
         pending_settings_request: None,
@@ -2942,6 +2942,9 @@ impl WorkspaceSurface {
         let chart_theme = aeris_chart_theme(self.theme.mode);
         let chart = cx.new(move |_| AerisChartView::with_replay_and_theme(snapshot, chart_theme));
         self.apply_chart_chrome_to_chart(&chart, cx);
+        // An open settings session previews unconfirmed edits; restore the drawing before
+        // its state is carried into the new chart.
+        self.close_drawing_settings_dialog(false, cx);
         self.remember_chart_drawings(cx);
         let drawings = self
             .retained_chart_presentation
@@ -2985,7 +2988,10 @@ impl WorkspaceSurface {
             });
         }
         self.last_chart_user_state_revision = chart.read(cx).user_state_revision();
-        self.last_chart_clock_revision = chart.read(cx).clock_revision();
+        self.observed_chart = ObservedChart {
+            clock_revision: chart.read(cx).clock_revision(),
+            selected_drawing: chart.read(cx).selected_drawing_id(),
+        };
         self.retained_chart_presentation
             .drawings
             .settle_chart(chart.read(cx));
@@ -5507,11 +5513,12 @@ impl WorkspaceSurface {
     }
 
     /// Replaces any open indicator settings dialog and dismisses the chrome menus.
-    fn open_indicator_settings_dialog(
+    pub(super) fn open_indicator_settings_dialog(
         &mut self,
         dialog: IndicatorSettingsDialog,
         cx: &mut Context<Self>,
     ) {
+        self.close_drawing_settings_dialog(false, cx);
         self.indicator_settings_dialog = Some(dialog);
         self.indicator_message = None;
         self.chrome_overlay = None;

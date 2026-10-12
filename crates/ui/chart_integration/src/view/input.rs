@@ -2,8 +2,8 @@
 //! module binds the shared GPUI adapter and turns the engine's host requests into product state.
 
 use super::{
-    ActivationRequest, AerisChartView, ChartContextKind, ChartContextRequest, Context,
-    KeyDownEvent, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ActivationRequest, AerisChartView, ChartContextKind, ChartContextRequest, ChartSettingsRequest,
+    Context, KeyDownEvent, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PointerInteractionState, ScrollWheelEvent, SharedString, Window, px,
 };
 use aeris_charts_engine::{ChartContextMenu, ChartInputEvent, ChartRegion, PriceScaleTarget};
@@ -46,6 +46,9 @@ impl AerisChartView {
             match event {
                 ChartInputEvent::ContextMenu(menu) => {
                     self.pending_context_menu = Some(self.context_menu_request(menu));
+                }
+                ChartInputEvent::DrawingSettingsRequested(id) => {
+                    self.pending_settings_request = Some(ChartSettingsRequest::Drawing(id));
                 }
                 // Terminal has no pane click, crosshair, drawing-created, delta-tooltip range, or
                 // general-chart brush subscribers, and the engine runs drawing text editing

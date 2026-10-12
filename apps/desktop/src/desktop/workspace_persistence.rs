@@ -10,6 +10,7 @@ struct WorkspaceLayoutRequest {
     workspace_tabs: Vec<WorkspaceTabState>,
     chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
+    drawing_templates: Vec<WorkspaceDrawingTemplateState>,
 }
 
 struct WorkspaceLayoutCompletion {
@@ -138,6 +139,7 @@ impl WorkspaceLayoutPersistence {
         workspace_tabs: Vec<WorkspaceTabState>,
         chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
         watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
+        drawing_templates: Vec<WorkspaceDrawingTemplateState>,
     ) -> Result<(), String> {
         let Some(generation) = self.layout_generation.get().checked_add(1) else {
             let error = "workspace layout generation is exhausted".to_string();
@@ -153,6 +155,7 @@ impl WorkspaceLayoutPersistence {
             workspace_tabs,
             chart_settings_templates,
             watchlist_entries,
+            drawing_templates,
         });
         match self.wake.try_send(()) {
             Ok(()) | Err(mpsc::TrySendError::Full(())) => {
@@ -185,6 +188,7 @@ impl WorkspaceLayoutPersistence {
         self.request_with_chart_settings(
             active_workspace_id,
             workspace_tabs,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
@@ -291,6 +295,7 @@ fn run_workspace_layout_persistence(
             })
             .collect();
         current.watchlist_entries = request.watchlist_entries;
+        current.drawing_templates = request.drawing_templates;
         let completed = local_state::save_workspace(&current).map(|()| current);
         *durability
             .lock()
@@ -402,12 +407,18 @@ mod tests {
                 .instrument
                 .clone(),
         };
+        let drawing_template = WorkspaceDrawingTemplateState {
+            kind: "trend_line".to_string(),
+            name: "Orange".to_string(),
+            template_json: r#"{"name":"Orange","kind":"trend_line","options":{}}"#.to_string(),
+        };
         state
             .request_with_chart_settings(
                 7,
                 vec![],
                 vec![template.clone()],
                 vec![watchlist_entry.clone()],
+                vec![drawing_template.clone()],
             )
             .expect("request");
 
@@ -415,6 +426,7 @@ mod tests {
         let request = latest.as_ref().expect("request remains coalesced");
         assert_eq!(request.chart_settings_templates, vec![template]);
         assert_eq!(request.watchlist_entries, vec![watchlist_entry]);
+        assert_eq!(request.drawing_templates, vec![drawing_template]);
     }
 
     #[test]

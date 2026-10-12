@@ -2328,7 +2328,7 @@ fn effective_appearance_color(
 /// The outline button that shows a color's swatch and hex code and opens its picker.
 pub(super) fn color_swatch_button(
     id: impl Into<gpui::ElementId>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     value: &str,
     open: bool,
     theme: &AerisTheme,
@@ -2561,7 +2561,7 @@ fn settings_stacked_choice_row(
         .into_any_element()
 }
 
-fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
+pub(super) fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {
     let Some(hex) = value.strip_prefix('#') else {
         return gpui_color(fallback);
     };
