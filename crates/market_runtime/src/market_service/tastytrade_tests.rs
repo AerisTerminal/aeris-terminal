@@ -540,15 +540,7 @@ fn dated_equity_session_phases_follow_regular_and_extended_boundaries() {
 fn candle_history_waits_for_atomic_transaction_and_cannot_complete_twice() {
     let request = request();
     let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
-    let mut task = HistoryTask {
-        request,
-        symbol: symbol.clone(),
-        deadline: Instant::now() + Duration::from_secs(45),
-        last_progress_at: Instant::now(),
-        candles: BTreeMap::new(),
-        saw_newer_candle: false,
-        candle_state: CandleHistoryState::Collecting,
-    };
+    let mut task = HistoryTask::collecting(request, symbol.clone(), Instant::now());
     let now = Instant::now();
     assert!(!task.expired(now));
     task.last_progress_at = now
@@ -618,15 +610,7 @@ fn newer_only_dxlink_snapshot_marks_backwards_history_exhausted() {
         end_unix_nanos: newest.exchange_timestamp_unix_nanos - 60_000_000_000,
     });
     let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
-    let mut task = HistoryTask {
-        request,
-        symbol: symbol.clone(),
-        deadline: Instant::now() + Duration::from_secs(45),
-        last_progress_at: Instant::now(),
-        candles: BTreeMap::new(),
-        saw_newer_candle: false,
-        candle_state: CandleHistoryState::Collecting,
-    };
+    let mut task = HistoryTask::collecting(request, symbol.clone(), Instant::now());
     task.accept(
         FeedEvent::Candle {
             channel: 7,
@@ -646,6 +630,118 @@ fn newer_only_dxlink_snapshot_marks_backwards_history_exhausted() {
         .unwrap();
     assert_eq!(snapshot.bars, [] as [MarketBar; 0]);
     assert!(snapshot.backwards_exhausted);
+}
+/// Daily bars delivered newest first, as dxFeed publishes a time-series
+/// snapshot, with the first one carrying `SNAPSHOT_BEGIN`.
+fn newest_first_daily_snapshot(task: &mut HistoryTask, days: i64) -> Vec<MarketBar> {
+    const DAY: i64 = 86_400_000_000_000;
+    let newest = bar();
+    let mut delivered = Vec::new();
+    for age in 0..days {
+        let time = newest.exchange_timestamp_unix_nanos - age * DAY;
+        let bar = MarketBar {
+            exchange_timestamp_seconds: time / 1_000_000_000,
+            exchange_timestamp_unix_nanos: time,
+            ..newest
+        };
+        task.accept(
+            FeedEvent::Candle {
+                channel: 7,
+                symbol: task.symbol.clone(),
+                flags: if age == 0 { SNAPSHOT_BEGIN } else { 0 },
+                index: (days - age).to_string(),
+                bar: Some(bar),
+                count: 1,
+            },
+            1,
+            &mut 1,
+        )
+        .unwrap();
+        delivered.push(bar);
+    }
+    delivered.reverse();
+    for (sequence, bar) in (1..).zip(&mut delivered) {
+        bar.source_sequence = sequence;
+    }
+    delivered
+}
+#[test]
+fn a_snapshot_that_stops_without_its_end_marker_keeps_the_delivered_newest_range() {
+    let mut request = request();
+    request.series.period = BarPeriod::session(1).unwrap();
+    let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
+    let started_at = Instant::now();
+    let mut task = HistoryTask::collecting(request, symbol, started_at);
+    let delivered = newest_first_daily_snapshot(&mut task, 276);
+    let streaming = task.last_progress_at
+        + CANDLE_SNAPSHOT_STALL
+            .checked_sub(Duration::from_millis(1))
+            .expect("stall window");
+    let quiet = task.last_progress_at + CANDLE_SNAPSHOT_STALL;
+    assert!(
+        !task.close_stalled_snapshot(streaming),
+        "a snapshot still streaming is not cut short"
+    );
+    assert_eq!(task.candle_state, CandleHistoryState::Collecting);
+    assert!(task.close_stalled_snapshot(quiet));
+    assert_eq!(task.candle_state, CandleHistoryState::Ready);
+    let snapshot = task
+        .snapshot_at(
+            delivered[delivered.len() - 1].exchange_timestamp_unix_nanos,
+            None,
+        )
+        .unwrap();
+    assert_eq!(snapshot.bars, delivered);
+    assert!(
+        !snapshot.backwards_exhausted,
+        "older history may still exist behind a cut-off snapshot"
+    );
+}
+#[test]
+fn a_channel_that_never_begins_its_snapshot_still_fails() {
+    let request = request();
+    let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
+    let started_at = Instant::now();
+    let mut task = HistoryTask::collecting(request, symbol, started_at);
+    let silent = started_at + Duration::from_secs(21);
+    assert!(!task.close_stalled_snapshot(silent));
+    assert_eq!(task.candle_state, CandleHistoryState::Collecting);
+    assert!(task.expired(silent));
+}
+#[test]
+fn a_cut_off_snapshot_without_bars_in_range_is_not_reported_as_empty_history() {
+    let mut request = request();
+    let newest = bar();
+    request.range = Some(super::super::HistoryRange {
+        start_unix_nanos: newest.exchange_timestamp_unix_nanos - 7_200_000_000_000,
+        end_unix_nanos: newest.exchange_timestamp_unix_nanos - 3_600_000_000_000,
+    });
+    let symbol = candle_symbol(&request.series, request.instrument.as_ref().unwrap()).unwrap();
+    for end in [None, Some(SNAPSHOT_SNIP)] {
+        let mut task = HistoryTask::collecting(request.clone(), symbol.clone(), Instant::now());
+        task.accept(
+            FeedEvent::Candle {
+                channel: 7,
+                symbol: symbol.clone(),
+                flags: SNAPSHOT_BEGIN | end.unwrap_or(0),
+                index: "2".into(),
+                bar: Some(newest),
+                count: 1,
+            },
+            1,
+            &mut 1,
+        )
+        .unwrap();
+        if end.is_none() {
+            assert!(task.close_stalled_snapshot(task.last_progress_at + CANDLE_SNAPSHOT_STALL));
+        }
+        assert_eq!(task.candle_state, CandleHistoryState::Ready);
+        assert!(
+            task.snapshot_at(newest.exchange_timestamp_unix_nanos, None)
+                .is_err(),
+            "a truncated snapshot proves neither empty nor exhausted history"
+        );
+    }
 }
 #[test]
 fn tape_backfill_keeps_only_its_requested_window_and_applies_corrections() {

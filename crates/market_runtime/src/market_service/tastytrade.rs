@@ -104,6 +104,11 @@ const REMOVE_EVENT: u32 = 2;
 const TX_PENDING: u32 = 1;
 const MAXIMUM_TICK_HISTORY: usize = 65_536;
 const MAXIMUM_CONCURRENT_CANDLE_HISTORY: usize = 4;
+/// Silence after which a begun candle snapshot is treated as cut short. The
+/// tastytrade `DXLink` endpoint can stop a deep candle snapshot after a few
+/// hundred events without ever sending its end marker; a healthy snapshot
+/// streams without pauses this long.
+const CANDLE_SNAPSHOT_STALL: Duration = Duration::from_secs(5);
 
 pub(super) enum CatalogControl {
     Search(SearchProviderInstruments),
@@ -1259,11 +1264,49 @@ struct HistoryTask {
     last_progress_at: Instant,
     candles: BTreeMap<String, (MarketBar, u64)>,
     saw_newer_candle: bool,
+    snapshot_begun: bool,
+    /// The snapshot ended without covering everything requested, by a
+    /// `SNAPSHOT_SNIP` marker or by delivery stopping short of its end.
+    truncated: bool,
     candle_state: CandleHistoryState,
 }
 impl HistoryTask {
+    fn collecting(request: HistoryRequest, symbol: String, started_at: Instant) -> Self {
+        Self {
+            request,
+            symbol,
+            // Bounds a snapshot that keeps trickling. Whatever newest range
+            // has arrived by then is still published as a truncated snapshot.
+            deadline: started_at + Duration::from_secs(120),
+            last_progress_at: started_at,
+            candles: BTreeMap::new(),
+            saw_newer_candle: false,
+            snapshot_begun: false,
+            truncated: false,
+            candle_state: CandleHistoryState::Collecting,
+        }
+    }
+
     fn expired(&self, now: Instant) -> bool {
         now >= self.deadline || now.duration_since(self.last_progress_at) >= Duration::from_secs(20)
+    }
+
+    /// Completes a begun snapshot that stopped short of its end marker.
+    ///
+    /// dxFeed publishes a time-series snapshot in descending time order,
+    /// starting with the newest event, so the bars received before delivery
+    /// stopped are a contiguous range ending at the newest bar. That range is
+    /// kept as a truncated snapshot rather than failing the whole request;
+    /// retrying the same subscription receives the same cut-off snapshot.
+    fn close_stalled_snapshot(&mut self, now: Instant) -> bool {
+        let stalled = now >= self.deadline
+            || now.duration_since(self.last_progress_at) >= CANDLE_SNAPSHOT_STALL;
+        if !self.snapshot_begun || self.candle_state != CandleHistoryState::Collecting || !stalled {
+            return false;
+        }
+        self.truncated = true;
+        self.candle_state = CandleHistoryState::Ready;
+        true
     }
 
     fn begin(
@@ -1302,20 +1345,7 @@ impl HistoryTask {
                 from_time_ms: Some(from / 1_000_000),
             }],
         )?;
-        let started_at = Instant::now();
-        Ok(Self {
-            request: request.clone(),
-            symbol,
-            // Two simultaneously requested 1,600-bar channels can take longer
-            // than 45 seconds to deliver their bounded DXLink snapshots. The
-            // channel stays finite, and an unanswered request still fails and
-            // enters the coordinator's series retry path.
-            deadline: started_at + Duration::from_secs(120),
-            last_progress_at: started_at,
-            candles: BTreeMap::new(),
-            saw_newer_candle: false,
-            candle_state: CandleHistoryState::Collecting,
-        })
+        Ok(Self::collecting(request.clone(), symbol, Instant::now()))
     }
     fn accept(
         &mut self,
@@ -1339,6 +1369,8 @@ impl HistoryTask {
                 if flags & SNAPSHOT_BEGIN != 0 {
                     self.candles.clear();
                     self.saw_newer_candle = false;
+                    self.snapshot_begun = true;
+                    self.truncated = false;
                     self.candle_state = CandleHistoryState::Collecting;
                 }
                 if flags & REMOVE_EVENT != 0 {
@@ -1372,6 +1404,7 @@ impl HistoryTask {
                     }
                 }
                 if flags & (SNAPSHOT_END | SNAPSHOT_SNIP) != 0 {
+                    self.truncated |= flags & SNAPSHOT_SNIP != 0;
                     self.candle_state = CandleHistoryState::Ending;
                 }
                 if self.candle_state == CandleHistoryState::Ending && flags & TX_PENDING == 0 {
@@ -1403,7 +1436,13 @@ impl HistoryTask {
             .collect();
         candles.sort_unstable_by_key(|(bar, _)| bar.exchange_timestamp_unix_nanos);
         candles.dedup_by_key(|(bar, _)| bar.exchange_timestamp_unix_nanos);
-        let backwards_exhausted = candles.is_empty() && self.saw_newer_candle;
+        // A truncated snapshot proves nothing about older or missing bars.
+        if self.truncated && candles.is_empty() {
+            return Err(
+                "Tastytrade candle history stopped before reaching the requested range".into(),
+            );
+        }
+        let backwards_exhausted = !self.truncated && candles.is_empty() && self.saw_newer_candle;
         let mut forming = None;
         if self.request.range.is_none()
             && self
@@ -1990,6 +2029,13 @@ impl Worker {
                     .series
                     .iter()
                     .any(|(series, _)| *series == task.request.series);
+            if !cancelled && task.close_stalled_snapshot(Instant::now()) {
+                diagnostic!(
+                    "Aeris tastytrade candle snapshot for {} stopped after {} bars without an end marker; keeping the delivered newest range",
+                    task.request.series.instrument_id,
+                    task.candles.len()
+                );
+            }
             if task.candle_state == CandleHistoryState::Ready && !cancelled {
                 let session = task
                     .request
