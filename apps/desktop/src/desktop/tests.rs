@@ -695,6 +695,212 @@ mod timeframe_input {
         }
     }
 
+    fn order_flow_tape(
+        product: &InstallProviderInstrument,
+        revision: u64,
+        last_ordinal: u64,
+    ) -> aeris_market_runtime::MarketTradeTapeSnapshot {
+        let trades = (1..=last_ordinal)
+            .map(|ordinal| {
+                let seconds = 1_700_000_000 + i64::try_from(ordinal).expect("small ordinal");
+                aeris_market_runtime::RetainedMarketTrade {
+                    ingestion_ordinal: ordinal,
+                    observed_unix_nanos: seconds * 1_000_000_000,
+                    trading_day: None,
+                    trade: Arc::new(aeris_market_data::MarketTrade {
+                        metadata: aeris_market_data::EventMetadata {
+                            provider_id: product.provider.clone(),
+                            instrument_id: product.instrument_id.clone(),
+                            entitlement_id: product.entitlement_id.clone(),
+                            session_generation: 1,
+                            source_sequence: ordinal,
+                            timestamps: aeris_market_data::QualifiedTimestamp {
+                                exchange_unix_nanos: Some(seconds * 1_000_000_000),
+                                provider_unix_nanos: None,
+                                received_unix_nanos: seconds * 1_000_000_000,
+                            },
+                        },
+                        trade_id: format!("trade-{ordinal}"),
+                        price: 100,
+                        quantity: 2,
+                        aggressor: aeris_market_data::AggressorSide::Buy,
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        aeris_market_runtime::MarketTradeTapeSnapshot {
+            consumer_id: aeris_market_runtime::MarketConsumerId(std::num::NonZeroU64::MIN),
+            generation: aeris_market_runtime::MarketGenerationId(std::num::NonZeroU64::MIN),
+            provider_id: product.provider.clone(),
+            instrument_id: product.instrument_id.clone(),
+            entitlement_id: product.entitlement_id.clone(),
+            provider_generation: 1,
+            revision,
+            source_watermark: last_ordinal,
+            rewrite_generation: 0,
+            price_scale: 0,
+            quantity_scale: 0,
+            trades: trades.into(),
+        }
+    }
+
+    fn deliver_market_message(
+        surface: &Entity<WorkspaceSurface>,
+        publications: &MarketWorkerSender,
+        message: MarketWorkerMessage,
+        cx: &mut VisualTestContext,
+    ) {
+        publications.send(message).expect("market message");
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.poll_market_worker(cx);
+            });
+        });
+    }
+
+    fn requested_interval_sequence(
+        surface: &Entity<WorkspaceSurface>,
+        requests: &mpsc::Receiver<MarketWorkerCommand>,
+        interval: ChartInterval,
+        cx: &mut VisualTestContext,
+    ) -> u64 {
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                assert!(surface.select_interval(interval, cx));
+            });
+        });
+        requests
+            .try_iter()
+            .find_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+                _ => None,
+            })
+            .expect("engine selection")
+    }
+
+    /// The tape ordinal a chart applied for `instrument_id` drawn in `minutes` bars.
+    fn applied_order_flow_ordinal(
+        chart: &Entity<AerisChartView>,
+        instrument_id: &str,
+        minutes: u64,
+        cx: &VisualTestContext,
+    ) -> Option<u64> {
+        cx.read(|cx| {
+            chart.read(cx).order_flow_resume_ordinal(
+                instrument_id,
+                1,
+                aeris_chart_integration::OrderFlowAggregation::TimeMicros(minutes * 60_000_000),
+                1.0,
+            )
+        })
+    }
+
+    fn assert_no_indicator_message(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) {
+        cx.read(|cx| {
+            let message = surface.read(cx).indicator_message.clone();
+            assert!(
+                message.is_none(),
+                "unexpected indicator message: {message:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn interval_switch_keeps_order_flow_off_the_superseded_chart(cx: &mut TestAppContext) {
+        let product = InstallProviderInstrument {
+            price_increment: Some(1),
+            ..local_state::default_workspace().watchlist_entries[0]
+                .instrument
+                .clone()
+                .expect("default instrument")
+        };
+        let (surface, requests, publications, cx) = harness_with(cx, product.clone());
+        publish_snapshot(&surface, cx);
+        let deliver = |message: MarketWorkerMessage, cx: &mut VisualTestContext| {
+            deliver_market_message(&surface, &publications, message, cx);
+        };
+        let applied_ordinal =
+            |chart: &Entity<AerisChartView>, minutes: u64, cx: &VisualTestContext| {
+                applied_order_flow_ordinal(chart, &product.instrument_id, minutes, cx)
+            };
+        let assert_no_order_flow_error = |cx: &VisualTestContext| {
+            assert_no_indicator_message(&surface, cx);
+        };
+
+        cx.update(|_, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.set_chart_order_flow_settings(
+                    OrderFlowSettings {
+                        show_cumulative_delta: true,
+                        show_delta_histogram: true,
+                        big_trades: Some(BigTradesSettings::default()),
+                        ..OrderFlowSettings::default()
+                    },
+                    cx,
+                );
+            });
+        });
+        deliver(
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 1, 3)),
+            cx,
+        );
+        let one_minute = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
+        assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
+        assert_no_order_flow_error(cx);
+
+        // The 5m selection is committed while the 1m chart stays on screen until the 5m
+        // covering snapshot arrives; the instrument's tape keeps streaming meanwhile.
+        let five_minutes =
+            requested_interval_sequence(&surface, &requests, ChartInterval::Minute5, cx);
+        deliver(
+            MarketWorkerMessage::EngineSwitchMarker {
+                sequence: five_minutes,
+            },
+            cx,
+        );
+        deliver(
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 2, 5)),
+            cx,
+        );
+        assert_no_order_flow_error(cx);
+        assert_eq!(
+            applied_ordinal(&one_minute, 1, cx),
+            Some(3),
+            "the superseded chart is not fed the committed selection's tape"
+        );
+
+        // A second selection before the 5m chart is drawn leaves the 1m chart on screen too.
+        let fifteen_minutes =
+            requested_interval_sequence(&surface, &requests, ChartInterval::Minute15, cx);
+        deliver(
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 3, 6)),
+            cx,
+        );
+        assert_no_order_flow_error(cx);
+        assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
+
+        deliver(
+            MarketWorkerMessage::EngineSwitchMarker {
+                sequence: fifteen_minutes,
+            },
+            cx,
+        );
+        publish_snapshot(&surface, cx);
+        let replacement = cx.read(|cx| surface.read(cx).chart.clone().expect("replacement chart"));
+        assert_ne!(one_minute.entity_id(), replacement.entity_id());
+        assert_eq!(
+            applied_ordinal(&replacement, 15, cx),
+            Some(6),
+            "the replacement chart rebuilds its order flow from the retained tape"
+        );
+        deliver(
+            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 4, 7)),
+            cx,
+        );
+        assert_eq!(applied_ordinal(&replacement, 15, cx), Some(7));
+        assert_no_order_flow_error(cx);
+    }
+
     #[gpui::test]
     fn invalid_quick_timeframe_stays_open_with_error_until_edited(cx: &mut TestAppContext) {
         let (surface, requests, _publications, cx) = harness(cx);

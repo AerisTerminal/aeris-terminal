@@ -2991,13 +2991,13 @@ impl WorkspaceSurface {
             .settle_chart(chart.read(cx));
         observe_chart(Some(&chart), cx);
         self.chart = Some(chart);
+        self.rithmic_switch = RithmicSwitchState::Initializing;
         // Interval switches keep the instrument's tape; project it into the new chart now
         // instead of leaving the footprint empty until the next tape revision.
         if let Some(tape) = self.trade_tape.clone() {
             self.apply_trade_tape_to_chart(&tape, cx);
         }
         self.synchronize_runtime_studies(cx);
-        self.rithmic_switch = RithmicSwitchState::Initializing;
     }
 
     /// A provider without trade prints has nothing to draw a footprint or tape study from,
@@ -4643,6 +4643,12 @@ impl WorkspaceSurface {
         };
         let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
         self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..]).into();
+        // The identity and aggregation above belong to the committed selection, which the
+        // chart on screen may not show yet. The retained tape is projected into the
+        // replacement chart when its covering snapshot installs it.
+        if self.rithmic_switch.awaits_replacement_chart() {
+            return;
+        }
         let Some(tick_size) = tick_size else {
             chart.update(cx, |chart, chart_cx| {
                 chart.clear_order_flow_trades();

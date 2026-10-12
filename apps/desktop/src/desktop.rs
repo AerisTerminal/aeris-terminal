@@ -1641,6 +1641,13 @@ impl RithmicSwitchState {
         matches!(self, Self::Swapping)
     }
 
+    /// Whether the chart on screen may predate the committed selection. A selection
+    /// made while `Swapping` returns to `Pending` over that same superseded chart, so
+    /// projections keyed by the committed selection wait for the replacement chart.
+    const fn awaits_replacement_chart(self) -> bool {
+        matches!(self, Self::Pending | Self::Swapping)
+    }
+
     const fn in_progress(self) -> bool {
         matches!(self, Self::Pending | Self::Swapping | Self::Initializing)
     }
