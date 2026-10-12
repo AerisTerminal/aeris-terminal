@@ -3547,6 +3547,49 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
 }
 
 #[test]
+fn saved_area_fill_follows_the_translucent_default_instead_of_a_pinned_fallback() {
+    use super::workspace_surface::{persisted_chart_appearance, restored_chart_appearance};
+    use aeris_chart_integration::{ChartAppearanceColor, ChartAppearanceSettings};
+
+    let persisted = persisted_chart_appearance(&ChartAppearanceSettings::default());
+    for color in [
+        &persisted.line_color,
+        &persisted.area_top_color,
+        &persisted.area_bottom_color,
+        &persisted.baseline_top_color,
+        &persisted.baseline_bottom_color,
+    ] {
+        assert_eq!(color, "theme");
+    }
+
+    // A layout saved before these colors carried provenance pinned the engine's opaque
+    // fallbacks and has no bottom fill.
+    let mut legacy = persisted.clone();
+    legacy.line_color = "#089981".to_string();
+    legacy.area_top_color = "#089981".to_string();
+    legacy.area_bottom_color.clear();
+    legacy.baseline_top_color = "#089981".to_string();
+    legacy.baseline_bottom_color = "#F7525F".to_string();
+    let restored = restored_chart_appearance(&legacy).expect("legacy appearance");
+    assert_eq!(restored, ChartAppearanceSettings::default());
+
+    // A user's own pick survives, including one equal to a former fallback once saved with
+    // provenance.
+    let mut picked = persisted;
+    picked.area_top_color = "#089981".to_string();
+    picked.area_bottom_color = "#2962FF00".to_string();
+    let restored = restored_chart_appearance(&picked).expect("picked appearance");
+    assert_eq!(
+        restored.area_top_color,
+        ChartAppearanceColor::Custom("#089981".to_string())
+    );
+    assert_eq!(
+        restored.area_bottom_color,
+        ChartAppearanceColor::Custom("#2962FF00".to_string())
+    );
+}
+
+#[test]
 fn ladder_clicks_rest_limits_passively_and_place_stops_on_breakout() {
     use super::ladder_click_order;
     use aeris_terminal_ui::OrderBookLevelSide;

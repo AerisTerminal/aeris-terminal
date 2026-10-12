@@ -19,8 +19,8 @@ use aeris_market_data::ChartInterval;
 use aeris_market_data::OrderBookFrame;
 use aeris_market_runtime::study::{NativeStudyRegistration, StudyInstanceId};
 use aeris_market_runtime::{
-    MarketConsumerResourceClass as ConsumerResourceClass, MarketDeltaDivergenceTrigger,
-    MarketPriceAlert, MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
+    MarketConsumerResourceClass as ConsumerResourceClass, MarketPriceAlert,
+    MarketPriceAlertTrigger, MarketRuntimeEvent, MarketStudyOutputSnapshot,
     MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
 };
 use aeris_observability::FeedConnectionState;
@@ -311,7 +311,6 @@ pub enum MarketWorkerMessage {
     MarketSessionStatus(aeris_contracts::MarketSessionStatus),
     OrderBook(OrderBookFrame),
     TradeTape(MarketTradeTapeSnapshot),
-    DeltaDivergenceTriggered(MarketDeltaDivergenceTrigger),
     PriceAlertTriggered(MarketPriceAlertTrigger),
     PriceAlertSyncFailed(String),
     StudyRegistered {

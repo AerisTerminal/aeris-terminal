@@ -665,7 +665,6 @@ struct ConsumerEvents {
     study_removed: Option<MarketRuntimeEvent>,
     order_book: Option<MarketRuntimeEvent>,
     trade_tape: Option<crate::MarketTradeTapeSnapshot>,
-    delta_divergence: Option<MarketRuntimeEvent>,
     price_alerts: VecDeque<MarketRuntimeEvent>,
     catalog_search: Option<MarketRuntimeEvent>,
     catalog_selection: Option<MarketRuntimeEvent>,

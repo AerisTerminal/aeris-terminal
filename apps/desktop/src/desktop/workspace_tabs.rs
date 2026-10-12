@@ -974,6 +974,7 @@ impl TerminalApp {
         Some(ChartSettingsSnapshot {
             chart_type: surface.chart_type(cx),
             appearance: surface.chart_appearance(cx)?,
+            series_colors: surface.chart_series_colors(cx)?,
             crosshair_mode: surface.chart_crosshair_mode(cx)?,
             order_flow: surface.chart_order_flow_settings(cx)?,
             time_zone: surface.chart_time_zone_id().to_string(),
@@ -1080,13 +1081,20 @@ impl TerminalApp {
             ChartColorSetting::BorderDown => {
                 appearance.border_down_color = ChartAppearanceColor::Custom(color.clone());
             }
-            ChartColorSetting::Line => appearance.line_color.clone_from(&color),
-            ChartColorSetting::AreaTop => appearance.area_top_color.clone_from(&color),
+            ChartColorSetting::Line => {
+                appearance.line_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::AreaTop => {
+                appearance.area_top_color = ChartAppearanceColor::Custom(color.clone());
+            }
+            ChartColorSetting::AreaBottom => {
+                appearance.area_bottom_color = ChartAppearanceColor::Custom(color.clone());
+            }
             ChartColorSetting::BaselineTop => {
-                appearance.baseline_top_color.clone_from(&color);
+                appearance.baseline_top_color = ChartAppearanceColor::Custom(color.clone());
             }
             ChartColorSetting::BaselineBottom => {
-                appearance.baseline_bottom_color.clone_from(&color);
+                appearance.baseline_bottom_color = ChartAppearanceColor::Custom(color.clone());
             }
             ChartColorSetting::Background => {
                 appearance.background_color = ChartAppearanceColor::Custom(color.clone());

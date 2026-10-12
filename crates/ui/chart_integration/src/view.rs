@@ -20,9 +20,9 @@ use aeris_charts_engine::FinancialThemeColors;
 use aeris_charts_engine::{
     AlertCreateRequest, AlertSnapshot, ChartEngine, ChartFrame, ChartTheme, DeltaTooltipOptions,
     DrawingId, DrawingInterval, DrawingIntervalUnit, EMA_RIBBON_DEFAULT_PERIODS,
-    FinancialAppearance, FinancialLegendIdentity, FinancialLegendRequest, HostLegendSeries,
-    IndicatorChromeOptions, IndicatorKind, IndicatorPane, InteractionOptions, PriceScaleMode,
-    PriceScaleTarget, SeriesChromeFlag, TradingIntent, TradingSnapshot,
+    FinancialAppearance, FinancialLegendIdentity, FinancialLegendRequest, FinancialSeriesColors,
+    HostLegendSeries, IndicatorChromeOptions, IndicatorKind, IndicatorPane, InteractionOptions,
+    PriceScaleMode, PriceScaleTarget, SeriesChromeFlag, TradingIntent, TradingSnapshot,
 };
 pub use aeris_charts_engine::{BigTradesFilter, BigTradesIntensity, BigTradesSize};
 pub use aeris_charts_engine::{
@@ -229,6 +229,17 @@ fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySna
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
+/// The asset title (symbol, venue and interval) leads the legend: larger and heavier than the
+/// readouts and study titles, which keep the row's `text_xs` size.
+const LEGEND_ASSET_TITLE_SIZE: f32 = 14.0;
+
+fn legend_title_weight(item: LegendItem) -> u16 {
+    platform_typography().weight(if item == LegendItem::Asset {
+        TypographyRole::Emphasis
+    } else {
+        TypographyRole::Normal
+    })
+}
 
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -634,6 +645,8 @@ pub struct OrderFlowSweep {
 
 /// Aeris Charts-owned typed financial appearance, re-exported under the Terminal API name.
 pub type ChartAppearanceSettings = FinancialAppearance;
+/// The painted primary-series colors, in the hex form [`AerisChartView::series_colors`] returns.
+pub type ChartSeriesColors = FinancialSeriesColors;
 
 /// Which parts of the chart legend show. Presentation only: hiding a legend never hides the
 /// series or indicator it describes.
@@ -2095,6 +2108,21 @@ impl AerisChartView {
         }
     }
 
+    /// The colors the primary series paints for its line, area and baseline controls, pinned
+    /// or default, as `#RRGGBB` or `#RRGGBBAA` for the color picker.
+    #[must_use]
+    pub fn series_colors(&self) -> Option<ChartSeriesColors> {
+        let colors = self.engine.financial_series_colors(0)?;
+        let hex = |css: String| drawing_color_hex(&css).unwrap_or(css);
+        Some(ChartSeriesColors {
+            line: hex(colors.line),
+            area_top: hex(colors.area_top),
+            area_bottom: hex(colors.area_bottom),
+            baseline_top: hex(colors.baseline_top),
+            baseline_bottom: hex(colors.baseline_bottom),
+        })
+    }
+
     /// Applies host-authored series/canvas presentation in place. Market data,
     /// viewport state and provider ownership are untouched.
     pub fn set_appearance_settings(&mut self, appearance: &ChartAppearanceSettings) -> bool {
@@ -2928,9 +2956,10 @@ fn chart_legend_row(
                 .flex()
                 .items_center()
                 .whitespace_nowrap()
-                .font_weight(gpui::FontWeight(f32::from(
-                    platform_typography().weight(TypographyRole::Normal),
-                )))
+                .when(row.item == LegendItem::Asset, |title| {
+                    title.text_size(px(LEGEND_ASSET_TITLE_SIZE))
+                })
+                .font_weight(gpui::FontWeight(f32::from(legend_title_weight(row.item))))
                 .child(row.title.clone()),
         )
         .children(values)

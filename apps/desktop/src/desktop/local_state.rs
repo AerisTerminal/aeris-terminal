@@ -565,6 +565,7 @@ fn valid_chart_appearance(appearance: &WorkspaceChartAppearanceState) -> bool {
         && [
             appearance.background_color.as_str(),
             appearance.text_color.as_str(),
+            appearance.area_bottom_color.as_str(),
         ]
         .into_iter()
         .all(|value| value.is_empty() || color_is_valid(value))
@@ -874,6 +875,7 @@ mod tests {
                 baseline_bottom_color: "#ef4444".to_string(),
                 background_color: "#0b1220".to_string(),
                 text_color: "#e2e8f0".to_string(),
+                area_bottom_color: "#2563eb00".to_string(),
             }),
             order_flow: Some(WorkspaceOrderFlowSettingsState {
                 display_mode: 2,
@@ -1458,6 +1460,7 @@ mod tests {
             baseline_bottom_color: "#ef4444".to_string(),
             background_color: "theme".to_string(),
             text_color: "theme".to_string(),
+            area_bottom_color: "theme".to_string(),
         });
 
         let sanitized = sanitize_workspace(workspace);

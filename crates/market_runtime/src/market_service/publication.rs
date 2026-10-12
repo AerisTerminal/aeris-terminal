@@ -251,7 +251,6 @@ impl ConsumerEvents {
                     .take()
                     .map(MarketRuntimeEvent::TradeTapeSnapshot)
             })
-            .or_else(|| self.delta_divergence.take())
             .or_else(|| self.startup_catalog_selection.take())
             .or_else(|| self.startup_catalog_search.take())
             .or_else(|| self.catalog_selection.take())
@@ -771,7 +770,7 @@ impl Coordinator<'_> {
                     && series.provider_id == provider
                     && series.instrument_id == instrument_id
                     && series.entitlement_id == order_book.instrument.entitlement_id)
-                    .then_some((*consumer_id, demand.generation?, series))
+                    .then_some((*consumer_id, demand.generation?))
             })
             .collect::<Vec<_>>();
         let trades: Arc<[crate::RetainedMarketTrade]> = order_book
@@ -782,7 +781,7 @@ impl Coordinator<'_> {
             .into();
         order_book.trade_tape_dirty = false;
         order_book.trade_tape_published_at = Some(Instant::now());
-        for (consumer_id, generation, series) in consumers {
+        for (consumer_id, generation) in consumers {
             let Some(snapshot) =
                 trade_tape_snapshot(consumer_id, generation, order_book, Arc::clone(&trades))
             else {
@@ -790,36 +789,6 @@ impl Coordinator<'_> {
             };
             if let Some(events) = self.events.get_mut(&consumer_id) {
                 events.trade_tape = Some(snapshot);
-            }
-            let Some(canonical) = self.engine.series_snapshot(&series) else {
-                continue;
-            };
-            let fired =
-                crate::order_flow_alerts::delta_divergence_completed_bar_sequence(&canonical)
-                    .is_some_and(|sequence| {
-                        self.delta_divergence_watermarks.get(&consumer_id)
-                            == Some(&(generation, sequence))
-                    });
-            if fired {
-                continue;
-            }
-            let Some(evidence) = crate::detect_delta_divergence(&canonical, &trades) else {
-                continue;
-            };
-            self.delta_divergence_watermarks.insert(
-                consumer_id,
-                (generation, evidence.completed_bar_source_sequence),
-            );
-            if let Some(events) = self.events.get_mut(&consumer_id) {
-                events.delta_divergence = Some(MarketRuntimeEvent::DeltaDivergenceTriggered(
-                    crate::MarketDeltaDivergenceTrigger {
-                        consumer_id,
-                        generation,
-                        series,
-                        provider_generation: canonical.provider_generation.0.get(),
-                        evidence,
-                    },
-                ));
             }
         }
     }

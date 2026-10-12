@@ -102,7 +102,6 @@ fn run_coordinator(
         display_depth: BTreeMap::new(),
         display_generations: BTreeMap::new(),
         price_alerts: PriceAlertRegistry::default(),
-        delta_divergence_watermarks: BTreeMap::new(),
         catalog: BTreeMap::new(),
         catalog_sessions: BTreeMap::new(),
         catalog_searches: BTreeMap::new(),
@@ -345,9 +344,6 @@ pub(super) struct Coordinator<'a> {
     /// Bounded alert definitions, baselines, and trigger evaluation. Provider
     /// workers remain shared with ordinary market demand.
     pub(super) price_alerts: PriceAlertRegistry,
-    /// Latest completed bar evaluated for each consumer's deterministic delta
-    /// divergence rule. A generation change makes the prior watermark stale.
-    pub(super) delta_divergence_watermarks: BTreeMap<ConsumerId, (GenerationId, u64)>,
     pub(super) catalog: BTreeMap<(String, String), InstallProviderInstrument>,
     pub(super) catalog_sessions: BTreeMap<String, u64>,
     /// Latest accepted provider-catalog command generation per consumer/provider.
@@ -382,7 +378,6 @@ impl Coordinator<'_> {
             removed_consumer = true;
             removed_study |= !self.studies.remove_consumer(consumer_id).is_empty();
             self.price_alerts.remove_consumer(consumer_id);
-            self.delta_divergence_watermarks.remove(&consumer_id);
             self.events.remove(&consumer_id);
             self.consumer_clients.remove(&consumer_id);
             self.catalog_searches
@@ -1541,7 +1536,6 @@ mod tests {
             display_depth: BTreeMap::new(),
             display_generations: BTreeMap::new(),
             price_alerts: PriceAlertRegistry::default(),
-            delta_divergence_watermarks: BTreeMap::new(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             catalog_searches: BTreeMap::new(),

@@ -426,12 +426,13 @@ pub(super) fn persisted_chart_appearance(
         border_visible: appearance.border_visible,
         open_visible: appearance.open_visible,
         thin_bars: appearance.thin_bars,
-        line_color: appearance.line_color.clone(),
+        line_color: persisted_appearance_color(&appearance.line_color),
         line_width: u32::from(appearance.line_width),
         line_style: u32::from(appearance.line_style),
-        area_top_color: appearance.area_top_color.clone(),
-        baseline_top_color: appearance.baseline_top_color.clone(),
-        baseline_bottom_color: appearance.baseline_bottom_color.clone(),
+        area_top_color: persisted_appearance_color(&appearance.area_top_color),
+        area_bottom_color: persisted_appearance_color(&appearance.area_bottom_color),
+        baseline_top_color: persisted_appearance_color(&appearance.baseline_top_color),
+        baseline_bottom_color: persisted_appearance_color(&appearance.baseline_bottom_color),
         background_color: persisted_appearance_color(&appearance.background_color),
         text_color: persisted_appearance_color(&appearance.text_color),
     }
@@ -445,6 +446,8 @@ pub(super) fn restored_chart_appearance(
     let crosshair_style = u8::try_from(appearance.crosshair_style).ok()?.min(4);
     let line_width = u8::try_from(appearance.line_width).ok()?.clamp(1, 4);
     let line_style = u8::try_from(appearance.line_style).ok()?.min(4);
+    let series_color =
+        |color: &str| restored_series_color(color, appearance.area_bottom_color.is_empty());
     Some(ChartAppearanceSettings {
         background_color: restored_appearance_color(&appearance.background_color, |colors| {
             colors.background
@@ -476,12 +479,13 @@ pub(super) fn restored_chart_appearance(
         border_visible: appearance.border_visible,
         open_visible: appearance.open_visible,
         thin_bars: appearance.thin_bars,
-        line_color: appearance.line_color.clone(),
+        line_color: series_color(&appearance.line_color),
         line_width,
         line_style,
-        area_top_color: appearance.area_top_color.clone(),
-        baseline_top_color: appearance.baseline_top_color.clone(),
-        baseline_bottom_color: appearance.baseline_bottom_color.clone(),
+        area_top_color: series_color(&appearance.area_top_color),
+        area_bottom_color: series_color(&appearance.area_bottom_color),
+        baseline_top_color: series_color(&appearance.baseline_top_color),
+        baseline_bottom_color: series_color(&appearance.baseline_bottom_color),
     })
 }
 
@@ -506,6 +510,24 @@ fn restored_appearance_color(
         .into_iter()
         .any(|theme| role(ChartThemeColors::for_theme(theme)).eq_ignore_ascii_case(color));
     if color.is_empty() || color == THEME_APPEARANCE_COLOR || theme_default {
+        ChartAppearanceColor::Theme
+    } else {
+        ChartAppearanceColor::Custom(color.to_string())
+    }
+}
+
+/// The colors Aeris Charts reported for an unset line, area or baseline color before those
+/// fields carried provenance (its line, market up and market down fallbacks).
+const LEGACY_SERIES_DEFAULT_COLORS: [&str; 3] = ["#2196f3", "#089981", "#f7525f"];
+
+/// A line, area or baseline color. A `legacy` layout pinned whichever fallback the engine
+/// reported, which painted an opaque area fill, so those fallbacks follow the default again.
+fn restored_series_color(color: &str, legacy: bool) -> ChartAppearanceColor {
+    let legacy_default = legacy
+        && LEGACY_SERIES_DEFAULT_COLORS
+            .iter()
+            .any(|fallback| fallback.eq_ignore_ascii_case(color));
+    if color.is_empty() || color == THEME_APPEARANCE_COLOR || legacy_default {
         ChartAppearanceColor::Theme
     } else {
         ChartAppearanceColor::Custom(color.to_string())
@@ -3345,9 +3367,6 @@ impl WorkspaceSurface {
                 });
             }
             MarketWorkerMessage::TradeTape(snapshot) => self.apply_trade_tape(snapshot, cx),
-            MarketWorkerMessage::DeltaDivergenceTriggered(trigger) => {
-                self.apply_delta_divergence_trigger(&trigger, cx);
-            }
             MarketWorkerMessage::StudyOutput(snapshot) => self.apply_study_output(&snapshot, cx),
             MarketWorkerMessage::StudyOutputsInvalidated(invalidated) => {
                 self.apply_study_invalidated(&invalidated, cx);
@@ -3457,33 +3476,6 @@ impl WorkspaceSurface {
             self.trade_tape = Some(snapshot);
             cx.notify();
         }
-    }
-
-    fn apply_delta_divergence_trigger(
-        &mut self,
-        trigger: &aeris_market_runtime::MarketDeltaDivergenceTrigger,
-        cx: &mut Context<Self>,
-    ) {
-        let direction = match trigger.evidence.direction {
-            aeris_market_runtime::DeltaDivergenceDirection::Bullish => "bullish",
-            aeris_market_runtime::DeltaDivergenceDirection::Bearish => "bearish",
-        };
-        let symbol = self
-            .product
-            .as_ref()
-            .map_or("contract", |product| product.display_symbol.as_str());
-        let message = format!("{symbol} formed a {direction} price / cumulative-delta divergence");
-        self.indicator_message = Some(message.clone());
-        let notification = aeris_platform_runtime::NativeUserNotification::try_new(
-            "Aeris order-flow alert",
-            message,
-        );
-        if let Err(error) =
-            notification.and_then(aeris_platform_runtime::try_send_user_notification)
-        {
-            diagnostic!("Aeris order-flow notification was not delivered: {error}");
-        }
-        cx.notify();
     }
 
     fn current_runtime_series(&self) -> Result<BarSeriesKey, String> {
@@ -4340,6 +4332,12 @@ impl WorkspaceSurface {
         self.chart
             .as_ref()
             .map(|chart| chart.read(cx).appearance_settings())
+    }
+
+    pub(super) fn chart_series_colors(&self, cx: &App) -> Option<ChartSeriesColors> {
+        self.chart
+            .as_ref()
+            .and_then(|chart| chart.read(cx).series_colors())
     }
 
     pub(super) fn chart_crosshair_mode(&self, cx: &App) -> Option<u8> {

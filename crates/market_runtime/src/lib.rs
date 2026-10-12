@@ -8,14 +8,9 @@ mod hyperliquid_history;
 mod hyperliquid_market_screen;
 mod hyperliquid_realtime;
 pub mod market_service;
-mod order_flow_alerts;
 mod rithmic_history;
 mod rithmic_realtime;
 pub mod study;
-
-pub use order_flow_alerts::{
-    DeltaDivergenceDirection, DeltaDivergenceEvidence, detect_delta_divergence,
-};
 
 /// Maximum durable alerts owned by one market consumer.
 pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;
@@ -158,17 +153,6 @@ pub struct MarketTradeTapeSnapshot {
     pub trades: std::sync::Arc<[RetainedMarketTrade]>,
 }
 
-/// One generation-fenced completed-bar delta divergence detected by the
-/// market runtime from canonical bars and the shared classified trade tape.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MarketDeltaDivergenceTrigger {
-    pub consumer_id: aeris_market_engine::ConsumerId,
-    pub generation: aeris_market_engine::GenerationId,
-    pub series: aeris_market_data::BarSeriesKey,
-    pub provider_generation: u64,
-    pub evidence: DeltaDivergenceEvidence,
-}
-
 /// Direct completed provider selection for one runtime consumer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketProviderInstrumentSelection {
@@ -268,7 +252,6 @@ pub enum MarketRuntimeEvent {
     DemandError(MarketDemandError),
     OrderBookSnapshot(MarketOrderBookSnapshot),
     TradeTapeSnapshot(MarketTradeTapeSnapshot),
-    DeltaDivergenceTriggered(MarketDeltaDivergenceTrigger),
     StudyOutputSnapshot(MarketStudyOutputSnapshot),
     StudyOutputsInvalidated(MarketStudyOutputsInvalidated),
     StudyRemoved(MarketStudyRemoved),

@@ -6,8 +6,9 @@
 //! screen and the brand mark, both laid out with the same bundled faces the window uses.
 
 use super::{
-    AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendRow,
-    format_utc_offset, platform_date_label, platform_theme,
+    AerisChartView, LEGEND_ASSET_TITLE_SIZE, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT,
+    LegendItem, LegendRow, format_utc_offset, legend_title_weight, platform_date_label,
+    platform_theme,
 };
 use aeris_charts_native::{
     ImageExportOptions, PreparedChartImage, measure_text, prepare_engine_image, register_font_data,
@@ -93,6 +94,7 @@ struct ExportLegendRow {
 struct ExportTextRun {
     text: String,
     color: Color,
+    size: f32,
     weight: u16,
 }
 
@@ -162,7 +164,6 @@ impl ChartCapture {
     fn legend_overlay(&self, overlay: &mut Vec<Prim>) {
         let scale = self.image.pixel_ratio();
         let family = platform_font_stack();
-        let size = LEGEND_TEXT_SIZE * scale;
         let row_height = LEGEND_ROW_HEIGHT * scale;
         let inset = LEGEND_INSET * scale;
         let padding = LEGEND_PADDING_X * scale;
@@ -177,6 +178,7 @@ impl ChartCapture {
             'rows: for row in self.legend.iter().filter(|row| row.pane == pane) {
                 let mut pen = line_start;
                 for run in &row.runs {
+                    let size = run.size * scale;
                     let advance = measure_text(&run.text, size, family, run.weight, false)
                         .unwrap_or_default();
                     if pen > line_start && pen + advance > line_end {
@@ -302,7 +304,12 @@ fn export_legend_rows(rows: Vec<LegendRow>, palette: ExportPalette) -> Vec<Expor
             let mut runs = vec![ExportTextRun {
                 text: row.title,
                 color: palette.text,
-                weight: typography.weight(TypographyRole::Normal),
+                size: if row.item == LegendItem::Asset {
+                    LEGEND_ASSET_TITLE_SIZE
+                } else {
+                    LEGEND_TEXT_SIZE
+                },
+                weight: legend_title_weight(row.item),
             }];
             runs.extend(row.values.into_iter().map(|value| {
                 ExportTextRun {
@@ -312,6 +319,7 @@ fn export_legend_rows(rows: Vec<LegendRow>, palette: ExportPalette) -> Vec<Expor
                         .and_then(Color::parse_css)
                         .unwrap_or(palette.muted),
                     text: value.text,
+                    size: LEGEND_TEXT_SIZE,
                     weight: typography.weight(TypographyRole::Normal),
                 }
             }));

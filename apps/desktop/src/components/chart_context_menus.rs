@@ -1610,6 +1610,7 @@ struct SwitchWithOption {
 fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -> AnyElement {
     let title = snapshot.chart_type.label();
     let appearance = &snapshot.appearance;
+    let colors = &snapshot.series_colors;
     let groups = match snapshot.chart_type {
         ChartType::Candles
         | ChartType::HollowCandles
@@ -1618,25 +1619,13 @@ fn chart_symbol_settings(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) -
         ChartType::Footprint => footprint_groups(ui, title, snapshot.order_flow),
         ChartType::Bars => vec![bar_group(ui, title, appearance)],
         ChartType::Line | ChartType::LineWithMarkers | ChartType::BrushableArea => {
-            vec![line_group(ui, title, appearance)]
+            vec![line_group(ui, title, appearance, colors)]
         }
         ChartType::Area => vec![
-            line_group(ui, "Line", appearance),
-            settings_group(
-                "Fill",
-                [settings_color_row(
-                    ui,
-                    "Color",
-                    ColorCell {
-                        setting: ChartColorSetting::AreaTop,
-                        value: &appearance.area_top_color,
-                    },
-                    true,
-                )],
-                ui.theme,
-            ),
+            line_group(ui, "Line", appearance, colors),
+            area_fill_group(ui, colors),
         ],
-        ChartType::Baseline => vec![baseline_group(ui, title, appearance)],
+        ChartType::Baseline => vec![baseline_group(ui, title, appearance, colors)],
     };
     settings_section(groups)
 }
@@ -1847,6 +1836,7 @@ fn line_group(
     ui: SettingsUi<'_>,
     title: &'static str,
     appearance: &ChartAppearanceSettings,
+    colors: &ChartSeriesColors,
 ) -> AnyElement {
     settings_group(
         title,
@@ -1856,7 +1846,7 @@ fn line_group(
                 "Color",
                 ColorCell {
                     setting: ChartColorSetting::Line,
-                    value: &appearance.line_color,
+                    value: &colors.line,
                 },
                 true,
             ),
@@ -1867,10 +1857,38 @@ fn line_group(
     )
 }
 
+/// The area's gradient: top at the series line, bottom at the plot floor. An unpinned stop
+/// shows the translucent default Aeris Charts derives from the line color.
+fn area_fill_group(ui: SettingsUi<'_>, colors: &ChartSeriesColors) -> AnyElement {
+    settings_group(
+        "Fill",
+        [
+            settings_pair_captions("Top", "Bottom", false, ui.theme),
+            settings_color_pair_row(
+                ui,
+                "Colors",
+                [
+                    ColorCell {
+                        setting: ChartColorSetting::AreaTop,
+                        value: &colors.area_top,
+                    },
+                    ColorCell {
+                        setting: ChartColorSetting::AreaBottom,
+                        value: &colors.area_bottom,
+                    },
+                ],
+                PairSwitch::Absent,
+            ),
+        ],
+        ui.theme,
+    )
+}
+
 fn baseline_group(
     ui: SettingsUi<'_>,
     title: &'static str,
     appearance: &ChartAppearanceSettings,
+    colors: &ChartSeriesColors,
 ) -> AnyElement {
     settings_group(
         title,
@@ -1882,11 +1900,11 @@ fn baseline_group(
                 [
                     ColorCell {
                         setting: ChartColorSetting::BaselineTop,
-                        value: &appearance.baseline_top_color,
+                        value: &colors.baseline_top,
                     },
                     ColorCell {
                         setting: ChartColorSetting::BaselineBottom,
-                        value: &appearance.baseline_bottom_color,
+                        value: &colors.baseline_bottom,
                     },
                 ],
                 PairSwitch::Absent,

@@ -487,6 +487,8 @@ pub struct WorkspaceChartAppearanceState {
     pub line_style: u32,
     #[prost(string, tag = "20")]
     pub area_top_color: String,
+    // Tag 21 held an earlier area bottom color whose saved values predate the engine gradient;
+    // it stays unused so those values are never read as the current field.
     #[prost(string, tag = "22")]
     pub baseline_top_color: String,
     #[prost(string, tag = "23")]
@@ -497,6 +499,10 @@ pub struct WorkspaceChartAppearanceState {
     /// Empty in layouts saved before canvas text control existed; restores as theme-following.
     #[prost(string, tag = "25")]
     pub text_color: String,
+    /// Empty in layouts saved before line, area and baseline colors carried provenance; those
+    /// layouts pinned the engine's reported defaults, which restore as default-following.
+    #[prost(string, tag = "26")]
+    pub area_bottom_color: String,
 }
 
 /// Durable host-owned state for one native Study Runtime instance.

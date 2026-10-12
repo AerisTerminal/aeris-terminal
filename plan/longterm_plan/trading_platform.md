@@ -115,7 +115,7 @@ features, 17 are Present, 15 Partial and 13 Absent.
 | M1.1 | Liquidity heatmap: resting depth over time with trades, color scaling, thresholds, minimum size | Absent | Feed canonical depth and PF5 trades into the chart; settings UI | F3, OF15, PD8, PD9 | T7 |
 | M1.2 | Footprint: bid×ask, delta, total and imbalance views; POC; stacked imbalances | Present | Consumes PF5; configurable and persisted | F2, OF12, PD10 | T3 |
 | M1.3 | Volume profile, VWAP bands and TPO: session, composite, fixed-range, anchored | Absent (Volume Profile (Visible Range) is in the indicator menu since `df9f2cef`) | Session definitions from PF6; profile settings; toolbar tools | OF3–OF10, F6 | T7 |
-| M1.4 | Cumulative delta and delta divergence | Present | Shared-tape delta and completed-bar divergence alerts | F2, OF1, OF2 | T3 |
+| M1.4 | Cumulative delta and delta divergence | Partial (cumulative delta; the always-on divergence notification was removed) | Shared-tape delta; divergence returns only as an opt-in alert under M6.1 | F2, OF1, OF2 | T3 |
 | M1.5 | Big trades and sweeps with adaptive per-contract thresholds | Present | Bounded sweep grouping; adaptive or explicit threshold | F2, OF11, PD8 | T3 |
 | M1.6 | Order-level intelligence: queue position, icebergs, pulled liquidity, size clustering | Absent | Deterministic detectors over PF4, labeled as estimates; DOM columns | PD8, PD1 | T5 |
 | M1.7 | Time and sales with size, side and price filters | Present | Bounded filtered window over PF5 | — | T3 |
@@ -184,7 +184,7 @@ and release time; missing keys or outages show "unavailable", never invented val
 
 | ID | Feature | Status | Platform work | Aeris Charts | Batch |
 | --- | --- | --- | --- | --- | --- |
-| M6.1 | Alerts for order flow, rule meters, events and studies | Partial (price and delta divergence) | Extend `market_runtime` alert evaluation; study alerts per study plan Phase J | Alert lines | T8 |
+| M6.1 | Alerts for order flow, rule meters, events and studies | Partial (price) | Extend `market_runtime` alert evaluation; study alerts per study plan Phase J | Alert lines | T8 |
 | M6.2 | Delivery to Telegram or Discord through the user's own bot or webhook | Partial (desktop notifications) | Follows the data licensing checklist | — | T8 |
 | M6.3 | Custom indicators and the in-app Study Editor | Partial (SDK Phases A–E) | Study plan Phases F–L | I4, F4 | T8 |
 | M6.4 | Strategies and local backtesting with order-book-aware fills | Absent | Separate strategy program; needs PF8 and PF9 | — | T8 |

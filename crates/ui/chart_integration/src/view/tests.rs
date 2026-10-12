@@ -2631,12 +2631,13 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
         border_visible: false,
         open_visible: false,
         thin_bars: false,
-        line_color: "#3B82F6".to_string(),
+        line_color: custom_color("#3B82F6"),
         line_width: 4,
         line_style: 2,
-        area_top_color: "#2563EB".to_string(),
-        baseline_top_color: "#22C55E".to_string(),
-        baseline_bottom_color: "#F43F5E".to_string(),
+        area_top_color: custom_color("#2563EB"),
+        area_bottom_color: AppearanceColor::Theme,
+        baseline_top_color: custom_color("#22C55E"),
+        baseline_bottom_color: custom_color("#F43F5E"),
     };
 
     assert!(chart.set_appearance_settings(&appearance));
@@ -2649,6 +2650,12 @@ fn chart_appearance_round_trips_series_grid_and_crosshair_styles() {
     )
     .expect("primary series options are JSON");
     assert_eq!(series_options["area_bottom_color"], "");
+    let colors = chart.series_colors().expect("primary series colors");
+    assert_eq!(colors.line, "#3B82F6");
+    assert_eq!(colors.area_top, "#2563EB");
+    // The unpinned bottom fill shows the translucent gradient of the pinned line.
+    assert_eq!(colors.area_bottom.len(), "#3B82F6AA".len());
+    assert!(colors.area_bottom.starts_with("#3B82F6"));
     assert_eq!(chart.user_state_revision(), revision + 1);
     assert!(!chart.set_appearance_settings(&appearance));
     assert_eq!(chart.user_state_revision(), revision + 1);
@@ -2744,8 +2751,8 @@ fn canvas_appearance_updates_do_not_rewrite_primary_series_options() {
     let mut series = chart.appearance_settings();
     series.up_color = custom_color("#10B981");
     series.down_color = custom_color("#EF4444");
-    series.line_color = "#3B82F6".to_string();
-    series.area_top_color = "#2563EB80".to_string();
+    series.line_color = custom_color("#3B82F6");
+    series.area_top_color = custom_color("#2563EB80");
     assert!(chart.set_series_appearance_settings(&series));
 
     let before = chart
@@ -2765,7 +2772,10 @@ fn canvas_appearance_updates_do_not_rewrite_primary_series_options() {
             .expect("primary series options"),
         before
     );
-    assert_eq!(chart.appearance_settings().area_top_color, "#2563EB80");
+    assert_eq!(
+        chart.appearance_settings().area_top_color,
+        custom_color("#2563EB80")
+    );
 }
 
 #[test]
@@ -2792,7 +2802,7 @@ fn series_appearance_updates_do_not_rewrite_canvas_options() {
         )
     };
     let mut series = chart.appearance_settings();
-    series.area_top_color = "#2563EB80".to_string();
+    series.area_top_color = custom_color("#2563EB80");
     series.line_width = 4;
     assert!(chart.set_series_appearance_settings(&series));
     let options = chart.engine.options.get();

@@ -57,7 +57,7 @@ pub use view::{
     ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingAnchorError,
     ChartDrawingAnchorText, ChartDrawingKind, ChartDrawingSettings, ChartDrawingStamp,
     ChartIndicator, ChartIndicatorError, ChartIndicatorState, ChartLegendOptions,
-    ChartSettingsRequest, ChartStudyInputRequirements, ChartStudyInputStream,
+    ChartSeriesColors, ChartSettingsRequest, ChartStudyInputRequirements, ChartStudyInputStream,
     ChartStudyOutputDescriptor, ChartStudyOutputError, ChartStudyPaneTarget, ChartStudyPlotKind,
     ChartStudyPointStyle, ChartStudyScaleTarget, ChartStudyThresholdRegion, ChartType,
     DrawingsLockSummary, FootprintDisplayMode, OrderFlowAggregation, OrderFlowSettings,
