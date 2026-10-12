@@ -2090,8 +2090,9 @@ impl TradingStore {
         transaction
             .execute(
                 "UPDATE orders SET time_in_force = ?1, limit_units = ?2, limit_scale = ?3,
-                    stop_units = ?4, stop_scale = ?5, provenance_json = ?6
-                 WHERE id = ?7 AND status IN ('working', 'partially_filled')",
+                    stop_units = ?4, stop_scale = ?5, provenance_json = ?6,
+                    quantity_units = ?7, quantity_scale = ?8
+                 WHERE id = ?9 AND status IN ('working', 'partially_filled')",
                 params![
                     order.time_in_force.as_str(),
                     order.limit_price.map(FixedPoint::units),
@@ -2099,6 +2100,8 @@ impl TradingStore {
                     order.stop_price.map(FixedPoint::units),
                     order.stop_price.map(FixedPoint::scale),
                     encode_provenance(&order.provenance),
+                    order.quantity.units(),
+                    order.quantity.scale(),
                     order.id.as_str(),
                 ],
             )

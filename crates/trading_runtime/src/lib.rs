@@ -6,6 +6,7 @@
 mod copier;
 mod discipline;
 mod plan;
+mod protection;
 mod risk;
 mod round_trip;
 mod store;
@@ -361,15 +362,7 @@ impl TradingSnapshot {
     pub fn protective_role(&self, client_order_id: &ClientOrderId) -> Option<ProtectiveOrderRole> {
         self.managed_brackets
             .iter()
-            .find_map(|bracket| {
-                if bracket.stop_client_order_id.as_ref() == Some(client_order_id) {
-                    Some(ProtectiveOrderRole::StopLoss)
-                } else if bracket.target_client_order_ids.contains(client_order_id) {
-                    Some(ProtectiveOrderRole::TakeProfit)
-                } else {
-                    None
-                }
-            })
+            .find_map(|bracket| protection::managed_bracket_role(bracket, client_order_id))
             .or_else(|| {
                 self.protective_orders
                     .iter()
@@ -386,7 +379,8 @@ impl TradingSnapshot {
         account_id: &TradingAccountId,
         instrument_id: &InstrumentId,
     ) -> PositionProtection {
-        let mut protection = PositionProtection::default();
+        let mut stop_loss: Option<(i64, FixedPoint)> = None;
+        let mut take_profit: Option<(i64, FixedPoint)> = None;
         for order in self.orders.iter().filter(|order| {
             order.status.is_open()
                 && &order.account_id == account_id
@@ -395,36 +389,21 @@ impl TradingSnapshot {
             let Some(role) = self.protective_role(&order.client_order_id) else {
                 continue;
             };
-            // A sell protects a long position: its stop sits below the market and its target
-            // above, so the highest stop and the lowest target trigger first.
-            let protects_long = order.side == OrderSide::Sell;
-            let (slot, price, first_wins_high) = match role {
-                ProtectiveOrderRole::StopLoss => (
-                    &mut protection.stop_loss,
-                    order.stop_price.or(order.limit_price),
-                    protects_long,
-                ),
-                ProtectiveOrderRole::TakeProfit => (
-                    &mut protection.take_profit,
-                    order.limit_price.or(order.stop_price),
-                    !protects_long,
-                ),
-            };
-            let Some(price) = price else {
+            let Some((key, price)) = protection::protection_trigger(order, role) else {
                 continue;
             };
-            let triggers_first = slot.is_none_or(|current| {
-                if first_wins_high {
-                    price.units() > current.units()
-                } else {
-                    price.units() < current.units()
-                }
-            });
-            if triggers_first {
-                *slot = Some(price);
+            let slot = match role {
+                ProtectiveOrderRole::StopLoss => &mut stop_loss,
+                ProtectiveOrderRole::TakeProfit => &mut take_profit,
+            };
+            if slot.is_none_or(|(first, _)| key < first) {
+                *slot = Some((key, price));
             }
         }
-        protection
+        PositionProtection {
+            stop_loss: stop_loss.map(|(_, price)| price),
+            take_profit: take_profit.map(|(_, price)| price),
+        }
     }
 }
 
@@ -629,6 +608,7 @@ impl TradingService {
                             connected_broker_accounts: BTreeSet::new(),
                         };
                         coordinator.repair_loaded_position_projections()?;
+                        coordinator.align_loaded_protection()?;
                         Ok(coordinator)
                     });
                 match coordinator {
@@ -2793,7 +2773,7 @@ impl Coordinator {
         for order in self.state.orders.values().filter(|order| {
             &order.account_id == account_id
                 && order.status.is_open()
-                && !self.is_managed_protection(&order.client_order_id)
+                && self.protection_role(&order.client_order_id).is_none()
         }) {
             let quantity = order
                 .quantity
@@ -2830,14 +2810,6 @@ impl Coordinator {
                     .ok_or_else(|| "risk contract quantity overflowed".to_string())
             })?;
         u64::try_from(total).map_err(|_| "risk contract quantity overflowed".to_string())
-    }
-
-    fn is_managed_protection(&self, client_order_id: &ClientOrderId) -> bool {
-        self.state.protective_orders.contains_key(client_order_id)
-            || self.state.managed_brackets.values().any(|bracket| {
-                bracket.stop_client_order_id.as_ref() == Some(client_order_id)
-                    || bracket.target_client_order_ids.contains(client_order_id)
-            })
     }
 
     fn risk_warnings(
@@ -3095,6 +3067,7 @@ impl Coordinator {
             .collect::<std::collections::BTreeSet<_>>();
         let fills = self.execute_market_fills(candidates, observation, &instrument)?;
         self.reconcile_managed_brackets(&fills, observation, &instrument)?;
+        self.align_position_protection(&fills, observation)?;
         let mut positions_changed = self.update_mark_to_market(observation, &instrument)?;
         self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
         positions_changed |= self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
@@ -3253,41 +3226,42 @@ impl Coordinator {
             self.activate_managed_bracket(&bracket_id, &fill, observation, instrument)?;
         }
 
-        let interrupted = self
-            .state
-            .managed_brackets
-            .iter()
-            .filter(|(_, bracket)| bracket.status == ManagedBracketStatus::Active)
-            .filter_map(|(id, bracket)| {
-                let stop_id = bracket.stop_client_order_id.as_ref()?;
-                let stop = self.order_by_client_id(stop_id).ok()?;
-                if stop.status == OrderStatus::Filled {
-                    return Some((id.clone(), stop_id.clone()));
-                }
-                let entry = self
-                    .order_by_client_id(&bracket.entry_client_order_id)
-                    .ok()?;
-                let position = self
-                    .state
-                    .positions
-                    .get(&(entry.account_id.clone(), entry.instrument_id.clone()))?;
-                let remaining = position.net_quantity.units().unsigned_abs();
-                let stop_quantity = stop.quantity.units().unsigned_abs();
-                (remaining != stop_quantity).then(|| {
-                    bracket
+        let interrupted =
+            self.state
+                .managed_brackets
+                .iter()
+                .filter(|(_, bracket)| bracket.status == ManagedBracketStatus::Active)
+                .filter_map(|(id, bracket)| {
+                    let stop_id = bracket.stop_client_order_id.as_ref()?;
+                    let stop = self.order_by_client_id(stop_id).ok()?;
+                    if stop.status == OrderStatus::Filled {
+                        return Some((id.clone(), stop_id.clone()));
+                    }
+                    let target_status = |target_id: &ClientOrderId| {
+                        self.order_by_client_id(target_id)
+                            .ok()
+                            .map(|target| target.status)
+                    };
+                    let filled_target = bracket
                         .target_client_order_ids
                         .iter()
-                        .find_map(|target_id| {
-                            self.order_by_client_id(target_id)
-                                .ok()
-                                .filter(|target| target.status == OrderStatus::Filled)
-                                .map(|_| (id.clone(), target_id.clone()))
-                        })
-                })?
-            })
-            .collect::<Vec<_>>();
+                        .find(|target_id| target_status(target_id) == Some(OrderStatus::Filled))?;
+                    let targets_open = bracket.target_client_order_ids.iter().any(|target_id| {
+                        target_status(target_id).is_some_and(OrderStatus::is_open)
+                    });
+                    let entry = self
+                        .order_by_client_id(&bracket.entry_client_order_id)
+                        .ok()?;
+                    let position_open = self
+                        .state
+                        .positions
+                        .get(&(entry.account_id.clone(), entry.instrument_id.clone()))
+                        .is_some_and(|position| position.net_quantity.units() != 0);
+                    (!targets_open || !position_open).then(|| (id.clone(), filled_target.clone()))
+                })
+                .collect::<Vec<_>>();
         for (bracket_id, child_id) in interrupted {
-            self.complete_or_resize_managed_bracket(&bracket_id, &child_id, observation)?;
+            self.complete_managed_bracket(&bracket_id, &child_id)?;
         }
         Ok(())
     }
@@ -3577,16 +3551,9 @@ impl Coordinator {
     }
 
     fn is_stop_fill(&self, fill: &Fill) -> bool {
-        let Some(order) = self.state.orders.get(&fill.order_id) else {
-            return false;
-        };
-        self.state
-            .protective_orders
-            .get(&order.client_order_id)
-            .is_some_and(|protective| protective.role == ProtectiveOrderRole::StopLoss)
-            || self.state.managed_brackets.values().any(|bracket| {
-                bracket.stop_client_order_id.as_ref() == Some(&order.client_order_id)
-            })
+        self.state.orders.get(&fill.order_id).is_some_and(|order| {
+            self.protection_role(&order.client_order_id) == Some(ProtectiveOrderRole::StopLoss)
+        })
     }
 
     fn apply_fill_to_memory(
@@ -3676,11 +3643,7 @@ impl Coordinator {
             if is_entry {
                 self.activate_managed_bracket(&bracket_id, fill, observation, instrument)?;
             } else {
-                self.complete_or_resize_managed_bracket(
-                    &bracket_id,
-                    &filled_client_order_id,
-                    observation,
-                )?;
+                self.complete_managed_bracket(&bracket_id, &filled_client_order_id)?;
             }
         }
         Ok(())
@@ -3833,11 +3796,12 @@ impl Coordinator {
         Ok((order, event, client_order_id))
     }
 
-    fn complete_or_resize_managed_bracket(
+    /// Completes a bracket once its stop fills, or once a target fill leaves no target or no
+    /// position.
+    fn complete_managed_bracket(
         &mut self,
         bracket_id: &str,
         filled_client_order_id: &ClientOrderId,
-        observation: &SimulatedMarketObservation,
     ) -> Result<(), String> {
         let mut bracket = self
             .state
@@ -3862,70 +3826,20 @@ impl Coordinator {
                         .is_ok_and(|order| order.status.is_open())
                 })
                 .count();
-            let position = self
+            let position_open = self
                 .state
                 .positions
-                .get(&(
-                    entry_order.account_id.clone(),
-                    entry_order.instrument_id.clone(),
-                ))
-                .cloned();
-            if remaining_targets == 0
-                || position
-                    .as_ref()
-                    .is_none_or(|position| position.net_quantity.units() == 0)
-            {
-                if let Some(stop) = &bracket.stop_client_order_id {
-                    self.cancel_order_internal(stop, false)?;
-                }
-                bracket.status = ManagedBracketStatus::Completed;
-            } else {
-                let current_stop = bracket
-                    .stop_client_order_id
-                    .as_ref()
-                    .ok_or_else(|| "active managed bracket stop is missing".to_string())?;
-                let stop_order = self.order_by_client_id(current_stop)?.clone();
-                let quantity = FixedPoint::try_new(
-                    i64::try_from(
-                        position
-                            .as_ref()
-                            .ok_or_else(|| "managed bracket position disappeared".to_string())?
-                            .net_quantity
-                            .units()
-                            .unsigned_abs(),
-                    )
-                    .map_err(|_| "managed bracket quantity overflowed".to_string())?,
-                    stop_order.quantity.scale(),
-                )
-                .map_err(|error| error.to_string())?;
-                if stop_order.quantity == quantity {
-                    return Ok(());
-                }
-                self.cancel_order_internal(current_stop, false)?;
-                let replacement = managed_child_client_order_id(
-                    &entry_order.client_order_id,
-                    "stop",
-                    u32::try_from(self.state.next_sequence)
-                        .map_err(|_| "managed bracket sequence overflowed".to_string())?,
-                )?;
-                self.place_single_order_with_risk(
-                    PlaceOrder {
-                        client_order_id: replacement.clone(),
-                        account_id: stop_order.account_id,
-                        instrument_id: stop_order.instrument_id,
-                        side: stop_order.side,
-                        order_type: OrderType::Stop,
-                        time_in_force: stop_order.time_in_force,
-                        quantity,
-                        limit_price: None,
-                        stop_price: stop_order.stop_price,
-                        submitted_unix_nanos: observation.provenance.observed_unix_nanos,
-                        provenance: observation.provenance.clone(),
-                    },
-                    false,
-                )?;
-                bracket.stop_client_order_id = Some(replacement);
+                .get(&(entry_order.account_id, entry_order.instrument_id))
+                .is_some_and(|position| position.net_quantity.units() != 0);
+            // While targets remain, the stop keeps working and position protection resizes it
+            // to the smaller position.
+            if remaining_targets > 0 && position_open {
+                return Ok(());
             }
+            if let Some(stop) = &bracket.stop_client_order_id {
+                self.cancel_order_internal(stop, false)?;
+            }
+            bracket.status = ManagedBracketStatus::Completed;
         }
         self.store.put_managed_bracket(&bracket)?;
         self.state

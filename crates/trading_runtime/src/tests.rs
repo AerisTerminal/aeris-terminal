@@ -1006,6 +1006,145 @@ fn position_protection_reports_the_stop_and_target_that_trigger_first() {
         .expect("service stops");
 }
 
+/// Opens a long position of `quantity` and protects all of it with a stop at 98.00 and a
+/// target at 103.00.
+fn protected_long(service: &TradingService, quantity: i64) {
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let mut entry = market_order("entry", OrderSide::Buy, 1, 1_000);
+    entry.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
+    service.place_order(entry).expect("entry accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills");
+    for (client_id, role, price) in [
+        ("stop", ProtectiveOrderRole::StopLoss, 9_800),
+        ("target", ProtectiveOrderRole::TakeProfit, 10_300),
+    ] {
+        let mut order = market_order(client_id, OrderSide::Sell, 3, 3_000);
+        order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
+        let price = Some(FixedPoint::try_new(price, 2).expect("price"));
+        if role == ProtectiveOrderRole::StopLoss {
+            order.order_type = OrderType::Stop;
+            order.stop_price = price;
+        } else {
+            order.order_type = OrderType::Limit;
+            order.limit_price = price;
+        }
+        service
+            .place_protective_order(PlaceProtectiveOrder { order, role })
+            .expect("protection accepted");
+    }
+}
+
+/// The quantity of each open protective order, by client identifier.
+fn open_protection(service: &TradingService) -> Vec<(String, i64)> {
+    service
+        .snapshot()
+        .expect("snapshot")
+        .orders
+        .into_iter()
+        .filter(|order| {
+            order.status.is_open() && ["stop", "target"].contains(&order.client_order_id.as_str())
+        })
+        .map(|order| {
+            (
+                order.client_order_id.as_str().to_string(),
+                order.quantity.units(),
+            )
+        })
+        .collect()
+}
+
+fn market(service: &TradingService, client_id: &str, side: OrderSide, quantity: i64, step: u64) {
+    let time = i64::try_from(step).expect("step") * 1_000;
+    let mut order = market_order(client_id, side, step, time);
+    order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
+    service.place_order(order).expect("order accepted");
+    service
+        .observe_market(observation(9_975, 10_000, step + 1, time + 500))
+        .expect("order fills");
+}
+
+#[test]
+fn protection_follows_the_position_as_it_grows_shrinks_and_closes() {
+    let directory = TestDirectory::new("protection-follows-position");
+    let service = start_service(&directory);
+    protected_long(&service, 2);
+
+    market(&service, "add", OrderSide::Buy, 4, 4);
+    let grown = vec![("stop".to_string(), 6), ("target".to_string(), 6)];
+    let mut protection = open_protection(&service);
+    protection.sort();
+    assert_eq!(
+        protection, grown,
+        "adding to the position grows its stop and target"
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let service = start_service(&directory);
+    let mut protection = open_protection(&service);
+    protection.sort();
+    assert_eq!(protection, grown, "the grown protection survives a restart");
+
+    market(&service, "trim", OrderSide::Sell, 2, 6);
+    let mut protection = open_protection(&service);
+    protection.sort();
+    assert_eq!(
+        protection,
+        vec![("stop".to_string(), 4), ("target".to_string(), 4)],
+        "a partial close shrinks the protection"
+    );
+
+    market(&service, "exit", OrderSide::Sell, 4, 8);
+    assert_eq!(
+        open_protection(&service),
+        Vec::<(String, i64)>::new(),
+        "closing the position cancels its protection"
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn a_filled_stop_cancels_the_target_and_a_reversal_cancels_protection() {
+    let directory = TestDirectory::new("protection-stop-and-reversal");
+    let service = start_service(&directory);
+    protected_long(&service, 2);
+    service
+        .observe_market(observation(9_775, 9_800, 4, 4_000))
+        .expect("stop fills");
+    assert_eq!(
+        open_protection(&service),
+        Vec::<(String, i64)>::new(),
+        "the target of a stopped-out position is cancelled"
+    );
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let directory = TestDirectory::new("protection-reversal");
+    let service = start_service(&directory);
+    protected_long(&service, 2);
+    market(&service, "reverse", OrderSide::Sell, 5, 4);
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.positions[0].net_quantity.units(), -3);
+    assert_eq!(
+        open_protection(&service),
+        Vec::<(String, i64)>::new(),
+        "a sell protection cannot protect the short a reversal opened"
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
 #[test]
 fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
     let directory = TestDirectory::new("intraday-drawdown");
