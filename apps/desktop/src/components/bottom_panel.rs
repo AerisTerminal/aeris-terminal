@@ -14,14 +14,20 @@ use super::*;
 use gpui::{Stateful, UniformListScrollHandle, uniform_list};
 use std::{collections::BTreeSet, sync::Arc};
 
-const TRADE_HISTORY_INITIAL_HEIGHT: f32 = 260.0;
-const TRADE_HISTORY_MINIMUM_HEIGHT: f32 = 140.0;
+const TRADE_HISTORY_INITIAL_HEIGHT: f32 = 280.0;
+/// Room for the header, the account statistics, the table header and a few rows.
+const TRADE_HISTORY_MINIMUM_HEIGHT: f32 = 200.0;
 const TRADE_HISTORY_MAXIMUM_HEIGHT: f32 = 640.0;
 /// Space a resize always leaves for the title bar, chart header and workspace above.
 const TRADE_HISTORY_MINIMUM_WORKSPACE_HEIGHT: f32 = 240.0;
 const TRADE_HISTORY_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
-const TRADE_HISTORY_ROW_HEIGHT: f32 = 28.0;
-const TRADE_HISTORY_TIME_WIDTH: f32 = 112.0;
+const ACCOUNT_STATS_GAP: f32 = 24.0;
+const ACCOUNT_STATS_DIVIDER_HEIGHT: f32 = 28.0;
+const TABLE_HEADER_HEIGHT: f32 = 30.0;
+const TABLE_ROW_HEIGHT: f32 = 30.0;
+const TABLE_CELL_PADDING_X: f32 = 6.0;
+/// Content widths of the table columns; each cell adds its padding around them.
+const TRADE_HISTORY_TIME_WIDTH: f32 = 100.0;
 const TRADE_HISTORY_ACCOUNT_WIDTH: f32 = 85.0;
 const TRADE_HISTORY_SYMBOL_WIDTH: f32 = 65.0;
 const TRADE_HISTORY_SIDE_WIDTH: f32 = 40.0;
@@ -32,7 +38,6 @@ const TRADE_HISTORY_PNL_WIDTH: f32 = 95.0;
 /// same compact window as the trade history.
 const POSITION_PRICE_WIDTH: f32 = 64.0;
 const POSITION_ACTION_WIDTH: f32 = 28.0;
-const TRADE_HISTORY_CELL_GAP: f32 = 8.0;
 const TRADE_HISTORY_ACCOUNT_MENU_WIDTH: f32 = 220.0;
 const TRADE_HISTORY_ACCOUNT_MENU_MAX_HEIGHT: f32 = 180.0;
 
@@ -528,18 +533,20 @@ pub(super) fn bottom_panel(
             rithmic_attribution,
             theme,
         ))
-        .when(open, |panel| match state.tab {
-            BottomPanelTab::TradeHistory => panel
-                .child(trade_history_column_header(
-                    state.shows_account_column(),
-                    theme,
-                ))
-                .child(trade_history_list(state, chart, theme))
-                .child(trade_history_resize_handle()),
-            BottomPanelTab::Positions => panel
-                .child(position_column_header(state.shows_account_column(), theme))
-                .child(position_list(terminal, state, chart, theme))
-                .child(trade_history_resize_handle()),
+        .when(open, |panel| {
+            let panel = panel.children(account_stats(state, theme));
+            match state.tab {
+                BottomPanelTab::TradeHistory => panel
+                    .child(trade_history_column_header(
+                        state.shows_account_column(),
+                        theme,
+                    ))
+                    .child(trade_history_list(state, chart, theme)),
+                BottomPanelTab::Positions => panel
+                    .child(position_column_header(state.shows_account_column(), theme))
+                    .child(position_list(terminal, state, chart, theme)),
+            }
+            .child(trade_history_resize_handle())
         })
         .on_drag_move::<TradeHistoryHeightDrag>(move |event, window, cx| {
             // The panel's bottom edge is the window's bottom edge, so the pointer's distance
@@ -609,13 +616,6 @@ fn trade_history_header(
         .child(bottom_panel_tabs(terminal, state, theme))
         .when(open, |header| header.child(count_label))
         .child(div().flex_1())
-        .children(
-            state
-                .history
-                .summaries
-                .iter()
-                .map(|summary| account_summary(summary, theme)),
-        )
         .when(rithmic_attribution, |header| {
             header.child(super::terminal_chrome::rithmic_attribution(theme))
         })
@@ -626,37 +626,78 @@ fn trade_history_header(
         .child(trade_history_expand_button(terminal, open, theme))
 }
 
-/// Balance, realized P&L and open P&L of the shown accounts in one currency. It stays in the
-/// header, so it is visible while the panel is collapsed.
-fn account_summary(summary: &AccountSummary, theme: &AerisTheme) -> Div {
+/// The statistics section above the table: balance, realized P&L and open P&L of the shown
+/// accounts, one group per currency.
+fn account_stats(state: &BottomPanelState, theme: &AerisTheme) -> Option<Div> {
     let colors = theme.colors;
-    let item = |label: &'static str, value: Div| {
+    let summaries = &state.history.summaries;
+    if summaries.is_empty() {
+        return None;
+    }
+    let divider = || {
+        div()
+            .flex_none()
+            .w(px(theme.dimensions.border_width))
+            .h(px(ACCOUNT_STATS_DIVIDER_HEIGHT))
+            .bg(gpui_color(colors.border))
+    };
+    let mut section = div()
+        .flex_none()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(ACCOUNT_STATS_GAP))
+        .px_3()
+        .py_2()
+        .overflow_hidden()
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border));
+    for (index, summary) in summaries.iter().enumerate() {
+        if index > 0 {
+            section = section.child(divider());
+        }
+        section = section.children(account_summary_stats(summary, theme));
+    }
+    Some(section)
+}
+
+fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 3] {
+    let colors = theme.colors;
+    let stat = |label: &'static str, value: Div| {
         div()
             .flex_none()
             .flex()
-            .items_center()
-            .gap_1()
-            .child(label)
-            .child(value)
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(gpui_color(colors.text_secondary))
+                    .child(label),
+            )
+            .child(
+                value
+                    .text_sm()
+                    .font_weight(platform_font_weight(TypographyRole::Emphasis))
+                    .font_features(platform_tabular_numerals()),
+            )
     };
-    let pnl = |value| {
-        trade_history_pnl_value(value, &summary.currency, theme)
-            .font_features(platform_tabular_numerals())
-    };
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_3()
-        .child(item(
+    [
+        stat(
             "Balance",
             div()
-                .text_color(gpui_color(colors.text_default))
-                .font_features(platform_tabular_numerals())
+                .text_color(gpui_color(colors.text_primary))
                 .child(trade_history_money_text(summary.balance, &summary.currency)),
-        ))
-        .child(item("Realized P&L", pnl(summary.realized)))
-        .child(item("Unrealized P&L", pnl(summary.unrealized)))
+        ),
+        stat(
+            "Realized P&L",
+            trade_history_pnl_value(summary.realized, &summary.currency, theme),
+        ),
+        stat(
+            "Unrealized P&L",
+            trade_history_pnl_value(summary.unrealized, &summary.currency, theme),
+        ),
+    ]
 }
 
 /// The panel's tabs. While the panel is collapsed no tab is selected; choosing the open tab
@@ -807,38 +848,22 @@ fn trade_history_account_menu(
 }
 
 fn trade_history_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoElement {
-    let colors = theme.colors;
-    trade_history_row_frame()
-        .border_b(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border_subtle))
-        .text_color(gpui_color(colors.text_secondary))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Opened"))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Closed"))
+    table_header_frame(theme)
+        .child(text_cell(TRADE_HISTORY_TIME_WIDTH, "Opened", theme))
+        .child(text_cell(TRADE_HISTORY_TIME_WIDTH, "Closed", theme))
         .when(show_account, |row| {
-            row.child(trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH).child("Account"))
+            row.child(text_cell(TRADE_HISTORY_ACCOUNT_WIDTH, "Account", theme))
         })
-        .child(trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH).child("Symbol"))
-        .child(trade_history_cell(TRADE_HISTORY_SIDE_WIDTH).child("Side"))
-        .child(
-            trade_history_cell(TRADE_HISTORY_QUANTITY_WIDTH)
-                .text_right()
-                .child("Qty"),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
-                .text_right()
-                .child("Entry"),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
-                .text_right()
-                .child("Exit"),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
-                .text_right()
-                .child("P&L"),
-        )
+        .child(text_cell(TRADE_HISTORY_SYMBOL_WIDTH, "Symbol", theme))
+        .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, "Side", theme))
+        .child(numeric_cell(TRADE_HISTORY_QUANTITY_WIDTH, "Qty", theme))
+        .child(numeric_cell(TRADE_HISTORY_PRICE_WIDTH, "Entry", theme))
+        .child(numeric_cell(TRADE_HISTORY_PRICE_WIDTH, "Exit", theme))
+        .child(last_cell(numeric_cell(
+            TRADE_HISTORY_PNL_WIDTH,
+            "P&L",
+            theme,
+        )))
 }
 
 fn trade_history_list(
@@ -867,7 +892,7 @@ fn trade_history_list(
     let history = state.history.clone();
     let show_account = state.shows_account_column();
     let list_theme = *theme;
-    uniform_list(
+    let list = uniform_list(
         "trade_history_rows",
         history.rows.len(),
         move |range, _, cx| {
@@ -887,11 +912,28 @@ fn trade_history_list(
                 .collect::<Vec<_>>()
         },
     )
-    .track_scroll(&state.scroll)
-    .w_full()
-    .flex_1()
-    .min_h_0()
-    .into_any_element()
+    .track_scroll(&state.scroll);
+    table_body(list, &state.scroll, theme)
+}
+
+/// The scrolling rows below a table header, with the screener's thin scrollbar.
+fn table_body(
+    list: gpui::UniformList,
+    scroll: &UniformListScrollHandle,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let scrollbar = scroll.0.borrow().base_handle.clone();
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .child(list.size_full())
+        .child(ThinScrollbar::new(
+            &scrollbar,
+            gpui_color(theme.colors.text_secondary),
+        ))
+        .into_any_element()
 }
 
 fn trade_history_row(
@@ -925,65 +967,67 @@ fn trade_history_row(
         .exit
         .map(|leg| trade_history_decimal(leg.average_price));
     let currency = history.account_currency(trip.account_id.as_str());
-    trade_history_row_frame()
+    table_row_frame(theme)
         .id(("trade_history_row", index))
-        .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
-        .text_color(gpui_color(colors.text_default))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(trade_history_text(opened)))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(trade_history_text(closed)))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            trade_history_text(opened),
+            theme,
+        ))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            trade_history_text(closed),
+            theme,
+        ))
         .when(show_account, |row| {
-            row.child(
-                trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH)
-                    .child(history.account_name(trip.account_id.as_str())),
-            )
+            row.child(text_cell(
+                TRADE_HISTORY_ACCOUNT_WIDTH,
+                history.account_name(trip.account_id.as_str()),
+                theme,
+            ))
         })
-        .child(
-            trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH)
-                .child(history.symbol(&trip.instrument_id)),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_SIDE_WIDTH)
-                .text_color(gpui_color(side_color))
-                .child(side),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_QUANTITY_WIDTH)
-                .text_right()
-                .child(trade_history_text(quantity)),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
-                .text_right()
-                .child(trade_history_text(entry_price)),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_PRICE_WIDTH)
-                .text_right()
-                .child(trade_history_text(exit_price)),
-        )
-        .child(trade_history_pnl_cell(trip.final_pnl, currency, theme))
+        .child(text_cell(
+            TRADE_HISTORY_SYMBOL_WIDTH,
+            history.symbol(&trip.instrument_id),
+            theme,
+        ))
+        .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, side, theme).text_color(gpui_color(side_color)))
+        .child(numeric_cell(
+            TRADE_HISTORY_QUANTITY_WIDTH,
+            trade_history_text(quantity),
+            theme,
+        ))
+        .child(numeric_cell(
+            TRADE_HISTORY_PRICE_WIDTH,
+            trade_history_text(entry_price),
+            theme,
+        ))
+        .child(numeric_cell(
+            TRADE_HISTORY_PRICE_WIDTH,
+            trade_history_text(exit_price),
+            theme,
+        ))
+        .child(last_cell(trade_history_pnl_cell(
+            trip.final_pnl,
+            currency,
+            theme,
+        )))
 }
 
 fn position_column_header(show_account: bool, theme: &AerisTheme) -> impl IntoElement {
-    let colors = theme.colors;
-    let right =
-        |width: f32, label: &'static str| trade_history_cell(width).text_right().child(label);
-    trade_history_row_frame()
-        .border_b(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border_subtle))
-        .text_color(gpui_color(colors.text_secondary))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child("Opened"))
+    table_header_frame(theme)
+        .child(text_cell(TRADE_HISTORY_TIME_WIDTH, "Opened", theme))
         .when(show_account, |row| {
-            row.child(trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH).child("Account"))
+            row.child(text_cell(TRADE_HISTORY_ACCOUNT_WIDTH, "Account", theme))
         })
-        .child(trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH).child("Symbol"))
-        .child(trade_history_cell(TRADE_HISTORY_SIDE_WIDTH).child("Side"))
-        .child(right(TRADE_HISTORY_QUANTITY_WIDTH, "Qty"))
-        .child(right(POSITION_PRICE_WIDTH, "Entry"))
-        .child(right(POSITION_PRICE_WIDTH, "SL"))
-        .child(right(POSITION_PRICE_WIDTH, "TP"))
-        .child(right(TRADE_HISTORY_PNL_WIDTH, "Open P&L"))
-        .child(div().w(px(POSITION_ACTION_WIDTH)).flex_none())
+        .child(text_cell(TRADE_HISTORY_SYMBOL_WIDTH, "Symbol", theme))
+        .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, "Side", theme))
+        .child(numeric_cell(TRADE_HISTORY_QUANTITY_WIDTH, "Qty", theme))
+        .child(numeric_cell(POSITION_PRICE_WIDTH, "Entry", theme))
+        .child(numeric_cell(POSITION_PRICE_WIDTH, "SL", theme))
+        .child(numeric_cell(POSITION_PRICE_WIDTH, "TP", theme))
+        .child(numeric_cell(TRADE_HISTORY_PNL_WIDTH, "Open P&L", theme))
+        .child(position_action_cell())
 }
 
 fn position_list(
@@ -1015,7 +1059,7 @@ fn position_list(
     let history = state.history.clone();
     let show_account = state.shows_account_column();
     let list_theme = *theme;
-    uniform_list(
+    let list = uniform_list(
         "position_rows",
         positions.rows.len(),
         move |range, _, cx| {
@@ -1036,11 +1080,8 @@ fn position_list(
                 .collect::<Vec<_>>()
         },
     )
-    .track_scroll(&state.positions_scroll)
-    .w_full()
-    .flex_1()
-    .min_h_0()
-    .into_any_element()
+    .track_scroll(&state.positions_scroll);
+    table_body(list, &state.positions_scroll, theme)
 }
 
 /// One open position. A broker position's open P&L is the broker's own value and shows only
@@ -1063,48 +1104,68 @@ fn position_row(
     let price = |value: Option<aeris_trading::FixedPoint>| {
         trade_history_text(value.map(trade_history_decimal))
     };
-    let right = |width: f32, text: String| trade_history_cell(width).text_right().child(text);
     let opened = position
         .opened_unix_nanos
         .map(|opened| trade_history_time(chart, opened));
-    trade_history_row_frame()
+    table_row_frame(theme)
         .id(("position_row", index))
-        .hover(move |row| row.bg(gpui_color(colors.hover_bg)))
-        .text_color(gpui_color(colors.text_default))
-        .child(trade_history_cell(TRADE_HISTORY_TIME_WIDTH).child(trade_history_text(opened)))
+        .child(text_cell(
+            TRADE_HISTORY_TIME_WIDTH,
+            trade_history_text(opened),
+            theme,
+        ))
         .when(show_account, |row| {
-            row.child(
-                trade_history_cell(TRADE_HISTORY_ACCOUNT_WIDTH)
-                    .child(history.account_name(position.account_id.as_str())),
-            )
+            row.child(text_cell(
+                TRADE_HISTORY_ACCOUNT_WIDTH,
+                history.account_name(position.account_id.as_str()),
+                theme,
+            ))
         })
-        .child(
-            trade_history_cell(TRADE_HISTORY_SYMBOL_WIDTH)
-                .child(history.symbol(&position.instrument_id)),
-        )
-        .child(
-            trade_history_cell(TRADE_HISTORY_SIDE_WIDTH)
-                .text_color(gpui_color(side_color))
-                .child(side),
-        )
-        .child(right(
+        .child(text_cell(
+            TRADE_HISTORY_SYMBOL_WIDTH,
+            history.symbol(&position.instrument_id),
+            theme,
+        ))
+        .child(text_cell(TRADE_HISTORY_SIDE_WIDTH, side, theme).text_color(gpui_color(side_color)))
+        .child(numeric_cell(
             TRADE_HISTORY_QUANTITY_WIDTH,
             trade_history_decimal(position.quantity),
+            theme,
         ))
-        .child(right(POSITION_PRICE_WIDTH, price(position.entry_price)))
-        .child(right(POSITION_PRICE_WIDTH, price(position.stop_loss)))
-        .child(right(POSITION_PRICE_WIDTH, price(position.take_profit)))
+        .child(numeric_cell(
+            POSITION_PRICE_WIDTH,
+            price(position.entry_price),
+            theme,
+        ))
+        .child(numeric_cell(
+            POSITION_PRICE_WIDTH,
+            price(position.stop_loss),
+            theme,
+        ))
+        .child(numeric_cell(
+            POSITION_PRICE_WIDTH,
+            price(position.take_profit),
+            theme,
+        ))
         .child(trade_history_pnl_cell(
             position.open_pnl,
             history.account_currency(position.account_id.as_str()),
             theme,
         ))
         .child(
-            div()
-                .w(px(POSITION_ACTION_WIDTH))
-                .flex_none()
-                .child(position_close_button(index, position, terminal, theme)),
+            position_action_cell().child(position_close_button(index, position, terminal, theme)),
         )
+}
+
+/// The undivided trailing column that holds a position's close action.
+fn position_action_cell() -> Div {
+    div()
+        .h_full()
+        .w(px(POSITION_ACTION_WIDTH + 2.0 * TABLE_CELL_PADDING_X))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
 }
 
 fn position_close_button(
@@ -1173,9 +1234,11 @@ fn trade_history_pnl_cell(
     currency: &str,
     theme: &AerisTheme,
 ) -> Div {
-    trade_history_cell(TRADE_HISTORY_PNL_WIDTH)
-        .text_right()
-        .child(trade_history_pnl_value(pnl, currency, theme))
+    numeric_cell(
+        TRADE_HISTORY_PNL_WIDTH,
+        trade_history_pnl_value(pnl, currency, theme),
+        theme,
+    )
 }
 
 fn trade_history_pnl_value(
@@ -1206,22 +1269,65 @@ fn trade_history_money_text(value: Option<aeris_trading::FixedPoint>, currency: 
     )
 }
 
+/// The column header band, styled like the screener table's.
+fn table_header_frame(theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    table_frame(TABLE_HEADER_HEIGHT)
+        .bg(gpui_color(colors.surface_secondary))
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border_secondary))
+        .text_color(gpui_color(colors.text_secondary))
+}
+
+fn table_row_frame(theme: &AerisTheme) -> Div {
+    let colors = theme.colors;
+    table_frame(TABLE_ROW_HEIGHT)
+        .border_b(px(theme.dimensions.border_width))
+        .border_color(gpui_color(colors.border_subtle))
+        .text_color(gpui_color(colors.text_default))
+        .hover(move |row| row.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+}
+
 /// Rows span the full panel width; a virtualized list otherwise sizes rows to their content.
-fn trade_history_row_frame() -> Div {
+fn table_frame(height: f32) -> Div {
     div()
         .w_full()
-        .h(px(TRADE_HISTORY_ROW_HEIGHT))
+        .h(px(height))
         .flex_none()
-        .px_2()
         .flex()
         .items_center()
-        .gap(px(TRADE_HISTORY_CELL_GAP))
         .text_xs()
         .font_features(platform_tabular_numerals())
 }
 
-fn trade_history_cell(width: f32) -> Div {
-    div().min_w(px(width)).flex_1().truncate()
+/// A padded cell at least `width` wide for its content, followed by the column divider.
+fn table_cell(width: f32, theme: &AerisTheme) -> Div {
+    div()
+        .h_full()
+        .min_w(px(width + 2.0 * TABLE_CELL_PADDING_X))
+        .flex_1()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .px(px(TABLE_CELL_PADDING_X))
+        .border_r(px(theme.dimensions.border_width))
+        .border_color(gpui_color(theme.colors.border_subtle))
+}
+
+fn text_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Div {
+    table_cell(width, theme).child(div().min_w_0().truncate().child(content))
+}
+
+/// Numbers align to the cell's trailing edge.
+fn numeric_cell(width: f32, content: impl IntoElement, theme: &AerisTheme) -> Div {
+    table_cell(width, theme)
+        .justify_end()
+        .child(div().min_w_0().truncate().child(content))
+}
+
+/// A row's last cell carries no divider.
+fn last_cell(cell: Div) -> Div {
+    cell.border_r(px(0.0))
 }
 
 #[cfg(test)]
@@ -1542,14 +1648,18 @@ mod tests {
             TRADE_HISTORY_PNL_WIDTH,
             POSITION_ACTION_WIDTH,
         ];
-        let width = columns.iter().sum::<f32>()
-            + TRADE_HISTORY_CELL_GAP
-                * f32::from(u8::try_from(columns.len() - 1).expect("column count fits"))
-            + 16.0;
         assert!(
-            width <= 800.0 - 12.0,
+            table_width(&columns) <= 800.0 - 12.0,
             "the Close action must remain visible"
         );
+    }
+
+    /// Every cell pads its content width on both sides.
+    fn table_width(columns: &[f32]) -> f32 {
+        columns
+            .iter()
+            .map(|width| width + 2.0 * TABLE_CELL_PADDING_X)
+            .sum()
     }
 
     #[test]
@@ -1565,10 +1675,9 @@ mod tests {
             TRADE_HISTORY_PRICE_WIDTH,
             TRADE_HISTORY_PNL_WIDTH,
         ];
-        let width = columns.iter().sum::<f32>()
-            + TRADE_HISTORY_CELL_GAP
-                * f32::from(u8::try_from(columns.len() - 1).expect("column count fits"))
-            + 16.0;
-        assert!(width <= 800.0 - 12.0, "the P&L column must remain visible");
+        assert!(
+            table_width(&columns) <= 800.0 - 12.0,
+            "the P&L column must remain visible"
+        );
     }
 }
