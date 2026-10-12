@@ -2246,7 +2246,7 @@ impl WorkspaceSurface {
         {
             return true;
         }
-        let interval = self.interval;
+        let interval = super::instrument_interval(instrument, self.interval);
         let Ok(sequence) = self
             .market_worker
             .try_select_engine(instrument.clone(), interval)
@@ -3136,12 +3136,15 @@ impl WorkspaceSurface {
     fn apply_recovery(
         &mut self,
         request_id: u64,
-        result: Result<MarketWorkerBootstrap, String>,
+        result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
         cx: &mut Context<Self>,
     ) {
         let bootstrap = match result {
             Ok(bootstrap) => bootstrap,
-            Err(error) => {
+            // The replacement request or selection delivers its own covering snapshot, which
+            // replaces this chart; retrying or reporting the retired request would be wrong.
+            Err(MarketRecoveryFailure::Superseded) => return,
+            Err(MarketRecoveryFailure::Failed(error)) => {
                 let current = self.chart.as_ref().is_some_and(|chart| {
                     chart.update(cx, |chart, chart_cx| {
                         let current = chart.mark_replay_recovery_failed(request_id);
@@ -4922,7 +4925,10 @@ impl WorkspaceSurface {
                 self.pending_symbol_selection_target = None;
                 self.consume_catalog_search_authorization();
                 let display = terminal_provider_display(self.symbol_provider);
-                let interval = self.rithmic_pending_interval.unwrap_or(self.interval);
+                let interval = super::instrument_interval(
+                    &instrument,
+                    self.rithmic_pending_interval.unwrap_or(self.interval),
+                );
                 let Ok(sequence) = self
                     .market_worker
                     .try_select_engine(instrument.clone(), interval)

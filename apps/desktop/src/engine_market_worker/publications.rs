@@ -2,8 +2,8 @@
 
 use super::{
     ChartInterval, ChartState, EngineFaultCode, FeedConnectionState, InstallProviderInstrument,
-    MarketDemandError, MarketOrderBookSnapshot, MarketPublicationGeneration, MarketRuntimeEvent,
-    MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
+    MarketDemandError, MarketOrderBookSnapshot, MarketPublicationGeneration, MarketRecoveryFailure,
+    MarketRuntimeEvent, MarketSeriesSnapshot, MarketSeriesState, MarketSeriesUpdate, MarketService,
     MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerSender,
     ProviderConnectionState, ProviderState, PushedEventContext, ReplayRecoveryCommand,
     ReplayStreamUpdate, SeriesLoadState, WorkerEndpoint, chart_demand_streams, demand_error,
@@ -429,7 +429,7 @@ pub(super) fn send_recovery(
             .messages
             .send(MarketWorkerMessage::Recovery {
                 request_id: previous.request_id,
-                result: Err("market recovery was superseded by a newer request".to_string()),
+                result: Err(MarketRecoveryFailure::Superseded),
             })
             .map_err(|error| error.to_string())?;
     }
@@ -454,17 +454,15 @@ pub(super) fn send_recovery(
             .messages
             .send(MarketWorkerMessage::Recovery {
                 request_id: pending.request_id,
-                result: Err(error),
+                result: Err(MarketRecoveryFailure::Failed(error)),
             })
             .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
 
-pub(super) fn cancel_pending_recovery(
-    endpoint: &mut WorkerEndpoint,
-    reason: &str,
-) -> Result<(), String> {
+/// Retires the pending recovery because a new market selection replaces the chart it served.
+pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(), String> {
     let Some(pending) = endpoint.pending_recovery.take() else {
         return Ok(());
     };
@@ -472,7 +470,7 @@ pub(super) fn cancel_pending_recovery(
         .messages
         .send(MarketWorkerMessage::Recovery {
             request_id: pending.request_id,
-            result: Err(reason.to_string()),
+            result: Err(MarketRecoveryFailure::Superseded),
         })
         .map_err(|error| error.to_string())
 }
@@ -518,7 +516,7 @@ pub(super) fn complete_pending_recovery(
                 .messages
                 .send(MarketWorkerMessage::Recovery {
                     request_id: command.request_id,
-                    result: Err(demand_error(error)),
+                    result: Err(MarketRecoveryFailure::Failed(demand_error(error))),
                 })
                 .map_err(|error| error.to_string())?;
             Ok(true)

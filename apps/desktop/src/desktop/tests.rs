@@ -3737,3 +3737,31 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
         "MNQZ6 · tastytrade"
     );
 }
+
+#[test]
+fn switching_a_seconds_chart_to_a_minute_bar_provider_opens_it_at_one_minute() {
+    let instrument = |provider: super::TerminalProvider| InstallProviderInstrument {
+        provider: super::terminal_provider_id(provider).to_string(),
+        ..Default::default()
+    };
+    let hyperliquid = instrument(super::TerminalProvider::Hyperliquid);
+    let tastytrade = instrument(super::TerminalProvider::Tastytrade);
+    assert_eq!(
+        super::instrument_interval(&hyperliquid, ChartInterval::Second30),
+        ChartInterval::Minute1
+    );
+    assert_eq!(
+        super::instrument_interval(&hyperliquid, ChartInterval::Second15),
+        ChartInterval::Minute1
+    );
+    assert_eq!(
+        super::instrument_interval(&hyperliquid, ChartInterval::Hour4),
+        ChartInterval::Hour4,
+        "an offered interval is kept"
+    );
+    assert_eq!(
+        super::instrument_interval(&tastytrade, ChartInterval::Second30),
+        ChartInterval::Second30,
+        "a provider with second bars keeps the seconds chart"
+    );
+}

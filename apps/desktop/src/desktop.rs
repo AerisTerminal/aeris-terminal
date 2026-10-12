@@ -128,9 +128,10 @@ use aeris_design_system::{
     TypographyRole,
 };
 use aeris_desktop::market_worker::{
-    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketWorkerBootstrap,
-    MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement, MarketWorkerStartup,
-    PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent, UiDiagnosticsFeedback,
+    ChartState, MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure,
+    MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
+    MarketWorkerStartup, PendingUiDiagnostics, ProviderCatalogCommand, ProviderCatalogEvent,
+    UiDiagnosticsFeedback,
 };
 use aeris_market_data::{BarSeriesKey, ChartAggregation, ChartInterval, MarketBar};
 use aeris_market_runtime::MarketConsumerResourceClass as ConsumerResourceClass;
@@ -680,6 +681,18 @@ fn provider_intervals(provider: TerminalProvider) -> &'static [ChartInterval] {
         .iter()
         .find(|(id, _)| *id == terminal_provider_id(provider))
         .map_or(&[], |(_, intervals)| intervals.as_slice())
+}
+
+/// The interval a chart on `interval` opens `instrument` at: the same interval when the
+/// instrument's provider offers it, otherwise the nearest one it does, so a seconds chart switched
+/// to a minute-bar provider opens at one minute instead of failing.
+fn instrument_interval(
+    instrument: &InstallProviderInstrument,
+    interval: ChartInterval,
+) -> ChartInterval {
+    known_terminal_provider(&instrument.provider)
+        .and_then(|provider| interval.nearest_offered(provider_intervals(provider)))
+        .unwrap_or(interval)
 }
 
 /// Rithmic searches require text, so its default listing is a symbol query;

@@ -76,6 +76,24 @@ impl ChartInterval {
         }
     }
 
+    /// The interval in `offered` nearest to this one on the [`Self::ALL`] ladder: this interval
+    /// when it is offered, otherwise the closest step, the finer one on a tie. A seconds chart
+    /// therefore opens at one minute on a provider whose bars start there.
+    #[must_use]
+    pub fn nearest_offered(self, offered: &[Self]) -> Option<Self> {
+        let rank = |interval: Self| {
+            Self::ALL
+                .iter()
+                .position(|candidate| *candidate == interval)
+                .unwrap_or_default()
+        };
+        let own = rank(self);
+        offered
+            .iter()
+            .copied()
+            .min_by_key(|candidate| (rank(*candidate).abs_diff(own), rank(*candidate)))
+    }
+
     /// Returns whether this interval matches a type-ahead query such as `1`, `1m`, or `1M`.
     ///
     /// Minutes use a lowercase `m` and months use an uppercase `M`. Other units match
@@ -272,6 +290,20 @@ mod tests {
         assert_eq!(ChartInterval::ALL[5].label(), "30s");
         assert_eq!(ChartInterval::ALL[6].label(), "1m");
         assert_eq!(ChartInterval::ALL[19].label(), "1M");
+    }
+
+    #[test]
+    fn unoffered_intervals_fall_back_to_the_nearest_offered_step() {
+        use ChartInterval::{
+            Day1, Day3, Hour1, Minute1, Minute5, Month1, Second15, Second30, Tick100, Week1,
+        };
+        let minute_bars = [Minute1, Minute5, Hour1, Day1, Week1, Month1];
+        assert_eq!(Second15.nearest_offered(&minute_bars), Some(Minute1));
+        assert_eq!(Second30.nearest_offered(&minute_bars), Some(Minute1));
+        assert_eq!(Tick100.nearest_offered(&minute_bars), Some(Minute1));
+        assert_eq!(Minute5.nearest_offered(&minute_bars), Some(Minute5));
+        assert_eq!(Day3.nearest_offered(&minute_bars), Some(Day1));
+        assert_eq!(Second30.nearest_offered(&[]), None);
     }
 
     #[test]

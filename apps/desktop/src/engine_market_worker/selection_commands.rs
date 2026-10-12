@@ -2,8 +2,8 @@
 
 use super::{
     ChartState, ConsumerResourceClass, EndpointRecord, FeedConnectionState,
-    InstallProviderInstrument, MarketPriceAlert, MarketRuntimeEvent, MarketService,
-    MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
+    InstallProviderInstrument, MarketPriceAlert, MarketRecoveryFailure, MarketRuntimeEvent,
+    MarketService, MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
     RITHMIC_CATALOG_READY_MESSAGE, ReplayRecoveryCommand, STARTUP_CATALOG_COMMAND_GENERATION,
     SearchProviderInstruments, SelectProviderInstrument, StartupResolution, StreamRequirements,
     WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams,
@@ -23,7 +23,7 @@ pub(super) fn fence_recovery_command(
         .messages
         .send(MarketWorkerMessage::Recovery {
             request_id: command.request_id,
-            result: Err("market recovery was superseded by a newer market selection".to_string()),
+            result: Err(MarketRecoveryFailure::Superseded),
         })
         .map_err(|error| error.to_string())?;
     Ok(None)
@@ -448,10 +448,7 @@ fn process_engine_select(
             return Ok(());
         }
     };
-    cancel_pending_recovery(
-        endpoint,
-        "market recovery was superseded by a new market selection",
-    )?;
+    cancel_pending_recovery(endpoint)?;
     let _ = endpoint
         .messages
         .send(MarketWorkerMessage::EngineSwitchMarker {

@@ -279,6 +279,15 @@ impl MarketPublicationGeneration {
     }
 }
 
+/// Why a chart recovery request ended without a covering snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MarketRecoveryFailure {
+    /// A newer recovery request or market selection replaced this one. Nothing failed: the
+    /// replacement's covering snapshot owns the chart, so the request is simply retired.
+    Superseded,
+    Failed(String),
+}
+
 pub enum MarketWorkerMessage {
     Update(MarketWorkerPublication),
     StudyOutput(MarketStudyOutputSnapshot),
@@ -287,7 +296,7 @@ pub enum MarketWorkerMessage {
     Diagnostics(Box<FeedDiagnosticsSnapshot>),
     Recovery {
         request_id: u64,
-        result: Result<MarketWorkerBootstrap, String>,
+        result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
     },
     State {
         state: ChartState,
@@ -1661,8 +1670,8 @@ impl FixtureMarketWorker {
 mod tests {
     use super::{
         ChartState, ChartViewportUpdate, ConsumerResourceClass, FixtureMarketWorker,
-        MarketDataWorker, MarketPublicationGeneration, MarketWorkerCommand, MarketWorkerMessage,
-        MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
+        MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
+        MarketWorkerMessage, MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
         ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
     use aeris_application::{
@@ -2713,7 +2722,7 @@ mod tests {
             recovery_sender
                 .send(MarketWorkerMessage::Recovery {
                     request_id: 7,
-                    result: Err("recovery failed".to_string()),
+                    result: Err(MarketRecoveryFailure::Failed("recovery failed".to_string())),
                 })
                 .is_ok()
         );

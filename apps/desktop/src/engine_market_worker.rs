@@ -42,9 +42,9 @@ use aeris_observability::FeedConnectionState;
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_desktop::market_worker::{
     ChartState, DesktopMarketGeneration, MarketDataWorker, MarketPublicationGeneration,
-    MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage, MarketWorkerPublication,
-    MarketWorkerSender, MarketWorkerStartup, classify_provider_catalog_event,
-    market_worker_channel,
+    MarketRecoveryFailure, MarketWorkerBootstrap, MarketWorkerCommand, MarketWorkerMessage,
+    MarketWorkerPublication, MarketWorkerSender, MarketWorkerStartup,
+    classify_provider_catalog_event, market_worker_channel,
 };
 
 const DEFAULT_WORKSPACE_ID: u64 = 1;
@@ -1562,11 +1562,7 @@ mod tests {
             reason: aeris_application::ResnapshotReason::QueueOverflow,
         });
 
-        cancel_pending_recovery(
-            &mut record.endpoint,
-            "market recovery was superseded by a new market selection",
-        )
-        .expect("selection cancels old recovery");
+        cancel_pending_recovery(&mut record.endpoint).expect("selection cancels old recovery");
         record.endpoint.active_generation = 4;
         let snapshot = MarketRuntimeEvent::SeriesSnapshot(runtime_snapshot(
             41,
@@ -1599,8 +1595,8 @@ mod tests {
             messages.as_slice(),
             [MarketWorkerMessage::Recovery {
                 request_id: 9,
-                result: Err(error),
-            }] if error == "market recovery was superseded by a new market selection"
+                result: Err(MarketRecoveryFailure::Superseded),
+            }]
         ));
     }
 
@@ -1658,8 +1654,8 @@ mod tests {
             messages.as_slice(),
             [MarketWorkerMessage::Recovery {
                 request_id: 10,
-                result: Err(error),
-            }] if error == "market recovery was superseded by a newer market selection"
+                result: Err(MarketRecoveryFailure::Superseded),
+            }]
         ));
 
         let current = ReplayRecoveryCommand {
