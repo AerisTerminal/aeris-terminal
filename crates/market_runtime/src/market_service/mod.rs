@@ -1074,7 +1074,8 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     id: "rithmic",
     display_name: "Rithmic",
     chart_interval_labels: &[
-        "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "1W", "1M",
+        "1s", "5s", "10s", "15s", "30s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h",
+        "12h", "1D", "1W", "1M",
     ],
     daily_bars: aeris_contracts::ProviderDailyBarCadence::TradingSession,
     default_listing: "MNQ",

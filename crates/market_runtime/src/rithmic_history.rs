@@ -439,9 +439,17 @@ fn replay_envelope(
     } else {
         maximum_visible_bars
     };
+    // The replay returns the first bars of its window, so the window has to end at the bars
+    // the chart shows. Padding a second-bar window with the longest market closure would fill
+    // the replay cap with second bars from days ago.
+    let closure_padding = if interval_seconds < 60 {
+        0
+    } else {
+        MAXIMUM_NON_TRADING_GAP_SECONDS
+    };
     let span_seconds = interval_seconds
         .checked_mul(requested_bars as u64)
-        .and_then(|span| span.checked_add(MAXIMUM_NON_TRADING_GAP_SECONDS))
+        .and_then(|span| span.checked_add(closure_padding))
         .ok_or_else(|| "Rithmic visible range overflowed".to_string())?;
     let start_seconds = closed_before_seconds
         .checked_sub(span_seconds)
@@ -561,6 +569,11 @@ fn history_range(start_seconds: u64, end_seconds: u64) -> Result<HistoryRange, S
 pub(super) fn chart_interval(period: BarPeriod) -> Result<ChartInterval, String> {
     match period {
         BarPeriod::Tick { trades: 100 } => Ok(ChartInterval::Tick100),
+        BarPeriod::Time { seconds: 1 } => Ok(ChartInterval::Second1),
+        BarPeriod::Time { seconds: 5 } => Ok(ChartInterval::Second5),
+        BarPeriod::Time { seconds: 10 } => Ok(ChartInterval::Second10),
+        BarPeriod::Time { seconds: 15 } => Ok(ChartInterval::Second15),
+        BarPeriod::Time { seconds: 30 } => Ok(ChartInterval::Second30),
         BarPeriod::Time { seconds: 60 } => Ok(ChartInterval::Minute1),
         BarPeriod::Time { seconds: 180 } => Ok(ChartInterval::Minute3),
         BarPeriod::Time { seconds: 300 } => Ok(ChartInterval::Minute5),
@@ -671,5 +684,29 @@ mod tests {
         assert_eq!(bars, [] as [MarketBar; 0]);
         assert!(forming.is_none());
         assert_eq!(boundary, replay.range.end_unix_nanos);
+    }
+
+    #[test]
+    fn second_bar_replay_window_ends_at_the_visible_bars_without_closure_padding() {
+        let now = UNIX_EPOCH + Duration::from_secs(864_003);
+        let replay =
+            replay_envelope(ChartInterval::Second5, 600, now).expect("five-second envelope");
+
+        assert_eq!(
+            replay.range.start_unix_nanos,
+            (864_000 - 5 * 600) * NANOS_PER_SECOND
+        );
+        assert_eq!(replay.range.end_unix_nanos, 864_003 * NANOS_PER_SECOND);
+        assert_eq!(replay.maximum_bars.get(), 603);
+        assert!(matches!(
+            replay.forming,
+            FormingPlan::Bucket {
+                closed_before_unix_nanos
+            } if closed_before_unix_nanos == 864_000 * NANOS_PER_SECOND
+        ));
+        assert_eq!(
+            chart_interval(BarPeriod::time(5).expect("five-second period")),
+            Ok(ChartInterval::Second5)
+        );
     }
 }

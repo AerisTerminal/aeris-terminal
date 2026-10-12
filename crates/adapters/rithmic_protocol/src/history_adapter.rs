@@ -684,6 +684,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
             &RithmicTimeBarResolution::try_new(
                 interval.label(),
                 match unit {
+                    RithmicTimeUnit::Second => TimeBarType::Second,
                     RithmicTimeUnit::Minute => TimeBarType::Minute,
                     RithmicTimeUnit::Day => TimeBarType::Daily,
                 },

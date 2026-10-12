@@ -5,6 +5,11 @@ use std::num::{NonZeroU16, NonZeroU32};
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ChartInterval {
     Tick100,
+    Second1,
+    Second5,
+    Second10,
+    Second15,
+    Second30,
     Minute1,
     Minute3,
     Minute5,
@@ -22,8 +27,13 @@ pub enum ChartInterval {
 }
 
 impl ChartInterval {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 20] = [
         Self::Tick100,
+        Self::Second1,
+        Self::Second5,
+        Self::Second10,
+        Self::Second15,
+        Self::Second30,
         Self::Minute1,
         Self::Minute3,
         Self::Minute5,
@@ -44,6 +54,11 @@ impl ChartInterval {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Tick100 => "100t",
+            Self::Second1 => "1s",
+            Self::Second5 => "5s",
+            Self::Second10 => "10s",
+            Self::Second15 => "15s",
+            Self::Second30 => "30s",
             Self::Minute1 => "1m",
             Self::Minute3 => "3m",
             Self::Minute5 => "5m",
@@ -84,6 +99,11 @@ impl ChartInterval {
     const fn typeahead_parts(self) -> (u16, char) {
         match self {
             Self::Tick100 => (100, 't'),
+            Self::Second1 => (1, 's'),
+            Self::Second5 => (5, 's'),
+            Self::Second10 => (10, 's'),
+            Self::Second15 => (15, 's'),
+            Self::Second30 => (30, 's'),
             Self::Minute1 => (1, 'm'),
             Self::Minute3 => (3, 'm'),
             Self::Minute5 => (5, 'm'),
@@ -107,6 +127,11 @@ impl ChartInterval {
             Self::Tick100 => {
                 ChartAggregation::Trades(NonZeroU32::new(100).unwrap_or(NonZeroU32::MIN))
             }
+            Self::Second1 => fixed_seconds(1),
+            Self::Second5 => fixed_seconds(5),
+            Self::Second10 => fixed_seconds(10),
+            Self::Second15 => fixed_seconds(15),
+            Self::Second30 => fixed_seconds(30),
             Self::Minute1 => fixed_seconds(60),
             Self::Minute3 => fixed_seconds(3 * 60),
             Self::Minute5 => fixed_seconds(5 * 60),
@@ -131,6 +156,11 @@ impl ChartInterval {
             Self::Tick100 => Some(RithmicChartAggregation::Trades {
                 trades_per_bar: NonZeroU16::new(100).unwrap_or(NonZeroU16::MIN),
             }),
+            Self::Second1 => Some(rithmic_time(RithmicTimeUnit::Second, 1)),
+            Self::Second5 => Some(rithmic_time(RithmicTimeUnit::Second, 5)),
+            Self::Second10 => Some(rithmic_time(RithmicTimeUnit::Second, 10)),
+            Self::Second15 => Some(rithmic_time(RithmicTimeUnit::Second, 15)),
+            Self::Second30 => Some(rithmic_time(RithmicTimeUnit::Second, 30)),
             Self::Minute1 => Some(rithmic_time(RithmicTimeUnit::Minute, 1)),
             Self::Minute3 => Some(rithmic_time(RithmicTimeUnit::Minute, 3)),
             Self::Minute5 => Some(rithmic_time(RithmicTimeUnit::Minute, 5)),
@@ -168,6 +198,7 @@ pub enum ChartAggregation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RithmicTimeUnit {
+    Second,
     Minute,
     Day,
 }
@@ -218,6 +249,7 @@ fn split_typeahead_query(query: &str) -> Option<(&str, Option<char>)> {
 
 const fn typeahead_unit_matches(interval_unit: char, typed: char) -> bool {
     match typed {
+        's' | 'S' => interval_unit == 's',
         'm' => interval_unit == 'm',
         'M' => interval_unit == 'M',
         'h' | 'H' => interval_unit == 'h',
@@ -234,10 +266,40 @@ mod tests {
 
     #[test]
     fn catalog_matches_legacy_intervals_plus_rithmic_ticks() {
-        assert_eq!(ChartInterval::ALL.len(), 15);
+        assert_eq!(ChartInterval::ALL.len(), 20);
         assert_eq!(ChartInterval::ALL[0].label(), "100t");
-        assert_eq!(ChartInterval::ALL[1].label(), "1m");
-        assert_eq!(ChartInterval::ALL[14].label(), "1M");
+        assert_eq!(ChartInterval::ALL[1].label(), "1s");
+        assert_eq!(ChartInterval::ALL[5].label(), "30s");
+        assert_eq!(ChartInterval::ALL[6].label(), "1m");
+        assert_eq!(ChartInterval::ALL[19].label(), "1M");
+    }
+
+    #[test]
+    fn second_intervals_are_fixed_seconds_and_native_rithmic_second_bars() {
+        for (interval, seconds) in [
+            (ChartInterval::Second1, 1_u16),
+            (ChartInterval::Second5, 5),
+            (ChartInterval::Second10, 10),
+            (ChartInterval::Second15, 15),
+            (ChartInterval::Second30, 30),
+        ] {
+            assert_eq!(
+                interval.aggregation(),
+                ChartAggregation::FixedSeconds(NonZeroU32::from(NonZeroU16::new(seconds).unwrap()))
+            );
+            assert_eq!(
+                interval.rithmic_aggregation(),
+                Some(RithmicChartAggregation::Time {
+                    unit: RithmicTimeUnit::Second,
+                    period: NonZeroU16::new(seconds).unwrap()
+                })
+            );
+            assert_eq!(interval.label(), format!("{seconds}s"));
+        }
+        assert!(ChartInterval::Second5.matches_typeahead("5s"));
+        assert!(ChartInterval::Second5.matches_typeahead("5S"));
+        assert!(!ChartInterval::Second5.matches_typeahead("5m"));
+        assert!(!ChartInterval::Minute5.matches_typeahead("5s"));
     }
 
     #[test]

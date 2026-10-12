@@ -454,8 +454,18 @@ fn pane_interval(series: Option<&SeriesKey>, provider: &str) -> Result<ChartInte
             provider_display_name(provider)
         )
     };
+    let supported = |interval| {
+        provider_supports_interval(provider, interval)
+            .then_some(interval)
+            .ok_or_else(unsupported)
+    };
     match SeriesCadence::try_from(series.cadence) {
         Ok(SeriesCadence::FixedSeconds) => match series.cadence_value {
+            1 => supported(ChartInterval::Second1),
+            5 => supported(ChartInterval::Second5),
+            10 => supported(ChartInterval::Second10),
+            15 => supported(ChartInterval::Second15),
+            30 => supported(ChartInterval::Second30),
             60 => Ok(ChartInterval::Minute1),
             180 => Ok(ChartInterval::Minute3),
             300 => Ok(ChartInterval::Minute5),
@@ -2509,6 +2519,19 @@ mod tests {
         assert!(series_key(&product, ChartInterval::Tick100).is_err());
         // Rithmic intervals stay Rithmic-only.
         assert!(series_key(&default_product("MNQ"), ChartInterval::Day3).is_err());
+    }
+
+    #[test]
+    fn second_series_keys_exist_only_where_the_provider_serves_second_bars() {
+        for interval in [ChartInterval::Second1, ChartInterval::Second30] {
+            assert!(series_key(&default_hyperliquid_product(), interval).is_err());
+        }
+        let five = series_key(&default_product("MNQ"), ChartInterval::Second5)
+            .expect("Rithmic second series");
+        assert_eq!(
+            five.period,
+            BarPeriod::time(5).expect("five-second period validates")
+        );
     }
 
     #[test]

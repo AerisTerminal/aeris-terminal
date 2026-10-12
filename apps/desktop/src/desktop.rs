@@ -1655,6 +1655,7 @@ enum ChromeOverlay {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TimeframeMenuGroup {
     Ticks,
+    Seconds,
     Minutes,
     Hours,
     Days,
@@ -1666,6 +1667,7 @@ impl TimeframeMenuGroup {
     const fn label(self) -> &'static str {
         match self {
             Self::Ticks => "Ticks",
+            Self::Seconds => "Seconds",
             Self::Minutes => "Minutes",
             Self::Hours => "Hours",
             Self::Days => "Days",

@@ -4945,6 +4945,45 @@ fn platform_crosshair_time_label_omits_midnight_for_weekly_bars() {
 }
 
 #[test]
+fn second_bars_show_seconds_on_the_time_axis_across_theme_changes() {
+    let baseline = EmbeddedReplaySource
+        .load_snapshot(LoadEmbeddedReplay { bar_count: 3 })
+        .expect("fixture snapshot");
+    let first = 1_735_689_600_i64;
+    let bars = baseline
+        .bars()
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut bar = *item.value();
+            let timestamp = first + 5 * i64::try_from(index).expect("small fixture index");
+            bar.exchange_timestamp_seconds = timestamp;
+            bar.exchange_timestamp_unix_nanos = timestamp.saturating_mul(1_000_000_000);
+            bar
+        })
+        .collect();
+    let mut definition = baseline.bar_definition().clone();
+    definition.definition_id = "fixture:seconds:5".to_string();
+    definition.interval_seconds = 5;
+    definition.trades_per_bar = None;
+    definition.calendar_months = None;
+    let replay = ReplaySnapshot::try_new(
+        baseline.instrument().clone(),
+        baseline.provenance(),
+        definition,
+        bars,
+    )
+    .expect("five-second snapshot validates");
+
+    let mut chart = AerisChartView::with_replay(&replay);
+    assert!(chart.engine.time_visible);
+    assert!(chart.engine.seconds_visible);
+
+    chart.set_theme(ChartTheme::Light);
+    assert!(chart.engine.seconds_visible);
+}
+
+#[test]
 fn indicator_separator_resize_has_bounded_native_pointer_state() {
     let mut chart = interactive_chart();
     chart

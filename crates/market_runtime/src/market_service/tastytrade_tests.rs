@@ -363,6 +363,27 @@ fn daily_candles_request_session_days_not_fixed_24_hours() {
 }
 
 #[test]
+fn second_candles_use_dxfeed_second_periods() {
+    assert_eq!(
+        candle_period(BarPeriod::time(1).unwrap()).as_deref(),
+        Ok("s")
+    );
+    assert_eq!(
+        candle_period(BarPeriod::time(5).unwrap()).as_deref(),
+        Ok("5s")
+    );
+    assert_eq!(
+        candle_period(BarPeriod::time(30).unwrap()).as_deref(),
+        Ok("30s")
+    );
+    assert_eq!(
+        candle_period(BarPeriod::time(60).unwrap()).as_deref(),
+        Ok("m")
+    );
+    assert!(PRESENTATION.chart_interval_labels.contains(&"1s"));
+}
+
+#[test]
 fn late_candle_subscription_starts_at_demand_time() {
     let mut starts = BTreeMap::new();
     assert_eq!(candle_start_ms(&mut starts, "ES{=1m}".into(), 100), 100);

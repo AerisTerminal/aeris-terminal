@@ -769,6 +769,11 @@ pub(super) fn quick_timeframe_overlay_content(
 pub(super) const fn timeframe_interval_group(interval: ChartInterval) -> TimeframeMenuGroup {
     match interval {
         ChartInterval::Tick100 => TimeframeMenuGroup::Ticks,
+        ChartInterval::Second1
+        | ChartInterval::Second5
+        | ChartInterval::Second10
+        | ChartInterval::Second15
+        | ChartInterval::Second30 => TimeframeMenuGroup::Seconds,
         ChartInterval::Minute1
         | ChartInterval::Minute3
         | ChartInterval::Minute5
@@ -810,6 +815,11 @@ pub(super) fn timeframe_group_intervals(
 pub(super) const fn timeframe_menu_row_label(interval: ChartInterval) -> &'static str {
     match interval {
         ChartInterval::Tick100 => "100 Ticks",
+        ChartInterval::Second1 => "1 Second",
+        ChartInterval::Second5 => "5 Seconds",
+        ChartInterval::Second10 => "10 Seconds",
+        ChartInterval::Second15 => "15 Seconds",
+        ChartInterval::Second30 => "30 Seconds",
         ChartInterval::Minute1 => "1 Minute",
         ChartInterval::Minute3 => "3 Minutes",
         ChartInterval::Minute5 => "5 Minutes",

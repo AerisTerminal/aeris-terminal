@@ -308,10 +308,7 @@ pub(super) fn snapshot_instrument(
     }
 }
 
-pub(crate) fn series_key(
-    product: &InstallProviderInstrument,
-    interval: ChartInterval,
-) -> Result<BarSeriesKey, String> {
+fn validate_product_identity(product: &InstallProviderInstrument) -> Result<(), String> {
     // The provider field must agree with the installed instrument identity:
     // a Hyperliquid product can never demand a Rithmic series and vice
     // versa, so a mismatch fails here instead of misrouting demand.
@@ -351,7 +348,34 @@ pub(crate) fn series_key(
             provider_display_name(product.provider.as_str())
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn series_key(
+    product: &InstallProviderInstrument,
+    interval: ChartInterval,
+) -> Result<BarSeriesKey, String> {
+    validate_product_identity(product)?;
     let period = match interval {
+        // Second bars need native provider history; a provider whose history starts at one
+        // minute would open a seconds chart with no bars at all.
+        ChartInterval::Second1
+        | ChartInterval::Second5
+        | ChartInterval::Second10
+        | ChartInterval::Second15
+        | ChartInterval::Second30
+            if !super::provider_supports_interval(product.provider.as_str(), interval) =>
+        {
+            return Err(format!(
+                "{} chart interval is unsupported",
+                provider_display_name(product.provider.as_str())
+            ));
+        }
+        ChartInterval::Second1 => BarPeriod::time(1),
+        ChartInterval::Second5 => BarPeriod::time(5),
+        ChartInterval::Second10 => BarPeriod::time(10),
+        ChartInterval::Second15 => BarPeriod::time(15),
+        ChartInterval::Second30 => BarPeriod::time(30),
         ChartInterval::Minute1 => BarPeriod::time(60),
         ChartInterval::Minute3 => BarPeriod::time(180),
         ChartInterval::Minute5 => BarPeriod::time(300),

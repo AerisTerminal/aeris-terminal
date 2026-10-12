@@ -85,10 +85,34 @@ fn gpui_theme_color(color: ThemeColor) -> Rgba {
     }
 }
 
-fn replay_time_visible(replay: &ReplaySnapshot) -> bool {
-    let definition = replay.bar_definition();
-    definition.trades_per_bar.is_some()
-        || (definition.calendar_months.is_none() && definition.interval_seconds < 86_400)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TimeAxisLabels {
+    time_visible: bool,
+    seconds_visible: bool,
+}
+
+impl TimeAxisLabels {
+    const INTRADAY: Self = Self {
+        time_visible: true,
+        seconds_visible: false,
+    };
+
+    fn for_replay(replay: &ReplaySnapshot) -> Self {
+        let definition = replay.bar_definition();
+        let time_bars = definition.trades_per_bar.is_none() && definition.calendar_months.is_none();
+        Self {
+            time_visible: definition.trades_per_bar.is_some()
+                || (time_bars && definition.interval_seconds < 86_400),
+            seconds_visible: time_bars && definition.interval_seconds < 60,
+        }
+    }
+
+    fn of(engine: &ChartEngine) -> Self {
+        Self {
+            time_visible: engine.time_visible,
+            seconds_visible: engine.seconds_visible,
+        }
+    }
 }
 
 /// Bars a freshly installed market opens on, matching the runtime's visible share of its
@@ -98,7 +122,7 @@ const INITIAL_VISIBLE_BARS: f64 = 600.0;
 /// display-only; no candle or volume data is synthesized for these logical slots.
 const REAL_TIME_RIGHT_OFFSET_BARS: f64 = 24.0;
 
-fn apply_platform_chrome_contract(engine: &mut ChartEngine, time_visible: bool) {
+fn apply_platform_chrome_contract(engine: &mut ChartEngine, labels: TimeAxisLabels) {
     let options = serde_json::json!({
         "layout": {
             "fontFamily": platform_font_stack(),
@@ -107,8 +131,8 @@ fn apply_platform_chrome_contract(engine: &mut ChartEngine, time_visible: bool) 
             "fontFamily": platform_font_stack(),
         },
         "timeScale": {
-            "timeVisible": time_visible,
-            "secondsVisible": false,
+            "timeVisible": labels.time_visible,
+            "secondsVisible": labels.seconds_visible,
         },
     })
     .to_string();
@@ -1073,7 +1097,7 @@ impl AerisChartView {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
         register_drawing_stamps(&mut engine, theme);
-        apply_platform_chrome_contract(&mut engine, true);
+        apply_platform_chrome_contract(&mut engine, TimeAxisLabels::INTRADAY);
         apply_platform_interaction(&mut engine);
         let volume_series = install_volume_series(&mut engine);
         Self {
@@ -1166,7 +1190,7 @@ impl AerisChartView {
         let mut engine = ChartEngine::new(1024.0, 640.0, 1.0);
         engine.set_theme(theme);
         register_drawing_stamps(&mut engine, theme);
-        apply_platform_chrome_contract(&mut engine, replay_time_visible(replay));
+        apply_platform_chrome_contract(&mut engine, TimeAxisLabels::for_replay(replay));
         apply_platform_interaction(&mut engine);
         apply_replay_time_scale_defaults(&mut engine, replay);
         let volume_series = install_volume_series(&mut engine);
@@ -1261,7 +1285,7 @@ impl AerisChartView {
             self.chart_type,
             &mut self.product_bars,
         );
-        apply_platform_chrome_contract(&mut self.engine, replay_time_visible(replay));
+        apply_platform_chrome_contract(&mut self.engine, TimeAxisLabels::for_replay(replay));
         apply_replay_time_scale_defaults(&mut self.engine, replay);
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
@@ -1526,7 +1550,7 @@ impl AerisChartView {
     /// Panics when the platform font options derived from `platform.css` stop
     /// parsing.
     pub fn set_theme(&mut self, theme: ChartTheme) {
-        let time_visible = self.engine.time_visible;
+        let time_labels = TimeAxisLabels::of(&self.engine);
         if self.theme != theme {
             // Re-registering issues fresh raster keys, so it happens only on a real change.
             register_drawing_stamps(&mut self.engine, theme);
@@ -1535,7 +1559,7 @@ impl AerisChartView {
         self.engine.set_theme(theme);
         // A hollow frame is pinned to the theme's candle colors, so it follows a theme switch.
         self.sync_hollow_candles();
-        apply_platform_chrome_contract(&mut self.engine, time_visible);
+        apply_platform_chrome_contract(&mut self.engine, time_labels);
         self.sync_big_trades_options();
         self.sync_footprint_visual_options();
         self.invalidate_series_layout();
@@ -1791,7 +1815,7 @@ impl AerisChartView {
             self.chart_type,
             &mut self.product_bars,
         );
-        apply_platform_chrome_contract(&mut self.engine, replay_time_visible(replay));
+        apply_platform_chrome_contract(&mut self.engine, TimeAxisLabels::for_replay(replay));
         self.apply_price_series_kind();
         self.displayed_provenance.replace_snapshot(replay);
         self.asset_legend_title = replay_legend_title(replay);
@@ -1888,7 +1912,10 @@ impl AerisChartView {
                     &update,
                 );
                 if let Some(snapshot) = update.snapshot() {
-                    apply_platform_chrome_contract(&mut self.engine, replay_time_visible(snapshot));
+                    apply_platform_chrome_contract(
+                        &mut self.engine,
+                        TimeAxisLabels::for_replay(snapshot),
+                    );
                 }
                 if mutation == SeriesMutation::Snapshot {
                     self.sync_brushable_interaction();

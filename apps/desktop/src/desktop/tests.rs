@@ -260,6 +260,11 @@ fn timeframe_menu_groups_every_catalog_interval() {
         groups,
         [
             TimeframeMenuGroup::Ticks,
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
             TimeframeMenuGroup::Minutes,
             TimeframeMenuGroup::Minutes,
             TimeframeMenuGroup::Minutes,
@@ -285,6 +290,11 @@ fn timeframe_menu_groups_every_catalog_interval() {
     assert_eq!(
         rithmic_groups,
         [
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
+            TimeframeMenuGroup::Seconds,
             TimeframeMenuGroup::Minutes,
             TimeframeMenuGroup::Minutes,
             TimeframeMenuGroup::Minutes,
@@ -303,11 +313,44 @@ fn timeframe_menu_groups_every_catalog_interval() {
 }
 
 #[test]
+fn seconds_timeframes_are_offered_only_by_second_bar_providers() {
+    for provider in [TerminalProvider::Rithmic, TerminalProvider::Tastytrade] {
+        assert!(
+            timeframe_menu_groups(super::provider_intervals(provider))
+                .contains(&TimeframeMenuGroup::Seconds)
+        );
+    }
+    for provider in [TerminalProvider::Hyperliquid, TerminalProvider::Ctrader] {
+        assert!(
+            !timeframe_menu_groups(super::provider_intervals(provider))
+                .contains(&TimeframeMenuGroup::Seconds)
+        );
+    }
+    assert_eq!(
+        timeframe_group_intervals(TimeframeMenuGroup::Seconds, &ChartInterval::ALL),
+        [
+            ChartInterval::Second1,
+            ChartInterval::Second5,
+            ChartInterval::Second10,
+            ChartInterval::Second15,
+            ChartInterval::Second30,
+        ]
+    );
+    assert_eq!(timeframe_menu_row_label(ChartInterval::Second1), "1 Second");
+    assert_eq!(
+        timeframe_menu_row_label(ChartInterval::Second30),
+        "30 Seconds"
+    );
+    assert_eq!(TimeframeMenuGroup::Seconds.label(), "Seconds");
+}
+
+#[test]
 fn timeframe_menu_uses_dual_group_and_interval_containers() {
     assert_eq!(
         timeframe_menu_groups(&ChartInterval::ALL),
         [
             TimeframeMenuGroup::Ticks,
+            TimeframeMenuGroup::Seconds,
             TimeframeMenuGroup::Minutes,
             TimeframeMenuGroup::Hours,
             TimeframeMenuGroup::Days,
@@ -318,6 +361,7 @@ fn timeframe_menu_uses_dual_group_and_interval_containers() {
     assert_eq!(
         timeframe_menu_groups(super::provider_intervals(TerminalProvider::Rithmic)),
         [
+            TimeframeMenuGroup::Seconds,
             TimeframeMenuGroup::Minutes,
             TimeframeMenuGroup::Hours,
             TimeframeMenuGroup::Days,

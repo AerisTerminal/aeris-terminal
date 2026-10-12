@@ -304,7 +304,8 @@ impl BarPeriod {
             Self::Tick { trades } if trades > 0 => Ok(()),
             Self::Time {
                 seconds:
-                    60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200 | 86_400,
+                    1 | 5 | 10 | 15 | 30 | 60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400
+                    | 28_800 | 43_200 | 86_400,
             }
             | Self::Session { days: 1 | 3 }
             | Self::Week { weeks: 1 }
@@ -335,13 +336,8 @@ impl BarPeriod {
     ///
     /// Returns an error unless seconds represent a supported fixed interval.
     pub fn time(seconds: u32) -> Result<Self, MarketDataValidationError> {
-        if !matches!(
-            seconds,
-            60 | 180 | 300 | 900 | 1_800 | 3_600 | 7_200 | 14_400 | 28_800 | 43_200 | 86_400
-        ) {
-            return Err(MarketDataValidationError::InvalidPeriod);
-        }
-        Ok(Self::Time { seconds })
+        let period = Self::Time { seconds };
+        period.validate().map(|()| period)
     }
 
     /// Creates a supported exchange-session day period.
@@ -658,7 +654,7 @@ mod tests {
     #[test]
     fn canonical_periods_cover_the_complete_rithmic_chart_catalog() {
         for seconds in [
-            60, 180, 300, 900, 1_800, 3_600, 7_200, 14_400, 28_800, 43_200,
+            1, 5, 10, 15, 30, 60, 180, 300, 900, 1_800, 3_600, 7_200, 14_400, 28_800, 43_200,
         ] {
             assert_eq!(BarPeriod::time(seconds), Ok(BarPeriod::Time { seconds }));
         }
@@ -668,7 +664,7 @@ mod tests {
         assert_eq!(BarPeriod::week(1), Ok(BarPeriod::Week { weeks: 1 }));
         assert_eq!(BarPeriod::month(1), Ok(BarPeriod::Month { months: 1 }));
         assert_eq!(
-            BarPeriod::time(30),
+            BarPeriod::time(45),
             Err(MarketDataValidationError::InvalidPeriod)
         );
         assert_eq!(
@@ -684,7 +680,7 @@ mod tests {
             provider_id: "fixture".to_string(),
             instrument_id: "instrument:fixture:es".to_string(),
             entitlement_id: "test".to_string(),
-            period: BarPeriod::Time { seconds: 30 },
+            period: BarPeriod::Time { seconds: 45 },
             definition_version: 1,
         };
         assert_eq!(

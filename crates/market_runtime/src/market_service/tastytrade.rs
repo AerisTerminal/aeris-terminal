@@ -35,7 +35,8 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
         id: "tastytrade",
         display_name: "tastytrade",
         chart_interval_labels: &[
-            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1D", "1W", "1M",
+            "1s", "5s", "10s", "15s", "30s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+            "8h", "12h", "1D", "1W", "1M",
         ],
         // dxFeed answers `{=d}` session candles; a `{=24h}` subscription returns nothing.
         daily_bars: aeris_contracts::ProviderDailyBarCadence::TradingSession,
@@ -1151,7 +1152,8 @@ pub(super) fn candle_period(period: BarPeriod) -> Result<String, String> {
             return Err("Tastytrade daily candles are session days".into());
         }
         BarPeriod::Time { seconds } if seconds.is_multiple_of(3600) => (seconds / 3600, "h"),
-        BarPeriod::Time { seconds } => (seconds / 60, "m"),
+        BarPeriod::Time { seconds } if seconds.is_multiple_of(60) => (seconds / 60, "m"),
+        BarPeriod::Time { seconds } => (seconds, "s"),
         BarPeriod::Session { days } => (days, "d"),
         BarPeriod::Week { weeks } => (weeks, "w"),
         BarPeriod::Month { months } => (months, "mo"),
