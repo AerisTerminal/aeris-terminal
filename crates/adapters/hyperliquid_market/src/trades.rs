@@ -13,7 +13,10 @@
 //! trade-count aggregation restarts at a new explicit boundary when
 //! continuity cannot be established.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 use aeris_market_data::{AggressorSide, EventMetadata, MarketTrade, QualifiedTimestamp};
 use serde::Deserialize;
@@ -130,45 +133,44 @@ pub fn decode_trades_batch(
     Ok(HyperliquidTradeBatch { trades })
 }
 
-/// Bounded duplicate tracker for one instrument.
+/// Provider trade identities one connection already delivered for one coin.
 ///
-/// Remembers observed provider trade ids and reports duplicates. Because
-/// `tid` values are hashes, this tracker never infers exchange gaps from
-/// them: a gap is reported only when the caller signals an upstream
-/// disconnect or overflow via `continuity_broken`. The local ingestion
-/// sequence is tracked separately and never used to claim exchange gap
-/// detection.
+/// Hyperliquid answers every `trades` subscription with a snapshot of the
+/// coin's most recent trades, sent as an ordinary `trades` frame with no
+/// snapshot marker. A coin resubscribed on the same connection therefore
+/// replays trades an earlier subscription already delivered. Those replays
+/// are the newest trades delivered before the unsubscribe, so a bounded
+/// window of the newest delivered identities is enough to deliver each trade
+/// once. Identity is the documented `(block_time, coin, tid)` triple carried
+/// by the decoded trade id; `tid` order is never consulted.
 #[derive(Debug, Default)]
-pub struct TradeDedup {
-    seen: BTreeSet<String>,
-    bounds: BTreeMap<String, usize>,
+pub struct DeliveredTradeIds {
+    newest: VecDeque<Arc<str>>,
+    delivered: HashSet<Arc<str>>,
 }
 
-impl TradeDedup {
-    /// Observes one batch, returning `(duplicates, has_gap)`.
-    ///
-    /// `continuity_broken` must be set on reconnect, buffer overflow, or any
-    /// other break after which trade continuity cannot be established; the
-    /// consumer then resumes aggregation at a new explicit boundary.
-    pub fn observe(
-        &mut self,
-        batch: &HyperliquidTradeBatch,
-        continuity_broken: bool,
-    ) -> (usize, bool) {
-        let mut duplicates = 0;
-        for trade in &batch.trades {
-            if !self.seen.insert(trade.trade_id.clone()) {
-                duplicates += 1;
+impl DeliveredTradeIds {
+    /// Newest delivered identities remembered per coin. A subscription
+    /// snapshot has been observed to carry 30 trades.
+    pub const CAPACITY: usize = 256;
+
+    /// Removes trades already delivered and remembers the remaining ones as
+    /// delivered, preserving their wire order.
+    pub fn retain_undelivered(&mut self, trades: &mut Vec<MarketTrade>) {
+        trades.retain(|trade| {
+            if self.delivered.contains(trade.trade_id.as_str()) {
+                return false;
             }
-            *self.bounds.entry(trade.trade_id.clone()).or_insert(0) += 1;
-            if self.bounds.len() > 20_000
-                && let Some(first) = self.bounds.keys().next().cloned()
+            let id: Arc<str> = Arc::from(trade.trade_id.as_str());
+            self.delivered.insert(Arc::clone(&id));
+            self.newest.push_back(id);
+            if self.newest.len() > Self::CAPACITY
+                && let Some(oldest) = self.newest.pop_front()
             {
-                self.bounds.remove(&first);
-                self.seen.remove(&first);
+                self.delivered.remove(&oldest);
             }
-        }
-        (duplicates, continuity_broken)
+            true
+        });
     }
 }
 
@@ -222,41 +224,58 @@ mod tests {
     }
 
     #[test]
-    fn non_consecutive_tids_are_normal_traffic_not_gaps() {
-        let batch = decode_trades_batch(
-            &raw(&payload()),
-            "BTC",
-            "hyperliquid:perp:BTC",
-            "hyperliquid:public",
-            3,
-            1_700_000_000_200_000_000,
-            10,
-        )
-        .expect("batch");
-        let mut dedup = TradeDedup::default();
+    fn replayed_trades_are_delivered_once_regardless_of_tid_spacing() {
+        let decode = |sequence| {
+            decode_trades_batch(
+                &raw(&payload()),
+                "BTC",
+                "hyperliquid:perp:BTC",
+                "hyperliquid:public",
+                3,
+                1_700_000_000_200_000_000,
+                sequence,
+            )
+            .expect("batch")
+            .trades
+        };
+        let mut delivered = DeliveredTradeIds::default();
         // The two tids differ by ~8e14; as hashes that carries no meaning.
-        let (duplicates, gap) = dedup.observe(&batch, false);
-        assert_eq!(duplicates, 0);
-        assert!(!gap, "hash-spaced tids must not raise a gap");
-        let (duplicates, _) = dedup.observe(&batch, false);
-        assert_eq!(duplicates, 2);
+        let mut first = decode(10);
+        delivered.retain_undelivered(&mut first);
+        assert_eq!(first.len(), 2);
+        let mut replay = decode(12);
+        delivered.retain_undelivered(&mut replay);
+        assert!(replay.is_empty(), "a resubscription snapshot is a replay");
     }
 
     #[test]
-    fn disconnect_and_overflow_raise_explicit_gaps() {
-        let batch = decode_trades_batch(
-            &raw(&payload()),
-            "BTC",
-            "hyperliquid:perp:BTC",
-            "hyperliquid:public",
-            3,
-            1_700_000_000_200_000_000,
-            10,
-        )
-        .expect("batch");
-        let mut dedup = TradeDedup::default();
-        let (_, gap) = dedup.observe(&batch, true);
-        assert!(gap, "disconnect must surface an explicit gap");
+    fn delivered_identities_stay_bounded_to_the_newest_trades() {
+        let trade = |time: i64| {
+            let row = json!([{"coin": "BTC", "px": "1.0", "sz": "1.0", "side": "B",
+                "time": time, "tid": 7, "hash": "0xabc", "users": ["0x1", "0x2"]}]);
+            decode_trades_batch(
+                &raw(&row),
+                "BTC",
+                "hyperliquid:perp:BTC",
+                "hyperliquid:public",
+                1,
+                2,
+                1,
+            )
+            .expect("trade")
+            .trades
+        };
+        let capacity = i64::try_from(DeliveredTradeIds::CAPACITY).expect("capacity fits i64");
+        let mut delivered = DeliveredTradeIds::default();
+        for time in 1..=capacity + 1 {
+            delivered.retain_undelivered(&mut trade(time));
+        }
+        let mut newest = trade(capacity + 1);
+        delivered.retain_undelivered(&mut newest);
+        assert!(newest.is_empty(), "the newest identity is remembered");
+        let mut evicted = trade(1);
+        delivered.retain_undelivered(&mut evicted);
+        assert_eq!(evicted.len(), 1, "the oldest identity was evicted");
     }
 
     #[test]

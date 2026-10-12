@@ -28,9 +28,9 @@ use aeris_contracts::{
     ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
 };
 use aeris_hyperliquid_market_adapter::{
-    HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig, HyperliquidLiveCandle,
-    WsClientEvent, decode_book_snapshot, decode_live_candle, decode_trades_batch,
-    fetch_meta_bundle, parse_ws_frame,
+    DeliveredTradeIds, HYPERLIQUID_WS_URL, HyperliquidCatalog, HyperliquidHttpConfig,
+    HyperliquidLiveCandle, WsClientEvent, decode_book_snapshot, decode_live_candle,
+    decode_trades_batch, fetch_meta_bundle, parse_ws_frame,
 };
 use aeris_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
@@ -723,13 +723,54 @@ struct SessionState {
     pending_subscriptions: BTreeMap<SubscriptionKey, Instant>,
     connected: bool,
     active: BTreeMap<SubscriptionKey, String>,
-    instruments: BTreeMap<String, HyperliquidInstrumentDemand>,
-    next_trade_sequence: u64,
-    book_sequences: BTreeMap<String, u64>,
-    decode_failures: u32,
+    feed: FeedState,
     last_inbound: Instant,
     last_ping: Instant,
     pending_ping: Option<Instant>,
+}
+
+/// What one connection knows when decoding inbound market frames.
+struct FeedState {
+    instruments: BTreeMap<String, HyperliquidInstrumentDemand>,
+    /// Feeds unsubscribed on this connection, with the instant each was
+    /// unsubscribed. The provider keeps sending frames already in flight until
+    /// it acknowledges the unsubscribe, so those are expected, not malformed.
+    retiring: BTreeMap<SubscriptionKey, Instant>,
+    next_trade_sequence: u64,
+    book_sequences: BTreeMap<String, u64>,
+    /// Kept across unsubscribe for every coin still demanded on any channel,
+    /// since its canonical tape outlives a `trades` resubscription.
+    delivered_trades: BTreeMap<String, DeliveredTradeIds>,
+    decode_failures: u32,
+}
+
+impl FeedState {
+    fn new() -> Self {
+        Self {
+            instruments: BTreeMap::new(),
+            retiring: BTreeMap::new(),
+            next_trade_sequence: 1,
+            book_sequences: BTreeMap::new(),
+            delivered_trades: BTreeMap::new(),
+            decode_failures: 0,
+        }
+    }
+
+    /// Installs the current demand mapping. A coin no longer demanded on any
+    /// channel has no canonical tape left to protect, so a later
+    /// subscription's snapshot is published as new.
+    fn replace_instruments(&mut self, instruments: BTreeMap<String, HyperliquidInstrumentDemand>) {
+        self.delivered_trades
+            .retain(|coin, _| instruments.contains_key(coin));
+        self.instruments = instruments;
+    }
+
+    /// An unacknowledged unsubscribe stops excusing its frames after the same
+    /// bound a subscription acknowledgement gets.
+    fn expire_retiring(&mut self, now: Instant) {
+        self.retiring
+            .retain(|_, retired| now.saturating_duration_since(*retired) < CONNECT_TIMEOUT);
+    }
 }
 
 fn run_session(
@@ -747,10 +788,7 @@ fn run_session(
         pending_subscriptions: BTreeMap::new(),
         connected: false,
         active: BTreeMap::new(),
-        instruments: BTreeMap::new(),
-        next_trade_sequence: 1,
-        book_sequences: BTreeMap::new(),
-        decode_failures: 0,
+        feed: FeedState::new(),
         last_inbound: started,
         // Make the first qualified RTT probe due immediately. Subsequent
         // probes retain the normal interval from the actual send instant.
@@ -782,15 +820,7 @@ fn run_session(
             Ok(MarketSocketEvent::Text(text)) => {
                 let received_at = Instant::now();
                 state.last_inbound = received_at;
-                match handle_frame(
-                    &text,
-                    generation,
-                    &state.instruments,
-                    &mut state.decode_failures,
-                    &mut state.next_trade_sequence,
-                    &mut state.book_sequences,
-                    &sink,
-                ) {
+                match handle_frame(&text, generation, &mut state.feed, &sink) {
                     Ok(progress) => {
                         if let FrameProgress::Subscribed(key) = &progress {
                             state.pending_subscriptions.remove(key);
@@ -872,6 +902,7 @@ fn heartbeat(
     if let Some(reason) = session_deadline(state, now) {
         return Some(reason);
     }
+    state.feed.expire_retiring(now);
     if now.saturating_duration_since(state.last_inbound) >= MESSAGE_SILENCE_TIMEOUT {
         return Some("inbound silence exceeded 45 seconds");
     }
@@ -1002,17 +1033,18 @@ fn reconcile_subscriptions(
         instruments.insert(book.wire_coin.clone(), book.clone());
     }
     remove_retired_subscriptions(socket, &desired, state)?;
-    retain_book_sequences(&mut state.book_sequences, &desired);
+    retain_book_sequences(&mut state.feed.book_sequences, &desired);
     for (key, frame) in &desired {
         if !state.active.contains_key(key) {
             socket.send_text(frame).map_err(|error| error.to_string())?;
             state.active.insert(key.clone(), frame.clone());
+            state.feed.retiring.remove(key);
             state
                 .pending_subscriptions
                 .insert(key.clone(), Instant::now());
         }
     }
-    state.instruments = instruments;
+    state.feed.replace_instruments(instruments);
     Ok(())
 }
 
@@ -1053,6 +1085,7 @@ fn remove_retired_subscriptions(
                     subscription,
                 ))
                 .map_err(|error| error.to_string())?;
+            state.feed.retiring.insert(key, Instant::now());
         }
     }
     Ok(())
@@ -1064,14 +1097,19 @@ enum FrameProgress {
     Other,
 }
 
-fn acknowledged_subscription(raw: &str) -> Result<Option<SubscriptionKey>, String> {
+enum Acknowledgement {
+    Subscribed(SubscriptionKey),
+    Unsubscribed(SubscriptionKey),
+}
+
+fn acknowledged_subscription(raw: &str) -> Result<Acknowledgement, String> {
     let data: serde_json::Value =
         serde_json::from_str(raw).map_err(|_| "invalid subscription response".to_string())?;
-    match data.get("method").and_then(serde_json::Value::as_str) {
-        Some("unsubscribe") => return Ok(None),
-        Some("subscribe") => {}
+    let subscribed = match data.get("method").and_then(serde_json::Value::as_str) {
+        Some("subscribe") => true,
+        Some("unsubscribe") => false,
         _ => return Err("subscription response omitted method".into()),
-    }
+    };
     let subscription = data
         .get("subscription")
         .ok_or("subscription response omitted identity")?;
@@ -1096,22 +1134,24 @@ fn acknowledged_subscription(raw: &str) -> Result<Option<SubscriptionKey>, Strin
         Some("l2Book") => SubscriptionKey::Book { coin },
         _ => return Err("unexpected subscription response type".into()),
     };
-    Ok(Some(key))
+    Ok(if subscribed {
+        Acknowledgement::Subscribed(key)
+    } else {
+        Acknowledgement::Unsubscribed(key)
+    })
 }
 
 fn handle_frame(
     text: &str,
     generation: u64,
-    instruments: &BTreeMap<String, HyperliquidInstrumentDemand>,
-    decode_failures: &mut u32,
-    next_trade_sequence: &mut u64,
-    book_sequences: &mut BTreeMap<String, u64>,
+    feed: &mut FeedState,
     sink: &RealtimeEventSink<'_>,
 ) -> Result<FrameProgress, FrameOutcome> {
     let event = match parse_ws_frame(text) {
         Ok(event) => event,
         Err(reason) => {
-            return record_frame_failure(decode_failures, &reason).map(|()| FrameProgress::Other);
+            return record_frame_failure(&mut feed.decode_failures, &reason)
+                .map(|()| FrameProgress::Other);
         }
     };
     if matches!(&event, WsClientEvent::Pong) {
@@ -1119,18 +1159,18 @@ fn handle_frame(
     }
     if let WsClientEvent::Subscribed { channel } = &event {
         return match acknowledged_subscription(channel) {
-            Ok(Some(key)) => Ok(FrameProgress::Subscribed(key)),
-            Ok(None) => Ok(FrameProgress::Other),
-            Err(reason) => {
-                record_frame_failure(decode_failures, &reason).map(|()| FrameProgress::Other)
+            Ok(Acknowledgement::Subscribed(key)) => Ok(FrameProgress::Subscribed(key)),
+            Ok(Acknowledgement::Unsubscribed(key)) => {
+                feed.retiring.remove(&key);
+                Ok(FrameProgress::Other)
             }
+            Err(reason) => record_frame_failure(&mut feed.decode_failures, &reason)
+                .map(|()| FrameProgress::Other),
         };
     }
     let mut frame = FrameDecoder {
         generation,
-        instruments,
-        next_trade_sequence,
-        book_sequences,
+        feed: &mut *feed,
         sink,
     };
     let outcome = match event {
@@ -1158,7 +1198,7 @@ fn handle_frame(
         Ok(()) => Ok(FrameProgress::Other),
         Err(FrameError::Abort(outcome)) => Err(outcome),
         Err(FrameError::Malformed(reason)) => {
-            record_frame_failure(decode_failures, &reason).map(|()| FrameProgress::Other)
+            record_frame_failure(&mut feed.decode_failures, &reason).map(|()| FrameProgress::Other)
         }
     }
 }
@@ -1180,9 +1220,7 @@ fn record_frame_failure(decode_failures: &mut u32, reason: &str) -> Result<(), F
 
 struct FrameDecoder<'a> {
     generation: u64,
-    instruments: &'a BTreeMap<String, HyperliquidInstrumentDemand>,
-    next_trade_sequence: &'a mut u64,
-    book_sequences: &'a mut BTreeMap<String, u64>,
+    feed: &'a mut FeedState,
     sink: &'a RealtimeEventSink<'a>,
 }
 
@@ -1197,13 +1235,27 @@ enum FrameError {
 }
 
 impl FrameDecoder<'_> {
+    /// Drops data for a coin with no demand mapping. Frames still in flight
+    /// for a feed this connection is retiring are expected and drop quietly;
+    /// anything else is counted. Neither may enter another instrument's state.
+    fn undemanded(&self, key: &SubscriptionKey, reason: &str) -> Result<(), FrameError> {
+        if self.feed.retiring.contains_key(key) {
+            Ok(())
+        } else {
+            Err(FrameError::Malformed(reason.to_string()))
+        }
+    }
+
     fn bbo(&mut self, coin: &str, bbo: &serde_json::value::RawValue) -> Result<(), FrameError> {
-        let Some(mapping) = self.instruments.get(coin) else {
-            return Err(FrameError::Malformed(
-                "bbo coin is not demanded".to_string(),
-            ));
+        let Some(mapping) = self.feed.instruments.get(coin) else {
+            return self.undemanded(
+                &SubscriptionKey::Bbo {
+                    coin: coin.to_string(),
+                },
+                "bbo coin is not demanded",
+            );
         };
-        let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
+        let sequence = self.feed.book_sequences.get(coin).copied().unwrap_or(1);
         let quote = aeris_hyperliquid_market_adapter::decode_bbo_quote(
             bbo,
             coin,
@@ -1217,7 +1269,7 @@ impl FrameDecoder<'_> {
         let next = sequence
             .checked_add(1)
             .ok_or(FrameError::Abort(FrameOutcome::Reconnect))?;
-        self.book_sequences.insert(coin.to_string(), next);
+        self.feed.book_sequences.insert(coin.to_string(), next);
         if self
             .sink
             .send(HyperliquidRealtimeEvent::Quote(self.generation, quote))
@@ -1237,8 +1289,8 @@ impl FrameDecoder<'_> {
         // rejects anything else without touching the socket.
         let candle = decode_live_candle(
             candles,
-            price_scale_for(coin, self.instruments),
-            quantity_scale_for(coin, self.instruments),
+            price_scale_for(coin, &self.feed.instruments),
+            quantity_scale_for(coin, &self.feed.instruments),
         )
         .map_err(|reason| FrameError::Malformed(format!("candle: {reason}")))?;
         if self.sink.send(HyperliquidRealtimeEvent::Candle(
@@ -1257,15 +1309,16 @@ impl FrameDecoder<'_> {
         coin: &str,
         trades: &serde_json::value::RawValue,
     ) -> Result<(), FrameError> {
-        let Some(mapping) = self.instruments.get(coin) else {
-            // Data for an unsubscribed coin is dropped and counted: it must
-            // never enter another instrument's continuity.
-            return Err(FrameError::Malformed(
-                "trade coin is not demanded".to_string(),
-            ));
+        let Some(mapping) = self.feed.instruments.get(coin) else {
+            return self.undemanded(
+                &SubscriptionKey::Trades {
+                    coin: coin.to_string(),
+                },
+                "trade coin is not demanded",
+            );
         };
-        let first = *self.next_trade_sequence;
-        let batch = decode_trades_batch(
+        let first = self.feed.next_trade_sequence;
+        let mut batch = decode_trades_batch(
             trades,
             coin,
             &mapping.instrument_id,
@@ -1277,9 +1330,17 @@ impl FrameDecoder<'_> {
         .map_err(|reason| FrameError::Malformed(format!("trades: {reason}")))?;
         let advance = u64::try_from(batch.trades.len()).unwrap_or(u64::MAX);
         match first.checked_add(advance) {
-            Some(next) => *self.next_trade_sequence = next.max(1),
+            Some(next) => self.feed.next_trade_sequence = next.max(1),
             None => return Err(FrameError::Abort(FrameOutcome::Reconnect)),
         }
+        // A resubscription snapshot replays trades this connection already
+        // published; the replays keep the local sequences they were decoded
+        // with, so published sequences only ever increase.
+        self.feed
+            .delivered_trades
+            .entry(coin.to_string())
+            .or_default()
+            .retain_undelivered(&mut batch.trades);
         if !batch.trades.is_empty()
             && self.sink.send(HyperliquidRealtimeEvent::Trades(
                 self.generation,
@@ -1292,12 +1353,15 @@ impl FrameDecoder<'_> {
     }
 
     fn book(&mut self, coin: &str, book: &serde_json::value::RawValue) -> Result<(), FrameError> {
-        let Some(mapping) = self.instruments.get(coin) else {
-            return Err(FrameError::Malformed(
-                "book coin is not demanded".to_string(),
-            ));
+        let Some(mapping) = self.feed.instruments.get(coin) else {
+            return self.undemanded(
+                &SubscriptionKey::Book {
+                    coin: coin.to_string(),
+                },
+                "book coin is not demanded",
+            );
         };
-        let sequence = self.book_sequences.get(coin).copied().unwrap_or(1);
+        let sequence = self.feed.book_sequences.get(coin).copied().unwrap_or(1);
         let decoded = decode_book_snapshot(
             book,
             coin,
@@ -1311,7 +1375,7 @@ impl FrameDecoder<'_> {
         let next = sequence
             .checked_add(1)
             .ok_or(FrameError::Abort(FrameOutcome::Reconnect))?;
-        self.book_sequences.insert(coin.to_string(), next);
+        self.feed.book_sequences.insert(coin.to_string(), next);
         if self.sink.send(HyperliquidRealtimeEvent::Depth(
             self.generation,
             decoded.snapshot,
@@ -1360,14 +1424,6 @@ mod tests {
     use super::*;
     use aeris_platform_runtime::{LiveMarketGateOutcome, LiveMarketGateRecorder};
 
-    type FrameHarness = (
-        BTreeMap<String, HyperliquidInstrumentDemand>,
-        u32,
-        u64,
-        BTreeMap<String, u64>,
-        SyncSender<HyperliquidRealtimeEvent>,
-    );
-
     fn demand() -> BTreeMap<String, HyperliquidInstrumentDemand> {
         BTreeMap::from([(
             "BTC".to_string(),
@@ -1381,9 +1437,11 @@ mod tests {
         )])
     }
 
-    fn harness() -> FrameHarness {
-        let (events, _dropped) = std::sync::mpsc::sync_channel(1_024);
-        (demand(), 0, 1, BTreeMap::new(), events)
+    /// Feed state of a fresh connection demanding BTC.
+    fn feed() -> FeedState {
+        let mut feed = FeedState::new();
+        feed.instruments = demand();
+        feed
     }
 
     /// One healthy live candle for the demanded coin.
@@ -1405,10 +1463,7 @@ mod tests {
 
     fn handle(
         text: &str,
-        instruments: &BTreeMap<String, HyperliquidInstrumentDemand>,
-        decode_failures: &mut u32,
-        next_trade_sequence: &mut u64,
-        book_sequences: &mut BTreeMap<String, u64>,
+        feed: &mut FeedState,
         events: &SyncSender<HyperliquidRealtimeEvent>,
     ) -> Result<(), FrameOutcome> {
         let stop = AtomicBool::new(false);
@@ -1418,16 +1473,19 @@ mod tests {
             stop: &stop,
             wake: &wake,
         };
-        handle_frame(
-            text,
-            1,
-            instruments,
-            decode_failures,
-            next_trade_sequence,
-            book_sequences,
-            &sink,
-        )
-        .map(|_| ())
+        handle_frame(text, 1, feed, &sink).map(|_| ())
+    }
+
+    fn published_trade_ids(received: &Receiver<HyperliquidRealtimeEvent>) -> Vec<String> {
+        received
+            .try_iter()
+            .filter_map(|event| match event {
+                HyperliquidRealtimeEvent::Trades(_, trades) => Some(trades),
+                _ => None,
+            })
+            .flatten()
+            .map(|trade| trade.trade_id)
+            .collect()
     }
 
     fn one_trade(coin: &str, time: i64, tid: u64) -> String {
@@ -1459,14 +1517,15 @@ mod tests {
     fn subscription_acknowledgement_matches_exact_stream_identity() {
         assert!(
             matches!(acknowledged_subscription(r#"{"method":"subscribe","subscription":{"type":"candle","coin":"BTC","interval":"1m"}}"#),
-            Ok(Some(SubscriptionKey::Candle { coin, interval })) if coin == "BTC" && interval == "1m")
+            Ok(Acknowledgement::Subscribed(SubscriptionKey::Candle { coin, interval })) if coin == "BTC" && interval == "1m")
         );
         assert!(acknowledged_subscription(r#"{"method":"subscribe"}"#).is_err());
+        // Observed shape: the unsubscribe acknowledgement echoes the request.
         assert!(
-            acknowledged_subscription(r#"{"method":"unsubscribe"}"#)
-                .unwrap()
-                .is_none()
+            matches!(acknowledged_subscription(r#"{"method":"unsubscribe","subscription":{"type":"l2Book","coin":"BTC","nSigFigs":null,"mantissa":null,"fast":false}}"#),
+            Ok(Acknowledgement::Unsubscribed(SubscriptionKey::Book { coin })) if coin == "BTC")
         );
+        assert!(acknowledged_subscription(r#"{"method":"unsubscribe"}"#).is_err());
     }
 
     #[test]
@@ -1476,10 +1535,7 @@ mod tests {
             active: BTreeMap::new(),
             pending_subscriptions: BTreeMap::new(),
             connected: true,
-            instruments: BTreeMap::new(),
-            next_trade_sequence: 1,
-            book_sequences: BTreeMap::new(),
-            decode_failures: 0,
+            feed: FeedState::new(),
             last_inbound: now,
             last_ping: now,
             pending_ping: Some(now.checked_sub(PING_INTERVAL).unwrap()),
@@ -1507,17 +1563,11 @@ mod tests {
 
     #[test]
     fn bbo_frames_enter_the_canonical_quote_path() {
-        let instruments = demand();
+        let mut feed = feed();
         let (events, received) = std::sync::mpsc::sync_channel(8);
-        let mut failures = 0;
-        let mut trades = 1;
-        let mut books = BTreeMap::new();
         handle(
             r#"{"channel":"bbo","data":{"coin":"BTC","time":1700000000000,"bbo":[{"px":"10.0","sz":"2.0","n":1},{"px":"10.5","sz":"3.0","n":2}]}}"#,
-            &instruments,
-            &mut failures,
-            &mut trades,
-            &mut books,
+            &mut feed,
             &events,
         )
         .expect("bbo frame accepted");
@@ -1559,14 +1609,12 @@ mod tests {
         retain_book_sequences(&mut sequences, &desired);
         assert_eq!(sequences, BTreeMap::from([("BTC".to_string(), 101)]));
 
-        let (instruments, mut failures, mut trades, _, _) = harness();
+        let mut feed = feed();
+        feed.book_sequences = sequences;
         let (events, received) = std::sync::mpsc::sync_channel(8);
         handle(
             r#"{"channel":"bbo","data":{"coin":"BTC","time":1700000000000,"bbo":[{"px":"10.0","sz":"2.0","n":1},{"px":"10.5","sz":"3.0","n":2}]}}"#,
-            &instruments,
-            &mut failures,
-            &mut trades,
-            &mut sequences,
+            &mut feed,
             &events,
         )
         .expect("bbo remains valid after reconciliation");
@@ -1575,31 +1623,24 @@ mod tests {
             panic!("expected quote event");
         };
         assert_eq!(quote.metadata.source_sequence, 101);
-        assert_eq!(sequences.get("BTC"), Some(&102));
+        assert_eq!(feed.book_sequences.get("BTC"), Some(&102));
     }
 
     #[test]
     fn book_ingestion_sequence_exhaustion_reconnects_without_publishing_duplicates() {
-        let (instruments, mut failures, mut trades, mut books, _) = harness();
+        let mut feed = feed();
         let (events, received) = std::sync::mpsc::sync_channel(8);
         for frame in [
             r#"{"channel":"bbo","data":{"coin":"BTC","time":1,"bbo":[null,null]}}"#,
             r#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[],[]]}}"#,
         ] {
-            books.insert("BTC".to_string(), u64::MAX);
+            feed.book_sequences.insert("BTC".to_string(), u64::MAX);
             assert!(matches!(
-                handle(
-                    frame,
-                    &instruments,
-                    &mut failures,
-                    &mut trades,
-                    &mut books,
-                    &events
-                ),
+                handle(frame, &mut feed, &events),
                 Err(FrameOutcome::Reconnect)
             ));
             assert_eq!(
-                failures, 0,
+                feed.decode_failures, 0,
                 "local exhaustion is not malformed provider data"
             );
             assert!(received.try_recv().is_err());
@@ -1608,42 +1649,19 @@ mod tests {
 
     #[test]
     fn payload_failures_count_across_healthy_frames() {
-        let (instruments, mut failures, mut trades, mut books, _) = harness();
+        let mut feed = feed();
         let (events, received) = std::sync::mpsc::sync_channel(1_024);
         // Just under the threshold of payload failures keeps the session up,
         // even with a healthy candle between every two failures: interleaved
         // success must not forgive sustained payload corruption.
         for _ in 0..MAXIMUM_DECODE_FAILURES_PER_CONNECTION - 1 {
-            handle(
-                &unmapped_trades(),
-                &instruments,
-                &mut failures,
-                &mut trades,
-                &mut books,
-                &events,
-            )
-            .expect("under threshold stays up");
-            handle(
-                &good_candle(),
-                &instruments,
-                &mut failures,
-                &mut trades,
-                &mut books,
-                &events,
-            )
-            .expect("healthy frame handled");
+            handle(&unmapped_trades(), &mut feed, &events).expect("under threshold stays up");
+            handle(&good_candle(), &mut feed, &events).expect("healthy frame handled");
         }
         // The next payload failure trips the threshold despite the healthy
         // traffic around it: the budget is per connection, not per streak.
         assert!(matches!(
-            handle(
-                &unmapped_trades(),
-                &instruments,
-                &mut failures,
-                &mut trades,
-                &mut books,
-                &events
-            ),
+            handle(&unmapped_trades(), &mut feed, &events),
             Err(FrameOutcome::Reconnect)
         ));
         assert_eq!(
@@ -1672,10 +1690,7 @@ mod tests {
             pending_subscriptions: BTreeMap::new(),
             connected: false,
             active: BTreeMap::new(),
-            instruments: BTreeMap::new(),
-            next_trade_sequence: 1,
-            book_sequences: BTreeMap::new(),
-            decode_failures: 0,
+            feed: FeedState::new(),
             last_inbound: started + Duration::from_secs(19),
             last_ping: started,
             pending_ping: None,
@@ -1698,10 +1713,7 @@ mod tests {
             pending_subscriptions: BTreeMap::new(),
             connected: false,
             active: BTreeMap::new(),
-            instruments: BTreeMap::new(),
-            next_trade_sequence: 1,
-            book_sequences: BTreeMap::new(),
-            decode_failures: 0,
+            feed: FeedState::new(),
             last_inbound: started,
             last_ping: started.checked_sub(PING_INTERVAL).unwrap_or(started),
             pending_ping: None,
@@ -1725,24 +1737,15 @@ mod tests {
             )])
         };
         let (events, received) = std::sync::mpsc::sync_channel(8);
-        let mut failures = 0;
-        let mut next_trade_sequence = 1;
-        let mut books = BTreeMap::new();
+        let mut feed = FeedState::new();
 
         for (coin, time, tid) in [
             ("BTC", 1_700_000_000_000_i64, 1_u64),
             ("ETH", 1_700_000_000_001_i64, 2_u64),
             ("BTC", 1_700_000_000_002_i64, 3_u64),
         ] {
-            handle(
-                &one_trade(coin, time, tid),
-                &instrument(coin),
-                &mut failures,
-                &mut next_trade_sequence,
-                &mut books,
-                &events,
-            )
-            .expect("trade frame accepted");
+            feed.instruments = instrument(coin);
+            handle(&one_trade(coin, time, tid), &mut feed, &events).expect("trade frame accepted");
         }
 
         let sequences = received
@@ -1755,7 +1758,150 @@ mod tests {
             .map(|trade| trade.metadata.source_sequence)
             .collect::<Vec<_>>();
         assert_eq!(sequences, vec![1, 2, 3]);
-        assert_eq!(next_trade_sequence, 4);
+        assert_eq!(feed.next_trade_sequence, 4);
+    }
+
+    /// The observed subscription response: acknowledgement, then a snapshot
+    /// of recent trades as an ordinary `trades` frame.
+    fn trades_frame(trades: &[(i64, u64)]) -> String {
+        let rows = trades
+            .iter()
+            .map(|(time, tid)| {
+                format!(
+                    r#"{{"coin":"BTC","px":"10","sz":"1","side":"B","time":{time},"tid":{tid},"hash":"0xabc","users":["0xbuyer","0xseller"]}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"channel":"trades","data":[{rows}]}}"#)
+    }
+
+    #[test]
+    fn resubscription_snapshot_does_not_republish_delivered_trades() {
+        let mut feed = feed();
+        let (events, received) = std::sync::mpsc::sync_channel(16);
+        handle(
+            &trades_frame(&[(1_000, 11), (1_000, 12), (2_000, 13)]),
+            &mut feed,
+            &events,
+        )
+        .expect("first subscription snapshot");
+        handle(&trades_frame(&[(3_000, 14)]), &mut feed, &events).expect("live trade");
+        assert_eq!(published_trade_ids(&received).len(), 4);
+
+        // Unsubscribed and subscribed again on the same connection while BTC
+        // stayed demanded on another channel: the new snapshot repeats
+        // delivered trades beside ones not yet delivered.
+        feed.replace_instruments(demand());
+        handle(
+            &trades_frame(&[(1_000, 12), (2_000, 13), (3_000, 14), (4_000, 15)]),
+            &mut feed,
+            &events,
+        )
+        .expect("resubscription snapshot");
+        let replay = received
+            .try_iter()
+            .filter_map(|event| match event {
+                HyperliquidRealtimeEvent::Trades(_, trades) => Some(trades),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replay
+                .iter()
+                .map(|trade| trade.trade_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hl:BTC:4000:15"],
+            "only the undelivered trade is published"
+        );
+        assert!(
+            replay[0].metadata.source_sequence > 4,
+            "ingestion order keeps increasing past the dropped replays"
+        );
+        assert_eq!(feed.decode_failures, 0, "a replay is not malformed data");
+    }
+
+    #[test]
+    fn delivered_trades_reset_when_the_coin_leaves_demand_or_the_connection() {
+        let mut feed = feed();
+        let (events, received) = std::sync::mpsc::sync_channel(16);
+        handle(&trades_frame(&[(1_000, 11)]), &mut feed, &events).expect("trade");
+        assert_eq!(published_trade_ids(&received).len(), 1);
+
+        // Nothing demands BTC any more, so its canonical tape is gone and a
+        // later subscription's snapshot starts a fresh one.
+        feed.replace_instruments(BTreeMap::new());
+        feed.replace_instruments(demand());
+        handle(&trades_frame(&[(1_000, 11)]), &mut feed, &events).expect("snapshot");
+        assert_eq!(published_trade_ids(&received), vec!["hl:BTC:1000:11"]);
+
+        let mut reconnected = self::feed();
+        handle(&trades_frame(&[(1_000, 11)]), &mut reconnected, &events).expect("snapshot");
+        assert_eq!(
+            published_trade_ids(&received),
+            vec!["hl:BTC:1000:11"],
+            "a new connection publishes into a new session generation"
+        );
+    }
+
+    #[test]
+    fn in_flight_frames_for_a_retiring_feed_are_dropped_without_counting() {
+        let mut feed = feed();
+        feed.instruments.clear();
+        let retired_at = Instant::now();
+        for key in [
+            SubscriptionKey::Bbo { coin: "BTC".into() },
+            SubscriptionKey::Trades { coin: "BTC".into() },
+            SubscriptionKey::Book { coin: "BTC".into() },
+        ] {
+            feed.retiring.insert(key, retired_at);
+        }
+        let (events, received) = std::sync::mpsc::sync_channel(16);
+        for frame in [
+            r#"{"channel":"bbo","data":{"coin":"BTC","time":1,"bbo":[null,null]}}"#.to_string(),
+            one_trade("BTC", 1_000, 11),
+            r#"{"channel":"l2Book","data":{"coin":"BTC","time":1,"levels":[[],[]]}}"#.to_string(),
+        ] {
+            handle(&frame, &mut feed, &events).expect("in-flight frame handled");
+        }
+        assert_eq!(
+            feed.decode_failures, 0,
+            "in-flight frames are not malformed"
+        );
+        assert!(received.try_recv().is_err(), "retired data is never routed");
+
+        // The acknowledgement ends the in-flight window for that feed only.
+        handle(
+            r#"{"channel":"subscriptionResponse","data":{"method":"unsubscribe","subscription":{"type":"bbo","coin":"BTC"}}}"#,
+            &mut feed,
+            &events,
+        )
+        .expect("unsubscribe acknowledgement");
+        handle(
+            r#"{"channel":"bbo","data":{"coin":"BTC","time":2,"bbo":[null,null]}}"#,
+            &mut feed,
+            &events,
+        )
+        .expect("counted, under threshold");
+        assert_eq!(
+            feed.decode_failures, 1,
+            "data after the acknowledgement counts"
+        );
+        handle(&unmapped_trades(), &mut feed, &events).expect("counted, under threshold");
+        assert_eq!(
+            feed.decode_failures, 2,
+            "a never-subscribed coin still counts"
+        );
+        assert!(received.try_recv().is_err());
+
+        // Without an acknowledgement the excuse lapses after a bounded wait.
+        feed.expire_retiring(retired_at + CONNECT_TIMEOUT.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(feed.retiring.len(), 2);
+        feed.expire_retiring(retired_at + CONNECT_TIMEOUT);
+        assert!(feed.retiring.is_empty());
+        handle(&one_trade("BTC", 2_000, 12), &mut feed, &events).expect("counted");
+        assert_eq!(feed.decode_failures, 3);
     }
 
     #[test]
@@ -1871,41 +2017,19 @@ mod tests {
 
     #[test]
     fn benign_control_traffic_neither_counts_nor_forgives() {
-        let (instruments, mut failures, mut trades, mut books, events) = harness();
+        let mut feed = feed();
+        let (events, _received) = std::sync::mpsc::sync_channel(1_024);
         for _ in 0..MAXIMUM_DECODE_FAILURES_PER_CONNECTION - 1 {
-            handle(
-                &unmapped_trades(),
-                &instruments,
-                &mut failures,
-                &mut trades,
-                &mut books,
-                &events,
-            )
-            .expect("under threshold stays up");
+            handle(&unmapped_trades(), &mut feed, &events).expect("under threshold stays up");
         }
         // Acknowledgements are healthy traffic but prove nothing about the
         // payload decoders: they must not consume budget, and must not reset
         // it either.
         for _ in 0..16 {
-            handle(
-                &subscribed_ack(),
-                &instruments,
-                &mut failures,
-                &mut trades,
-                &mut books,
-                &events,
-            )
-            .expect("control traffic handled");
+            handle(&subscribed_ack(), &mut feed, &events).expect("control traffic handled");
         }
         assert!(matches!(
-            handle(
-                &unmapped_trades(),
-                &instruments,
-                &mut failures,
-                &mut trades,
-                &mut books,
-                &events
-            ),
+            handle(&unmapped_trades(), &mut feed, &events),
             Err(FrameOutcome::Reconnect)
         ));
     }

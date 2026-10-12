@@ -51,7 +51,7 @@ pub use statistics::{
     FUNDING_INTERVAL_SECONDS, HyperliquidMarketStatistics, STATISTICS_NOTIONAL_SCALE,
     decode_market_statistics,
 };
-pub use trades::{HyperliquidTradeBatch, TradeDedup, decode_trades_batch};
+pub use trades::{DeliveredTradeIds, HyperliquidTradeBatch, decode_trades_batch};
 pub use ws::{
     WsClientEvent, build_aggregated_l2_subscription, build_bbo_subscription,
     build_candle_subscription, build_l2_subscription, build_ping, build_trades_subscription,
