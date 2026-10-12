@@ -10,7 +10,8 @@ use aeris_context_runtime::{
     ContextMetric, ContextProvenance, ContextSource, CotPosition, DegreeDayMetric, EconomicEvent,
     SourceAvailability,
 };
-use chrono::{TimeZone, Utc};
+use aeris_design_system::platform_date_label;
+use chrono::{Datelike as _, NaiveDate, TimeZone, Timelike as _, Utc};
 use gpui::{AppContext as _, Div, prelude::FluentBuilder as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -304,7 +305,7 @@ fn energy_rows(
                 "HDD {} · CDD {} · {}",
                 fixed_value(i128::from(metric.heating_degree_days_units), metric.scale),
                 fixed_value(i128::from(metric.cooling_degree_days_units), metric.scale),
-                metric.period
+                period_label(&metric.period)
             ),
             &metric.provenance,
             theme,
@@ -344,7 +345,7 @@ fn metric_rows(metrics: &[ContextMetric], theme: &AerisTheme) -> Vec<Div> {
                     "{} {} · {}{range}{surprise}",
                     fixed_value(metric.value_units, metric.value_scale),
                     metric.unit,
-                    metric.period
+                    period_label(&metric.period)
                 ),
                 &metric.provenance,
                 theme,
@@ -479,8 +480,43 @@ fn fixed_value(units: i128, scale: u8) -> String {
 fn format_timestamp(unix_seconds: i64) -> String {
     Utc.timestamp_opt(unix_seconds, 0).single().map_or_else(
         || "invalid time".to_string(),
-        |time| time.format("%Y-%m-%d %H:%M UTC").to_string(),
+        |time| {
+            format!(
+                "{} {:02}:{:02} UTC",
+                platform_date_label(time.year(), time.month(), time.day()),
+                time.hour(),
+                time.minute()
+            )
+        },
     )
+}
+
+/// A provider's release period with its calendar dates in the platform format. Providers publish
+/// ISO dates (`2026-09-17`, optionally with a `T` time), NOAA CPC compact dates (`20260926 to
+/// 20260927`) and free text; only the dates are rewritten.
+fn period_label(period: &str) -> String {
+    period
+        .split(' ')
+        .map(|word| {
+            provider_calendar_date(word).map_or_else(
+                || word.to_string(),
+                |date| platform_date_label(date.year(), date.month(), date.day()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn provider_calendar_date(word: &str) -> Option<NaiveDate> {
+    let date = word.split_once('T').map_or(word, |(date, _)| date);
+    if date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return NaiveDate::from_ymd_opt(
+            date[..4].parse().ok()?,
+            date[4..6].parse().ok()?,
+            date[6..].parse().ok()?,
+        );
+    }
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
 fn countdown(event_unix_seconds: i64, now_unix_seconds: i64) -> String {
@@ -522,5 +558,16 @@ mod tests {
     fn countdown_is_stable_at_release_boundary() {
         assert_eq!(countdown(1_000, 1_000), "released");
         assert_eq!(countdown(1_000 + 90 * 60, 1_000), "in 1h 30m");
+    }
+
+    #[test]
+    fn context_dates_read_day_month_two_digit_year() {
+        // 2026-10-03 11:10:12 UTC.
+        assert_eq!(format_timestamp(1_791_025_812), "03-10-26 11:10 UTC");
+        assert_eq!(period_label("2026-09-17"), "17-09-26");
+        assert_eq!(period_label("2026-09-17T00:00:00"), "17-09-26");
+        assert_eq!(period_label("20260926 to 20260927"), "26-09-26 to 27-09-26");
+        assert_eq!(period_label("Q3 2026"), "Q3 2026");
+        assert_eq!(period_label("Total"), "Total");
     }
 }

@@ -2716,14 +2716,25 @@ fn selected_time_zone_date_time_crosses_the_local_calendar_day() {
     // 2026-01-15 00:00:00 UTC is still the previous evening in New York.
     assert_eq!(
         chart.time_zone_date_time_label_at(1_768_435_200),
-        "2026-01-15 00:00:00"
+        "15-01-26 00:00:00"
     );
     chart
         .set_time_zone("America/New_York")
         .expect("New York zone accepted");
     assert_eq!(
         chart.time_zone_date_time_label_at(1_768_435_200),
-        "2026-01-14 19:00:00"
+        "14-01-26 19:00:00"
+    );
+}
+
+#[test]
+fn crosshair_dates_read_like_the_rest_of_the_platform() {
+    let chart = AerisChartView::new();
+    // 2026-10-03 11:10:12 UTC.
+    let label = chart.engine.format_crosshair_ts(1_791_025_812);
+    assert!(
+        label.starts_with(&platform_date_label(2026, 10, 3)),
+        "{label}"
     );
 }
 

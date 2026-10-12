@@ -41,8 +41,8 @@ use aeris_charts_render_gpui::backend::measure_text;
 use aeris_charts_render_gpui::input::{GpuiChartInput, install_text_metrics};
 use aeris_charts_render_gpui::{AerisViewport, GpuiChartRenderer, PreparedAerisFrame};
 use aeris_design_system::{
-    AerisTheme, ThemeColor, TypographyRole, platform_font_family, platform_font_stack,
-    platform_typography,
+    AerisTheme, ThemeColor, TypographyRole, platform_date_label, platform_font_family,
+    platform_font_stack, platform_typography,
 };
 use aeris_observability::diagnostic;
 use gpui::{
@@ -122,10 +122,17 @@ const INITIAL_VISIBLE_BARS: f64 = 600.0;
 /// display-only; no candle or volume data is synthesized for these logical slots.
 const REAL_TIME_RIGHT_OFFSET_BARS: f64 = 24.0;
 
+/// [`platform_date_label`]'s `DD-MM-YY` in Aeris Charts' `localization.dateFormat` syntax, so the
+/// crosshair time label reads dates like every other platform surface.
+const PLATFORM_DATE_FORMAT: &str = "dd-MM-yy";
+
 fn apply_platform_chrome_contract(engine: &mut ChartEngine, labels: TimeAxisLabels) {
     let options = serde_json::json!({
         "layout": {
             "fontFamily": platform_font_stack(),
+        },
+        "localization": {
+            "dateFormat": PLATFORM_DATE_FORMAT,
         },
         "watermark": {
             "fontFamily": platform_font_stack(),
@@ -2415,8 +2422,11 @@ impl AerisChartView {
             || "----------".to_string(),
             |parts| {
                 format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                    parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second
+                    "{} {:02}:{:02}:{:02}",
+                    platform_date_label(parts.year, parts.month, parts.day),
+                    parts.hour,
+                    parts.minute,
+                    parts.second
                 )
             },
         )

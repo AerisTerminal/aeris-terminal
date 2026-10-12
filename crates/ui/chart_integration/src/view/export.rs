@@ -7,7 +7,7 @@
 
 use super::{
     AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendRow,
-    format_utc_offset, platform_theme,
+    format_utc_offset, platform_date_label, platform_theme,
 };
 use aeris_charts_native::{
     ImageExportOptions, PreparedChartImage, measure_text, prepare_engine_image, register_font_data,
@@ -55,12 +55,10 @@ struct ChartCapture {
 }
 
 /// The image caption and file name for a capture at `utc_seconds`, both read in the chart's
-/// time zone like its time axis: "Created with Aeris, Oct 03, 2026 07:10 UTC-4" and
-/// "BTC_2026-10-03_07-10-12.png".
+/// time zone like its time axis: "Created with Aeris, 03-10-26 07:10 UTC-4" and
+/// "BTC_2026-10-03_07-10-12.png". The file name keeps the year first so saved captures sort
+/// chronologically in a file browser.
 fn capture_labels(symbol: &str, time_zone: &str, utc_seconds: i64) -> (String, String) {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     let symbol: String = symbol
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.'))
@@ -71,16 +69,9 @@ fn capture_labels(symbol: &str, time_zone: &str, utc_seconds: i64) -> (String, S
     else {
         return ("Created with Aeris".to_owned(), format!("{symbol}.png"));
     };
-    let month = time
-        .month
-        .checked_sub(1)
-        .and_then(|index| MONTHS.get(usize::try_from(index).ok()?))
-        .copied()
-        .unwrap_or("---");
     let caption = format!(
-        "Created with Aeris, {month} {:02}, {} {:02}:{:02} {}",
-        time.day,
-        time.year,
+        "Created with Aeris, {} {:02}:{:02} {}",
+        platform_date_label(time.year, time.month, time.day),
         time.hour,
         time.minute,
         format_utc_offset(time.offset_seconds)
@@ -586,7 +577,7 @@ mod tests {
         assert_eq!(
             capture_labels("NQZ2026", "America/New_York", instant),
             (
-                "Created with Aeris, Oct 03, 2026 07:10 UTC-4".to_owned(),
+                "Created with Aeris, 03-10-26 07:10 UTC-4".to_owned(),
                 "NQZ2026_2026-10-03_07-10-12.png".to_owned()
             )
         );

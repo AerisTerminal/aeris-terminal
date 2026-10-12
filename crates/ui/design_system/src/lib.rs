@@ -108,6 +108,12 @@ pub const fn brand_font_family() -> &'static str {
     BRAND_FONT_FAMILY
 }
 
+/// A calendar date in the platform format, `DD-MM-YY`: day first, two-digit year.
+#[must_use]
+pub fn platform_date_label(year: i32, month: u32, day: u32) -> String {
+    format!("{day:02}-{month:02}-{:02}", year.rem_euclid(100))
+}
+
 /// The application-wide color mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThemeMode {
@@ -466,8 +472,14 @@ impl RadiusToken {
 mod tests {
     use super::{
         AerisTheme, ColorToken, RadiusToken, ThemeColor, TypographyRole, brand_font_family,
-        platform_font_family, platform_font_stack, platform_typography,
+        platform_date_label, platform_font_family, platform_font_stack, platform_typography,
     };
+
+    #[test]
+    fn platform_dates_read_day_month_two_digit_year() {
+        assert_eq!(platform_date_label(2026, 10, 9), "09-10-26");
+        assert_eq!(platform_date_label(2000, 1, 1), "01-01-00");
+    }
 
     fn token_source<'a>(tokens: &'a [ColorToken], identifier: &str) -> &'a str {
         tokens
