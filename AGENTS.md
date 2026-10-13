@@ -212,6 +212,14 @@ The local launcher and signed lifecycle code remain for future integration; deve
 - Do not create planning documents, architecture diaries, nested agent files, or duplicate README files.
   Durable architecture rules belong in code/tests/`tools/naming_check`; implementation notes belong near
   the code they describe.
+- `plan/stabilization/` is the one sanctioned exception to the rule above: it holds the stabilization
+  tracking document `stabilization_work.md` and the audit/design report copies under
+  `plan/stabilization/reports/` (redacted; the repo is public). Every feature commit must update
+  `plan/stabilization/stabilization_work.md` in the same commit: check the work item, note the findings
+  it closes, append a progress-log line, and record any new restriction there.
+- Every commit that introduces or changes an architecture restriction (a `tools/naming_check` rule, a
+  crate boundary, a writer or CI rule) must also update this `AGENTS.md` in the same commit, so the
+  rule lives where future agents read it.
 
 ## Delivery
 
