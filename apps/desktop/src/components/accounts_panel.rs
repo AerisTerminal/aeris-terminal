@@ -1,8 +1,8 @@
 //! Accounts panel: market-data connections and the practice accounts used for trading.
 //!
-//! Presentation only. The market runtime owns broker connections and their credentials;
-//! `trading_runtime` owns practice accounts. This panel dispatches their commands and shows
-//! the last observed state.
+//! Presentation only. The market runtime owns broker connections, the saved Rithmic login and
+//! their credentials; `trading_runtime` owns practice accounts. This panel dispatches their
+//! commands and shows the last observed state.
 
 use super::*;
 use gpui::Stateful;
@@ -12,27 +12,31 @@ const ROW_HEIGHT: f32 = 44.0;
 pub(super) fn accounts_panel_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
-    connections: &HostedBrokerConnections,
+    connections: &DataConnections,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
     div()
+        .id("accounts_panel")
         .w(px(ACCOUNTS_PANEL_WIDTH))
         .max_h(px(ACCOUNTS_PANEL_MAX_HEIGHT))
+        .overflow_y_scroll()
         .flex()
         .flex_col()
         .gap_3()
         .p_3()
         .child(section_label("Data connections", theme))
+        .child(rithmic_card(&connections.rithmic, theme))
+        .child(rithmic_login::rithmic_marks(theme))
         .child(broker_card(
             HostedBroker::Tastytrade,
-            connections.get(HostedBroker::Tastytrade),
+            connections.brokers.get(HostedBroker::Tastytrade),
             theme,
         ))
         .child(tastytrade_attribution(theme))
         .child(broker_card(
             HostedBroker::Ctrader,
-            connections.get(HostedBroker::Ctrader),
+            connections.brokers.get(HostedBroker::Ctrader),
             theme,
         ))
         .child(
@@ -299,6 +303,70 @@ fn broker_card(
             div()
                 .text_xs()
                 .text_color(gpui_color(if connection.failed {
+                    theme.colors.danger
+                } else {
+                    theme.colors.text_muted
+                }))
+                .child(message.clone())
+        }))
+}
+
+fn rithmic_card(view: &rithmic_login::RithmicLoginView, theme: &AerisTheme) -> impl IntoElement {
+    let connected = view.connected();
+    let busy = view.busy();
+    let actions = if connected {
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                Button::new("accounts_rithmic_change", theme)
+                    .variant(ButtonVariant::Ghost)
+                    .label("Change")
+                    .button_size(ButtonSize::Lg)
+                    .disabled(busy)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(ConnectRithmic), cx);
+                    }),
+            )
+            .child(
+                Button::new("accounts_rithmic_disconnect", theme)
+                    .variant(ButtonVariant::Outline)
+                    .label("Disconnect")
+                    .button_size(ButtonSize::Lg)
+                    .loading(busy)
+                    .disabled(busy)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(DisconnectRithmic), cx);
+                    }),
+            )
+    } else {
+        div().flex_none().child(
+            Button::new("accounts_rithmic_connect", theme)
+                .variant(ButtonVariant::Default)
+                .label("Connect")
+                .button_size(ButtonSize::Lg)
+                .loading(busy)
+                .disabled(busy)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(ConnectRithmic), cx);
+                }),
+        )
+    };
+    card("accounts_rithmic", theme)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(provider_heading("Rithmic", view.detail(), connected, theme))
+                .child(actions),
+        )
+        .children(view.message.as_ref().map(|message| {
+            div()
+                .text_xs()
+                .text_color(gpui_color(if view.failed {
                     theme.colors.danger
                 } else {
                     theme.colors.text_muted

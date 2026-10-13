@@ -22,6 +22,7 @@ use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
 };
 use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidRealtimeControl};
+use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_contracts::ProviderPresentationDescriptor;
 
 impl HistorySource for LiveRithmicHistory {
@@ -169,12 +170,20 @@ impl ProviderRuntimeRegistry {
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
-        _context: &super::ProviderStartContext,
+        context: &super::ProviderStartContext,
     ) -> Result<ProviderRuntimeRecord, String> {
         let enabled = spec.realtime.enabled;
         let descriptor = spec.descriptor;
         let started = Self::start_history_runtime(spec, completions, active_workers)?;
-        Self::start_rithmic_record(started, descriptor, enabled, wake, engine, active_workers)
+        Self::start_rithmic_record(
+            started,
+            descriptor,
+            enabled,
+            context.rithmic_login.clone(),
+            wake,
+            engine,
+            active_workers,
+        )
     }
 
     pub(super) fn start_hyperliquid_runtime(
@@ -249,6 +258,7 @@ impl ProviderRuntimeRegistry {
         mut started: StartedProviderRuntime,
         descriptor: super::ProviderDescriptor,
         enabled: bool,
+        login: RithmicLoginRevision,
         wake: ProviderCoordinatorWake,
         engine: &MarketEngine,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
@@ -291,6 +301,7 @@ impl ProviderRuntimeRegistry {
                         &realtime_events_tx,
                         &wake,
                         reconnect_delay,
+                        &login,
                     );
                     if !worker_cancellation.load(Ordering::Acquire) {
                         worker_lifecycle
@@ -1258,6 +1269,7 @@ impl MarketService {
         let start_context = super::ProviderStartContext {
             tastytrade: Arc::clone(&broker_api),
             ctrader: super::ctrader::CtraderShared::default(),
+            rithmic_login: RithmicLoginRevision::default(),
         };
         let provider_registry = ProviderRuntimeRegistry::start(
             providers,
@@ -1298,6 +1310,7 @@ impl MarketService {
         let super::ProviderStartContext {
             tastytrade: broker_api,
             ctrader,
+            rithmic_login,
         } = context;
         let (broker_authorization, worker) =
             match super::broker_authorization::BrokerAuthorization::start(
@@ -1321,6 +1334,7 @@ impl MarketService {
                 provider_presentations,
                 provider_search_preparers,
                 broker_authorization,
+                rithmic_login: super::rithmic_login::RithmicLogin::new(rithmic_login),
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
             }),
@@ -1974,6 +1988,7 @@ mod tests {
             super::super::ProviderStartContext {
                 tastytrade: Arc::new(super::super::tastytrade::BrokerApi::default()),
                 ctrader: super::super::ctrader::CtraderShared::default(),
+                rithmic_login: RithmicLoginRevision::default(),
             },
             BTreeMap::new(),
             vec![*super::super::RITHMIC_DESCRIPTOR.presentation],

@@ -61,6 +61,8 @@ mod price_alert_dialog;
 #[cfg(any(test, feature = "diagnostics"))]
 #[path = "readiness_conformance.rs"]
 mod readiness_conformance;
+#[path = "components/rithmic_login.rs"]
+mod rithmic_login;
 #[path = "rithmic_shell.rs"]
 mod rithmic_shell;
 #[path = "components/side_panel_dock.rs"]
@@ -553,6 +555,8 @@ actions!(
         DisconnectTastytrade,
         ConnectCtrader,
         DisconnectCtrader,
+        ConnectRithmic,
+        DisconnectRithmic,
         RefreshBrokerConnections,
     ]
 );
@@ -1234,6 +1238,23 @@ enum HostedBrokerOperation {
     Checking,
     Connecting,
     Disconnecting,
+}
+
+/// Every market-data connection the Accounts panel presents.
+#[derive(Clone, Default)]
+struct DataConnections {
+    brokers: HostedBrokerConnections,
+    rithmic: rithmic_login::RithmicLoginView,
+}
+
+impl DataConnections {
+    /// Whether the runtime reported no stored connection for a provider that needs one.
+    fn disconnected(&self, provider: TerminalProvider) -> bool {
+        match provider {
+            TerminalProvider::Rithmic => self.rithmic.missing(),
+            provider => self.brokers.disconnected(provider),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3734,8 +3755,8 @@ fn terminal_startup_state(
 ) -> TerminalStartupState {
     match startup {
         MarketWorkerStartup::Rithmic => {
-            let shell = rithmic_shell::RithmicShellState::local()
-                .expect("fixed Rithmic Test profile validates");
+            let shell =
+                rithmic_shell::RithmicShellState::local().expect("fixed Rithmic profile validates");
             let profile = shell.profile_label();
             let connection = shell.connection();
             let message = shell.message().to_string();
@@ -4979,7 +5000,8 @@ struct TerminalApp {
     keyboard_trading: trading_hotkeys::KeyboardTrading,
     keyboard_shortcuts_open: bool,
     broker_connection_task: Option<gpui::Task<()>>,
-    broker_connections: HostedBrokerConnections,
+    data_connections: DataConnections,
+    rithmic_login: rithmic_login::RithmicLoginFlow,
     linked_sync_revisions: BTreeMap<String, u64>,
     event_risk_dispatches: BTreeMap<String, i64>,
     next_event_risk_check: Instant,
@@ -5329,9 +5351,9 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
             run_desktop_endurance_command(arguments)?;
             return Ok(None);
         }
-        if argument == "--rithmic-test" {
+        if argument == "--rithmic" {
             if arguments.next().is_some() {
-                diagnostic!("usage: aeris_desktop --rithmic-test");
+                diagnostic!("usage: aeris_desktop --rithmic");
                 exit_after_account_refresh_quiesce(2);
             }
             let lifecycle = configure_desktop_state();

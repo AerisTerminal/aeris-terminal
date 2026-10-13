@@ -24,10 +24,13 @@ pub(super) fn provider_exchange_mark(
     }
 }
 
-fn show_hosted_broker_connect_prompt(provider: TerminalProvider, disconnected: bool) -> bool {
-    disconnected
+fn show_connect_prompt(provider: TerminalProvider, connection_missing: bool) -> bool {
+    connection_missing
         && super::provider_presentation(provider).is_some_and(|descriptor| {
-            descriptor.connection_kind == ProviderConnectionKind::HostedBroker
+            matches!(
+                descriptor.connection_kind,
+                ProviderConnectionKind::HostedBroker | ProviderConnectionKind::Credentials
+            )
         })
 }
 
@@ -82,9 +85,9 @@ pub(super) struct InstrumentSelectorState {
     pub(super) menu: InstrumentSelectorMenu,
     pub(super) scroll: ScrollHandle,
     pub(super) target: SymbolSelectionTarget,
-    /// The runtime reported no stored connection for the menu's hosted-broker provider;
-    /// the menu points to Accounts.
-    pub(super) hosted_broker_disconnected: bool,
+    /// The runtime reported no stored connection or login for the menu's provider; the menu
+    /// points to Accounts.
+    pub(super) connection_missing: bool,
     /// The provider and category dropdown opened from the search-field logo.
     pub(super) provider_menu_open: bool,
     pub(super) markets_flyout_open: bool,
@@ -132,16 +135,13 @@ pub(super) fn instrument_dialog_content(
             |input| instrument_search_header(input, theme, app, state).into_any_element(),
         ))
         .when(
-            show_hosted_broker_connect_prompt(
-                state.menu_provider,
-                state.hosted_broker_disconnected,
-            ),
+            show_connect_prompt(state.menu_provider, state.connection_missing),
             |menu| {
                 let accounts = app.clone();
                 let provider_name = terminal_provider_display(state.menu_provider).to_string();
                 menu.child(
                     div().px_3().py_1().child(
-                        Button::new("symbol_menu_connect_hosted_broker", theme)
+                        Button::new("symbol_menu_connect_provider", theme)
                             .variant(ButtonVariant::Outline)
                             .label(format!("Connect {provider_name} in Accounts"))
                             .on_click(move |_, window, cx| {
@@ -415,27 +415,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disconnected_hosted_broker_keeps_the_accounts_prompt() {
-        assert!(show_hosted_broker_connect_prompt(
-            TerminalProvider::Tastytrade,
-            true,
-        ));
-        assert!(!show_hosted_broker_connect_prompt(
-            TerminalProvider::Tastytrade,
-            false,
-        ));
-        assert!(show_hosted_broker_connect_prompt(
-            TerminalProvider::Ctrader,
-            true,
-        ));
-        assert!(!show_hosted_broker_connect_prompt(
-            TerminalProvider::Rithmic,
-            true,
-        ));
-        assert!(!show_hosted_broker_connect_prompt(
-            TerminalProvider::Hyperliquid,
-            true,
-        ));
+    fn missing_connection_keeps_the_accounts_prompt() {
+        assert!(show_connect_prompt(TerminalProvider::Tastytrade, true));
+        assert!(!show_connect_prompt(TerminalProvider::Tastytrade, false));
+        assert!(show_connect_prompt(TerminalProvider::Ctrader, true));
+        assert!(show_connect_prompt(TerminalProvider::Rithmic, true));
+        assert!(!show_connect_prompt(TerminalProvider::Rithmic, false));
+        assert!(!show_connect_prompt(TerminalProvider::Hyperliquid, true));
     }
 
     #[test]
@@ -453,14 +439,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_menu_providers_broker_reports_disconnected() {
-        let mut connections = HostedBrokerConnections::default();
-        connections.ctrader.connected = Some(false);
-        connections.tastytrade.connected = Some(true);
+    fn only_the_menu_providers_connection_reports_disconnected() {
+        let mut connections = DataConnections::default();
+        connections.brokers.ctrader.connected = Some(false);
+        connections.brokers.tastytrade.connected = Some(true);
         assert!(connections.disconnected(TerminalProvider::Ctrader));
         assert!(!connections.disconnected(TerminalProvider::Tastytrade));
         assert!(!connections.disconnected(TerminalProvider::Hyperliquid));
         // An unchecked connection is not reported as disconnected.
-        assert!(!HostedBrokerConnections::default().disconnected(TerminalProvider::Ctrader));
+        assert!(!DataConnections::default().disconnected(TerminalProvider::Ctrader));
+        assert!(!connections.disconnected(TerminalProvider::Rithmic));
+        connections.rithmic.saved = rithmic_login::SavedRithmicLogin::Missing;
+        assert!(connections.disconnected(TerminalProvider::Rithmic));
     }
 }

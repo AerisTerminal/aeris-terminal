@@ -506,7 +506,7 @@ pub(super) fn header_controls(
                 scroll: state.instrument_scroll,
                 target: SymbolSelectionTarget::Chart,
                 // The header trigger never renders the menu body that uses these.
-                hosted_broker_disconnected: false,
+                connection_missing: false,
                 provider_menu_open: false,
                 markets_flyout_open: false,
                 search_categories: aeris_contracts::InstrumentSearchCategories::ALL,

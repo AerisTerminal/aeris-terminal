@@ -2525,12 +2525,12 @@ fn dead_rithmic_worker_stop_transition_is_applied_once() {
 fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
     assert!(should_autoload_rithmic_catalog(
         FeedConnectionState::Authenticating,
-        "Rithmic Test session is ready for instrument search",
+        crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE,
         false,
     ));
     assert!(!should_autoload_rithmic_catalog(
         FeedConnectionState::Authenticating,
-        "Rithmic Test session is ready for instrument search",
+        crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE,
         true,
     ));
     assert!(!should_autoload_rithmic_catalog(
@@ -2542,8 +2542,8 @@ fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
 
 #[test]
 fn first_rithmic_connection_is_not_presented_as_recovery_and_autoloads_catalog() {
-    let shell = crate::desktop::rithmic_shell::RithmicShellState::local()
-        .expect("fixed Rithmic Test profile");
+    let shell =
+        crate::desktop::rithmic_shell::RithmicShellState::local().expect("fixed Rithmic profile");
     let discovering =
         stabilized_connection_state(Some(shell.connection()), FeedConnectionState::Discovering);
     assert_eq!(discovering, FeedConnectionState::Discovering);

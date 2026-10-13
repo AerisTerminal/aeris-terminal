@@ -2327,48 +2327,51 @@ mod tests {
     }
 
     #[test]
-    fn rithmic_live_surface_stays_on_test_credentials() {
-        for (path, marker) in [
-            (
-                "crates/market_runtime/src/rithmic_realtime.rs",
-                "RITHMIC_TEST_VAULT_KEY",
-            ),
-            (
-                "crates/market_runtime/src/rithmic_history.rs",
-                "RITHMIC_TEST_VAULT_KEY",
-            ),
-            (
-                "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
-                "RITHMIC_TEST_VAULT_KEY",
-            ),
-            (
-                "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",
-                "RITHMIC_TEST_VAULT_KEY",
-            ),
-        ] {
-            assert!(
-                manifest(path).contains(marker),
-                "{path} lost test credential scope"
-            );
-        }
-        for path in [
+    fn rithmic_logins_stay_in_the_native_vault() {
+        // Every Rithmic login, Test or production, is read from and written to
+        // the one native-vault entry; none may arrive through the environment,
+        // arguments, CI or source.
+        let readers = [
             "crates/market_runtime/src/rithmic_realtime.rs",
             "crates/market_runtime/src/rithmic_history.rs",
+            "crates/market_runtime/src/market_service/rithmic_login.rs",
             "crates/adapters/rithmic_protocol/src/bin/rithmic_test_smoke.rs",
-            ".github/workflows/live_market_gates.yml",
-        ] {
+            "crates/adapters/rithmic_protocol/src/bin/provision_rithmic_test.rs",
+        ];
+        for path in readers {
+            assert!(
+                manifest(path).contains("RITHMIC_LOGIN_VAULT_KEY"),
+                "{path} lost the native-vault Rithmic login boundary"
+            );
+        }
+        for path in readers
+            .into_iter()
+            .chain(["apps/desktop/src/components/rithmic_login.rs"])
+            .chain([".github/workflows/live_market_gates.yml"])
+        {
             let content = manifest(path);
             for forbidden in [
                 "RITHMIC_PROD",
                 "rithmic-prod",
+                "RITHMIC_USER",
+                "RITHMIC_PASSWORD",
                 "production password",
                 "prod password",
             ] {
                 assert!(
                     !content.contains(forbidden),
-                    "{path} references production credentials ({forbidden})"
+                    "{path} takes Rithmic credentials outside the native vault ({forbidden})"
                 );
             }
+        }
+        // The desktop hands a login to the market runtime and never opens the
+        // vault or the adapter itself.
+        let desktop = manifest("apps/desktop/src/components/rithmic_login.rs");
+        for forbidden in ["NativeCredentialVault", "aeris_rithmic_protocol_adapter"] {
+            assert!(
+                !desktop.contains(forbidden),
+                "the desktop Rithmic login reaches past the market runtime ({forbidden})"
+            );
         }
     }
     #[test]

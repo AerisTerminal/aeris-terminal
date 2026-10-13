@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn chrome_overlay_layer(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
-    connection: &HostedBrokerConnections,
+    connection: &DataConnections,
     theme: &AerisTheme,
     chrome_height: f32,
     viewport: gpui::Size<Pixels>,
@@ -213,7 +213,7 @@ pub(super) fn chrome_overlay_content(
     app_state: &WorkspaceSurface,
     app: &Entity<WorkspaceSurface>,
     overlay: ChromeOverlay,
-    connection: &HostedBrokerConnections,
+    connection: &DataConnections,
     extent: super::chrome_menu::ChromeMenuExtent,
     theme: &AerisTheme,
     cx: &App,
@@ -240,7 +240,7 @@ pub(super) fn chrome_overlay_content(
                 },
                 scroll: app_state.scrolls.instrument.clone(),
                 target: app_state.symbol_selection_target,
-                hosted_broker_disconnected: connection.disconnected(app_state.symbol_provider),
+                connection_missing: connection.disconnected(app_state.symbol_provider),
                 provider_menu_open: app_state.menu_state.symbol_provider_menu.is_open(),
                 markets_flyout_open: app_state
                     .menu_state

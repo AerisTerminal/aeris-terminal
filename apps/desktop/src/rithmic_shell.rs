@@ -16,7 +16,7 @@ impl RithmicShellState {
         Ok(Self {
             identity,
             connection: FeedConnectionState::Discovering,
-            message: "Connecting to Rithmic Test".to_string(),
+            message: "Connecting to Rithmic with the saved login".to_string(),
         })
     }
 
@@ -24,16 +24,13 @@ impl RithmicShellState {
         self.connection
     }
 
+    /// The server and system come from the saved login, which the runtime alone reads, so the
+    /// pre-login shell names only the provider.
     pub(crate) fn profile_label(&self) -> String {
-        let provider = match self.identity.provider() {
-            "rithmic" => "Rithmic",
-            provider => provider,
-        };
-        let system = match self.identity.system() {
-            "RITHMIC_TEST" => "Rithmic Test",
-            system => system,
-        };
-        format!("{provider} / {system} / {}", self.identity.environment())
+        match self.identity.provider() {
+            "rithmic" => "Rithmic".to_string(),
+            provider => provider.to_string(),
+        }
     }
 
     pub(crate) fn message(&self) -> &str {
@@ -304,7 +301,7 @@ impl RithmicSymbolBrowser {
 pub(crate) const fn connection_label(connection: FeedConnectionState) -> &'static str {
     match connection {
         FeedConnectionState::Disconnected => "Not connected",
-        FeedConnectionState::Discovering => "Discovering Test systems",
+        FeedConnectionState::Discovering => "Discovering Rithmic systems",
         FeedConnectionState::Authenticating => "Authenticating",
         FeedConnectionState::Streaming => "Live market data",
         FeedConnectionState::Recovering => "Reconnecting",
@@ -331,17 +328,20 @@ mod tests {
 
     #[test]
     fn local_shell_is_available_before_login_or_history() {
-        let shell = RithmicShellState::local().expect("fixed Rithmic Test profile validates");
+        let shell = RithmicShellState::local().expect("fixed Rithmic profile validates");
         assert_eq!(shell.identity.provider(), "rithmic");
         assert_eq!(shell.identity.system(), "RITHMIC_TEST");
         assert_eq!(shell.identity.environment(), "Test");
         assert_eq!(shell.connection(), FeedConnectionState::Discovering);
         assert_eq!(
             connection_label(shell.connection()),
-            "Discovering Test systems"
+            "Discovering Rithmic systems"
         );
-        assert_eq!(shell.profile_label(), "Rithmic / Rithmic Test / Test");
-        assert_eq!(shell.message(), "Connecting to Rithmic Test");
+        assert_eq!(shell.profile_label(), "Rithmic");
+        assert_eq!(
+            shell.message(),
+            "Connecting to Rithmic with the saved login"
+        );
     }
 
     #[test]

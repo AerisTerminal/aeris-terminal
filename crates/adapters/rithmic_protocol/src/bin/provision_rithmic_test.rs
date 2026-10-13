@@ -1,10 +1,15 @@
 use aeris_platform_runtime::{CredentialVault, NativeCredentialVault};
 use aeris_rithmic_protocol_adapter::{
-    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCredentialBytes,
+    RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicCredentialBytes, RithmicCredentials,
+    RithmicGateway,
 };
 use rpassword::prompt_password;
 use std::{fmt, io::IsTerminal};
 use zeroize::Zeroizing;
+
+/// The only system the conformance gateway serves; production logins are
+/// saved from the desktop's Rithmic connect dialog instead.
+const RITHMIC_TEST_SYSTEM: &str = "Rithmic Test";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProvisionError {
@@ -44,11 +49,16 @@ fn provision() -> Result<(), ProvisionError> {
         prompt_password("Rithmic Test password: ")
             .map_err(|_| ProvisionError::PromptUnavailable)?,
     );
-    let encoded = RithmicCredentialBytes::try_encode(user.as_str(), password.as_str())
-        .map_err(|_| ProvisionError::InvalidCredentials)?;
-    let vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
+    let encoded = RithmicCredentialBytes::try_encode(RithmicCredentials {
+        gateway: RithmicGateway::Test,
+        system_name: RITHMIC_TEST_SYSTEM,
+        user: user.as_str(),
+        password: password.as_str(),
+    })
+    .map_err(|_| ProvisionError::InvalidCredentials)?;
+    let vault = NativeCredentialVault::new(RITHMIC_VAULT_SERVICE)
         .map_err(|_| ProvisionError::VaultUnavailable)?;
     vault
-        .store(RITHMIC_TEST_VAULT_KEY, encoded.as_bytes())
+        .store(RITHMIC_LOGIN_VAULT_KEY, encoded.as_bytes())
         .map_err(|_| ProvisionError::VaultUnavailable)
 }

@@ -7,14 +7,13 @@ use aeris_rithmic_protocol_adapter::{
     DepthByOrderSnapshotRequest, DepthByOrderSubscription, HistoryBars, HistoryCollectionRequest,
     HistoryCollector, HistorySeries, InstrumentReferenceRequest, MarketDataSubscription,
     ProviderInvalidationReason, ProviderSessionDriver, ProviderSessionEvent,
-    RITHMIC_APPLICATION_NAME, RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE,
-    RithmicApplication, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
-    RithmicCredentialBytes, RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents,
+    RITHMIC_APPLICATION_NAME, RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication,
+    RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits, RithmicCredentialBytes,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicSession,
     RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicSessionTiming,
-    RithmicTestSession, SearchPattern, SessionGeneration, SubscriptionAction,
-    SymbolSearchCollectionRequest, SymbolSearchCollector, SymbolSearchRequest,
-    TickBarReplayRequest, TimeBarReplayRequest, TimeBarType,
-    collect_rithmic_covering_recovery_evidence,
+    SearchPattern, SessionGeneration, SubscriptionAction, SymbolSearchCollectionRequest,
+    SymbolSearchCollector, SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
+    TimeBarType, collect_rithmic_covering_recovery_evidence,
 };
 use std::{
     io::{self, Write},
@@ -263,7 +262,7 @@ fn login_and_select(
     let borrowed = credentials
         .credentials()
         .map_err(|_| "credentials_invalid")?;
-    let mut ticker = RithmicTestSession::discover_and_login(
+    let mut ticker = RithmicSession::discover_and_login(
         borrowed,
         application,
         RithmicSessionLimits::default(),
@@ -646,7 +645,7 @@ fn run_history(
     let borrowed = credentials
         .credentials()
         .map_err(|_| "credentials_invalid")?;
-    let mut history = RithmicTestSession::discover_and_login_history(
+    let mut history = RithmicSession::discover_and_login_history(
         borrowed,
         application,
         RithmicSessionLimits::default(),
@@ -1144,7 +1143,7 @@ fn verify_authorized_clean_close(credentials: &RithmicCredentialBytes) -> Result
     let borrowed = credentials
         .credentials()
         .map_err(|_| "credentials_invalid")?;
-    let ticker = RithmicTestSession::discover_and_login(
+    let ticker = RithmicSession::discover_and_login(
         borrowed,
         application(),
         RithmicSessionLimits::default(),
@@ -1243,9 +1242,9 @@ fn phase(name: &str) {
 
 fn load_credentials() -> Result<RithmicCredentialBytes, String> {
     let vault =
-        NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE).map_err(|_| "vault_unavailable")?;
+        NativeCredentialVault::new(RITHMIC_VAULT_SERVICE).map_err(|_| "vault_unavailable")?;
     let mut stored = vault
-        .load(RITHMIC_TEST_VAULT_KEY)
+        .load(RITHMIC_LOGIN_VAULT_KEY)
         .map_err(|_| "vault_load_failed")?
         .ok_or("credentials_missing")?;
     let copied =

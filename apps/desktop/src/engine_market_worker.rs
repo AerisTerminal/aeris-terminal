@@ -56,7 +56,7 @@ const WORKER_LABEL: &str = "Rithmic market runtime";
 const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_runtime_hyperliquid_bars";
 const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid market runtime";
 pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
-    "Rithmic Test session is ready for instrument search";
+    "Rithmic session is ready for instrument search";
 /// Foreground selections live in latest-value slots outside the event reader.
 /// Keep the reader wait short so a symbol click cannot sit behind a half-frame
 /// polling quantum before the runtime receives it.

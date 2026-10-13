@@ -139,6 +139,7 @@ struct MarketRuntime {
     provider_presentations: Vec<ProviderPresentationDescriptor>,
     provider_search_preparers: BTreeMap<&'static str, ProviderSearchPreparer>,
     broker_authorization: broker_authorization::BrokerAuthorization,
+    rithmic_login: rithmic_login::RithmicLogin,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
 }
@@ -994,6 +995,7 @@ enum LiveModel {
 struct ProviderStartContext {
     tastytrade: Arc<tastytrade::BrokerApi>,
     ctrader: ctrader::CtraderShared,
+    rithmic_login: crate::rithmic_realtime::RithmicLoginRevision,
 }
 
 type ProviderRuntimeStarter = fn(
@@ -1734,12 +1736,14 @@ impl std::fmt::Display for LoggedInstrument<'_> {
 
 mod broker_authorization;
 mod ctrader;
+mod rithmic_login;
 mod runtime;
 mod session_hours;
 mod tastytrade;
 pub use ctrader::{
     CtraderStreamStatistics, VenueEventSink as CtraderVenueEventSink, VenueLink as CtraderVenueLink,
 };
+pub use rithmic_login::{RithmicLoginSummary, RithmicServer};
 use runtime::join_runtime_workers;
 
 mod coordinator;

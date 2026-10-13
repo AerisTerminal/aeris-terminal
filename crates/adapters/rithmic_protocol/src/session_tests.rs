@@ -5,11 +5,11 @@ use crate::{
     DecodedPnlMessage, DecodedTimeBar, DecodedTimeBarType, HistorySource, ProviderSessionDriver,
     ProviderSessionEvent, RITHMIC_APPLICATION_NAME, ReplayKind, RetryDisposition,
     RithmicAccountKey, RithmicApplication, RithmicCallbackLimits, RithmicCredentialBytes,
-    RithmicCredentials, RithmicOrderPlantMessage, RithmicPnlPlantMessage, RithmicProviderConfig,
-    RithmicProviderDriver, RithmicProviderEvents, RithmicRequestKind, RithmicRequestOutcome,
-    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession,
-    SessionGeneration, TimeBarReplayRequest, TimeBarType, endpoint::RithmicEndpoint,
-    generated::rti, session::STOPPING_LOGOUT_TIMEOUT,
+    RithmicCredentials, RithmicGateway, RithmicOrderPlantMessage, RithmicPnlPlantMessage,
+    RithmicProviderConfig, RithmicProviderDriver, RithmicProviderEvents, RithmicRequestKind,
+    RithmicRequestOutcome, RithmicSession, RithmicSessionError, RithmicSessionLimits,
+    RithmicSessionMessage, SessionGeneration, TimeBarReplayRequest, TimeBarType,
+    endpoint::RithmicEndpoint, generated::rti, session::STOPPING_LOGOUT_TIMEOUT,
 };
 use prost::Message as _;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -85,7 +85,7 @@ fn discovery_closes_before_fresh_ticker_login_over_tls() {
         })
         .expect("spawn local Rithmic TLS server");
 
-    let mut connection = RithmicTestSession::connect_with(
+    let mut connection = RithmicSession::connect_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -164,7 +164,7 @@ fn priceless_trade_marker_is_skipped_before_the_next_trade() {
         })
         .expect("spawn trade marker fixture");
 
-    let mut connection = RithmicTestSession::connect_with(
+    let mut connection = RithmicSession::connect_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -222,7 +222,7 @@ fn authenticated_close_deadline_survives_continuous_control_frames() {
 
     let mut limits = fixture_limits();
     limits.close_timeout = Duration::from_millis(100);
-    let connection = RithmicTestSession::connect_with(
+    let connection = RithmicSession::connect_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -261,7 +261,7 @@ fn stop_interrupts_a_blocked_tls_read_and_still_logs_out() {
         .expect("spawn stop read fixture");
 
     let stop = Arc::new(AtomicBool::new(false));
-    let mut connection = RithmicTestSession::connect_with(
+    let mut connection = RithmicSession::connect_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -427,7 +427,7 @@ fn history_replay_uses_fresh_history_plant_connection_over_tls() {
         })
         .expect("spawn local history TLS server");
 
-    let mut connection = RithmicTestSession::connect_history_with(
+    let mut connection = RithmicSession::connect_history_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -547,7 +547,7 @@ fn order_stream_subscribes_before_snapshot_over_tls() {
         })
         .expect("spawn local order-plant TLS server");
 
-    let mut connection = RithmicTestSession::connect_order_with(
+    let mut connection = RithmicSession::connect_order_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -639,7 +639,7 @@ fn pnl_stream_subscribes_before_snapshot_over_tls() {
         })
         .expect("spawn local PnL-plant TLS server");
 
-    let mut connection = RithmicTestSession::connect_pnl_with(
+    let mut connection = RithmicSession::connect_pnl_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -681,7 +681,93 @@ fn pnl_stream_subscribes_before_snapshot_over_tls() {
 }
 
 #[test]
-fn unavailable_test_system_is_terminal_and_redacted() {
+fn discovery_lists_every_offered_system_and_closes() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-discovery-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
+            assert_system_discovery_request(&read_binary(&mut discovery)?);
+            discovery
+                .send(Message::binary(system_info_response(
+                    &["Rithmic Paper Trading", "Rithmic 01"],
+                    &[],
+                )))
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)
+        })
+        .expect("spawn discovery Rithmic TLS server");
+
+    let systems = RithmicSession::discover_systems_on(endpoint, fixture_limits(), client_config)
+        .expect("discover systems over local TLS");
+    assert_eq!(systems, ["Rithmic Paper Trading", "Rithmic 01"]);
+    server
+        .join()
+        .expect("discovery Rithmic TLS server did not panic")
+        .expect("discovery Rithmic TLS scenario completed");
+}
+
+#[test]
+fn permission_denied_login_is_terminal_and_distinct() {
+    let fixture = LocalTlsFixture::bind();
+    let endpoint = fixture.endpoint;
+    let client_config = fixture.client_config;
+    let listener = fixture.listener;
+    let server_config = fixture.server_config;
+    let server = thread::Builder::new()
+        .name("rithmic-permission-fixture".to_string())
+        .spawn(move || -> Result<(), String> {
+            let (mut discovery, _) = accept_websocket(&listener, &server_config)?;
+            assert_system_discovery_request(&read_binary(&mut discovery)?);
+            discovery
+                .send(Message::binary(system_info_response(&[TEST_SYSTEM], &[])))
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)?;
+            drop(discovery);
+
+            let (mut ticker, _) = accept_websocket(&listener, &server_config)?;
+            assert_login_request(&read_binary(&mut ticker)?)?;
+            ticker
+                .send(Message::binary(
+                    rti::ResponseLogin {
+                        template_id: 11,
+                        template_version: Some(env!("RITHMIC_TEMPLATE_VERSION").to_string()),
+                        rp_code: vec!["13".to_string(), "permission denied".to_string()],
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ))
+                .map_err(|error| error.to_string())
+        })
+        .expect("spawn permission Rithmic TLS server");
+
+    let result = RithmicSession::connect_with(
+        endpoint,
+        fixture_credentials(),
+        fixture_application(),
+        fixture_limits(),
+        None,
+        client_config,
+    );
+    let Err(error) = result else {
+        panic!("permission-denied login unexpectedly succeeded");
+    };
+    assert_eq!(error, RithmicSessionError::LoginPermissionDenied);
+    assert_eq!(error.retry_disposition(), RetryDisposition::Terminal);
+    server
+        .join()
+        .expect("permission Rithmic TLS server did not panic")
+        .expect("permission Rithmic TLS scenario completed");
+}
+
+#[test]
+fn unavailable_system_is_terminal_and_redacted() {
     let fixture = LocalTlsFixture::bind();
     let endpoint = fixture.endpoint;
     let client_config = fixture.client_config;
@@ -697,11 +783,13 @@ fn unavailable_test_system_is_terminal_and_redacted() {
                     &["Rithmic 01"],
                     &[FIXTURE_USER, FIXTURE_PASSWORD],
                 )))
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            discovery.close(None).map_err(|error| error.to_string())?;
+            finish_server_close(&mut discovery)
         })
         .expect("spawn terminal Rithmic TLS server");
 
-    let result = RithmicTestSession::connect_with(
+    let result = RithmicSession::connect_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -712,7 +800,7 @@ fn unavailable_test_system_is_terminal_and_redacted() {
     let Err(error) = result else {
         panic!("unsupported system discovery unexpectedly logged in");
     };
-    assert_eq!(error, RithmicSessionError::TestSystemUnavailable);
+    assert_eq!(error, RithmicSessionError::SystemUnavailable);
     assert_eq!(error.retry_disposition(), RetryDisposition::Terminal);
     let output = format!("{error:?} {error}");
     assert!(!output.contains(FIXTURE_USER));
@@ -741,7 +829,7 @@ fn discovery_response_deadline_is_bounded_and_transient() {
         .expect("spawn deadline Rithmic TLS server");
 
     let started = Instant::now();
-    let result = RithmicTestSession::connect_with(
+    let result = RithmicSession::connect_with(
         endpoint,
         fixture_credentials(),
         fixture_application(),
@@ -882,7 +970,7 @@ fn fixture_driver(
         config,
         callback_limits,
         Arc::new(move |credentials, application, limits, stop, abort| {
-            RithmicTestSession::connect_with_abort(
+            RithmicSession::connect_with_abort(
                 endpoint,
                 credentials,
                 application,
@@ -896,8 +984,7 @@ fn fixture_driver(
 }
 
 fn fixture_credential_bytes() -> RithmicCredentialBytes {
-    RithmicCredentialBytes::try_encode(FIXTURE_USER, FIXTURE_PASSWORD)
-        .expect("fixture credentials encode")
+    RithmicCredentialBytes::try_encode(fixture_credentials()).expect("fixture credentials encode")
 }
 
 fn session_generation(value: u64) -> SessionGeneration {
@@ -1282,6 +1369,8 @@ fn time_replay_complete() -> Vec<u8> {
 
 const fn fixture_credentials() -> RithmicCredentials<'static> {
     RithmicCredentials {
+        gateway: RithmicGateway::Test,
+        system_name: TEST_SYSTEM,
         user: FIXTURE_USER,
         password: FIXTURE_PASSWORD,
     }

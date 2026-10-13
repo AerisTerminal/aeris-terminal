@@ -48,10 +48,10 @@ pub use collectors::{
 };
 pub use credentials::{
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_CREDENTIAL_FIELD_BYTES,
-    RithmicCredentialBytes, RithmicCredentialError,
+    MAXIMUM_RITHMIC_SYSTEM_NAME_BYTES, RithmicCredentialBytes, RithmicCredentialError,
 };
 pub use decimal::{MAXIMUM_RITHMIC_DECIMAL_SCALE, RithmicDecimal};
-pub use endpoint::{RetryDisposition, RithmicSessionError, RithmicSessionLimits};
+pub use endpoint::{RetryDisposition, RithmicGateway, RithmicSessionError, RithmicSessionLimits};
 pub use history::{
     BarIdentity, DecodedHistoryMessage, DecodedTickBar, DecodedTimeBar, DecodedTimeBarType,
     HistorySource, Ohlc, ReplayKind, TickBarKey,
@@ -106,8 +106,8 @@ pub use provider_runtime::{
     RithmicProviderRuntimeError, RithmicProviderRuntimeState, SessionGeneration,
 };
 pub use provider_session::{
-    AppliedRithmicEvent, MAXIMUM_RITHMIC_SEARCH_RESULTS, RITHMIC_TEST_VAULT_KEY,
-    RITHMIC_TEST_VAULT_SERVICE, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
+    AppliedRithmicEvent, MAXIMUM_RITHMIC_SEARCH_RESULTS, RITHMIC_LOGIN_VAULT_KEY,
+    RITHMIC_VAULT_SERVICE, RithmicAuthorizedSilenceEvidenceFault, RithmicCallbackLimits,
     RithmicCatalogCallback, RithmicCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
     RithmicInstrumentSelection, RithmicProviderCallback, RithmicProviderCommandError,
     RithmicProviderConfig, RithmicProviderConfigError, RithmicProviderDriver,
@@ -118,7 +118,7 @@ pub use provider_session::{
 };
 pub use session::{
     RithmicApplication, RithmicCredentials, RithmicHistoryConnection, RithmicLoginMetadata,
-    RithmicSessionMessage, RithmicTestSession, RithmicTickerConnection,
+    RithmicSession, RithmicSessionMessage, RithmicTickerConnection,
 };
 pub use session_contract::{
     AuthenticationState, InstrumentContractMetadata, InstrumentDescriptor,

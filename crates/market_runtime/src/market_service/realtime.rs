@@ -30,12 +30,17 @@ pub(super) const fn rithmic_invalidation_detail(
 ) -> &'static str {
     match reason {
         Some(ProviderInvalidationReason::Transport) => "Rithmic transport connection failed",
-        Some(ProviderInvalidationReason::Authentication) => "Rithmic authentication was rejected",
+        Some(ProviderInvalidationReason::Authentication) => {
+            "Rithmic rejected the user ID or password for the selected system"
+        }
+        Some(ProviderInvalidationReason::PermissionDenied) => {
+            "Rithmic denied this login for Aeris; the account needs a paid market-data subscription and Aeris enabled by its broker or prop firm"
+        }
         Some(ProviderInvalidationReason::AgreementRequired) => {
             "Rithmic account requires an agreement before market data can stream"
         }
         Some(ProviderInvalidationReason::UnsupportedSystem) => {
-            "Rithmic Test system is unavailable for this account"
+            "The selected Rithmic system is not offered on this server"
         }
         Some(ProviderInvalidationReason::SchemaMismatch) => {
             "Rithmic protocol schema does not match the installed provider kit"
@@ -5152,6 +5157,7 @@ mod tests {
     fn terminal_rithmic_failures_do_not_auto_resubscribe() {
         for reason in [
             ProviderInvalidationReason::Authentication,
+            ProviderInvalidationReason::PermissionDenied,
             ProviderInvalidationReason::AgreementRequired,
             ProviderInvalidationReason::UnsupportedSystem,
             ProviderInvalidationReason::SchemaMismatch,

@@ -1766,6 +1766,11 @@ pub fn native_installation_inventory(
         vault_entries: vec![
             VaultEntry {
                 service: "com.aeris.terminal".to_string(),
+                key: "provider-rithmic-login-v2".to_string(),
+            },
+            // Earlier builds kept a Rithmic Test-only login under this key.
+            VaultEntry {
+                service: "com.aeris.terminal".to_string(),
                 key: "provider-rithmic-test-default-v1".to_string(),
             },
             VaultEntry {

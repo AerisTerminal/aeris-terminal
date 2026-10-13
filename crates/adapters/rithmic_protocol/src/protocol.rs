@@ -413,6 +413,8 @@ pub enum DecodedControlMessage {
     },
     Login {
         accepted: bool,
+        /// The rejection carried `rp_code` 13, Rithmic's "permission denied".
+        permission_denied: bool,
         heartbeat_seconds: Option<f64>,
         unique_user_id: Option<String>,
     },
@@ -524,7 +526,6 @@ pub enum ProtocolError {
     FieldTooLong { field: &'static str, maximum: usize },
     ControlCharacter(&'static str),
     InvalidHeartbeat,
-    UnsupportedSystem,
     TemplateVersionMismatch,
     EmptyMarketDataSelection,
     InvalidRange,
@@ -595,7 +596,7 @@ mod kit {
     const MAX_RESPONSE_CODES: usize = 8;
     const MAX_SYSTEMS: usize = 64;
     const MAX_HEARTBEAT_INTERVAL_SECONDS: f64 = 300.0;
-    const TEST_SYSTEM: &str = "Rithmic Test";
+    const PERMISSION_DENIED_CODE: &str = "13";
     const TEMPLATE_VERSION: &str = env!("RITHMIC_TEMPLATE_VERSION");
     const SYSTEM_INFO_REQUEST: i32 = 16;
     const SYSTEM_INFO_RESPONSE: i32 = 17;
@@ -687,9 +688,6 @@ mod kit {
         validate_field("app_name", request.app_name)?;
         validate_field("app_version", request.app_version)?;
         validate_field("system_name", request.system_name)?;
-        if request.system_name != TEST_SYSTEM {
-            return Err(ProtocolError::UnsupportedSystem);
-        }
         let (infra_type, aggregated_quotes) = match request.plant {
             RithmicPlant::Ticker => (rti::request_login::SysInfraType::TickerPlant, Some(false)),
             RithmicPlant::History => (rti::request_login::SysInfraType::HistoryPlant, None),
@@ -1117,8 +1115,11 @@ mod kit {
         if let Some(unique_user_id) = response.unique_user_id.as_deref() {
             validate_field("unique_user_id", unique_user_id)?;
         }
+        let accepted = accepted(&response.rp_code);
         Ok(DecodedControlMessage::Login {
-            accepted: accepted(&response.rp_code),
+            accepted,
+            permission_denied: !accepted
+                && response.rp_code.first().map(String::as_str) == Some(PERMISSION_DENIED_CODE),
             heartbeat_seconds,
             unique_user_id: response.unique_user_id,
         })
@@ -1540,10 +1541,47 @@ mod tests {
             codec.decode_control(&login).expect("login decodes"),
             DecodedControlMessage::Login {
                 accepted: true,
+                permission_denied: false,
                 heartbeat_seconds: Some(10.0),
                 unique_user_id: Some("fixture-unique-user-id".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn login_rejections_distinguish_permission_denied() {
+        let codec = RithmicProtocolCodec;
+        let rejection = |codes: &[&str]| {
+            rti::ResponseLogin {
+                template_id: 11,
+                template_version: None,
+                user_msg: Vec::new(),
+                rp_code: codes.iter().map(ToString::to_string).collect(),
+                fcm_id: None,
+                ib_id: None,
+                country_code: None,
+                state_code: None,
+                unique_user_id: None,
+                heartbeat_interval: None,
+            }
+            .encode_to_vec()
+        };
+        assert!(matches!(
+            codec.decode_control(&rejection(&["13", "permission denied"])),
+            Ok(DecodedControlMessage::Login {
+                accepted: false,
+                permission_denied: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            codec.decode_control(&rejection(&["3", "bad username or password"])),
+            Ok(DecodedControlMessage::Login {
+                accepted: false,
+                permission_denied: false,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1579,20 +1617,32 @@ mod tests {
             Err(ProtocolError::FrameTooLarge { .. })
         ));
 
-        for unsupported in [
-            "Rithmic Paper Trading",
-            "Rithmic 01",
-            "rithmic test",
-            "Rithmic Test ",
+        for system_name in ["Rithmic Paper Trading", "Rithmic 01", "Apex"] {
+            let frame = codec
+                .encode(OutboundRequest::Login(LoginRequest {
+                    system_name,
+                    ..login
+                }))
+                .expect("a discovered system name encodes");
+            let wire = rti::RequestLogin::decode(frame.as_bytes()).expect("login wire decodes");
+            assert_eq!(wire.system_name.as_deref(), Some(system_name));
+        }
+        for (system_name, expected) in [
+            ("", ProtocolError::EmptyField("system_name")),
+            (
+                "Rithmic\n01",
+                ProtocolError::ControlCharacter("system_name"),
+            ),
         ] {
-            let request = LoginRequest {
-                system_name: unsupported,
-                ..login
-            };
-            assert!(matches!(
-                codec.encode(OutboundRequest::Login(request)),
-                Err(ProtocolError::UnsupportedSystem)
-            ));
+            assert_eq!(
+                codec
+                    .encode(OutboundRequest::Login(LoginRequest {
+                        system_name,
+                        ..login
+                    }))
+                    .err(),
+                Some(expected)
+            );
         }
 
         assert!(matches!(

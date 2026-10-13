@@ -1004,6 +1004,7 @@ where
         let recovery = match reason {
             ProviderInvalidationReason::Transport => FeedRecoveryReason::Transport,
             ProviderInvalidationReason::Authentication => FeedRecoveryReason::Authentication,
+            ProviderInvalidationReason::PermissionDenied => FeedRecoveryReason::PermissionDenied,
             ProviderInvalidationReason::AgreementRequired => FeedRecoveryReason::AgreementRequired,
             ProviderInvalidationReason::UnsupportedSystem => FeedRecoveryReason::UnsupportedSystem,
             ProviderInvalidationReason::SchemaMismatch => FeedRecoveryReason::SchemaMismatch,

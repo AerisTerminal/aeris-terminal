@@ -274,5 +274,5 @@ pub use aeris_market_engine::{
 };
 pub use market_service::{
     CtraderStreamStatistics, CtraderVenueEventSink, CtraderVenueLink, MarketService,
-    MarketServiceStatus, built_in_provider_presentations,
+    MarketServiceStatus, RithmicLoginSummary, RithmicServer, built_in_provider_presentations,
 };

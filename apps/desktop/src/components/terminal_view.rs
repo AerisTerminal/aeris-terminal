@@ -219,6 +219,7 @@ impl TerminalApp {
             window,
             cx,
         );
+        self.check_rithmic_login(window, cx);
     }
 
     fn change_broker_connection(
@@ -404,7 +405,7 @@ impl TerminalApp {
         if self.broker_connection_task.is_some() {
             if operation != HostedBrokerOperation::Checking {
                 for broker in brokers {
-                    let view = self.broker_connections.get_mut(*broker);
+                    let view = self.data_connections.brokers.get_mut(*broker);
                     view.message = Some(
                         "A broker connection change is already running. Finish or close the \
                          browser login and wait for its result."
@@ -417,7 +418,7 @@ impl TerminalApp {
             return;
         }
         for broker in brokers {
-            let view = self.broker_connections.get_mut(*broker);
+            let view = self.data_connections.brokers.get_mut(*broker);
             view.operation = Some(operation);
             if operation != HostedBrokerOperation::Checking {
                 view.message = None;
@@ -458,7 +459,7 @@ impl TerminalApp {
                             connected_now = Some(broker);
                         }
                         apply_broker_result(
-                            terminal.broker_connections.get_mut(broker),
+                            terminal.data_connections.brokers.get_mut(broker),
                             operation,
                             result,
                         );
@@ -677,7 +678,7 @@ impl TerminalApp {
         chrome_overlay_layer(
             active.read(cx),
             active,
-            &self.broker_connections,
+            &self.data_connections,
             &self.theme,
             chart_chrome::CHART_CHROME_HEIGHT + title_bar_row_height,
             window.viewport_size(),
@@ -779,6 +780,8 @@ impl Render for TerminalApp {
             .on_action(cx.listener(Self::disconnect_tastytrade))
             .on_action(cx.listener(Self::connect_ctrader))
             .on_action(cx.listener(Self::disconnect_ctrader))
+            .on_action(cx.listener(Self::connect_rithmic))
+            .on_action(cx.listener(Self::disconnect_rithmic))
             .on_action(cx.listener(Self::refresh_broker_connections))
     }
 }
@@ -840,6 +843,12 @@ impl TerminalApp {
             placement.row_height(self.frameless_title_bar.visibility_at(now));
         let overlay = self.rendered_chrome_overlay(&active, title_bar_row_height, window, cx);
         let account_dialog = accounts_panel::account_dialog_layer(workspace, &active, &self.theme);
+        let rithmic_login_dialog = rithmic_login::rithmic_login_dialog_layer(
+            &terminal,
+            &self.rithmic_login,
+            &self.data_connections.rithmic,
+            &self.theme,
+        );
         let (context_menu, settings_menu) = self.chart_surface_menus(
             &terminal,
             pane_count,
@@ -909,6 +918,7 @@ impl TerminalApp {
             .children(overlay)
             .children(frameless_reveal_zone)
             .children(account_dialog)
+            .children(rithmic_login_dialog)
             .children(context_menu)
             .children(settings_menu)
             .children(drawing_tool_menu)

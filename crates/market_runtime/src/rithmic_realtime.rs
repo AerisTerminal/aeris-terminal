@@ -4,7 +4,11 @@ use aeris_observability::diagnostic;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
-    sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -23,7 +27,7 @@ use aeris_rithmic_protocol_adapter::{
     AppliedRithmicEvent, InstrumentContractMetadata, InstrumentDescriptor,
     MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES, MAXIMUM_RITHMIC_SEARCH_RESULTS,
     ProviderInvalidationReason, ProviderSessionEvent, RITHMIC_APPLICATION_NAME,
-    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicCallbackLimits,
+    RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicCallbackLimits,
     RithmicCatalogEvent as AdapterCatalogEvent, RithmicCatalogRejection, RithmicEnvironmentEvent,
     RithmicInstrumentSelection, RithmicProviderCommandError, RithmicProviderConfig,
     RithmicProviderDriver, RithmicProviderEvents, RithmicProviderInstrument,
@@ -125,6 +129,24 @@ impl RithmicRealtimeEvent {
 
 type Runtime = RithmicProviderRuntime<NativeCredentialVault, RithmicProviderDriver>;
 
+/// Revision of the saved Rithmic login. Saving or forgetting the login
+/// advances it; the provider worker then retires any session that signed in
+/// under an older login, so the next connection reads the vault again. A
+/// counter rather than a queued control coalesces repeated saves and can never
+/// be dropped by a full control queue.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RithmicLoginRevision(Arc<AtomicU64>);
+
+impl RithmicLoginRevision {
+    pub(crate) fn advance(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn current(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ProviderChannels<'a> {
     catalog_controls: &'a Receiver<RithmicCatalogControl>,
@@ -133,9 +155,15 @@ struct ProviderChannels<'a> {
     realtime_publications: &'a SyncSender<RithmicRealtimeEvent>,
     coordinator_wake: &'a ProviderCoordinatorWake,
     reconnect_delay: Duration,
+    login: &'a RithmicLoginRevision,
 }
 
 impl ProviderChannels<'_> {
+    /// Whether the saved login changed after a session read revision `seen`.
+    fn login_changed(&self, seen: u64) -> bool {
+        self.login.current() != seen
+    }
+
     fn publish_realtime(&self, event: RithmicRealtimeEvent) {
         let generation = event.generation();
         if self.coordinator_wake.overflowed("rithmic", generation) {
@@ -236,14 +264,16 @@ impl EnvironmentState {
 /// One authenticated ticker-plant login together with the bookkeeping that
 /// must follow it when ownership moves from catalog service to live demand.
 ///
-/// Rithmic Test permits one ticker-plant login per account. Stopping the
-/// catalog session and opening a second login for realtime left a window in
-/// which every catalog command was rejected and two logins overlapped, so the
+/// Rithmic permits one ticker-plant login per account. Stopping the catalog
+/// session and opening a second login for realtime left a window in which
+/// every catalog command was rejected and two logins overlapped, so the
 /// session is handed over intact instead.
 struct CatalogHandoff {
     runtime: Runtime,
     events: RithmicProviderEvents,
     retries: RithmicRetryScheduler,
+    /// Saved-login revision the session signed in under.
+    login: u64,
     /// Searches still awaiting a callback, keyed by search generation.
     searches: BTreeMap<usize, u64>,
     /// Selections still awaiting a callback, keyed by selection generation.
@@ -273,6 +303,7 @@ fn run_catalog_session(
     mut generation: u64,
     initial_control: RithmicCatalogControl,
 ) -> CatalogSessionExit {
+    let login = channels.login.current();
     let mut retries = RithmicRetryScheduler::default();
     let mut searches = BTreeMap::new();
     let mut selections = BTreeMap::new();
@@ -315,6 +346,15 @@ fn run_catalog_session(
                 return CatalogSessionExit::Closed;
             }
         }
+        if channels.login_changed(login) {
+            generation = retire_pending_catalog_generation(
+                channels.catalog_publications,
+                generation,
+                &mut searches,
+                &mut selections,
+            );
+            return retry_catalog_session(&mut runtime, generation);
+        }
         match channels.realtime_controls.try_recv() {
             Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
                 return CatalogSessionExit::Demand {
@@ -322,6 +362,7 @@ fn run_catalog_session(
                         runtime,
                         events,
                         retries,
+                        login,
                         searches,
                         selections,
                     }),
@@ -821,15 +862,17 @@ pub(crate) fn run(
     realtime_publications: &SyncSender<RithmicRealtimeEvent>,
     coordinator_wake: &ProviderCoordinatorWake,
     reconnect_delay: Duration,
+    login: &RithmicLoginRevision,
 ) {
-    let channels = provider_channels(
+    let channels = ProviderChannels {
         catalog_controls,
         catalog_publications,
         realtime_controls,
         realtime_publications,
         coordinator_wake,
         reconnect_delay,
-    );
+        login,
+    };
     let mut environment = match start_environment_monitors() {
         Ok(environment) => environment,
         Err(error) => {
@@ -1021,24 +1064,6 @@ fn handle_idle_catalog(
     }
 }
 
-const fn provider_channels<'a>(
-    catalog_controls: &'a Receiver<RithmicCatalogControl>,
-    catalog_publications: &'a CatalogPublisher<RithmicCatalogEvent>,
-    realtime_controls: &'a Receiver<RithmicRealtimeControl>,
-    realtime_publications: &'a SyncSender<RithmicRealtimeEvent>,
-    coordinator_wake: &'a ProviderCoordinatorWake,
-    reconnect_delay: Duration,
-) -> ProviderChannels<'a> {
-    ProviderChannels {
-        catalog_controls,
-        catalog_publications,
-        realtime_controls,
-        realtime_publications,
-        coordinator_wake,
-        reconnect_delay,
-    }
-}
-
 fn reject_unavailable_provider(channels: ProviderChannels<'_>) {
     loop {
         while let Ok(control) = channels.catalog_controls.try_recv() {
@@ -1190,10 +1215,16 @@ fn run_demand(
     environment_state: &mut EnvironmentState,
 ) -> SelectionExit {
     let handed_over = handoff.is_some();
+    // Read before a fresh session loads the vault, so a save racing the
+    // connection still retires it.
+    let login = handoff
+        .as_ref()
+        .map_or_else(|| channels.login.current(), |handoff| handoff.login);
     let Ok(start) = live_session_start(handoff) else {
         channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
         return wait_for_replacement(
-            channels.realtime_controls,
+            channels,
+            login,
             environment,
             environment_state,
             generation,
@@ -1251,6 +1282,11 @@ fn run_demand(
                 return SelectionExit::Closed { generation };
             }
         }
+        if channels.login_changed(login) {
+            // Idle publishes a recoverable disconnect, so the coordinator
+            // reissues this demand on a session that reads the new login.
+            return stop_selection(&mut runtime, generation);
+        }
         loop {
             match channels.realtime_controls.try_recv() {
                 Ok(RithmicRealtimeControl::Subscribe(replacement)) => {
@@ -1280,16 +1316,23 @@ fn run_demand(
         ) {
             return exit;
         }
-        if let Some(exit) = drain_live_events(
+        if drain_live_events(
             &mut runtime,
             &events,
             &mut retries,
             channels,
-            (environment, &mut *environment_state),
             generation,
             &mut subscription_generation,
-        ) {
-            return exit;
+        ) == LiveDrain::SessionEnded
+        {
+            return wait_for_replacement(
+                channels,
+                login,
+                environment,
+                environment_state,
+                generation,
+                true,
+            );
         }
         if subscription_dirty
             && subscription_generation
@@ -1306,7 +1349,8 @@ fn run_demand(
                     channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                     let _ = runtime.stop();
                     return wait_for_replacement(
-                        channels.realtime_controls,
+                        channels,
+                        login,
                         environment,
                         environment_state,
                         generation,
@@ -1323,7 +1367,8 @@ fn run_demand(
                     channels.publish_realtime(RithmicRealtimeEvent::Failed(generation, error));
                     let _ = runtime.stop();
                     return wait_for_replacement(
-                        channels.realtime_controls,
+                        channels,
+                        login,
                         environment,
                         environment_state,
                         generation,
@@ -1348,16 +1393,21 @@ fn run_demand(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveDrain {
+    Open,
+    /// The session failed and was stopped; wait for replacement demand.
+    SessionEnded,
+}
+
 fn drain_live_events(
     runtime: &mut Runtime,
     events: &RithmicProviderEvents,
     retries: &mut RithmicRetryScheduler,
     channels: ProviderChannels<'_>,
-    environment: (&Receiver<EnvironmentMessage>, &mut EnvironmentState),
     generation: u64,
     subscription_generation: &mut Option<SessionGeneration>,
-) -> Option<SelectionExit> {
-    let (environment, environment_state) = environment;
+) -> LiveDrain {
     let mut pending_depth = None;
     for _ in (0..CALLBACK_CAPACITY).take_while(|_| {
         events.has_ready() && !channels.coordinator_wake.overflowed("rithmic", generation)
@@ -1427,26 +1477,14 @@ fn drain_live_events(
                 channels
                     .publish_realtime(RithmicRealtimeEvent::Disconnected(generation, Some(reason)));
                 let _ = runtime.stop();
-                return Some(wait_for_replacement(
-                    channels.realtime_controls,
-                    environment,
-                    environment_state,
-                    generation,
-                    true,
-                ));
+                return LiveDrain::SessionEnded;
             }
             Err(error) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
                 diagnostic!("Aeris Rithmic live callback failed: {error}");
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
                 let _ = runtime.stop();
-                return Some(wait_for_replacement(
-                    channels.realtime_controls,
-                    environment,
-                    environment_state,
-                    generation,
-                    true,
-                ));
+                return LiveDrain::SessionEnded;
             }
             Ok(None) => {
                 publish_pending_depth(channels, generation, &mut pending_depth);
@@ -1455,7 +1493,7 @@ fn drain_live_events(
         }
     }
     publish_pending_depth(channels, generation, &mut pending_depth);
-    None
+    LiveDrain::Open
 }
 
 fn queue_depth_snapshot(
@@ -1534,8 +1572,12 @@ fn poll_environment(
     }
 }
 
+/// Waits after a failed session for replacement demand. A login saved since
+/// the failed session read the vault ends the wait as idle: that publishes a
+/// recoverable disconnect, and the coordinator reissues its demand.
 fn wait_for_replacement(
-    controls: &Receiver<RithmicRealtimeControl>,
+    channels: ProviderChannels<'_>,
+    login: u64,
     environment: &Receiver<EnvironmentMessage>,
     environment_state: &mut EnvironmentState,
     generation: u64,
@@ -1549,7 +1591,10 @@ fn wait_for_replacement(
             }
             Err(TryRecvError::Empty) => {}
         }
-        match controls.recv_timeout(EVENT_WAIT) {
+        if channels.login_changed(login) {
+            return SelectionExit::Idle { generation };
+        }
+        match channels.realtime_controls.recv_timeout(EVENT_WAIT) {
             Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
                 return SelectionExit::Replace {
                     demand,
@@ -1746,12 +1791,12 @@ fn open_runtime_with_instruments(
     )
     .map_err(|_| "Rithmic live callback limits are invalid".to_string())?;
     let (driver, events) = RithmicProviderDriver::new(provider, limits);
-    let vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
+    let vault = NativeCredentialVault::new(RITHMIC_VAULT_SERVICE)
         .map_err(|_| "Rithmic live credential vault is unavailable".to_string())?;
     let runtime = RithmicProviderRuntime::try_new(
         vault,
         driver,
-        RITHMIC_TEST_VAULT_KEY,
+        RITHMIC_LOGIN_VAULT_KEY,
         RithmicProviderRuntimeConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES)),
     )
     .map_err(|_| "Rithmic live runtime is unavailable".to_string())?;

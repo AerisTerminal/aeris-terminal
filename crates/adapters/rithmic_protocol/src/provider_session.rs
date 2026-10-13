@@ -13,8 +13,8 @@ use crate::{
     DepthByOrderSnapshotMessage, DepthByOrderSnapshotRequest, DepthByOrderSubscription,
     InstrumentReference, InstrumentReferenceRequest, InstrumentType, MarketDataSubscription,
     MarketIdentity, ProviderTimestamp, QuoteLevel, QuoteSideUpdate, RetryDisposition,
-    RithmicApplication, RithmicCredentialBytes, RithmicCredentials, RithmicSessionError,
-    RithmicSessionLimits, RithmicSessionMessage, RithmicTestSession, RithmicTickerConnection,
+    RithmicApplication, RithmicCredentialBytes, RithmicCredentials, RithmicSession,
+    RithmicSessionError, RithmicSessionLimits, RithmicSessionMessage, RithmicTickerConnection,
     SearchPattern, SubscriptionAction, SymbolSearchCollectionRequest, SymbolSearchCollector,
     SymbolSearchRequest, SymbolSearchResult, TradeAggressor,
 };
@@ -43,9 +43,9 @@ const PROVIDER_ID: &str = "rithmic";
 const SYSTEM_ID: &str = "RITHMIC_TEST";
 const ENVIRONMENT: &str = "Test";
 /// Native credential-vault service for the `Aeris` terminal.
-pub const RITHMIC_TEST_VAULT_SERVICE: &str = "com.aeris.terminal";
-/// Non-secret vault key for the default Rithmic Test account.
-pub const RITHMIC_TEST_VAULT_KEY: &str = "provider-rithmic-test-default-v1";
+pub const RITHMIC_VAULT_SERVICE: &str = "com.aeris.terminal";
+/// Non-secret vault key for the saved Rithmic login: server, system, user and password.
+pub const RITHMIC_LOGIN_VAULT_KEY: &str = "provider-rithmic-login-v2";
 const MAXIMUM_INSTRUMENTS: usize = 128;
 /// Largest result bound one direct-session symbol search accepts.
 pub const MAXIMUM_RITHMIC_SEARCH_RESULTS: usize = MAXIMUM_INSTRUMENTS;
@@ -1872,7 +1872,7 @@ pub(crate) type TickerConnector = dyn Fn(
     + Sync;
 
 fn direct_session_task() -> Arc<SessionTask> {
-    ticker_session_task(Arc::new(RithmicTestSession::discover_and_login_with_abort))
+    ticker_session_task(Arc::new(RithmicSession::discover_and_login_with_abort))
 }
 
 fn ticker_session_task(connect: Arc<TickerConnector>) -> Arc<SessionTask> {
@@ -2063,7 +2063,8 @@ use canonical_market::{CanonicalSessionState, MAXIMUM_MBO_ORDERS, malformed, uni
 fn session_failure(error: RithmicSessionError) -> (ProviderInvalidationReason, RetryDisposition) {
     let reason = match error {
         RithmicSessionError::LoginRejected => ProviderInvalidationReason::Authentication,
-        RithmicSessionError::TestSystemUnavailable => ProviderInvalidationReason::UnsupportedSystem,
+        RithmicSessionError::LoginPermissionDenied => ProviderInvalidationReason::PermissionDenied,
+        RithmicSessionError::SystemUnavailable => ProviderInvalidationReason::UnsupportedSystem,
         RithmicSessionError::SchemaMismatch | RithmicSessionError::KitUnavailable => {
             ProviderInvalidationReason::SchemaMismatch
         }
@@ -2593,8 +2594,13 @@ mod tests {
     }
 
     fn credentials() -> RithmicCredentialBytes {
-        RithmicCredentialBytes::try_encode("fixture-user", "fixture-password")
-            .expect("fixture credentials encode")
+        RithmicCredentialBytes::try_encode(RithmicCredentials {
+            gateway: crate::RithmicGateway::Test,
+            system_name: "Rithmic Test",
+            user: "fixture-user",
+            password: "fixture-password",
+        })
+        .expect("fixture credentials encode")
     }
 
     fn wait_event(events: &RithmicProviderEvents) -> RithmicProviderCallback {
@@ -2767,7 +2773,7 @@ mod tests {
         RithmicProviderRuntime::try_new(
             MemoryVault(encoded.as_bytes().to_vec()),
             driver,
-            RITHMIC_TEST_VAULT_KEY,
+            RITHMIC_LOGIN_VAULT_KEY,
             RithmicProviderRuntimeConfig::new(nonzero(MAXIMUM_RITHMIC_CREDENTIAL_BLOB_BYTES))
                 .with_diagnostics(RithmicProviderConfig::environment(), None)
                 .expect("diagnostics identity validates"),

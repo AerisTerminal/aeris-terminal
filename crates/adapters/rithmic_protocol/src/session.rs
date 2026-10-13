@@ -2,9 +2,9 @@ use crate::{
     DecodedCatalogMessage, DecodedControlMessage, DecodedHistoryMessage, DecodedMarketMessage,
     DepthByOrderSnapshotRequest, DepthByOrderSubscription, InstrumentReferenceRequest,
     LoginRequest, MarketDataSubscription, OutboundRequest, ProtocolError, ReplayKind,
-    RithmicOrderConnection, RithmicPlant, RithmicPnlConnection, RithmicProtocolBackend,
-    RithmicProtocolCodec, RithmicSessionError, RithmicSessionLimits, SymbolSearchRequest,
-    TickBarReplayRequest, TimeBarReplayRequest,
+    RithmicGateway, RithmicOrderConnection, RithmicPlant, RithmicPnlConnection,
+    RithmicProtocolBackend, RithmicProtocolCodec, RithmicSessionError, RithmicSessionLimits,
+    SymbolSearchRequest, TickBarReplayRequest, TimeBarReplayRequest,
     endpoint::RithmicEndpoint,
     network::{
         ConnectionAbort, RithmicWebSocket, begin_shutdown, connect_websocket, default_tls_config,
@@ -21,8 +21,6 @@ use std::{
 };
 use tungstenite::{Bytes, Message};
 
-const TEST_SYSTEM: &str = "Rithmic Test";
-
 /// Logout budget once the session owner has requested a stop. Shutdown paths
 /// must finish within the desktop's shutdown budget, so a stopping session
 /// waits at most this long for the provider's logout acknowledgement even when
@@ -34,9 +32,12 @@ struct ConnectionControl<'a> {
     abort: Option<&'a ConnectionAbort>,
 }
 
-/// Borrowed credentials used only during one synchronous connection attempt.
+/// One borrowed Rithmic login used only during one synchronous connection
+/// attempt: the server and system it signs in to, and the user's credentials.
 #[derive(Clone, Copy)]
 pub struct RithmicCredentials<'a> {
+    pub gateway: RithmicGateway,
+    pub system_name: &'a str,
     pub user: &'a str,
     pub password: &'a str,
 }
@@ -45,6 +46,8 @@ impl fmt::Debug for RithmicCredentials<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RithmicCredentials")
+            .field("gateway", &self.gateway)
+            .field("system_name", &self.system_name)
             .field("user", &"[REDACTED]")
             .field("password", &"[REDACTED]")
             .finish()
@@ -64,7 +67,8 @@ pub struct RithmicApplication<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RithmicLoginMetadata {
     pub plant: RithmicPlant,
-    pub system_name: &'static str,
+    pub gateway: RithmicGateway,
+    pub system_name: String,
     pub unique_user_id: Option<String>,
     pub started_at_utc: String,
 }
@@ -78,11 +82,31 @@ pub enum RithmicSessionMessage {
     History(DecodedHistoryMessage),
 }
 
-/// Fixed-endpoint Rithmic Test session connector.
+/// Rithmic session connector for the server named by each login.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RithmicTestSession;
+pub struct RithmicSession;
 
-impl RithmicTestSession {
+impl RithmicSession {
+    /// Lists the Rithmic systems one server offers, on a single WSS connection
+    /// that is closed before returning. Discovery needs no credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted terminal or transient session failure.
+    pub fn discover_systems(
+        gateway: RithmicGateway,
+        limits: RithmicSessionLimits,
+        stop: Option<Arc<AtomicBool>>,
+    ) -> Result<Vec<String>, RithmicSessionError> {
+        let tls_config = default_tls_config()?;
+        Self::discover_systems_with(
+            RithmicEndpoint::for_gateway(gateway),
+            limits,
+            ConnectionControl { stop, abort: None },
+            tls_config,
+        )
+    }
+
     /// Performs system discovery on one WSS connection, closes it, then logs in
     /// to the ticker plant on a fresh WSS connection.
     ///
@@ -97,7 +121,7 @@ impl RithmicTestSession {
     ) -> Result<RithmicTickerConnection, RithmicSessionError> {
         let tls_config = default_tls_config()?;
         Self::connect_with(
-            RithmicEndpoint::TEST,
+            RithmicEndpoint::for_gateway(credentials.gateway),
             credentials,
             application,
             limits,
@@ -120,7 +144,7 @@ impl RithmicTestSession {
     ) -> Result<RithmicHistoryConnection, RithmicSessionError> {
         let tls_config = default_tls_config()?;
         Self::connect_plant_with(
-            RithmicEndpoint::TEST,
+            RithmicEndpoint::for_gateway(credentials.gateway),
             credentials,
             application,
             limits,
@@ -145,7 +169,7 @@ impl RithmicTestSession {
     ) -> Result<RithmicOrderConnection, RithmicSessionError> {
         let tls_config = default_tls_config()?;
         Self::connect_plant_with(
-            RithmicEndpoint::TEST,
+            RithmicEndpoint::for_gateway(credentials.gateway),
             credentials,
             application,
             limits,
@@ -170,7 +194,7 @@ impl RithmicTestSession {
     ) -> Result<RithmicPnlConnection, RithmicSessionError> {
         let tls_config = default_tls_config()?;
         Self::connect_plant_with(
-            RithmicEndpoint::TEST,
+            RithmicEndpoint::for_gateway(credentials.gateway),
             credentials,
             application,
             limits,
@@ -210,7 +234,7 @@ impl RithmicTestSession {
     ) -> Result<RithmicTickerConnection, RithmicSessionError> {
         let tls_config = default_tls_config()?;
         Self::connect_plant_with(
-            RithmicEndpoint::TEST,
+            RithmicEndpoint::for_gateway(credentials.gateway),
             credentials,
             application,
             limits,
@@ -316,6 +340,51 @@ impl RithmicTestSession {
         .map(RithmicHistoryConnection::new)
     }
 
+    #[cfg(all(test, rithmic_kit))]
+    pub(crate) fn discover_systems_on(
+        endpoint: RithmicEndpoint,
+        limits: RithmicSessionLimits,
+        tls_config: ClientConfig,
+    ) -> Result<Vec<String>, RithmicSessionError> {
+        Self::discover_systems_with(
+            endpoint,
+            limits,
+            ConnectionControl {
+                stop: None,
+                abort: None,
+            },
+            tls_config,
+        )
+    }
+
+    fn discover_systems_with(
+        endpoint: RithmicEndpoint,
+        limits: RithmicSessionLimits,
+        control: ConnectionControl<'_>,
+        tls_config: ClientConfig,
+    ) -> Result<Vec<String>, RithmicSessionError> {
+        let endpoint = endpoint.validate()?;
+        let limits = limits.validate()?;
+        let backend = RithmicProtocolBackend::detected();
+        if !backend.is_available() {
+            return Err(RithmicSessionError::KitUnavailable);
+        }
+        let mut discovery =
+            connect_websocket(endpoint, limits, control.stop, control.abort, tls_config)?;
+        set_deadline(&mut discovery, Instant::now() + limits.response_timeout);
+        send_request(&mut discovery, &backend, OutboundRequest::DiscoverSystems)?;
+        set_deadline(&mut discovery, Instant::now() + limits.response_timeout);
+        let names = match read_control(&mut discovery, &backend)? {
+            DecodedControlMessage::Systems {
+                accepted: false, ..
+            } => return Err(RithmicSessionError::DiscoveryRejected),
+            DecodedControlMessage::Systems { names, .. } => names,
+            _ => return Err(RithmicSessionError::UnexpectedMessage),
+        };
+        finish_discovery_close(&mut discovery, limits.close_timeout)?;
+        Ok(names)
+    }
+
     fn connect_plant_with(
         endpoint: RithmicEndpoint,
         credentials: RithmicCredentials<'_>,
@@ -325,36 +394,22 @@ impl RithmicTestSession {
         tls_config: ClientConfig,
         plant: RithmicPlant,
     ) -> Result<AuthenticatedConnection, RithmicSessionError> {
+        let ConnectionControl { stop, abort } = control;
+        let systems = Self::discover_systems_with(
+            endpoint,
+            limits,
+            ConnectionControl {
+                stop: stop.clone(),
+                abort,
+            },
+            tls_config.clone(),
+        )?;
+        if !systems.iter().any(|name| name == credentials.system_name) {
+            return Err(RithmicSessionError::SystemUnavailable);
+        }
         let endpoint = endpoint.validate()?;
         let limits = limits.validate()?;
         let backend = RithmicProtocolBackend::detected();
-        if !backend.is_available() {
-            return Err(RithmicSessionError::KitUnavailable);
-        }
-
-        let ConnectionControl { stop, abort } = control;
-
-        let mut discovery =
-            connect_websocket(endpoint, limits, stop.clone(), abort, tls_config.clone())?;
-        set_deadline(&mut discovery, Instant::now() + limits.response_timeout);
-        send_request(&mut discovery, &backend, OutboundRequest::DiscoverSystems)?;
-        set_deadline(&mut discovery, Instant::now() + limits.response_timeout);
-        let systems = read_control(&mut discovery, &backend)?;
-        match systems {
-            DecodedControlMessage::Systems {
-                accepted: false, ..
-            } => {
-                return Err(RithmicSessionError::DiscoveryRejected);
-            }
-            DecodedControlMessage::Systems { names, .. }
-                if names.iter().any(|name| name == TEST_SYSTEM) => {}
-            DecodedControlMessage::Systems { .. } => {
-                return Err(RithmicSessionError::TestSystemUnavailable);
-            }
-            _ => return Err(RithmicSessionError::UnexpectedMessage),
-        }
-        finish_discovery_close(&mut discovery, limits.close_timeout)?;
-        drop(discovery);
 
         let mut socket = connect_websocket(endpoint, limits, stop, abort, tls_config)?;
         set_deadline(&mut socket, Instant::now() + limits.response_timeout);
@@ -366,7 +421,7 @@ impl RithmicTestSession {
                 password: credentials.password,
                 app_name: application.name,
                 app_version: application.version,
-                system_name: TEST_SYSTEM,
+                system_name: credentials.system_name,
                 plant,
             }),
         )?;
@@ -377,6 +432,7 @@ impl RithmicTestSession {
                 accepted: true,
                 heartbeat_seconds: Some(heartbeat_seconds),
                 unique_user_id,
+                ..
             } => {
                 let heartbeat_interval = Duration::from_secs_f64(heartbeat_seconds);
                 if heartbeat_interval.is_zero() {
@@ -384,7 +440,8 @@ impl RithmicTestSession {
                 }
                 let metadata = RithmicLoginMetadata {
                     plant,
-                    system_name: TEST_SYSTEM,
+                    gateway: credentials.gateway,
+                    system_name: credentials.system_name.to_string(),
                     unique_user_id,
                     started_at_utc: utc_timestamp(SystemTime::now()),
                 };
@@ -397,6 +454,11 @@ impl RithmicTestSession {
                     logout_confirmed: false,
                 })
             }
+            DecodedControlMessage::Login {
+                accepted: false,
+                permission_denied: true,
+                ..
+            } => Err(RithmicSessionError::LoginPermissionDenied),
             DecodedControlMessage::Login {
                 accepted: false, ..
             } => Err(RithmicSessionError::LoginRejected),
@@ -537,6 +599,7 @@ fn session_event_record(
 ) -> serde_json::Value {
     let mut record = serde_json::json!({
         "event": event,
+        "gateway": metadata.gateway.host(),
         "system": metadata.system_name,
         "plant": metadata.plant.name(),
         "unique_user_id": metadata.unique_user_id,
@@ -959,10 +1022,13 @@ fn map_websocket_error(error: tungstenite::Error) -> RithmicSessionError {
 mod tests {
     use super::*;
 
+    const SYSTEM: &str = "Rithmic Paper Trading";
+
     fn metadata() -> RithmicLoginMetadata {
         RithmicLoginMetadata {
             plant: RithmicPlant::Ticker,
-            system_name: TEST_SYSTEM,
+            gateway: RithmicGateway::Chicago,
+            system_name: SYSTEM.to_string(),
             unique_user_id: Some("fixture-unique-user-id".to_string()),
             started_at_utc: "2026-01-02T03:04:05.006Z".to_string(),
         }
@@ -975,7 +1041,8 @@ mod tests {
             login,
             serde_json::json!({
                 "event": "login",
-                "system": TEST_SYSTEM,
+                "gateway": "rprotocol.rithmic.com",
+                "system": SYSTEM,
                 "plant": "ticker",
                 "unique_user_id": "fixture-unique-user-id",
                 "started_at_utc": "2026-01-02T03:04:05.006Z",
@@ -995,7 +1062,8 @@ mod tests {
                 end,
                 serde_json::json!({
                     "event": "end",
-                    "system": TEST_SYSTEM,
+                    "gateway": "rprotocol.rithmic.com",
+                    "system": SYSTEM,
                     "plant": "ticker",
                     "unique_user_id": "fixture-unique-user-id",
                     "started_at_utc": "2026-01-02T03:04:05.006Z",

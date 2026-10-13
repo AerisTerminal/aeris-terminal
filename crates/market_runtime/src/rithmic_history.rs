@@ -20,9 +20,9 @@ use aeris_provider_history::HistoryRange;
 use crate::market_service::{FormingBar, HistoryFetchWindow};
 use aeris_rithmic_protocol_adapter::{
     InstrumentContractMetadata, InstrumentDescriptor, RITHMIC_APPLICATION_NAME,
-    RITHMIC_TEST_VAULT_KEY, RITHMIC_TEST_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
-    RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSessionLimits,
-    RithmicTestSession, collect_rithmic_chart_history, collect_rithmic_trade_history,
+    RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
+    RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSession,
+    RithmicSessionLimits, collect_rithmic_chart_history, collect_rithmic_trade_history,
 };
 use zeroize::Zeroize;
 
@@ -363,20 +363,20 @@ fn provider_instrument(
 fn connect(
     stop: Arc<AtomicBool>,
 ) -> Result<aeris_rithmic_protocol_adapter::RithmicHistoryConnection, String> {
-    let vault = NativeCredentialVault::new(RITHMIC_TEST_VAULT_SERVICE)
+    let vault = NativeCredentialVault::new(RITHMIC_VAULT_SERVICE)
         .map_err(|_| "native credential vault unavailable".to_string())?;
     let mut stored = vault
-        .load(RITHMIC_TEST_VAULT_KEY)
-        .map_err(|_| "Rithmic Test credentials are unavailable".to_string())?
-        .ok_or_else(|| "Rithmic Test credentials are unavailable".to_string())?;
+        .load(RITHMIC_LOGIN_VAULT_KEY)
+        .map_err(|_| "Saved Rithmic login could not be loaded".to_string())?
+        .ok_or_else(|| "Connect Rithmic in Accounts to load history".to_string())?;
     let copied = RithmicCredentialBytes::try_copy_from_vault(&stored)
-        .map_err(|_| "Rithmic Test credentials are invalid".to_string());
+        .map_err(|_| "Saved Rithmic login is unreadable; save it again".to_string());
     stored.zeroize();
     let copied = copied?;
     let credentials = copied
         .credentials()
-        .map_err(|_| "Rithmic Test credentials are invalid".to_string())?;
-    RithmicTestSession::discover_and_login_history(
+        .map_err(|_| "Saved Rithmic login is unreadable; save it again".to_string())?;
+    RithmicSession::discover_and_login_history(
         credentials,
         RithmicApplication {
             name: RITHMIC_APPLICATION_NAME,
@@ -385,7 +385,7 @@ fn connect(
         RithmicSessionLimits::default(),
         Some(stop),
     )
-    .map_err(|_| "Rithmic Test history login failed".to_string())
+    .map_err(|error| format!("Rithmic history login failed: {error}"))
 }
 
 #[derive(Clone, Copy)]
