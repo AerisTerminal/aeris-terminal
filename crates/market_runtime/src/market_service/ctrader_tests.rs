@@ -2711,6 +2711,44 @@ mod venue_relay {
     }
 
     #[test]
+    fn trading_venue_attach_is_logged_only_after_a_demo_session_opens() {
+        let root = std::env::temp_dir().join(format!(
+            "aeris-venue-attach-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let log = root.join("aeris.log");
+        let sink = aeris_observability::install_log_sink(&log).expect("log sink");
+        let mut harness = harness(trading_script(), Duration::ZERO);
+        harness.drive();
+        let (requests, receiver) = mpsc::sync_channel(64);
+        harness.script.lock().unwrap().open_fault = Some(SessionFault::NeedsReconnect);
+        harness.venue.put(VenueLink {
+            generation: GENERATION,
+            requests: receiver,
+            events: Box::new(|_| Ok(())),
+        });
+        harness.drive();
+        assert!(aeris_observability::flush_diagnostics());
+        assert!(
+            !std::fs::read_to_string(&log)
+                .expect("diagnostics")
+                .contains("cTrader trading venue attached")
+        );
+        harness.worker.retry_venue_now();
+        harness.drive();
+        assert!(aeris_observability::flush_diagnostics());
+        assert!(
+            std::fs::read_to_string(&log)
+                .expect("diagnostics after session")
+                .contains("Aeris cTrader trading venue attached (generation 7)")
+        );
+        drop(requests);
+        drop(sink);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn demo_accounts_are_announced_with_their_currency_and_balance() {
         let (harness, venue) = attached(trading_script());
         assert_eq!(

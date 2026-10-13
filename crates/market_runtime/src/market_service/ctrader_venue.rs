@@ -6,8 +6,8 @@
 //! can replay what the owner missed.
 
 use super::{
-    BTreeMap, BTreeSet, Duration, Failure, HostFault, Instant, Mutex, Receiver, Route, Worker,
-    classify, now_nanos, parse_instrument_id, request_error,
+    BTreeMap, BTreeSet, DISCONNECTED_DETAIL, Duration, Failure, HostFault, Instant, Mutex,
+    Receiver, Route, Worker, classify, now_nanos, parse_instrument_id, request_error,
 };
 use aeris_ctrader_open_api_adapter::{
     ProtoMessage,
@@ -523,10 +523,6 @@ impl Worker {
     /// Takes a newly attached venue generation; the previous one is retired with it.
     pub(super) fn take_venue(&mut self) {
         if let Some(link) = self.ports.venue.take() {
-            diagnostic!(
-                "Aeris cTrader trading venue attached (generation {})",
-                link.generation
-            );
             self.venue = Some(VenueRelay::new(link));
         }
     }
@@ -576,7 +572,7 @@ impl Worker {
                     .map_or(FIRST_OPEN_RETRY, |(_, delay, _)| {
                         delay.saturating_mul(2).min(MAXIMUM_OPEN_RETRY)
                     });
-                if delay == FIRST_OPEN_RETRY {
+                if delay == FIRST_OPEN_RETRY && fault.detail != DISCONNECTED_DETAIL {
                     diagnostic!(
                         "Aeris cTrader trading is waiting for a session: {}",
                         fault.detail
@@ -684,6 +680,10 @@ impl Worker {
         }
         if let Some(relay) = self.venue.as_mut() {
             relay.announced = true;
+            diagnostic!(
+                "Aeris cTrader trading venue attached (generation {})",
+                relay.link.generation
+            );
         }
         Ok(())
     }

@@ -395,7 +395,8 @@ mod tests {
     use super::{
         BORROWED_CTRADER_NOTICE, CredentialVault, KeyringError, NativeCredentialBackend,
         NativeCredentialVault, NativeCredentialVaultError, backend_identifier,
-        legacy_backend_identifier, log_borrowed_ctrader_once, validate_identifier,
+        legacy_backend_identifier, log_borrowed_ctrader_once, previous_backend_identifier,
+        validate_identifier,
     };
     use std::{
         collections::BTreeMap,
@@ -661,11 +662,15 @@ mod tests {
             Some(b"production".to_vec())
         );
         assert_eq!(borrowed.load("other").expect("scoped load"), None);
+        borrowed
+            .store("broker_connection", b"rotated")
+            .expect("borrowed write-through");
+        borrowed.store("other", b"isolated").expect("other write");
         let other_service = NativeCredentialVault::with_validation_backend(
             "aeris.provider.tastytrade",
             "0123456789ab",
             true,
-            backend,
+            backend.clone(),
         )
         .expect("other validation vault");
         assert_eq!(
@@ -674,6 +679,61 @@ mod tests {
                 .expect("other service load"),
             None
         );
+        other_service
+            .store("broker_connection", b"isolated service")
+            .expect("other service write");
+        let production_service = backend_identifier("service", "aeris.provider.ctrader");
+        assert_eq!(
+            backend
+                .load(
+                    &production_service,
+                    &backend_identifier("key", "broker_connection")
+                )
+                .expect("production write-through"),
+            b"rotated"
+        );
+        assert!(matches!(
+            backend.load(&production_service, &backend_identifier("key", "other")),
+            Err(KeyringError::NoEntry)
+        ));
+        let validation_service =
+            previous_backend_identifier("0123456789ab", "service", "aeris.provider.ctrader");
+        assert_eq!(
+            backend
+                .load(
+                    &validation_service,
+                    &previous_backend_identifier("0123456789ab", "key", "other")
+                )
+                .expect("other key isolated"),
+            b"isolated"
+        );
+        assert!(matches!(
+            backend.load(
+                &validation_service,
+                &previous_backend_identifier("0123456789ab", "key", "broker_connection")
+            ),
+            Err(KeyringError::NoEntry)
+        ));
+        assert_eq!(
+            backend
+                .load(
+                    &previous_backend_identifier(
+                        "0123456789ab",
+                        "service",
+                        "aeris.provider.tastytrade"
+                    ),
+                    &previous_backend_identifier("0123456789ab", "key", "broker_connection")
+                )
+                .expect("other service isolated"),
+            b"isolated service"
+        );
+        assert!(matches!(
+            backend.load(
+                &backend_identifier("service", "aeris.provider.tastytrade"),
+                &backend_identifier("key", "broker_connection")
+            ),
+            Err(KeyringError::NoEntry)
+        ));
     }
 
     #[test]

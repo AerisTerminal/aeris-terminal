@@ -547,6 +547,17 @@ mod tests {
             ),
             Err(DataRootError::ValidationRootOverlapsProduction)
         ));
+        let nested_production = parent.join("validation").join("Aeris").join("nested");
+        assert!(matches!(
+            resolve_data_root(
+                DataRootMode::Validation {
+                    root: parent.join("validation"),
+                    borrow_stored_ctrader: false,
+                },
+                &nested_production
+            ),
+            Err(DataRootError::ValidationRootOverlapsProduction)
+        ));
         let absent = parent.join("new-validation-root");
         let resolved = resolve_data_root(
             DataRootMode::Validation {

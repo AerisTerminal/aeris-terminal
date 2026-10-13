@@ -283,6 +283,10 @@ Status: in progress
   - Readiness schema 5 reports the lock, log path and validation context; validation disables release side effects.
   - Scrutiny follow-up: the namespace is exactly `com.aeris.terminal.validation.<sha12>`, borrowing
     logs exactly once at initialization, and launcher promotion, update checks and AUMID registration use one tested deny policy.
+  - User-testing follow-up: scripted venue tests distinguish a configured relay from an opened demo
+    session; the attachment line appears only after the session opens. Root-overlap and fake-vault tests
+    cover contained production roots and exact-key read/write-through with other keys isolated.
+    A non-opt-in isolated desktop showed no venue attachment line in 60 seconds.
 - [x] M1.9 sqlite-hardening-migrations - SQLite busy timeout, integrity check, quarantine, table-driven migrations and pre-migration backup
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added quick-check corruption errors, confirmed-only quarantine, contiguous migrations, pre-migration backups and clean checkpoints.
@@ -465,6 +469,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.6 fix(naming): scan production after cfg(test) declarations - closed scrutiny R2-B1 with direct scanner fixtures for inline/out-of-line modules and reasoned, stale-checked allowlists.
 - 2026-10-13 M1.6 fix(naming): label source-policy failures accurately - corrected the shared naming_check diagnostic heading for secret-Debug failures.
 - 2026-10-13 M1.7 fix(desktop): trigger forced panic after store startup - moved the debug-only panic after service and market setup so the crashing session leaves earlier diagnostics.
+- 2026-10-13 M1.8 fix(validation): report only real cTrader venue attachments - corrected attachment diagnostics and covered root overlap and exact-key vault read/write isolation.
 
 ## 7. Known gaps / deferred
 
