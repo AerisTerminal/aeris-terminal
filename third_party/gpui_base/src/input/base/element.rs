@@ -358,6 +358,22 @@ pub(super) fn cursor_surrounding_padding(
     raw.min(viewport_half)
 }
 
+/// The caret as painted: snapped to whole device pixels and at least one device pixel wide.
+///
+/// Unsnapped, a bar at a fractional position or display scale is antialiased across
+/// neighbouring pixels, so it reads thicker than it is and its weight changes as it moves.
+fn device_pixel_caret(caret: Bounds<Pixels>, scale_factor: f32) -> Bounds<Pixels> {
+    let to_device = |value: Pixels| (f32::from(value) * scale_factor).round();
+    let left = to_device(caret.left());
+    let top = to_device(caret.top());
+    let bottom = to_device(caret.bottom()).max(top + 1.);
+    let width = to_device(caret.size.width).max(1.);
+    Bounds::new(
+        point(px(left / scale_factor), px(top / scale_factor)),
+        size(px(width / scale_factor), px((bottom - top) / scale_factor)),
+    )
+}
+
 /// Pixel height of the empty area below the last line in the editor's
 /// scrollable region. Backs [`InputBaseState::scroll_beyond_last_line`].
 ///
@@ -2305,7 +2321,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // Paint blinking cursor
         if focused && show_cursor {
             if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
-                window.paint_quad(fill(cursor_bounds, editor_style.caret));
+                let caret = device_pixel_caret(cursor_bounds, window.scale_factor());
+                window.paint_quad(fill(caret, editor_style.caret));
             }
         }
 
@@ -2648,6 +2665,37 @@ fn split_runs_by_bg_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caret_paints_on_whole_device_pixels_at_a_constant_width() {
+        for (scale_factor, device_width) in [(1., 1.), (1.25, 1.), (1.5, 2.), (2., 2.)] {
+            for step in 0..20 {
+                let unsnapped = Bounds::new(
+                    point(px(40. + step as f32 * 0.13), px(17.45)),
+                    size(CURSOR_WIDTH, px(22.1)),
+                );
+                let caret = device_pixel_caret(unsnapped, scale_factor);
+                let device = |value: Pixels| f32::from(value) * scale_factor;
+
+                for edge in [caret.left(), caret.right(), caret.top(), caret.bottom()] {
+                    let edge = device(edge);
+                    assert!(
+                        (edge - edge.round()).abs() < 1e-3,
+                        "edge {edge} is between device pixels at {scale_factor}x"
+                    );
+                }
+                assert!(
+                    (device(caret.size.width) - device_width).abs() < 1e-3,
+                    "caret is {} device pixels wide at {scale_factor}x",
+                    device(caret.size.width)
+                );
+                assert!(
+                    (device(caret.left()) - device(unsnapped.left())).abs() <= 0.5 + 1e-3,
+                    "the caret stays at its text position"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_plain_text_decorations_include_unstyled_gaps() {

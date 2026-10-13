@@ -4,9 +4,10 @@ use instant::Duration;
 static INTERVAL: Duration = Duration::from_millis(500);
 static PAUSE_DELAY: Duration = Duration::from_millis(300);
 
-// On Windows, Linux, we should use integer to avoid blurry cursor.
+// The painted caret is snapped to whole device pixels, so this is one device pixel at 100%
+// and 125% and grows with the display scale.
 #[cfg(not(target_os = "macos"))]
-pub(super) const CURSOR_WIDTH: Pixels = px(2.);
+pub(super) const CURSOR_WIDTH: Pixels = px(1.);
 #[cfg(target_os = "macos")]
 pub(super) const CURSOR_WIDTH: Pixels = px(1.5);
 
