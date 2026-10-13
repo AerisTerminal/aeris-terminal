@@ -86,7 +86,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    eprintln!("non-snake_case platform-owned paths:");
+    eprintln!("repository naming and source-policy violations:");
     for violation in violations {
         eprintln!("  {}", violation.display());
     }
