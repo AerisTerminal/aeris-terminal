@@ -79,35 +79,53 @@ fn run_coordinator(
             coordinator.begin_shutdown();
             return;
         }
-        coordinator.studies.begin_turn();
-        let drained = drain_coordinator_events(&mut coordinator);
-        coordinator.broadcast_dirty_trade_tapes();
-        coordinator.publish_rithmic_live();
-        coordinator.publish_candle_live();
-        coordinator.recover_stalled_live_series();
-        coordinator.recover_overflowed_series_queues();
-        for flush in &demand_flushers {
-            flush(&mut coordinator);
-        }
-        coordinator.stop_realtime_if_idle();
-        coordinator.retry_history();
-        match commands.recv_timeout(if drained >= REALTIME_DRAIN_BUDGET {
-            Duration::ZERO
-        } else {
-            COORDINATOR_TICK
-        }) {
-            Ok(command) if !shutdown.load(Ordering::Acquire) => {
-                coordinator.handle_command(command);
-            }
-            Ok(_) => {
+        if !coordinator_turn(
+            &mut coordinator,
+            commands,
+            &demand_flushers,
+            shutdown,
+            COORDINATOR_TICK,
+        ) {
+            if shutdown.load(Ordering::Acquire) {
                 drain_shutdown_provider_events(&mut coordinator);
                 coordinator.begin_shutdown();
-                return;
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            return;
         }
     }
+}
+
+/// Runs one production coordinator turn through the bounded provider lanes and
+/// command receiver. Tests use this same entry with a zero wait, not a state hook.
+fn coordinator_turn(
+    coordinator: &mut Coordinator<'_>,
+    commands: &Receiver<Command>,
+    demand_flushers: &[for<'a> fn(&mut Coordinator<'a>)],
+    shutdown: &AtomicBool,
+    timeout: Duration,
+) -> bool {
+    coordinator.studies.begin_turn();
+    let drained = drain_coordinator_events(coordinator);
+    coordinator.broadcast_dirty_trade_tapes();
+    coordinator.publish_rithmic_live();
+    coordinator.publish_candle_live();
+    coordinator.recover_stalled_live_series();
+    coordinator.recover_overflowed_series_queues();
+    for flush in demand_flushers {
+        flush(coordinator);
+    }
+    coordinator.stop_realtime_if_idle();
+    coordinator.retry_history();
+    match commands.recv_timeout(if drained >= REALTIME_DRAIN_BUDGET {
+        Duration::ZERO
+    } else {
+        timeout
+    }) {
+        Ok(command) if !shutdown.load(Ordering::Acquire) => coordinator.handle_command(command),
+        Ok(_) | Err(RecvTimeoutError::Disconnected) => return false,
+        Err(RecvTimeoutError::Timeout) => {}
+    }
+    true
 }
 
 impl<'a> Coordinator<'a> {
@@ -4257,6 +4275,47 @@ mod tests {
             .install_provider_instrument(&instrument())
             .expect("Rithmic instrument installs");
         (coordinator, history_receiver)
+    }
+
+    fn scripted_rithmic_coordinator(
+        clock: Arc<dyn super::super::clock::Clock>,
+    ) -> (
+        Coordinator<'static>,
+        std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        std::sync::mpsc::SyncSender<RithmicRealtimeEvent>,
+        std::sync::mpsc::Receiver<super::super::RithmicRealtimeControl>,
+    ) {
+        let (history_sender, history_receiver) = std::sync::mpsc::sync_channel(4);
+        let (controls, controls_receiver) = std::sync::mpsc::sync_channel(4);
+        let (events, event_receiver) =
+            std::sync::mpsc::sync_channel(super::super::REALTIME_CAPACITY);
+        let providers = ProviderDispatch {
+            wake: None,
+            records: BTreeMap::from([(
+                "rithmic",
+                ProviderDispatchRecord {
+                    descriptor: super::super::RITHMIC_DESCRIPTOR,
+                    history: Box::leak(Box::new(history_sender)),
+                    lifecycle: None,
+                    realtime: ProviderRealtimeDispatch::Rithmic {
+                        controls: Box::leak(Box::new(controls)),
+                        events: Box::leak(Box::new(event_receiver)),
+                    },
+                    catalog: ProviderCatalogDispatch::Disabled,
+                },
+            )]),
+            lanes: vec![super::super::ProviderEventLane::Realtime("rithmic")],
+        };
+        (
+            Coordinator::with_clock(
+                super::super::configured_engine().expect("configured engine"),
+                providers,
+                clock,
+            ),
+            history_receiver,
+            events,
+            controls_receiver,
+        )
     }
 
     #[test]

@@ -324,6 +324,9 @@ Status: in progress
   - User-testing round 1: the four named scenarios now take exact history tickets from provider requests and
     assert only consumer publications, command replies and provider-session status; scripted fixture setup and
     coordinator turns live outside the characterization file. No private history/coordinator state is inspected.
+  - User-testing round 2: the shared driver injects `ScriptedClock` at construction and sends bounded
+    commands and provider events through production channels; the production coordinator turn drains both
+    without benchmark-only helpers. All four scenarios, crate checks and the full gate pass.
 - [x] M2.2 market-benchmark-baseline - Hot-path and coordinator benchmark baseline
   - Release engine example measures 50,000 completed bars, 10,000 forming-bar revisions
     per simulated second, 63 snapshots at a 16 ms cadence and 256 full study-input copies.
@@ -579,6 +582,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M2.10 feat(market): centralize history lanes and exact completion tickets - replaced eight maps, bounded retry/deferral and provider-history scheduler with a single tracker; verified older Hyperliquid chart pages without gaps.
 - 2026-10-14 M2.10 fix(market): drain deferred backfill after empty current history - closed the M2 scrutiny blocker with ticket-fenced dispatch and scripted completion-path regressions.
 - 2026-10-14 M2.1/M2.5/M2.6 test(market): close user-testing boundary and calendar coverage gaps - moved characterization observations to the command/event boundary; completed the calendar/status matrix and five scripted recovery request checks; full gate green.
+- 2026-10-14 M2.1 test(market): drive characterization through coordinator channels - removed direct clock assignment and benchmark turn calls; verified four boundary scenarios and the full gate.
 
 ## 7. Known gaps / deferred
 

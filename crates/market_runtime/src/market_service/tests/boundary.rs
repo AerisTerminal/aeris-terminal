@@ -4,6 +4,10 @@ use super::*;
 
 pub(super) struct Boundary {
     coordinator: Coordinator<'static>,
+    commands: std::sync::mpsc::SyncSender<Command>,
+    command_receiver: std::sync::mpsc::Receiver<Command>,
+    provider_events: std::sync::mpsc::SyncSender<RithmicRealtimeEvent>,
+    provider_requests: std::sync::mpsc::Receiver<super::super::super::RithmicRealtimeControl>,
     history: std::sync::mpsc::Receiver<super::super::super::HistoryRequest>,
     series: BarSeriesKey,
     consumer: ConsumerId,
@@ -12,19 +16,32 @@ pub(super) struct Boundary {
 
 impl Boundary {
     pub(super) fn new() -> Self {
-        let (mut coordinator, history) = connected_rithmic_coordinator();
-        coordinator.clock = std::sync::Arc::new(super::super::super::clock::ScriptedClock::new(
-            1_800_000_000_000_000_000,
-        ));
-        coordinator.handle_provider_event(
-            super::super::super::ProviderEvent::rithmic(RithmicRealtimeEvent::Connected(1)),
+        let (coordinator, history, provider_events, provider_requests) = scripted_rithmic_coordinator(
+            std::sync::Arc::new(super::super::super::clock::ScriptedClock::new(
+                1_800_000_000_000_000_000,
+            )),
         );
+        let (commands, command_receiver) = std::sync::mpsc::sync_channel(32);
+        let mut boundary = Self {
+            coordinator,
+            commands,
+            command_receiver,
+            provider_events,
+            provider_requests,
+            history,
+            series: series(),
+            consumer: consumer(1),
+            provider_generation: 1,
+        };
+        boundary.provider_event(RithmicRealtimeEvent::Connecting(1));
+        boundary.provider_event(RithmicRealtimeEvent::Connected(1));
+        boundary.install(instrument());
         let consumer = consumer(1);
         let (reply, received) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::Attach(client(1), reply));
+        boundary.command(Command::Attach(client(1), reply));
         received.recv().expect("attach reply").expect("attach succeeds");
         let (reply, received) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::Register(
+        boundary.command(Command::Register(
             ConsumerIdentity {
                 client_id: client(1),
                 workspace_id: WorkspaceId(nonzero(1)),
@@ -33,14 +50,19 @@ impl Boundary {
             reply,
         ));
         received.recv().expect("register reply").expect("register succeeds");
-        Self { coordinator, history, series: series(), consumer, provider_generation: 1 }
+        boundary
+    }
+
+    fn command(&mut self, command: Command) {
+        self.commands.send(command).expect("bounded coordinator command");
+        self.tick();
     }
 
     pub(super) fn series(&self) -> BarSeriesKey { self.series.clone() }
 
     pub(super) fn demand(&mut self, series: BarSeriesKey, generation_number: u64) {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.coordinator.handle_command(Command::Demand(
+        self.command(Command::Demand(
             client(1), self.consumer, generation(generation_number),
             series, StreamRequirements::BARS, reply,
         ));
@@ -51,13 +73,17 @@ impl Boundary {
         self.history.try_recv().expect("provider history request")
     }
 
+    pub(super) fn provider_requests(&self) -> Vec<super::super::super::RithmicRealtimeControl> {
+        self.provider_requests.try_iter().collect()
+    }
+
     pub(super) fn complete(
         &mut self,
         request: super::super::super::HistoryRequest,
         bars: Vec<MarketBar>,
         forming: Option<MarketBar>,
     ) {
-        self.coordinator.handle_command(Command::HistoryCompleted(
+        self.command(Command::HistoryCompleted(
             request.series,
             request.provider_generation,
             request.range,
@@ -75,14 +101,14 @@ impl Boundary {
 
     pub(super) fn events(&mut self) -> Vec<MarketRuntimeEvent> {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.coordinator.handle_command(Command::PollClient(client(1), vec![(self.consumer, 256)], reply));
+        self.command(Command::PollClient(client(1), vec![(self.consumer, 256)], reply));
         received.recv().expect("poll reply").expect("poll succeeds")
             .into_iter().map(|(_, event)| event).collect()
     }
 
     pub(super) fn status(&mut self) -> MarketServiceStatus {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.coordinator.handle_command(Command::Status(reply));
+        self.command(Command::Status(reply));
         received.recv().expect("status reply").expect("status succeeds")
     }
 
@@ -90,7 +116,8 @@ impl Boundary {
         if let RithmicRealtimeEvent::Connecting(next) = &event {
             self.provider_generation = *next;
         }
-        self.coordinator.handle_provider_event(super::super::super::ProviderEvent::rithmic(event));
+        self.provider_events.send(event).expect("bounded provider event");
+        self.tick();
     }
 
     pub(super) fn trade(&mut self, sequence: u64, minute: i64) {
@@ -102,11 +129,19 @@ impl Boundary {
         self.tick();
     }
 
-    pub(super) fn tick(&mut self) { benchmark_turn(&mut self.coordinator); }
+    pub(super) fn tick(&mut self) {
+        assert!(coordinator_turn(
+            &mut self.coordinator,
+            &self.command_receiver,
+            &[super::super::super::RITHMIC_DESCRIPTOR.flush_demand],
+            &std::sync::atomic::AtomicBool::new(false),
+            std::time::Duration::ZERO,
+        ));
+    }
 
     pub(super) fn install(&mut self, instrument: InstallProviderInstrument) {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.coordinator.handle_command(Command::InstallProviderInstrument(instrument, reply));
+        self.command(Command::InstallProviderInstrument(instrument, reply));
         received.recv().expect("install reply").expect("instrument installs");
     }
 }

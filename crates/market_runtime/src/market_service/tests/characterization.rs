@@ -93,6 +93,14 @@ fn characterization_symbol_or_timeframe_change_keeps_provider_session() {
         .into_iter()
         .find(|state| state.provider == "rithmic")
         .expect("provider status");
+    let initial_requests = boundary.provider_requests();
+    assert!(
+        !initial_requests.is_empty()
+            && initial_requests.iter().all(|request| matches!(
+            request, super::super::super::RithmicRealtimeControl::Subscribe(_)
+        )),
+        "initial demand does not stop the provider session"
+    );
     let mut other = boundary.series();
     other.period = BarPeriod::time(300).expect("five minute interval");
     boundary.demand(other, 2);
@@ -113,4 +121,12 @@ fn characterization_symbol_or_timeframe_change_keeps_provider_session() {
         .find(|state| state.provider == "rithmic")
         .expect("provider status");
     assert_eq!(initial.generation, after.generation);
+    let changed_requests = boundary.provider_requests();
+    assert!(
+        !changed_requests.is_empty()
+            && changed_requests.iter().all(|request| matches!(
+            request, super::super::super::RithmicRealtimeControl::Subscribe(_)
+        )),
+        "changing the series or symbol updates demand without stopping the provider session"
+    );
 }
