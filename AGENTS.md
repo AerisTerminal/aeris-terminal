@@ -104,6 +104,9 @@ violations and missing verification explicitly, and never describe them as satis
   cTrader borrowing flag may route the exact cTrader broker-connection vault key to production.
 
 Architecture assertions in `tools/naming_check` are authoritative when they are stricter than prose.
+Its source scans strip only balanced `#[cfg(test)]` module bodies, so production code after a test
+module is still scanned, and every allowlist entry must carry a written reason; stale entries fail
+the check.
 
 ## Market-data and provider work
 
@@ -220,8 +223,10 @@ CI runs the same gates on GitHub-hosted runners. `.github/workflows/ci.yml` trig
 tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check. The workflow keeps
 `permissions: contents: read`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1` (hosted
 runners have no Rithmic kit; kit-gated code is skipped there). `pull_request_target`, `secrets.`
-references and self-hosted runners are forbidden on the pull-request path; live, credentialed and
-performance lanes stay `workflow_dispatch`-only. `tools/naming_check` enforces this shape.
+references and self-hosted runners are forbidden on the pull-request path, and any workflow that uses
+a self-hosted runner must stay `workflow_dispatch`-only in every trigger form; live, credentialed and
+performance lanes stay `workflow_dispatch`-only. `tools/naming_check` enforces this shape across
+every workflow.
 
 ## Release workflow
 

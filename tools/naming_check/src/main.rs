@@ -97,7 +97,7 @@ fn inspect_directory(
                     .components()
                     .any(|component| component.as_os_str() == "src")
                 && let Ok(source) = fs::read_to_string(&path)
-                && contains_sensitive_debug(production_source_prefix(&source))
+                && contains_sensitive_debug(&production_source_prefix(&source))
             {
                 violations.push(relative);
             }
@@ -106,22 +106,129 @@ fn inspect_directory(
     Ok(())
 }
 
-fn production_source_prefix(contents: &str) -> &str {
+fn production_source_prefix(contents: &str) -> String {
     if contents.starts_with("#![cfg(test)]") {
-        return "";
+        return String::new();
     }
-    for (index, _) in contents.match_indices("#[cfg(test)]") {
+    let mut production = String::with_capacity(contents.len());
+    let mut cursor = 0;
+    while let Some(relative_index) = contents[cursor..].find("#[cfg(test)]") {
+        let index = cursor + relative_index;
         let after_attribute = &contents[index + "#[cfg(test)]".len()..];
-        let declaration = after_attribute
-            .trim_start_matches(['\r', '\n'])
-            .lines()
-            .next()
-            .unwrap_or_default();
-        if declaration.starts_with("mod ") && declaration.ends_with(" {") {
-            return &contents[..index];
+        let whitespace = after_attribute.len() - after_attribute.trim_start().len();
+        let declaration_start = index + "#[cfg(test)]".len() + whitespace;
+        let declaration = &contents[declaration_start..];
+        if declaration.starts_with("mod ")
+            && let Some(open_relative) = declaration.find('{')
+        {
+            let open = declaration_start + open_relative;
+            if let Some(end) = source_block_end(contents, open) {
+                production.push_str(&contents[cursor..index]);
+                cursor = end;
+                continue;
+            }
+        }
+        production.push_str(&contents[cursor..index + "#[cfg(test)]".len()]);
+        cursor = index + "#[cfg(test)]".len();
+    }
+    production.push_str(&contents[cursor..]);
+    production
+}
+
+fn source_block_end(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0_u32;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                let mut comment_depth = 1_u32;
+                while index < bytes.len() && comment_depth > 0 {
+                    if bytes[index..].starts_with(b"/*") {
+                        comment_depth += 1;
+                        index += 2;
+                    } else if bytes[index..].starts_with(b"*/") {
+                        comment_depth -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index = index.saturating_add(2);
+                    } else {
+                        let quote = bytes[index] == b'"';
+                        index += 1;
+                        if quote {
+                            break;
+                        }
+                    }
+                }
+            }
+            b'\'' => {
+                let character_end = if bytes.get(index + 1) == Some(&b'\\') {
+                    index.saturating_add(3)
+                } else {
+                    source[index + 1..]
+                        .chars()
+                        .next()
+                        .map_or(index + 1, |character| index + 1 + character.len_utf8())
+                };
+                if bytes.get(character_end) == Some(&b'\'') {
+                    index = character_end + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            b'r' if bytes.get(index + 1) == Some(&b'"') || bytes.get(index + 1) == Some(&b'#') => {
+                let mut marker_end = index + 1;
+                while bytes.get(marker_end) == Some(&b'#') {
+                    marker_end += 1;
+                }
+                if bytes.get(marker_end) == Some(&b'"') {
+                    let hashes = marker_end - index - 1;
+                    index = marker_end + 1;
+                    while index < bytes.len() {
+                        if bytes[index] == b'"'
+                            && bytes
+                                .get(index + 1..index + 1 + hashes)
+                                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+                        {
+                            index += 1 + hashes;
+                            break;
+                        }
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+                index += 1;
+            }
+            _ => index += 1,
         }
     }
-    contents
+    None
 }
 
 fn contains_sensitive_debug(source: &str) -> bool {
@@ -349,22 +456,42 @@ mod tests {
             .replace('\\', "/")
     }
 
-    fn production_prefix(contents: &str) -> &str {
+    fn production_prefix(contents: &str) -> String {
         if contents.starts_with("#![cfg(test)]") {
-            return "";
+            return String::new();
         }
-        for (index, _) in contents.match_indices("#[cfg(test)]") {
+        let mut production = String::with_capacity(contents.len());
+        let mut cursor = 0;
+        while let Some(relative_index) = contents[cursor..].find("#[cfg(test)]") {
+            let index = cursor + relative_index;
             let after_attribute = &contents[index + "#[cfg(test)]".len()..];
-            let declaration = after_attribute
-                .trim_start_matches(['\r', '\n'])
-                .lines()
-                .next()
-                .unwrap_or_default();
-            if declaration.starts_with("mod ") && declaration.ends_with(" {") {
-                return &contents[..index];
+            let whitespace = after_attribute.len() - after_attribute.trim_start().len();
+            let declaration_start = index + "#[cfg(test)]".len() + whitespace;
+            let declaration = &contents[declaration_start..];
+            if declaration.starts_with("mod ")
+                && let Some(open_relative) = declaration.find('{')
+            {
+                let open = declaration_start + open_relative;
+                if let Some(end) = super::source_block_end(contents, open) {
+                    production.push_str(&contents[cursor..index]);
+                    cursor = end;
+                    continue;
+                }
             }
+            production.push_str(&contents[cursor..index + "#[cfg(test)]".len()]);
+            cursor = index + "#[cfg(test)]".len();
         }
-        contents
+        production.push_str(&contents[cursor..]);
+        production
+    }
+
+    #[test]
+    fn production_prefix_removes_only_balanced_test_modules() {
+        let source = "fn before() {}\n#[cfg(test)]\nmod tests {\nmod nested { fn hidden() {} }\n}\nfn after() { forbidden(); }\n";
+        let production = production_prefix(source);
+        assert!(production.contains("fn before()"));
+        assert!(production.contains("fn after() { forbidden(); }"));
+        assert!(!production.contains("fn hidden()"));
     }
 
     fn contains_identifier(source: &str, identifier: &str) -> bool {
@@ -489,21 +616,45 @@ mod tests {
         .contains(&relative)
     }
 
-    const RAW_FILE_MUTATION_ALLOWLIST: &[(&str, &str)] = &[
-        ("apps/desktop/build.rs", "fs::write("),
-        ("crates/platform_runtime/build.rs", "fs::write("),
+    const RAW_FILE_MUTATION_ALLOWLIST: &[(&str, &str, &str)] = &[
+        (
+            "apps/desktop/build.rs",
+            "fs::write(",
+            "Cargo build output is generated inside OUT_DIR",
+        ),
+        (
+            "crates/platform_runtime/build.rs",
+            "fs::write(",
+            "Cargo build output is generated inside OUT_DIR",
+        ),
         (
             "crates/platform_runtime/src/bin/aeris_launcher.rs",
             "fs::rename(",
+            "launcher self-replacement stages an executable before the platform replacement boundary",
         ),
-        ("crates/platform_runtime/src/data_root.rs", "fs::rename("),
-        ("crates/platform_runtime/src/lifecycle.rs", "fs::rename("),
-        ("crates/platform_sys/src/fs.rs", "fs::rename("),
-        ("crates/ui/design_system/build.rs", "fs::write("),
+        (
+            "crates/platform_runtime/src/data_root.rs",
+            "fs::rename(",
+            "owned legacy data migration moves entries without replacing files",
+        ),
+        (
+            "crates/platform_sys/src/fs.rs",
+            "fs::rename(",
+            "platform_sys owns the raw move and atomic replacement implementations",
+        ),
+        (
+            "crates/ui/design_system/build.rs",
+            "fs::write(",
+            "Cargo build output is generated inside OUT_DIR",
+        ),
     ];
 
     fn raw_file_mutation_is_allowed(relative: &str, operation: &str) -> bool {
-        RAW_FILE_MUTATION_ALLOWLIST.contains(&(relative, operation))
+        RAW_FILE_MUTATION_ALLOWLIST
+            .iter()
+            .any(|(path, allowed_operation, reason)| {
+                !reason.is_empty() && relative == *path && operation == *allowed_operation
+            })
     }
 
     #[test]
@@ -531,7 +682,7 @@ mod tests {
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path).expect("source");
             let production = production_prefix(&contents);
-            if !contains_unsafe_code(production) {
+            if !contains_unsafe_code(&production) {
                 continue;
             }
             let relative = relative_string(&path);
@@ -602,6 +753,7 @@ mod tests {
 
     #[test]
     fn production_raw_file_mutation_is_exactly_allowlisted() {
+        let mut observed = BTreeSet::new();
         for path in production_rust_sources() {
             let contents = fs::read_to_string(&path).expect("source");
             let production = production_prefix(&contents);
@@ -614,8 +766,23 @@ mod tests {
                     raw_file_mutation_is_allowed(&relative, operation),
                     "{relative} performs raw {operation} outside the exact allowlist"
                 );
+                observed.insert((relative.clone(), operation));
             }
         }
+        let expected = RAW_FILE_MUTATION_ALLOWLIST
+            .iter()
+            .map(|(path, operation, reason)| {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{path} {operation} requires an explicit reason"
+                );
+                ((*path).to_string(), *operation)
+            })
+            .collect();
+        assert_eq!(
+            observed, expected,
+            "the raw file mutation allowlist must not retain stale entries"
+        );
     }
 
     #[test]
@@ -816,7 +983,7 @@ mod tests {
             let production = production_prefix(&contents);
             for primitive in ENGINE_INTERACTION_PRIMITIVES {
                 assert!(
-                    !contains_identifier(production, primitive),
+                    !contains_identifier(&production, primitive),
                     "{relative} uses `{primitive}`; chart interaction belongs in the Aeris Charts \
                      input controller and the shared GPUI adapter"
                 );
@@ -2734,6 +2901,70 @@ jobs:
         }
     }
 
+    fn self_hosted_automatic_trigger_violation(workflow: &str) -> bool {
+        let mut in_triggers = false;
+        let has_automatic_trigger = workflow.lines().any(|line| {
+            let indentation = line.len() - line.trim_start().len();
+            let normalized = line.trim().replace(['\'', '"'], "");
+            if indentation == 0 {
+                in_triggers = normalized == "on:" || normalized.starts_with("on: ");
+            }
+            if !in_triggers {
+                return false;
+            }
+            if indentation == 0 && normalized.starts_with("jobs:") {
+                in_triggers = false;
+                return false;
+            }
+            let trigger_text = normalized
+                .strip_prefix("on:")
+                .unwrap_or(normalized.as_str());
+            trigger_text
+                .split(|character: char| {
+                    character.is_ascii_whitespace()
+                        || matches!(character, ':' | ',' | '[' | ']' | '{' | '}')
+                })
+                .any(|token| token == "push" || token == "pull_request")
+        });
+        workflow.contains("self-hosted") && has_automatic_trigger
+    }
+
+    #[test]
+    fn self_hosted_workflow_rule_rejects_push_and_pull_request_fixtures() {
+        for trigger in ["push:", "pull_request:"] {
+            let workflow =
+                format!("on:\n  {trigger}\njobs:\n  gate:\n    runs-on: [self-hosted, linux]\n");
+            assert!(
+                self_hosted_automatic_trigger_violation(&workflow),
+                "self-hosted workflow with {trigger} must be rejected"
+            );
+        }
+        for workflow in [
+            "on: [push, workflow_dispatch]\njobs:\n  gate:\n    runs-on: self-hosted\n",
+            "on:\n  'pull_request': {}\njobs:\n  gate:\n    runs-on: self-hosted\n",
+        ] {
+            assert!(self_hosted_automatic_trigger_violation(workflow));
+        }
+        assert!(!self_hosted_automatic_trigger_violation(
+            "on:\n  workflow_dispatch:\njobs:\n  gate:\n    runs-on: [self-hosted, linux]\n"
+        ));
+    }
+
+    #[test]
+    fn self_hosted_workflows_are_never_triggered_by_push_or_pull_request() {
+        for entry in fs::read_dir(repository_root().join(".github/workflows"))
+            .expect("workflow directory is readable")
+        {
+            let path = entry.expect("workflow entry is readable").path();
+            let workflow = fs::read_to_string(&path).expect("workflow");
+            assert!(
+                !self_hosted_automatic_trigger_violation(&workflow),
+                "{} uses a self-hosted runner and must remain manual-dispatch only",
+                relative_string(&path)
+            );
+        }
+    }
+
     #[test]
     fn live_market_gates_use_public_chart_source() {
         let workflow = manifest(".github/workflows/live_market_gates.yml");
@@ -2969,7 +3200,7 @@ jobs:
             if !allowed {
                 for identifier in ACCOUNT_IDENTIFIERS {
                     assert!(
-                        !contains_identifier(production, identifier),
+                        !contains_identifier(&production, identifier),
                         "{relative} owns account surface {identifier} outside its boundary"
                     );
                 }

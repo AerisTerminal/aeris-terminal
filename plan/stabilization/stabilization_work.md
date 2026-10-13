@@ -99,7 +99,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 
 | Finding | Severity | Title | Closed by | Status |
 |---|---|---|---|---|
-| MD-01 | High | A persisted 3-day chart pane cannot be restored because the workspace writer and reader disagree | M1.3 | closed in this commit |
+| MD-01 | High | A persisted 3-day chart pane cannot be restored because the workspace writer and reader disagree | M1.3 | closed in ab5ff341 |
 | MD-02 | High | The stalled-live recovery watchdog only works for tastytrade | M2.6 (market), M4.8 (trading) | open |
 | MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | open |
 | MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | open |
@@ -138,23 +138,23 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | UI-08 | Medium | Trading state duplicated per pane and polled from the render path | M6.10 | open |
 | UI-09 | Medium | Persistence lacks versioning, duplicates atomic-write logic, and silently resets on corruption | M7.7 (duplication/backup), M7.8 | open |
 | UI-10 | Medium | Control flow depends on matching display strings | M5.1 (runtime part), M6.8, M6.11 | open |
-| UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | exit park closed in this commit; remainder open |
+| UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | exit park closed in 3c42981b; remainder open |
 | UI-12 | Medium (bloat; not a runtime risk) | Dormant account and placeholder code compiled into production | M7.2 | open |
 | UI-13 | Low | Hardcoded colours outside the design system | M7.1 | open |
 | UI-14 | Medium | Chart analytics and transforms in the integration glue | M7.3 (requests), M7.9 (hollow), M7.10 (sweeps), M7.11 (tape) | open |
 | UI-15 | Medium | Tests are coupled to implementation details | M7.12 | open |
 | UI-16 | Low | Frame loop does unrelated work on every frame | M7.6 | open |
 | PL-01 | High | Dormant release, launcher, rollout, and updater stack | M8.1 (kept and isolated per D2) | open |
-| PL-02 | High | `unsafe_code` forbid is not enforced in platform_runtime | M1.5 (start), M8.3 | platform_sys boundary started in this commit; remaining FFI migration open |
-| PL-03 | High | Diagnostics are lost in Windows release builds; no panic hook or log file | M1.7 | closed in this commit |
-| PL-04 | High | No single-instance lock | M1.8 | closed in this commit |
-| PL-05 | Medium-High | Trading SQLite store lacks busy timeout, integrity check, and corruption recovery | M1.9 | closed in this commit |
-| PL-06 | Medium | Five atomic-write implementations; trading `write_atomic` is not atomic | M1.5 (primitive), M1.6 | closed in this commit |
-| PL-07 | Medium | Dormant account_runtime with latent defects and a heavy dependency stack | M1.4 (part), M8.4 (rest) | token safety closed in this commit; remainder open |
+| PL-02 | High | `unsafe_code` forbid is not enforced in platform_runtime | M1.5 (start), M8.3 | platform_sys boundary started in 3c42981b; remaining FFI migration open |
+| PL-03 | High | Diagnostics are lost in Windows release builds; no panic hook or log file | M1.7 | closed in 3c42981b |
+| PL-04 | High | No single-instance lock | M1.8 | closed in 3c42981b |
+| PL-05 | Medium-High | Trading SQLite store lacks busy timeout, integrity check, and corruption recovery | M1.9 | closed in 3c42981b |
+| PL-06 | Medium | Five atomic-write implementations; trading `write_atomic` is not atomic | M1.5 (primitive), M1.6 | closed in 3c42981b |
+| PL-07 | Medium | Dormant account_runtime with latent defects and a heavy dependency stack | M1.4 (part), M8.4 (rest) | token safety closed in 3c42981b; remainder open |
 | PL-08 | Medium | `naming_check` pins source text and is co-edited with the code it checks | M8.12 | open |
-| PL-09 | High | CI is manual-only | M1.2 | closed in this commit |
+| PL-09 | High | CI is manual-only | M1.2 | closed in 63a71463 |
 | PL-10 | Medium | Stale physical-pacing tooling and display_timing module | M8.3 (display_timing), M8.11 | open |
-| PL-11 | Low | `plan/` directory contradicts the AGENTS documentation rule | M1.1 (rule change; `plan/` kept per D15), M8.12 (Readme/.gitignore part) | closed in this commit |
+| PL-11 | Low | `plan/` directory contradicts the AGENTS documentation rule | M1.1 (rule change; `plan/` kept per D15), M8.12 (Readme/.gitignore part) | closed in 853a3916 |
 | PL-12 | Medium | Vendored `gpui_base` is unlinted and oversized | M8.11 | open |
 | PL-13 | Medium | `study_sdk` depends on `market_runtime` | M8.9 (accepted facade; see architecture.md 2.2 rule 8) | open |
 | PL-14 | Low-Medium | `contracts` mixes in-process DTOs with persisted schema | M8.9 | open |
@@ -172,8 +172,8 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | LC-07 | Medium | Authenticode checked via PowerShell text parsing; silently skipped without a thumbprint | M8.2 | open |
 | LC-08 | Medium | Block-delivery errors swallowed without a record | M8.6 | open |
 | LC-09 | Medium | Probation misses a hung or parked desktop | M8.8 | open |
-| LC-10 | Medium | Some release publishes are not durable (plain renames) | M1.5 (primitive), M1.6 | closed in this commit |
-| LC-11 | Medium | Readiness report written non-atomically; schema declared twice | M1.6 (durable-write part), M8.5 | durable write closed in this commit; shared schema remains open |
+| LC-10 | Medium | Some release publishes are not durable (plain renames) | M1.5 (primitive), M1.6 | closed in 3c42981b |
+| LC-11 | Medium | Readiness report written non-atomically; schema declared twice | M1.6 (durable-write part), M8.5 | durable write closed in 3c42981b; shared schema remains open |
 | LC-12 | High | Uninstall deletes user data without asking; Axiusflow installer lines remain | M8.6 | open |
 | LC-13 | Low | `.bat` self-delete with unescaped paths | M8.2 | open |
 | LC-14 | Low | Launcher shows errors by spawning PowerShell | M8.2 | open |
@@ -184,11 +184,11 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | LC-19 | Low | `minimum_version` mixes product semver with generation numbering | M8.6 | open |
 | LC-20 | Low | Six build-time release variables read in five places; partial config compiles silently | M8.2 | open |
 | LC-21 | Medium | No end-to-end download, readiness-schema contract, producer or durable-write crash tests | M8.7 | open |
-| AC-01 | High | Tokens derive `Clone + Debug`; any `{:?}` leaks them | M1.4 | closed in this commit |
+| AC-01 | High | Tokens derive `Clone + Debug`; any `{:?}` leaks them | M1.4 | closed in 3c42981b |
 | AC-02 | Medium | Profile vault limit (4096) exceeds the Windows 2560-byte cap; no size precheck | M8.4 | open |
 | AC-03 | Medium | Vault I/O runs under the account state mutex | M8.4 | open |
 | AC-04 | High (when enabled) | OIDC issuer comes from a runtime environment variable | M8.4 | open |
-| AC-05 | High | Exit path can park the thread forever, leaving a zombie process | M1.4 | closed in this commit |
+| AC-05 | High | Exit path can park the thread forever, leaving a zombie process | M1.4 | closed in 3c42981b |
 | AC-06 | Medium | Poisoned credential-access mutex fails permanently | M8.4 | open |
 | AC-07 | Medium | GPUI reqwest client installed only to fetch the avatar image | M8.10 | open |
 | AC-08 | Info | Unverified that an empty issuer spawns no network work | M8.4 | open |
@@ -243,26 +243,34 @@ Status: in progress
   - Verification: full local gate green with `AERIS_RITHMIC_KIT_DISABLED=1` (VAL-FND-006); the
     post-push GitHub Actions run URL is recorded here by the orchestrator after the milestone push.
   - Closes PL-09.
+  - Scrutiny follow-up: every workflow now rejects self-hosted runners combined with `push` or
+    `pull_request`, including inline and quoted YAML trigger forms; live and macOS lanes remain manual-only.
 - [x] M1.3 unified-interval-mapping - Fix Day3 workspace restore with one runtime-owned interval/cadence mapping
   - `market_runtime::cadence` now owns interval resolution and the legacy inverse; workspace panes persist stable `ChartInterval` labels.
   - Both legacy Day3 encodings restore, unsupported panes are repaired or skipped with a notice, and desktop cadence construction is forbidden.
   - Hyperliquid's official candle-snapshot contract and a representative public `3d` response were checked first; opens were UTC-aligned and exactly 259,200,000 milliseconds apart.
   - Verified by runtime/desktop round-trip, legacy migration, repair-notice, naming, and real Hyperliquid 3D restart checks.
 - [x] M1.4 bounded-exit-and-secret-tokens - Exit never parks forever; tokens are redacted and zeroized
+  - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Exit and readiness perform one bounded account-refresh quiesce wait; failure is logged and exits nonzero without parking.
   - `VerifiedTokens` now uses non-cloneable, zeroizing `SecretToken` values with redacted debug output.
 - [x] M1.5 platform-sys-durable-writer - New `platform_sys` crate with the single durable file writer and unsafe isolation rule
+  - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added the leaf `platform_sys` crate, durable staged-file primitives, crash/drop tests, and an exact interim unsafe allowlist.
 - [x] M1.6 adopt-durable-writer - Replace every hand-rolled file writer, including the non-atomic trading export
+  - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Workspace, chart chrome, trading export, readiness, lifecycle, launcher and chart export writes use the durable writer.
   - Removed write-time `.bak` rotation and verified uncommitted trading exports preserve the previous file.
 - [x] M1.7 diagnostics-log-sink-panic-hook - Rotating log file, panic crash files and a fatal-startup dialog
+  - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added bounded rotating logs, durable panic reports, native fatal dialogs and debug-only `--force-diagnostics-panic`.
   - Validation produced `logs/aeris.log` and one crash report containing the forced panic and backtrace.
 - [x] M1.8 single-instance-and-validation-mode - Per-data-folder instance lock and validation mode with an isolated vault namespace
+  - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added safe `--validation-root`, hashed validation vault namespaces, scoped cTrader borrowing and per-root instance locks.
   - Readiness schema 5 reports the lock, log path and validation context; validation disables release side effects.
 - [x] M1.9 sqlite-hardening-migrations - SQLite busy timeout, integrity check, quarantine, table-driven migrations and pre-migration backup
+  - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added quick-check corruption errors, confirmed-only quarantine, contiguous migrations, pre-migration backups and clean checkpoints.
   - A 999,424-byte fixture with 500 executions and 2,000 user records measured `quick_check` at 2.4027 ms.
 
@@ -386,29 +394,30 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
-- Desktop production code stores `ChartInterval` and never constructs `SeriesCadence`; the sole mapping belongs
-  to `market_runtime::cadence` and is enforced by `desktop_never_constructs_series_cadence` (M1.3, this commit).
-
 - `plan/stabilization/` is the one sanctioned planning location in the repo; the "no planning
-  documents" rule applies everywhere else (M1.1, this commit).
+  documents" rule applies everywhere else (M1.1, 853a3916).
 - Every feature commit updates `plan/stabilization/stabilization_work.md` in the same commit: check the
   item, note the findings it closes, append a progress-log line, and record any new restriction here
-  (M1.1, this commit).
+  (M1.1, 853a3916).
 - Every commit that introduces or changes an architecture restriction (a `tools/naming_check` rule, a
   crate boundary, a writer or CI rule) also updates the repo `AGENTS.md` in the same commit (M1.1,
-  this commit).
+  853a3916).
 - CI runs on GitHub-hosted runners on `push`/`pull_request` to `main` and `workflow_dispatch`:
   `windows-latest` runs the full local gate and `ubuntu-latest` runs fmt plus naming_check, with
   read-only `permissions`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1`.
   `pull_request_target`, `secrets.` references and self-hosted runners are forbidden on the
-  pull-request path; `tools/naming_check` enforces the shape (M1.2, this commit).
+  pull-request path; `tools/naming_check` enforces the shape (M1.2, 63a71463).
+- Desktop production code stores `ChartInterval` and never constructs `SeriesCadence`; the sole mapping belongs
+  to `market_runtime::cadence` and is enforced by `desktop_never_constructs_series_cadence` (M1.3, ab5ff341).
 - `platform_sys` is the only new unsafe boundary. Only its platform-specific source files may add unsafe code;
-  the remaining pre-existing `platform_runtime` FFI files stay on an exact interim allowlist until M8.3.
+  the remaining pre-existing `platform_runtime` FFI files stay on an exact interim allowlist until M8.3
+  (M1.5, 3c42981b).
 - Durable file publication goes through `platform_sys::fs`; production raw `fs::write` and `fs::rename` calls are
-  rejected outside the exact lifecycle/build allowlist.
-- Secret-bearing types use reviewed redacting wrappers and cannot derive or use debug formatting in production.
+  rejected outside the exact lifecycle/build allowlist (M1.6, 3c42981b).
+- Secret-bearing types use reviewed redacting wrappers and cannot derive or use debug formatting in production
+  (M1.7, 3c42981b).
 - Each data root has one process owner. Validation roots and vault namespaces are isolated unless the explicit
-  stored-cTrader borrowing flag is present.
+  stored-cTrader borrowing flag is present (M1.8, 3c42981b).
 
 ## 6. Progress log
 
@@ -423,6 +432,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.7 feat(foundations): harden lifecycle persistence and diagnostics - added rotating logs, durable panic reports, fatal dialogs and `--force-diagnostics-panic`.
 - 2026-10-13 M1.8 feat(foundations): harden lifecycle persistence and diagnostics - added validation-root isolation, vault namespaces, readiness schema 5 and per-root instance locking.
 - 2026-10-13 M1.9 feat(foundations): harden lifecycle persistence and diagnostics - hardened SQLite open/shutdown, migrations, backups and confirmed-only corruption quarantine.
+- 2026-10-13 M1.2 fix(ci): enforce safe triggers across every workflow - closed scrutiny B1 with cross-workflow self-hosted trigger checks and repaired M1 tracking metadata.
 
 ## 7. Known gaps / deferred
 
