@@ -245,6 +245,8 @@ Status: in progress
   - Closes PL-09.
   - Scrutiny follow-up: every workflow now rejects self-hosted runners combined with `push` or
     `pull_request`, including inline and quoted YAML trigger forms; live and macOS lanes remain manual-only.
+  - User-testing follow-up: the live_market_gates header now distinguishes workflow_dispatch-only
+    self-hosted live lanes from GitHub-hosted push/pull-request CI; no trigger or runner changed.
 - [x] M1.3 unified-interval-mapping - Fix Day3 workspace restore with one runtime-owned interval/cadence mapping
   - `market_runtime::cadence` now owns interval resolution and the legacy inverse; workspace panes persist stable `ChartInterval` labels.
   - Both legacy Day3 encodings restore, unsupported panes are repaired or skipped with a notice, and desktop cadence construction is forbidden.
@@ -470,6 +472,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.6 fix(naming): label source-policy failures accurately - corrected the shared naming_check diagnostic heading for secret-Debug failures.
 - 2026-10-13 M1.7 fix(desktop): trigger forced panic after store startup - moved the debug-only panic after service and market setup so the crashing session leaves earlier diagnostics.
 - 2026-10-13 M1.8 fix(validation): report only real cTrader venue attachments - corrected attachment diagnostics and covered root overlap and exact-key vault read/write isolation.
+- 2026-10-13 M1.2 fix(ci): correct live gate runner guidance - removed the obsolete hosted-runner ban from the live gate comment without changing workflow behavior.
 
 ## 7. Known gaps / deferred
 

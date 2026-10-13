@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   hyperliquid:
-    # Self-hosted like every other lane: the account carries no paid Actions
-    # quota, so GitHub-hosted runners are forbidden. The public feed needs no
-    # credentials, so this gate runs on any networked lane hardware.
+    # Live gates stay workflow_dispatch-only on self-hosted hardware. Unlike
+    # these live lanes, deterministic CI runs on GitHub-hosted runners for
+    # pushes and pull requests. Hyperliquid needs no credentials here.
     runs-on: [self-hosted, axiusflow, linux]
     timeout-minutes: 45
     steps:
