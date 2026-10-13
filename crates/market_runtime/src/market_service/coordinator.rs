@@ -1,8 +1,8 @@
 use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
-    ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DeferredHistoryRequest,
-    DemandWaiter, Duration, EngineError, GenerationId, HistoryRange, InstallProviderInstrument,
-    Instant, LiveHistoryState, MAXIMUM_STUDIES, MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS,
+    ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DemandWaiter, Duration,
+    EngineError, GenerationId, InstallProviderInstrument, Instant, LiveHistoryState,
+    MAXIMUM_STUDIES, MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS,
     MAXIMUM_STUDY_POINTS_PER_OUTPUT, MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
     MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS, MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine,
     MarketServiceStatus, MarketStream, NonZeroUsize, Ordering, PriceAlertRegistry,
@@ -31,18 +31,25 @@ pub(super) struct OwnedCoordinatorChannels {
 
 pub(super) fn spawn_coordinator(
     engine: MarketEngine,
-    mut channels: OwnedCoordinatorChannels,
+    channels: OwnedCoordinatorChannels,
     shutdown: Arc<AtomicBool>,
     clock: Arc<dyn super::clock::Clock>,
 ) -> Result<thread::JoinHandle<()>, String> {
     thread::Builder::new()
         .name("aeris-market-engine".to_string())
         .spawn(move || {
+            let OwnedCoordinatorChannels {
+                commands,
+                mut providers,
+            } = channels;
             {
-                let providers = channels.providers.dispatch();
-                run_coordinator(engine, &channels.commands, providers, &shutdown, clock);
+                let dispatch = providers.dispatch();
+                run_coordinator(engine, &commands, dispatch, &shutdown, clock);
             }
-            let panicked = channels.providers.cancel_and_join();
+            // A history worker may be blocked on a full bounded completion
+            // channel. Close that receiver before joining provider workers.
+            drop(commands);
+            let panicked = providers.cancel_and_join();
             assert!(
                 panicked.is_empty(),
                 "provider runtime workers panicked during shutdown: {}",
@@ -145,14 +152,7 @@ impl<'a> Coordinator<'a> {
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
-            history_inflight: BTreeMap::new(),
-            history_deferred: BTreeMap::new(),
-            history_confirmed_empty: BTreeMap::new(),
-            history_backwards_exhausted: BTreeSet::new(),
-            history_current_empty: BTreeMap::new(),
-            detached_history: BTreeSet::new(),
-            history_cancellations: BTreeMap::new(),
-            history_retries: BTreeMap::new(),
+            history: super::history::tracker::HistoryTracker::default(),
             events: BTreeMap::new(),
             series_live: super::SeriesLiveMap::default(),
             order_books: BTreeMap::new(),
@@ -528,26 +528,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
-    pub(super) history_inflight: BTreeMap<(BarSeriesKey, ProviderGeneration), Option<HistoryRange>>,
-    pub(super) history_deferred:
-        BTreeMap<(BarSeriesKey, ProviderGeneration), DeferredHistoryRequest>,
-    /// Provider-confirmed empty suffix for the current backwards history edge.
-    /// This is request coverage metadata only; canonical bars remain owned by
-    /// `MarketEngine::SeriesStore`.
-    pub(super) history_confirmed_empty: BTreeMap<(BarSeriesKey, ProviderGeneration), HistoryRange>,
-    /// Series for which a provider snapshot proved no older candles are available.
-    pub(super) history_backwards_exhausted: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
-    /// Current covering requests the provider answered with no bars; bounded
-    /// to demanded series of the current provider generation.
-    pub(super) history_current_empty:
-        BTreeMap<(BarSeriesKey, ProviderGeneration), super::EmptyCurrentHistory>,
-    /// Series whose bounded canonical working window is intentionally away from
-    /// the live tail. The provider handoff remains active; live publication is
-    /// gated until current history reseeds this canonical window.
-    pub(super) detached_history: BTreeSet<(BarSeriesKey, ProviderGeneration)>,
-    pub(super) history_cancellations: BTreeMap<(BarSeriesKey, ProviderGeneration), Arc<AtomicBool>>,
-    pub(super) history_retries:
-        BTreeMap<(BarSeriesKey, ProviderGeneration), (Instant, u8, Option<HistoryRange>)>,
+    pub(super) history: super::history::tracker::HistoryTracker,
     pub(super) events: BTreeMap<ConsumerId, ConsumerEvents>,
     pub(super) series_live: super::SeriesLiveMap,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
@@ -602,9 +583,7 @@ impl Coordinator<'_> {
     pub(super) fn begin_shutdown(&mut self) {
         self.publish_rithmic_live();
         self.publish_candle_live();
-        for stop in self.history_cancellations.values() {
-            stop.store(true, Ordering::Release);
-        }
+        self.history.cancel_all();
         for provider in self.providers.records.keys().copied().collect::<Vec<_>>() {
             let _ = self
                 .providers
@@ -624,17 +603,20 @@ impl Coordinator<'_> {
                     wake.pending.store(false, Ordering::Release);
                 }
             }
-            Command::HistoryCompleted(series, generation, range, result, epoch) => {
-                if !self.provider_epochs.accepts(&series.provider_id, epoch)
+            Command::HistoryCompleted(series, generation, range, result, ticket) => {
+                if !self
+                    .provider_epochs
+                    .accepts(&series.provider_id, ticket.provider)
                     || self
                         .engine
                         .provider_status(&series.provider_id)
                         .and_then(|status| status.generation)
                         != Some(generation)
+                    || ticket.series != series
                 {
                     self.provider_epochs.drop_history();
                 } else {
-                    self.history_completed(&series, generation, range, result);
+                    self.history_completed(&ticket, generation, range, result);
                 }
             }
             command @ (Command::BrokerAuthorizationChanged(..)
@@ -1557,11 +1539,10 @@ mod tests {
 
     use super::*;
     use crate::market_service::{
-        FormingBar, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
-        HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistorySnapshot,
-        INITIAL_HISTORY_BARS, LiveHistoryState, MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
-        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderDisplayDepthEvent,
-        ProviderRealtimeDispatch, SeriesLoadState,
+        FormingBar, HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange,
+        HistorySnapshot, INITIAL_HISTORY_BARS, LiveHistoryState, MAXIMUM_HISTORY_RETRIES,
+        MAXIMUM_STORED_BARS, ProviderCatalogDispatch, ProviderDispatchRecord,
+        ProviderDisplayDepthEvent, ProviderRealtimeDispatch, SeriesLoadState,
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -1768,14 +1749,7 @@ mod tests {
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
-            history_inflight: BTreeMap::new(),
-            history_deferred: BTreeMap::new(),
-            history_confirmed_empty: BTreeMap::new(),
-            history_backwards_exhausted: BTreeSet::new(),
-            history_current_empty: BTreeMap::new(),
-            detached_history: BTreeSet::new(),
-            history_cancellations: BTreeMap::new(),
-            history_retries: BTreeMap::new(),
+            history: super::super::history::tracker::HistoryTracker::default(),
             events: BTreeMap::new(),
             series_live: super::super::SeriesLiveMap::default(),
             order_books: BTreeMap::new(),
@@ -1806,23 +1780,75 @@ mod tests {
             .expect("consumer registers");
     }
 
+    fn history_epoch(
+        coordinator: &mut Coordinator<'_>,
+        provider: &str,
+        generation: ProviderGeneration,
+    ) -> aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag> {
+        coordinator
+            .provider_epochs
+            .stamp(provider, generation.0.get())
+            .expect("provider epoch")
+    }
+
+    fn history_ticket(
+        coordinator: &mut Coordinator<'_>,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+    ) -> super::super::history::tracker::HistoryTicket {
+        let epoch = history_epoch(coordinator, &series.provider_id, generation);
+        if let Some((ticket, active_range)) = coordinator.history.inflight(series, epoch)
+            && active_range == range
+        {
+            return ticket.clone();
+        }
+        coordinator.history.begin(
+            series.clone(),
+            epoch,
+            if range.is_some() {
+                super::super::history::tracker::LaneKind::Backfill
+            } else {
+                super::super::history::tracker::LaneKind::Current
+            },
+            range,
+            coordinator.clock.as_ref(),
+        )
+    }
+
+    fn finish_history(
+        coordinator: &mut Coordinator<'_>,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        range: Option<HistoryRange>,
+        result: Result<super::super::HistorySnapshot, String>,
+    ) {
+        let ticket = history_ticket(coordinator, series, generation, range);
+        coordinator.history_completed(&ticket, generation, range, result);
+    }
+
     #[test]
     fn exhausted_current_history_keeps_one_cooldown_recovery_ticket() {
         let mut coordinator = coordinator();
         let selected = series();
         let generation = ProviderGeneration(nonzero(1));
+        let epoch = history_epoch(&mut coordinator, &selected.provider_id, generation);
         for _ in 0..super::super::MAXIMUM_HISTORY_RETRIES {
             assert!(coordinator.schedule_history_retry(&selected, generation, None, "transient"));
         }
         assert!(!coordinator.schedule_history_retry(&selected, generation, None, "transient"));
         let ticket = coordinator
-            .history_retries
-            .get(&(selected, generation))
+            .history
+            .pending(
+                &selected,
+                epoch,
+                super::super::history::tracker::LaneKind::Current,
+            )
             .unwrap();
-        assert_eq!(ticket.1, 0);
-        assert!(ticket.2.is_none());
+        assert_eq!(ticket.2, 0);
+        assert!(ticket.1.is_none());
         assert!(ticket.0 > Instant::now());
-        assert_eq!(coordinator.history_retries.len(), 1);
+        assert_eq!(coordinator.history.count(), 1);
     }
 
     #[test]
@@ -1833,18 +1859,32 @@ mod tests {
         coordinator.clock = clock.clone();
         let selected = series();
         let generation = ProviderGeneration(nonzero(1));
+        let epoch = history_epoch(&mut coordinator, &selected.provider_id, generation);
         assert!(coordinator.schedule_history_retry(&selected, generation, None, "transient"));
-        let deadline = coordinator.history_retries[&(selected.clone(), generation)].0;
-        assert_eq!(
-            deadline,
-            clock.monotonic() + super::super::HISTORY_RETRY_DELAY
-        );
+        let deadline = coordinator
+            .history
+            .pending(
+                &selected,
+                epoch,
+                super::super::history::tracker::LaneKind::Current,
+            )
+            .unwrap()
+            .0;
+        assert!(deadline > clock.monotonic());
         clock.advance(Duration::from_millis(250));
         assert_eq!(
-            coordinator.history_retries[&(selected.clone(), generation)].0,
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Current
+                )
+                .unwrap()
+                .0,
             deadline
         );
-        clock.advance(Duration::from_millis(750));
+        clock.advance(deadline.saturating_duration_since(clock.monotonic()));
         assert_eq!(clock.monotonic(), deadline);
     }
 
@@ -2014,12 +2054,7 @@ mod tests {
         assert!(!coordinator.engine.has_subscription(&selected));
         assert!(!coordinator.series_live.trade_contains_key(&selected));
         assert!(!coordinator.pending.contains_key(&selected));
-        assert!(
-            !coordinator
-                .history_inflight
-                .keys()
-                .any(|(series, _)| series == &selected)
-        );
+        assert_eq!(coordinator.history.count(), 0);
     }
 
     fn minute_bars(start_minute: i64, count: usize) -> Vec<MarketBar> {
@@ -2345,6 +2380,14 @@ mod tests {
             .engine
             .begin_provider_session("rithmic", provider_generation)
             .expect("provider session begins");
+        let epoch = history_epoch(&mut coordinator, &series.provider_id, provider_generation);
+        coordinator.history.begin(
+            series.clone(),
+            epoch,
+            super::super::history::tracker::LaneKind::Current,
+            None,
+            coordinator.clock.as_ref(),
+        );
         register(&mut coordinator, consumer_id);
         coordinator
             .engine
@@ -2445,9 +2488,17 @@ mod tests {
             .engine
             .install_history(first_generation, &selected, 2, 0, current.clone())
             .expect("first generation history installs");
+        let first_epoch = history_epoch(&mut coordinator, &selected.provider_id, first_generation);
+        coordinator.history.begin(
+            selected.clone(),
+            first_epoch,
+            super::super::history::tracker::LaneKind::Current,
+            None,
+            coordinator.clock.as_ref(),
+        );
         coordinator
-            .detached_history
-            .insert((selected.clone(), first_generation));
+            .history
+            .set_detached(&selected, first_epoch, true, coordinator.clock.as_ref());
         let before = coordinator
             .engine
             .series_snapshot(&selected)
@@ -2462,7 +2513,8 @@ mod tests {
             .engine
             .begin_provider_session("rithmic", second_generation)
             .expect("second provider session begins");
-        coordinator.history_completed(
+        finish_history(
+            &mut coordinator,
             &selected,
             first_generation,
             None,
@@ -2481,17 +2533,11 @@ mod tests {
             .series_snapshot(&selected)
             .expect("stale completion cannot replace cached history");
         assert_eq!(after.bars, before.bars);
-        assert!(
-            !coordinator
-                .detached_history
-                .contains(&(selected.clone(), second_generation))
-        );
+        let second_epoch =
+            history_epoch(&mut coordinator, &selected.provider_id, second_generation);
+        assert!(!coordinator.history.is_detached(&selected, second_epoch));
         coordinator.prune_history_tracking();
-        assert!(
-            !coordinator
-                .detached_history
-                .contains(&(selected, first_generation))
-        );
+        assert!(!coordinator.history.is_detached(&selected, first_epoch));
     }
 
     #[test]
@@ -2520,32 +2566,58 @@ mod tests {
                 catalog: ProviderCatalogDispatch::Disabled,
             },
         );
-        coordinator.history_completed(
+        finish_history(
+            &mut coordinator,
             &series,
             provider_generation,
             None,
             Err("history channel did not finish".into()),
         );
-        let key = (series.clone(), provider_generation);
-        assert!(coordinator.history_retries.contains_key(&key));
-        coordinator
-            .history_retries
-            .get_mut(&key)
-            .expect("retry ticket")
-            .0 = Instant::now();
-        coordinator.retry_history();
+        let epoch = history_epoch(&mut coordinator, &series.provider_id, provider_generation);
         assert!(
-            history_rx.try_recv().is_ok(),
-            "retry reached the history worker"
+            coordinator
+                .history
+                .pending(
+                    &series,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Current
+                )
+                .is_some()
         );
-        coordinator.history_completed(
+        if let Some((deadline, _, _)) = coordinator.history.pending(
             &series,
+            epoch,
+            super::super::history::tracker::LaneKind::Current,
+        ) {
+            let clock = Arc::new(super::super::clock::ScriptedClock::new(1_000_000_000));
+            // The next retry is driven by the injected monotonic clock.
+            clock.advance(
+                deadline.saturating_duration_since(coordinator.clock.monotonic())
+                    + Duration::from_secs(1),
+            );
+            coordinator.clock = clock;
+        }
+        coordinator.retry_history();
+        let retried = history_rx
+            .try_recv()
+            .expect("retry reached the history worker");
+        coordinator.history_completed(
+            &retried.ticket,
             provider_generation,
             None,
             Ok(current_rejoin_snapshot(live_timestamp)),
         );
         coordinator.publish_rithmic_live();
-        assert!(!coordinator.history_retries.contains_key(&key));
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &series,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Current
+                )
+                .is_none()
+        );
         assert!(
             coordinator
                 .engine
@@ -2573,11 +2645,12 @@ mod tests {
             .engine
             .begin_provider_session("rithmic", second_generation)
             .expect("second provider session begins");
-        let stale_key = (selected.clone(), first_generation);
-        coordinator.history_inflight.insert(stale_key.clone(), None);
-        coordinator.history_deferred.insert(
-            stale_key.clone(),
-            DeferredHistoryRequest::Range(HistoryRange {
+        let ticket = history_ticket(&mut coordinator, &selected, first_generation, None);
+        coordinator.history.defer_next(
+            &selected,
+            ticket.provider,
+            super::super::history::tracker::LaneKind::Backfill,
+            Some(HistoryRange {
                 start_unix_nanos: 0,
                 end_unix_nanos: 60_000_000_000,
             }),
@@ -2586,7 +2659,7 @@ mod tests {
         assert!(
             coordinator
                 .accept_history_completion(
-                    &selected,
+                    &ticket,
                     first_generation,
                     None,
                     Ok(HistorySnapshot {
@@ -2600,14 +2673,8 @@ mod tests {
                 )
                 .is_none()
         );
-        assert!(!coordinator.history_inflight.contains_key(&stale_key));
-        assert!(!coordinator.history_deferred.contains_key(&stale_key));
-        assert!(
-            !coordinator
-                .history_inflight
-                .contains_key(&(selected.clone(), second_generation))
-        );
-        assert!(coordinator.history_retries.is_empty());
+        coordinator.prune_history_tracking();
+        assert_eq!(coordinator.history.count(), 0);
     }
 
     #[test]
@@ -2625,14 +2692,13 @@ mod tests {
             .engine
             .set_series_demand(consumer_id, generation(1), &selected)
             .expect("foreground demand subscribes");
-        let stale_key = (selected.clone(), first_generation);
-        let stop = Arc::new(AtomicBool::new(false));
-        coordinator
-            .history_cancellations
-            .insert(stale_key.clone(), Arc::clone(&stop));
-        coordinator.history_deferred.insert(
-            stale_key.clone(),
-            DeferredHistoryRequest::Range(HistoryRange {
+        let ticket = history_ticket(&mut coordinator, &selected, first_generation, None);
+        let stop = coordinator.history.cancel_token(&ticket);
+        coordinator.history.defer_next(
+            &selected,
+            ticket.provider,
+            super::super::history::tracker::LaneKind::Backfill,
+            Some(HistoryRange {
                 start_unix_nanos: 0,
                 end_unix_nanos: 60_000_000_000,
             }),
@@ -2652,7 +2718,7 @@ mod tests {
         coordinator.prune_history_tracking();
 
         assert!(stop.load(Ordering::Acquire));
-        assert!(!coordinator.history_deferred.contains_key(&stale_key));
+        assert_eq!(coordinator.history.count(), 0);
     }
 
     #[test]
@@ -2667,8 +2733,8 @@ mod tests {
             detached_snapshot,
         } = detached_rithmic_fixture();
         let minute = 60_i64 * 1_000_000_000;
-        let detached_key = (series.clone(), provider_generation);
-        assert!(coordinator.detached_history.contains(&detached_key));
+        let epoch = history_epoch(&mut coordinator, &series.provider_id, provider_generation);
+        assert!(coordinator.history.is_detached(&series, epoch));
         assert!(
             !coordinator.series_live_if_ready(&series),
             "a historical canonical window cannot advertise live readiness"
@@ -2702,13 +2768,14 @@ mod tests {
                     .expect("recent viewport"),
             )
             .expect("recent viewport installs");
-        coordinator.history_completed(
+        finish_history(
+            &mut coordinator,
             &series,
             provider_generation,
             None,
             Ok(current_rejoin_snapshot(live_timestamp)),
         );
-        assert!(!coordinator.detached_history.contains(&detached_key));
+        assert!(!coordinator.history.is_detached(&series, epoch));
         coordinator.publish_rithmic_live();
         let rejoined = coordinator
             .engine
@@ -3819,16 +3886,34 @@ mod tests {
             .set_resource_class(consumer, ConsumerResourceClass::Background)
             .expect("consumer backgrounds");
         assert!(!coordinator.engine.has_subscription(&first));
-        let empty_key = (first.clone(), ProviderGeneration(nonzero(1)));
-        coordinator.history_confirmed_empty.insert(
-            empty_key.clone(),
-            HistoryRange {
-                start_unix_nanos: 0,
-                end_unix_nanos: 60_000_000_000,
-            },
+        let epoch = history_epoch(
+            &mut coordinator,
+            &first.provider_id,
+            ProviderGeneration(nonzero(1)),
         );
+        coordinator.history.begin(
+            first.clone(),
+            epoch,
+            super::super::history::tracker::LaneKind::Backfill,
+            None,
+            coordinator.clock.as_ref(),
+        );
+        coordinator
+            .history
+            .coverage_mut(&first, epoch)
+            .unwrap()
+            .confirmed_empty = Some(HistoryRange {
+            start_unix_nanos: 0,
+            end_unix_nanos: 60_000_000_000,
+        });
         coordinator.prune_history_tracking();
-        assert!(coordinator.history_confirmed_empty.contains_key(&empty_key));
+        assert!(
+            coordinator
+                .history
+                .coverage(&first, epoch)
+                .and_then(|coverage| coverage.confirmed_empty)
+                .is_some()
+        );
         assert_eq!(
             coordinator.evict_unreferenced_series(),
             [] as [BarSeriesKey; 0]
@@ -3845,7 +3930,7 @@ mod tests {
             )
             .expect("replacement demand installs");
         coordinator.prune_history_tracking();
-        assert!(!coordinator.history_confirmed_empty.contains_key(&empty_key));
+        assert!(coordinator.history.coverage(&first, epoch).is_none());
         assert_eq!(coordinator.evict_unreferenced_series(), vec![first.clone()]);
         assert!(coordinator.engine.series_snapshot(&first).is_none());
     }
@@ -3863,15 +3948,17 @@ mod tests {
             start_unix_nanos: 0,
             end_unix_nanos: 60_000_000_000,
         };
-        let key = (selected.clone(), generation);
-        coordinator.history_retries.insert(
-            key.clone(),
-            (
-                Instant::now() + HISTORY_FAILED_RETRY_COOLDOWN,
-                MAXIMUM_HISTORY_RETRIES.saturating_add(1),
+        let epoch = history_epoch(&mut coordinator, &selected.provider_id, generation);
+        for _ in 0..=MAXIMUM_HISTORY_RETRIES {
+            coordinator.history.schedule(
+                selected.clone(),
+                epoch,
+                super::super::history::tracker::LaneKind::Backfill,
                 Some(failed),
-            ),
-        );
+                coordinator.clock.as_ref(),
+                false,
+            );
+        }
 
         assert!(
             coordinator
@@ -3879,7 +3966,16 @@ mod tests {
                 .is_ok(),
             "identical failed range is suppressed during cooldown"
         );
-        assert!(coordinator.history_retries.contains_key(&key));
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Backfill
+                )
+                .is_some()
+        );
 
         let older = HistoryRange {
             start_unix_nanos: -60_000_000_000,
@@ -3891,7 +3987,16 @@ mod tests {
                 .is_err(),
             "a genuinely different viewport range proceeds to provider dispatch"
         );
-        assert!(!coordinator.history_retries.contains_key(&key));
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Backfill
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -3907,10 +4012,14 @@ mod tests {
             start_unix_nanos: 0,
             end_unix_nanos: 60_000_000_000,
         };
-        let key = (selected.clone(), generation);
-        coordinator.history_retries.insert(
-            key.clone(),
-            (Instant::now() + HISTORY_RETRY_DELAY, 1, Some(failed)),
+        let epoch = history_epoch(&mut coordinator, &selected.provider_id, generation);
+        coordinator.history.schedule(
+            selected.clone(),
+            epoch,
+            super::super::history::tracker::LaneKind::Backfill,
+            Some(failed),
+            coordinator.clock.as_ref(),
+            false,
         );
 
         assert!(
@@ -3921,12 +4030,16 @@ mod tests {
         );
         assert_eq!(
             coordinator
-                .history_retries
-                .get(&key)
-                .map(|(_, attempts, range)| (*attempts, *range)),
+                .history
+                .pending(
+                    &selected,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Backfill
+                )
+                .map(|(_, range, attempts)| (attempts, range)),
             Some((1, Some(failed)))
         );
-        assert!(coordinator.history_inflight.is_empty());
+        assert!(coordinator.history.inflight(&selected, epoch).is_none());
     }
 
     #[test]
@@ -3961,11 +4074,16 @@ mod tests {
                 .is_ok(),
             "bounded queue pressure is converted into coordinator-owned retry state"
         );
+        let epoch = history_epoch(&mut coordinator, &selected.provider_id, generation);
         assert_eq!(
             coordinator
-                .history_retries
-                .get(&(selected, generation))
-                .map(|(_, attempts, queued_range)| (*attempts, *queued_range)),
+                .history
+                .pending(
+                    &selected,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Backfill
+                )
+                .map(|(_, range, attempts)| (attempts, range)),
             Some((0, Some(range)))
         );
     }
@@ -3979,12 +4097,22 @@ mod tests {
             .engine
             .begin_provider_session("rithmic", generation)
             .expect("provider session begins");
-        let key = (selected.clone(), generation);
-        coordinator.history_inflight.insert(key.clone(), None);
+        let ticket = history_ticket(&mut coordinator, &selected, generation, None);
         coordinator
             .enqueue_history_request(&selected, generation, None)
             .expect("the active page covers the duplicate demand");
-        assert!(!coordinator.history_deferred.contains_key(&key));
+        assert!(
+            coordinator
+                .history
+                .inflight(&selected, ticket.provider)
+                .is_some()
+        );
+        assert!(
+            coordinator
+                .history
+                .take_deferred(&selected, ticket.provider)
+                .is_none()
+        );
     }
 
     #[test]
@@ -4000,16 +4128,9 @@ mod tests {
             start_unix_nanos: 0,
             end_unix_nanos: 60_000_000_000,
         };
-        let key = (selected.clone(), generation);
-        coordinator
-            .history_inflight
-            .insert(key.clone(), Some(range));
-        coordinator
-            .history_retries
-            .insert(key.clone(), (Instant::now(), 1, Some(range)));
-
+        let ticket = history_ticket(&mut coordinator, &selected, generation, Some(range));
         coordinator.history_completed(
-            &selected,
+            &ticket,
             generation,
             Some(range),
             Ok(HistorySnapshot {
@@ -4022,9 +4143,29 @@ mod tests {
             }),
         );
 
-        assert_eq!(coordinator.history_confirmed_empty.get(&key), Some(&range));
-        assert!(!coordinator.history_inflight.contains_key(&key));
-        assert!(!coordinator.history_retries.contains_key(&key));
+        assert_eq!(
+            coordinator
+                .history
+                .coverage(&selected, ticket.provider)
+                .and_then(|coverage| coverage.confirmed_empty),
+            Some(range)
+        );
+        assert!(
+            coordinator
+                .history
+                .inflight(&selected, ticket.provider)
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    ticket.provider,
+                    super::super::history::tracker::LaneKind::Backfill
+                )
+                .is_none()
+        );
     }
 
     fn empty_history_snapshot(boundary_unix_nanos: i64) -> HistorySnapshot {
@@ -4160,12 +4301,14 @@ mod tests {
             phase
         );
         assert_eq!(coordinator.provider_epochs.stale_counts(), (1, 0));
+        let mut retired_ticket = super::super::fixture_history_ticket(&series);
+        retired_ticket.provider = previous;
         coordinator.handle_command(Command::HistoryCompleted(
             series.clone(),
             ProviderGeneration(nonzero(1)),
             None,
             Err("retired history".into()),
-            previous,
+            retired_ticket,
         ));
         assert_eq!(coordinator.provider_epochs.stale_counts(), (1, 1));
         assert_eq!(coordinator.engine.series_snapshot(&series), before);
@@ -4396,7 +4539,6 @@ mod tests {
         let first_generation = ProviderGeneration(nonzero(1));
         let consumer = consumer(1);
         let selected = series();
-        let key = (selected.clone(), first_generation);
         register(&mut coordinator, consumer);
         coordinator
             .events
@@ -4410,14 +4552,24 @@ mod tests {
         assert!(request.range.is_none());
 
         coordinator.history_completed(
-            &selected,
+            &request.ticket,
             first_generation,
             None,
             Ok(empty_history_snapshot(60_000_000_000)),
         );
 
-        assert!(!coordinator.history_inflight.contains_key(&key));
-        assert!(!coordinator.history_retries.contains_key(&key));
+        let epoch = request.ticket.provider;
+        assert!(coordinator.history.inflight(&selected, epoch).is_none());
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    epoch,
+                    super::super::history::tracker::LaneKind::Current
+                )
+                .is_none()
+        );
         assert!(coordinator.engine.series_snapshot(&selected).is_none());
         let events = coordinator.events.get(&consumer).expect("consumer outbox");
         assert!(
@@ -4446,17 +4598,13 @@ mod tests {
         assert_eq!(state.generation, generation(2));
         assert!(!coordinator.pending.contains_key(&selected));
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
-            RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(&selected, 1, 30_000_000_000)),
-        ));
+        send_fixture_trade(&mut coordinator, &selected, 1, 30_000_000_000);
         assert_no_history_request(
             &history_receiver,
             "a trade the empty replay already covered is not new evidence",
         );
 
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
-            RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(&selected, 2, 120_000_000_000)),
-        ));
+        send_fixture_trade(&mut coordinator, &selected, 2, 120_000_000_000);
         let request = history_receiver
             .try_recv()
             .expect("the first newer live trade allows one covering request");
@@ -4464,18 +4612,18 @@ mod tests {
         assert!(request.range.is_none());
 
         coordinator.history_completed(
-            &selected,
+            &request.ticket,
             first_generation,
             None,
             Ok(empty_history_snapshot(150_000_000_000)),
         );
         assert_eq!(
-            coordinator.history_current_empty.get(&key),
-            Some(&super::super::EmptyCurrentHistory::Final)
+            coordinator
+                .history
+                .current_empty(&selected, request.ticket.provider),
+            Some(super::super::EmptyCurrentHistory::Final)
         );
-        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
-            RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(&selected, 3, 180_000_000_000)),
-        ));
+        send_fixture_trade(&mut coordinator, &selected, 3, 180_000_000_000);
         coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
             RithmicRealtimeEvent::Heartbeat(1, None),
         ));
@@ -4492,6 +4640,17 @@ mod tests {
             .expect("a new provider generation requests covering history again");
         assert_eq!(request.provider_generation, ProviderGeneration(nonzero(2)));
         assert!(request.range.is_none());
+    }
+
+    fn send_fixture_trade(
+        coordinator: &mut Coordinator<'_>,
+        selected: &BarSeriesKey,
+        sequence: u64,
+        timestamp: i64,
+    ) {
+        coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Trade(1, rithmic_trade_for_series(selected, sequence, timestamp)),
+        ));
     }
 
     #[test]
@@ -4513,15 +4672,9 @@ mod tests {
             start_unix_nanos: 0,
             end_unix_nanos: first_timestamp,
         };
-        let key = (selected.clone(), generation);
-        coordinator
-            .history_inflight
-            .insert(key.clone(), Some(range));
-        coordinator
-            .history_retries
-            .insert(key.clone(), (Instant::now(), 1, Some(range)));
+        let ticket = history_ticket(&mut coordinator, &selected, generation, Some(range));
         coordinator.history_completed(
-            &selected,
+            &ticket,
             generation,
             Some(range),
             Ok(HistorySnapshot {
@@ -4534,9 +4687,29 @@ mod tests {
             }),
         );
 
-        assert!(coordinator.history_backwards_exhausted.contains(&key));
-        assert!(!coordinator.history_retries.contains_key(&key));
-        assert!(!coordinator.history_inflight.contains_key(&key));
+        assert!(
+            coordinator
+                .history
+                .coverage(&selected, ticket.provider)
+                .unwrap()
+                .backwards_exhausted
+        );
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    ticket.provider,
+                    super::super::history::tracker::LaneKind::Backfill
+                )
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .history
+                .inflight(&selected, ticket.provider)
+                .is_none()
+        );
         let farther_left = HistoryRange {
             start_unix_nanos: 0,
             end_unix_nanos: first_timestamp - 60_000_000_000,
@@ -4546,8 +4719,22 @@ mod tests {
                 .enqueue_history_request(&selected, generation, Some(farther_left))
                 .is_ok()
         );
-        assert!(!coordinator.history_inflight.contains_key(&key));
-        assert!(!coordinator.history_retries.contains_key(&key));
+        assert!(
+            coordinator
+                .history
+                .inflight(&selected, ticket.provider)
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    ticket.provider,
+                    super::super::history::tracker::LaneKind::Backfill
+                )
+                .is_none()
+        );
         assert!(coordinator.events.is_empty());
     }
 
@@ -4582,13 +4769,10 @@ mod tests {
             start_unix_nanos: 0,
             end_unix_nanos: first_timestamp,
         };
-        let key = (selected.clone(), provider_generation);
 
         for attempt in 0..=MAXIMUM_HISTORY_RETRIES {
-            coordinator
-                .history_inflight
-                .insert(key.clone(), Some(range));
-            coordinator.history_completed(
+            finish_history(
+                &mut coordinator,
                 &selected,
                 provider_generation,
                 Some(range),

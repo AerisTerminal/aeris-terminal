@@ -56,6 +56,11 @@ impl ProviderEpochRegistry {
             .get(provider)
             .is_some_and(|(_, current)| current == &epoch)
     }
+    pub(super) fn current(&self, provider: &str, wire: u64) -> Option<Epoch<ProviderTag>> {
+        self.active
+            .get(provider)
+            .and_then(|(number, epoch)| (*number == wire).then_some(*epoch))
+    }
 
     pub(super) fn drop_event(&mut self) {
         self.stale_events = self.stale_events.saturating_add(1);

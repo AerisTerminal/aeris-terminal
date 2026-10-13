@@ -2116,7 +2116,7 @@ impl Worker {
             request.provider_generation,
             request.range,
             result,
-            request.provider_epoch,
+            request.ticket,
         ));
     }
     fn flush_completions(&mut self) {

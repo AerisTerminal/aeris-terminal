@@ -52,18 +52,16 @@ impl Boundary {
     }
 
     fn complete(&mut self, provider_number: u64, bars: Vec<MarketBar>, forming: Option<MarketBar>) {
-        let epoch = self
-            .coordinator
-            .provider_epochs
-            .stamp("rithmic", provider_number)
-            .expect("active provider epoch");
-        self.complete_with_epoch(provider_number, epoch, bars, forming);
+        let series = self.series.clone();
+        let ticket = history_ticket(&mut self.coordinator, &series,
+            ProviderGeneration(nonzero(provider_number)), None);
+        self.complete_with_ticket(provider_number, ticket, bars, forming);
     }
 
-    fn complete_with_epoch(
+    fn complete_with_ticket(
         &mut self,
         provider_number: u64,
-        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+        ticket: super::super::super::history::tracker::HistoryTicket,
         bars: Vec<MarketBar>,
         forming: Option<MarketBar>,
     ) {
@@ -79,7 +77,7 @@ impl Boundary {
                 handoff_boundary_unix_nanos: Some(180_000_000_000),
                 backwards_exhausted: false,
             }),
-            epoch,
+            ticket,
         ));
     }
 
@@ -182,7 +180,7 @@ fn characterization_stale_generation_history_completion_is_ignored() {
         super::super::super::ProviderEvent::rithmic(RithmicRealtimeEvent::Connecting(2)),
     );
     boundary.events();
-    boundary.complete_with_epoch(1, request.provider_epoch, minute_bars(0, 3), None);
+    boundary.complete_with_ticket(1, request.ticket, minute_bars(0, 3), None);
     assert!(
         !boundary.events().iter().any(|event| {
             matches!(event, MarketRuntimeEvent::SeriesSnapshot(_))

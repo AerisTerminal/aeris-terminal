@@ -5,8 +5,6 @@ use std::{
 };
 
 const MAXIMUM_IDENTITY_BYTES: usize = 192;
-const MAXIMUM_CURSOR_BYTES: usize = 512;
-const MAXIMUM_ITEM_BYTES: usize = 1_048_576;
 
 /// Provider history dataset class.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -137,47 +135,6 @@ impl HistoryCapabilities {
             DataClass::Depth => &self.depth,
         }
     }
-
-    pub(crate) fn validate_request(
-        &self,
-        request: &HistoryPageRequest,
-        now_unix_nanos: i64,
-    ) -> Result<(), ProviderHistoryError> {
-        request.validate_identity()?;
-        if request.provider_id != self.provider_id {
-            return Err(ProviderHistoryError::InvalidIdentity("provider_id"));
-        }
-        let DatasetCapability::Supported {
-            resolutions,
-            maximum_lookback_nanos,
-            maximum_request_span_nanos,
-            maximum_page_items,
-            pagination,
-            ..
-        } = self.dataset(request.data_class)
-        else {
-            return Err(ProviderHistoryError::UnsupportedDataClass);
-        };
-        if !resolutions.contains(&request.resolution) {
-            return Err(ProviderHistoryError::UnsupportedResolution);
-        }
-        let span = request.range.span_nanos()?;
-        if span > maximum_request_span_nanos.get() {
-            return Err(ProviderHistoryError::RequestSpanExceeded);
-        }
-        let lookback = now_unix_nanos
-            .checked_sub(request.range.start_unix_nanos)
-            .and_then(|value| u64::try_from(value).ok());
-        if request.range.end_unix_nanos > now_unix_nanos
-            || lookback.is_none_or(|value| value > maximum_lookback_nanos.get())
-        {
-            return Err(ProviderHistoryError::LookbackExceeded);
-        }
-        if request.maximum_items.get() > maximum_page_items.get() {
-            return Err(ProviderHistoryError::PageLimitExceeded);
-        }
-        validate_continuation(request.continuation.as_ref(), *pagination, request.range)
-    }
 }
 
 /// Half-open requested provider time range.
@@ -187,21 +144,6 @@ pub struct HistoryRange {
     pub end_unix_nanos: i64,
 }
 
-impl HistoryRange {
-    pub(crate) fn span_nanos(self) -> Result<u64, ProviderHistoryError> {
-        let span = self
-            .end_unix_nanos
-            .checked_sub(self.start_unix_nanos)
-            .ok_or(ProviderHistoryError::InvalidIdentity("time_range"))?;
-        let span =
-            u64::try_from(span).map_err(|_| ProviderHistoryError::InvalidIdentity("time_range"))?;
-        if span == 0 {
-            return Err(ProviderHistoryError::InvalidIdentity("time_range"));
-        }
-        Ok(span)
-    }
-}
-
 /// Provider pagination token.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Continuation {
@@ -209,7 +151,7 @@ pub enum Continuation {
     EndBeforeUnixNanos(i64),
 }
 
-/// One exact page request; equality is the scheduler deduplication identity.
+/// One exact page request to a provider adapter.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct HistoryPageRequest {
     pub provider_id: String,
@@ -223,37 +165,12 @@ pub struct HistoryPageRequest {
     pub continuation: Option<Continuation>,
 }
 
-impl HistoryPageRequest {
-    fn validate_identity(&self) -> Result<(), ProviderHistoryError> {
-        validate_identifier("provider_id", &self.provider_id)?;
-        validate_identifier("account_id", &self.account_id)?;
-        validate_identifier("entitlement_revision", &self.entitlement_revision)?;
-        validate_identifier("instrument_id", &self.instrument_id)?;
-        validate_identifier("resolution", &self.resolution)?;
-        self.range.span_nanos().map(|_| ())
-    }
-}
-
 /// One bounded provider history item.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistoryItem {
     pub sequence: u64,
     pub event_time_unix_nanos: i64,
     pub payload: Vec<u8>,
-}
-
-impl HistoryItem {
-    pub(crate) fn validate(&self) -> Result<(), ProviderHistoryError> {
-        if self.sequence == 0 {
-            return Err(ProviderHistoryError::InvalidPage("zero item sequence"));
-        }
-        if self.payload.len() > MAXIMUM_ITEM_BYTES {
-            return Err(ProviderHistoryError::InvalidPage(
-                "item payload exceeds bound",
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// One provider response page and its optional next-page token.
@@ -274,57 +191,6 @@ pub trait ProviderHistoryAdapter {
     ///
     /// Returns a provider-specific transport, protocol, or entitlement failure.
     fn fetch_page(&mut self, request: &HistoryPageRequest) -> Result<HistoryPage, String>;
-}
-
-fn validate_continuation(
-    continuation: Option<&Continuation>,
-    pagination: PaginationStyle,
-    range: HistoryRange,
-) -> Result<(), ProviderHistoryError> {
-    match (continuation, pagination) {
-        (None, _)
-        | (Some(Continuation::Cursor(_)), PaginationStyle::OpaqueCursor)
-        | (Some(Continuation::EndBeforeUnixNanos(_)), PaginationStyle::EndTime) => {}
-        _ => return Err(ProviderHistoryError::InvalidContinuation),
-    }
-    if let Some(Continuation::Cursor(cursor)) = continuation
-        && (cursor.is_empty()
-            || cursor.len() > MAXIMUM_CURSOR_BYTES
-            || cursor.chars().any(char::is_control))
-    {
-        return Err(ProviderHistoryError::InvalidContinuation);
-    }
-    if let Some(Continuation::EndBeforeUnixNanos(end)) = continuation
-        && (*end <= range.start_unix_nanos || *end >= range.end_unix_nanos)
-    {
-        return Err(ProviderHistoryError::InvalidContinuation);
-    }
-    Ok(())
-}
-
-pub(crate) fn page_capability(
-    capabilities: &HistoryCapabilities,
-    request: &HistoryPageRequest,
-) -> Result<(PaginationStyle, usize), ProviderHistoryError> {
-    let DatasetCapability::Supported {
-        pagination,
-        maximum_page_items,
-        ..
-    } = capabilities.dataset(request.data_class)
-    else {
-        return Err(ProviderHistoryError::UnsupportedDataClass);
-    };
-    Ok((*pagination, maximum_page_items.get()))
-}
-
-pub(crate) fn rate_limit(
-    capabilities: &HistoryCapabilities,
-    data_class: DataClass,
-) -> Result<RateLimit, ProviderHistoryError> {
-    let DatasetCapability::Supported { rate_limit, .. } = capabilities.dataset(data_class) else {
-        return Err(ProviderHistoryError::UnsupportedDataClass);
-    };
-    Ok(*rate_limit)
 }
 
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), ProviderHistoryError> {

@@ -231,7 +231,7 @@ enum Command {
         ProviderGeneration,
         Option<HistoryRange>,
         Result<HistorySnapshot, String>,
-        aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+        history::tracker::HistoryTicket,
     ),
 }
 
@@ -355,19 +355,25 @@ impl<T> CatalogPublisher<T> {
 
 #[derive(Clone)]
 struct HistoryRequest {
-    series: BarSeriesKey,
+    ticket: history::tracker::HistoryTicket,
     provider_generation: ProviderGeneration,
-    provider_epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+    series: BarSeriesKey,
     instrument: Option<InstallProviderInstrument>,
     maximum_bars: usize,
     range: Option<HistoryRange>,
     stop: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeferredHistoryRequest {
-    Full,
-    Range(HistoryRange),
+#[cfg(test)]
+fn fixture_history_ticket(series: &BarSeriesKey) -> history::tracker::HistoryTicket {
+    use aeris_market_engine::fence::{DemandTag, EpochSequence, ProviderTag};
+    history::tracker::HistoryTicket {
+        series: series.clone(),
+        provider: EpochSequence::<ProviderTag>::default().next(),
+        demand: EpochSequence::<DemandTag>::default().next(),
+        lane: history::tracker::LaneKind::Current,
+        seq: 1,
+    }
 }
 
 /// A current (unranged) covering request that the provider answered

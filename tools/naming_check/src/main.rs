@@ -1381,7 +1381,7 @@ mod tests {
     fn durable_migration_test_boundaries_remain_present() {
         for relative in [
             "tools/run_rithmic_protocol_conformance.sh",
-            "crates/provider_history/tests/provider_history_conformance.rs",
+            "crates/market_runtime/src/market_service/history/tracker.rs",
             "crates/provider_history/tests/handoff_conformance.rs",
             "crates/contracts/tests/contracts.rs",
             "crates/market_runtime/src/market_service/tests.rs",

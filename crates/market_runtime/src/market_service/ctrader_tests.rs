@@ -1011,9 +1011,9 @@ fn history_request(
     range: Option<HistoryRange>,
 ) -> HistoryRequest {
     HistoryRequest {
+        ticket: crate::market_service::fixture_history_ticket(series),
         series: series.clone(),
         provider_generation: ProviderGeneration(NonZeroU64::new(generation).expect("generation")),
-        provider_epoch: aeris_market_engine::fence::EpochSequence::default().next(),
         instrument: Some(instrument.clone()),
         maximum_bars,
         range,

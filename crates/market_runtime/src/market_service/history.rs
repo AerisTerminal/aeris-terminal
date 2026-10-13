@@ -1,16 +1,19 @@
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, CandleHandoffSeed, Command,
-    ConsumerId, Coordinator, DeferredHistoryRequest, DemandWaiter, EMPTY_CURRENT_HISTORY_DETAIL,
+    ConsumerId, Coordinator, DemandWaiter, EMPTY_CURRENT_HISTORY_DETAIL,
     EMPTY_CURRENT_HISTORY_RETAINED_DETAIL, EmptyCurrentHistory, FailureStage, FormingBar,
-    GenerationId, HISTORY_CAPACITY_EXHAUSTED, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
-    HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest,
-    HistorySnapshot, HistorySource, INITIAL_HISTORY_BARS, InstallProviderInstrument,
-    MAXIMUM_HISTORY_BARS_PER_REQUEST, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
-    ProviderGeneration, ProviderRequest, Receiver, SeriesLoadState, SeriesSnapshot, SyncSender,
-    TradeHandoffSeed, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
-    fail_waiters, publish_state, series_state, thread, try_enqueue_history,
+    GenerationId, HISTORY_CAPACITY_EXHAUSTED, HISTORY_SERIES_HIGH_WATERMARK,
+    HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest, HistorySnapshot, HistorySource,
+    INITIAL_HISTORY_BARS, InstallProviderInstrument, MAXIMUM_HISTORY_BARS_PER_REQUEST,
+    MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering, ProviderGeneration, ProviderRequest,
+    Receiver, SeriesLoadState, SeriesSnapshot, SyncSender, TradeHandoffSeed,
+    VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage, fail_waiters,
+    publish_state, series_state, thread, try_enqueue_history,
 };
 use aeris_observability::diagnostic;
+
+pub(super) mod tracker;
+use tracker::{DeferredRequest, HistoryTicket, LaneKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewportRefillPlan {
@@ -89,22 +92,16 @@ pub(super) fn reconcile_history_repair(
     Ok(retained)
 }
 
-fn merge_deferred_history_request(
-    deferred: &mut DeferredHistoryRequest,
-    range: Option<HistoryRange>,
-) {
-    match (deferred, range) {
-        (DeferredHistoryRequest::Full, _) => {}
-        (slot, None) => *slot = DeferredHistoryRequest::Full,
-        (DeferredHistoryRequest::Range(existing), Some(range)) => {
+fn merge_deferred_request(deferred: &mut DeferredRequest, range: Option<HistoryRange>) {
+    match (*deferred, range) {
+        (DeferredRequest::Full, _) => {}
+        (DeferredRequest::Range(_), None) => *deferred = DeferredRequest::Full,
+        (DeferredRequest::Range(mut existing), Some(range)) => {
             existing.start_unix_nanos = existing.start_unix_nanos.min(range.start_unix_nanos);
             existing.end_unix_nanos = existing.end_unix_nanos.max(range.end_unix_nanos);
+            *deferred = DeferredRequest::Range(existing);
         }
     }
-}
-
-fn deferred_history_request(range: Option<HistoryRange>) -> DeferredHistoryRequest {
-    range.map_or(DeferredHistoryRequest::Full, DeferredHistoryRequest::Range)
 }
 
 pub(super) fn history_request_bar_limit(
@@ -448,7 +445,10 @@ pub(super) fn run_history_worker(
                 .position(|request| request.range.is_none())
                 .unwrap_or(0)
         } else {
-            0
+            queued
+                .iter()
+                .position(|request| request.range.is_some())
+                .unwrap_or(0)
         };
         let request = queued.remove(index);
         current_burst = if request.range.is_some() || current_burst == 3 {
@@ -461,25 +461,15 @@ pub(super) fn run_history_worker(
         } else {
             source.fetch(&request)
         };
-        let mut completion = Command::HistoryCompleted(
+        let completion = Command::HistoryCompleted(
             request.series,
             request.provider_generation,
             request.range,
             result,
-            request.provider_epoch,
+            request.ticket,
         );
-        loop {
-            if shutdown.load(Ordering::Acquire) {
-                return;
-            }
-            match completions.try_send(completion) {
-                Ok(()) => break,
-                Err(super::TrySendError::Disconnected(_)) => return,
-                Err(super::TrySendError::Full(returned)) => {
-                    completion = returned;
-                    thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }
+        if completions.send(completion).is_err() {
+            return;
         }
     }
 }
@@ -528,20 +518,15 @@ impl Coordinator<'_> {
     ) -> Result<(), &'static str> {
         match self.enqueue_history_request(series, generation, range) {
             Err(HISTORY_CAPACITY_EXHAUSTED) => {
-                if let std::collections::btree_map::Entry::Vacant(entry) =
-                    self.history_retries.entry((series.clone(), generation))
-                {
-                    entry.insert((self.clock.monotonic() + HISTORY_RETRY_DELAY, 0, range));
-                    diagnostic!(
-                        "Aeris market history queue full for {}; bounded retry scheduled",
-                        super::LoggedInstrument(&series.instrument_id)
-                    );
-                    self.broadcast_series_resolution_for(
-                        series,
-                        SeriesLoadState::Partial,
-                        Some("Current market history is queued for retry"),
-                    );
-                }
+                diagnostic!(
+                    "Aeris market history queue full for {}; bounded retry scheduled",
+                    super::LoggedInstrument(&series.instrument_id)
+                );
+                self.broadcast_series_resolution_for(
+                    series,
+                    SeriesLoadState::Partial,
+                    Some("Current market history is queued for retry"),
+                );
                 Ok(())
             }
             result => result,
@@ -623,91 +608,72 @@ impl Coordinator<'_> {
         range: Option<HistoryRange>,
         error: &str,
     ) -> bool {
-        let key = (series.clone(), generation);
+        let Some(epoch) = self
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get())
+        else {
+            return false;
+        };
+        let kind = if range.is_some() {
+            LaneKind::Backfill
+        } else {
+            LaneKind::Current
+        };
         let attempts = self
-            .history_retries
-            .get(&key)
-            .map_or(1, |(_, attempts, _)| attempts.saturating_add(1));
+            .history
+            .pending(series, epoch, kind)
+            .map_or(1, |(_, _, attempts)| attempts);
         diagnostic!(
             "Aeris engine {} history attempt {attempts} failed for {}: {error}",
             series.provider_id,
             super::LoggedInstrument(&series.instrument_id)
         );
-        if attempts > MAXIMUM_HISTORY_RETRIES {
-            if range.is_some() {
-                self.history_retries.insert(
-                    key,
-                    (
-                        self.clock.monotonic() + HISTORY_FAILED_RETRY_COOLDOWN,
-                        attempts,
-                        range,
-                    ),
-                );
-            } else {
-                // Keep current-continuity recovery alive, with one bounded ticket
-                // per demanded series. Optional backfill keeps its existing policy.
-                self.history_retries.insert(
-                    key,
-                    (
-                        self.clock.monotonic() + HISTORY_FAILED_RETRY_COOLDOWN,
-                        0,
-                        None,
-                    ),
-                );
-            }
-            return false;
-        }
-        self.history_retries.insert(
-            key,
-            (
-                self.clock.monotonic() + HISTORY_RETRY_DELAY,
-                attempts,
-                range,
-            ),
+        let retry = self.history.schedule(
+            series.clone(),
+            epoch,
+            kind,
+            range,
+            self.clock.as_ref(),
+            false,
         );
         // An older-range page sits behind the published series; retrying it
         // leaves the current series state untouched.
-        if range.is_none() {
+        if retry && range.is_none() {
             self.broadcast_series_recovery_for(series, "Current market history is retrying");
         }
-        true
+        retry
     }
 
     pub(super) fn retry_history(&mut self) {
         let now = self.clock.monotonic();
-        let Some(key) = self
-            .history_retries
-            .iter()
-            .find(|(key, (retry_at, attempts, _))| {
-                *attempts <= MAXIMUM_HISTORY_RETRIES
-                    && now >= *retry_at
-                    && !self.history_inflight.contains_key(*key)
-            })
-            .map(|(key, (_, _, range))| (key.clone(), *range))
-        else {
+        let Some((series, epoch, _kind, range)) = self.history.retry_due(now) else {
             return;
         };
-        let (key, range) = key;
-        let (series, generation) = &key;
         let current_generation = self
             .engine
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation);
-        if !self.engine.has_subscription(series) || current_generation != Some(*generation) {
-            self.history_retries.remove(&key);
+        let Some(generation) = current_generation else {
+            return;
+        };
+        if !self.engine.has_subscription(&series)
+            || self
+                .provider_epochs
+                .current(&series.provider_id, generation.0.get())
+                != Some(epoch)
+        {
+            self.prune_history_tracking();
             return;
         }
-        if let Err(error) = self.enqueue_history_request(series, *generation, range) {
-            self.schedule_history_retry(series, *generation, range, error);
+        if let Err(error) = self.enqueue_history_request(&series, generation, range) {
+            self.schedule_history_retry(&series, generation, range, error);
             if range.is_none() {
                 self.broadcast_series_resolution_for(
-                    series,
+                    &series,
                     SeriesLoadState::Partial,
                     Some("Current market history is unavailable; recovery will retry"),
                 );
             }
-        } else if let Some((retry_at, _, _)) = self.history_retries.get_mut(&key) {
-            *retry_at = now + HISTORY_RETRY_DELAY;
         }
     }
 
@@ -806,8 +772,10 @@ impl Coordinator<'_> {
             return Ok(());
         };
         let provider_generation = self.provider_generation_for_series(&series)?;
-        let key = (series.clone(), provider_generation);
-        let detached = self.detached_history.contains(&key);
+        let detached = self
+            .provider_epochs
+            .current(&series.provider_id, provider_generation.0.get())
+            .is_some_and(|epoch| self.history.is_detached(&series, epoch));
         let Some(plan) = viewport_refill_plan(
             &series,
             &snapshot,
@@ -868,43 +836,28 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    /// Seeds the live aggregator from installed history and drains the buffer.
-    ///
-    /// The seam is closed in three steps, in this order:
-    ///
-    /// 1. Closed buckets seed the aggregator's completed history.
-    /// 2. The bucket that was still open when the page was served seeds the
-    ///    in-flight bar, so a chart the trader has just selected opens on the
-    ///    real current candle instead of on the first trade after the click.
-    /// 3. Trades buffered during the fetch are replayed in order, skipping
-    ///    everything the served page already covers so nothing is counted twice.
-    ///
-    /// The handoff always completes — a series left waiting publishes nothing at
-    /// all, and on a thin product it would wait for the whole quiet stretch.
-    /// Realigns an already-live aggregator with the series a repair just
-    /// installed, without discarding the bucket currently forming.
-    ///
-    /// A backfill extends history backwards and can keep or drop the forming
-    /// tail, so what the series holds as *completed* moves. Bar identity comes
-    /// from the bucket, so nothing is renumbered — only the append cursor has to
-    /// follow. If the aggregator turns out not to line up after all, the next
-    /// publication fails for this one series and reseeds it.
+    /// Schedules a covering or page-bounded older-history request. A second
+    /// request for the same series is deferred until the active page completes.
     pub(super) fn enqueue_history_request(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         range: Option<HistoryRange>,
     ) -> Result<(), &'static str> {
-        if self
-            .engine
+        self.engine
             .verify_provider_request(&series.provider_id, ProviderRequest::HistoricalBars)
-            .is_err()
-        {
-            return Err("provider does not support historical bars");
-        }
-        let key = (series.clone(), generation);
+            .map_err(|_| "provider does not support historical bars")?;
+        let epoch = self
+            .provider_epochs
+            .stamp(&series.provider_id, generation.0.get())
+            .ok_or("history request belongs to a retired provider session")?;
+        let kind = if range.is_some() {
+            LaneKind::Backfill
+        } else {
+            LaneKind::Current
+        };
         let range = if let Some(requested) = range {
-            let Some(missing) = self.uncovered_history_range(series, &key, requested) else {
+            let Some(missing) = self.uncovered_history_range(series, epoch, requested) else {
                 return Ok(());
             };
             Some(missing)
@@ -917,7 +870,7 @@ impl Coordinator<'_> {
             }
             None
         };
-        if let Some(inflight) = self.history_inflight.get(&key).copied() {
+        if let Some((_, inflight)) = self.history.inflight(series, epoch) {
             if inflight.is_none() && range.is_none() {
                 // A study lease and its chart may request the same covering
                 // snapshot in one turn. The active request already owns both.
@@ -932,45 +885,43 @@ impl Coordinator<'_> {
                 }
                 _ => range,
             };
-            self.history_deferred
-                .entry(key)
-                .and_modify(|deferred| merge_deferred_history_request(deferred, range))
-                .or_insert_with(|| deferred_history_request(range));
+            self.history.defer_next(series, epoch, kind, range);
             return Ok(());
         }
         let (range, remainder) = self.page_history_range(series, range);
-        if let Some((retry_at, attempts, failed_range)) = self.history_retries.get(&key).copied() {
+        if let Some((retry_at, failed_range, attempts)) = self.history.pending(series, epoch, kind)
+        {
             if failed_range == range && self.clock.monotonic() < retry_at {
                 return Ok(());
             }
             if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {
                 // The failed cooldown expired, or the user moved to a genuinely
                 // different range. Start that request with a fresh retry budget.
-                self.history_retries.remove(&key);
+                self.history.clear_retry(series, epoch, kind);
             }
         }
-        let instrument = if self.providers.live_model(&series.provider_id).is_some() {
-            self.catalog
-                .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                .cloned()
-        } else {
-            None
-        };
-        let stop = Arc::new(AtomicBool::new(false));
+        let instrument = self.history_request_instrument(series);
+        let ticket = self
+            .history
+            .begin(series.clone(), epoch, kind, range, self.clock.as_ref());
+        let stop = self.history.cancel_token(&ticket);
         let maximum_bars = history_request_bar_limit(series, range);
         let request = HistoryRequest {
+            ticket: ticket.clone(),
             series: series.clone(),
             provider_generation: generation,
-            provider_epoch: self
-                .provider_epochs
-                .stamp(&series.provider_id, generation.0.get())
-                .ok_or("history request belongs to a retired provider session")?,
             instrument,
             maximum_bars,
             range,
             stop: Arc::clone(&stop),
         };
-        let history = self.providers.history(&series.provider_id)?;
+        let history = match self.providers.history(&series.provider_id) {
+            Ok(history) => history,
+            Err(error) => {
+                self.history.defer(&ticket, range);
+                return Err(error);
+            }
+        };
         match try_enqueue_history(history, request) {
             Ok(()) => {
                 if range.is_none() {
@@ -980,20 +931,35 @@ impl Coordinator<'_> {
                         generation.0.get()
                     );
                 }
-                self.history_inflight.insert(key.clone(), range);
-                self.history_cancellations.insert(key.clone(), stop);
                 if let Some(remainder) = remainder {
-                    self.history_deferred
-                        .entry(key)
-                        .and_modify(|deferred| {
-                            merge_deferred_history_request(deferred, Some(remainder));
-                        })
-                        .or_insert(DeferredHistoryRequest::Range(remainder));
+                    self.history
+                        .defer_next(series, epoch, kind, Some(remainder));
                 }
                 Ok(())
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                self.history.defer(&ticket, range);
+                self.history.schedule(
+                    series.clone(),
+                    epoch,
+                    kind,
+                    range,
+                    self.clock.as_ref(),
+                    true,
+                );
+                Err(error)
+            }
         }
+    }
+
+    fn history_request_instrument(
+        &self,
+        series: &BarSeriesKey,
+    ) -> Option<InstallProviderInstrument> {
+        self.providers.live_model(&series.provider_id)?;
+        self.catalog
+            .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+            .cloned()
     }
 
     fn page_history_range(
@@ -1031,10 +997,12 @@ impl Coordinator<'_> {
     fn backwards_history_exhausted(
         &self,
         series: &BarSeriesKey,
-        key: &(BarSeriesKey, ProviderGeneration),
+        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
         requested: HistoryRange,
     ) -> bool {
-        self.history_backwards_exhausted.contains(key)
+        self.history
+            .coverage(series, epoch)
+            .is_some_and(|coverage| coverage.backwards_exhausted)
             && self.engine.series_snapshot(series).is_some_and(|snapshot| {
                 snapshot.bars.first().is_some_and(|first| {
                     requested.end_unix_nanos <= first.exchange_timestamp_unix_nanos
@@ -1044,15 +1012,15 @@ impl Coordinator<'_> {
     fn uncovered_history_range(
         &self,
         series: &BarSeriesKey,
-        key: &(BarSeriesKey, ProviderGeneration),
+        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
         requested: HistoryRange,
     ) -> Option<HistoryRange> {
-        if self.backwards_history_exhausted(series, key, requested) {
+        if self.backwards_history_exhausted(series, epoch, requested) {
             return None;
         }
-        self.history_confirmed_empty
-            .get(key)
-            .copied()
+        self.history
+            .coverage(series, epoch)
+            .and_then(|coverage| coverage.confirmed_empty)
             .map_or(Some(requested), |confirmed| {
                 history_range_after_confirmed_empty(requested, confirmed)
             })
@@ -1081,24 +1049,22 @@ impl Coordinator<'_> {
     }
     pub(super) fn accept_history_completion(
         &mut self,
-        series: &BarSeriesKey,
+        ticket: &HistoryTicket,
         generation: ProviderGeneration,
         range: Option<HistoryRange>,
         result: Result<HistorySnapshot, String>,
     ) -> Option<HistorySnapshot> {
-        let key = (series.clone(), generation);
-        self.history_inflight.remove(&key);
-        let cancelled = self
-            .history_cancellations
-            .remove(&key)
-            .is_some_and(|stop| stop.load(Ordering::Acquire));
+        let series = &ticket.series;
+        let Some(cancelled) = self.history.finish(ticket, range, result.is_ok()) else {
+            self.provider_epochs.drop_history();
+            return None;
+        };
         let current = self
             .engine
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation);
         if current != Some(generation) {
-            self.history_deferred.remove(&key);
-            self.history_retries.remove(&key);
+            self.prune_history_tracking();
             return None;
         }
         if cancelled {
@@ -1117,21 +1083,22 @@ impl Coordinator<'_> {
                         snapshot.bars.len()
                     );
                 }
-                self.history_retries.remove(&key);
                 Some(snapshot)
             }
             Err(error) => {
-                if !self.schedule_history_retry(series, generation, range, &error) {
+                let retry = self.schedule_history_retry(series, generation, range, &error);
+                if range.is_some() {
+                    self.dispatch_deferred_history(series, generation);
+                }
+                if !retry {
                     if range.is_none() {
                         let _ = self.cancel_live_history_reseed(series);
-                        self.history_deferred.remove(&key);
                         self.history_failed(series, generation);
                     } else {
                         self.broadcast_older_history_error_for(
                             series,
                             "Visible history backfill is temporarily unavailable",
                         );
-                        self.dispatch_deferred_history(series, generation);
                     }
                 }
                 None
@@ -1140,11 +1107,12 @@ impl Coordinator<'_> {
     }
     pub(super) fn history_completed(
         &mut self,
-        series: &BarSeriesKey,
+        ticket: &HistoryTicket,
         generation: ProviderGeneration,
         range: Option<HistoryRange>,
         result: Result<HistorySnapshot, String>,
     ) {
+        let series = &ticket.series;
         if self
             .sessions
             .get(series.provider_id.as_str())
@@ -1152,12 +1120,12 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let Some(snapshot) = self.accept_history_completion(series, generation, range, result)
+        let Some(snapshot) = self.accept_history_completion(ticket, generation, range, result)
         else {
             return;
         };
         if snapshot.bars.is_empty() {
-            self.handle_empty_history(series, generation, range, &snapshot);
+            self.handle_empty_history(series, ticket.provider, generation, range, &snapshot);
             return;
         }
         let repaired_timestamp_span = range.and_then(|_| {
@@ -1199,11 +1167,12 @@ impl Coordinator<'_> {
             }
             return;
         }
-        let key = (series.clone(), generation);
         if detached_from_live {
-            self.detached_history.insert(key.clone());
+            self.history
+                .set_detached(series, ticket.provider, true, self.clock.as_ref());
         } else if range.is_none() {
-            self.detached_history.remove(&key);
+            self.history
+                .set_detached(series, ticket.provider, false, self.clock.as_ref());
         }
         if range.is_some() && !detached_from_live {
             let Some(canonical) = self.engine.series_snapshot(series) else {
@@ -1230,11 +1199,11 @@ impl Coordinator<'_> {
             );
         }
         self.execute_studies_after_history_install(series, repaired_timestamp_span);
-        self.history_confirmed_empty
-            .remove(&(series.clone(), generation));
-        if range.is_none() {
-            self.history_current_empty
-                .remove(&(series.clone(), generation));
+        if let Some(coverage) = self.history.coverage_mut(series, ticket.provider) {
+            coverage.confirmed_empty = None;
+            if range.is_none() {
+                coverage.current_empty = None;
+            }
         }
         // Re-check visible coverage after every successful non-empty install.
         // A provider may return a partial page; the canonical snapshot remains
@@ -1249,32 +1218,32 @@ impl Coordinator<'_> {
     fn handle_empty_history(
         &mut self,
         series: &BarSeriesKey,
+        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
         generation: ProviderGeneration,
         range: Option<HistoryRange>,
         snapshot: &HistorySnapshot,
     ) {
-        let key = (series.clone(), generation);
         if let Some(range) = range {
-            if snapshot.backwards_exhausted {
-                self.history_backwards_exhausted.insert(key.clone());
-                self.history_deferred.remove(&key);
+            if let Some(coverage) = self.history.coverage_mut(series, epoch) {
+                if snapshot.backwards_exhausted {
+                    coverage.backwards_exhausted = true;
+                }
+                match &mut coverage.confirmed_empty {
+                    Some(existing) => merge_confirmed_empty_range(existing, range),
+                    none @ None => *none = Some(range),
+                }
             }
-            self.history_confirmed_empty
-                .entry(key)
-                .and_modify(|existing| merge_confirmed_empty_range(existing, range))
-                .or_insert(range);
             self.dispatch_deferred_history(series, generation);
             return;
         }
         let _ = self.cancel_live_history_reseed(series);
-        self.history_deferred.remove(&key);
         if self.live_history_ready(series) {
             // A live edge is already installed; this was only a refill of a
             // detached window and the live handoff remains authoritative.
             self.history_failed(series, generation);
             return;
         }
-        let recorded = match self.history_current_empty.get(&key) {
+        let recorded = match self.history.current_empty(series, epoch) {
             Some(EmptyCurrentHistory::LiveTradeRequested | EmptyCurrentHistory::Final) => {
                 EmptyCurrentHistory::Final
             }
@@ -1296,9 +1265,9 @@ impl Coordinator<'_> {
         );
         // Only the generation being answered can still be current; keeping one
         // record per series bounds this map across repeated reconnects.
-        self.history_current_empty
-            .retain(|(recorded_series, _), _| recorded_series != series);
-        self.history_current_empty.insert(key, recorded);
+        if let Some(coverage) = self.history.coverage_mut(series, epoch) {
+            coverage.current_empty = Some(recorded);
+        }
         self.pending.remove(series);
         let detail = if self.engine.series_snapshot(series).is_some() {
             EMPTY_CURRENT_HISTORY_RETAINED_DETAIL
@@ -1313,9 +1282,10 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
     ) -> bool {
-        self.history_current_empty
-            .get(&(series.clone(), generation))
-            .is_some_and(|recorded| recorded.suppresses_current_requests())
+        self.provider_epochs
+            .current(&series.provider_id, generation.0.get())
+            .and_then(|epoch| self.history.current_empty(series, epoch))
+            .is_some_and(EmptyCurrentHistory::suppresses_current_requests)
     }
 
     /// Load state and detail for a retained snapshot whose covering repair is
@@ -1349,30 +1319,20 @@ impl Coordinator<'_> {
         entitlement_id: &str,
         exchange_unix_nanos: i64,
     ) {
-        if self.history_current_empty.is_empty() {
+        let Some(epoch) = self.provider_epochs.current(provider, generation.0.get()) else {
             return;
-        }
-        let due = self
-            .history_current_empty
-            .iter()
-            .filter(|((series, recorded_generation), recorded)| {
-                *recorded_generation == generation
-                    && series.provider_id == provider
-                    && series.instrument_id == instrument_id
-                    && series.entitlement_id == entitlement_id
-                    && matches!(
-                        recorded,
-                        EmptyCurrentHistory::AwaitingLiveTrade { boundary_unix_nanos }
-                            if exchange_unix_nanos > *boundary_unix_nanos
-                    )
-            })
-            .map(|((series, _), _)| series.clone())
-            .collect::<Vec<_>>();
+        };
+        let due = self.history.current_empty_due(
+            provider,
+            epoch,
+            instrument_id,
+            entitlement_id,
+            exchange_unix_nanos,
+        );
         for series in due {
-            self.history_current_empty.insert(
-                (series.clone(), generation),
-                EmptyCurrentHistory::LiveTradeRequested,
-            );
+            if let Some(coverage) = self.history.coverage_mut(&series, epoch) {
+                coverage.current_empty = Some(EmptyCurrentHistory::LiveTradeRequested);
+            }
             diagnostic!(
                 "Aeris market live trade arrived for {} generation={}; requesting covering history",
                 super::LoggedInstrument(&series.instrument_id),
@@ -1420,13 +1380,18 @@ impl Coordinator<'_> {
     }
 
     fn dispatch_deferred_history(&mut self, series: &BarSeriesKey, generation: ProviderGeneration) {
-        let key = (series.clone(), generation);
-        let Some(deferred) = self.history_deferred.remove(&key) else {
+        let Some(epoch) = self
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get())
+        else {
+            return;
+        };
+        let Some(deferred) = self.history.take_deferred(series, epoch) else {
             return;
         };
         let range = match deferred {
-            DeferredHistoryRequest::Full => None,
-            DeferredHistoryRequest::Range(range) => Some(range),
+            DeferredRequest::Full => None,
+            DeferredRequest::Range(range) => Some(range),
         };
         if let Err(error) =
             self.enqueue_history_request_with_capacity_retry(series, generation, range)
@@ -1571,8 +1536,10 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
     ) -> Result<bool, String> {
-        let key = (series.clone(), generation);
-        if self.detached_history.contains(&key) {
+        let epoch = self
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get());
+        if epoch.is_some_and(|epoch| self.history.is_detached(series, epoch)) {
             return Ok(true);
         }
         if self.engine.series_bar_count(series).unwrap_or(0) < HISTORY_SERIES_HIGH_WATERMARK {
@@ -1609,7 +1576,10 @@ impl Coordinator<'_> {
         .map_err(|error| error.to_string())?;
         self.publish_installed_history(&publications);
         if compacted.dropped_newer {
-            self.detached_history.insert(key);
+            if let Some(epoch) = epoch {
+                self.history
+                    .set_detached(series, epoch, true, self.clock.as_ref());
+            }
             return Ok(true);
         }
         Ok(false)
@@ -1622,8 +1592,10 @@ impl Coordinator<'_> {
         range: Option<HistoryRange>,
         mut snapshot: HistorySnapshot,
     ) -> Option<PreparedHistoryRepair> {
-        let key = (series.clone(), generation);
-        let was_detached = self.detached_history.contains(&key);
+        let was_detached = self
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get())
+            .is_some_and(|epoch| self.history.is_detached(series, epoch));
         let viewport = self
             .engine
             .primary_retained_viewport(series)
@@ -1680,6 +1652,9 @@ impl Coordinator<'_> {
         })
     }
 
+    /// Seeds the live aggregator from installed history and drains its buffer.
+    /// Closed buckets seed completed history, the last forming bucket seeds the
+    /// open period, and trades buffered during the fetch close the seam.
     pub(super) fn start_rithmic_realtime_from_snapshot(
         &mut self,
         series: &BarSeriesKey,
@@ -1848,71 +1823,22 @@ impl Coordinator<'_> {
         // Timeframe/symbol changes supersede the old series immediately. Cancel
         // its queued/in-flight provider work so one user rapidly changing the
         // chart cannot occupy the bounded history queue with obsolete fetches.
-        for ((series, generation), stop) in &self.history_cancellations {
-            let current_generation = self
-                .engine
-                .provider_status(&series.provider_id)
-                .and_then(|status| status.generation);
-            if !self.engine.has_subscription(series) || current_generation != Some(*generation) {
-                stop.store(true, Ordering::Release);
-            }
-        }
-        self.history_deferred.retain(|(series, generation), _| {
-            self.engine.has_subscription(series)
-                && self
-                    .engine
-                    .provider_status(&series.provider_id)
-                    .and_then(|status| status.generation)
-                    == Some(*generation)
-        });
-        let demanded_series = self
+        let demanded = self
             .engine
             .demanded_series()
             .into_iter()
+            .filter_map(|series| {
+                let generation = self
+                    .engine
+                    .provider_status(&series.provider_id)?
+                    .generation?;
+                let epoch = self
+                    .provider_epochs
+                    .current(&series.provider_id, generation.0.get())?;
+                Some((series, epoch))
+            })
             .collect::<BTreeSet<_>>();
-        self.history_confirmed_empty
-            .retain(|(series, generation), _| {
-                demanded_series.contains(series)
-                    && self
-                        .engine
-                        .provider_status(&series.provider_id)
-                        .and_then(|status| status.generation)
-                        == Some(*generation)
-            });
-        self.history_current_empty
-            .retain(|(series, generation), _| {
-                demanded_series.contains(series)
-                    && self
-                        .engine
-                        .provider_status(&series.provider_id)
-                        .and_then(|status| status.generation)
-                        == Some(*generation)
-            });
-        self.history_backwards_exhausted
-            .retain(|(series, generation)| {
-                demanded_series.contains(series)
-                    && self
-                        .engine
-                        .provider_status(&series.provider_id)
-                        .and_then(|status| status.generation)
-                        == Some(*generation)
-            });
-        self.detached_history.retain(|(series, generation)| {
-            demanded_series.contains(series)
-                && self
-                    .engine
-                    .provider_status(&series.provider_id)
-                    .and_then(|status| status.generation)
-                    == Some(*generation)
-        });
-        self.history_retries.retain(|(series, generation), _| {
-            self.engine.has_subscription(series)
-                && self
-                    .engine
-                    .provider_status(&series.provider_id)
-                    .and_then(|status| status.generation)
-                    == Some(*generation)
-        });
+        self.history.retain_demanded(&demanded);
     }
 }
 
@@ -1922,6 +1848,7 @@ mod tests {
     use aeris_market_data::BarPeriod;
     use std::num::NonZeroU64;
     use std::sync::{Arc as StdArc, Mutex as StdMutex, mpsc};
+    use std::time::Duration;
 
     fn test_series(instrument_id: &str) -> BarSeriesKey {
         BarSeriesKey {
@@ -1934,10 +1861,11 @@ mod tests {
     }
 
     fn test_history_request(instrument_id: &str) -> HistoryRequest {
+        let series = test_series(instrument_id);
         HistoryRequest {
-            series: test_series(instrument_id),
+            ticket: super::super::fixture_history_ticket(&series),
+            series,
             provider_generation: ProviderGeneration(NonZeroU64::MIN),
-            provider_epoch: aeris_market_engine::fence::EpochSequence::default().next(),
             instrument: None,
             maximum_bars: 10,
             range: None,
@@ -2202,12 +2130,84 @@ mod tests {
     }
 
     #[test]
+    fn history_worker_blocks_on_full_completion_channel() {
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let (requests_tx, requests_rx) = mpsc::sync_channel(2);
+        let (completions_tx, completions_rx) = mpsc::sync_channel(1);
+        completions_tx.send(Command::ProviderWake).unwrap();
+        requests_tx.send(test_history_request("first")).unwrap();
+        requests_tx.send(test_history_request("second")).unwrap();
+        drop(requests_tx);
+        let observed = StdArc::clone(&calls);
+        let worker = thread::spawn(move || {
+            run_history_worker(
+                Box::new(RecordingHistorySource { calls: observed }),
+                &requests_rx,
+                &completions_tx,
+                &AtomicBool::new(false),
+            );
+        });
+        assert!(matches!(
+            completions_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(Command::ProviderWake)
+        ));
+        assert!(matches!(
+            completions_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(Command::HistoryCompleted(series, _, _, _, _)) if series.instrument_id == "first"
+        ));
+        assert!(matches!(
+            completions_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(Command::HistoryCompleted(series, _, _, _, _)) if series.instrument_id == "second"
+        ));
+        worker.join().expect("worker exits after draining");
+        assert_eq!(*calls.lock().unwrap(), ["first", "second"]);
+    }
+
+    #[test]
+    fn history_worker_serves_oldest_backfill_in_every_fourth_slot() {
+        let calls = StdArc::new(StdMutex::new(Vec::new()));
+        let (requests_tx, requests_rx) = mpsc::sync_channel(super::super::HISTORY_CAPACITY);
+        let (completions_tx, _completions_rx) = mpsc::sync_channel(super::super::HISTORY_CAPACITY);
+        for name in ["current-a", "current-b", "current-c", "current-d"] {
+            requests_tx.send(test_history_request(name)).unwrap();
+        }
+        for name in ["backfill-old", "backfill-new"] {
+            let mut request = test_history_request(name);
+            request.range = Some(HistoryRange {
+                start_unix_nanos: 1,
+                end_unix_nanos: 2,
+            });
+            requests_tx.send(request).unwrap();
+        }
+        drop(requests_tx);
+        run_history_worker(
+            Box::new(RecordingHistorySource {
+                calls: StdArc::clone(&calls),
+            }),
+            &requests_rx,
+            &completions_tx,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "current-a",
+                "current-b",
+                "current-c",
+                "backfill-old",
+                "current-d",
+                "backfill-new"
+            ]
+        );
+    }
+
+    #[test]
     fn deferred_history_coalesces_ranges_and_full_request_supersedes_them() {
-        let mut deferred = DeferredHistoryRequest::Range(HistoryRange {
+        let mut deferred = DeferredRequest::Range(HistoryRange {
             start_unix_nanos: 100,
             end_unix_nanos: 200,
         });
-        merge_deferred_history_request(
+        merge_deferred_request(
             &mut deferred,
             Some(HistoryRange {
                 start_unix_nanos: 50,
@@ -2216,22 +2216,22 @@ mod tests {
         );
         assert_eq!(
             deferred,
-            DeferredHistoryRequest::Range(HistoryRange {
+            DeferredRequest::Range(HistoryRange {
                 start_unix_nanos: 50,
                 end_unix_nanos: 200,
             })
         );
 
-        merge_deferred_history_request(&mut deferred, None);
-        assert_eq!(deferred, DeferredHistoryRequest::Full);
-        merge_deferred_history_request(
+        merge_deferred_request(&mut deferred, None);
+        assert_eq!(deferred, DeferredRequest::Full);
+        merge_deferred_request(
             &mut deferred,
             Some(HistoryRange {
                 start_unix_nanos: 0,
                 end_unix_nanos: 300,
             }),
         );
-        assert_eq!(deferred, DeferredHistoryRequest::Full);
+        assert_eq!(deferred, DeferredRequest::Full);
     }
 
     #[test]

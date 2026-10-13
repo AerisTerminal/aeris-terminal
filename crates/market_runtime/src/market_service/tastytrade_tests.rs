@@ -456,16 +456,17 @@ fn instrument() -> InstallProviderInstrument {
 }
 fn request() -> HistoryRequest {
     let instrument = instrument();
+    let series = BarSeriesKey {
+        provider_id: instrument.provider.clone(),
+        instrument_id: instrument.instrument_id.clone(),
+        entitlement_id: ENTITLEMENT.into(),
+        period: BarPeriod::time(60).unwrap(),
+        definition_version: 1,
+    };
     HistoryRequest {
-        series: BarSeriesKey {
-            provider_id: instrument.provider.clone(),
-            instrument_id: instrument.instrument_id.clone(),
-            entitlement_id: ENTITLEMENT.into(),
-            period: BarPeriod::time(60).unwrap(),
-            definition_version: 1,
-        },
+        ticket: crate::market_service::fixture_history_ticket(&series),
+        series,
         provider_generation: ProviderGeneration(id(1).unwrap()),
-        provider_epoch: aeris_market_engine::fence::EpochSequence::default().next(),
         instrument: Some(instrument),
         maximum_bars: 1600,
         range: None,

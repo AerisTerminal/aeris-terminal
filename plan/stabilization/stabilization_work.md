@@ -105,7 +105,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | closed in this commit |
 | MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | open |
 | MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | open |
-| MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | open |
+| MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in this commit |
 | MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | open |
 | MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in this commit |
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
@@ -114,7 +114,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup closed in this commit; remaining wrappers/order-book demand open |
 | MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | open |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
-| MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | open |
+| MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history doc comments closed in this commit; other items open |
 | MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | open |
 | TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | open |
@@ -383,7 +383,10 @@ Status: in progress
   - Replaced the five catalog pending maps with typed command-kind fences; desktop startup assigns a unique command generation and explicitly marks startup requests. Tastytrade retains independent startup and picker search lanes without a numeric sentinel.
   - `ConsumerRegistry::remove_consumer` is shared by detach and explicit remove; tests assert no command/outbox/client/demand/order-book residue on either path, and a superseded startup callback is dropped.
   - Market-runtime, desktop and naming scoped checks plus workspace fmt/Clippy/tests/naming passed. The single milestone GUI restore/search check remains after M2.10.
-- [ ] M2.10 history-tracker - `HistoryTracker` with current and backfill lanes; trim unused `provider_history`
+- [x] M2.10 history-tracker - `HistoryTracker` with current and backfill lanes; trim unused `provider_history`
+  - One tracker replaces all eight coordinator ledgers and the retry tuple. Exact provider/demand/lane/sequence tickets travel through worker and provider completions; deferred, in-flight, retry, coverage, detached and cancellation state are pruned together.
+  - The worker blocks on a full bounded completion channel and serves the oldest backfill every fourth slot. Removed the unused provider-history scheduler modules while preserving model/handoff/error and Rithmic conformance; fixed misplaced history comments.
+  - Tracker API, boundary characterization, full fmt/workspace Clippy/workspace tests/naming passed. In an isolated desktop, BTC-USDC 1m history grew from 1,599 to 4,003 bars after panning, with zero interior gaps; ETH search, 1D chart and restart restore succeeded.
 
 ### M3 market lifecycle
 
@@ -526,6 +529,7 @@ the repo root `AGENTS.md`.
 - Dated provider calendar events are fenced at the coordinator and expire into the instrument's recurring calendar or Unknown; live session, week and month bars and tape dates use the same calendar (M2.7, this commit).
 - Typed provider events and history completions use registry-minted epochs and an equality fence; naming_check rejects a raw `ProviderEvent.generation` (M2.8, this commit).
 - Catalog callbacks use coordinator-owned command fences by consumer/provider/kind; startup resolution has an explicit lane and consumer retirement uses one registry cleanup path (M2.9, this commit).
+- `HistoryTracker` owns current/backfill retry, deferral, empty coverage, detached windows and cancellation behind exact provider/demand/sequence tickets; no parallel coordinator history maps (M2.10, this commit).
 
 ## 6. Progress log
 
@@ -561,6 +565,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M2.7 feat(market): roll live bars at calendar sessions - replaced fixed session durations and CME-only live buckets, integrated fenced dated provider holidays and calendar tape dates, and tested six non-CME week/month paths.
 - 2026-10-14 M2.8 feat(market): fence provider events and history with typed epochs - registry-stamped adapter generations, fenced dated calendar and history completions, counted retired inputs and pinned typed event fields.
 - 2026-10-14 M2.9 feat(market): unify catalog command fences and consumer retirement - removed the startup sentinel and five pending maps, separated startup/picker searches, and centralized consumer cleanup.
+- 2026-10-14 M2.10 feat(market): centralize history lanes and exact completion tickets - replaced eight maps, bounded retry/deferral and provider-history scheduler with a single tracker; verified older Hyperliquid chart pages without gaps.
 
 ## 7. Known gaps / deferred
 
@@ -588,3 +593,7 @@ From `reports/work_items.md` ("Deferred / out of scope") plus mission-accepted l
 - As checked with `gh workflow list --all` on 2026-10-13, the GitHub `CI` workflow is
   `disabled_manually`; consequently there was no post-push run for M1 head `f2170311`.
   Re-enabling it requires the maintainer; no Actions setting was changed.
+- The M2.4 blocked-network reconnect interval log was not collected: routing an isolated
+  validation process through an unreachable HTTP proxy also blocks the required startup catalog,
+  so no WebSocket session begins. Deterministic backoff tests pass; a controlled WebSocket-only
+  failure injection or maintainer-approved per-process network restriction is needed for the live log.

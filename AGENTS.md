@@ -131,6 +131,9 @@ the check.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider
   and command kind. Startup resolution uses its own kind, not a numeric generation sentinel;
   consumer retirement clears every pending command through `ConsumerRegistry::remove_consumer`.
+- `HistoryTracker` alone owns per-series current/backfill lanes, retry deadlines, empty coverage,
+  detached windows and cancellation. History requests and completions carry the same exact
+  provider/demand/sequence ticket; retirement prunes the tracker, never parallel coordinator maps.
 - Stall recovery considers every live candle and trade series while its calendar is open;
   closed sessions never recover for silence, and unknown sessions use a longer threshold.
   Practice session checks use the same calendar for every provider.

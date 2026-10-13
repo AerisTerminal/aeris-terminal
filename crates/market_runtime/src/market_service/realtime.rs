@@ -1617,15 +1617,18 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         generation: ProviderGeneration,
     ) {
-        let key = (series.clone(), generation);
-        if self.history_inflight.contains_key(&key)
-            && let Some(stop) = self.history_cancellations.get(&key)
+        if let Some(epoch) = self
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get())
+            && let Some((ticket, _)) = self.history.inflight(series, epoch)
         {
             // The buffered live seam is about to be discarded. Any covering
             // history already in flight may end before those discarded events,
             // so its completion can no longer safely seed continuity. The
             // normal cancelled-completion path schedules a fresh covering read.
-            stop.store(true, Ordering::Release);
+            self.history
+                .cancel_token(ticket)
+                .store(true, Ordering::Release);
         }
     }
 
@@ -1837,8 +1840,9 @@ impl Coordinator<'_> {
         bar: MarketBar,
     ) -> Result<(), String> {
         if self
-            .detached_history
-            .contains(&(series.clone(), generation))
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get())
+            .is_some_and(|epoch| self.history.is_detached(series, epoch))
         {
             return Ok(());
         }
@@ -2660,9 +2664,6 @@ impl Coordinator<'_> {
         generation: u64,
         trades: &[MarketTrade],
     ) {
-        if self.history_current_empty.is_empty() {
-            return;
-        }
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
@@ -2946,11 +2947,7 @@ impl Coordinator<'_> {
             {
                 self.session_mut(provider).demand_dirty = true;
             }
-            for ((series, _), stop) in &self.history_cancellations {
-                if series.provider_id == provider {
-                    stop.store(true, Ordering::Release);
-                }
-            }
+            self.history.cancel_provider(provider);
             let series = self
                 .series_live
                 .candle_keys()
@@ -3022,9 +3019,10 @@ impl Coordinator<'_> {
             self.series_live_if_ready(&series);
         }
         for series in missing {
-            if !self
-                .history_inflight
-                .contains_key(&(series.clone(), generation))
+            if self
+                .provider_epochs
+                .current(&series.provider_id, generation.0.get())
+                .is_none_or(|epoch| self.history.inflight(&series, epoch).is_none())
             {
                 self.request_series_history_recovery(&series, generation);
             }
@@ -3118,9 +3116,10 @@ impl Coordinator<'_> {
             live.pending_publications.clear();
         }
         self.broadcast_series_recovery_for(series, detail);
-        if !self
-            .history_inflight
-            .contains_key(&(series.clone(), generation))
+        if self
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get())
+            .is_none_or(|epoch| self.history.inflight(series, epoch).is_none())
         {
             self.request_series_history_recovery(series, generation);
         }
@@ -3187,11 +3186,7 @@ impl Coordinator<'_> {
         }
         if current.is_some_and(|current| generation > current) {
             self.invalidate_provider_live_market(provider, generation);
-            for ((series, _), stop) in &self.history_cancellations {
-                if series.provider_id == provider {
-                    stop.store(true, Ordering::Release);
-                }
-            }
+            self.history.cancel_provider(provider);
             let series = self
                 .series_live
                 .trade_keys()
@@ -3263,9 +3258,10 @@ impl Coordinator<'_> {
             self.series_live_if_ready(&series);
         }
         for series in missing {
-            if !self
-                .history_inflight
-                .contains_key(&(series.clone(), generation))
+            if self
+                .provider_epochs
+                .current(&series.provider_id, generation.0.get())
+                .is_none_or(|epoch| self.history.inflight(&series, epoch).is_none())
             {
                 self.request_series_history_recovery(&series, generation);
             }
@@ -3378,9 +3374,10 @@ impl Coordinator<'_> {
             live.pending_publications.clear();
         }
         self.broadcast_series_recovery_for(series, detail);
-        if !self
-            .history_inflight
-            .contains_key(&(series.clone(), generation))
+        if self
+            .provider_epochs
+            .current(&series.provider_id, generation.0.get())
+            .is_none_or(|epoch| self.history.inflight(series, epoch).is_none())
         {
             self.request_series_history_recovery(series, generation);
         }
@@ -3755,8 +3752,9 @@ impl Coordinator<'_> {
             .provider_status(&series.provider_id)
             .and_then(|status| status.generation)
             .is_some_and(|generation| {
-                self.detached_history
-                    .contains(&(series.clone(), generation))
+                self.provider_epochs
+                    .current(&series.provider_id, generation.0.get())
+                    .is_some_and(|epoch| self.history.is_detached(series, epoch))
             });
         if detached {
             return false;
@@ -3939,11 +3937,7 @@ impl Coordinator<'_> {
             .collect::<Vec<_>>();
         self.pending.retain(|_, waiters| !waiters.is_empty());
         for series in unobserved {
-            for ((active, _), stop) in &self.history_cancellations {
-                if active == &series {
-                    stop.store(true, Ordering::Release);
-                }
-            }
+            self.history.cancel_series(&series);
         }
     }
 
@@ -3959,11 +3953,7 @@ impl Coordinator<'_> {
             .trade_keys()
             .filter(|series| !self.engine.has_subscription(series))
         {
-            for ((active, _), stop) in &self.history_cancellations {
-                if active == series {
-                    stop.store(true, Ordering::Release);
-                }
-            }
+            self.history.cancel_series(series);
         }
         self.series_live
             .retain_trades(|series, _| self.engine.has_subscription(series));
@@ -3989,11 +3979,7 @@ impl Coordinator<'_> {
             .candle_keys()
             .filter(|series| !self.engine.has_subscription(series))
         {
-            for ((active, _), stop) in &self.history_cancellations {
-                if active == series {
-                    stop.store(true, Ordering::Release);
-                }
-            }
+            self.history.cancel_series(series);
         }
         self.series_live
             .retain_candles(|series, _| self.engine.has_subscription(series));
