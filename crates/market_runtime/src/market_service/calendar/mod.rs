@@ -610,22 +610,46 @@ mod tests {
             "future".into(),
             CalendarSource::ExchangeRule(ExchangeRule::CmeGlobex),
         );
-        for (before, open) in [
-            ("2026-02-08T22:59:00Z", "2026-02-08T23:00:00Z"),
-            ("2026-03-08T21:59:00Z", "2026-03-08T22:00:00Z"),
-            ("2026-11-01T22:59:00Z", "2026-11-01T23:00:00Z"),
+        for (before, open, close) in [
+            (
+                "2026-02-08T22:59:00Z",
+                "2026-02-08T23:00:00Z",
+                "2026-02-09T22:00:00Z",
+            ),
+            (
+                "2026-03-08T21:59:00Z",
+                "2026-03-08T22:00:00Z",
+                "2026-03-09T21:00:00Z",
+            ),
+            (
+                "2026-11-01T22:59:00Z",
+                "2026-11-01T23:00:00Z",
+                "2026-11-02T22:00:00Z",
+            ),
         ] {
             assert_eq!(calendar.phase("future", ms(before)), SessionPhase::Closed);
+            assert_eq!(
+                calendar.session_window("future", ms(before)),
+                Some(SessionWindow {
+                    open_utc_ms: ms(open),
+                    close_utc_ms: ms(close)
+                })
+            );
             assert_eq!(
                 calendar.next_transition("future", ms(before)),
                 Some((ms(open), SessionPhase::Open))
             );
             assert_eq!(calendar.phase("future", ms(open)), SessionPhase::Open);
             assert_eq!(
-                calendar
-                    .session_window("future", ms(open))
-                    .map(|window| window.open_utc_ms),
-                Some(ms(open))
+                calendar.session_window("future", ms(open)),
+                Some(SessionWindow {
+                    open_utc_ms: ms(open),
+                    close_utc_ms: ms(close)
+                })
+            );
+            assert_eq!(
+                calendar.next_transition("future", ms(open)),
+                Some((ms(close), SessionPhase::Closed))
             );
         }
     }
@@ -667,38 +691,70 @@ mod tests {
             CalendarSource::ExchangeRule(ExchangeRule::UsEquity),
         );
         calendar.insert("crypto".into(), CalendarSource::AlwaysOpen);
-        assert_eq!(
-            calendar.phase("cfe", ms("2026-08-17T18:00:00Z")),
-            SessionPhase::Open
-        );
-        assert_eq!(
-            calendar.phase("equity", ms("2026-08-17T13:00:00Z")),
-            SessionPhase::Extended
-        );
-        assert_eq!(
-            calendar.phase("equity", ms("2026-08-17T14:00:00Z")),
-            SessionPhase::Open
-        );
-        assert_eq!(
-            calendar.phase("equity", ms("2026-08-17T22:00:00Z")),
-            SessionPhase::Extended
-        );
-        assert_eq!(
-            calendar.phase("crypto", ms("2026-08-17T22:00:00Z")),
-            SessionPhase::AlwaysOpen
-        );
-        assert_eq!(
-            calendar.next_transition("crypto", ms("2026-08-17T22:00:00Z")),
-            None
-        );
-        assert_eq!(
-            calendar.phase("unlisted", ms("2026-08-17T22:00:00Z")),
-            SessionPhase::Unknown
-        );
-        assert_eq!(
-            calendar.session_window("unlisted", ms("2026-08-17T22:00:00Z")),
-            None
-        );
+        for (instrument, at, phase, window, transition) in [
+            (
+                "cfe",
+                "2026-08-17T18:00:00Z",
+                SessionPhase::Open,
+                Some(("2026-08-16T22:00:00Z", "2026-08-17T21:00:00Z")),
+                Some(("2026-08-17T21:00:00Z", SessionPhase::Closed)),
+            ),
+            (
+                "equity",
+                "2026-08-17T13:00:00Z",
+                SessionPhase::Extended,
+                Some(("2026-08-17T08:00:00Z", "2026-08-17T13:30:00Z")),
+                Some(("2026-08-17T13:30:00Z", SessionPhase::Open)),
+            ),
+            (
+                "equity",
+                "2026-08-17T14:00:00Z",
+                SessionPhase::Open,
+                Some(("2026-08-17T13:30:00Z", "2026-08-17T20:00:00Z")),
+                Some(("2026-08-17T20:00:00Z", SessionPhase::Extended)),
+            ),
+            (
+                "equity",
+                "2026-08-17T22:00:00Z",
+                SessionPhase::Extended,
+                Some(("2026-08-17T20:00:00Z", "2026-08-18T00:00:00Z")),
+                Some(("2026-08-18T00:00:00Z", SessionPhase::Closed)),
+            ),
+            (
+                "crypto",
+                "2026-08-17T22:00:00Z",
+                SessionPhase::AlwaysOpen,
+                None,
+                None,
+            ),
+            (
+                "unlisted",
+                "2026-08-17T22:00:00Z",
+                SessionPhase::Unknown,
+                None,
+                None,
+            ),
+        ] {
+            let at = ms(at);
+            assert_eq!(
+                calendar.phase(instrument, at),
+                phase,
+                "{instrument} at {at}"
+            );
+            assert_eq!(
+                calendar.session_window(instrument, at),
+                window.map(|(open, close)| SessionWindow {
+                    open_utc_ms: ms(open),
+                    close_utc_ms: ms(close)
+                }),
+                "{instrument} at {at}"
+            );
+            assert_eq!(
+                calendar.next_transition(instrument, at),
+                transition.map(|(time, phase)| (ms(time), phase)),
+                "{instrument} at {at}"
+            );
+        }
     }
 
     #[test]
@@ -744,12 +800,30 @@ mod tests {
             SessionPhase::Closed
         );
         assert_eq!(
+            calendar.session_window("fx", ms("2026-10-10T16:00:00Z")),
+            Some(SessionWindow {
+                open_utc_ms: ms("2026-10-11T21:00:00Z"),
+                close_utc_ms: ms("2026-10-16T21:00:00Z")
+            })
+        );
+        assert_eq!(
             calendar.next_transition("fx", ms("2026-10-10T16:00:00Z")),
             Some((ms("2026-10-11T21:00:00Z"), SessionPhase::Open))
         );
         assert_eq!(
             calendar.phase("fx", ms("2026-10-12T16:00:00Z")),
             SessionPhase::Open
+        );
+        assert_eq!(
+            calendar.session_window("fx", ms("2026-10-12T16:00:00Z")),
+            Some(SessionWindow {
+                open_utc_ms: ms("2026-10-11T21:00:00Z"),
+                close_utc_ms: ms("2026-10-16T21:00:00Z")
+            })
+        );
+        assert_eq!(
+            calendar.next_transition("fx", ms("2026-10-12T16:00:00Z")),
+            Some((ms("2026-10-16T21:00:00Z"), SessionPhase::Closed))
         );
     }
 

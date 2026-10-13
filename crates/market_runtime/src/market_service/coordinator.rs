@@ -1533,6 +1533,9 @@ impl Coordinator<'_> {
 
 #[cfg(test)]
 mod tests {
+    mod boundary {
+        include!("tests/boundary.rs");
+    }
     mod characterization {
         include!("tests/characterization.rs");
     }
@@ -4527,6 +4530,158 @@ mod tests {
                 .history_state,
             LiveHistoryState::AwaitingHistory
         );
+        coordinator.recover_stalled_live_series();
+        assert_no_history_request(&history_rx, "Rithmic recovery is requested only once");
+    }
+
+    fn scripted_watchdog_recovery(provider: &'static str, unknown: bool) {
+        use super::super::clock::{Clock, ScriptedClock};
+        use chrono::{DateTime, Utc};
+
+        let at = "2026-08-17T14:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("UTC instant")
+            .timestamp_nanos_opt()
+            .expect("timestamp");
+        let clock = Arc::new(ScriptedClock::new(at));
+        let mut coordinator = coordinator();
+        coordinator.clock = Arc::clone(&clock) as Arc<dyn Clock>;
+        let installed = if provider == "hyperliquid" {
+            hyperliquid_instrument()
+        } else {
+            let mut installed = instrument();
+            installed.provider = provider.into();
+            installed.instrument_id = format!("{provider}:ES");
+            installed.provider_symbol = "ES".into();
+            installed.venue_id = if unknown { String::new() } else { "CME".into() };
+            installed
+        };
+        let selected = BarSeriesKey {
+            provider_id: installed.provider.clone(),
+            instrument_id: installed.instrument_id.clone(),
+            entitlement_id: installed.entitlement_id.clone(),
+            period: BarPeriod::time(60).expect("minute"),
+            definition_version: 1,
+        };
+        let provider_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .begin_provider_session(provider, provider_generation)
+            .expect("session");
+        coordinator
+            .engine
+            .set_provider_health(provider, provider_generation, ProviderHealth::Online)
+            .expect("online");
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(1),
+                &selected,
+                StreamRequirements::BARS,
+            )
+            .expect("demand");
+        let (history_tx, history_rx) = std::sync::mpsc::sync_channel(2);
+        let descriptor = super::super::BUILT_IN_PROVIDER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.id == provider)
+            .expect("registered provider");
+        coordinator.providers.records.insert(
+            provider,
+            super::super::ProviderDispatchRecord {
+                descriptor: *descriptor,
+                history: Box::leak(Box::new(history_tx)),
+                lifecycle: None,
+                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                catalog: super::super::ProviderCatalogDispatch::Disabled,
+            },
+        );
+        coordinator.catalog.insert(
+            (installed.provider.clone(), installed.instrument_id.clone()),
+            installed.clone(),
+        );
+        coordinator.calendar.resolve(&installed, None);
+        install_scripted_watchdog_handoff(
+            &mut coordinator,
+            provider,
+            &installed,
+            &selected,
+            provider_generation,
+            &clock,
+        );
+        clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+        coordinator.recover_stalled_live_series();
+        assert_eq!(
+            history_rx.try_iter().count(),
+            usize::from(!unknown),
+            "{provider}: normal open threshold"
+        );
+        if unknown {
+            clock.advance(
+                super::super::watchdog::UNKNOWN_STALL_THRESHOLD
+                    .checked_sub(super::super::watchdog::OPEN_STALL_THRESHOLD)
+                    .expect("long threshold exceeds open threshold"),
+            );
+            coordinator.recover_stalled_live_series();
+            assert_eq!(history_rx.try_iter().count(), 1, "Unknown long threshold");
+        }
+        coordinator.recover_stalled_live_series();
+        assert_no_history_request(&history_rx, "no duplicate current history request");
+    }
+
+    fn install_scripted_watchdog_handoff(
+        coordinator: &mut Coordinator<'_>,
+        provider: &str,
+        installed: &InstallProviderInstrument,
+        selected: &BarSeriesKey,
+        provider_generation: ProviderGeneration,
+        clock: &Arc<super::super::clock::ScriptedClock>,
+    ) {
+        use super::super::clock::Clock;
+        if provider == "hyperliquid" {
+            let mut live = CandleLiveHandoff::with_clock(
+                selected.clone(),
+                provider_generation,
+                "BTC".into(),
+                "1m".into(),
+                super::super::CandleGapPolicy::Contiguous,
+                Arc::clone(clock) as Arc<dyn Clock>,
+            );
+            live.connected = true;
+            live.history_state = LiveHistoryState::Ready;
+            coordinator
+                .series_live
+                .insert_candle(selected.clone(), live);
+        } else {
+            let mut live = TradeLiveHandoff::with_clock(
+                selected,
+                provider_generation,
+                &installed.venue_id,
+                None,
+                Arc::clone(clock) as Arc<dyn Clock>,
+            )
+            .expect("trade handoff");
+            live.connected = true;
+            live.history_state = LiveHistoryState::Ready;
+            coordinator.series_live.insert_trade(selected.clone(), live);
+        }
+    }
+
+    #[test]
+    fn watchdog_tastytrade_open_trade_series_requests_one_recovery() {
+        scripted_watchdog_recovery("tastytrade", false);
+    }
+
+    #[test]
+    fn watchdog_hyperliquid_always_open_candle_series_requests_one_recovery() {
+        scripted_watchdog_recovery("hyperliquid", false);
+    }
+
+    #[test]
+    fn watchdog_unknown_series_waits_for_long_threshold_before_one_recovery() {
+        scripted_watchdog_recovery("tastytrade", true);
     }
 
     /// Rithmic Test answers a closed-market current replay with zero bars. That

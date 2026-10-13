@@ -1,145 +1,41 @@
-// Coordinator command/event characterization. These tests observe replies and
-// consumer publications, not the coordinator's internal ledgers.
+// Coordinator command/event characterization. Scripted setup and loop turns
+// live in the boundary driver; assertions observe only outbound publications.
 
 use super::*;
-
-struct Boundary {
-    coordinator: Coordinator<'static>,
-    history: std::sync::mpsc::Receiver<super::super::super::HistoryRequest>,
-    series: BarSeriesKey,
-    consumer: ConsumerId,
-}
-
-impl Boundary {
-    fn new() -> Self {
-        let (mut coordinator, history) = connected_rithmic_coordinator();
-        coordinator.handle_provider_event(
-            super::super::super::ProviderEvent::rithmic(RithmicRealtimeEvent::Connected(1)),
-        );
-        let consumer = consumer(1);
-        let (reply, received) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::Attach(client(1), reply));
-        received.recv().expect("attach reply").expect("attach succeeds");
-        let (reply, received) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_command(Command::Register(
-            ConsumerIdentity {
-                client_id: client(1),
-                workspace_id: WorkspaceId(nonzero(1)),
-                consumer_id: consumer,
-            },
-            reply,
-        ));
-        received.recv().expect("register reply").expect("register succeeds");
-        Self {
-            coordinator,
-            history,
-            series: series(),
-            consumer,
-        }
-    }
-
-    fn demand(&mut self, series: BarSeriesKey, generation_number: u64) {
-        let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.coordinator.handle_command(Command::Demand(
-            client(1),
-            self.consumer,
-            generation(generation_number),
-            series,
-            StreamRequirements::BARS,
-            reply,
-        ));
-        received.recv().expect("demand reply").expect("demand succeeds");
-    }
-
-    fn complete(&mut self, provider_number: u64, bars: Vec<MarketBar>, forming: Option<MarketBar>) {
-        let series = self.series.clone();
-        let ticket = history_ticket(&mut self.coordinator, &series,
-            ProviderGeneration(nonzero(provider_number)), None);
-        self.complete_with_ticket(provider_number, ticket, bars, forming);
-    }
-
-    fn complete_with_ticket(
-        &mut self,
-        provider_number: u64,
-        ticket: super::super::super::history::tracker::HistoryTicket,
-        bars: Vec<MarketBar>,
-        forming: Option<MarketBar>,
-    ) {
-        self.coordinator.handle_command(Command::HistoryCompleted(
-            self.series.clone(),
-            ProviderGeneration(nonzero(provider_number)),
-            None,
-            Ok(HistorySnapshot {
-                price_scale: 2,
-                quantity_scale: 0,
-                bars,
-                forming: forming.map(|bar| FormingBar { bar, trades: None }),
-                handoff_boundary_unix_nanos: Some(180_000_000_000),
-                backwards_exhausted: false,
-            }),
-            ticket,
-        ));
-    }
-
-    fn events(&mut self) -> Vec<MarketRuntimeEvent> {
-        let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.coordinator
-            .handle_command(Command::PollClient(client(1), vec![(self.consumer, 256)], reply));
-        received
-            .recv()
-            .expect("poll reply")
-            .expect("poll succeeds")
-            .into_iter()
-            .map(|(_, event)| event)
-            .collect()
-    }
-
-    fn status(&mut self) -> MarketServiceStatus {
-        let (reply, received) = std::sync::mpsc::sync_channel(1);
-        self.coordinator.handle_command(Command::Status(reply));
-        received.recv().expect("status reply").expect("status succeeds")
-    }
-
-    fn trade(&mut self, sequence: u64, minute: i64) {
-        self.coordinator.handle_provider_event(
-            super::super::super::ProviderEvent::rithmic(RithmicRealtimeEvent::Trade(
-                1,
-                rithmic_trade_for_series(&self.series, sequence, minute * 60_000_000_000),
-            )),
-        );
-        self.coordinator.publish_rithmic_live();
-    }
-}
+use super::boundary::Boundary;
 
 #[test]
 fn characterization_reseed_during_live_flow_keeps_one_forming_bar_and_contiguous_history() {
     let mut boundary = Boundary::new();
-    boundary.demand(boundary.series.clone(), 1);
-    boundary.history.try_recv().expect("initial history request");
-    boundary.complete(1, minute_bars(0, 3), Some(minute_bars(3, 1)[0]));
+    boundary.demand(boundary.series(), 1);
+    let initial = boundary.history_request();
+    boundary.complete(initial, minute_bars(0, 3), Some(minute_bars(3, 1)[0]));
     boundary.events();
 
     boundary.trade(1, 3);
-    boundary.coordinator.handle_provider_event(
-        super::super::super::ProviderEvent::rithmic(RithmicRealtimeEvent::Recovering(
-            1,
-            None,
-        )),
-    );
+    boundary.provider_event(RithmicRealtimeEvent::Connecting(2));
+    boundary.provider_event(RithmicRealtimeEvent::Connected(2));
     boundary.trade(2, 4);
-    boundary.complete(1, minute_bars(0, 4), Some(minute_bars(4, 1)[0]));
-    boundary.trade(3, 4);
+    let reseed = boundary.history_request();
+    boundary.complete(reseed, minute_bars(0, 4), Some(minute_bars(4, 1)[0]));
+    boundary.trade(3, 5);
 
-    let snapshots: Vec<_> = boundary
-        .events()
-        .into_iter()
-        .filter_map(|event| match event {
-            MarketRuntimeEvent::SeriesSnapshot(publication) => Some(publication.snapshot),
-            _ => None,
-        })
-        .collect();
+    let events = boundary.events();
+    let snapshots: Vec<_> = events.iter().filter_map(|event| match event {
+        MarketRuntimeEvent::SeriesSnapshot(publication) => Some(&publication.snapshot),
+        _ => None,
+    }).collect();
     let latest = snapshots.last().expect("a covering snapshot after reseed");
-    assert!(latest.forming, "only the last bar is forming");
+    let last_update = events.iter().rev().find_map(|event| match event {
+        MarketRuntimeEvent::SeriesUpdate(update) => Some(update),
+        _ => None,
+    }).expect("live flow publishes after reseed");
+    assert!(last_update.forming, "the latest published tail has one forming bar");
+    assert!(
+        last_update.bar.exchange_timestamp_unix_nanos
+            > latest.bars.last().expect("completed history").exchange_timestamp_unix_nanos,
+        "the forming bar follows the completed history"
+    );
     assert_eq!(
         latest
             .bars
@@ -153,9 +49,9 @@ fn characterization_reseed_during_live_flow_keeps_one_forming_bar_and_contiguous
 #[test]
 fn characterization_outbox_overflow_emits_covering_snapshot() {
     let mut boundary = Boundary::new();
-    boundary.demand(boundary.series.clone(), 1);
-    boundary.history.try_recv().expect("initial history request");
-    boundary.complete(1, minute_bars(0, 3), Some(minute_bars(3, 1)[0]));
+    boundary.demand(boundary.series(), 1);
+    let initial = boundary.history_request();
+    boundary.complete(initial, minute_bars(0, 3), Some(minute_bars(3, 1)[0]));
     boundary.events();
     for minute in 4..(4
         + i64::try_from(super::super::super::CONSUMER_SERIES_QUEUE_CAPACITY)
@@ -164,7 +60,7 @@ fn characterization_outbox_overflow_emits_covering_snapshot() {
     {
         boundary.trade(u64::try_from(minute).expect("positive fixture minute"), minute);
     }
-    boundary.coordinator.recover_overflowed_series_queues();
+    boundary.tick();
     assert!(boundary.events().iter().any(|event| match event {
         MarketRuntimeEvent::SeriesSnapshot(publication) => publication.snapshot.bars.len() > 1_024,
         _ => false,
@@ -174,13 +70,11 @@ fn characterization_outbox_overflow_emits_covering_snapshot() {
 #[test]
 fn characterization_stale_generation_history_completion_is_ignored() {
     let mut boundary = Boundary::new();
-    boundary.demand(boundary.series.clone(), 1);
-    let request = boundary.history.try_recv().expect("initial history request");
-    boundary.coordinator.handle_provider_event(
-        super::super::super::ProviderEvent::rithmic(RithmicRealtimeEvent::Connecting(2)),
-    );
+    boundary.demand(boundary.series(), 1);
+    let request = boundary.history_request();
+    boundary.provider_event(RithmicRealtimeEvent::Connecting(2));
     boundary.events();
-    boundary.complete_with_ticket(1, request.ticket, minute_bars(0, 3), None);
+    boundary.complete(request, minute_bars(0, 3), None);
     assert!(
         !boundary.events().iter().any(|event| {
             matches!(event, MarketRuntimeEvent::SeriesSnapshot(_))
@@ -192,14 +86,14 @@ fn characterization_stale_generation_history_completion_is_ignored() {
 #[test]
 fn characterization_symbol_or_timeframe_change_keeps_provider_session() {
     let mut boundary = Boundary::new();
-    boundary.demand(boundary.series.clone(), 1);
+    boundary.demand(boundary.series(), 1);
     let initial = boundary
         .status()
         .providers
         .into_iter()
         .find(|state| state.provider == "rithmic")
         .expect("provider status");
-    let mut other = boundary.series.clone();
+    let mut other = boundary.series();
     other.period = BarPeriod::time(300).expect("five minute interval");
     boundary.demand(other, 2);
     let mut symbol = instrument();
@@ -207,15 +101,8 @@ fn characterization_symbol_or_timeframe_change_keeps_provider_session() {
     symbol.provider_symbol = "MESU6".into();
     symbol.display_symbol = "MES Sep 2026".into();
     symbol.entitlement_id = "rithmic-test:CME:MESU6".into();
-    let (reply, received) = std::sync::mpsc::sync_channel(1);
-    boundary
-        .coordinator
-        .handle_command(Command::InstallProviderInstrument(symbol.clone(), reply));
-    received
-        .recv()
-        .expect("install reply")
-        .expect("second symbol installs");
-    let mut second_series = boundary.series.clone();
+    boundary.install(symbol.clone());
+    let mut second_series = boundary.series();
     second_series.instrument_id = symbol.instrument_id;
     second_series.entitlement_id = symbol.entitlement_id;
     boundary.demand(second_series, 3);

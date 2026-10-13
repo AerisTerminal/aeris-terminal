@@ -151,6 +151,126 @@ fn provider_calendar_status_uses_the_cached_dated_window_and_fails_closed() {
 }
 
 #[test]
+fn calendar_public_market_service_status_delegates_for_four_providers() {
+    use super::super::calendar::MarketCalendarService;
+    use crate::MarketService;
+    use aeris_instruments::{CalendarSourceKind, SessionPhase};
+
+    let at = "2026-08-17T14:00:00Z"
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .expect("UTC instant")
+        .timestamp_nanos_opt()
+        .expect("timestamp");
+    let service = MarketService::start_composed(vec![]).expect("offline market service");
+    *service.runtime.broker_api.futures_sessions.lock().unwrap() = Some((
+        Instant::now(),
+        [
+            session_at(at - 60_000_000_000, at + 60_000_000_000),
+            MarketSession {
+                collection: MarketCollection::Cfe,
+                ..session_at(at - 60_000_000_000, at + 60_000_000_000)
+            },
+        ],
+    ));
+    for (instrument, expected_kind, expected_source) in calendar_service_instruments() {
+        let status = service.market_session_status(&instrument, at);
+        let mut calendar = MarketCalendarService::default();
+        let provider_status = (expected_kind == CalendarSourceKind::ProviderCalendar).then(|| {
+            service.runtime.broker_api.market_session_status(
+                &instrument.instrument_id,
+                &instrument.provider_symbol,
+                at,
+            )
+        });
+        calendar.resolve(&instrument, provider_status);
+        assert_eq!(
+            calendar.source_kind(&instrument.instrument_id),
+            expected_kind
+        );
+        assert_eq!(status.source, expected_source, "{}", instrument.provider);
+        assert_eq!(
+            status.phase,
+            calendar
+                .status(&instrument.instrument_id, at.div_euclid(1_000_000))
+                .phase,
+            "{}",
+            instrument.provider
+        );
+        assert_eq!(
+            calendar.phase(&instrument.instrument_id, at.div_euclid(1_000_000)),
+            if expected_kind == CalendarSourceKind::AlwaysOpen {
+                SessionPhase::AlwaysOpen
+            } else {
+                SessionPhase::Open
+            }
+        );
+    }
+    service
+        .shutdown(Duration::from_secs(5))
+        .expect("offline service shutdown");
+}
+
+fn calendar_service_instruments() -> [(
+    InstallProviderInstrument,
+    aeris_instruments::CalendarSourceKind,
+    MarketSessionSource,
+); 4] {
+    use aeris_contracts::{ProviderContractMetadata, ProviderSessionHours};
+    use aeris_instruments::CalendarSourceKind;
+    [
+        (
+            InstallProviderInstrument {
+                provider: "tastytrade".into(),
+                instrument_id: "tastytrade:Future:/ESZ6".into(),
+                provider_symbol: "/ESZ26:XCME".into(),
+                venue_id: "CME".into(),
+                ..Default::default()
+            },
+            CalendarSourceKind::ProviderCalendar,
+            MarketSessionSource::ProviderCalendar,
+        ),
+        (
+            InstallProviderInstrument {
+                provider: "ctrader".into(),
+                instrument_id: "ctrader:EURUSD".into(),
+                contract_metadata: Some(Box::new(ProviderContractMetadata {
+                    session_hours: vec![ProviderSessionHours {
+                        weekday: 1,
+                        open_seconds: 0,
+                        close_seconds: 86_400,
+                        timezone: "UTC".into(),
+                    }],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            CalendarSourceKind::ContractHours,
+            MarketSessionSource::ProviderHours,
+        ),
+        (
+            InstallProviderInstrument {
+                provider: "rithmic".into(),
+                instrument_id: "rithmic:ES".into(),
+                venue_id: "CME".into(),
+                ..Default::default()
+            },
+            CalendarSourceKind::ExchangeRule,
+            MarketSessionSource::ProviderCalendar,
+        ),
+        (
+            InstallProviderInstrument {
+                provider: "hyperliquid".into(),
+                instrument_id: "hyperliquid:BTC".into(),
+                venue_id: "HYPERLIQUID".into(),
+                ..Default::default()
+            },
+            CalendarSourceKind::AlwaysOpen,
+            MarketSessionSource::Continuous,
+        ),
+    ]
+}
+
+#[test]
 fn equity_query_with_loaded_futures_catalog_returns_preliminary_empty_result() {
     let search = SearchProviderInstruments {
         consumer_id: 1,

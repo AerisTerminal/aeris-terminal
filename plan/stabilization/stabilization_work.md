@@ -321,6 +321,9 @@ Status: in progress
   - `aeris_naming_check` requires each test name individually; the test suite verifies all
     four removal cases. Full local fmt, workspace clippy, workspace tests and naming gate passed.
     MD-17 is partly addressed; replay migration remains M3.11.
+  - User-testing round 1: the four named scenarios now take exact history tickets from provider requests and
+    assert only consumer publications, command replies and provider-session status; scripted fixture setup and
+    coordinator turns live outside the characterization file. No private history/coordinator state is inspected.
 - [x] M2.2 market-benchmark-baseline - Hot-path and coordinator benchmark baseline
   - Release engine example measures 50,000 completed bars, 10,000 forming-bar revisions
     per simulated second, 63 snapshots at a 16 ms cadence and 256 full study-input copies.
@@ -367,10 +370,17 @@ Status: in progress
   - Added the session source resolver (provider calendar, contract hours, exchange rule, continuous, unknown), domain phase/window/source kinds, and shared exchange-code normalization. CME bucket and DST rules moved from the Rithmic adapter to the shared instruments domain; the runtime calendar owns dated phase/transition projection and weekly contract hours.
   - Runtime session status delegates to the calendar; interval resolution takes calendar source kind. Unsupported weekly/monthly trade-built demands produce a permanent `MarketDemandError` event and an error reply, including tastytrade equity 1W, rather than a series without live handoff. Existing cTrader daily cadence remains accepted without published hours.
   - Calendar matrix, four-provider source resolution, CME DST, unknown 1W/1M and tastytrade equity 1W tests pass; naming_check rejects provider literals in generic calendar and adapter-owned calendar imports. Full local fmt, workspace clippy/tests and naming gate passed. MD-04's non-CME live aggregation remains M2.7.
+  - User-testing round 1: every CME/DST, CFE, equity regular/extended, crypto, FX weekend/open and Unknown
+    matrix row asserts phase, complete session window and next transition. The public
+    `MarketService::market_session_status` is compared with calendar phase and source for all four providers;
+    the three moved CME rule tests pass in `aeris_instruments`.
 - [x] M2.6 provider-neutral-watchdog - Stall watchdog and practice session answer for every provider
   - Candle and trade handoffs use the injected clock for last progress. The watchdog evaluates both models for every provider against the calendar's open/extended/always-open phase, never retries while closed, and uses a 300-second threshold for unknown sessions (30 seconds while open). It no longer calls the tastytrade broker API from the coordinator.
   - Practice session admission retrieves the installed instrument from the coordinator and asks the same calendar for all providers; unknown and closed phases produce distinct errors. Removed the superseded tastytrade-only practice gate.
   - Scripted cTrader open/closed and Rithmic CME no-trades recovery tests assert one current history request while open and none while closed; pure tests cover all four providers, unknown grace and practice crypto/CME/unknown cases. Full local fmt, workspace clippy/tests and naming gate passed. MD-02 market half closed; the trading-side gate remains M4.8.
+  - User-testing round 1: scripted coordinator tests count exactly one current history request for each
+    open-market cTrader, tastytrade, Rithmic CME and AlwaysOpen Hyperliquid series; Unknown requests none
+    at 30 seconds and exactly one after 300 seconds. The injected clock advances without sleeps.
 - [x] M2.7 calendar-session-live-bars - Session-day, weekly and monthly live bars follow the calendar
   - Trade handoffs use calendar session/day, week and month buckets rather than elapsed daily seconds or CME-only buckets. Coordinator owns the installed calendar; tape dates, watchdog and trade-built bars read its current source. Contiguous contract hours still roll daily at the local opening time.
   - Dated provider projections and holidays arrive through generation-fenced provider calendar events, take precedence while valid, and then fall back to contract/exchange rules or Unknown. The tastytrade catalog worker publishes bounded updates when its cached calendar changes and on instrument selection.
@@ -568,6 +578,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M2.9 feat(market): unify catalog command fences and consumer retirement - removed the startup sentinel and five pending maps, separated startup/picker searches, and centralized consumer cleanup.
 - 2026-10-14 M2.10 feat(market): centralize history lanes and exact completion tickets - replaced eight maps, bounded retry/deferral and provider-history scheduler with a single tracker; verified older Hyperliquid chart pages without gaps.
 - 2026-10-14 M2.10 fix(market): drain deferred backfill after empty current history - closed the M2 scrutiny blocker with ticket-fenced dispatch and scripted completion-path regressions.
+- 2026-10-14 M2.1/M2.5/M2.6 test(market): close user-testing boundary and calendar coverage gaps - moved characterization observations to the command/event boundary; completed the calendar/status matrix and five scripted recovery request checks; full gate green.
 
 ## 7. Known gaps / deferred
 
