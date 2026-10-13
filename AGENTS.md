@@ -122,6 +122,9 @@ the check.
   codes share one normalization table; generic calendar code contains no provider identity
   literals and does not import an adapter-owned exchange calendar. Unknown week/month
   boundaries reject demand explicitly rather than installing a silent live series.
+- Stall recovery considers every live candle and trade series while its calendar is open;
+  closed sessions never recover for silence, and unknown sessions use a longer threshold.
+  Practice session checks use the same calendar for every provider.
 - Verify protocol fields, precision, timestamp meaning, ordering, snapshot semantics, and recovery
   against current provider documentation or representative observed responses before depending on them.
 - Keep provider identity, local ingestion order, and continuity evidence separate. Never infer sequence

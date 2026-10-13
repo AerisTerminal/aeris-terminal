@@ -174,6 +174,7 @@ enum Command {
     /// the top of the next coordinator iteration.
     ProviderWake,
     Status(Reply<MarketServiceStatus>),
+    InstalledInstrument(String, String, Reply<Option<InstallProviderInstrument>>),
     BrokerAuthorizationChanged(&'static str, bool, Reply<()>),
     AvailableStreams(String, StreamRequirements, Reply<StreamRequirements>),
     Attach(ClientId, Reply<()>),
@@ -721,6 +722,7 @@ enum TradeLiveUpdate {
 
 mod provider_event;
 mod realtime;
+mod watchdog;
 use provider_event::{
     ProviderCandle, ProviderDisconnect, ProviderEvent, ProviderEventKind, ProviderTradeBatch,
 };
@@ -739,6 +741,8 @@ enum LiveHistoryState {
 /// merge by candle-open timestamp with exactly one forming candle. Sequence
 /// ingestion sequence numbers stay runtime-owned so a redelivered update can never look new.
 struct CandleLiveHandoff {
+    clock: Arc<dyn clock::Clock>,
+    last_progress_at: Instant,
     series: BarSeriesKey,
     generation: ProviderGeneration,
     gap_policy: CandleGapPolicy,

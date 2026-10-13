@@ -1,8 +1,8 @@
 use super::{
     AggressorSide, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CandleGapPolicy, CandleLiveHandoff,
-    CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, Duration, ExchangeCalendar,
+    CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, ExchangeCalendar,
     ExchangeCalendarPeriod, FailureStage, FormingBar, HyperliquidInstrumentDemand,
-    IndexedTradeMutation, InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY,
+    IndexedTradeMutation, InstallProviderInstrument, LIVE_BUFFER_CAPACITY,
     LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
     MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
     OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent,
@@ -12,7 +12,7 @@ use super::{
     series_state_payload, series_update_message,
 };
 #[cfg(test)]
-use super::{HyperliquidDemand, RithmicRealtimeDemand};
+use super::{Duration, HyperliquidDemand, Instant, RithmicRealtimeDemand};
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl, HyperliquidDisplayDepthDemand,
 };
@@ -96,34 +96,6 @@ fn enqueue_bar_transition(
     }
     queue.push_back(bar);
     Ok(())
-}
-
-const LIVE_SERIES_STALL_THRESHOLD: Duration = Duration::from_secs(30);
-const RECENT_INSTRUMENT_TRADE_WINDOW: Duration = Duration::from_secs(10);
-
-fn live_series_stalled(
-    now: Instant,
-    last_publication: Instant,
-    last_trade: Option<Instant>,
-    provider_health: ProviderHealth,
-    session_phase: aeris_contracts::MarketSessionPhase,
-    connected: bool,
-    history_state: LiveHistoryState,
-) -> bool {
-    provider_health == ProviderHealth::Online
-        && matches!(
-            session_phase,
-            aeris_contracts::MarketSessionPhase::Regular
-                | aeris_contracts::MarketSessionPhase::PreMarket
-                | aeris_contracts::MarketSessionPhase::PostMarket
-                | aeris_contracts::MarketSessionPhase::Overnight
-                | aeris_contracts::MarketSessionPhase::AlwaysOpen
-        )
-        && connected
-        && history_state == LiveHistoryState::Ready
-        && now.duration_since(last_publication) >= LIVE_SERIES_STALL_THRESHOLD
-        && last_trade
-            .is_some_and(|trade| now.duration_since(trade) <= RECENT_INSTRUMENT_TRADE_WINDOW)
 }
 
 impl ProviderOrderBook {
@@ -1326,6 +1298,7 @@ pub(super) fn started_rithmic_bar(
 }
 
 impl CandleLiveHandoff {
+    #[cfg(test)]
     pub(super) fn new(
         series: BarSeriesKey,
         generation: ProviderGeneration,
@@ -1333,7 +1306,27 @@ impl CandleLiveHandoff {
         interval: String,
         gap_policy: CandleGapPolicy,
     ) -> Self {
+        Self::with_clock(
+            series,
+            generation,
+            wire_coin,
+            interval,
+            gap_policy,
+            std::sync::Arc::new(super::clock::SystemClock),
+        )
+    }
+
+    pub(super) fn with_clock(
+        series: BarSeriesKey,
+        generation: ProviderGeneration,
+        wire_coin: String,
+        interval: String,
+        gap_policy: CandleGapPolicy,
+        clock: std::sync::Arc<dyn super::clock::Clock>,
+    ) -> Self {
         Self {
+            last_progress_at: clock.monotonic(),
+            clock,
             series,
             generation,
             gap_policy,
@@ -1360,6 +1353,7 @@ impl CandleLiveHandoff {
         self.connected = false;
         self.history_state = LiveHistoryState::AwaitingHistory;
         self.dirty = false;
+        self.last_progress_at = self.clock.monotonic();
     }
 
     pub(super) fn coverage(&self) -> Option<(i64, i64)> {
@@ -1391,6 +1385,7 @@ impl CandleLiveHandoff {
         }
         let buffered = std::mem::take(&mut self.buffered);
         self.history_state = LiveHistoryState::Ready;
+        self.last_progress_at = self.clock.monotonic();
         for candle in &buffered {
             if self
                 .forming
@@ -1449,6 +1444,7 @@ impl CandleLiveHandoff {
         self.dirty = !self.pending_publications.is_empty();
         let buffered = std::mem::take(&mut self.buffered);
         self.history_state = LiveHistoryState::Ready;
+        self.last_progress_at = self.clock.monotonic();
         for candle in &buffered {
             if self
                 .forming
@@ -1545,6 +1541,7 @@ impl CandleLiveHandoff {
             "Provider candle publication buffer overflowed",
         )?;
         self.dirty = true;
+        self.last_progress_at = self.clock.monotonic();
         Ok(true)
     }
 }
@@ -2046,12 +2043,13 @@ impl Coordinator<'_> {
                         descriptor.candle_wire_interval.ok_or_else(|| {
                             "provider candle interval is unavailable".to_string()
                         })?(series.period)?;
-                    let mut handoff = CandleLiveHandoff::new(
+                    let mut handoff = CandleLiveHandoff::with_clock(
                         series.clone(),
                         generation,
                         instrument.provider_symbol,
                         interval,
                         descriptor.gap_policy,
+                        std::sync::Arc::clone(&self.clock),
                     );
                     handoff.connected = connected;
                     self.series_live.insert_candle(series.clone(), handoff);
@@ -3517,61 +3515,86 @@ impl Coordinator<'_> {
 
     pub(super) fn recover_stalled_live_series(&mut self) {
         let now = self.clock.monotonic();
-        let candidates = self
+        let trade_candidates = self
             .series_live
             .trade_iter_mut()
-            .filter(|(_, live)| {
-                live.connected
+            .filter_map(|(series, live)| {
+                (live.connected
                     && live.history_state == LiveHistoryState::Ready
-                    && now.duration_since(live.last_publication_at) >= LIVE_SERIES_STALL_THRESHOLD
-                    && live.last_trade_at.is_some_and(|trade| {
-                        now.duration_since(trade) <= RECENT_INSTRUMENT_TRADE_WINDOW
+                    && now.duration_since(live.last_publication_at)
+                        >= super::watchdog::OPEN_STALL_THRESHOLD)
+                    .then(|| {
+                        (
+                            series.clone(),
+                            live.generation,
+                            live.last_publication_at,
+                            false,
+                        )
                     })
             })
-            .map(|(series, live)| (series.clone(), live.generation))
+            .collect::<Vec<_>>();
+        let candidates = trade_candidates
+            .into_iter()
+            .chain(
+                self.series_live
+                    .candle_iter()
+                    .filter(|(_, live)| {
+                        live.connected
+                            && live.history_state == LiveHistoryState::Ready
+                            && now.duration_since(live.last_progress_at)
+                                >= super::watchdog::OPEN_STALL_THRESHOLD
+                    })
+                    .map(|(series, live)| {
+                        (series.clone(), live.generation, live.last_progress_at, true)
+                    }),
+            )
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             return;
         }
-        let Some(now_unix_nanos) = self.clock.wall_nanos() else {
-            return;
-        };
-        for (series, generation) in candidates {
+        let at_utc_ms = self
+            .clock
+            .wall_nanos()
+            .map(|nanos| nanos.div_euclid(1_000_000));
+        for (series, generation, last_progress, candle) in candidates {
             let provider_health = self
                 .engine
                 .provider_status(&series.provider_id)
                 .filter(|status| status.generation == Some(generation))
                 .map_or(ProviderHealth::Disconnected, |status| status.health);
-            let session_phase = self
+            let phase = self
                 .catalog
                 .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                .map_or(aeris_contracts::MarketSessionPhase::Unknown, |instrument| {
-                    self.broker_api
-                        .market_session_status(
-                            &instrument.instrument_id,
-                            &instrument.provider_symbol,
-                            now_unix_nanos,
-                        )
-                        .phase
-                });
-            let stalled = self.series_live.trade(&series).is_some_and(|live| {
-                live_series_stalled(
-                    now,
-                    live.last_publication_at,
-                    live.last_trade_at,
-                    provider_health,
-                    session_phase,
-                    live.connected,
-                    live.history_state,
-                )
-            });
-            if stalled {
-                self.rithmic_series_recovering(
-                    &series,
-                    generation,
-                    FailureStage::Publication,
-                    "Live series stalled while instrument trades continued",
-                );
+                .and_then(|instrument| {
+                    let at = at_utc_ms?;
+                    let mut calendar = super::calendar::MarketCalendarService::default();
+                    calendar.resolve(instrument, None);
+                    Some(calendar.phase(&instrument.instrument_id, at))
+                })
+                .unwrap_or(aeris_instruments::SessionPhase::Unknown);
+            if super::watchdog::stalled(
+                now,
+                last_progress,
+                provider_health,
+                phase,
+                true,
+                LiveHistoryState::Ready,
+            ) {
+                if candle {
+                    self.candle_series_recovering(
+                        &series,
+                        generation,
+                        FailureStage::Publication,
+                        "Live candle series stalled while the market was open",
+                    );
+                } else {
+                    self.rithmic_series_recovering(
+                        &series,
+                        generation,
+                        FailureStage::Publication,
+                        "Live trade series stalled while the market was open",
+                    );
+                }
             }
         }
     }
@@ -4937,72 +4960,59 @@ mod tests {
     }
 
     #[test]
-    fn stalled_series_requires_online_open_market_and_recent_trades() {
+    fn watchdog_stalled_series_requires_online_open_market() {
         let now = Instant::now();
         let old_publication = now
-            .checked_sub(LIVE_SERIES_STALL_THRESHOLD + Duration::from_secs(1))
+            .checked_sub(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1))
             .expect("test clock can subtract 31 seconds");
-        let recent_trade = now.checked_sub(Duration::from_secs(1));
-        assert!(live_series_stalled(
+        assert!(super::super::watchdog::stalled(
             now,
             old_publication,
-            recent_trade,
             ProviderHealth::Online,
-            aeris_contracts::MarketSessionPhase::Regular,
+            aeris_instruments::SessionPhase::Open,
             true,
             LiveHistoryState::Ready,
         ));
         for (health, phase, connected, history_state) in [
             (
                 ProviderHealth::Recovering,
-                aeris_contracts::MarketSessionPhase::Regular,
+                aeris_instruments::SessionPhase::Open,
                 true,
                 LiveHistoryState::Ready,
             ),
             (
                 ProviderHealth::Online,
-                aeris_contracts::MarketSessionPhase::Closed,
+                aeris_instruments::SessionPhase::Closed,
                 true,
                 LiveHistoryState::Ready,
             ),
             (
                 ProviderHealth::Online,
-                aeris_contracts::MarketSessionPhase::Regular,
+                aeris_instruments::SessionPhase::Open,
                 false,
                 LiveHistoryState::Ready,
             ),
             (
                 ProviderHealth::Online,
-                aeris_contracts::MarketSessionPhase::Regular,
+                aeris_instruments::SessionPhase::Open,
                 true,
                 LiveHistoryState::AwaitingHistory,
             ),
         ] {
-            assert!(!live_series_stalled(
+            assert!(!super::super::watchdog::stalled(
                 now,
                 old_publication,
-                recent_trade,
                 health,
                 phase,
                 connected,
                 history_state,
             ));
         }
-        assert!(!live_series_stalled(
+        assert!(!super::super::watchdog::stalled(
             now,
             now.checked_sub(Duration::from_secs(5)).expect("test clock"),
-            recent_trade,
             ProviderHealth::Online,
-            aeris_contracts::MarketSessionPhase::Regular,
-            true,
-            LiveHistoryState::Ready,
-        ));
-        assert!(!live_series_stalled(
-            now,
-            old_publication,
-            now.checked_sub(RECENT_INSTRUMENT_TRADE_WINDOW + Duration::from_secs(1)),
-            ProviderHealth::Online,
-            aeris_contracts::MarketSessionPhase::Regular,
+            aeris_instruments::SessionPhase::Open,
             true,
             LiveHistoryState::Ready,
         ));
@@ -5013,14 +5023,13 @@ mod tests {
         use super::super::clock::{Clock, ScriptedClock};
         let clock = ScriptedClock::new(1_000_000_000);
         let published = clock.monotonic();
-        clock.advance(LIVE_SERIES_STALL_THRESHOLD + Duration::from_secs(1));
+        clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
         let now = clock.monotonic();
-        assert!(live_series_stalled(
+        assert!(super::super::watchdog::stalled(
             now,
             published,
-            Some(now),
             ProviderHealth::Online,
-            aeris_contracts::MarketSessionPhase::Regular,
+            aeris_instruments::SessionPhase::Open,
             true,
             LiveHistoryState::Ready,
         ));

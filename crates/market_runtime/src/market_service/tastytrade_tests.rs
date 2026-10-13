@@ -77,21 +77,12 @@ fn resolved_instrument_cache_reuses_identity_and_clears_on_authorization_change(
 }
 
 #[test]
-fn practice_calendar_uses_the_cached_dated_window_and_fails_closed() {
+fn provider_calendar_status_uses_the_cached_dated_window_and_fails_closed() {
     let api = BrokerApi::default();
-    assert!(
-        !api.require_practice_market_session("hyperliquid", "hyperliquid:perp:BTC", "BTC", 150)
-            .expect("other providers keep their existing execution policy")
-    );
     assert_eq!(
-        api.require_practice_market_session(
-            "tastytrade",
-            "tastytrade:Future:/ESZ6",
-            "/ESZ26:XCME",
-            150
-        )
-        .unwrap_err(),
-        "Practice market calendar is unavailable"
+        api.market_session_status("tastytrade:Future:/ESZ6", "/ESZ26:XCME", 150)
+            .phase,
+        MarketSessionPhase::Unknown
     );
     *api.futures_sessions.lock().unwrap() = Some((
         Instant::now(),
@@ -103,14 +94,10 @@ fn practice_calendar_uses_the_cached_dated_window_and_fails_closed() {
             },
         ],
     ));
-    assert!(
-        api.require_practice_market_session(
-            "tastytrade",
-            "tastytrade:Future:/ESZ6",
-            "/ESZ26:XCME",
-            150
-        )
-        .is_ok()
+    assert_eq!(
+        api.market_session_status("tastytrade:Future:/ESZ6", "/ESZ26:XCME", 150)
+            .phase,
+        MarketSessionPhase::Regular
     );
     for (symbol, streamer) in [
         ("/MESZ6", "/MESZ26:XCME"),
@@ -120,30 +107,21 @@ fn practice_calendar_uses_the_cached_dated_window_and_fails_closed() {
         ("/ZNZ6", "/ZNZ26:XCBT"),
     ] {
         assert_eq!(
-            api.require_practice_market_session(
-                "tastytrade",
-                &format!("tastytrade:Future:{symbol}"),
-                streamer,
-                150,
-            ),
-            Ok(true),
+            api.market_session_status(&format!("tastytrade:Future:{symbol}"), streamer, 150)
+                .phase,
+            MarketSessionPhase::Regular,
             "{streamer} must use the provider CME collection",
         );
     }
     assert_eq!(
-        api.require_practice_market_session(
-            "tastytrade",
-            "tastytrade:Future:/ESZ6",
-            "/ESZ26:XCME",
-            200
-        )
-        .unwrap_err(),
-        "Practice market is closed"
+        api.market_session_status("tastytrade:Future:/ESZ6", "/ESZ26:XCME", 200)
+            .phase,
+        MarketSessionPhase::Closed
     );
     assert_eq!(
-        api.require_practice_market_session("tastytrade", "tastytrade:Future:/ESZ6", "ESZ26", 150)
-            .unwrap_err(),
-        "Practice market calendar is unavailable"
+        api.market_session_status("tastytrade:Future:/ESZ6", "ESZ26", 150)
+            .phase,
+        MarketSessionPhase::Unknown
     );
     *api.equity_session.lock().unwrap() = Some((
         Instant::now(),
@@ -152,22 +130,23 @@ fn practice_calendar_uses_the_cached_dated_window_and_fails_closed() {
             ..session_at(100, 200)
         },
     ));
-    assert!(
-        api.require_practice_market_session("tastytrade", "tastytrade:Equity:AAPL", "AAPL", 150)
-            .is_ok()
+    assert_eq!(
+        api.market_session_status("tastytrade:Equity:AAPL", "AAPL", 150)
+            .phase,
+        MarketSessionPhase::Regular
     );
     assert_eq!(
-        api.require_practice_market_session("tastytrade", "tastytrade:Equity:AAPL", "AAPL", 200)
-            .unwrap_err(),
-        "Practice market is closed"
+        api.market_session_status("tastytrade:Equity:AAPL", "AAPL", 200)
+            .phase,
+        MarketSessionPhase::Closed
     );
     api.equity_session.lock().unwrap().as_mut().unwrap().0 = Instant::now()
         .checked_sub(Duration::from_mins(7))
         .expect("test instant has seven minutes of history");
     assert_eq!(
-        api.require_practice_market_session("tastytrade", "tastytrade:Equity:AAPL", "AAPL", 150)
-            .unwrap_err(),
-        "Practice market calendar is unavailable"
+        api.market_session_status("tastytrade:Equity:AAPL", "AAPL", 150)
+            .phase,
+        MarketSessionPhase::Unknown
     );
 }
 

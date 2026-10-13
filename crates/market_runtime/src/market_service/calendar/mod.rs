@@ -3,6 +3,7 @@ mod venue;
 pub(crate) mod weekly_hours;
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use aeris_contracts::{
     InstallProviderInstrument, MarketSessionPhase, MarketSessionSource, MarketSessionStatus,
@@ -65,6 +66,22 @@ pub struct MarketCalendarService {
     sources: BTreeMap<String, CalendarSource>,
 }
 
+/// An installed instrument cannot admit a simulated order at this phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarSessionError {
+    Closed,
+    Unknown,
+}
+
+impl fmt::Display for CalendarSessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed => f.write_str("Practice market is closed"),
+            Self::Unknown => f.write_str("Practice market session is unknown"),
+        }
+    }
+}
+
 impl MarketCalendarService {
     /// Select a source in descending order of specificity. A missing or
     /// unavailable provider projection must not shadow contract hours.
@@ -110,6 +127,24 @@ impl MarketCalendarService {
     #[must_use]
     pub fn phase(&self, instrument_id: &str, at_utc_ms: i64) -> SessionPhase {
         phase_from_status(self.status(instrument_id, at_utc_ms).phase)
+    }
+
+    /// Apply one session policy for every provider without guessing on unknown sources.
+    ///
+    /// # Errors
+    /// Returns the precise closed or unknown phase instead of assuming tradability.
+    pub fn require_practice_session(
+        &self,
+        instrument_id: &str,
+        at_utc_ms: i64,
+    ) -> Result<(), CalendarSessionError> {
+        match self.phase(instrument_id, at_utc_ms) {
+            SessionPhase::Open | SessionPhase::Extended | SessionPhase::AlwaysOpen => Ok(()),
+            SessionPhase::Unknown => Err(CalendarSessionError::Unknown),
+            SessionPhase::PreOpen | SessionPhase::Break | SessionPhase::Closed => {
+                Err(CalendarSessionError::Closed)
+            }
+        }
     }
 
     #[must_use]
@@ -286,6 +321,29 @@ mod tests {
                 "{provider}: calendar status and phase disagree"
             );
         }
+    }
+
+    #[test]
+    fn calendar_practice_sessions_are_uniform_across_providers() {
+        let mut calendar = MarketCalendarService::default();
+        calendar.insert("crypto".into(), CalendarSource::AlwaysOpen);
+        calendar.insert(
+            "cme".into(),
+            CalendarSource::ExchangeRule(ExchangeRule::CmeGlobex),
+        );
+        let saturday = ms("2026-10-10T18:00:00Z");
+        assert_eq!(
+            calendar.require_practice_session("crypto", saturday),
+            Ok(())
+        );
+        assert_eq!(
+            calendar.require_practice_session("cme", saturday),
+            Err(CalendarSessionError::Closed)
+        );
+        assert_eq!(
+            calendar.require_practice_session("unknown", saturday),
+            Err(CalendarSessionError::Unknown)
+        );
     }
 
     fn ms(text: &str) -> i64 {

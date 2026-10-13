@@ -31,7 +31,6 @@ pub(super) struct OwnedCoordinatorChannels {
 pub(super) fn spawn_coordinator(
     engine: MarketEngine,
     mut channels: OwnedCoordinatorChannels,
-    broker_api: Arc<super::tastytrade::BrokerApi>,
     shutdown: Arc<AtomicBool>,
     clock: Arc<dyn super::clock::Clock>,
 ) -> Result<thread::JoinHandle<()>, String> {
@@ -40,14 +39,7 @@ pub(super) fn spawn_coordinator(
         .spawn(move || {
             {
                 let providers = channels.providers.dispatch();
-                run_coordinator(
-                    engine,
-                    &channels.commands,
-                    providers,
-                    broker_api,
-                    &shutdown,
-                    clock,
-                );
+                run_coordinator(engine, &channels.commands, providers, &shutdown, clock);
             }
             let panicked = channels.providers.cancel_and_join();
             assert!(
@@ -63,11 +55,10 @@ fn run_coordinator(
     engine: MarketEngine,
     commands: &Receiver<Command>,
     providers: ProviderDispatch<'_>,
-    broker_api: Arc<super::tastytrade::BrokerApi>,
     shutdown: &AtomicBool,
     clock: Arc<dyn super::clock::Clock>,
 ) {
-    let mut coordinator = Coordinator::with_clock(engine, providers, broker_api, clock);
+    let mut coordinator = Coordinator::with_clock(engine, providers, clock);
     let demand_flushers = coordinator
         .providers
         .records
@@ -112,23 +103,13 @@ fn run_coordinator(
 }
 
 impl<'a> Coordinator<'a> {
-    fn new(
-        engine: MarketEngine,
-        providers: ProviderDispatch<'a>,
-        broker_api: Arc<super::tastytrade::BrokerApi>,
-    ) -> Self {
-        Self::with_clock(
-            engine,
-            providers,
-            broker_api,
-            Arc::new(super::clock::SystemClock),
-        )
+    fn new(engine: MarketEngine, providers: ProviderDispatch<'a>) -> Self {
+        Self::with_clock(engine, providers, Arc::new(super::clock::SystemClock))
     }
 
     fn with_clock(
         engine: MarketEngine,
         providers: ProviderDispatch<'a>,
-        broker_api: Arc<super::tastytrade::BrokerApi>,
         clock: Arc<dyn super::clock::Clock>,
     ) -> Self {
         let sessions = providers
@@ -157,7 +138,6 @@ impl<'a> Coordinator<'a> {
                     .unwrap_or(NonZeroUsize::MIN),
             }),
             providers,
-            broker_api,
             clock,
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
@@ -395,11 +375,7 @@ fn benchmark_coordinator() -> Result<(Coordinator<'static>, Vec<BarSeriesKey>), 
         records: BTreeMap::new(),
         lanes: Vec::new(),
     };
-    let mut coordinator = Coordinator::new(
-        engine,
-        providers,
-        Arc::new(super::tastytrade::BrokerApi::default()),
-    );
+    let mut coordinator = Coordinator::new(engine, providers);
     for index in 0..SERIES {
         coordinator.events.insert(
             ConsumerId(NonZeroU64::new(index as u64 + 1).ok_or("zero consumer")?),
@@ -547,7 +523,6 @@ pub(super) struct Coordinator<'a> {
     pub(super) engine: MarketEngine,
     pub(super) studies: StudyRuntime,
     pub(super) providers: ProviderDispatch<'a>,
-    pub(super) broker_api: Arc<super::tastytrade::BrokerApi>,
     pub(super) clock: Arc<dyn super::clock::Clock>,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
@@ -669,6 +644,7 @@ impl Coordinator<'_> {
             }
             command @ (Command::BrokerAuthorizationChanged(..)
             | Command::AvailableStreams(..)
+            | Command::InstalledInstrument(..)
             | Command::Status(..)
             | Command::Attach(..)
             | Command::Detach(..)
@@ -738,6 +714,10 @@ impl Coordinator<'_> {
             }
             Command::Status(reply) => {
                 let _ = reply.send(Ok(self.status()));
+            }
+            Command::InstalledInstrument(provider, instrument, reply) => {
+                let installed = self.catalog.get(&(provider, instrument)).cloned();
+                let _ = reply.send(Ok(installed));
             }
             Command::Attach(client_id, reply) => {
                 self.handle_attach(client_id, &reply);
@@ -842,6 +822,7 @@ impl Coordinator<'_> {
             | Command::Detach(..)
             | Command::PollClient(..)
             | Command::AvailableStreams(..)
+            | Command::InstalledInstrument(..)
             | Command::BrokerAuthorizationChanged(..) => {
                 unreachable!("command was routed to the wrong dispatcher")
             }
@@ -1807,7 +1788,6 @@ mod tests {
                 records: BTreeMap::new(),
                 lanes: Vec::new(),
             },
-            broker_api: Arc::new(super::super::tastytrade::BrokerApi::default()),
             clock: Arc::new(super::super::clock::SystemClock),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
@@ -3699,6 +3679,115 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_ctrader_candles_recover_only_while_contract_hours_are_open() {
+        use super::super::clock::{Clock, ScriptedClock};
+        use chrono::{DateTime, Utc};
+        for (at, expect_recovery) in [
+            ("2026-08-17T14:00:00Z", true),
+            ("2026-08-22T14:00:00Z", false),
+        ] {
+            let at_nanos = at
+                .parse::<DateTime<Utc>>()
+                .expect("UTC instant")
+                .timestamp_nanos_opt()
+                .expect("timestamp");
+            let clock = Arc::new(ScriptedClock::new(at_nanos));
+            let mut coordinator = coordinator();
+            coordinator.clock = Arc::clone(&clock) as Arc<dyn Clock>;
+            let mut installed = hyperliquid_instrument();
+            installed.provider = "ctrader".into();
+            installed.instrument_id = "instrument:ctrader:FX:EURUSD".into();
+            installed.provider_symbol = "EURUSD".into();
+            installed.venue_id = String::new();
+            installed.contract_metadata =
+                Some(Box::new(aeris_contracts::ProviderContractMetadata {
+                    session_hours: (1..=5)
+                        .map(|weekday| aeris_contracts::ProviderSessionHours {
+                            weekday,
+                            open_seconds: 0,
+                            close_seconds: 86_400,
+                            timezone: "UTC".into(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                }));
+            let selected = BarSeriesKey {
+                provider_id: installed.provider.clone(),
+                instrument_id: installed.instrument_id.clone(),
+                entitlement_id: installed.entitlement_id.clone(),
+                period: BarPeriod::time(60).expect("minute"),
+                definition_version: 1,
+            };
+            let provider_generation = ProviderGeneration(nonzero(1));
+            coordinator
+                .engine
+                .begin_provider_session("ctrader", provider_generation)
+                .expect("provider begins");
+            coordinator
+                .engine
+                .set_provider_health("ctrader", provider_generation, ProviderHealth::Online)
+                .expect("provider online");
+            let consumer = consumer(1);
+            register(&mut coordinator, consumer);
+            coordinator
+                .engine
+                .set_series_demand_with_streams(
+                    consumer,
+                    generation(1),
+                    &selected,
+                    StreamRequirements::BARS,
+                )
+                .expect("series demanded");
+            let (history_tx, history_rx) = std::sync::mpsc::sync_channel(2);
+            coordinator.providers.records.insert(
+                "ctrader",
+                super::super::ProviderDispatchRecord {
+                    descriptor: super::super::ctrader::DESCRIPTOR,
+                    history: Box::leak(Box::new(history_tx)),
+                    lifecycle: None,
+                    realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                    catalog: super::super::ProviderCatalogDispatch::Disabled,
+                },
+            );
+            coordinator.catalog.insert(
+                (installed.provider.clone(), installed.instrument_id.clone()),
+                installed,
+            );
+            let mut live = CandleLiveHandoff::with_clock(
+                selected.clone(),
+                provider_generation,
+                "EURUSD".into(),
+                "1m".into(),
+                super::super::CandleGapPolicy::SessionGapsAllowed,
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            );
+            live.connected = true;
+            live.history_state = LiveHistoryState::Ready;
+            coordinator
+                .series_live
+                .insert_candle(selected.clone(), live);
+            clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+            coordinator.recover_stalled_live_series();
+            assert_eq!(history_rx.try_recv().is_ok(), expect_recovery, "{at}");
+            coordinator.recover_stalled_live_series();
+            assert!(
+                history_rx.try_recv().is_err(),
+                "no duplicate recovery: {at}"
+            );
+            assert_eq!(
+                coordinator
+                    .series_live
+                    .candle(&selected)
+                    .expect("candle series")
+                    .history_state
+                    == LiveHistoryState::AwaitingHistory,
+                expect_recovery,
+                "{at}"
+            );
+        }
+    }
+
+    #[test]
     fn unreferenced_series_evicts_but_background_consumer_history_is_retained() {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
@@ -4161,6 +4250,59 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn watchdog_rithmic_cme_trade_series_recovers_without_recent_trades() {
+        use super::super::clock::{Clock, ScriptedClock};
+        use chrono::{DateTime, Utc};
+        let at = "2026-08-17T14:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("UTC instant")
+            .timestamp_nanos_opt()
+            .expect("timestamp");
+        let clock = Arc::new(ScriptedClock::new(at));
+        let (mut coordinator, history_rx) = connected_rithmic_coordinator();
+        coordinator.clock = Arc::clone(&clock) as Arc<dyn Clock>;
+        let selected = series();
+        let provider_generation = ProviderGeneration(nonzero(1));
+        coordinator
+            .engine
+            .set_provider_health("rithmic", provider_generation, ProviderHealth::Online)
+            .expect("provider online");
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer,
+                generation(1),
+                &selected,
+                StreamRequirements::BARS,
+            )
+            .expect("series demanded");
+        let mut live = TradeLiveHandoff::with_clock(
+            &selected,
+            provider_generation,
+            "CME",
+            None,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        )
+        .expect("trade handoff");
+        live.connected = true;
+        live.history_state = LiveHistoryState::Ready;
+        coordinator.series_live.insert_trade(selected.clone(), live);
+        clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
+        coordinator.recover_stalled_live_series();
+        assert!(history_rx.try_recv().is_ok(), "current history requested");
+        assert_eq!(
+            coordinator
+                .series_live
+                .trade(&selected)
+                .expect("trade handoff")
+                .history_state,
+            LiveHistoryState::AwaitingHistory
+        );
     }
 
     /// Rithmic Test answers a closed-market current replay with zero bars. That

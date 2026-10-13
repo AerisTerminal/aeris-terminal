@@ -1148,6 +1148,17 @@ impl MarketService {
         instrument: &aeris_contracts::InstallProviderInstrument,
         now_unix_nanos: i64,
     ) -> aeris_contracts::MarketSessionStatus {
+        self.calendar_for(instrument, now_unix_nanos).status(
+            &instrument.instrument_id,
+            now_unix_nanos.div_euclid(1_000_000),
+        )
+    }
+
+    fn calendar_for(
+        &self,
+        instrument: &aeris_contracts::InstallProviderInstrument,
+        now_unix_nanos: i64,
+    ) -> super::calendar::MarketCalendarService {
         use super::calendar::MarketCalendarService;
         let provider_calendar = if instrument.provider == "tastytrade" {
             let status = self.runtime.broker_api.market_session_status(
@@ -1162,16 +1173,13 @@ impl MarketService {
         };
         let mut calendar = MarketCalendarService::default();
         calendar.resolve(instrument, provider_calendar);
-        calendar.status(
-            &instrument.instrument_id,
-            now_unix_nanos.div_euclid(1_000_000),
-        )
+        calendar
     }
 
-    /// Checks the broker's bounded cached calendar before simulated execution.
-    /// A true result requires a quote newer than the submitted order revision.
+    /// Checks the installed instrument's calendar before simulated execution.
+    /// Quote freshness remains the trading owner's separate responsibility.
     /// # Errors
-    /// Rejects a closed or unavailable provider calendar.
+    /// Rejects a closed or unavailable calendar.
     pub fn require_practice_market_session(
         &self,
         provider_id: &str,
@@ -1179,12 +1187,25 @@ impl MarketService {
         provider_symbol: &str,
         now_unix_nanos: i64,
     ) -> Result<bool, String> {
-        self.runtime.broker_api.require_practice_market_session(
-            provider_id,
-            instrument_id,
-            provider_symbol,
-            now_unix_nanos,
-        )
+        let installed = self
+            .request(|reply| {
+                Ok(Command::InstalledInstrument(
+                    provider_id.into(),
+                    instrument_id.into(),
+                    reply,
+                ))
+            })?
+            .ok_or_else(|| "Practice market instrument is not installed".to_string())?;
+        if installed.provider_symbol != provider_symbol {
+            return Err("Practice market instrument identity changed".into());
+        }
+        self.calendar_for(&installed, now_unix_nanos)
+            .require_practice_session(
+                &installed.instrument_id,
+                now_unix_nanos.div_euclid(1_000_000),
+            )
+            .map(|()| true)
+            .map_err(|error| error.to_string())
     }
 
     /// Returns the requested streams supported by the authoritative provider configuration.
@@ -1263,7 +1284,6 @@ impl MarketService {
                 commands: command_rx,
                 providers: provider_registry,
             },
-            Arc::clone(&broker_api),
             Arc::clone(&shutdown),
             Arc::new(super::clock::SystemClock),
         )?];

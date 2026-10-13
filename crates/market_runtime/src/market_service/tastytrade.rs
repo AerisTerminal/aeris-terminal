@@ -560,29 +560,6 @@ impl BrokerApi {
                 })
         })
     }
-    pub(super) fn require_practice_market_session(
-        &self,
-        provider_id: &str,
-        instrument_id: &str,
-        provider_symbol: &str,
-        now_unix_nanos: i64,
-    ) -> Result<bool, String> {
-        if provider_id != "tastytrade" {
-            return Ok(false);
-        }
-        let status = self.market_session_status(instrument_id, provider_symbol, now_unix_nanos);
-        match status.phase {
-            MarketSessionPhase::Regular
-            | MarketSessionPhase::PreMarket
-            | MarketSessionPhase::PostMarket
-            | MarketSessionPhase::Overnight => Ok(true),
-            MarketSessionPhase::Closed => Err("Practice market is closed".into()),
-            MarketSessionPhase::Unknown | MarketSessionPhase::AlwaysOpen => {
-                Err("Practice market calendar is unavailable".into())
-            }
-        }
-    }
-
     pub(super) fn market_session_status(
         &self,
         instrument_id: &str,
