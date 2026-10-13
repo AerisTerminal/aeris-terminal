@@ -4,7 +4,7 @@ use super::{
     EMPTY_CURRENT_HISTORY_RETAINED_DETAIL, EmptyCurrentHistory, FailureStage, FormingBar,
     GenerationId, HISTORY_CAPACITY_EXHAUSTED, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,
     HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest,
-    HistorySnapshot, HistorySource, INITIAL_HISTORY_BARS, InstallProviderInstrument, Instant,
+    HistorySnapshot, HistorySource, INITIAL_HISTORY_BARS, InstallProviderInstrument,
     MAXIMUM_HISTORY_BARS_PER_REQUEST, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
     ProviderGeneration, ProviderRequest, Receiver, SeriesLoadState, SeriesSnapshot, SyncSender,
     TradeHandoffSeed, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
@@ -530,7 +530,7 @@ impl Coordinator<'_> {
                 if let std::collections::btree_map::Entry::Vacant(entry) =
                     self.history_retries.entry((series.clone(), generation))
                 {
-                    entry.insert((Instant::now() + HISTORY_RETRY_DELAY, 0, range));
+                    entry.insert((self.clock.monotonic() + HISTORY_RETRY_DELAY, 0, range));
                     diagnostic!(
                         "Aeris market history queue full for {}; bounded retry scheduled",
                         super::LoggedInstrument(&series.instrument_id)
@@ -637,7 +637,7 @@ impl Coordinator<'_> {
                 self.history_retries.insert(
                     key,
                     (
-                        Instant::now() + HISTORY_FAILED_RETRY_COOLDOWN,
+                        self.clock.monotonic() + HISTORY_FAILED_RETRY_COOLDOWN,
                         attempts,
                         range,
                     ),
@@ -647,13 +647,23 @@ impl Coordinator<'_> {
                 // per demanded series. Optional backfill keeps its existing policy.
                 self.history_retries.insert(
                     key,
-                    (Instant::now() + HISTORY_FAILED_RETRY_COOLDOWN, 0, None),
+                    (
+                        self.clock.monotonic() + HISTORY_FAILED_RETRY_COOLDOWN,
+                        0,
+                        None,
+                    ),
                 );
             }
             return false;
         }
-        self.history_retries
-            .insert(key, (Instant::now() + HISTORY_RETRY_DELAY, attempts, range));
+        self.history_retries.insert(
+            key,
+            (
+                self.clock.monotonic() + HISTORY_RETRY_DELAY,
+                attempts,
+                range,
+            ),
+        );
         // An older-range page sits behind the published series; retrying it
         // leaves the current series state untouched.
         if range.is_none() {
@@ -663,7 +673,7 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn retry_history(&mut self) {
-        let now = Instant::now();
+        let now = self.clock.monotonic();
         let Some(key) = self
             .history_retries
             .iter()
@@ -929,7 +939,7 @@ impl Coordinator<'_> {
         }
         let (range, remainder) = self.page_history_range(series, range);
         if let Some((retry_at, attempts, failed_range)) = self.history_retries.get(&key).copied() {
-            if failed_range == range && Instant::now() < retry_at {
+            if failed_range == range && self.clock.monotonic() < retry_at {
                 return Ok(());
             }
             if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {

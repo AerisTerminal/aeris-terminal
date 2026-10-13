@@ -113,6 +113,8 @@ the check.
 - Keep the four coordinator command/event characterization scenarios under
   `market_service/tests/characterization.rs`; `tools/naming_check` requires their exact names so
   lifecycle refactors cannot silently drop the baseline.
+- Coordinator-owned watchdog, history retry and trade-handoff timestamps use the injected
+  `market_service::clock::Clock`; direct system time belongs only in `SystemClock`.
 - Verify protocol fields, precision, timestamp meaning, ordering, snapshot semantics, and recovery
   against current provider documentation or representative observed responses before depending on them.
 - Keep provider identity, local ingestion order, and continuity evidence separate. Never infer sequence

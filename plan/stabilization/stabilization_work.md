@@ -343,7 +343,15 @@ Status: in progress
     797,800/1,633,500 ns; 1,024 events dropped.
     The benchmark workload and source tree are committed by this item; rerun
     from the resulting commit for a clean-tree provenance hash.
-- [ ] M2.3 market-injectable-clock - Injected clock for the market coordinator
+- [x] M2.3 market-injectable-clock - Injected clock for the market coordinator
+  - `Clock` supplies monotonic and wall time; production uses `SystemClock`, while
+    tests advance `ScriptedClock` without sleeping. The coordinator receives a
+    clock at construction and shares it with trade handoffs, history retries
+    and the stall watchdog.
+  - `history_retry_uses_scripted_clock_without_waiting` and
+    `watchdog_uses_scripted_clock_without_waiting` pass in under one second.
+    Existing public session-status requests use the caller-supplied wall timestamp;
+    provider calendar resolution remains M2.5.
 - [ ] M2.4 reconnect-policy - One jittered, capped, budgeted reconnect policy
 - [ ] M2.5 market-calendar-service - Provider-neutral market calendar and session service
 - [ ] M2.6 provider-neutral-watchdog - Stall watchdog and practice session answer for every provider
@@ -483,6 +491,8 @@ the repo root `AGENTS.md`.
   stored-cTrader borrowing flag is present (M1.8, 3c42981b).
 - The four market coordinator characterization cases and exact test names remain in the boundary
   test file, checked by `aeris_naming_check` (M2.1, this commit).
+- Coordinator-owned watchdog, history retry and trade-handoff timestamps come from
+  the injected clock; only `SystemClock` reads system time (M2.3, this commit).
 
 ## 6. Progress log
 
@@ -511,6 +521,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.8 fix(validation): keep unconfigured cTrader startup diagnostics silent - suppressed the disconnected catalog warm-up line and bounded the isolated diagnostic test; full gate and isolated desktop/panic checks passed.
 - 2026-10-13 M2.1 test(market): characterize coordinator market handoffs - pinned four command/event scenarios and registered their exact names; backfilled the M1 validated/pushed state and recorded the disabled hosted CI workflow.
 - 2026-10-13 M2.2 perf(market): record engine and coordinator baselines - measured release workloads and added a manual-only CI performance job.
+- 2026-10-13 M2.3 feat(market): inject coordinator clock into recovery timing - shared a monotonic/wall clock with handoffs, watchdog and history retries; scripted tests advance without sleeps.
 
 ## 7. Known gaps / deferred
 

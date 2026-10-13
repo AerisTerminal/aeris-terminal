@@ -33,13 +33,21 @@ pub(super) fn spawn_coordinator(
     mut channels: OwnedCoordinatorChannels,
     broker_api: Arc<super::tastytrade::BrokerApi>,
     shutdown: Arc<AtomicBool>,
+    clock: Arc<dyn super::clock::Clock>,
 ) -> Result<thread::JoinHandle<()>, String> {
     thread::Builder::new()
         .name("aeris-market-engine".to_string())
         .spawn(move || {
             {
                 let providers = channels.providers.dispatch();
-                run_coordinator(engine, &channels.commands, providers, broker_api, &shutdown);
+                run_coordinator(
+                    engine,
+                    &channels.commands,
+                    providers,
+                    broker_api,
+                    &shutdown,
+                    clock,
+                );
             }
             let panicked = channels.providers.cancel_and_join();
             assert!(
@@ -57,8 +65,9 @@ fn run_coordinator(
     providers: ProviderDispatch<'_>,
     broker_api: Arc<super::tastytrade::BrokerApi>,
     shutdown: &AtomicBool,
+    clock: Arc<dyn super::clock::Clock>,
 ) {
-    let mut coordinator = Coordinator::new(engine, providers, broker_api);
+    let mut coordinator = Coordinator::with_clock(engine, providers, broker_api, clock);
     let demand_flushers = coordinator
         .providers
         .records
@@ -108,6 +117,20 @@ impl<'a> Coordinator<'a> {
         providers: ProviderDispatch<'a>,
         broker_api: Arc<super::tastytrade::BrokerApi>,
     ) -> Self {
+        Self::with_clock(
+            engine,
+            providers,
+            broker_api,
+            Arc::new(super::clock::SystemClock),
+        )
+    }
+
+    fn with_clock(
+        engine: MarketEngine,
+        providers: ProviderDispatch<'a>,
+        broker_api: Arc<super::tastytrade::BrokerApi>,
+        clock: Arc<dyn super::clock::Clock>,
+    ) -> Self {
         let sessions = providers
             .records
             .keys()
@@ -135,6 +158,7 @@ impl<'a> Coordinator<'a> {
             }),
             providers,
             broker_api,
+            clock,
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -524,6 +548,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) studies: StudyRuntime,
     pub(super) providers: ProviderDispatch<'a>,
     pub(super) broker_api: Arc<super::tastytrade::BrokerApi>,
+    pub(super) clock: Arc<dyn super::clock::Clock>,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
@@ -1737,6 +1762,7 @@ mod tests {
                 lanes: Vec::new(),
             },
             broker_api: Arc::new(super::super::tastytrade::BrokerApi::default()),
+            clock: Arc::new(super::super::clock::SystemClock),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1799,6 +1825,29 @@ mod tests {
         assert!(ticket.2.is_none());
         assert!(ticket.0 > Instant::now());
         assert_eq!(coordinator.history_retries.len(), 1);
+    }
+
+    #[test]
+    fn history_retry_uses_scripted_clock_without_waiting() {
+        use super::super::clock::Clock;
+        let clock = Arc::new(super::super::clock::ScriptedClock::new(1_000_000_000));
+        let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
+        let selected = series();
+        let generation = ProviderGeneration(nonzero(1));
+        assert!(coordinator.schedule_history_retry(&selected, generation, None, "transient"));
+        let deadline = coordinator.history_retries[&(selected.clone(), generation)].0;
+        assert_eq!(
+            deadline,
+            clock.monotonic() + super::super::HISTORY_RETRY_DELAY
+        );
+        clock.advance(Duration::from_millis(250));
+        assert_eq!(
+            coordinator.history_retries[&(selected.clone(), generation)].0,
+            deadline
+        );
+        clock.advance(Duration::from_millis(750));
+        assert_eq!(clock.monotonic(), deadline);
     }
 
     #[test]

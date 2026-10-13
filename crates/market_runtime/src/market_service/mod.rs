@@ -58,6 +58,7 @@ use crate::rithmic_realtime::{
 };
 
 mod alerts;
+mod clock;
 use alerts::PriceAlertRegistry;
 
 const COMMAND_CAPACITY: usize = 64;
@@ -757,6 +758,7 @@ struct CandleLiveHandoff {
 }
 
 struct TradeLiveHandoff {
+    clock: Arc<dyn clock::Clock>,
     series: BarSeriesKey,
     generation: ProviderGeneration,
     cadence: TradeLiveCadence,

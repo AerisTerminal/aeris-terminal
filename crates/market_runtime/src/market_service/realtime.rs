@@ -439,11 +439,28 @@ impl ProviderOrderBook {
 }
 
 impl TradeLiveHandoff {
+    #[cfg(test)]
     pub(super) fn new(
         series: &BarSeriesKey,
         generation: ProviderGeneration,
         venue_id: &str,
         candle: Option<(CandleGapPolicy, String)>,
+    ) -> Option<Self> {
+        Self::with_clock(
+            series,
+            generation,
+            venue_id,
+            candle,
+            std::sync::Arc::new(super::clock::SystemClock),
+        )
+    }
+
+    pub(super) fn with_clock(
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        venue_id: &str,
+        candle: Option<(CandleGapPolicy, String)>,
+        clock: std::sync::Arc<dyn super::clock::Clock>,
     ) -> Option<Self> {
         let cadence = match series.period {
             BarPeriod::Tick { trades } => TradeLiveCadence::Tick {
@@ -471,6 +488,8 @@ impl TradeLiveHandoff {
                 (policy, Some(symbol))
             });
         Some(Self {
+            last_publication_at: clock.monotonic(),
+            clock,
             series: series.clone(),
             generation,
             cadence,
@@ -493,7 +512,6 @@ impl TradeLiveHandoff {
             indexed_overlay: BTreeMap::new(),
             provider_candle_count: None,
             provider_candle_timestamp: None,
-            last_publication_at: Instant::now(),
             last_trade_at: None,
         })
     }
@@ -515,7 +533,7 @@ impl TradeLiveHandoff {
         self.indexed_overlay.clear();
         self.provider_candle_count = None;
         self.provider_candle_timestamp = None;
-        self.last_publication_at = Instant::now();
+        self.last_publication_at = self.clock.monotonic();
         self.last_trade_at = None;
         if let TradeLiveCadence::Tick { trades, forming } = &mut self.cadence {
             *forming = *trades;
@@ -598,7 +616,7 @@ impl TradeLiveHandoff {
             .max(last_bar_boundary);
         self.live_session_generation = None;
         self.last_trade_sequence = None;
-        self.last_publication_at = Instant::now();
+        self.last_publication_at = self.clock.monotonic();
         self.last_trade_at = None;
         self.overlay_base = None;
         self.indexed_overlay.clear();
@@ -661,7 +679,7 @@ impl TradeLiveHandoff {
 
     pub(super) fn accept_trade(&mut self, trade: &MarketTrade) -> Result<(), String> {
         if self.history_state == LiveHistoryState::Ready {
-            self.last_trade_at = Some(Instant::now());
+            self.last_trade_at = Some(self.clock.monotonic());
             if self.apply_trade(trade)? {
                 self.dirty = true;
             }
@@ -688,7 +706,7 @@ impl TradeLiveHandoff {
                         .is_some_and(|time| time > self.history_boundary_unix_nanos)
                 })
             {
-                self.last_trade_at = Some(Instant::now());
+                self.last_trade_at = Some(self.clock.monotonic());
             }
             if self.apply_indexed_trade(mutation)? {
                 self.dirty = true;
@@ -1996,9 +2014,13 @@ impl Coordinator<'_> {
                             })
                         })
                         .transpose()?;
-                    if let Some(mut handoff) =
-                        TradeLiveHandoff::new(series, generation, &instrument.venue_id, candle)
-                    {
+                    if let Some(mut handoff) = TradeLiveHandoff::with_clock(
+                        series,
+                        generation,
+                        &instrument.venue_id,
+                        candle,
+                        std::sync::Arc::clone(&self.clock),
+                    ) {
                         handoff.connected = connected;
                         self.series_live.insert_trade(series.clone(), handoff);
                     }
@@ -3489,13 +3511,13 @@ impl Coordinator<'_> {
                     "Live publication requires covering history",
                 );
             } else if let Some(live) = self.series_live.trade_mut(&series) {
-                live.last_publication_at = Instant::now();
+                live.last_publication_at = self.clock.monotonic();
             }
         }
     }
 
     pub(super) fn recover_stalled_live_series(&mut self) {
-        let now = Instant::now();
+        let now = self.clock.monotonic();
         let candidates = self
             .series_live
             .trade_iter_mut()
@@ -3512,7 +3534,7 @@ impl Coordinator<'_> {
         if candidates.is_empty() {
             return;
         }
-        let Ok(now_unix_nanos) = super::tastytrade::now_nanos() else {
+        let Some(now_unix_nanos) = self.clock.wall_nanos() else {
             return;
         };
         for (series, generation) in candidates {
@@ -4985,6 +5007,25 @@ mod tests {
             true,
             LiveHistoryState::Ready,
         ));
+    }
+
+    #[test]
+    fn watchdog_uses_scripted_clock_without_waiting() {
+        use super::super::clock::{Clock, ScriptedClock};
+        let clock = ScriptedClock::new(1_000_000_000);
+        let published = clock.monotonic();
+        clock.advance(LIVE_SERIES_STALL_THRESHOLD + Duration::from_secs(1));
+        let now = clock.monotonic();
+        assert!(live_series_stalled(
+            now,
+            published,
+            Some(now),
+            ProviderHealth::Online,
+            aeris_contracts::MarketSessionPhase::Regular,
+            true,
+            LiveHistoryState::Ready,
+        ));
+        assert_eq!(clock.wall_nanos().expect("wall clock"), 32_000_000_000);
     }
 
     #[test]

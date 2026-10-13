@@ -1286,6 +1286,7 @@ impl MarketService {
             },
             Arc::clone(&broker_api),
             Arc::clone(&shutdown),
+            Arc::new(super::clock::SystemClock),
         )?];
         Self::build_market_service(
             command_tx,
