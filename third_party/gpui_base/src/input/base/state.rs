@@ -1913,33 +1913,41 @@ impl<M: InputModeKind> InputBaseState<M> {
             }
         }
 
-        // Scroll the row into view. Use the same edge clearance helper as
-        // `TextElement::layout_cursor` so both scroll-into-view paths agree
-        // (a mismatch flickered on `Down` at end-of-buffer with a small
-        // `cursor_surrounding_lines` override).
-        let edge_height = if direction.is_some() && self.is_code_editor() {
-            super::element::cursor_surrounding_padding(
-                self.mode.is_auto_grow(),
-                self.cursor_surrounding_lines,
-                last_layout.visible_range.len(),
-                line_height,
-            )
+        if self.is_single_line() {
+            // A single line never scrolls vertically (`update_scroll_offset` pins it to 0).
+            // On fractional display scales its box rounds a fraction of a pixel below the
+            // line height, which the row check below reads as overflow, painting the text
+            // shifted for one frame before the persisted offset snaps it back.
+            scroll_offset.y = px(0.);
         } else {
-            line_height
-        };
-        if row_offset_y - edge_height + line_height < -scroll_offset.y {
-            // Scroll up
-            scroll_offset.y = -row_offset_y + edge_height - line_height;
-        } else if row_offset_y + edge_height > -scroll_offset.y + bounds.size.height {
-            // Scroll down
-            scroll_offset.y = -(row_offset_y - bounds.size.height + edge_height);
-        }
+            // Scroll the row into view. Use the same edge clearance helper as
+            // `TextElement::layout_cursor` so both scroll-into-view paths agree
+            // (a mismatch flickered on `Down` at end-of-buffer with a small
+            // `cursor_surrounding_lines` override).
+            let edge_height = if direction.is_some() && self.is_code_editor() {
+                super::element::cursor_surrounding_padding(
+                    self.mode.is_auto_grow(),
+                    self.cursor_surrounding_lines,
+                    last_layout.visible_range.len(),
+                    line_height,
+                )
+            } else {
+                line_height
+            };
+            if row_offset_y - edge_height + line_height < -scroll_offset.y {
+                // Scroll up
+                scroll_offset.y = -row_offset_y + edge_height - line_height;
+            } else if row_offset_y + edge_height > -scroll_offset.y + bounds.size.height {
+                // Scroll down
+                scroll_offset.y = -(row_offset_y - bounds.size.height + edge_height);
+            }
 
-        // Avoid necessary scroll, when it was already in the correct position.
-        if direction == Some(MoveDirection::Up) {
-            scroll_offset.y = scroll_offset.y.max(was_offset.y);
-        } else if direction == Some(MoveDirection::Down) {
-            scroll_offset.y = scroll_offset.y.min(was_offset.y);
+            // Avoid necessary scroll, when it was already in the correct position.
+            if direction == Some(MoveDirection::Up) {
+                scroll_offset.y = scroll_offset.y.max(was_offset.y);
+            } else if direction == Some(MoveDirection::Down) {
+                scroll_offset.y = scroll_offset.y.min(was_offset.y);
+            }
         }
 
         // Clamp the deferred target into the same safe range that
