@@ -645,6 +645,89 @@ mod timeframe_input {
     }
 
     #[gpui::test]
+    fn ticket_field_and_chart_menu_edit_one_order_quantity(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        let (ticket, menu) = cx.read(|cx| {
+            let controls = &surface.read(cx).order_quantity;
+            (
+                controls.ticket_input().clone(),
+                controls.menu_input().clone(),
+            )
+        });
+        cx.read(|cx| assert_eq!(ticket.read(cx).value(), "1"));
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| surface.set_order_quantity(7, window, cx));
+        });
+        cx.read(|cx| {
+            assert_eq!(surface.read(cx).trading_pnl.order_entry.quantity, 7);
+            assert_eq!(
+                ticket.read(cx).value(),
+                "7",
+                "the ticket shows a quantity set elsewhere"
+            );
+        });
+
+        cx.update(|window, cx| {
+            ticket.update(cx, |input, cx| input.set_value(" 12 ", window, cx));
+            surface.update(cx, WorkspaceSurface::apply_ticket_quantity_text);
+        });
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(surface.trading_pnl.order_entry.quantity, 12);
+            assert!(!surface.order_quantity.ticket_invalid());
+        });
+
+        cx.update(|window, cx| {
+            ticket.update(cx, |input, cx| input.set_value("1000", window, cx));
+            surface.update(cx, WorkspaceSurface::apply_ticket_quantity_text);
+        });
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert_eq!(
+                surface.trading_pnl.order_entry.quantity, 12,
+                "rejected text never becomes the order quantity"
+            );
+            assert!(surface.order_quantity.ticket_invalid());
+        });
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.toggle_order_quantity_menu(window, cx);
+            });
+            menu.update(cx, |input, cx| input.set_value("abc", window, cx));
+            surface.update(cx, |surface, cx| {
+                surface.submit_order_quantity_menu(window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert!(surface.order_quantity.menu_open());
+            assert!(surface.order_quantity.menu_invalid());
+            assert_eq!(surface.trading_pnl.order_entry.quantity, 12);
+        });
+
+        cx.update(|window, cx| {
+            menu.update(cx, |input, cx| input.set_value("40", window, cx));
+            surface.update(cx, |surface, cx| {
+                surface.submit_order_quantity_menu(window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let surface = surface.read(cx);
+            assert!(!surface.order_quantity.menu_open());
+            assert_eq!(surface.trading_pnl.order_entry.quantity, 40);
+            assert!(!surface.order_quantity.ticket_invalid());
+            assert_eq!(ticket.read(cx).value(), "40");
+        });
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| surface.set_order_quantity(0, window, cx));
+        });
+        cx.read(|cx| assert_eq!(surface.read(cx).trading_pnl.order_entry.quantity, 1));
+    }
+
+    #[gpui::test]
     fn restored_chart_from_an_unavailable_provider_fails_explicitly(cx: &mut TestAppContext) {
         let product = InstallProviderInstrument {
             provider: "retired".to_string(),

@@ -18,6 +18,7 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) feedback: Option<&'a aeris_desktop::trading::TradingCommandFeedback>,
     pub(super) market_error: Option<&'a str>,
     pub(super) order_entry: &'a super::TradingOrderEntryState,
+    pub(super) quantity: &'a super::order_quantity::OrderQuantityControls,
     pub(super) theme: &'a AerisTheme,
 }
 
@@ -46,11 +47,7 @@ pub(super) fn trading_order_controls(
         .bg(gpui_color(state.theme.colors.surface))
         .child(account_selector(state))
         .children(account_summary(state.trading_pnl, state.theme))
-        .child(quantity_selector(
-            state.app,
-            state.order_entry.quantity,
-            state.theme,
-        ))
+        .child(quantity_selector(state))
         .child(action_row(
             trade_order_button(
                 "trading_buy_market",
@@ -184,61 +181,43 @@ pub(super) fn format_money(currency: &str, value: aeris_trading::FixedPoint) -> 
     )
 }
 
-fn quantity_selector(
-    app: &Entity<WorkspaceSurface>,
-    quantity: u64,
-    theme: &AerisTheme,
-) -> impl IntoElement + use<> {
-    let decrement = app.clone();
-    let increment = app.clone();
+fn quantity_selector(state: &TradingOrderControlsState<'_>) -> impl IntoElement + use<> {
+    let theme = state.theme;
+    let quantity = state.order_entry.quantity;
+    let step = |id: &'static str, plus: bool| {
+        let app = state.app.clone();
+        quantity_step_button(id, plus, theme).on_click(move |_, window, cx| {
+            app.update(cx, |surface, surface_cx| {
+                let next = if plus {
+                    quantity.saturating_add(1)
+                } else {
+                    quantity.saturating_sub(1)
+                };
+                surface.set_order_quantity(next, window, surface_cx);
+            });
+        })
+    };
     div()
         .h(px(CONTROL_HEIGHT))
         .flex()
         .items_center()
         .gap(px(GAP))
-        .child(
-            quantity_step_button("trading_quantity_decrement", false, theme).on_click(
-                move |_, _, cx| {
-                    decrement.update(cx, |surface, surface_cx| {
-                        surface.trading_pnl.order_entry.quantity =
-                            quantity.saturating_sub(1).max(1);
-                        surface_cx.notify();
-                    });
-                },
-            ),
-        )
-        .child(
-            div()
-                .h_full()
-                .px_2()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(gpui_color(theme.colors.text_primary))
-                .child(format!("{quantity} lots")),
-        )
-        .child(
-            quantity_step_button("trading_quantity_increment", true, theme).on_click(
-                move |_, _, cx| {
-                    increment.update(cx, |surface, surface_cx| {
-                        surface.trading_pnl.order_entry.quantity =
-                            quantity.saturating_add(1).min(999);
-                        surface_cx.notify();
-                    });
-                },
-            ),
-        )
+        .child(step("trading_quantity_decrement", false))
+        .child(super::order_quantity::ticket_quantity_field(
+            state.quantity,
+            theme,
+        ))
+        .child(step("trading_quantity_increment", true))
         .child(
             TabList::new("trading_quantity_presets", "Quantity presets", theme).children(
                 [1_u64, 3, 5, 10, 15].map(|preset| {
-                    let select = app.clone();
+                    let select = state.app.clone();
                     Tab::new(("trading_quantity", preset), theme)
                         .selected(quantity == preset)
                         .child(preset.to_string())
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
                             select.update(cx, |surface, surface_cx| {
-                                surface.trading_pnl.order_entry.quantity = preset;
-                                surface_cx.notify();
+                                surface.set_order_quantity(preset, window, surface_cx);
                             });
                         })
                 }),
@@ -309,7 +288,7 @@ fn order_button(
         .on_click(frame_action(state, action))
 }
 
-const fn trade_variant(side: aeris_trading::OrderSide) -> ButtonVariant {
+pub(super) const fn trade_variant(side: aeris_trading::OrderSide) -> ButtonVariant {
     match side {
         aeris_trading::OrderSide::Buy => ButtonVariant::Buy,
         aeris_trading::OrderSide::Sell => ButtonVariant::Sell,
@@ -333,7 +312,7 @@ fn trade_order_button(
         .on_click(frame_action(state, action))
 }
 
-fn dispatch_market(
+pub(super) fn dispatch_market(
     frame: &aeris_market_data::OrderBookFrame,
     account: Option<String>,
     quantity: u64,

@@ -46,10 +46,10 @@ use aeris_design_system::{
 };
 use aeris_observability::diagnostic;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, Context, CursorStyle, Entity, FocusHandle,
-    KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task, Transformation,
-    Window, canvas, div, percentage, prelude::*, px, rgba, svg,
+    Animation, AnimationExt, AnyElement, AnyView, App, Bounds, Context, CursorStyle, Entity,
+    FocusHandle, KeyDownEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, Rgba, Role, ScrollWheelEvent, SharedString, Task,
+    Transformation, Window, canvas, div, percentage, prelude::*, px, rgba, svg,
 };
 use num_traits::ToPrimitive;
 use order_flow::{OrderFlowChartState, OrderFlowStudy};
@@ -229,10 +229,8 @@ fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySna
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
-/// The asset title (symbol, venue and interval) leads the legend: larger and heavier than the
-/// readouts and study titles, which keep the row's `text_xs` size.
-const LEGEND_ASSET_TITLE_SIZE: f32 = 14.0;
-
+/// The asset title (symbol, venue and interval) leads the legend at the row's `text_xs` size,
+/// set apart from the readouts and study titles by weight alone.
 fn legend_title_weight(item: LegendItem) -> u16 {
     platform_typography().weight(if item == LegendItem::Asset {
         TypographyRole::Emphasis
@@ -1116,6 +1114,9 @@ pub struct AerisChartView {
     order_flow_state: Option<OrderFlowChartState>,
     product_bars: ProductPriceBars,
     legend_options: ChartLegendOptions,
+    /// Host content placed under the symbol legend row, such as the trading host's order
+    /// buttons. The chart only positions it; the host owns its state and behavior.
+    legend_accessory: Option<AnyView>,
     /// Transient host-projected plan levels. These are deliberately separate
     /// from Aeris Charts-owned user drawings and are reinstalled with price series.
     session_plan_levels: Vec<(f64, String)>,
@@ -1216,6 +1217,7 @@ impl AerisChartView {
             order_flow_state: None,
             product_bars: ProductPriceBars::default(),
             legend_options: ChartLegendOptions::default(),
+            legend_accessory: None,
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
@@ -1320,6 +1322,7 @@ impl AerisChartView {
             order_flow_state: None,
             product_bars,
             legend_options: ChartLegendOptions::default(),
+            legend_accessory: None,
             session_plan_levels: Vec::new(),
             session_plan_price_line_ids: Vec::new(),
             user_state_revision: 0,
@@ -1411,6 +1414,12 @@ impl AerisChartView {
     /// Takes a pending host request to remove one runtime-managed study.
     pub fn take_study_remove_request(&mut self) -> Option<u64> {
         self.pending_study_remove.take()
+    }
+
+    /// Places host content under the symbol legend row of the main pane, or removes it.
+    /// Presses on it stay with the host and never reach chart input.
+    pub fn set_legend_accessory(&mut self, accessory: Option<AnyView>) {
+        self.legend_accessory = accessory;
     }
 
     /// Reads Aeris Charts-owned Y-axis chrome for the hit-tested price scale.
@@ -2861,6 +2870,7 @@ fn chart_legend_layers(
     panes: &[LegendPaneLayout],
     theme: ChartTheme,
     loading: bool,
+    accessory: Option<&AnyView>,
 ) -> Vec<AnyElement> {
     let palette = legend_palette(theme);
     panes
@@ -2869,6 +2879,10 @@ fn chart_legend_layers(
         .enumerate()
         .filter_map(|(pane_index, pane)| {
             let pane_rows = rows.iter().filter(|row| row.pane == pane_index);
+            let mut accessory = accessory.filter(|_| pane_index == 0).cloned();
+            let follows_asset = rows
+                .iter()
+                .any(|row| row.pane == pane_index && row.item == LegendItem::Asset);
             // Cap the legend at the plot area so it wraps inside the pane instead of running
             // under the price axis.
             let available_width = (pane.width - LEGEND_INSET * 2.0).clamp(0.0, LEGEND_MAX_WIDTH);
@@ -2885,13 +2899,44 @@ fn chart_legend_layers(
                 .items_start()
                 .cursor(CursorStyle::Arrow);
             let mut row_count = 0;
+            if !follows_asset && let Some(accessory) = accessory.take() {
+                row_count += 1;
+                layer = layer.child(legend_accessory(chart, accessory));
+            }
             for row in pane_rows {
                 row_count += 1;
                 layer = layer.child(chart_legend_row(chart, row, palette, loading));
+                if row.item == LegendItem::Asset
+                    && let Some(accessory) = accessory.take()
+                {
+                    layer = layer.child(legend_accessory(chart, accessory));
+                }
             }
             (row_count > 0).then(|| layer.into_any_element())
         })
         .collect()
+}
+
+/// Host content under the symbol row. Presses stop here so a click on a host control never
+/// starts a chart gesture or moves keyboard focus to the chart; like any press on the chart,
+/// it still asks the host to activate the chart's pane.
+fn legend_accessory(chart: &Entity<AerisChartView>, accessory: AnyView) -> AnyElement {
+    let activate = chart.clone();
+    div()
+        .id("chart_legend_accessory")
+        .flex_none()
+        .px_1()
+        .py_1()
+        .on_any_mouse_down(move |_, _, cx| {
+            activate.update(cx, |chart, chart_cx| {
+                chart.pending_activate = ActivationRequest::Pending;
+                chart_cx.notify();
+            });
+            cx.stop_propagation();
+        })
+        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(accessory)
+        .into_any_element()
 }
 
 fn chart_legend_row(
@@ -2956,9 +3001,6 @@ fn chart_legend_row(
                 .flex()
                 .items_center()
                 .whitespace_nowrap()
-                .when(row.item == LegendItem::Asset, |title| {
-                    title.text_size(px(LEGEND_ASSET_TITLE_SIZE))
-                })
                 .font_weight(gpui::FontWeight(f32::from(legend_title_weight(row.item))))
                 .child(row.title.clone()),
         )
@@ -3146,6 +3188,7 @@ impl Render for AerisChartView {
             &self.legend_panes,
             self.theme,
             self.asset_loading.is_present(),
+            self.legend_accessory.as_ref(),
         );
 
         div()

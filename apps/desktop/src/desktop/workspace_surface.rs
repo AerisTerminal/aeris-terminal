@@ -61,6 +61,7 @@ struct WorkspaceSurfaceInitialization {
     indicator_input: Entity<InputState>,
     timeframe_input: Entity<InputState>,
     time_zone_input: Entity<InputState>,
+    order_quantity: order_quantity::OrderQuantityControls,
     chart_chrome: chart_chrome::ChartChromePreferences,
     restored_chart_state: Option<WorkspaceChartState>,
     retained_chart_presentation: RetainedChartPresentation,
@@ -86,6 +87,7 @@ struct WorkspaceSurfaceInitialization {
 }
 
 // One line per surface field; splitting the literal would only scatter the defaults.
+#[allow(clippy::too_many_lines)]
 fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -> WorkspaceSurface {
     WorkspaceSurface {
         chart: init.startup.chart,
@@ -126,6 +128,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         connection_message: init.startup.connection_message,
         provider_transport_rtt_nanos: None,
         trading_pnl: TradingPnlState::default(),
+        order_quantity: init.order_quantity,
         chart_trading_visibility: init.chart_trading_visibility,
         symbol_browser: init.symbol_browser,
         symbol_message: initial_symbol_message(init.startup.provider),
@@ -1793,6 +1796,7 @@ impl WorkspaceSurface {
         indicator_input: Entity<InputState>,
         timeframe_input: Entity<InputState>,
         time_zone_input: Entity<InputState>,
+        order_quantity: order_quantity::OrderQuantityControls,
         chart_chrome: chart_chrome::ChartChromePreferences,
         restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
@@ -1844,6 +1848,7 @@ impl WorkspaceSurface {
             indicator_input,
             timeframe_input,
             time_zone_input,
+            order_quantity,
             chart_chrome,
             retained_chart_presentation: RetainedChartPresentation {
                 drawings: PaneDrawings::restored(

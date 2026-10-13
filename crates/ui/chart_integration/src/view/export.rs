@@ -6,9 +6,8 @@
 //! screen and the brand mark, both laid out with the same bundled faces the window uses.
 
 use super::{
-    AerisChartView, LEGEND_ASSET_TITLE_SIZE, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT,
-    LegendItem, LegendRow, format_utc_offset, legend_title_weight, platform_date_label,
-    platform_theme,
+    AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendRow,
+    format_utc_offset, legend_title_weight, platform_date_label, platform_theme,
 };
 use aeris_charts_native::{
     ImageExportOptions, PreparedChartImage, measure_text, prepare_engine_image, register_font_data,
@@ -304,11 +303,7 @@ fn export_legend_rows(rows: Vec<LegendRow>, palette: ExportPalette) -> Vec<Expor
             let mut runs = vec![ExportTextRun {
                 text: row.title,
                 color: palette.text,
-                size: if row.item == LegendItem::Asset {
-                    LEGEND_ASSET_TITLE_SIZE
-                } else {
-                    LEGEND_TEXT_SIZE
-                },
+                size: LEGEND_TEXT_SIZE,
                 weight: legend_title_weight(row.item),
             }];
             runs.extend(row.values.into_iter().map(|value| {

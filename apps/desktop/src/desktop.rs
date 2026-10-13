@@ -52,6 +52,8 @@ mod market_screener_view;
 mod native_ui;
 #[path = "components/order_book_panel.rs"]
 mod order_book_panel;
+#[path = "components/order_quantity.rs"]
+mod order_quantity;
 #[path = "components/order_ticket.rs"]
 mod order_ticket;
 #[path = "components/platform_menu.rs"]
@@ -838,6 +840,7 @@ struct WorkspaceSurface {
     connection_message: Option<String>,
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPnlState,
+    order_quantity: order_quantity::OrderQuantityControls,
     chart_trading_visibility: ChartTradingVisibilitySettings,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
@@ -3083,6 +3086,7 @@ fn chart_intent_has_confirmation_evidence(intent: &ChartTradingIntent) -> bool {
 
 fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<WorkspaceSurface>) {
     if let Some(chart) = chart {
+        order_quantity::attach_chart_trade_bar(chart, cx);
         cx.observe(chart, |app, chart, cx| {
             let user_state_revision = chart.read(cx).user_state_revision();
             if user_state_revision != app.last_chart_user_state_revision {
@@ -4609,6 +4613,11 @@ fn workspace_surface_entity(
     let timeframe_search_input = timeframe_input.clone();
     let time_zone_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search time zones"));
     let time_zone_search_input = time_zone_input.clone();
+    let order_quantity = order_quantity::OrderQuantityControls::new(
+        TradingOrderEntryState::default().quantity,
+        window,
+        cx,
+    );
     let workspace_lifecycle = lifecycle.clone();
     let workspace = cx.new(move |cx| {
         WorkspaceSurface::new(
@@ -4620,6 +4629,7 @@ fn workspace_surface_entity(
             indicator_input,
             timeframe_input,
             time_zone_input,
+            order_quantity,
             chart_chrome,
             restored.chart,
         )
@@ -4647,6 +4657,7 @@ fn workspace_surface_entity(
     subscribe_indicator_input(&indicator_search_input, &workspace, window, cx);
     subscribe_timeframe_input(&timeframe_search_input, &workspace, window, cx);
     subscribe_time_zone_input(&time_zone_search_input, &workspace, window, cx);
+    order_quantity::subscribe_order_quantity_inputs(&workspace, window, cx);
     workspace
 }
 
