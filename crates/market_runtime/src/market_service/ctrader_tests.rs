@@ -2712,6 +2712,34 @@ mod venue_relay {
 
     #[test]
     fn trading_venue_attach_is_logged_only_after_a_demo_session_opens() {
+        // The log sink is process-wide; other tests may write to it in parallel.
+        // Isolate this diagnostic assertion without allowing an unbounded child.
+        const CHILD: &str = "AERIS_CTRADER_VENUE_ATTACH_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .arg("--exact")
+                .arg("market_service::ctrader::ctrader_tests::venue_relay::trading_venue_attach_is_logged_only_after_a_demo_session_opens")
+                .env(CHILD, "1")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("isolated test process");
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = child.try_wait().expect("child status") {
+                    assert!(
+                        status.success(),
+                        "isolated venue diagnostics failed: {status}"
+                    );
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().expect("kill timed-out test child");
+                    child.wait().expect("reap timed-out test child");
+                    panic!("isolated venue diagnostics exceeded 15 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         let root = std::env::temp_dir().join(format!(
             "aeris-venue-attach-{}-{:?}",
             std::process::id(),
@@ -2719,6 +2747,18 @@ mod venue_relay {
         ));
         let log = root.join("aeris.log");
         let sink = aeris_observability::install_log_sink(&log).expect("log sink");
+        let mut disconnected = harness(trading_script(), Duration::ZERO);
+        disconnected.worker.config.opener =
+            Box::new(|_, _| Err(HostFault::from(DISCONNECTED_DETAIL.to_string())));
+        disconnected.worker.catalog_warmup_requested = true;
+        disconnected.drive();
+        assert!(aeris_observability::flush_diagnostics());
+        assert!(
+            !std::fs::read_to_string(&log)
+                .expect("diagnostics without a connection")
+                .contains("cTrader"),
+            "an unconfigured provider must not announce itself at launch"
+        );
         let mut harness = harness(trading_script(), Duration::ZERO);
         harness.drive();
         let (requests, receiver) = mpsc::sync_channel(64);

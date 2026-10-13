@@ -1877,10 +1877,12 @@ impl Worker {
                 Err(failure) => {
                     // Listing accounts fails only when opening a session fails, so no
                     // session exists to recover.
-                    diagnostic!(
-                        "Aeris cTrader symbol catalog warm-up skipped: {}",
-                        failure.detail()
-                    );
+                    if failure.detail() != DISCONNECTED_DETAIL {
+                        diagnostic!(
+                            "Aeris cTrader symbol catalog warm-up skipped: {}",
+                            failure.detail()
+                        );
+                    }
                     return;
                 }
             }

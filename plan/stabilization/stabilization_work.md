@@ -289,6 +289,10 @@ Status: in progress
     session; the attachment line appears only after the session opens. Root-overlap and fake-vault tests
     cover contained production roots and exact-key read/write-through with other keys isolated.
     A non-opt-in isolated desktop showed no venue attachment line in 60 seconds.
+  - Follow-up: an unconfigured cTrader catalog warm-up no longer announces a skipped provider;
+    the diagnostic test isolates the process-wide log sink with a non-recursive, 15-second-bounded
+    child. The full gate passed; a fresh 60-second isolated GUI session rendered Hyperliquid with
+    no cTrader session, venue or warm-up lines, and a forced-panic run left earlier log lines and one crash file.
 - [x] M1.9 sqlite-hardening-migrations - SQLite busy timeout, integrity check, quarantine, table-driven migrations and pre-migration backup
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added quick-check corruption errors, confirmed-only quarantine, contiguous migrations, pre-migration backups and clean checkpoints.
@@ -473,6 +477,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.7 fix(desktop): trigger forced panic after store startup - moved the debug-only panic after service and market setup so the crashing session leaves earlier diagnostics.
 - 2026-10-13 M1.8 fix(validation): report only real cTrader venue attachments - corrected attachment diagnostics and covered root overlap and exact-key vault read/write isolation.
 - 2026-10-13 M1.2 fix(ci): correct live gate runner guidance - removed the obsolete hosted-runner ban from the live gate comment without changing workflow behavior.
+- 2026-10-13 M1.8 fix(validation): keep unconfigured cTrader startup diagnostics silent - suppressed the disconnected catalog warm-up line and bounded the isolated diagnostic test; full gate and isolated desktop/panic checks passed.
 
 ## 7. Known gaps / deferred
 
