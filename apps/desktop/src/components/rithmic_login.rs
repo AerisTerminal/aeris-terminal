@@ -1,9 +1,9 @@
 //! Rithmic login: the Accounts-panel state for the saved login, and the dialog that picks a
 //! Rithmic server and system and takes the user ID and password.
 //!
-//! Presentation only. The market runtime owns the server catalog, system discovery and the
-//! saved login. The password goes from the dialog straight to the runtime, which keeps it only
-//! in the native credential vault; nothing here can read it back.
+//! Presentation only. The market runtime owns the server catalog, system discovery, the
+//! sign-in check and the saved login. The password goes from the dialog straight to the
+//! runtime, which keeps it only in the native credential vault; nothing here can read it back.
 
 use super::*;
 use aeris_market_runtime::{RithmicLoginSummary, RithmicServer};
@@ -44,7 +44,7 @@ impl RithmicLoginView {
     /// A background check of a known state refreshes silently; only real changes show progress.
     pub(super) const fn busy(&self) -> bool {
         match self.operation {
-            Some(RithmicLoginOperation::Saving | RithmicLoginOperation::Forgetting) => true,
+            Some(RithmicLoginOperation::SigningIn | RithmicLoginOperation::Forgetting) => true,
             Some(RithmicLoginOperation::Checking) => {
                 matches!(self.saved, SavedRithmicLogin::Unchecked)
             }
@@ -54,7 +54,7 @@ impl RithmicLoginView {
 
     pub(super) fn detail(&self) -> String {
         match (self.operation, &self.saved) {
-            (Some(RithmicLoginOperation::Saving), _) => "Saving login…".to_string(),
+            (Some(RithmicLoginOperation::SigningIn), _) => "Signing in to Rithmic…".to_string(),
             (Some(RithmicLoginOperation::Forgetting), _) => "Disconnecting…".to_string(),
             (Some(RithmicLoginOperation::Checking), SavedRithmicLogin::Unchecked) => {
                 "Checking saved login…".to_string()
@@ -77,7 +77,8 @@ impl RithmicLoginView {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RithmicLoginOperation {
     Checking,
-    Saving,
+    /// Signing in with a new login; the runtime saves it only if Rithmic accepts it.
+    SigningIn,
     Forgetting,
 }
 
@@ -269,7 +270,7 @@ impl TerminalApp {
         cx.notify();
     }
 
-    fn save_rithmic_login(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn sign_in_rithmic(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.rithmic_login.operation.is_some() {
             return;
         }
@@ -288,11 +289,11 @@ impl TerminalApp {
             user: Zeroizing::new(dialog.user.read(cx).value().to_string()),
             password: Zeroizing::new(dialog.password.read(cx).value().to_string()),
         };
-        self.run_rithmic_login_operation(RithmicLoginOperation::Saving, Some(login), window, cx);
+        self.run_rithmic_login_operation(RithmicLoginOperation::SigningIn, Some(login), window, cx);
     }
 
     /// Runs one runtime-owned login operation off the UI thread and mirrors its outcome. A
-    /// background check never interrupts a save or disconnect already in flight.
+    /// background check never interrupts a sign-in or disconnect already in flight.
     fn run_rithmic_login_operation(
         &mut self,
         operation: RithmicLoginOperation,
@@ -322,8 +323,8 @@ impl TerminalApp {
                 (RithmicLoginOperation::Forgetting, _) => {
                     market.forget_rithmic_login().map(|()| None)
                 }
-                (RithmicLoginOperation::Saving, Some(login)) => market
-                    .save_rithmic_login(
+                (RithmicLoginOperation::SigningIn, Some(login)) => market
+                    .sign_in_rithmic(
                         login.server,
                         &login.system_name,
                         &login.user,
@@ -335,8 +336,8 @@ impl TerminalApp {
                             system_name: login.system_name,
                         })
                     }),
-                (RithmicLoginOperation::Saving, None) => {
-                    Err("Enter the Rithmic login to save".to_string())
+                (RithmicLoginOperation::SigningIn, None) => {
+                    Err("Enter the Rithmic login to sign in".to_string())
                 }
             }
         });
@@ -363,38 +364,36 @@ impl TerminalApp {
         view.operation = None;
         match (operation, result) {
             (_, Ok(saved)) => {
-                view.saved = saved.map_or(SavedRithmicLogin::Missing, SavedRithmicLogin::Saved);
-                match operation {
-                    RithmicLoginOperation::Checking => {}
-                    RithmicLoginOperation::Saving => {
-                        view.message = Some(
-                            "Login saved. Rithmic signs in when you open a Rithmic market."
-                                .to_string(),
-                        );
+                match (operation, &saved) {
+                    (RithmicLoginOperation::Checking, _)
+                    | (RithmicLoginOperation::SigningIn, None) => {}
+                    (RithmicLoginOperation::SigningIn, Some(login)) => {
+                        view.message = Some(signed_in_message(login));
                         view.failed = false;
-                        self.rithmic_login.dialog = None;
-                        // A new login goes straight to choosing one of its markets.
-                        self.active_surface().update(cx, |surface, surface_cx| {
-                            surface.choose_symbol_provider(
-                                TerminalProvider::Rithmic,
-                                window,
-                                surface_cx,
-                            );
-                            surface.open_chrome_overlay(
-                                ChromeOverlay::Instrument,
-                                window,
-                                surface_cx,
-                            );
-                        });
                     }
-                    RithmicLoginOperation::Forgetting => {
+                    (RithmicLoginOperation::Forgetting, _) => {
                         view.message =
                             Some("Rithmic login removed from this computer.".to_string());
                         view.failed = false;
                     }
                 }
+                view.saved = saved.map_or(SavedRithmicLogin::Missing, SavedRithmicLogin::Saved);
+                // A new login goes straight to choosing one of its markets, unless the
+                // dialog was cancelled while signing in.
+                if operation == RithmicLoginOperation::SigningIn
+                    && self.rithmic_login.dialog.take().is_some()
+                {
+                    self.active_surface().update(cx, |surface, surface_cx| {
+                        surface.choose_symbol_provider(
+                            TerminalProvider::Rithmic,
+                            window,
+                            surface_cx,
+                        );
+                        surface.open_chrome_overlay(ChromeOverlay::Instrument, window, surface_cx);
+                    });
+                }
             }
-            (RithmicLoginOperation::Saving, Err(error)) => {
+            (RithmicLoginOperation::SigningIn, Err(error)) => {
                 if let Some(dialog) = &mut self.rithmic_login.dialog {
                     dialog.message = Some(error);
                 } else {
@@ -415,6 +414,22 @@ impl TerminalApp {
         }
         cx.notify();
     }
+}
+
+fn signing_in_status(dialog: &RithmicLoginDialog) -> String {
+    format!(
+        "Signing in to {} on {}…",
+        dialog.system.as_deref().unwrap_or("Rithmic"),
+        dialog.server.label()
+    )
+}
+
+fn signed_in_message(login: &RithmicLoginSummary) -> String {
+    format!(
+        "Signed in to {} on {}. The login is saved on this computer.",
+        login.system_name,
+        login.server.label()
+    )
 }
 
 /// A login on its way to the runtime. The user ID and password are wiped when it drops.
@@ -456,7 +471,7 @@ pub(super) fn rithmic_login_dialog_layer(
     let dismiss = terminal.clone();
     let cancel = terminal.clone();
     let save = terminal.clone();
-    let saving = view.operation == Some(RithmicLoginOperation::Saving);
+    let signing_in = view.operation == Some(RithmicLoginOperation::SigningIn);
     Some(
         Dialog::new(
             "rithmic_login_dialog",
@@ -473,7 +488,9 @@ pub(super) fn rithmic_login_dialog_layer(
                 .text_color(gpui_color(theme.colors.text_secondary))
                 .child("Use the Rithmic login from your broker or prop firm."),
         )
-        .child(rithmic_login_dialog_body(terminal, dialog, theme))
+        .child(rithmic_login_dialog_body(
+            terminal, dialog, signing_in, theme,
+        ))
         .action(
             Button::new("rithmic_login_cancel", theme)
                 .variant(ButtonVariant::Outline)
@@ -485,12 +502,12 @@ pub(super) fn rithmic_login_dialog_layer(
         .action(
             Button::new("rithmic_login_save", theme)
                 .variant(ButtonVariant::Secondary)
-                .label("Connect")
-                .loading(saving)
-                .disabled(saving || dialog.system.is_none())
+                .label(if signing_in { "Signing in" } else { "Connect" })
+                .loading(signing_in)
+                .disabled(signing_in || dialog.system.is_none())
                 .on_click(move |_, window, cx| {
                     save.update(cx, |terminal, terminal_cx| {
-                        terminal.save_rithmic_login(window, terminal_cx);
+                        terminal.sign_in_rithmic(window, terminal_cx);
                     });
                 }),
         )
@@ -508,6 +525,7 @@ fn field_label(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
 fn rithmic_login_dialog_body(
     terminal: &Entity<TerminalApp>,
     dialog: &RithmicLoginDialog,
+    signing_in: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
     let colors = theme.colors;
@@ -569,6 +587,12 @@ fn rithmic_login_dialog_body(
                      account and Aeris enabled by its broker or prop firm.",
                 ),
         )
+        .children(signing_in.then(|| {
+            div()
+                .text_sm()
+                .text_color(gpui_color(colors.text_secondary))
+                .child(signing_in_status(dialog))
+        }))
         .children(dialog.message.as_ref().map(|message| {
             div()
                 .text_sm()
@@ -767,5 +791,21 @@ mod tests {
         view.operation = Some(RithmicLoginOperation::Forgetting);
         assert!(view.busy());
         assert_eq!(view.detail(), "Disconnecting…");
+        view.operation = Some(RithmicLoginOperation::SigningIn);
+        assert!(view.busy());
+        assert_eq!(view.detail(), "Signing in to Rithmic…");
+    }
+
+    #[test]
+    fn sign_in_reports_name_the_system_and_server() {
+        let login = RithmicLoginSummary {
+            server: RithmicServer::CORE,
+            system_name: "Rithmic Paper Trading".to_string(),
+        };
+        assert_eq!(
+            signed_in_message(&login),
+            "Signed in to Rithmic Paper Trading on Chicago (core). The login is saved on this \
+             computer."
+        );
     }
 }
