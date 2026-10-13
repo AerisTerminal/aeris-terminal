@@ -263,6 +263,9 @@ Status: in progress
   - Removed write-time `.bak` rotation and verified uncommitted trading exports preserve the previous file.
   - Scrutiny follow-up: lifecycle scans and audits share the exact `StagedFile` name parser; read-only
     workspace and chart-chrome `.bak` recovery remains available without restoring backup rotation.
+  - Scrutiny R2-B1: out-of-line `#[cfg(test)] mod name;` no longer hides subsequent production from
+    naming checks; both module forms have production-function regression fixtures. Debug and interim
+    unsafe allowlists now have per-entry reasons and reject stale entries; no owner violations surfaced.
 - [x] M1.7 diagnostics-log-sink-panic-hook - Rotating log file, panic crash files and a fatal-startup dialog
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added bounded rotating logs, durable panic reports, native fatal dialogs and debug-only `--force-diagnostics-panic`.
@@ -454,6 +457,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.8 fix(validation): isolate identity and vault side effects - closed scrutiny B8-B9 with one side-effect policy, exact vault namespace derivation and exact once-only borrowing diagnostics.
 - 2026-10-13 M1.9 fix(trading): reject unsafe journals and preserve migrations - closed scrutiny B10-B14 with typed newer-schema errors, non-mutating corruption checks, correct backup eligibility, historical-row fixtures and measured integrity-check placement.
 - 2026-10-13 M1.9 fix(trading): reject unsafe journals and preserve migrations - closed the VAL-FND-032 recheck: WAL databases are preflighted on a scratch copy so a declined quarantine keeps every trading file byte-identical.
+- 2026-10-13 M1.6 fix(naming): scan production after cfg(test) declarations - closed scrutiny R2-B1 with direct scanner fixtures for inline/out-of-line modules and reasoned, stale-checked allowlists.
 
 ## 7. Known gaps / deferred
 

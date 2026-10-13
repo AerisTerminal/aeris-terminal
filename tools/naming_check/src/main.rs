@@ -27,18 +27,43 @@ const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
 ];
 /// Legal and OS-owned filenames must keep their exact spelling, but only at these paths.
 const PLATFORM_PATH_EXCEPTIONS: &[&str] = &["LICENSE", "apps/desktop/packaging/macos/Info.plist"];
-const REVIEWED_SAFE_DEBUG_TYPES: &[&str] = &[
-    "ColorToken",
-    "CredentialSource",
-    "KeyringCredentialBackend",
-    "MemoryCredentialBackend",
-    "NativeCredentialVaultError",
-    "ProviderCredentialRequirement",
-    "RadiusToken",
-    "RithmicCredentialError",
-    "SpotToken",
-    // Every secret-bearing field uses SecretToken's explicit redacting Debug implementation.
-    "VerifiedTokens",
+const REVIEWED_SAFE_DEBUG_TYPES: &[(&str, &str)] = &[
+    (
+        "ColorToken",
+        "design-system color value, never an authentication token",
+    ),
+    (
+        "CredentialSource",
+        "evidence enum identifying the native vault, not its contents",
+    ),
+    (
+        "KeyringCredentialBackend",
+        "unit backend marker with no stored secrets",
+    ),
+    (
+        "NativeCredentialVaultError",
+        "vault operation error classes, not secret values",
+    ),
+    (
+        "ProviderCredentialRequirement",
+        "provider policy enum, not credential material",
+    ),
+    (
+        "RadiusToken",
+        "design-system radius value, never an authentication token",
+    ),
+    (
+        "RithmicCredentialError",
+        "credential validation error classes, not input values",
+    ),
+    (
+        "SpotToken",
+        "public spot-asset metadata, not authentication material",
+    ),
+    (
+        "VerifiedTokens",
+        "its secret-bearing fields are SecretToken values with explicit redacting Debug",
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -120,6 +145,9 @@ fn production_source_prefix(contents: &str) -> String {
         let declaration = &contents[declaration_start..];
         if declaration.starts_with("mod ")
             && let Some(open_relative) = declaration.find('{')
+            && declaration
+                .find(';')
+                .is_none_or(|semi| open_relative < semi)
         {
             let open = declaration_start + open_relative;
             if let Some(end) = source_block_end(contents, open) {
@@ -234,17 +262,13 @@ fn source_block_end(source: &str, open: usize) -> Option<usize> {
 fn contains_sensitive_debug(source: &str) -> bool {
     let lines = source.lines().collect::<Vec<_>>();
     for (index, line) in lines.iter().enumerate() {
-        if line.contains("derive(") && line.contains("Debug") {
-            let declaration = lines
+        if let Some(name) = derived_debug_type_name(&lines[index..])
+            && is_sensitive_name(name)
+            && !REVIEWED_SAFE_DEBUG_TYPES
                 .iter()
-                .skip(index + 1)
-                .take(6)
-                .find_map(|candidate| declared_type_name(candidate));
-            if declaration.is_some_and(|name| {
-                is_sensitive_name(name) && !REVIEWED_SAFE_DEBUG_TYPES.contains(&name)
-            }) {
-                return true;
-            }
+                .any(|(reviewed, reason)| *reviewed == name && !reason.trim().is_empty())
+        {
+            return true;
         }
         let lower = line.to_ascii_lowercase();
         if (lower.contains(":?}") || lower.contains(":#?}"))
@@ -256,6 +280,19 @@ fn contains_sensitive_debug(source: &str) -> bool {
         }
     }
     false
+}
+
+fn derived_debug_type_name<'a>(lines: &[&'a str]) -> Option<&'a str> {
+    let line = lines.first()?;
+    (line.contains("derive(") && line.contains("Debug"))
+        .then(|| {
+            lines
+                .iter()
+                .skip(1)
+                .take(6)
+                .find_map(|line| declared_type_name(line))
+        })
+        .flatten()
 }
 
 fn declared_type_name(line: &str) -> Option<&str> {
@@ -338,6 +375,7 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use super::production_source_prefix as production_prefix;
     use std::{
         collections::BTreeSet,
         fs,
@@ -456,42 +494,38 @@ mod tests {
             .replace('\\', "/")
     }
 
-    fn production_prefix(contents: &str) -> String {
-        if contents.starts_with("#![cfg(test)]") {
-            return String::new();
-        }
-        let mut production = String::with_capacity(contents.len());
-        let mut cursor = 0;
-        while let Some(relative_index) = contents[cursor..].find("#[cfg(test)]") {
-            let index = cursor + relative_index;
-            let after_attribute = &contents[index + "#[cfg(test)]".len()..];
-            let whitespace = after_attribute.len() - after_attribute.trim_start().len();
-            let declaration_start = index + "#[cfg(test)]".len() + whitespace;
-            let declaration = &contents[declaration_start..];
-            if declaration.starts_with("mod ")
-                && let Some(open_relative) = declaration.find('{')
-            {
-                let open = declaration_start + open_relative;
-                if let Some(end) = super::source_block_end(contents, open) {
-                    production.push_str(&contents[cursor..index]);
-                    cursor = end;
-                    continue;
-                }
-            }
-            production.push_str(&contents[cursor..index + "#[cfg(test)]".len()]);
-            cursor = index + "#[cfg(test)]".len();
-        }
-        production.push_str(&contents[cursor..]);
-        production
-    }
-
     #[test]
     fn production_prefix_removes_only_balanced_test_modules() {
         let source = "fn before() {}\n#[cfg(test)]\nmod tests {\nmod nested { fn hidden() {} }\n}\nfn after() { forbidden(); }\n";
-        let production = production_prefix(source);
+        let production = super::production_source_prefix(source);
         assert!(production.contains("fn before()"));
         assert!(production.contains("fn after() { forbidden(); }"));
         assert!(!production.contains("fn hidden()"));
+    }
+
+    #[test]
+    fn out_of_line_test_module_does_not_hide_following_production_rules() {
+        let source = "#[cfg(test)]\nmod tests;\nfn after() { unsafe { fs::write(path, bytes); } SeriesCadence::FixedSeconds(60); AccountId; }\n#[derive(Debug)]\nstruct ApiCredential { value: String }\n";
+        let production = super::production_source_prefix(source);
+        assert!(
+            production.contains("fn after() {"),
+            "production after mod tests; was lost"
+        );
+        assert!(contains_unsafe_code(&production));
+        assert!(production.contains("fs::write("));
+        assert!(production.contains("SeriesCadence::"));
+        assert!(contains_identifier(&production, "AccountId"));
+        assert!(super::contains_sensitive_debug(&production));
+    }
+
+    #[test]
+    fn inline_test_module_hides_only_its_body_and_scans_following_production() {
+        let source = "#[cfg(test)]\nmod tests {\n fn hidden() { unsafe { fs::write(path, bytes); } }\n}\nfn after() { unsafe { fs::write(path, bytes); } }\n";
+        let production = super::production_source_prefix(source);
+        assert!(!production.contains("fn hidden()"));
+        assert!(production.contains("fn after() {"));
+        assert!(contains_unsafe_code(&production));
+        assert!(production.contains("fs::write("));
     }
 
     fn contains_identifier(source: &str, identifier: &str) -> bool {
@@ -577,12 +611,27 @@ mod tests {
         }
     }
 
-    const INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES: &[&str] = &[
-        "crates/platform_runtime/src/display_timing.rs",
-        "crates/platform_runtime/src/io_cancellation.rs",
-        "crates/platform_runtime/src/network_notifications.rs",
-        "crates/platform_runtime/src/power_notifications.rs",
-        "crates/platform_runtime/src/session_shutdown.rs",
+    const INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES: &[(&str, &str)] = &[
+        (
+            "crates/platform_runtime/src/display_timing.rs",
+            "existing native display probes await the M8.3 FFI consolidation",
+        ),
+        (
+            "crates/platform_runtime/src/io_cancellation.rs",
+            "existing Windows CancelIoEx boundary awaits the M8.3 abort-latency decision",
+        ),
+        (
+            "crates/platform_runtime/src/network_notifications.rs",
+            "existing native interface-change callbacks await M8.3 extraction",
+        ),
+        (
+            "crates/platform_runtime/src/power_notifications.rs",
+            "existing native suspend/resume callbacks await M8.3 extraction",
+        ),
+        (
+            "crates/platform_runtime/src/session_shutdown.rs",
+            "existing native shutdown callbacks await M8.3 manual logoff verification",
+        ),
     ];
 
     fn contains_unsafe_code(source: &str) -> bool {
@@ -597,7 +646,9 @@ mod tests {
     fn unsafe_location_is_allowed(relative: &str) -> bool {
         relative.starts_with("crates/platform_sys/src/windows/")
             || relative.starts_with("crates/platform_sys/src/macos/")
-            || INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES.contains(&relative)
+            || INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES
+                .iter()
+                .any(|(path, reason)| *path == relative && !reason.trim().is_empty())
     }
 
     fn declares_platform_sys_dependency(manifest: &str) -> bool {
@@ -698,9 +749,49 @@ mod tests {
             interim,
             INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES
                 .iter()
-                .map(|path| (*path).to_string())
+                .map(|(path, reason)| {
+                    assert!(
+                        !reason.trim().is_empty(),
+                        "{path} requires an explicit reason"
+                    );
+                    (*path).to_string()
+                })
                 .collect(),
             "the temporary platform_runtime FFI allowlist must stay exact until M8.3"
+        );
+    }
+
+    #[test]
+    fn reviewed_safe_debug_types_have_reasons_and_are_not_stale() {
+        let mut observed = BTreeSet::new();
+        for path in production_rust_sources() {
+            let source = fs::read_to_string(&path).expect("source");
+            let production = production_prefix(&source);
+            let lines: Vec<_> = production.lines().collect();
+            for index in 0..lines.len() {
+                if let Some(name) = super::derived_debug_type_name(&lines[index..])
+                    && super::is_sensitive_name(name)
+                    && super::REVIEWED_SAFE_DEBUG_TYPES
+                        .iter()
+                        .any(|(reviewed, _)| *reviewed == name)
+                {
+                    observed.insert(name.to_string());
+                }
+            }
+        }
+        let expected: BTreeSet<_> = super::REVIEWED_SAFE_DEBUG_TYPES
+            .iter()
+            .map(|(name, reason)| {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{name} requires an explicit reason"
+                );
+                (*name).to_string()
+            })
+            .collect();
+        assert_eq!(
+            observed, expected,
+            "the reviewed Debug allowlist must not retain stale entries"
         );
     }
 
