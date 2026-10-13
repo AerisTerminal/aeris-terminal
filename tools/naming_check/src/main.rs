@@ -99,6 +99,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    for path in [
+        "crates/market_runtime/src/market_service/calendar/mod.rs",
+        "crates/market_runtime/src/market_service/mod.rs",
+        "crates/market_runtime/src/market_service/realtime.rs",
+        "crates/market_runtime/src/market_service/history.rs",
+        "crates/market_runtime/src/market_service/coordinator.rs",
+        "crates/market_runtime/src/market_service/runtime.rs",
+    ] {
+        let file = root.join(path);
+        match fs::read_to_string(&file) {
+            Ok(source) if violates_calendar_boundary(path, &source) => {
+                violations.push(relative_to(&root, &file));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("failed to read calendar boundary at {path}: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     if violations.is_empty() {
         println!("snake_case naming check passed");
@@ -122,6 +142,23 @@ fn missing_market_characterization_tests(source: &str) -> Vec<&'static str> {
                 .any(|line| line.trim() == format!("fn {name}() {{"))
         })
         .collect()
+}
+
+fn violates_calendar_boundary(path: &str, source: &str) -> bool {
+    let production = production_source_prefix(source);
+    if path.ends_with("/calendar/mod.rs")
+        && [
+            "\"rithmic\"",
+            "\"tastytrade\"",
+            "\"ctrader\"",
+            "\"hyperliquid\"",
+        ]
+        .iter()
+        .any(|literal| production.contains(literal))
+    {
+        return true;
+    }
+    production.contains("RithmicExchangeCalendar")
 }
 
 fn inspect_directory(
@@ -412,6 +449,33 @@ mod tests {
         fs,
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn calendar_boundary_rejects_provider_literals_and_adapter_calendar_imports() {
+        let calendar = "crates/market_runtime/src/market_service/calendar/mod.rs";
+        let generic = "crates/market_runtime/src/market_service/realtime.rs";
+        assert!(super::violates_calendar_boundary(
+            calendar,
+            "fn source() { let _ = \"rithmic\"; }"
+        ));
+        assert!(super::violates_calendar_boundary(
+            generic,
+            "use aeris_rithmic_protocol_adapter::RithmicExchangeCalendar;"
+        ));
+        assert!(super::violates_calendar_boundary(
+            calendar,
+            "#[cfg(test)] mod tests { fn fixture() { let _ = \"rithmic\"; } }\nfn source() { let _ = \"tastytrade\"; }"
+        ));
+    }
+
+    #[test]
+    fn calendar_boundary_accepts_provider_neutral_production_after_tests() {
+        let calendar = "crates/market_runtime/src/market_service/calendar/mod.rs";
+        assert!(!super::violates_calendar_boundary(
+            calendar,
+            "#[cfg(test)] mod tests { fn fixture() { let _ = \"rithmic\"; } }\nfn source() { let _ = \"CME\"; }"
+        ));
+    }
 
     #[test]
     fn sensitive_debug_rule_rejects_derived_and_formatted_secrets() {

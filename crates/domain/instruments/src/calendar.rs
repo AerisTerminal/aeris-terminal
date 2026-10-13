@@ -1,20 +1,41 @@
 const SECONDS_PER_DAY: i64 = 86_400;
 const CME_SESSION_ROLL_SECONDS: i64 = 17 * 60 * 60;
 
-/// Calendar aggregation requested for one Rithmic session series.
+/// Exchange family normalized from a provider's venue code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RithmicCalendarPeriod {
+pub enum Venue {
+    Cme,
+    Cfe,
+    UsEquity,
+    Continuous,
+}
+
+/// The single exchange-code table used by adapters and the calendar service.
+#[must_use]
+pub fn classify_venue(code: &str) -> Option<Venue> {
+    match code.trim().to_ascii_uppercase().as_str() {
+        "CME" | "XCME" | "CBOT" | "XCBT" | "NYMEX" | "XNYM" | "COMEX" | "XCEC" => Some(Venue::Cme),
+        "CFE" | "XCFE" => Some(Venue::Cfe),
+        "NYSE" | "XNYS" | "NASDAQ" | "XNAS" | "US_EQUITY" => Some(Venue::UsEquity),
+        "HYPERLIQUID" => Some(Venue::Continuous),
+        _ => None,
+    }
+}
+
+/// Calendar aggregation requested for one exchange session series.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExchangeCalendarPeriod {
     Week,
     Month,
 }
 
 /// Opaque exchange-calendar bucket used to compare history and live events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RithmicCalendarBucket(i64);
+pub struct ExchangeCalendarBucket(i64);
 
-/// Provider-owned exchange calendar for the currently supported Rithmic venues.
+/// Exchange calendar for a recognized venue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RithmicExchangeCalendar {
+pub struct ExchangeCalendar {
     kind: CalendarKind,
 }
 
@@ -23,11 +44,11 @@ enum CalendarKind {
     CmeGlobex,
 }
 
-impl RithmicExchangeCalendar {
-    /// Resolves the exchange calendar without leaking provider metadata above the adapter.
+impl ExchangeCalendar {
+    /// Resolves a normalized venue without associating it with a provider.
     #[must_use]
-    pub fn for_venue(venue_id: &str) -> Option<Self> {
-        matches!(venue_id, "CME" | "CBOT" | "COMEX" | "NYMEX").then_some(Self {
+    pub fn for_code(venue_id: &str) -> Option<Self> {
+        (classify_venue(venue_id) == Some(Venue::Cme)).then_some(Self {
             kind: CalendarKind::CmeGlobex,
         })
     }
@@ -37,19 +58,19 @@ impl RithmicExchangeCalendar {
     pub fn bucket(
         self,
         exchange_timestamp_seconds: i64,
-        period: RithmicCalendarPeriod,
-    ) -> RithmicCalendarBucket {
+        period: ExchangeCalendarPeriod,
+    ) -> ExchangeCalendarBucket {
         match self.kind {
             CalendarKind::CmeGlobex => {
                 let trading_day = cme_trading_day(exchange_timestamp_seconds);
                 match period {
-                    RithmicCalendarPeriod::Week => {
+                    ExchangeCalendarPeriod::Week => {
                         let monday = trading_day - (trading_day + 3).rem_euclid(7);
-                        RithmicCalendarBucket(monday)
+                        ExchangeCalendarBucket(monday)
                     }
-                    RithmicCalendarPeriod::Month => {
+                    ExchangeCalendarPeriod::Month => {
                         let (year, month, _) = civil_from_days(trading_day);
-                        RithmicCalendarBucket(year * 12 + i64::from(month))
+                        ExchangeCalendarBucket(year * 12 + i64::from(month))
                     }
                 }
             }
@@ -156,25 +177,25 @@ mod tests {
 
     #[test]
     fn cme_week_rolls_at_the_sunday_evening_session_boundary() {
-        let calendar = RithmicExchangeCalendar::for_venue("CME").expect("CME calendar");
+        let calendar = ExchangeCalendar::for_code("CME").expect("CME calendar");
         let before = utc_seconds(2026, 8, 16, 21);
         let after = utc_seconds(2026, 8, 16, 22);
 
         assert_ne!(
-            calendar.bucket(before, RithmicCalendarPeriod::Week),
-            calendar.bucket(after, RithmicCalendarPeriod::Week)
+            calendar.bucket(before, ExchangeCalendarPeriod::Week),
+            calendar.bucket(after, ExchangeCalendarPeriod::Week)
         );
     }
 
     #[test]
     fn cme_month_uses_the_trading_date_across_dst() {
-        let calendar = RithmicExchangeCalendar::for_venue("CME").expect("CME calendar");
+        let calendar = ExchangeCalendar::for_code("CME").expect("CME calendar");
         let august_session = utc_seconds(2026, 8, 31, 21);
         let september_session = utc_seconds(2026, 8, 31, 22);
 
         assert_ne!(
-            calendar.bucket(august_session, RithmicCalendarPeriod::Month),
-            calendar.bucket(september_session, RithmicCalendarPeriod::Month)
+            calendar.bucket(august_session, ExchangeCalendarPeriod::Month),
+            calendar.bucket(september_session, ExchangeCalendarPeriod::Month)
         );
         assert_eq!(
             chicago_utc_offset_seconds(utc_seconds(2026, 1, 15, 12)),
@@ -212,7 +233,7 @@ mod tests {
 
     #[test]
     fn cme_trading_day_opens_at_the_previous_evening_session() {
-        let calendar = RithmicExchangeCalendar::for_venue("CME").expect("CME calendar");
+        let calendar = ExchangeCalendar::for_code("CME").expect("CME calendar");
         let monday = days_from_civil(2026, 8, 17);
         // 16:59 and 17:00 Chicago (CDT) on Sunday 2026-08-16.
         assert_eq!(
@@ -229,6 +250,6 @@ mod tests {
 
     #[test]
     fn unsupported_venues_do_not_receive_a_guessed_calendar() {
-        assert_eq!(RithmicExchangeCalendar::for_venue("UNKNOWN"), None);
+        assert_eq!(ExchangeCalendar::for_code("UNKNOWN"), None);
     }
 }

@@ -28,6 +28,7 @@ use aeris_contracts::{
     SeriesLoadState,
 };
 use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
+use aeris_instruments::calendar::{ExchangeCalendar, ExchangeCalendarPeriod};
 use aeris_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
     MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
@@ -40,9 +41,7 @@ use aeris_market_engine::{
     StreamRequirements, Viewport, WorkspaceId,
 };
 use aeris_provider_history::HistoryRange;
-use aeris_rithmic_protocol_adapter::{
-    RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID, RithmicCalendarPeriod, RithmicExchangeCalendar,
-};
+use aeris_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
 
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
@@ -800,8 +799,8 @@ enum TradeLiveCadence {
         forming: u32,
     },
     Calendar {
-        calendar: RithmicExchangeCalendar,
-        period: RithmicCalendarPeriod,
+        calendar: ExchangeCalendar,
+        period: ExchangeCalendarPeriod,
     },
 }
 
@@ -1737,10 +1736,10 @@ impl std::fmt::Display for LoggedInstrument<'_> {
 }
 
 mod broker_authorization;
+pub mod calendar;
 mod ctrader;
 mod rithmic_login;
 mod runtime;
-mod session_hours;
 mod tastytrade;
 pub use ctrader::{
     CtraderStreamStatistics, VenueEventSink as CtraderVenueEventSink, VenueLink as CtraderVenueLink,

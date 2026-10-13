@@ -6,6 +6,7 @@ use aeris_contracts::{
     InstallProviderInstrument, ProviderDailyBarCadence, ProviderPresentationDescriptor,
     SeriesCadence, SeriesKey,
 };
+use aeris_instruments::CalendarSourceKind;
 use aeris_market_data::{BarPeriod, BarSeriesKey, ChartInterval};
 
 /// A chart interval cannot be represented by the selected provider.
@@ -29,8 +30,9 @@ impl std::error::Error for CadenceError {}
 
 /// Resolves a presentation interval to the canonical runtime cadence.
 ///
-/// `ProviderDailyBarCadence::FixedDay` means UTC-aligned fixed-duration daily bars.
-/// Session providers retain exchange-session day boundaries.
+/// A declared always-open source uses UTC-aligned fixed daily bars. Session
+/// sources retain exchange-session boundaries; unknown sources cannot promise
+/// a live week/month boundary.
 ///
 /// # Errors
 ///
@@ -39,6 +41,7 @@ impl std::error::Error for CadenceError {}
 pub fn resolve_cadence(
     interval: ChartInterval,
     presentation: &ProviderPresentationDescriptor,
+    calendar: CalendarSourceKind,
 ) -> Result<BarPeriod, CadenceError> {
     if !presentation
         .chart_interval_labels
@@ -63,16 +66,30 @@ pub fn resolve_cadence(
         ChartInterval::Hour4 => BarPeriod::time(14_400),
         ChartInterval::Hour8 => BarPeriod::time(28_800),
         ChartInterval::Hour12 => BarPeriod::time(43_200),
-        ChartInterval::Day1 => match presentation.daily_bars {
-            ProviderDailyBarCadence::FixedDay => BarPeriod::time(86_400),
-            ProviderDailyBarCadence::TradingSession => BarPeriod::session(1),
-        },
-        ChartInterval::Day3 => match presentation.daily_bars {
-            ProviderDailyBarCadence::FixedDay => BarPeriod::time(259_200),
-            ProviderDailyBarCadence::TradingSession => BarPeriod::session(3),
-        },
-        ChartInterval::Week1 => BarPeriod::week(1),
-        ChartInterval::Month1 => BarPeriod::month(1),
+        ChartInterval::Day1 | ChartInterval::Day3 => {
+            let days = if interval == ChartInterval::Day1 {
+                1
+            } else {
+                3
+            };
+            match calendar {
+                CalendarSourceKind::AlwaysOpen => BarPeriod::time(days * 86_400),
+                // Older catalog entries may not publish contract hours yet.
+                // Preserve their advertised daily cadence; unlike week/month,
+                // the provider can still answer a single daily candle.
+                CalendarSourceKind::Unknown
+                    if presentation.daily_bars == ProviderDailyBarCadence::FixedDay =>
+                {
+                    BarPeriod::time(days * 86_400)
+                }
+                _ => BarPeriod::session(days),
+            }
+        }
+        ChartInterval::Week1 if calendar != CalendarSourceKind::Unknown => BarPeriod::week(1),
+        ChartInterval::Month1 if calendar != CalendarSourceKind::Unknown => BarPeriod::month(1),
+        ChartInterval::Week1 | ChartInterval::Month1 => {
+            return Err(unsupported(presentation, interval));
+        }
     };
     period.map_err(|_| unsupported(presentation, interval))
 }
@@ -91,7 +108,11 @@ pub fn resolve_series_key(
         provider_id: instrument.provider.clone(),
         instrument_id: instrument.instrument_id.clone(),
         entitlement_id: instrument.entitlement_id.clone(),
-        period: resolve_cadence(interval, presentation)?,
+        period: resolve_cadence(
+            interval,
+            presentation,
+            crate::market_service::calendar::source_kind_for(instrument),
+        )?,
         definition_version: 1,
     })
 }
@@ -187,7 +208,8 @@ fn unsupported(
 mod tests {
     use super::{legacy_interval, persisted_interval, resolve_cadence};
     use crate::built_in_provider_presentations;
-    use aeris_contracts::{SeriesCadence, SeriesKey};
+    use aeris_contracts::{ProviderDailyBarCadence, SeriesCadence, SeriesKey};
+    use aeris_instruments::CalendarSourceKind;
     use aeris_market_data::{BarPeriod, ChartInterval};
 
     #[test]
@@ -196,7 +218,12 @@ mod tests {
             for interval in ChartInterval::ALL {
                 let persisted = interval.label();
                 assert_eq!(persisted_interval(persisted), Some(interval));
-                let resolution = resolve_cadence(interval, presentation);
+                let source = if presentation.daily_bars == ProviderDailyBarCadence::FixedDay {
+                    CalendarSourceKind::AlwaysOpen
+                } else {
+                    CalendarSourceKind::ExchangeRule
+                };
+                let resolution = resolve_cadence(interval, presentation, source);
                 assert_eq!(
                     resolution.is_ok(),
                     presentation.chart_interval_labels.contains(&persisted),
@@ -231,12 +258,31 @@ mod tests {
             .find(|presentation| presentation.id == "hyperliquid")
             .expect("Hyperliquid presentation");
         assert_eq!(
-            resolve_cadence(ChartInterval::Day1, presentation),
+            resolve_cadence(
+                ChartInterval::Day1,
+                presentation,
+                CalendarSourceKind::AlwaysOpen
+            ),
             Ok(BarPeriod::time(86_400).expect("one day"))
         );
         assert_eq!(
-            resolve_cadence(ChartInterval::Day3, presentation),
+            resolve_cadence(
+                ChartInterval::Day3,
+                presentation,
+                CalendarSourceKind::AlwaysOpen
+            ),
             Ok(BarPeriod::time(259_200).expect("three days"))
         );
+    }
+
+    #[test]
+    fn unknown_calendar_rejects_week_and_month_without_silent_live_handoff() {
+        let presentation = built_in_provider_presentations()
+            .iter()
+            .find(|presentation| presentation.id == "tastytrade")
+            .expect("tastytrade presentation");
+        for interval in [ChartInterval::Week1, ChartInterval::Month1] {
+            assert!(resolve_cadence(interval, presentation, CalendarSourceKind::Unknown).is_err());
+        }
     }
 }

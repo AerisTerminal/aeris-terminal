@@ -1464,6 +1464,31 @@ impl Coordinator<'_> {
     > {
         authorize_consumer(&self.engine, client_id, waiter.consumer_id)?;
         let provider_generation = self.provider_generation_for_series(series)?;
+        if matches!(
+            series.period,
+            aeris_market_data::BarPeriod::Week { .. } | aeris_market_data::BarPeriod::Month { .. }
+        ) && self
+            .catalog
+            .get(&(series.provider_id.clone(), series.instrument_id.clone()))
+            .is_some_and(|instrument| {
+                super::calendar::source_kind_for(instrument)
+                    == aeris_instruments::CalendarSourceKind::Unknown
+                    || (self
+                        .providers
+                        .descriptor(&series.provider_id)
+                        .is_some_and(|descriptor| {
+                            descriptor.live_model == super::LiveModel::TradeBuilt
+                        })
+                        && aeris_instruments::calendar::ExchangeCalendar::for_code(
+                            &instrument.venue_id,
+                        )
+                        .is_none())
+            })
+        {
+            let error = "weekly or monthly live series requires a supported instrument calendar";
+            self.report_unsupported_calendar(waiter, series, error);
+            return Err(error.into());
+        }
         let publication = self
             .engine
             .set_series_demand_with_streams(waiter.consumer_id, waiter.generation, series, streams)
@@ -1545,6 +1570,27 @@ impl Coordinator<'_> {
             }
         };
         let _ = reply.send(result);
+    }
+
+    fn report_unsupported_calendar(
+        &mut self,
+        waiter: &DemandWaiter,
+        series: &BarSeriesKey,
+        detail: &str,
+    ) {
+        if let Some(events) = self.events.get_mut(&waiter.consumer_id) {
+            events.demand_error = Some(MarketRuntimeEvent::DemandError(crate::MarketDemandError {
+                consumer_id: waiter.consumer_id,
+                generation: waiter.generation,
+                scope: crate::MarketDemandErrorScope::Series,
+                code: aeris_contracts::EngineFaultCode::Permanent,
+                stage: aeris_contracts::FailureStage::Handoff,
+                detail: detail.to_string(),
+                series: Some(series.clone()),
+                cause: "calendar unavailable for live series".into(),
+                elapsed_millis: None,
+            }));
+        }
     }
 }
 
@@ -4001,6 +4047,120 @@ mod tests {
             .install_provider_instrument(&instrument())
             .expect("Rithmic instrument installs");
         (coordinator, history_receiver)
+    }
+
+    #[test]
+    fn calendar_unknown_week_and_month_publish_explicit_market_demand_error() {
+        let (mut coordinator, _) = connected_rithmic_coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator.events.entry(consumer).or_default();
+        let mut installed = instrument();
+        installed.venue_id = "UNKNOWN".into();
+        coordinator.catalog.insert(
+            (installed.provider.clone(), installed.instrument_id.clone()),
+            installed,
+        );
+        for (index, period) in [
+            BarPeriod::week(1).expect("week"),
+            BarPeriod::month(1).expect("month"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = BarSeriesKey { period, ..series() };
+            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+            coordinator.handle_demand(
+                client(1),
+                &selected,
+                StreamRequirements::BARS,
+                DemandWaiter {
+                    consumer_id: consumer,
+                    generation: generation(index as u64 + 1),
+                    started_at: Instant::now(),
+                },
+                &reply,
+            );
+            assert!(receiver.recv().expect("demand reply").is_err());
+            let event = coordinator
+                .events
+                .get_mut(&consumer)
+                .and_then(|events| events.demand_error.take())
+                .expect("typed demand error");
+            let MarketRuntimeEvent::DemandError(error) = event else {
+                panic!("expected MarketDemandError");
+            };
+            assert_eq!(error.code, aeris_contracts::EngineFaultCode::Permanent);
+            assert_eq!(error.series, Some(selected));
+        }
+    }
+
+    #[test]
+    fn calendar_tastytrade_equity_week_demand_returns_explicit_error() {
+        let mut coordinator = coordinator();
+        let consumer = consumer(1);
+        register(&mut coordinator, consumer);
+        coordinator.events.entry(consumer).or_default();
+        coordinator
+            .engine
+            .begin_provider_session("tastytrade", ProviderGeneration(nonzero(1)))
+            .expect("provider session");
+        let (history_sender, _) = std::sync::mpsc::sync_channel(1);
+        coordinator.providers.records.insert(
+            "tastytrade",
+            super::super::ProviderDispatchRecord {
+                descriptor: super::super::tastytrade::DESCRIPTOR,
+                history: Box::leak(Box::new(history_sender)),
+                lifecycle: None,
+                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                catalog: super::super::ProviderCatalogDispatch::Disabled,
+            },
+        );
+        let instrument = InstallProviderInstrument {
+            provider: "tastytrade".into(),
+            instrument_id: "tastytrade:Equity:TEST".into(),
+            provider_symbol: "TEST".into(),
+            venue_id: "NYSE".into(),
+            entitlement_id: super::super::tastytrade::ENTITLEMENT.into(),
+            ..Default::default()
+        };
+        let selected = BarSeriesKey {
+            provider_id: instrument.provider.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            entitlement_id: instrument.entitlement_id.clone(),
+            period: BarPeriod::week(1).expect("week"),
+            definition_version: 1,
+        };
+        coordinator.catalog.insert(
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
+            instrument,
+        );
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_demand(
+            client(1),
+            &selected,
+            StreamRequirements::BARS,
+            DemandWaiter {
+                consumer_id: consumer,
+                generation: generation(1),
+                started_at: Instant::now(),
+            },
+            &reply,
+        );
+        assert!(receiver.recv().expect("demand reply").is_err());
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&consumer)
+                .and_then(|events| events.demand_error.take()),
+            Some(MarketRuntimeEvent::DemandError(crate::MarketDemandError {
+                code: aeris_contracts::EngineFaultCode::Permanent,
+                ..
+            }))
+        ));
     }
 
     /// Rithmic Test answers a closed-market current replay with zero bars. That

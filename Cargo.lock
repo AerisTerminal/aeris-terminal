@@ -416,6 +416,7 @@ version = "0.2.3"
 name = "aeris_rithmic_protocol_adapter"
 version = "0.2.3"
 dependencies = [
+ "aeris_instruments",
  "aeris_market_data",
  "aeris_observability",
  "aeris_platform_runtime",

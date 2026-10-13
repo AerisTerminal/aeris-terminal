@@ -536,7 +536,7 @@ impl BrokerApi {
         self.calendar_revision.load(Ordering::Acquire)
     }
     fn market_session(&self, instrument: &InstallProviderInstrument) -> Option<MarketSession> {
-        let collection = market_collection(instrument)?;
+        let collection = calendar_collection(instrument)?;
         self.session_for_collection(collection)
     }
     fn session_for_collection(&self, collection: MarketCollection) -> Option<MarketSession> {
@@ -597,31 +597,17 @@ impl BrokerApi {
             session_end_unix_nanos: None,
             next_open_unix_nanos: None,
         };
-        let Some(collection) = tastytrade_market_collection(instrument_id, provider_symbol) else {
+        let Some(collection) = calendar_collection(&InstallProviderInstrument {
+            instrument_id: instrument_id.into(),
+            provider_symbol: provider_symbol.into(),
+            ..InstallProviderInstrument::default()
+        }) else {
             return unknown();
         };
         self.session_for_collection(collection)
             .map_or_else(unknown, |session| {
                 session_status_at(instrument_id, session, now_unix_nanos)
             })
-    }
-}
-
-fn tastytrade_market_collection(
-    instrument_id: &str,
-    provider_symbol: &str,
-) -> Option<MarketCollection> {
-    if instrument_id.starts_with("tastytrade:Equity:") {
-        return Some(MarketCollection::Equity);
-    }
-    if !instrument_id.starts_with("tastytrade:Future:") {
-        return None;
-    }
-    let (_, exchange) = provider_symbol.strip_prefix('/')?.rsplit_once(':')?;
-    match exchange {
-        "XCME" | "XCBT" | "XNYM" | "XCEC" => Some(MarketCollection::Cme),
-        "XCFE" => Some(MarketCollection::Cfe),
-        _ => None,
     }
 }
 
@@ -683,16 +669,17 @@ fn session_status_at(instrument_id: &str, session: MarketSession, now: i64) -> M
     }
 }
 
-fn market_collection(instrument: &InstallProviderInstrument) -> Option<MarketCollection> {
-    match instrument.venue_id.as_str() {
-        "CME" | "CBOT" | "NYMEX" | "COMEX" => Some(MarketCollection::Cme),
-        "CFE" => Some(MarketCollection::Cfe),
-        _ if instrument.instrument_id.starts_with("tastytrade:Equity:")
-            || instrument.instrument_id.starts_with("tastytrade:Index:") =>
+fn calendar_collection(instrument: &InstallProviderInstrument) -> Option<MarketCollection> {
+    match super::calendar::instrument_venue(instrument)? {
+        super::calendar::Venue::Cme => Some(MarketCollection::Cme),
+        super::calendar::Venue::Cfe => Some(MarketCollection::Cfe),
+        super::calendar::Venue::UsEquity
+            if instrument.instrument_id.starts_with("tastytrade:Equity:")
+                || instrument.instrument_id.starts_with("tastytrade:Index:") =>
         {
             Some(MarketCollection::Equity)
         }
-        _ => None,
+        super::calendar::Venue::UsEquity | super::calendar::Venue::Continuous => None,
     }
 }
 
@@ -1511,7 +1498,7 @@ impl HistoryTask {
                 })
         {
             if let Some(instrument) = &self.request.instrument
-                && market_collection(instrument).is_some()
+                && calendar_collection(instrument).is_some()
                 && session.is_none()
             {
                 return Err("Tastytrade market session calendar is unavailable".into());

@@ -1148,45 +1148,24 @@ impl MarketService {
         instrument: &aeris_contracts::InstallProviderInstrument,
         now_unix_nanos: i64,
     ) -> aeris_contracts::MarketSessionStatus {
-        if instrument.provider == "tastytrade" {
-            return self.runtime.broker_api.market_session_status(
+        use super::calendar::MarketCalendarService;
+        let provider_calendar = if instrument.provider == "tastytrade" {
+            let status = self.runtime.broker_api.market_session_status(
                 &instrument.instrument_id,
                 &instrument.provider_symbol,
                 now_unix_nanos,
             );
-        }
-        if let Some(status) = instrument
-            .contract_metadata
-            .as_deref()
-            .and_then(|metadata| {
-                super::session_hours::weekly_hours_status(
-                    &instrument.instrument_id,
-                    &metadata.session_hours,
-                    now_unix_nanos,
-                )
-            })
-        {
-            return status;
-        }
-        let (phase, source) = if instrument.provider == "hyperliquid" {
-            (
-                aeris_contracts::MarketSessionPhase::AlwaysOpen,
-                aeris_contracts::MarketSessionSource::Continuous,
-            )
+            (status.source == aeris_contracts::MarketSessionSource::ProviderCalendar)
+                .then_some(status)
         } else {
-            (
-                aeris_contracts::MarketSessionPhase::Unknown,
-                aeris_contracts::MarketSessionSource::Unavailable,
-            )
+            None
         };
-        aeris_contracts::MarketSessionStatus {
-            instrument_id: instrument.instrument_id.clone(),
-            phase,
-            source,
-            session_start_unix_nanos: None,
-            session_end_unix_nanos: None,
-            next_open_unix_nanos: None,
-        }
+        let mut calendar = MarketCalendarService::default();
+        calendar.resolve(instrument, provider_calendar);
+        calendar.status(
+            &instrument.instrument_id,
+            now_unix_nanos.div_euclid(1_000_000),
+        )
     }
 
     /// Checks the broker's bounded cached calendar before simulated execution.

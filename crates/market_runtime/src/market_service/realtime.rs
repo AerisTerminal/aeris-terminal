@@ -1,15 +1,15 @@
 use super::{
     AggressorSide, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CandleGapPolicy, CandleLiveHandoff,
-    CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, Duration, FailureStage,
-    FormingBar, HyperliquidInstrumentDemand, IndexedTradeMutation, InstallProviderInstrument,
-    Instant, LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState,
-    LiveSeriesPublication, MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade,
-    NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect,
-    ProviderDisplayDepthEvent, ProviderEvent, ProviderEventKind, ProviderGeneration,
-    ProviderHealth, ProviderInstrumentDemand, ProviderOrderBook, ProviderTradeBatch,
-    RithmicCalendarPeriod, RithmicExchangeCalendar, SeriesLoadState, StreamRequirements,
-    TopOfBookQuote, TradeLiveCadence, TradeLiveHandoff, TradeLiveUpdate, VecDeque, id,
-    merge_live_candle, series_state_payload, series_update_message,
+    CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, Duration, ExchangeCalendar,
+    ExchangeCalendarPeriod, FailureStage, FormingBar, HyperliquidInstrumentDemand,
+    IndexedTradeMutation, InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY,
+    LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
+    MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
+    OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent,
+    ProviderEvent, ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
+    ProviderOrderBook, ProviderTradeBatch, SeriesLoadState, StreamRequirements, TopOfBookQuote,
+    TradeLiveCadence, TradeLiveHandoff, TradeLiveUpdate, VecDeque, id, merge_live_candle,
+    series_state_payload, series_update_message,
 };
 #[cfg(test)]
 use super::{HyperliquidDemand, RithmicRealtimeDemand};
@@ -279,14 +279,13 @@ impl ProviderOrderBook {
         let ingestion_ordinal = self.next_trade_ingestion_ordinal;
         self.next_trade_ingestion_ordinal = self.next_trade_ingestion_ordinal.saturating_add(1);
         let timestamps = &trade.metadata.timestamps;
-        let trading_day =
-            RithmicExchangeCalendar::for_venue(&self.instrument.venue_id).map(|calendar| {
-                let timestamp_nanos = timestamps
-                    .exchange_unix_nanos
-                    .or(timestamps.provider_unix_nanos)
-                    .unwrap_or(timestamps.received_unix_nanos);
-                calendar.trading_day(timestamp_nanos.div_euclid(1_000_000_000))
-            });
+        let trading_day = ExchangeCalendar::for_code(&self.instrument.venue_id).map(|calendar| {
+            let timestamp_nanos = timestamps
+                .exchange_unix_nanos
+                .or(timestamps.provider_unix_nanos)
+                .unwrap_or(timestamps.received_unix_nanos);
+            calendar.trading_day(timestamp_nanos.div_euclid(1_000_000_000))
+        });
         let retained = crate::RetainedMarketTrade {
             ingestion_ordinal,
             observed_unix_nanos,
@@ -474,12 +473,12 @@ impl TradeLiveHandoff {
                 seconds: i64::from(days) * 86_400,
             },
             BarPeriod::Week { weeks: 1 } => TradeLiveCadence::Calendar {
-                calendar: RithmicExchangeCalendar::for_venue(venue_id)?,
-                period: RithmicCalendarPeriod::Week,
+                calendar: ExchangeCalendar::for_code(venue_id)?,
+                period: ExchangeCalendarPeriod::Week,
             },
             BarPeriod::Month { months: 1 } => TradeLiveCadence::Calendar {
-                calendar: RithmicExchangeCalendar::for_venue(venue_id)?,
-                period: RithmicCalendarPeriod::Month,
+                calendar: ExchangeCalendar::for_code(venue_id)?,
+                period: ExchangeCalendarPeriod::Month,
             },
             BarPeriod::Week { .. } | BarPeriod::Month { .. } => return None,
         };

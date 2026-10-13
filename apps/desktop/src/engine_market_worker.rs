@@ -432,7 +432,8 @@ fn restored_workspace_pane_specs(
                 });
             let interval = requested
                 .filter(|interval| {
-                    aeris_market_runtime::resolve_cadence(*interval, presentation).is_ok()
+                    aeris_market_runtime::resolve_series_key(&instrument, *interval, presentation)
+                        .is_ok()
                 })
                 .or_else(|| {
                     let offered = presentation

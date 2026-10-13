@@ -118,6 +118,10 @@ the check.
 - Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;
   the Rithmic adapter alone retries transport, while its non-transport session replacements
   wait at least one second. Never stack a coordinator transport retry on that adapter.
+- Market session and cadence decisions use the provider-neutral market calendar. Exchange
+  codes share one normalization table; generic calendar code contains no provider identity
+  literals and does not import an adapter-owned exchange calendar. Unknown week/month
+  boundaries reject demand explicitly rather than installing a silent live series.
 - Verify protocol fields, precision, timestamp meaning, ordering, snapshot semantics, and recovery
   against current provider documentation or representative observed responses before depending on them.
 - Keep provider identity, local ingestion order, and continuity evidence separate. Never infer sequence

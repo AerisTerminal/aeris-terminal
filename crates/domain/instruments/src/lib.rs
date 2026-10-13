@@ -1,11 +1,42 @@
 //! Provider-neutral instrument identity and versioned reference data.
 
+pub mod calendar;
+
 use core::fmt;
 use std::error::Error;
 
 const MAX_DECIMAL_SCALE: u8 = 18;
 /// Most weekly session segments one contract may carry.
 pub const MAXIMUM_SESSION_SEGMENTS: usize = 32;
+
+/// Phase of a market session at a UTC instant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionPhase {
+    Open,
+    Extended,
+    PreOpen,
+    Break,
+    Closed,
+    AlwaysOpen,
+    Unknown,
+}
+
+/// Half-open UTC interval of a session, in milliseconds since the Unix epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionWindow {
+    pub open_utc_ms: i64,
+    pub close_utc_ms: i64,
+}
+
+/// Provenance of the calendar used for one instrument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarSourceKind {
+    ProviderCalendar,
+    ContractHours,
+    ExchangeRule,
+    AlwaysOpen,
+    Unknown,
+}
 
 /// A stable `Aeris` instrument identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

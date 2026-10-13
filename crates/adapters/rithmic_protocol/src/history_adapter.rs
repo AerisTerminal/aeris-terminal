@@ -1,8 +1,11 @@
 use crate::{
     CollectedHistory, CollectionProgress, DecodedControlMessage, DecodedTimeBar,
     DecodedTimeBarType, HistoryBars, HistoryCollectionRequest, HistoryCollector, HistorySeries,
-    RithmicCalendarPeriod, RithmicExchangeCalendar, RithmicHistoryConnection,
-    RithmicProviderInstrument, RithmicSessionMessage, TimeBarReplayRequest, TimeBarType,
+    RithmicHistoryConnection, RithmicProviderInstrument, RithmicSessionMessage,
+    TimeBarReplayRequest, TimeBarType,
+};
+use aeris_instruments::calendar::{
+    ExchangeCalendar, ExchangeCalendarBucket, ExchangeCalendarPeriod,
 };
 use aeris_market_data::{
     ChartInterval, MarketBar, RithmicChartAggregation, RithmicDailyAggregation, RithmicTimeUnit,
@@ -796,18 +799,18 @@ fn aggregate_daily_chart_history(
     period: RithmicDailyAggregation,
     venue_id: &str,
 ) -> Result<Vec<MarketBar>, RithmicHistoryAdapterError> {
-    let calendar = RithmicExchangeCalendar::for_venue(venue_id)
-        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?;
+    let calendar =
+        ExchangeCalendar::for_code(venue_id).ok_or(RithmicHistoryAdapterError::InvalidRequest)?;
     let calendar_period = match period {
-        RithmicDailyAggregation::Week => RithmicCalendarPeriod::Week,
-        RithmicDailyAggregation::Month => RithmicCalendarPeriod::Month,
+        RithmicDailyAggregation::Week => ExchangeCalendarPeriod::Week,
+        RithmicDailyAggregation::Month => ExchangeCalendarPeriod::Month,
     };
     let daily = daily
         .into_iter()
         .map(|bar| (bar.exchange_timestamp_unix_nanos, bar))
         .collect::<BTreeMap<_, _>>();
     let mut aggregated = Vec::new();
-    let mut active = None::<(crate::RithmicCalendarBucket, MarketBar)>;
+    let mut active = None::<(ExchangeCalendarBucket, MarketBar)>;
     for (_, daily_bar) in daily {
         let bucket = calendar.bucket(daily_bar.exchange_timestamp_seconds, calendar_period);
         match &mut active {

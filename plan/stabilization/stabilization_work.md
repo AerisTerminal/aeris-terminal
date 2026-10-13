@@ -107,7 +107,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | open |
 | MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | open |
 | MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | open |
-| MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | open |
+| MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in this commit |
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
 | MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in this commit |
@@ -363,7 +363,10 @@ Status: in progress
     exactly one concurrent ticker login. Tests cover policy bounds, capped
     retries, rate-limit headers and recovery, and cTrader failure publication.
     The blocked-network instance log is deferred to the single M2 milestone probe.
-- [ ] M2.5 market-calendar-service - Provider-neutral market calendar and session service
+- [x] M2.5 market-calendar-service - Provider-neutral market calendar and session service
+  - Added the session source resolver (provider calendar, contract hours, exchange rule, continuous, unknown), domain phase/window/source kinds, and shared exchange-code normalization. CME bucket and DST rules moved from the Rithmic adapter to the shared instruments domain; the runtime calendar owns dated phase/transition projection and weekly contract hours.
+  - Runtime session status delegates to the calendar; interval resolution takes calendar source kind. Unsupported weekly/monthly trade-built demands produce a permanent `MarketDemandError` event and an error reply, including tastytrade equity 1W, rather than a series without live handoff. Existing cTrader daily cadence remains accepted without published hours.
+  - Calendar matrix, four-provider source resolution, CME DST, unknown 1W/1M and tastytrade equity 1W tests pass; naming_check rejects provider literals in generic calendar and adapter-owned calendar imports. Full local fmt, workspace clippy/tests and naming gate passed. MD-04's non-CME live aggregation remains M2.7.
 - [ ] M2.6 provider-neutral-watchdog - Stall watchdog and practice session answer for every provider
 - [ ] M2.7 calendar-session-live-bars - Session-day, weekly and monthly live bars follow the calendar
 - [ ] M2.8 typed-epoch-fencing - `Epoch<Tag>` and `Fenced<T>` replace raw generations at the provider boundary
@@ -506,6 +509,7 @@ the repo root `AGENTS.md`.
 - Provider reconnect attempts use capped policy backoff; Rithmic transport has
   only the adapter scheduler and a separate bounded non-transport delay
   (M2.4, this commit).
+- Session/cadence resolution uses one provider-neutral calendar and one exchange-code table; generic calendar code cannot contain provider literals or import adapter calendars, and unsupported weekly/monthly live demand reports a typed error (M2.5, this commit).
 
 ## 6. Progress log
 
@@ -536,6 +540,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M2.2 perf(market): record engine and coordinator baselines - measured release workloads and added a manual-only CI performance job.
 - 2026-10-13 M2.3 feat(market): inject coordinator clock into recovery timing - shared a monotonic/wall clock with handoffs, watchdog and history retries; scripted tests advance without sleeps.
 - 2026-10-13 M2.4 feat(market): bound provider reconnect policies - replaced fixed Hyperliquid retry, budgeted cTrader with real-cause failure, jittered tastytrade and bounded Rithmic non-transport recovery.
+- 2026-10-13 M2.5 feat(market): centralize calendar sources and exchange rules - shared CME calendar and venue table, resolved dated/weekly/continuous sessions and rejected unsupported weekly/monthly live demand explicitly.
 
 ## 7. Known gaps / deferred
 
