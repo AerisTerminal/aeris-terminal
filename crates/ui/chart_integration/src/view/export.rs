@@ -6,8 +6,8 @@
 //! screen and the brand mark, both laid out with the same bundled faces the window uses.
 
 use super::{
-    AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendRow,
-    format_utc_offset, legend_title_weight, platform_date_label, platform_theme,
+    AerisChartView, LEGEND_INSET, LEGEND_MAX_WIDTH, LEGEND_ROW_HEIGHT, LegendItem, LegendRow,
+    format_utc_offset, platform_date_label, platform_theme,
 };
 use aeris_charts_native::{
     ImageExportOptions, PreparedChartImage, measure_text, prepare_engine_image, register_font_data,
@@ -31,6 +31,8 @@ use std::sync::OnceLock;
 const EXPORT_SCALE: f32 = 2.0;
 /// The on-screen legend's `text_xs` size, gap between readouts, and row padding.
 const LEGEND_TEXT_SIZE: f32 = 12.0;
+/// The on-screen asset title's `text_sm` size.
+const LEGEND_ASSET_TITLE_SIZE: f32 = 14.0;
 const LEGEND_RUN_GAP: f32 = 8.0;
 const LEGEND_PADDING_X: f32 = 4.0;
 /// The brand lockup, sized to read clearly in a shared image without crowding the plot.
@@ -303,8 +305,12 @@ fn export_legend_rows(rows: Vec<LegendRow>, palette: ExportPalette) -> Vec<Expor
             let mut runs = vec![ExportTextRun {
                 text: row.title,
                 color: palette.text,
-                size: LEGEND_TEXT_SIZE,
-                weight: legend_title_weight(row.item),
+                size: if row.item == LegendItem::Asset {
+                    LEGEND_ASSET_TITLE_SIZE
+                } else {
+                    LEGEND_TEXT_SIZE
+                },
+                weight: typography.weight(TypographyRole::Normal),
             }];
             runs.extend(row.values.into_iter().map(|value| {
                 ExportTextRun {

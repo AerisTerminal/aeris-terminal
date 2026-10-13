@@ -229,15 +229,6 @@ fn apply_replay_time_scale_defaults(engine: &mut ChartEngine, replay: &ReplaySna
 const LEGEND_INSET: f32 = 8.0;
 const LEGEND_ROW_HEIGHT: f32 = 24.0;
 const LEGEND_MAX_WIDTH: f32 = 640.0;
-/// The asset title (symbol, venue and interval) leads the legend at the row's `text_xs` size,
-/// set apart from the readouts and study titles by weight alone.
-fn legend_title_weight(item: LegendItem) -> u16 {
-    platform_typography().weight(if item == LegendItem::Asset {
-        TypographyRole::Emphasis
-    } else {
-        TypographyRole::Normal
-    })
-}
 
 /// A native indicator supported by the chart's current OHLCV data bridge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -3001,7 +2992,9 @@ fn chart_legend_row(
                 .flex()
                 .items_center()
                 .whitespace_nowrap()
-                .font_weight(gpui::FontWeight(f32::from(legend_title_weight(row.item))))
+                // The asset title (symbol, venue and interval) leads the legend one step up the
+                // type scale, at the surface's regular weight like every other legend row.
+                .when(row.item == LegendItem::Asset, gpui::Styled::text_sm)
                 .child(row.title.clone()),
         )
         .children(values)
