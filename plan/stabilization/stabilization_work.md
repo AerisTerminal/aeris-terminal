@@ -321,7 +321,28 @@ Status: in progress
   - `aeris_naming_check` requires each test name individually; the test suite verifies all
     four removal cases. Full local fmt, workspace clippy, workspace tests and naming gate passed.
     MD-17 is partly addressed; replay migration remains M3.11.
-- [ ] M2.2 market-benchmark-baseline - Hot-path and coordinator benchmark baseline
+- [x] M2.2 market-benchmark-baseline - Hot-path and coordinator benchmark baseline
+  - Release engine example measures 50,000 completed bars, 10,000 forming-bar revisions
+    per simulated second, 63 snapshots at a 16 ms cadence and 256 full study-input copies.
+    Allocated bar payload is a capacity-derived lower bound (excludes `Arc` header and
+    allocator overhead), not a process-wide allocation counter.
+  - Offline coordinator example drives 64 canonical series through 63 idle and loaded
+    coordinator turns; 1,025 distinct queued updates exceed the 1,024-event outbox
+    capacity and produce a covering snapshot. CPU figures are active single-thread
+    workload time per simulated second, not process CPU including worker threads.
+    CI's benchmark job is gated by `workflow_dispatch`, never the push/PR path.
+  - Baseline, Windows x86_64 release, 24 logical processors, source revision
+    `20abd4cc6e8ab9c3b290e39a14e52a515b9b286a` plus M2.2 source diff
+    (engine source tree SHA-256 `3c9ef3bedf6d62705c2fedebf3beca6817a6d84dd7a3c09ba55062155da9d93c`):
+    engine snapshot 975,593 ns/publish, 6,389 ns/trade, 3,200,064
+    bar-payload bytes/publish minimum; study input copy 440,159 ns/tick,
+    3,200,000 bar-payload bytes/copy minimum.
+    Coordinator first/second release runs (synthetic provider, no sockets):
+    idle active CPU 82,000/74,200 ns per simulated second; loaded
+    4,018,600/4,530,100 ns; idle and loaded wakeups 63/s; covering snapshot
+    797,800/1,633,500 ns; 1,024 events dropped.
+    The benchmark workload and source tree are committed by this item; rerun
+    from the resulting commit for a clean-tree provenance hash.
 - [ ] M2.3 market-injectable-clock - Injected clock for the market coordinator
 - [ ] M2.4 reconnect-policy - One jittered, capped, budgeted reconnect policy
 - [ ] M2.5 market-calendar-service - Provider-neutral market calendar and session service
@@ -489,6 +510,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.2 fix(ci): correct live gate runner guidance - removed the obsolete hosted-runner ban from the live gate comment without changing workflow behavior.
 - 2026-10-13 M1.8 fix(validation): keep unconfigured cTrader startup diagnostics silent - suppressed the disconnected catalog warm-up line and bounded the isolated diagnostic test; full gate and isolated desktop/panic checks passed.
 - 2026-10-13 M2.1 test(market): characterize coordinator market handoffs - pinned four command/event scenarios and registered their exact names; backfilled the M1 validated/pushed state and recorded the disabled hosted CI workflow.
+- 2026-10-13 M2.2 perf(market): record engine and coordinator baselines - measured release workloads and added a manual-only CI performance job.
 
 ## 7. Known gaps / deferred
 

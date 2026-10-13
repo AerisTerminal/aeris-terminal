@@ -60,3 +60,18 @@ jobs:
         run: cargo test -p aeris_naming_check --locked
       - name: Check naming and architecture assertions
         run: cargo run -p aeris_naming_check --locked
+
+  market_performance:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Measure market engine baseline
+        run: |
+          cargo run -p aeris_market_engine --release --example market_data_performance --locked -- "$env:RUNNER_TEMP\market_data_performance.json"
+          Get-Content "$env:RUNNER_TEMP\market_data_performance.json"
+      - name: Measure offline market coordinator baseline
+        run: cargo run -p aeris_market_runtime --release --example coordinator_performance --locked

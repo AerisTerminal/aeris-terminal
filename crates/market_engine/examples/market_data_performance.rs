@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::{
     error::Error,
     hint::black_box,
+    mem::size_of,
     num::{NonZeroU64, NonZeroUsize},
     path::Path,
     process::Command,
@@ -20,6 +21,9 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const WARM_UP: usize = 10_000;
 const SAMPLES: usize = 100_000;
 const GENERATION: ProviderGeneration = ProviderGeneration(NonZeroU64::MIN);
+const HISTORY_BARS: usize = 50_000;
+const TRADES_PER_SECOND: usize = 10_000;
+const PUBLISH_INTERVAL_MS: usize = 16;
 
 fn identity(value: usize) -> Result<NonZeroU64> {
     NonZeroU64::new(u64::try_from(value)?).ok_or_else(|| "zero identity".into())
@@ -191,6 +195,125 @@ fn profile(consumers: usize, series_count: usize) -> Result<Value> {
     }))
 }
 
+/// Capacity-based lower bound: Arc's contiguous bar allocation contains at
+/// least this many bytes. This excludes its header and allocator overhead.
+fn bar_payload_bytes(snapshot: &aeris_market_engine::SeriesSnapshot) -> Result<usize> {
+    snapshot
+        .bars
+        .len()
+        .checked_mul(size_of::<MarketBar>())
+        .ok_or_else(|| "bar allocation size overflowed".into())
+}
+
+fn snapshot_publish_profile() -> Result<Value> {
+    let (mut engine, key) = large_history_engine()?;
+    let history: Vec<_> = (1..=HISTORY_BARS)
+        .map(|sequence| bar(u64::try_from(sequence)?, 0))
+        .collect::<Result<_>>()?;
+    engine.install_history(GENERATION, &key, 2, 0, history)?;
+    let mut total_publish_nanos = 0_u128;
+    let mut total_payload_bytes = 0_usize;
+    let mut publishes = 0_usize;
+    let started = Instant::now();
+    for trade in 0..TRADES_PER_SECOND {
+        let tail = bar(u64::try_from(HISTORY_BARS + 1)?, trade)?;
+        black_box(engine.install_realtime_tail(GENERATION, &key, 2, 0, tail, true)?);
+        if trade % (TRADES_PER_SECOND * PUBLISH_INTERVAL_MS / 1_000) == 0 {
+            let publish_start = Instant::now();
+            let snapshot = engine
+                .series_snapshot(&key)
+                .ok_or("published series missing")?;
+            let payload_bytes = bar_payload_bytes(&snapshot)?;
+            black_box(snapshot);
+            total_publish_nanos += publish_start.elapsed().as_nanos();
+            total_payload_bytes += payload_bytes;
+            publishes += 1;
+        }
+    }
+    let elapsed = started.elapsed();
+    if publishes == 0 {
+        return Err("snapshot workload produced no publications".into());
+    }
+    Ok(json!({
+        "completed_bars": HISTORY_BARS,
+        "trades_per_second_input": TRADES_PER_SECOND,
+        "publish_interval_millis": PUBLISH_INTERVAL_MS,
+        "trades_processed": TRADES_PER_SECOND,
+        "publish_count": publishes,
+        "elapsed_nanos": u64::try_from(elapsed.as_nanos())?,
+        "nanos_per_trade": elapsed.as_nanos() / TRADES_PER_SECOND as u128,
+        "nanos_per_publish": total_publish_nanos / publishes as u128,
+        "bar_payload_bytes_per_publish_lower_bound": total_payload_bytes / publishes,
+        "allocation_measurement": "Arc<[MarketBar]> payload capacity; excludes Arc header and allocator overhead",
+    }))
+}
+
+fn large_history_engine() -> Result<(MarketEngine, BarSeriesKey)> {
+    let mut engine = MarketEngine::new(MarketEngineConfig {
+        maximum_consumers: bound(1)?,
+        maximum_series: bound(1)?,
+        maximum_bars: bound(HISTORY_BARS + 2)?,
+    });
+    engine.register_provider(
+        "synthetic".into(),
+        ProviderConfig {
+            account_id: "synthetic:public".into(),
+            capabilities: ProviderCapabilities {
+                historical_bars: true,
+                realtime_bars: true,
+                streams: StreamRequirements::BARS,
+            },
+            reconnect_delay: Duration::from_millis(250),
+        },
+    )?;
+    engine.begin_provider_session("synthetic", GENERATION)?;
+    engine.register_consumer(
+        ConsumerIdentity {
+            client_id: ClientId(NonZeroU64::MIN),
+            workspace_id: WorkspaceId(NonZeroU64::MIN),
+            consumer_id: ConsumerId(NonZeroU64::MIN),
+        },
+        true,
+    )?;
+    let key = BarSeriesKey {
+        provider_id: "synthetic".into(),
+        instrument_id: "synthetic:0".into(),
+        entitlement_id: "public".into(),
+        period: BarPeriod::Time { seconds: 60 },
+        definition_version: 1,
+    };
+    engine.set_series_demand(
+        ConsumerId(NonZeroU64::MIN),
+        GenerationId(NonZeroU64::MIN),
+        &key,
+    )?;
+    Ok((engine, key))
+}
+
+fn study_copy_profile() -> Result<Value> {
+    let (mut engine, key) = large_history_engine()?;
+    // A full study input copy on each tick: the next milestone replaces this
+    // with a segmented view. Bound the sample to avoid excessive allocations.
+    let history: Vec<_> = (1..=HISTORY_BARS)
+        .map(|sequence| bar(u64::try_from(sequence)?, 0))
+        .collect::<Result<_>>()?;
+    engine.install_history(GENERATION, &key, 2, 0, history)?;
+    let iterations = 256_usize;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let snapshot = engine.series_snapshot(&key).ok_or("study series missing")?;
+        black_box(snapshot.bars.to_vec());
+    }
+    let elapsed = started.elapsed();
+    let snapshot = engine.series_snapshot(&key).ok_or("study series missing")?;
+    Ok(json!({
+        "completed_bars": HISTORY_BARS,
+        "ticks_sampled": iterations,
+        "nanos_per_tick_copy": elapsed.as_nanos() / iterations as u128,
+        "bar_payload_bytes_per_tick_copy_lower_bound": bar_payload_bytes(&snapshot)?,
+    }))
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -275,6 +398,8 @@ fn main() -> Result<()> {
         "logical_processors": std::thread::available_parallelism()?.get(),
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "profiles": [profile(1, 1)?, profile(16, 8)?, profile(256, 128)?],
+        "snapshot_per_publish": snapshot_publish_profile()?,
+        "study_per_tick_copies": study_copy_profile()?,
     });
     let path = Path::new(&output);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -287,4 +412,27 @@ fn main() -> Result<()> {
     serde_json::to_writer_pretty(file, &report)?;
     println!("{}", path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HISTORY_BARS, Result, snapshot_publish_profile, study_copy_profile};
+
+    #[test]
+    fn snapshot_workload_copies_fifty_thousand_bars_at_publish_cadence() -> Result<()> {
+        let profile = snapshot_publish_profile()?;
+        assert_eq!(profile["completed_bars"], HISTORY_BARS);
+        assert_eq!(profile["trades_processed"], 10_000);
+        assert_eq!(profile["publish_count"], 63);
+        assert!(profile["bar_payload_bytes_per_publish_lower_bound"].as_u64() > Some(3_000_000));
+        Ok(())
+    }
+
+    #[test]
+    fn study_workload_materializes_a_full_copy_each_tick() -> Result<()> {
+        let profile = study_copy_profile()?;
+        assert_eq!(profile["ticks_sampled"], 256);
+        assert!(profile["bar_payload_bytes_per_tick_copy_lower_bound"].as_u64() > Some(3_000_000));
+        Ok(())
+    }
 }

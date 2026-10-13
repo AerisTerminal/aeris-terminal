@@ -2832,12 +2832,30 @@ jobs:
     #[test]
     fn hosted_push_ci_keeps_bounded_environment_and_pinned_actions() {
         let workflow = manifest(".github/workflows/ci.yml");
-        // The toolchain comes from rust-toolchain.toml on both lanes, and
+        // The toolchain comes from rust-toolchain.toml on every lane, and
         // hosted runs emulate a machine without the licensed provider kit.
-        assert_eq!(
-            workflow.matches("rustup show").count(),
-            2,
-            "both lanes must install the pinned toolchain from rust-toolchain.toml"
+        for (job, next) in [
+            ("windows", Some("ubuntu")),
+            ("ubuntu", Some("market_performance")),
+            ("market_performance", None),
+        ] {
+            let section = workflow
+                .split_once(&format!("  {job}:"))
+                .unwrap_or_else(|| panic!("missing {job} CI job"))
+                .1;
+            let section = next
+                .and_then(|next| section.split_once(&format!("\n  {next}:")))
+                .map_or(section, |(current, _)| current);
+            assert_eq!(
+                section.matches("rustup show").count(),
+                1,
+                "{job} must install the pinned toolchain from rust-toolchain.toml"
+            );
+        }
+        assert!(
+            workflow
+                .contains("market_performance:\n    if: github.event_name == 'workflow_dispatch'"),
+            "market benchmarks must run only on a manual dispatch"
         );
         for environment in [
             "AERIS_RITHMIC_KIT_DISABLED: \"1\"",
@@ -2879,12 +2897,11 @@ jobs:
                 && !workflow.contains("git config --global"),
             "CI must fetch public Aeris Charts without credential rewriting"
         );
-        // Stale pacing/evidence verifiers and the market-data performance lane
-        // stay off the push/pull_request path (they leave with their tools).
+        // Stale pacing/evidence verifiers stay out of CI entirely. The
+        // performance lane exists only under the dispatch-only job above.
         for retired_step in [
             "test_evidence_verifiers.ps1",
             "test_desktop_endurance_workflow.ps1",
-            "market_data_performance",
         ] {
             assert!(
                 !workflow.contains(retired_step),

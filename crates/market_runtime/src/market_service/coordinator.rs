@@ -58,59 +58,7 @@ fn run_coordinator(
     broker_api: Arc<super::tastytrade::BrokerApi>,
     shutdown: &AtomicBool,
 ) {
-    let sessions = providers
-        .records
-        .keys()
-        .copied()
-        .map(|provider| (provider, ProviderSessionSlot::default()))
-        .collect();
-    let mut coordinator = Coordinator {
-        engine,
-        studies: StudyRuntime::new(StudyRuntimeConfig {
-            maximum_studies: NonZeroUsize::new(MAXIMUM_STUDIES).unwrap_or(NonZeroUsize::MIN),
-            maximum_dependencies_per_study: NonZeroUsize::new(MAXIMUM_STUDY_DEPENDENCIES)
-                .unwrap_or(NonZeroUsize::MIN),
-            maximum_outputs_per_study: NonZeroUsize::new(MAXIMUM_STUDY_OUTPUTS)
-                .unwrap_or(NonZeroUsize::MIN),
-            maximum_points_per_output: NonZeroUsize::new(MAXIMUM_STUDY_POINTS_PER_OUTPUT)
-                .unwrap_or(NonZeroUsize::MIN),
-            maximum_total_output_points: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS)
-                .unwrap_or(NonZeroUsize::MIN),
-            maximum_state_bytes_per_study: NonZeroUsize::new(
-                MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
-            )
-            .unwrap_or(NonZeroUsize::MIN),
-            maximum_total_state_bytes: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_STATE_BYTES)
-                .unwrap_or(NonZeroUsize::MIN),
-        }),
-        providers,
-        broker_api,
-        attached: BTreeSet::new(),
-        consumer_clients: BTreeMap::new(),
-        pending: BTreeMap::new(),
-        history_inflight: BTreeMap::new(),
-        history_deferred: BTreeMap::new(),
-        history_confirmed_empty: BTreeMap::new(),
-        history_backwards_exhausted: BTreeSet::new(),
-        history_current_empty: BTreeMap::new(),
-        detached_history: BTreeSet::new(),
-        history_cancellations: BTreeMap::new(),
-        history_retries: BTreeMap::new(),
-        events: BTreeMap::new(),
-        series_live: super::SeriesLiveMap::default(),
-        order_books: BTreeMap::new(),
-        display_depth: BTreeMap::new(),
-        display_generations: BTreeMap::new(),
-        price_alerts: PriceAlertRegistry::default(),
-        catalog: BTreeMap::new(),
-        catalog_sessions: BTreeMap::new(),
-        catalog_searches: BTreeMap::new(),
-        startup_catalog_searches: BTreeMap::new(),
-        catalog_selections: BTreeMap::new(),
-        startup_catalog_selections: BTreeMap::new(),
-        catalog_screens: BTreeMap::new(),
-        sessions,
-    };
+    let mut coordinator = Coordinator::new(engine, providers, broker_api);
     let demand_flushers = coordinator
         .providers
         .records
@@ -150,6 +98,68 @@ fn run_coordinator(
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+impl<'a> Coordinator<'a> {
+    fn new(
+        engine: MarketEngine,
+        providers: ProviderDispatch<'a>,
+        broker_api: Arc<super::tastytrade::BrokerApi>,
+    ) -> Self {
+        let sessions = providers
+            .records
+            .keys()
+            .copied()
+            .map(|provider| (provider, ProviderSessionSlot::default()))
+            .collect();
+        Self {
+            engine,
+            studies: StudyRuntime::new(StudyRuntimeConfig {
+                maximum_studies: NonZeroUsize::new(MAXIMUM_STUDIES).unwrap_or(NonZeroUsize::MIN),
+                maximum_dependencies_per_study: NonZeroUsize::new(MAXIMUM_STUDY_DEPENDENCIES)
+                    .unwrap_or(NonZeroUsize::MIN),
+                maximum_outputs_per_study: NonZeroUsize::new(MAXIMUM_STUDY_OUTPUTS)
+                    .unwrap_or(NonZeroUsize::MIN),
+                maximum_points_per_output: NonZeroUsize::new(MAXIMUM_STUDY_POINTS_PER_OUTPUT)
+                    .unwrap_or(NonZeroUsize::MIN),
+                maximum_total_output_points: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS)
+                    .unwrap_or(NonZeroUsize::MIN),
+                maximum_state_bytes_per_study: NonZeroUsize::new(
+                    MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
+                )
+                .unwrap_or(NonZeroUsize::MIN),
+                maximum_total_state_bytes: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_STATE_BYTES)
+                    .unwrap_or(NonZeroUsize::MIN),
+            }),
+            providers,
+            broker_api,
+            attached: BTreeSet::new(),
+            consumer_clients: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            history_inflight: BTreeMap::new(),
+            history_deferred: BTreeMap::new(),
+            history_confirmed_empty: BTreeMap::new(),
+            history_backwards_exhausted: BTreeSet::new(),
+            history_current_empty: BTreeMap::new(),
+            detached_history: BTreeSet::new(),
+            history_cancellations: BTreeMap::new(),
+            history_retries: BTreeMap::new(),
+            events: BTreeMap::new(),
+            series_live: super::SeriesLiveMap::default(),
+            order_books: BTreeMap::new(),
+            display_depth: BTreeMap::new(),
+            display_generations: BTreeMap::new(),
+            price_alerts: PriceAlertRegistry::default(),
+            catalog: BTreeMap::new(),
+            catalog_sessions: BTreeMap::new(),
+            catalog_searches: BTreeMap::new(),
+            startup_catalog_searches: BTreeMap::new(),
+            catalog_selections: BTreeMap::new(),
+            startup_catalog_selections: BTreeMap::new(),
+            catalog_screens: BTreeMap::new(),
+            sessions,
         }
     }
 }
@@ -245,6 +255,210 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
         }
     }
     drained
+}
+
+/// Offline, bounded coordinator workload for comparing subsequent hot-path
+/// changes. CPU is active coordinator work in 63 simulated 16 ms turns, not
+/// process-wide CPU (which would include unrelated worker threads).
+pub(super) fn performance_baseline() -> Result<serde_json::Value, String> {
+    use serde_json::json;
+    use std::num::NonZeroU64;
+
+    const SERIES: usize = 64;
+    const TURNS: usize = 63;
+    let (mut coordinator, keys) = benchmark_coordinator()?;
+    let capacity = super::CONSUMER_SERIES_QUEUE_CAPACITY;
+    let generation = ProviderGeneration(NonZeroU64::MIN);
+    let idle_started = Instant::now();
+    for _ in 0..TURNS {
+        benchmark_turn(&mut coordinator);
+    }
+    let idle_nanos = idle_started.elapsed().as_nanos();
+    let loaded_started = Instant::now();
+    for revision in 0..TURNS {
+        for key in &keys {
+            let mut bar = benchmark_bar(1);
+            bar.close = 100 + i64::try_from(revision).map_err(|error| error.to_string())?;
+            for update in coordinator
+                .engine
+                .install_realtime_tail(generation, key, 2, 0, bar, true)
+                .map_err(|error| error.to_string())?
+            {
+                let events = coordinator
+                    .events
+                    .get_mut(&update.consumer_id)
+                    .ok_or("missing consumer outbox")?;
+                events.publish_series_update(MarketRuntimeEvent::SeriesUpdate(update));
+            }
+        }
+        benchmark_turn(&mut coordinator);
+        for events in coordinator.events.values_mut() {
+            while events.pop().is_some() {}
+        }
+    }
+    let loaded_nanos = loaded_started.elapsed().as_nanos();
+    let overflow_nanos = benchmark_overflow(&mut coordinator, &keys[0], capacity)?;
+    Ok(json!({
+        "series": SERIES,
+        "simulated_seconds": 1,
+        "idle_coordinator_cpu_nanos_per_second": idle_nanos,
+        "loaded_coordinator_cpu_nanos_per_second": loaded_nanos,
+        "idle_wakeups_per_second": TURNS,
+        "loaded_wakeups_per_second": TURNS,
+        "overflow_capacity": capacity,
+        "covering_snapshot_nanos": overflow_nanos,
+        "overflow_events_dropped": capacity,
+        "cpu_measurement": "active single-thread coordinator workload over 63 simulated 16ms turns",
+    }))
+}
+
+fn benchmark_coordinator() -> Result<(Coordinator<'static>, Vec<BarSeriesKey>), String> {
+    use aeris_market_data::BarPeriod;
+    use aeris_market_engine::{ProviderCapabilities, ProviderConfig, WorkspaceId};
+    use std::num::NonZeroU64;
+
+    const SERIES: usize = 64;
+    let mut engine =
+        super::configured_engine_from_descriptors(super::BUILT_IN_PROVIDER_DESCRIPTORS)?;
+    let generation = ProviderGeneration(NonZeroU64::MIN);
+    engine
+        .register_provider(
+            "synthetic".into(),
+            ProviderConfig {
+                account_id: "synthetic:public".into(),
+                capabilities: ProviderCapabilities {
+                    historical_bars: true,
+                    realtime_bars: true,
+                    streams: StreamRequirements::BARS,
+                },
+                reconnect_delay: Duration::from_millis(250),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    engine
+        .begin_provider_session("synthetic", generation)
+        .map_err(|error| error.to_string())?;
+    let mut keys = Vec::with_capacity(SERIES);
+    for index in 0..SERIES {
+        let consumer = ConsumerId(NonZeroU64::new(index as u64 + 1).ok_or("zero consumer")?);
+        let key = BarSeriesKey {
+            provider_id: "synthetic".into(),
+            instrument_id: format!("benchmark:{index}"),
+            entitlement_id: "public".into(),
+            period: BarPeriod::Time { seconds: 60 },
+            definition_version: 1,
+        };
+        engine
+            .register_consumer(
+                ConsumerIdentity {
+                    client_id: ClientId(NonZeroU64::MIN),
+                    workspace_id: WorkspaceId(NonZeroU64::MIN),
+                    consumer_id: consumer,
+                },
+                true,
+            )
+            .map_err(|error| error.to_string())?;
+        engine
+            .set_series_demand(consumer, GenerationId(NonZeroU64::MIN), &key)
+            .map_err(|error| error.to_string())?;
+        engine
+            .install_realtime(generation, &key, 2, 0, vec![benchmark_bar(1)], true)
+            .map_err(|error| error.to_string())?;
+        keys.push(key);
+    }
+    let providers = ProviderDispatch {
+        wake: None,
+        records: BTreeMap::new(),
+        lanes: Vec::new(),
+    };
+    let mut coordinator = Coordinator::new(
+        engine,
+        providers,
+        Arc::new(super::tastytrade::BrokerApi::default()),
+    );
+    for index in 0..SERIES {
+        coordinator.events.insert(
+            ConsumerId(NonZeroU64::new(index as u64 + 1).ok_or("zero consumer")?),
+            ConsumerEvents::default(),
+        );
+    }
+    Ok((coordinator, keys))
+}
+
+fn benchmark_overflow(
+    coordinator: &mut Coordinator<'_>,
+    key: &BarSeriesKey,
+    capacity: usize,
+) -> Result<u128, String> {
+    use std::num::NonZeroU64;
+
+    let generation = ProviderGeneration(NonZeroU64::MIN);
+    let consumer = ConsumerId(NonZeroU64::MIN);
+    let overflow_started = Instant::now();
+    for revision in 0..=capacity {
+        let bar = benchmark_bar(u64::try_from(revision).map_err(|error| error.to_string())? + 2);
+        let update = coordinator
+            .engine
+            .install_realtime_tail(generation, key, 2, 0, bar, true)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|update| update.consumer_id == consumer)
+            .ok_or("missing benchmark publication")?;
+        coordinator
+            .events
+            .get_mut(&consumer)
+            .ok_or("missing overflow outbox")?
+            .publish_series_update(MarketRuntimeEvent::SeriesUpdate(update));
+    }
+    coordinator.recover_overflowed_series_queues();
+    let overflow_nanos = overflow_started.elapsed().as_nanos();
+    let first = coordinator
+        .events
+        .get_mut(&consumer)
+        .and_then(ConsumerEvents::pop)
+        .ok_or("overflow produced no covering publication")?;
+    let MarketRuntimeEvent::SeriesSnapshot(_) = first else {
+        return Err("overflow did not produce a covering snapshot".into());
+    };
+    Ok(overflow_nanos)
+}
+
+fn benchmark_turn(coordinator: &mut Coordinator<'_>) {
+    coordinator.studies.begin_turn();
+    drain_coordinator_events(coordinator);
+    coordinator.broadcast_dirty_trade_tapes();
+    coordinator.publish_rithmic_live();
+    coordinator.publish_candle_live();
+    coordinator.recover_stalled_live_series();
+    coordinator.recover_overflowed_series_queues();
+    coordinator.stop_realtime_if_idle();
+    coordinator.retry_history();
+}
+
+fn benchmark_bar(sequence: u64) -> aeris_market_data::MarketBar {
+    let seconds = 1_700_000_000 + sequence.cast_signed() * 60;
+    aeris_market_data::MarketBar {
+        source_sequence: sequence,
+        exchange_timestamp_seconds: seconds,
+        exchange_timestamp_unix_nanos: seconds * 1_000_000_000,
+        open: 100,
+        high: 5_000,
+        low: 90,
+        close: 100,
+        volume: 7,
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    #[test]
+    fn offline_coordinator_overflow_replaces_updates_with_covering_snapshot() {
+        let profile = super::performance_baseline().expect("offline coordinator baseline");
+        assert_eq!(profile["series"], 64);
+        assert_eq!(profile["overflow_capacity"], 1024);
+        assert_eq!(profile["overflow_events_dropped"], 1024);
+        assert!(profile["covering_snapshot_nanos"].as_u64().is_some());
+    }
 }
 
 /// Drains only work already bounded by provider event lanes before stopping

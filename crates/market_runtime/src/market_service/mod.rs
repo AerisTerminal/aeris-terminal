@@ -1747,6 +1747,16 @@ pub use rithmic_login::{RithmicLoginSummary, RithmicServer};
 use runtime::join_runtime_workers;
 
 mod coordinator;
+
+/// Offline coordinator workload used by the release benchmark example.
+///
+/// It starts no provider workers or network sessions.
+///
+/// # Errors
+/// Returns an error if fixture setup, a canonical update, or overflow recovery fails.
+pub fn coordinator_performance_baseline() -> Result<serde_json::Value, String> {
+    coordinator::performance_baseline()
+}
 use coordinator::{Coordinator, OwnedCoordinatorChannels, spawn_coordinator};
 
 fn try_enqueue_history(
