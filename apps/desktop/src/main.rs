@@ -72,11 +72,5 @@ fn main() {
         aeris_observability::diagnostic!("Aeris crash diagnostics could not start: {error}");
     }
 
-    #[cfg(debug_assertions)]
-    assert!(
-        !std::env::args_os().any(|argument| argument == "--force-diagnostics-panic"),
-        "forced diagnostics panic requested by --force-diagnostics-panic"
-    );
-
     desktop::run(parsed.command_arguments, instance_lock);
 }

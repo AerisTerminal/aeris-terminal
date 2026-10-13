@@ -5629,18 +5629,59 @@ fn configured_market_workers(
     }))
 }
 
+#[cfg(debug_assertions)]
+fn take_forced_diagnostics_panic(arguments: &mut Vec<std::ffi::OsString>) -> bool {
+    let requested = arguments
+        .iter()
+        .any(|argument| argument == "--force-diagnostics-panic");
+    arguments.retain(|argument| argument != "--force-diagnostics-panic");
+    requested
+}
+
+#[cfg(all(test, debug_assertions))]
+#[test]
+fn forced_diagnostics_panic_is_consumed_before_desktop_argument_dispatch() {
+    let mut arguments = vec![
+        "--force-diagnostics-panic".into(),
+        "--workspace-tabs".into(),
+    ];
+    assert!(take_forced_diagnostics_panic(&mut arguments));
+    assert_eq!(arguments, ["--workspace-tabs"]);
+    assert!(!take_forced_diagnostics_panic(&mut arguments));
+}
+
+#[cfg(debug_assertions)]
+fn panic_after_stores_open() -> ! {
+    diagnostic!("Aeris desktop stores opened; entering forced diagnostics panic session");
+    assert!(
+        aeris_observability::flush_diagnostics(),
+        "forced diagnostics panic could not flush the session log"
+    );
+    panic!("forced diagnostics panic requested by --force-diagnostics-panic");
+}
+
+fn dispatch_desktop_readiness(arguments: &mut Vec<std::ffi::OsString>) -> bool {
+    if arguments.first().map(std::ffi::OsString::as_os_str)
+        != Some(std::ffi::OsStr::new("--desktop-readiness"))
+    {
+        return false;
+    }
+    if let Err(error) = run_desktop_readiness_command(std::mem::take(arguments).into_iter().skip(1))
+    {
+        diagnostic!("Aeris desktop readiness failed: {error}");
+        let _ = aeris_observability::flush_diagnostics();
+        std::process::exit(1);
+    }
+    true
+}
+
 pub(super) fn run(
-    command_arguments: Vec<std::ffi::OsString>,
+    mut command_arguments: Vec<std::ffi::OsString>,
     instance_lock: aeris_platform_runtime::InstanceLock,
 ) {
-    if command_arguments.first().map(std::ffi::OsString::as_os_str)
-        == Some(std::ffi::OsStr::new("--desktop-readiness"))
-    {
-        if let Err(error) = run_desktop_readiness_command(command_arguments.into_iter().skip(1)) {
-            diagnostic!("Aeris desktop readiness failed: {error}");
-            let _ = aeris_observability::flush_diagnostics();
-            std::process::exit(1);
-        }
+    #[cfg(debug_assertions)]
+    let force_diagnostics_panic = take_forced_diagnostics_panic(&mut command_arguments);
+    if dispatch_desktop_readiness(&mut command_arguments) {
         return;
     }
     if let Err(error) = aeris_platform_runtime::migrate_legacy_native_data_root() {
@@ -5731,6 +5772,10 @@ pub(super) fn run(
         fatal_startup("The practice market calendar could not be installed.");
     }
     let lifecycle = DesktopLifecycle::new(trading, context, instance_lock);
+    #[cfg(debug_assertions)]
+    if force_diagnostics_panic {
+        panic_after_stores_open();
+    }
     run_desktop(configured, lifecycle);
 }
 

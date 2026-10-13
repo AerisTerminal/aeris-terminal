@@ -274,6 +274,9 @@ Status: in progress
   - Validation produced `logs/aeris.log` and one crash report containing the forced panic and backtrace.
   - Scrutiny follow-up: rotation uses `aeris.N.log`, drop notices use the contract text, child-panic
     evidence checks every field and the previous hook, and process exits explicitly flush within two seconds.
+  - User-testing follow-up: the debug-only forced panic now occurs after trading, context and market
+    setup; a flushed session line precedes the crash. One isolated restart produced one crash file
+    with the panic, location, thread, backtrace and release identity.
 - [x] M1.8 single-instance-and-validation-mode - Per-data-folder instance lock and validation mode with an isolated vault namespace
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added safe `--validation-root`, hashed validation vault namespaces, scoped cTrader borrowing and per-root instance locks.
@@ -461,6 +464,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.9 fix(trading): reject unsafe journals and preserve migrations - closed the VAL-FND-032 recheck: WAL databases are preflighted on a scratch copy so a declined quarantine keeps every trading file byte-identical.
 - 2026-10-13 M1.6 fix(naming): scan production after cfg(test) declarations - closed scrutiny R2-B1 with direct scanner fixtures for inline/out-of-line modules and reasoned, stale-checked allowlists.
 - 2026-10-13 M1.6 fix(naming): label source-policy failures accurately - corrected the shared naming_check diagnostic heading for secret-Debug failures.
+- 2026-10-13 M1.7 fix(desktop): trigger forced panic after store startup - moved the debug-only panic after service and market setup so the crashing session leaves earlier diagnostics.
 
 ## 7. Known gaps / deferred
 
