@@ -1824,6 +1824,7 @@ fn select(
     entitlement_id: &str,
 ) -> CatalogControl {
     CatalogControl::Select(SelectProviderInstrument {
+        startup_resolve: false,
         consumer_id: 7,
         selection_generation,
         search_generation,

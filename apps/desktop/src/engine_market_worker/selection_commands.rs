@@ -4,12 +4,19 @@ use super::{
     ChartState, ConsumerResourceClass, EndpointRecord, FeedConnectionState,
     InstallProviderInstrument, MarketPriceAlert, MarketRecoveryFailure, MarketRuntimeEvent,
     MarketService, MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
-    RITHMIC_CATALOG_READY_MESSAGE, ReplayRecoveryCommand, STARTUP_CATALOG_COMMAND_GENERATION,
-    SearchProviderInstruments, SelectProviderInstrument, StartupResolution, StreamRequirements,
-    WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams,
-    provider_display_name, retire_endpoint, send_recovery, series_key,
+    RITHMIC_CATALOG_READY_MESSAGE, ReplayRecoveryCommand, SearchProviderInstruments,
+    SelectProviderInstrument, StartupResolution, StreamRequirements, WorkerEndpoint,
+    cancel_pending_recovery, chart_demand_streams, chart_streams, provider_display_name,
+    retire_endpoint, send_recovery, series_key,
 };
 use aeris_observability::diagnostic;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static STARTUP_COMMAND_SEQUENCE: AtomicU64 = AtomicU64::new(1 << 48);
+
+pub(super) fn next_startup_command_generation() -> u64 {
+    STARTUP_COMMAND_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
 
 pub(super) fn fence_recovery_command(
     endpoint: &WorkerEndpoint,
@@ -94,7 +101,8 @@ pub(super) fn initialize_endpoint(
             client_id,
             SearchProviderInstruments {
                 consumer_id: record.endpoint.consumer_id,
-                search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
+                search_generation: record.startup_command_generation,
+                startup_resolve: true,
                 provider: requested.provider.clone(),
                 query: catalog_symbol(&requested),
                 maximum_results: 32,
@@ -142,6 +150,7 @@ fn begin_endpoint_demand(
         SearchProviderInstruments {
             consumer_id: record.endpoint.consumer_id,
             search_generation: 1,
+            startup_resolve: false,
             provider: record.product.provider.clone(),
             query: String::new(),
             maximum_results: u32::try_from(
@@ -167,7 +176,10 @@ pub(super) fn handle_startup_catalog_event(
     };
 
     let Some((searching, requested)) = resolution else {
-        return Ok(is_retired_startup_catalog_event(event));
+        return Ok(is_retired_startup_catalog_event(
+            event,
+            record.startup_command_generation,
+        ));
     };
 
     if searching {
@@ -175,7 +187,7 @@ pub(super) fn handle_startup_catalog_event(
             MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
                 if result.consumer_id == record.endpoint.consumer_id
                     && result.provider == requested.provider
-                    && result.search_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
+                    && result.search_generation == record.startup_command_generation =>
             {
                 let candidate =
                     startup_catalog_candidate(result.instruments.as_slice(), &requested)?;
@@ -183,8 +195,9 @@ pub(super) fn handle_startup_catalog_event(
                     client_id,
                     SelectProviderInstrument {
                         consumer_id: record.endpoint.consumer_id,
-                        selection_generation: STARTUP_CATALOG_COMMAND_GENERATION,
-                        search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
+                        selection_generation: record.startup_command_generation,
+                        search_generation: record.startup_command_generation,
+                        startup_resolve: true,
                         provider: requested.provider.clone(),
                         symbol: candidate.symbol,
                         exchange: candidate.exchange,
@@ -197,7 +210,7 @@ pub(super) fn handle_startup_catalog_event(
             MarketRuntimeEvent::ProviderCatalogRejected(rejection)
                 if rejection.consumer_id == record.endpoint.consumer_id
                     && rejection.provider == requested.provider
-                    && rejection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
+                    && rejection.command_generation == record.startup_command_generation =>
             {
                 record.startup_resolution = None;
                 diagnostic!(
@@ -214,7 +227,7 @@ pub(super) fn handle_startup_catalog_event(
     match event {
         MarketRuntimeEvent::ProviderInstrumentSelection(selection)
             if selection.consumer_id.0.get() == record.endpoint.consumer_id
-                && selection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
+                && selection.command_generation == record.startup_command_generation =>
         {
             let instrument = &selection.instrument;
             if instrument.provider != requested.provider
@@ -243,7 +256,7 @@ pub(super) fn handle_startup_catalog_event(
         MarketRuntimeEvent::ProviderCatalogRejected(rejection)
             if rejection.consumer_id == record.endpoint.consumer_id
                 && rejection.provider == requested.provider
-                && rejection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION =>
+                && rejection.command_generation == record.startup_command_generation =>
         {
             record.startup_resolution = None;
             diagnostic!(
@@ -296,16 +309,16 @@ fn catalog_symbol(product: &InstallProviderInstrument) -> String {
     }
 }
 
-fn is_retired_startup_catalog_event(event: &MarketRuntimeEvent) -> bool {
+fn is_retired_startup_catalog_event(event: &MarketRuntimeEvent, generation: u64) -> bool {
     match event {
         MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
-            result.search_generation == STARTUP_CATALOG_COMMAND_GENERATION
+            result.search_generation == generation
         }
         MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
-            selection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION
+            selection.command_generation == generation
         }
         MarketRuntimeEvent::ProviderCatalogRejected(rejection) => {
-            rejection.command_generation == STARTUP_CATALOG_COMMAND_GENERATION
+            rejection.command_generation == generation
         }
         _ => false,
     }

@@ -1683,7 +1683,14 @@ impl MarketService {
             .provider_search_preparers
             .get(search.provider.as_str())
             .copied()
-            .map(|prepare| (prepare, search.consumer_id, search.search_generation));
+            .map(|prepare| {
+                (
+                    prepare,
+                    search.consumer_id,
+                    search.search_generation,
+                    search.startup_resolve,
+                )
+            });
         self.request(|reply| {
             Ok(Command::SearchProviderInstruments(
                 ClientId(id(client_id)?),
@@ -1691,8 +1698,8 @@ impl MarketService {
                 reply,
             ))
         })?;
-        if let Some((prepare, consumer, generation)) = preparation {
-            prepare(&self.runtime.broker_api, consumer, generation)?;
+        if let Some((prepare, consumer, generation, startup)) = preparation {
+            prepare(&self.runtime.broker_api, consumer, generation, startup)?;
         }
         Ok(())
     }

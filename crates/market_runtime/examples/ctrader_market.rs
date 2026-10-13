@@ -251,6 +251,7 @@ impl<'a> Driver<'a> {
                 consumer_id: CONSUMER,
                 selection_generation: 1,
                 search_generation: 1,
+                startup_resolve: false,
                 provider: PROVIDER.into(),
                 symbol: candidate.symbol.clone(),
                 exchange: candidate.exchange.clone(),
@@ -427,6 +428,7 @@ fn drive(market: &MarketService, started: Instant) -> Result<(), String> {
         SearchProviderInstruments {
             consumer_id: CONSUMER,
             search_generation: 1,
+            startup_resolve: false,
             provider: PROVIDER.into(),
             query: SYMBOL.into(),
             maximum_results: 32,

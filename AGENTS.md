@@ -128,6 +128,9 @@ the check.
 - Provider events and history completions carry registry-minted `Epoch<ProviderTag>` identities;
   the coordinator rejects retired epochs by equality and counts their drops. Adapter wire
   generation numbers never serve as market event identities.
+- Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider
+  and command kind. Startup resolution uses its own kind, not a numeric generation sentinel;
+  consumer retirement clears every pending command through `ConsumerRegistry::remove_consumer`.
 - Stall recovery considers every live candle and trade series while its calendar is open;
   closed sessions never recover for silence, and unknown sessions use a longer threshold.
   Practice session checks use the same calendar for every provider.

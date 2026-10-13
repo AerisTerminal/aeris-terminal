@@ -15,7 +15,7 @@ use super::{
 use super::{ProviderGeneration, id};
 use aeris_contracts::{
     MarketSessionPhase, MarketSessionSource, MarketSessionStatus, ProviderContractMetadata,
-    ProviderInstrumentSearchResult, ProviderInstrumentSummary, STARTUP_CATALOG_COMMAND_GENERATION,
+    ProviderInstrumentSearchResult, ProviderInstrumentSummary,
 };
 use aeris_market_data::{EventMetadata, MarketDataValidationError, QualifiedTimestamp, QuoteLevel};
 use aeris_observability::diagnostic;
@@ -93,8 +93,13 @@ fn flush_demand(coordinator: &mut Coordinator<'_>) {
     coordinator.flush_session_managed_demand(DESCRIPTOR.id);
 }
 
-fn prepare_search(api: &BrokerApi, consumer: u64, generation: u64) -> Result<(), String> {
-    api.register_search(consumer, generation)
+fn prepare_search(
+    api: &BrokerApi,
+    consumer: u64,
+    generation: u64,
+    startup: bool,
+) -> Result<(), String> {
+    api.register_search(consumer, generation, startup)
 }
 
 const SNAPSHOT_BEGIN: u32 = 4;
@@ -139,11 +144,8 @@ pub(super) enum CatalogEvent {
 /// re-resolution. A picker search on the same consumer must not retire the
 /// startup results its pending startup selection resolves against.
 type CatalogSearches = BTreeMap<(u64, bool), (u64, Vec<SearchInstrument>)>;
-fn search_slot(consumer: u64, search_generation: u64) -> (u64, bool) {
-    (
-        consumer,
-        search_generation == STARTUP_CATALOG_COMMAND_GENERATION,
-    )
+fn search_slot(consumer: u64, startup_resolve: bool) -> (u64, bool) {
+    (consumer, startup_resolve)
 }
 struct RemoteSearchRequest {
     search: SearchProviderInstruments,
@@ -217,12 +219,23 @@ struct BrokerApiState {
     instrument_order: VecDeque<(String, String)>,
 }
 impl BrokerApi {
-    pub(super) fn register_search(&self, consumer: u64, generation: u64) -> Result<(), String> {
-        if generation == STARTUP_CATALOG_COMMAND_GENERATION {
+    pub(super) fn register_search(
+        &self,
+        consumer: u64,
+        generation: u64,
+        startup: bool,
+    ) -> Result<(), String> {
+        if startup {
             let mut searches = self
                 .startup_search_control
                 .lock()
                 .map_err(|_| "Tastytrade startup search control failed")?;
+            if searches
+                .get(&consumer)
+                .is_some_and(|(current, _)| *current >= generation)
+            {
+                return Ok(());
+            }
             if let Some((_, cancellation)) = searches.remove(&consumer) {
                 cancellation.store(true, Ordering::Release);
             }
@@ -238,10 +251,10 @@ impl BrokerApi {
             .search_control
             .lock()
             .map_err(|_| "Tastytrade search control failed")?;
-        if searches.get(&consumer).is_some_and(|(current, _)| {
-            (generation == STARTUP_CATALOG_COMMAND_GENERATION && *current != generation)
-                || (*current >= generation && *current != STARTUP_CATALOG_COMMAND_GENERATION)
-        }) {
+        if searches
+            .get(&consumer)
+            .is_some_and(|(current, _)| *current >= generation)
+        {
             return Ok(());
         }
         if let Some((_, cancellation)) = searches.remove(&consumer) {
@@ -336,11 +349,12 @@ impl BrokerApi {
         &self,
         consumer: u64,
         generation: u64,
+        startup: bool,
         query: &str,
         stop: &Arc<AtomicBool>,
     ) -> Result<Vec<SearchInstrument>, String> {
         let cancellation = {
-            if generation == STARTUP_CATALOG_COMMAND_GENERATION {
+            if startup {
                 let searches = self
                     .startup_search_control
                     .lock()
@@ -979,7 +993,7 @@ fn remote_search_event(
     }
     let search = &reply.request.search;
     let (search_generation, items) =
-        searches.get_mut(&search_slot(search.consumer_id, search.search_generation))?;
+        searches.get_mut(&search_slot(search.consumer_id, search.startup_resolve))?;
     if *search_generation != search.search_generation {
         return None;
     }
@@ -1047,7 +1061,7 @@ fn resolve_selection(
     let item = searches
         .get(&search_slot(
             selection.consumer_id,
-            selection.search_generation,
+            selection.startup_resolve,
         ))
         .filter(|(epoch, _)| *epoch == selection.search_generation)
         .and_then(|(_, items)| {
@@ -1115,7 +1129,7 @@ fn run_remote_search(
             Err(RecvTimeoutError::Disconnected) => return,
         };
         let slot = |request: &RemoteSearchRequest| {
-            search_slot(request.search.consumer_id, request.search.search_generation)
+            search_slot(request.search.consumer_id, request.search.startup_resolve)
         };
         let mut pending = BTreeMap::new();
         pending.insert(slot(&first), first);
@@ -1132,6 +1146,7 @@ fn run_remote_search(
             let result = api.search(
                 request.search.consumer_id,
                 request.search.search_generation,
+                request.search.startup_resolve,
                 &request.search.query,
                 stop,
             );
@@ -1258,7 +1273,7 @@ fn search_catalog(
         .take(search.maximum_results.min(100) as usize)
         .map(instrument_summary)
         .collect();
-    let slot = search_slot(search.consumer_id, search.search_generation);
+    let slot = search_slot(search.consumer_id, search.startup_resolve);
     // Each consumer may hold one startup and one interactive result.
     if !searches.contains_key(&slot) && searches.len() >= 2 * MAXIMUM_CONSUMERS {
         searches.pop_first();

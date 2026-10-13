@@ -131,6 +131,11 @@ impl Coordinator<'_> {
         let raw_consumer_id = search.consumer_id;
         let provider = search.provider.clone();
         let generation = search.search_generation;
+        let kind = if search.startup_resolve {
+            super::CommandKind::StartupResolve
+        } else {
+            super::CommandKind::Search
+        };
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
@@ -140,11 +145,10 @@ impl Coordinator<'_> {
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
-            let key = (consumer_id, provider);
-            if generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
-                self.startup_catalog_searches.insert(key, generation);
-            } else {
-                self.catalog_searches.insert(key, generation);
+            self.command_fences
+                .record(consumer_id, provider, kind, generation);
+            if let Some(events) = self.events.get_mut(&consumer_id) {
+                *events.catalog_search_slot(kind) = None;
             }
         }
         let _ = reply.send(result);
@@ -159,6 +163,11 @@ impl Coordinator<'_> {
         let raw_consumer_id = selection.consumer_id;
         let provider = selection.provider.clone();
         let generation = selection.selection_generation;
+        let kind = if selection.startup_resolve {
+            super::CommandKind::StartupResolve
+        } else {
+            super::CommandKind::Select
+        };
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
@@ -168,11 +177,10 @@ impl Coordinator<'_> {
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
-            let key = (consumer_id, provider);
-            if generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
-                self.startup_catalog_selections.insert(key, generation);
-            } else {
-                self.catalog_selections.insert(key, generation);
+            self.command_fences
+                .record_operation(consumer_id, provider, kind, generation, true);
+            if let Some(events) = self.events.get_mut(&consumer_id) {
+                *events.catalog_selection_slot(kind) = None;
             }
         }
         let _ = reply.send(result);
@@ -196,8 +204,15 @@ impl Coordinator<'_> {
         if result.is_ok()
             && let Ok(consumer_id) = id(raw_consumer_id).map(ConsumerId)
         {
-            self.catalog_screens
-                .insert((consumer_id, provider), generation);
+            self.command_fences.record(
+                consumer_id,
+                provider,
+                super::CommandKind::Screen,
+                generation,
+            );
+            if let Some(events) = self.events.get_mut(&consumer_id) {
+                events.catalog_screen = None;
+            }
         }
         let _ = reply.send(result);
     }
@@ -334,11 +349,12 @@ impl Coordinator<'_> {
         generation: u64,
     ) -> Option<ConsumerId> {
         let consumer_id = id(consumer_id).map(ConsumerId).ok()?;
-        let key = (consumer_id, provider.to_string());
-        if self.catalog_screens.get(&key).copied() != Some(generation) {
-            return None;
-        }
-        self.catalog_screens.remove(&key);
+        self.command_fences.take(
+            consumer_id,
+            provider,
+            super::CommandKind::Screen,
+            generation,
+        )?;
         Some(consumer_id)
     }
 
@@ -428,19 +444,16 @@ impl Coordinator<'_> {
         let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
             return;
         };
-        let key = (consumer_id, result.provider.clone());
-        let pending =
-            if result.search_generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
-                &self.startup_catalog_searches
-            } else {
-                &self.catalog_searches
-            };
-        if pending.get(&key).copied() != Some(result.search_generation) {
+        let Some(kind) = self.command_fences.kind_for(
+            consumer_id,
+            &result.provider,
+            result.search_generation,
+            false,
+        ) else {
             return;
-        }
+        };
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            let generation = result.search_generation;
-            *events.catalog_search_slot(generation) =
+            *events.catalog_search_slot(kind) =
                 Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(result));
         }
     }
@@ -455,20 +468,22 @@ impl Coordinator<'_> {
         let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
             return;
         };
-        let key = (consumer_id, result.provider.clone());
-        let pending =
-            if result.search_generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
-                &mut self.startup_catalog_searches
-            } else {
-                &mut self.catalog_searches
-            };
-        if pending.get(&key).copied() != Some(result.search_generation) {
+        let Some(kind) = self.command_fences.kind_for(
+            consumer_id,
+            &result.provider,
+            result.search_generation,
+            false,
+        ) else {
             return;
-        }
-        pending.remove(&key);
+        };
+        self.command_fences.take(
+            consumer_id,
+            &result.provider,
+            kind,
+            result.search_generation,
+        );
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            let generation = result.search_generation;
-            *events.catalog_search_slot(generation) =
+            *events.catalog_search_slot(kind) =
                 Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result));
         }
     }
@@ -486,16 +501,14 @@ impl Coordinator<'_> {
             return;
         };
         let provider = instrument.provider.clone();
-        let key = (id, provider.clone());
-        let pending = if command_generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
-            &mut self.startup_catalog_selections
-        } else {
-            &mut self.catalog_selections
-        };
-        if pending.get(&key).copied() != Some(command_generation) {
+        let Some(kind) = self
+            .command_fences
+            .kind_for(id, &provider, command_generation, true)
+        else {
             return;
-        }
-        pending.remove(&key);
+        };
+        self.command_fences
+            .take(id, &provider, kind, command_generation);
         let publication = match self.install_provider_instrument(&instrument) {
             Ok(()) => {
                 MarketRuntimeEvent::ProviderInstrumentSelection(MarketProviderInstrumentSelection {
@@ -513,63 +526,34 @@ impl Coordinator<'_> {
             }),
         };
         if let Some(events) = self.events.get_mut(&id) {
-            *events.catalog_selection_slot(command_generation) = Some(publication);
+            *events.catalog_selection_slot(kind) = Some(publication);
         }
     }
 
     pub(super) fn reject_overflowed_catalog(&mut self, provider: &str) {
         let screens = self
-            .catalog_screens
-            .iter()
-            .filter(|((_, candidate), _)| candidate == provider)
-            .map(|((consumer, _), generation)| (consumer.0.get(), *generation))
-            .collect::<Vec<_>>();
-        for (consumer_id, command_generation) in screens {
+            .command_fences
+            .pending_for(provider, super::CommandKind::Screen);
+        for (consumer_id, command_generation, _) in screens {
             self.handle_catalog_screen_rejection(ProviderCatalogRejected {
-                consumer_id,
+                consumer_id: consumer_id.0.get(),
                 provider: provider.to_string(),
                 provider_generation: None,
                 command_generation,
                 reason: ProviderCatalogRejectionReason::DispatchUnavailable,
             });
         }
-        for selection in [false, true] {
-            let pending = if selection {
-                &self.catalog_selections
-            } else {
-                &self.catalog_searches
-            };
-            let rejected = pending
-                .iter()
-                .filter(|((_, candidate), _)| candidate == provider)
-                .map(|((consumer, _), generation)| (consumer.0.get(), *generation))
-                .collect::<Vec<_>>();
-            for (consumer_id, command_generation) in rejected {
+        for kind in [
+            super::CommandKind::Search,
+            super::CommandKind::Select,
+            super::CommandKind::StartupResolve,
+        ] {
+            for (consumer_id, command_generation, selection) in
+                self.command_fences.pending_for(provider, kind)
+            {
                 self.handle_catalog_rejection(
                     ProviderCatalogRejected {
-                        consumer_id,
-                        provider: provider.to_string(),
-                        provider_generation: None,
-                        command_generation,
-                        reason: ProviderCatalogRejectionReason::DispatchUnavailable,
-                    },
-                    selection,
-                );
-            }
-            let startup_pending = if selection {
-                &self.startup_catalog_selections
-            } else {
-                &self.startup_catalog_searches
-            };
-            let rejected = startup_pending
-                .iter()
-                .filter(|((_, candidate), _)| candidate == provider)
-                .map(|((consumer, _), generation)| (consumer.0.get(), *generation))
-                .collect::<Vec<_>>();
-            for (consumer_id, command_generation) in rejected {
-                self.handle_catalog_rejection(
-                    ProviderCatalogRejected {
-                        consumer_id,
+                        consumer_id: consumer_id.0.get(),
                         provider: provider.to_string(),
                         provider_generation: None,
                         command_generation,
@@ -592,30 +576,25 @@ impl Coordinator<'_> {
         let Ok(consumer_id) = id(rejection.consumer_id).map(ConsumerId) else {
             return;
         };
-        let key = (consumer_id, rejection.provider.clone());
-        let pending = if selection {
-            if rejection.command_generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
-                &mut self.startup_catalog_selections
-            } else {
-                &mut self.catalog_selections
-            }
-        } else {
-            if rejection.command_generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
-                &mut self.startup_catalog_searches
-            } else {
-                &mut self.catalog_searches
-            }
-        };
-        if pending.get(&key).copied() != Some(rejection.command_generation) {
+        let Some(kind) = self.command_fences.kind_for(
+            consumer_id,
+            &rejection.provider,
+            rejection.command_generation,
+            selection,
+        ) else {
             return;
-        }
-        pending.remove(&key);
+        };
+        self.command_fences.take(
+            consumer_id,
+            &rejection.provider,
+            kind,
+            rejection.command_generation,
+        );
         if let Some(events) = self.events.get_mut(&consumer_id) {
-            let generation = rejection.command_generation;
             let slot = if selection {
-                events.catalog_selection_slot(generation)
+                events.catalog_selection_slot(kind)
             } else {
-                events.catalog_search_slot(generation)
+                events.catalog_search_slot(kind)
             };
             *slot = Some(MarketRuntimeEvent::ProviderCatalogRejected(rejection));
         }

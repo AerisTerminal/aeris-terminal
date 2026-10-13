@@ -632,6 +632,7 @@ impl MarketScreener {
         let generation = self.next_generation;
         self.next_generation = generation.checked_add(1).unwrap_or(1);
         let request = SelectProviderInstrument {
+            startup_resolve: false,
             consumer_id: 0,
             selection_generation: generation,
             search_generation: self.displayed_generation.max(1),

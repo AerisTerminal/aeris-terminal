@@ -20,9 +20,8 @@ use aeris_application::{
 };
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
-    ProviderInstrumentSummary, ProviderState, STARTUP_CATALOG_COMMAND_GENERATION,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState, WorkspacePaneKind,
-    WorkspaceState,
+    ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument,
+    SeriesLoadState, WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
 use aeris_contracts::{SeriesKey, WorkspacePaneState, WorkspaceTabState};
@@ -127,6 +126,7 @@ struct EndpointRecord {
     interval: ChartInterval,
     role: EndpointRole,
     startup_resolution: Option<StartupResolution>,
+    startup_command_generation: u64,
     /// Instrument and calendar revision of the last session status sent to the chart.
     session_status_sent: Option<(String, u64)>,
     endpoint: WorkerEndpoint,
@@ -622,6 +622,7 @@ fn worker_endpoint(
         interval,
         role: EndpointRole::Market,
         startup_resolution: None,
+        startup_command_generation: selection_commands::next_startup_command_generation(),
         session_status_sent: None,
         endpoint: WorkerEndpoint {
             consumer_id,
@@ -962,6 +963,7 @@ mod tests {
         let (pane, record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute1, None, 7);
         let provider_selection = SelectProviderInstrument {
+            startup_resolve: false,
             consumer_id: 0,
             selection_generation: 3,
             search_generation: 2,

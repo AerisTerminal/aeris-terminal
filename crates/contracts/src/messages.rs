@@ -842,10 +842,6 @@ pub struct MarketSessionStatus {
     pub next_open_unix_nanos: Option<i64>,
 }
 
-/// Reserves the startup catalog command generation used by desktop pane restore
-/// for provider metadata refreshes and selections.
-pub const STARTUP_CATALOG_COMMAND_GENERATION: u64 = u32::MAX as u64;
-
 /// Instrument categories a provider search may return. Providers without a category simply
 /// ignore it; a provider that serves a category from a slow remote lookup skips that lookup
 /// entirely when the category is excluded.
@@ -873,6 +869,8 @@ impl Default for InstrumentSearchCategories {
 pub struct SearchProviderInstruments {
     pub consumer_id: u64,
     pub search_generation: u64,
+    /// Startup metadata resolution has its own command lane beside picker searches.
+    pub startup_resolve: bool,
     pub provider: String,
     pub query: String,
     pub maximum_results: u32,
@@ -885,6 +883,7 @@ pub struct SelectProviderInstrument {
     pub consumer_id: u64,
     pub selection_generation: u64,
     pub search_generation: u64,
+    pub startup_resolve: bool,
     pub provider: String,
     pub symbol: String,
     pub exchange: String,

@@ -260,9 +260,9 @@ impl ConsumerEvents {
 
     pub(super) fn catalog_search_slot(
         &mut self,
-        generation: u64,
+        kind: super::CommandKind,
     ) -> &mut Option<MarketRuntimeEvent> {
-        if generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
+        if kind == super::CommandKind::StartupResolve {
             &mut self.startup_catalog_search
         } else {
             &mut self.catalog_search
@@ -271,9 +271,9 @@ impl ConsumerEvents {
 
     pub(super) fn catalog_selection_slot(
         &mut self,
-        generation: u64,
+        kind: super::CommandKind,
     ) -> &mut Option<MarketRuntimeEvent> {
-        if generation == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION {
+        if kind == super::CommandKind::StartupResolve {
             &mut self.startup_catalog_selection
         } else {
             &mut self.catalog_selection

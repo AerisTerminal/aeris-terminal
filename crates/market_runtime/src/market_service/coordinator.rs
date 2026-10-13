@@ -161,11 +161,7 @@ impl<'a> Coordinator<'a> {
             price_alerts: PriceAlertRegistry::default(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
-            catalog_searches: BTreeMap::new(),
-            startup_catalog_searches: BTreeMap::new(),
-            catalog_selections: BTreeMap::new(),
-            startup_catalog_selections: BTreeMap::new(),
-            catalog_screens: BTreeMap::new(),
+            command_fences: super::CommandFences::default(),
             sessions,
         }
     }
@@ -568,11 +564,7 @@ pub(super) struct Coordinator<'a> {
     /// Latest accepted provider-catalog command generation per consumer/provider.
     /// Provider callbacks are fenced here before entering the canonical consumer
     /// outbox, so desktop presentation code never needs a second pending-command map.
-    pub(super) catalog_searches: BTreeMap<(ConsumerId, String), u64>,
-    pub(super) startup_catalog_searches: BTreeMap<(ConsumerId, String), u64>,
-    pub(super) catalog_selections: BTreeMap<(ConsumerId, String), u64>,
-    pub(super) startup_catalog_selections: BTreeMap<(ConsumerId, String), u64>,
-    pub(super) catalog_screens: BTreeMap<(ConsumerId, String), u64>,
+    pub(super) command_fences: super::CommandFences,
     /// One bounded lifecycle and control slot per registered provider.
     pub(super) sessions: BTreeMap<&'static str, ProviderSessionSlot>,
 }
@@ -595,27 +587,15 @@ impl Coordinator<'_> {
         let mut removed_study = false;
         for consumer_id in self.engine.detach_client(client_id) {
             removed_consumer = true;
-            removed_study |= !self.studies.remove_consumer(consumer_id).is_empty();
-            self.price_alerts.remove_consumer(consumer_id);
-            self.events.remove(&consumer_id);
-            self.consumer_clients.remove(&consumer_id);
-            self.catalog_searches
-                .retain(|(candidate, _), _| *candidate != consumer_id);
-            self.startup_catalog_searches
-                .retain(|(candidate, _), _| *candidate != consumer_id);
-            self.catalog_selections
-                .retain(|(candidate, _), _| *candidate != consumer_id);
-            self.startup_catalog_selections
-                .retain(|(candidate, _), _| *candidate != consumer_id);
-            self.catalog_screens
-                .retain(|(candidate, _), _| *candidate != consumer_id);
-            self.remove_waiter(consumer_id);
+            removed_study |= super::consumer_registry::ConsumerRegistry::new(self)
+                .remove_consumer(consumer_id, false);
         }
         if removed_study && let Err(error) = self.reconcile_study_market_data() {
             diagnostic!("Aeris study cleanup failed during client detach: {error}");
         }
         if removed_consumer {
             self.mark_alert_demand_changed();
+            self.reconcile_order_books();
         }
     }
 
@@ -997,26 +977,13 @@ impl Coordinator<'_> {
         consumer_id: ConsumerId,
     ) -> Result<(), String> {
         authorize_consumer(&self.engine, client_id, consumer_id)?;
-        let removed_studies = self.studies.remove_consumer(consumer_id);
-        self.events.remove(&consumer_id);
-        self.consumer_clients.remove(&consumer_id);
-        self.catalog_searches
-            .retain(|(candidate, _), _| *candidate != consumer_id);
-        self.startup_catalog_searches
-            .retain(|(candidate, _), _| *candidate != consumer_id);
-        self.catalog_selections
-            .retain(|(candidate, _), _| *candidate != consumer_id);
-        self.startup_catalog_selections
-            .retain(|(candidate, _), _| *candidate != consumer_id);
-        self.catalog_screens
-            .retain(|(candidate, _), _| *candidate != consumer_id);
-        self.price_alerts.remove_consumer(consumer_id);
-        self.remove_waiter(consumer_id);
-        self.engine.remove_consumer(consumer_id);
-        if !removed_studies.is_empty() {
+        let removed_studies = super::consumer_registry::ConsumerRegistry::new(self)
+            .remove_consumer(consumer_id, true);
+        if removed_studies {
             self.reconcile_study_market_data()?;
         }
         self.mark_alert_demand_changed();
+        self.reconcile_order_books();
         for session in self.sessions.values_mut() {
             session.demand_dirty = true;
         }
@@ -1817,11 +1784,7 @@ mod tests {
             price_alerts: PriceAlertRegistry::default(),
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
-            catalog_searches: BTreeMap::new(),
-            startup_catalog_searches: BTreeMap::new(),
-            catalog_selections: BTreeMap::new(),
-            startup_catalog_selections: BTreeMap::new(),
-            catalog_screens: BTreeMap::new(),
+            command_fences: super::super::CommandFences::default(),
             sessions: super::super::BUILT_IN_PROVIDER_DESCRIPTORS
                 .iter()
                 .map(|descriptor| (descriptor.id, ProviderSessionSlot::default()))
@@ -5565,8 +5528,12 @@ mod tests {
         coordinator
             .events
             .insert(consumer, ConsumerEvents::default());
-        let key = (consumer, "rithmic".to_string());
-        coordinator.catalog_searches.insert(key.clone(), 8);
+        coordinator.command_fences.record(
+            consumer,
+            "rithmic".into(),
+            super::super::CommandKind::Search,
+            8,
+        );
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
             consumer_id: consumer.0.get(),
@@ -5584,7 +5551,12 @@ mod tests {
                 .is_none(),
             "a superseded provider callback never reaches presentation"
         );
-        assert_eq!(coordinator.catalog_searches.get(&key), Some(&8));
+        assert!(coordinator.command_fences.accepts(
+            consumer,
+            "rithmic",
+            super::super::CommandKind::Search,
+            8
+        ));
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
             consumer_id: consumer.0.get(),
@@ -5602,7 +5574,7 @@ mod tests {
             Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(ref result))
                 if result.search_generation == 8
         ));
-        assert!(!coordinator.catalog_searches.contains_key(&key));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
     }
 
     fn market_screen(consumer: ConsumerId, screen_generation: u64) -> ProviderMarketScreen {
@@ -5624,8 +5596,12 @@ mod tests {
         coordinator
             .events
             .insert(consumer, ConsumerEvents::default());
-        let key = (consumer, "hyperliquid".to_string());
-        coordinator.catalog_screens.insert(key.clone(), 4);
+        coordinator.command_fences.record(
+            consumer,
+            "hyperliquid".into(),
+            super::super::CommandKind::Screen,
+            4,
+        );
 
         coordinator.handle_catalog_screen(market_screen(consumer, 3));
         assert!(
@@ -5637,7 +5613,12 @@ mod tests {
                 .is_none(),
             "a superseded screen never reaches presentation"
         );
-        assert_eq!(coordinator.catalog_screens.get(&key), Some(&4));
+        assert!(coordinator.command_fences.accepts(
+            consumer,
+            "hyperliquid",
+            super::super::CommandKind::Screen,
+            4
+        ));
 
         coordinator.handle_catalog_screen(market_screen(consumer, 4));
         assert!(matches!(
@@ -5649,7 +5630,7 @@ mod tests {
             Some(MarketRuntimeEvent::ProviderMarketScreen(ref screen))
                 if screen.screen_generation == 4
         ));
-        assert!(!coordinator.catalog_screens.contains_key(&key));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
 
         coordinator.handle_catalog_screen(market_screen(consumer, 4));
         assert!(
@@ -5676,12 +5657,16 @@ mod tests {
         coordinator
             .events
             .insert(consumer, ConsumerEvents::default());
-        let key = (consumer, "hyperliquid".to_string());
-        coordinator.catalog_screens.insert(key.clone(), 9);
+        coordinator.command_fences.record(
+            consumer,
+            "hyperliquid".into(),
+            super::super::CommandKind::Screen,
+            9,
+        );
 
         coordinator.reject_overflowed_catalog("hyperliquid");
 
-        assert!(!coordinator.catalog_screens.contains_key(&key));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
         assert!(matches!(
             coordinator
                 .events
@@ -5701,8 +5686,12 @@ mod tests {
         coordinator
             .events
             .insert(consumer, ConsumerEvents::default());
-        let key = (consumer, "tastytrade".to_string());
-        coordinator.catalog_searches.insert(key.clone(), 8);
+        coordinator.command_fences.record(
+            consumer,
+            "tastytrade".into(),
+            super::super::CommandKind::Search,
+            8,
+        );
         let result = ProviderInstrumentSearchResult {
             consumer_id: consumer.0.get(),
             provider: "tastytrade".into(),
@@ -5711,39 +5700,60 @@ mod tests {
             instruments: Vec::new(),
         };
         coordinator.handle_catalog_search_preview(result.clone());
-        assert_eq!(coordinator.catalog_searches.get(&key), Some(&8));
+        assert!(coordinator.command_fences.accepts(
+            consumer,
+            "tastytrade",
+            super::super::CommandKind::Search,
+            8
+        ));
         assert!(matches!(
             coordinator.events.get(&consumer).unwrap().catalog_search,
             Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(_))
         ));
         coordinator.handle_catalog_search(result);
-        assert!(!coordinator.catalog_searches.contains_key(&key));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
     }
 
     #[test]
-    fn startup_and_user_catalog_searches_have_independent_fences() {
+    fn startup_and_user_searches_have_independent_fences() {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
         register(&mut coordinator, consumer);
         coordinator
             .events
             .insert(consumer, ConsumerEvents::default());
-        let key = (consumer, "tastytrade".to_string());
-        coordinator.startup_catalog_searches.insert(
-            key.clone(),
-            aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
+        coordinator.command_fences.record(
+            consumer,
+            "tastytrade".into(),
+            super::super::CommandKind::StartupResolve,
+            17,
         );
-        coordinator.catalog_searches.insert(key.clone(), 1);
+        coordinator.command_fences.record(
+            consumer,
+            "tastytrade".into(),
+            super::super::CommandKind::Search,
+            1,
+        );
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
             consumer_id: consumer.0.get(),
             provider: "tastytrade".into(),
             provider_generation: 1,
-            search_generation: aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
+            search_generation: 17,
             instruments: Vec::new(),
         });
-        assert!(!coordinator.startup_catalog_searches.contains_key(&key));
-        assert_eq!(coordinator.catalog_searches.get(&key), Some(&1));
+        assert!(!coordinator.command_fences.accepts(
+            consumer,
+            "tastytrade",
+            super::super::CommandKind::StartupResolve,
+            17
+        ));
+        assert!(coordinator.command_fences.accepts(
+            consumer,
+            "tastytrade",
+            super::super::CommandKind::Search,
+            1
+        ));
 
         coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
             consumer_id: consumer.0.get(),
@@ -5752,7 +5762,7 @@ mod tests {
             search_generation: 1,
             instruments: Vec::new(),
         });
-        assert!(!coordinator.catalog_searches.contains_key(&key));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
 
         let events = coordinator
             .events
@@ -5768,31 +5778,67 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             delivered,
-            [aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION, 1],
+            [17, 1],
             "a picker result must not replace the pending startup re-resolution"
         );
     }
 
     #[test]
-    fn startup_and_user_catalog_selections_reach_the_consumer_independently() {
+    fn superseded_startup_search_result_never_reaches_consumer() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+        for generation in [17, 18] {
+            coordinator.command_fences.record(
+                owner,
+                "tastytrade".into(),
+                super::super::CommandKind::StartupResolve,
+                generation,
+            );
+        }
+        for generation in [17, 18] {
+            coordinator.handle_catalog_search(ProviderInstrumentSearchResult {
+                consumer_id: owner.0.get(),
+                provider: "tastytrade".into(),
+                provider_generation: 1,
+                search_generation: generation,
+                instruments: Vec::new(),
+            });
+        }
+        let events = coordinator.events.get_mut(&owner).expect("outbox");
+        assert!(matches!(
+            events.startup_catalog_search.take(),
+            Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result))
+                if result.search_generation == 18
+        ));
+        assert_eq!(coordinator.command_fences.count_for(owner), 0);
+    }
+
+    #[test]
+    fn startup_and_user_selections_reach_the_consumer_independently() {
         let mut coordinator = coordinator();
         let consumer = consumer(1);
         register(&mut coordinator, consumer);
         coordinator
             .events
             .insert(consumer, ConsumerEvents::default());
-        let key = (consumer, "rithmic".to_string());
-        coordinator.startup_catalog_selections.insert(
-            key.clone(),
-            aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
+        coordinator.command_fences.record_operation(
+            consumer,
+            "rithmic".into(),
+            super::super::CommandKind::StartupResolve,
+            17,
+            true,
         );
-        coordinator.catalog_selections.insert(key, 3);
+        coordinator.command_fences.record_operation(
+            consumer,
+            "rithmic".into(),
+            super::super::CommandKind::Select,
+            3,
+            true,
+        );
 
-        coordinator.handle_catalog_selection(
-            consumer.0.get(),
-            aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION,
-            instrument(),
-        );
+        coordinator.handle_catalog_selection(consumer.0.get(), 17, instrument());
         coordinator.handle_catalog_rejection(
             aeris_contracts::ProviderCatalogRejected {
                 consumer_id: consumer.0.get(),
@@ -5813,7 +5859,7 @@ mod tests {
             event,
             MarketRuntimeEvent::ProviderInstrumentSelection(selection)
                 if selection.command_generation
-                    == aeris_contracts::STARTUP_CATALOG_COMMAND_GENERATION
+                    == 17
         )));
         assert!(delivered.iter().any(|event| matches!(
             event,
@@ -5830,8 +5876,13 @@ mod tests {
         coordinator
             .events
             .insert(consumer, ConsumerEvents::default());
-        let key = (consumer, "rithmic".to_string());
-        coordinator.catalog_selections.insert(key.clone(), 12);
+        coordinator.command_fences.record_operation(
+            consumer,
+            "rithmic".into(),
+            super::super::CommandKind::Select,
+            12,
+            true,
+        );
 
         let mut stale = instrument();
         stale.selection_generation = 11;
@@ -5845,7 +5896,12 @@ mod tests {
                 .catalog_selection
                 .is_none()
         );
-        assert_eq!(coordinator.catalog_selections.get(&key), Some(&12));
+        assert!(coordinator.command_fences.accepts(
+            consumer,
+            "rithmic",
+            super::super::CommandKind::Select,
+            12
+        ));
 
         let mut current = instrument();
         current.selection_generation = 12;
@@ -5865,6 +5921,65 @@ mod tests {
             Some(MarketRuntimeEvent::ProviderInstrumentSelection(ref selection))
                 if selection.command_generation == 12
         ));
-        assert!(!coordinator.catalog_selections.contains_key(&key));
+        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+    }
+
+    #[test]
+    fn consumer_registry_removes_every_per_consumer_resource_on_both_paths() {
+        for detach in [false, true] {
+            let mut coordinator = coordinator();
+            let owner = consumer(1);
+            let selected = series();
+            coordinator.attached.insert(client(1));
+            coordinator
+                .handle_register(ConsumerIdentity {
+                    client_id: client(1),
+                    workspace_id: WorkspaceId(nonzero(1)),
+                    consumer_id: owner,
+                })
+                .expect("consumer registers");
+            coordinator
+                .engine
+                .begin_provider_session("rithmic", ProviderGeneration(nonzero(1)))
+                .expect("provider session");
+            coordinator
+                .engine
+                .set_series_demand(owner, generation(1), &selected)
+                .expect("series demand");
+            coordinator
+                .engine
+                .set_stream_requirements(
+                    owner,
+                    generation(1),
+                    StreamRequirements::BARS.with(MarketStream::Depth),
+                )
+                .expect("depth demand");
+            for kind in [
+                super::super::CommandKind::Search,
+                super::super::CommandKind::Select,
+                super::super::CommandKind::Screen,
+                super::super::CommandKind::StartupResolve,
+            ] {
+                coordinator
+                    .command_fences
+                    .record(owner, "rithmic".into(), kind, 10);
+            }
+            assert_eq!(coordinator.command_fences.count_for(owner), 4);
+            assert!(coordinator.engine.has_subscription(&selected));
+            if detach {
+                coordinator.attached.remove(&client(1));
+                coordinator.detach_client(client(1));
+            } else {
+                coordinator
+                    .handle_remove(client(1), owner)
+                    .expect("consumer removes");
+            }
+            assert_eq!(coordinator.command_fences.count_for(owner), 0);
+            assert!(!coordinator.events.contains_key(&owner));
+            assert!(!coordinator.consumer_clients.contains_key(&owner));
+            assert!(!coordinator.engine.has_subscription(&selected));
+            assert!(coordinator.engine.current_demand(owner).is_none());
+            assert!(coordinator.order_books.is_empty());
+        }
     }
 }

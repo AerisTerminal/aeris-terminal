@@ -155,6 +155,7 @@ fn equity_query_with_loaded_futures_catalog_returns_preliminary_empty_result() {
     let search = SearchProviderInstruments {
         consumer_id: 1,
         search_generation: 1,
+        startup_resolve: false,
         provider: "tastytrade".into(),
         query: "SPY".into(),
         maximum_results: 100,
@@ -195,6 +196,7 @@ fn futures_search_accepts_slashless_and_slash_prefixed_queries() {
             &SearchProviderInstruments {
                 consumer_id: 1,
                 search_generation: 1,
+                startup_resolve: false,
                 provider: "tastytrade".into(),
                 query: query.into(),
                 maximum_results: 10,
@@ -224,6 +226,7 @@ fn excluded_futures_category_returns_no_catalog_futures() {
         &SearchProviderInstruments {
             consumer_id: 1,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             query: "/ES".into(),
             maximum_results: 10,
@@ -250,6 +253,7 @@ fn no_match_query_returns_empty_search_result() {
     let search = SearchProviderInstruments {
         consumer_id: 1,
         search_generation: 1,
+        startup_resolve: false,
         provider: "tastytrade".into(),
         query: "/NO_SUCH_FUTURE".into(),
         maximum_results: 100,
@@ -962,31 +966,33 @@ fn tape_backfill_keeps_only_its_requested_window_and_applies_corrections() {
 #[test]
 fn newer_catalog_search_cancels_the_prior_request_for_its_consumer() {
     let api = BrokerApi::default();
-    api.register_search(1, 1).unwrap();
+    api.register_search(1, 1, false).unwrap();
     let prior = Arc::clone(&api.search_control.lock().unwrap()[&1].1);
-    api.register_search(1, 2).unwrap();
+    api.register_search(1, 2, false).unwrap();
     assert!(prior.load(Ordering::Acquire));
     let current = Arc::clone(&api.search_control.lock().unwrap()[&1].1);
     assert!(!current.load(Ordering::Acquire));
-    api.register_search(1, 1).unwrap();
+    api.register_search(1, 1, false).unwrap();
     assert!(!current.load(Ordering::Acquire));
     api.cancel_searches();
     assert!(current.load(Ordering::Acquire));
 }
 
 #[test]
-fn startup_catalog_generation_is_retired_by_the_first_user_search() {
+fn startup_search_does_not_retire_the_user_search() {
     let api = BrokerApi::default();
-    api.register_search(66, u64::from(u32::MAX)).unwrap();
-    api.register_search(66, 1).unwrap();
+    api.register_search(66, 17, true).unwrap();
+    api.register_search(66, 1, false).unwrap();
+    assert_eq!(api.startup_search_control.lock().unwrap()[&66].0, 17);
     assert_eq!(api.search_control.lock().unwrap()[&66].0, 1);
 }
 
 #[test]
-fn startup_catalog_generation_cannot_replace_a_user_search() {
+fn startup_search_and_user_search_are_independent() {
     let api = BrokerApi::default();
-    api.register_search(66, 1).unwrap();
-    api.register_search(66, u64::from(u32::MAX)).unwrap();
+    api.register_search(66, 1, false).unwrap();
+    api.register_search(66, 17, true).unwrap();
+    assert_eq!(api.startup_search_control.lock().unwrap()[&66].0, 17);
     assert_eq!(api.search_control.lock().unwrap()[&66].0, 1);
 }
 #[test]
@@ -1001,6 +1007,7 @@ fn futures_search_uses_the_primed_catalog_before_remote_equity_search() {
     let search = SearchProviderInstruments {
         consumer_id: 7,
         search_generation: 2,
+        startup_resolve: false,
         provider: "tastytrade".into(),
         query: "ES".into(),
         maximum_results: 10,
@@ -1047,10 +1054,11 @@ fn a_picker_search_cannot_retire_the_pending_startup_selection() {
     let mut searches = CatalogSearches::new();
     let stop = Arc::new(AtomicBool::new(false));
     let generation = Arc::new(AtomicU64::new(1));
-    for (search_generation, query) in [(STARTUP_CATALOG_COMMAND_GENERATION, "ESZ6"), (4, "")] {
+    for (search_generation, query, startup_resolve) in [(17, "ESZ6", true), (4, "", false)] {
         let search = SearchProviderInstruments {
             consumer_id: 7,
             search_generation,
+            startup_resolve,
             provider: "tastytrade".into(),
             query: query.into(),
             maximum_results: 10,
@@ -1068,8 +1076,9 @@ fn a_picker_search_cannot_retire_the_pending_startup_selection() {
     }
     let selection = SelectProviderInstrument {
         consumer_id: 7,
-        selection_generation: STARTUP_CATALOG_COMMAND_GENERATION,
-        search_generation: STARTUP_CATALOG_COMMAND_GENERATION,
+        selection_generation: 17,
+        search_generation: 17,
+        startup_resolve: true,
         provider: "tastytrade".into(),
         symbol: "/ESZ6".into(),
         exchange: "CME".into(),
@@ -1088,15 +1097,15 @@ fn a_picker_search_cannot_retire_the_pending_startup_selection() {
     assert!(matches!(
         selected,
         CatalogEvent::Selection { command_generation, instrument, .. }
-            if command_generation == STARTUP_CATALOG_COMMAND_GENERATION
+            if command_generation == 17
                 && instrument.provider_symbol == "/ESZ26:XCME"
     ));
 }
 #[test]
 fn equity_search_worker_debounces_to_the_latest_consumer_query() {
     let api = BrokerApi::default();
-    api.register_search(7, 1).unwrap();
-    api.register_search(7, 2).unwrap();
+    api.register_search(7, 1, false).unwrap();
+    api.register_search(7, 2, false).unwrap();
     api.state.lock().unwrap().searches.insert(
         "SPY".into(),
         (
@@ -1117,6 +1126,7 @@ fn equity_search_worker_debounces_to_the_latest_consumer_query() {
                 search: SearchProviderInstruments {
                     consumer_id: 7,
                     search_generation: generation,
+                    startup_resolve: false,
                     provider: "tastytrade".into(),
                     query: query.into(),
                     maximum_results: 10,
@@ -1146,7 +1156,7 @@ fn futures_selection_does_not_wait_for_remote_equity_search() {
         )
         .unwrap();
     api.state.lock().unwrap().futures = Some((Instant::now(), vec![future]));
-    api.register_search(7, 1).unwrap();
+    api.register_search(7, 1, false).unwrap();
     let (control_tx, control_rx) = mpsc::sync_channel(4);
     let (event_tx, event_rx) = mpsc::sync_channel(4);
     let (wake_tx, _wake_rx) = mpsc::sync_channel(4);
@@ -1171,6 +1181,7 @@ fn futures_selection_does_not_wait_for_remote_equity_search() {
         .send(CatalogControl::Search(SearchProviderInstruments {
             consumer_id: 7,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             query: "ES".into(),
             maximum_results: 10,
@@ -1182,6 +1193,7 @@ fn futures_selection_does_not_wait_for_remote_equity_search() {
             consumer_id: 7,
             selection_generation: 1,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             symbol: "/ESZ6".into(),
             exchange: "CME".into(),

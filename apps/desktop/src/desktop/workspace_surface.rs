@@ -2434,6 +2434,7 @@ impl WorkspaceSurface {
                 return false;
             };
             let request = SelectProviderInstrument {
+                startup_resolve: false,
                 consumer_id: 0,
                 selection_generation: selection.generation.get() as u64,
                 search_generation: selection.search_generation.get() as u64,
@@ -4789,6 +4790,7 @@ impl WorkspaceSurface {
         let retained_query = request.query.clone();
         let request_id = request.request_id;
         let search = SearchProviderInstruments {
+            startup_resolve: false,
             consumer_id: 0,
             search_generation: u64::try_from(request_id.get()).unwrap_or(u64::MAX),
             provider: provider.to_string(),
@@ -4873,6 +4875,7 @@ impl WorkspaceSurface {
             selection.instrument.exchange, selection.instrument.symbol
         );
         let request = SelectProviderInstrument {
+            startup_resolve: false,
             consumer_id: 0,
             selection_generation: u64::try_from(selection.generation.get()).unwrap_or(u64::MAX),
             search_generation: u64::try_from(selection.search_generation.get()).unwrap_or(u64::MAX),

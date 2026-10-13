@@ -3133,6 +3133,7 @@ mod tests {
         let mut worker =
             MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
         let search = SearchProviderInstruments {
+            startup_resolve: false,
             consumer_id: 0,
             search_generation: 1,
             provider: "rithmic".to_string(),
@@ -3141,6 +3142,7 @@ mod tests {
             categories: aeris_contracts::InstrumentSearchCategories::ALL,
         };
         let selection = SelectProviderInstrument {
+            startup_resolve: false,
             consumer_id: 0,
             selection_generation: 1,
             search_generation: 1,
@@ -3256,6 +3258,7 @@ mod tests {
             .try_set_chart_viewport(1, 2)
             .expect("viewport fills the ordinary command mailbox");
         let selection = SelectProviderInstrument {
+            startup_resolve: false,
             consumer_id: 0,
             selection_generation: 3,
             search_generation: 2,

@@ -25,6 +25,7 @@ fn run(market: &MarketService) -> Result<(), String> {
         SearchProviderInstruments {
             consumer_id: 1,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             query: query.clone(),
             maximum_results: 100,
@@ -368,6 +369,7 @@ impl SearchTimings {
                     SearchProviderInstruments {
                         consumer_id: 1,
                         search_generation: 2,
+                        startup_resolve: false,
                         provider: "tastytrade".into(),
                         query: "/ES".into(),
                         maximum_results: 100,
@@ -390,6 +392,7 @@ impl SearchTimings {
                     SearchProviderInstruments {
                         consumer_id: 1,
                         search_generation: 3,
+                        startup_resolve: false,
                         provider: "tastytrade".into(),
                         query: "SPY".into(),
                         maximum_results: 100,
@@ -520,6 +523,7 @@ fn run_soak(market: &MarketService) -> Result<(), String> {
             SearchProviderInstruments {
                 consumer_id,
                 search_generation: 1,
+                startup_resolve: false,
                 provider: "tastytrade".into(),
                 query: (*query).into(),
                 maximum_results: 20,
@@ -652,6 +656,7 @@ fn process_soak_event(
                         consumer_id,
                         selection_generation: 1,
                         search_generation: 1,
+                        startup_resolve: false,
                         provider: "tastytrade".into(),
                         symbol: item.symbol,
                         exchange: item.exchange,
@@ -748,6 +753,7 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
         SearchProviderInstruments {
             consumer_id: 1,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             query: query.clone(),
             maximum_results: 100,
@@ -886,6 +892,7 @@ fn run_history_load(market: &MarketService) -> Result<(), String> {
         SearchProviderInstruments {
             consumer_id: 1,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             query: "/ES".into(),
             maximum_results: 100,
@@ -981,6 +988,7 @@ fn select_load_instrument(
             consumer_id: 1,
             selection_generation: 1,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             symbol: candidate.symbol,
             exchange: candidate.exchange,
@@ -1012,6 +1020,7 @@ fn select(
             consumer_id: 1,
             selection_generation: 1,
             search_generation: 1,
+            startup_resolve: false,
             provider: "tastytrade".into(),
             symbol: candidate.symbol,
             exchange: candidate.exchange,

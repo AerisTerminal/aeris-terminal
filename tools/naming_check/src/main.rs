@@ -1988,13 +1988,15 @@ mod tests {
         }
     }
     #[test]
-    fn desktop_startup_catalog_resolution_stays_event_driven() {
+    fn desktop_startup_catalog_resolution_uses_command_fences() {
         let source = manifest("apps/desktop/src/engine_market_worker/selection_commands.rs");
         for required in [
             "StartupResolution::Searching",
             "handle_startup_catalog_event",
             "market.search_provider_instruments",
             "market.select_provider_instrument",
+            "startup_resolve: true",
+            "record.startup_command_generation",
         ] {
             assert!(
                 source.contains(required),
@@ -2002,6 +2004,7 @@ mod tests {
             );
         }
         for forbidden in [
+            "STARTUP_CATALOG_COMMAND_GENERATION",
             "STARTUP_CATALOG_RESOLUTION_TIMEOUT",
             "poll_market_event_until",
             "recv_timeout",
@@ -2012,6 +2015,32 @@ mod tests {
                 "startup catalog path must not block the shared workspace worker through {forbidden}"
             );
         }
+        let fences = manifest("crates/market_runtime/src/market_service/command_fences.rs");
+        for required in [
+            "CommandKind::StartupResolve",
+            "Epoch<CommandTag>",
+            "remove_consumer",
+        ] {
+            assert!(
+                fences.contains(required),
+                "catalog command fence lost {required}"
+            );
+        }
+        let coordinator = manifest("crates/market_runtime/src/market_service/coordinator.rs");
+        for forbidden in [
+            "catalog_searches:",
+            "startup_catalog_searches:",
+            "catalog_selections:",
+            "startup_catalog_selections:",
+            "catalog_screens:",
+        ] {
+            assert!(
+                !coordinator.contains(forbidden),
+                "duplicate command map {forbidden}"
+            );
+        }
+        let contracts = manifest("crates/contracts/src/messages.rs");
+        assert!(!contracts.contains("STARTUP_CATALOG_COMMAND_GENERATION"));
     }
 
     #[test]

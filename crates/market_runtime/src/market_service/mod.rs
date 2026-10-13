@@ -1008,7 +1008,7 @@ type ProviderRuntimeStarter = fn(
     &ProviderStartContext,
 ) -> Result<ProviderRuntimeRecord, String>;
 
-type ProviderSearchPreparer = fn(&tastytrade::BrokerApi, u64, u64) -> Result<(), String>;
+type ProviderSearchPreparer = fn(&tastytrade::BrokerApi, u64, u64, bool) -> Result<(), String>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CandleGapPolicy {
@@ -1767,7 +1767,10 @@ pub use ctrader::{
 pub use rithmic_login::{RithmicLoginSummary, RithmicServer};
 use runtime::join_runtime_workers;
 
+mod command_fences;
+mod consumer_registry;
 mod coordinator;
+use command_fences::{CommandFences, CommandKind};
 
 /// Offline coordinator workload used by the release benchmark example.
 ///

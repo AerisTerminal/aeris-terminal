@@ -111,7 +111,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
 | MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in this commit |
-| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | open |
+| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup closed in this commit; remaining wrappers/order-book demand open |
 | MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | open |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
 | MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | open |
@@ -379,7 +379,10 @@ Status: in progress
   - Added non-arithmetic `Epoch<Tag>`, exhaustion-safe `EpochSequence`, `Fenced` and equality-only `Fence` in market_engine. The coordinator registry alone stamps adapter wire generations; provider events and history completions carry typed provider epochs, including dated calendar updates.
   - Stale provider events and history completions each increment their own bounded diagnostic count and cannot mutate current series or calendar state. Existing engine `ProviderGeneration` and `GenerationId` wrappers remain until their broader consumers migrate; raw adapter counters remain inside the wire boundary.
   - Scoped runtime/engine/naming tests and full workspace fmt/Clippy/tests/naming gate passed; naming_check rejects raw generations in the typed ProviderEvent.
-- [ ] M2.9 command-fences-consumer-registry - Command fences and one consumer registry; remove the startup sentinel
+- [x] M2.9 command-fences-consumer-registry - Command fences and one consumer registry; remove the startup sentinel
+  - Replaced the five catalog pending maps with typed command-kind fences; desktop startup assigns a unique command generation and explicitly marks startup requests. Tastytrade retains independent startup and picker search lanes without a numeric sentinel.
+  - `ConsumerRegistry::remove_consumer` is shared by detach and explicit remove; tests assert no command/outbox/client/demand/order-book residue on either path, and a superseded startup callback is dropped.
+  - Market-runtime, desktop and naming scoped checks plus workspace fmt/Clippy/tests/naming passed. The single milestone GUI restore/search check remains after M2.10.
 - [ ] M2.10 history-tracker - `HistoryTracker` with current and backfill lanes; trim unused `provider_history`
 
 ### M3 market lifecycle
@@ -522,6 +525,7 @@ the repo root `AGENTS.md`.
 - Every live model's stall policy and every provider's practice-session check use calendar phases. Unknown sessions use a conservative 300-second stall threshold; closed sessions do not recover from silence (M2.6, this commit).
 - Dated provider calendar events are fenced at the coordinator and expire into the instrument's recurring calendar or Unknown; live session, week and month bars and tape dates use the same calendar (M2.7, this commit).
 - Typed provider events and history completions use registry-minted epochs and an equality fence; naming_check rejects a raw `ProviderEvent.generation` (M2.8, this commit).
+- Catalog callbacks use coordinator-owned command fences by consumer/provider/kind; startup resolution has an explicit lane and consumer retirement uses one registry cleanup path (M2.9, this commit).
 
 ## 6. Progress log
 
@@ -556,6 +560,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M2.6 feat(market): recover stalled live series by calendar phase - applied the same injected-clock watchdog to candle and trade models and routed practice-session checks through the calendar.
 - 2026-10-13 M2.7 feat(market): roll live bars at calendar sessions - replaced fixed session durations and CME-only live buckets, integrated fenced dated provider holidays and calendar tape dates, and tested six non-CME week/month paths.
 - 2026-10-14 M2.8 feat(market): fence provider events and history with typed epochs - registry-stamped adapter generations, fenced dated calendar and history completions, counted retired inputs and pinned typed event fields.
+- 2026-10-14 M2.9 feat(market): unify catalog command fences and consumer retirement - removed the startup sentinel and five pending maps, separated startup/picker searches, and centralized consumer cleanup.
 
 ## 7. Known gaps / deferred
 
