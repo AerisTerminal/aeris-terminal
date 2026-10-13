@@ -48,7 +48,8 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use store::{FillPolicyPersistence, SCHEMA_VERSION, StoredState, TradingStore};
+use store::{FillPolicyPersistence, StoredState, TradingStore};
+pub use store::{SCHEMA_VERSION, StoreError};
 pub use strategy::{
     BracketStrategyTemplate, BracketTarget, BreakEvenRule, MAXIMUM_BRACKET_TARGETS,
     MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES, ManagedBracket, ManagedBracketStatus,
@@ -526,7 +527,7 @@ enum Command {
     DrainVenueEvents,
     #[cfg(test)]
     BlockOwnerForTest(SyncSender<()>, Arc<std::sync::Barrier>),
-    Shutdown,
+    Shutdown(Reply<()>),
 }
 
 struct Coordinator {
@@ -587,7 +588,7 @@ impl TradingService {
     ///
     /// # Errors
     /// Returns an error when configuration, storage, migration, or worker startup fails.
-    pub fn start(config: TradingServiceConfig) -> Result<Self, String> {
+    pub fn start(config: TradingServiceConfig) -> Result<Self, StoreError> {
         let retention = config.retention.validate()?;
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (started_tx, started_rx) = mpsc::sync_channel(REPLY_CAPACITY);
@@ -602,7 +603,7 @@ impl TradingService {
             .spawn(move || {
                 let coordinator =
                     TradingStore::open(&database_path, retention).and_then(|mut store| {
-                        let state = store.load_state()?;
+                        let state = store.load_state().map_err(StoreError::Other)?;
                         let restored_orders = state
                             .orders
                             .values()
@@ -625,8 +626,12 @@ impl TradingService {
                             venue_ingestion: 0,
                             connected_broker_accounts: BTreeSet::new(),
                         };
-                        coordinator.repair_loaded_position_projections()?;
-                        coordinator.align_loaded_protection()?;
+                        coordinator
+                            .repair_loaded_position_projections()
+                            .map_err(StoreError::Other)?;
+                        coordinator
+                            .align_loaded_protection()
+                            .map_err(StoreError::Other)?;
                         Ok(coordinator)
                     });
                 match coordinator {
@@ -1064,7 +1069,8 @@ impl TradingService {
             return Err("trading owner shutdown is already in progress".to_string());
         }
         self.runtime.venue_inbox.wake_stopped();
-        match self.commands.try_send(Command::Shutdown) {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(REPLY_CAPACITY);
+        match self.commands.try_send(Command::Shutdown(reply_tx)) {
             Ok(()) | Err(TrySendError::Disconnected(_)) => {}
             Err(TrySendError::Full(_)) => {
                 self.runtime.stopping.store(false, Ordering::Release);
@@ -1089,11 +1095,12 @@ impl TradingService {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                return if worker.is_some_and(|worker| worker.join().is_err()) {
-                    Err("trading owner panicked during shutdown".to_string())
-                } else {
-                    Ok(())
-                };
+                if worker.is_some_and(|worker| worker.join().is_err()) {
+                    return Err("trading owner panicked during shutdown".to_string());
+                }
+                return reply_rx
+                    .recv()
+                    .map_err(|_| "trading owner stopped before checkpointing".to_string())?;
             }
             let now = Instant::now();
             if now >= deadline {
@@ -1332,7 +1339,11 @@ impl Coordinator {
                     let _ = ready.send(());
                     barrier.wait();
                 }
-                Command::Shutdown => break,
+                Command::Shutdown(reply) => {
+                    let result = self.store.checkpoint_for_shutdown();
+                    let _ = reply.send(result);
+                    break;
+                }
             }
         }
     }

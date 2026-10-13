@@ -364,12 +364,17 @@ version = "0.2.3"
 [[package]]
 name = "aeris_observability"
 version = "0.2.3"
+dependencies = [
+ "aeris_platform_sys",
+ "chrono",
+]
 
 [[package]]
 name = "aeris_platform_runtime"
 version = "0.2.3"
 dependencies = [
  "aeris_observability",
+ "aeris_platform_sys",
  "base64 0.23.1",
  "display-info",
  "ed25519-dalek",
@@ -394,6 +399,13 @@ dependencies = [
  "windows-sys 0.61.2",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "aeris_platform_sys"
+version = "0.2.3"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -473,6 +485,7 @@ name = "aeris_trading_runtime"
 version = "0.2.3"
 dependencies = [
  "aeris_instruments",
+ "aeris_platform_sys",
  "aeris_trading",
  "rusqlite",
  "serde",

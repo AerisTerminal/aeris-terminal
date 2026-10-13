@@ -300,53 +300,46 @@ fn install_platform_http_client(cx: &mut App) {
     }
 }
 
-fn retain_account_refresh_quiesce_for_exit(
-    account_refresh: Result<aeris_account_runtime::AccountRefreshQuiesce, String>,
-    context: &str,
-) {
-    let quiesce = match account_refresh {
-        Ok(quiesce) => quiesce,
-        Err(error) => {
-            diagnostic!(
-                "Aeris refused {context} because account refresh could not be quiesced: {error}"
-            );
-            loop {
-                std::thread::park();
-            }
-        }
-    };
+trait AccountRefreshExitClaim {
+    fn wait_for_exit(&self) -> Result<(), String>;
+    fn retain_for_exit(self);
+}
 
-    let first_error = match quiesce.wait() {
-        Ok(()) => {
-            quiesce.retain_until_process_exit();
-            return;
-        }
-        Err(error) => error,
-    };
-    diagnostic!("Aeris account shutdown retrying after: {first_error}");
-    let second_error = match quiesce.wait() {
-        Ok(()) => {
-            quiesce.retain_until_process_exit();
-            return;
-        }
-        Err(error) => error,
-    };
-    diagnostic!(
-        "Aeris refused {context} because durable account refresh did not settle: {second_error}"
-    );
-    // This startup/background path has no GPUI lifecycle to return to. Keep the
-    // existing quiesce claim alive after the bounded retries so a forced exit
-    // cannot be followed by another rotating grant in this process.
-    loop {
-        std::thread::park();
+impl AccountRefreshExitClaim for aeris_account_runtime::AccountRefreshQuiesce {
+    fn wait_for_exit(&self) -> Result<(), String> {
+        self.wait()
+    }
+
+    fn retain_for_exit(self) {
+        self.retain_until_process_exit();
     }
 }
 
+fn retain_account_refresh_quiesce_for_exit<Q: AccountRefreshExitClaim>(
+    account_refresh: Result<Q, String>,
+    context: &str,
+) -> Result<(), String> {
+    let quiesce = account_refresh.map_err(|error| {
+        format!("Aeris refused {context} because account refresh could not be quiesced: {error}")
+    })?;
+    quiesce.wait_for_exit().map_err(|error| {
+        format!("Aeris refused {context} because durable account refresh did not settle: {error}")
+    })?;
+    quiesce.retain_for_exit();
+    Ok(())
+}
+
 fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
-    retain_account_refresh_quiesce_for_exit(
+    let exit_code = match retain_account_refresh_quiesce_for_exit(
         aeris_desktop::account::begin_refresh_quiesce(),
         "process exit",
-    );
+    ) {
+        Ok(()) => exit_code,
+        Err(error) => {
+            diagnostic!("{error}");
+            1
+        }
+    };
     std::process::exit(exit_code);
 }
 
@@ -3947,9 +3940,32 @@ fn validate_workspace_boot_for_readiness(workspace: &WorkspaceState) -> Result<(
 
 #[cfg(test)]
 mod desktop_readiness_account_tests {
-    use super::wait_for_account_restore_readiness;
+    use super::{
+        AccountRefreshExitClaim, retain_account_refresh_quiesce_for_exit,
+        wait_for_account_restore_readiness,
+    };
     use aeris_account_runtime::AccountRestoreReadiness;
-    use std::{cell::Cell, time::Duration};
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, Instant},
+    };
+
+    static EXIT_WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    struct StalledRefreshQuiesce;
+
+    impl AccountRefreshExitClaim for StalledRefreshQuiesce {
+        fn wait_for_exit(&self) -> Result<(), String> {
+            EXIT_WAIT_CALLS.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(10));
+            Err("fixture refresh stayed active".to_string())
+        }
+
+        fn retain_for_exit(self) {
+            panic!("a stalled refresh cannot be retained");
+        }
+    }
 
     #[test]
     fn account_restore_readiness_accepts_ready_without_network_or_ui() {
@@ -3993,6 +4009,20 @@ mod desktop_readiness_account_tests {
             .is_ok()
         );
         assert_eq!(polls.get(), 2);
+    }
+
+    #[test]
+    fn stalled_account_quiesce_returns_after_one_bounded_wait() {
+        EXIT_WAIT_CALLS.store(0, Ordering::Relaxed);
+        let started = Instant::now();
+        let error =
+            retain_account_refresh_quiesce_for_exit(Ok(StalledRefreshQuiesce), "fixture exit")
+                .expect_err("stalled quiesce fails");
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(EXIT_WAIT_CALLS.load(Ordering::Relaxed), 1);
+        assert!(error.contains("fixture exit"));
+        assert!(error.contains("fixture refresh stayed active"));
     }
 }
 
@@ -4046,7 +4076,7 @@ fn run_desktop_readiness_command(
                 retain_account_refresh_quiesce_for_exit(
                     account_service.begin_refresh_quiesce(),
                     "candidate readiness exit",
-                );
+                )?;
                 return Err(error);
             }
         }
@@ -4061,7 +4091,7 @@ fn run_desktop_readiness_command(
             })?;
         }
         let market = aeris_market_runtime::MarketService::start()?;
-        let trading = start_trading_service()?;
+        let trading = start_trading_service().map_err(|error| error.to_string())?;
         let context = start_context_service()?;
         let status = market.status()?;
         if status.providers.is_empty() {
@@ -4072,14 +4102,21 @@ fn run_desktop_readiness_command(
         if trading_status.schema_version == 0 {
             return Err("candidate trading service did not reach readiness".to_string());
         }
+        let (validation_mode, log_path, vault_namespace, borrowed_stored_ctrader) =
+            readiness_data_root_fields()?;
         let report = LifecycleReadinessReport {
-            schema_version: 4,
+            schema_version: 5,
             release_identity: release.release_identity,
             install_generation: release.install_generation,
             desktop_process_id: std::process::id(),
             workspace_revision: workspace.workspace_revision,
             provider_count: status.providers.len(),
             workspace_restored: true,
+            validation_mode,
+            instance_lock: ReadinessFlag(true),
+            log_path,
+            vault_namespace,
+            borrowed_stored_ctrader,
             services: LifecycleServiceReadiness {
                 market: ServiceReady(true),
                 account: ServiceReady(true),
@@ -4093,14 +4130,42 @@ fn run_desktop_readiness_command(
         let mut encoded = serde_json::to_vec(&report)
             .map_err(|_| "candidate readiness report could not be encoded".to_string())?;
         encoded.push(b'\n');
-        std::fs::write(std::path::Path::new(&report_path), encoded)
+        aeris_platform_runtime::fs::write_file_durably(std::path::Path::new(&report_path), &encoded)
             .map_err(|_| "candidate readiness report could not be written".to_string())
     })();
-    retain_account_refresh_quiesce_for_exit(
+    let quiesce_result = retain_account_refresh_quiesce_for_exit(
         account_service.begin_refresh_quiesce(),
         "candidate readiness exit",
     );
-    result
+    match (result, quiesce_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(operation_error), Err(quiesce_error)) => {
+            Err(format!("{operation_error}; {quiesce_error}"))
+        }
+    }
+}
+
+fn readiness_data_root_fields()
+-> Result<(ReadinessFlag, String, &'static str, ReadinessFlag), String> {
+    let root = aeris_platform_runtime::active_data_root()
+        .map_err(|_| "candidate data root policy is unavailable".to_string())?;
+    let log_path = root
+        .path()
+        .join("logs")
+        .join("aeris.log")
+        .to_string_lossy()
+        .into_owned();
+    Ok((
+        ReadinessFlag(root.is_validation()),
+        log_path,
+        if root.is_validation() {
+            "validation"
+        } else {
+            "production"
+        },
+        ReadinessFlag(root.borrow_stored_ctrader()),
+    ))
 }
 
 #[derive(serde::Serialize)]
@@ -4114,6 +4179,11 @@ struct LifecycleReadinessReport {
     workspace_revision: u64,
     provider_count: usize,
     workspace_restored: bool,
+    validation_mode: ReadinessFlag,
+    instance_lock: ReadinessFlag,
+    log_path: String,
+    vault_namespace: &'static str,
+    borrowed_stored_ctrader: ReadinessFlag,
     services: LifecycleServiceReadiness,
 }
 
@@ -4128,6 +4198,10 @@ struct LifecycleServiceReadiness {
 #[derive(serde::Serialize)]
 #[serde(transparent)]
 struct ServiceReady(bool);
+
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+struct ReadinessFlag(bool);
 
 /// Carries the trading owner's broker venue over the market runtime's shared cTrader
 /// session (D8). The desktop only hands the bounded channel ends across; neither runtime
@@ -4146,15 +4220,158 @@ fn attach_ctrader_venue(
     Ok(())
 }
 
-fn start_trading_service() -> Result<aeris_trading_runtime::TradingService, String> {
+fn start_trading_service()
+-> Result<aeris_trading_runtime::TradingService, aeris_trading_runtime::StoreError> {
     let database_path = aeris_platform_runtime::native_data_root()
-        .map_err(|error| format!("trading data root is unavailable: {error}"))?
+        .map_err(|error| {
+            aeris_trading_runtime::StoreError::Other(format!(
+                "trading data root is unavailable: {error}"
+            ))
+        })?
         .join("trading")
         .join("trading.sqlite3");
     aeris_trading_runtime::TradingService::start(aeris_trading_runtime::TradingServiceConfig {
         database_path,
         retention: aeris_trading_runtime::TradingRetention::default(),
     })
+}
+
+fn trading_corruption_message(
+    database: &std::path::Path,
+    newest_backup: Option<&std::path::Path>,
+) -> String {
+    let backup = newest_backup.map_or_else(
+        || "No migration backup is available.".to_string(),
+        |path| format!("Newest migration backup:\n{}", path.display()),
+    );
+    format!(
+        "Aeris cannot open the trading database because it is corrupt:\n{}\n\n{backup}\n\n\
+         Select Yes to quarantine the database and its WAL sidecars. Aeris will exit; \
+         a new database is created only after you restart.\n\n\
+         Select No to exit without changing any files.",
+        database.display()
+    )
+}
+
+fn quarantine_trading_database(database: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let directory = database
+        .parent()
+        .ok_or_else(|| "trading database has no parent directory".to_string())?;
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system clock precedes Unix epoch".to_string())?
+        .as_millis();
+    let quarantine = directory.join(format!("trading.corrupt-{unix}.sqlite3"));
+    for suffix in ["-wal", "-shm"] {
+        let source = std::path::PathBuf::from(format!("{}{suffix}", database.display()));
+        if source.exists() {
+            let destination = std::path::PathBuf::from(format!("{}{suffix}", quarantine.display()));
+            std::fs::rename(&source, &destination).map_err(|error| {
+                format!(
+                    "trading sidecar {} could not be quarantined: {error}",
+                    source.display()
+                )
+            })?;
+        }
+    }
+    std::fs::rename(database, &quarantine).map_err(|error| {
+        format!(
+            "trading database {} could not be quarantined: {error}",
+            database.display()
+        )
+    })?;
+    Ok(quarantine)
+}
+
+fn handle_trading_corruption(
+    path: &std::path::Path,
+    newest_backup: Option<&std::path::Path>,
+    detail: &str,
+) -> ! {
+    diagnostic!(
+        "Aeris trading database integrity check failed for {}: {detail}",
+        path.display()
+    );
+    let message = trading_corruption_message(path, newest_backup);
+    match aeris_platform_runtime::confirm_message_box("Aeris Terminal", &message) {
+        Ok(true) => match quarantine_trading_database(path) {
+            Ok(quarantine) => {
+                diagnostic!(
+                    "Aeris corrupt trading database quarantined at {}",
+                    quarantine.display()
+                );
+                fatal_startup(
+                    "The corrupt trading database was quarantined. Restart Aeris to create a new database.",
+                );
+            }
+            Err(error) => {
+                diagnostic!("Aeris trading database quarantine failed: {error}");
+                fatal_startup(
+                    "The corrupt trading database could not be quarantined and was not recreated.",
+                );
+            }
+        },
+        Ok(false) => {
+            fatal_startup("The corrupt trading database was left untouched. Aeris cannot start.");
+        }
+        Err(error) => {
+            diagnostic!("Aeris corruption confirmation dialog failed: {error}");
+            fatal_startup(
+                "Aeris could not obtain confirmation. The corrupt trading database was left untouched.",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod trading_corruption_tests {
+    use super::{quarantine_trading_database, trading_corruption_message};
+
+    #[test]
+    fn corruption_message_names_database_backup_and_requires_confirmation() {
+        let database = std::path::Path::new("trading/trading.sqlite3");
+        let backup = std::path::Path::new("trading/backups/trading-v18-123.sqlite3");
+        let message = trading_corruption_message(database, Some(backup));
+        assert!(message.contains(&database.display().to_string()));
+        assert!(message.contains(&backup.display().to_string()));
+        assert!(message.contains("Select Yes"));
+        assert!(message.contains("Select No"));
+        assert!(message.contains("only after you restart"));
+    }
+
+    #[test]
+    fn confirmed_quarantine_moves_database_and_sidecars_together() {
+        let directory = std::env::temp_dir().join(format!(
+            "aeris-corruption-quarantine-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        let database = directory.join("trading.sqlite3");
+        std::fs::write(&database, b"database").expect("database fixture");
+        std::fs::write(format!("{}-wal", database.display()), b"wal").expect("WAL fixture");
+        std::fs::write(format!("{}-shm", database.display()), b"shm").expect("SHM fixture");
+
+        let quarantine = quarantine_trading_database(&database).expect("quarantine succeeds");
+
+        assert!(!database.exists());
+        assert_eq!(
+            std::fs::read(&quarantine).expect("database moved"),
+            b"database"
+        );
+        assert_eq!(
+            std::fs::read(format!("{}-wal", quarantine.display())).expect("WAL moved"),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(format!("{}-shm", quarantine.display())).expect("SHM moved"),
+            b"shm"
+        );
+        std::fs::remove_dir_all(directory).expect("fixture cleanup");
+    }
 }
 
 fn start_context_service() -> Result<aeris_context_runtime::ContextService, String> {
@@ -5330,8 +5547,10 @@ fn configure_desktop_state() -> ConfiguredLifecycle {
     ConfiguredLifecycle { workspace }
 }
 
-fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
-    let mut arguments = std::env::args_os().skip(1);
+fn configured_market_workers(
+    command_arguments: Vec<std::ffi::OsString>,
+) -> Result<Option<ConfiguredDesktop>, String> {
+    let mut arguments = command_arguments.into_iter();
     let command = arguments.next();
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
@@ -5409,10 +5628,14 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     }))
 }
 
-pub(super) fn run() {
-    let mut lifecycle_arguments = std::env::args_os().skip(1);
-    if lifecycle_arguments.next().as_deref() == Some(std::ffi::OsStr::new("--desktop-readiness")) {
-        if let Err(error) = run_desktop_readiness_command(lifecycle_arguments) {
+pub(super) fn run(
+    command_arguments: Vec<std::ffi::OsString>,
+    instance_lock: aeris_platform_runtime::InstanceLock,
+) {
+    if command_arguments.first().map(std::ffi::OsString::as_os_str)
+        == Some(std::ffi::OsStr::new("--desktop-readiness"))
+    {
+        if let Err(error) = run_desktop_readiness_command(command_arguments.into_iter().skip(1)) {
             diagnostic!("Aeris desktop readiness failed: {error}");
             std::process::exit(1);
         }
@@ -5421,16 +5644,24 @@ pub(super) fn run() {
     if let Err(error) = aeris_platform_runtime::migrate_legacy_native_data_root() {
         diagnostic!("Aeris legacy local state migration deferred: {error}");
     }
-    if std::env::args_os().len() == 1
+    let installed_app_side_effects = aeris_platform_runtime::active_data_root()
+        .is_ok_and(aeris_platform_runtime::DataRoot::allows_installed_app_side_effects);
+    if installed_app_side_effects
+        && command_arguments.is_empty()
         && let Err(error) = schedule_versioned_launcher_promotion()
     {
         diagnostic!("Aeris launcher promotion deferred: {error}");
     }
     let trading = match start_trading_service() {
         Ok(trading) => trading,
+        Err(aeris_trading_runtime::StoreError::Corrupt {
+            path,
+            newest_backup,
+            detail,
+        }) => handle_trading_corruption(&path, newest_backup.as_deref(), &detail),
         Err(error) => {
             diagnostic!("Aeris trading owner could not start: {error}");
-            exit_after_account_refresh_quiesce(1);
+            fatal_startup("The trading service could not start.");
         }
     };
     let context = match start_context_service() {
@@ -5438,15 +5669,15 @@ pub(super) fn run() {
         Err(error) => {
             diagnostic!("Aeris context owner could not start: {error}");
             let _ = trading.shutdown(Duration::from_secs(2));
-            exit_after_account_refresh_quiesce(1);
+            fatal_startup("The context service could not start.");
         }
     };
     if let Err(error) = aeris_desktop::trading::install(trading.clone()) {
         diagnostic!("Aeris trading owner could not be installed: {error}");
         let _ = trading.shutdown(Duration::from_secs(2));
-        exit_after_account_refresh_quiesce(1);
+        fatal_startup("The trading service could not be installed.");
     }
-    let configured = match configured_market_workers() {
+    let configured = match configured_market_workers(command_arguments) {
         Ok(Some(configured)) => configured,
         Ok(None) => {
             let _ = context.shutdown(Duration::from_secs(2));
@@ -5457,7 +5688,7 @@ pub(super) fn run() {
             diagnostic!("Aeris market worker could not start: {error}");
             let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
-            exit_after_account_refresh_quiesce(1);
+            fatal_startup("The market service could not start.");
         }
     };
     let market = match engine_market_worker::shared_market_runtime() {
@@ -5466,7 +5697,7 @@ pub(super) fn run() {
             diagnostic!("Aeris practice market calendar could not start: {error}");
             let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
-            exit_after_account_refresh_quiesce(1);
+            fatal_startup("The practice market calendar could not start.");
         }
     };
     // cTrader demo trading is optional: without it the desktop still runs, and broker
@@ -5490,10 +5721,23 @@ pub(super) fn run() {
         diagnostic!("Aeris practice market calendar could not be installed: {error}");
         let _ = context.shutdown(Duration::from_secs(2));
         let _ = trading.shutdown(Duration::from_secs(2));
-        exit_after_account_refresh_quiesce(1);
+        fatal_startup("The practice market calendar could not be installed.");
     }
-    let lifecycle = DesktopLifecycle::new(trading, context);
+    let lifecycle = DesktopLifecycle::new(trading, context, instance_lock);
     run_desktop(configured, lifecycle);
+}
+
+fn fatal_startup(message: &str) -> ! {
+    let diagnostics_log_path = aeris_platform_runtime::native_data_root().map_or_else(
+        |_| std::path::PathBuf::from("aeris.log"),
+        |root| root.join("logs").join("aeris.log"),
+    );
+    let detail = format!(
+        "{message}\n\nDiagnostics were written to:\n{}",
+        diagnostics_log_path.display()
+    );
+    let _ = aeris_platform_runtime::message_box("Aeris Terminal", &detail);
+    exit_after_account_refresh_quiesce(1);
 }
 
 fn schedule_versioned_launcher_promotion() -> Result<(), String> {
@@ -5529,10 +5773,14 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             gpui_base::init(cx);
             cx.set_global(base_theme(&AerisTheme::dark()));
             install_platform_http_client(cx);
-            cx.set_app_identity(
-                aeris_platform_runtime::APPLICATION_IDENTIFIER,
-                aeris_platform_runtime::APPLICATION_NAME,
-            );
+            if aeris_platform_runtime::active_data_root()
+                .is_ok_and(aeris_platform_runtime::DataRoot::allows_installed_app_side_effects)
+            {
+                cx.set_app_identity(
+                    aeris_platform_runtime::APPLICATION_IDENTIFIER,
+                    aeris_platform_runtime::APPLICATION_NAME,
+                );
+            }
             if let Err(error) = cx.text_system().add_fonts(
                 PLATFORM_FONT_BYTES
                     .iter()
@@ -5572,7 +5820,11 @@ fn mount_desktop(
             if let Some(quit) = quit
                 && let Err(error) = quit.await
             {
+                let blocks_exit = error.blocks_exit();
                 diagnostic!("Aeris desktop shutdown failed: {error}");
+                if blocks_exit {
+                    std::process::exit(1);
+                }
             }
         }
     })

@@ -21,6 +21,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use crate::data_root::merge_legacy_owned_directory;
+use crate::data_root::{native_data_root, native_legacy_data_root};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use same_file::Handle as FileIdentity;
@@ -1486,141 +1489,6 @@ fn inventory_roots(inventory: &InstallationInventory) -> Vec<PathBuf> {
     roots
 }
 
-/// Resolves the one native `Aeris` data root used by the desktop runtime.
-///
-/// # Errors
-/// Returns an error when the current user's native data directory is unavailable.
-pub fn native_data_root() -> Result<PathBuf, LifecycleError> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|root| root.join("Aeris"))
-            .ok_or(LifecycleError::InvalidInventory)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|root| root.join("Library/Application Support/Aeris"))
-            .ok_or(LifecycleError::InvalidInventory)
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
-            })
-            .map(|root| root.join("aeris"))
-            .ok_or(LifecycleError::InvalidInventory)
-    }
-}
-
-fn native_legacy_data_root(product: &str) -> Result<PathBuf, LifecycleError> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|root| root.join(product))
-            .ok_or(LifecycleError::InvalidInventory)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|root| root.join("Library/Application Support").join(product))
-            .ok_or(LifecycleError::InvalidInventory)
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".local/share"))
-            })
-            .map(|root| root.join(product.to_ascii_lowercase()))
-            .ok_or(LifecycleError::InvalidInventory)
-    }
-}
-
-/// Moves legacy Axiusflow local state into the `Aeris` data root before
-/// runtime services open persisted files. Existing `Aeris` files win; only
-/// missing paths are migrated, so a previous `Aeris` run is never replaced
-/// by older local state.
-///
-/// # Errors
-/// Returns an error if either owned root is unsafe or a required filesystem
-/// move cannot complete.
-pub fn migrate_legacy_native_data_root() -> Result<(), LifecycleError> {
-    let current = native_data_root()?;
-    validate_owned_root(&current)?;
-    // The immediately preceding product name takes precedence over older state.
-    for product in ["TradingPlot", "Axiusflow"] {
-        let legacy = native_legacy_data_root(product)?;
-        if legacy == current || !legacy.exists() {
-            continue;
-        }
-        validate_owned_root(&legacy)?;
-        if let Ok(metadata) = fs::symlink_metadata(&current)
-            && (!metadata.is_dir() || metadata.file_type().is_symlink())
-        {
-            return Err(LifecycleError::StateMigrationFailed);
-        }
-        merge_legacy_owned_directory(&legacy, &current)?;
-    }
-    Ok(())
-}
-
-fn merge_legacy_owned_directory(source: &Path, destination: &Path) -> Result<(), LifecycleError> {
-    let source_metadata =
-        fs::symlink_metadata(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
-    if !source_metadata.is_dir() || source_metadata.file_type().is_symlink() {
-        return Err(LifecycleError::StateMigrationFailed);
-    }
-    fs::create_dir_all(destination).map_err(|_| LifecycleError::StateMigrationFailed)?;
-    let destination_metadata =
-        fs::symlink_metadata(destination).map_err(|_| LifecycleError::StateMigrationFailed)?;
-    if !destination_metadata.is_dir() || destination_metadata.file_type().is_symlink() {
-        return Err(LifecycleError::StateMigrationFailed);
-    }
-
-    for entry in fs::read_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)? {
-        let entry = entry.map_err(|_| LifecycleError::StateMigrationFailed)?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let source_type = entry
-            .file_type()
-            .map_err(|_| LifecycleError::StateMigrationFailed)?;
-        if source_type.is_symlink() {
-            return Err(LifecycleError::StateMigrationFailed);
-        }
-        match fs::symlink_metadata(&destination_path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::rename(&source_path, &destination_path)
-                    .map_err(|_| LifecycleError::StateMigrationFailed)?;
-            }
-            Ok(destination_metadata)
-                if source_type.is_dir()
-                    && destination_metadata.is_dir()
-                    && !destination_metadata.file_type().is_symlink() =>
-            {
-                merge_legacy_owned_directory(&source_path, &destination_path)?;
-            }
-            Ok(_) => {}
-            Err(_) => return Err(LifecycleError::StateMigrationFailed),
-        }
-    }
-
-    let mut remaining = fs::read_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
-    let empty = remaining.next().is_none();
-    drop(remaining);
-    if empty {
-        fs::remove_dir(source).map_err(|_| LifecycleError::StateMigrationFailed)?;
-    }
-    Ok(())
-}
-
 /// Resolves the stable per-user `Aeris` installation root used by the
 /// website bootstrap and the persisted launcher. It intentionally requires no
 /// administrator-owned system directory.
@@ -1798,7 +1666,7 @@ pub fn native_installation_inventory(
     })
 }
 
-fn validate_owned_root(path: &Path) -> Result<(), LifecycleError> {
+pub(crate) fn validate_owned_root(path: &Path) -> Result<(), LifecycleError> {
     if !path.is_absolute()
         || path.components().count() < 3
         || path.parent().is_none()
@@ -2186,34 +2054,8 @@ fn write_json_atomic<T: Serialize>(
     if bytes.len() > MAXIMUM_MANIFEST_BYTES || !valid_identifier(name, 192) {
         return Err(LifecycleError::JournalCorrupt);
     }
-    let temporary = directory.join(format!(".{name}.next"));
-    remove_file_if_present(&temporary).map_err(|_| LifecycleError::StagingFailed)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|_| LifecycleError::StagingFailed)?;
-    file.write_all(&bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| LifecycleError::StagingFailed)?;
     let destination = directory.join(name);
-    if let Err(error) = replace_file_atomic(&temporary, &destination) {
-        let _ = remove_file_if_present(&temporary);
-        return Err(error);
-    }
-    #[cfg(unix)]
-    return sync_directory(directory);
-    #[cfg(not(unix))]
-    {
-        sync_directory(directory);
-        Ok(())
-    }
-}
-
-/// Replaces a small lifecycle record without exposing a partially written file.
-///
-fn replace_file_atomic(temporary: &Path, destination: &Path) -> Result<(), LifecycleError> {
-    crate::replace_file_atomically(temporary, destination)
+    aeris_platform_sys::fs::write_file_durably(&destination, &bytes)
         .map_err(|_| LifecycleError::StagingFailed)
 }
 

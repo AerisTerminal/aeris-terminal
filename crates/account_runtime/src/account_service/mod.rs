@@ -570,7 +570,7 @@ impl AccountService {
             self.apply_online_restore_tokens(&vault, tokens, |tokens| {
                 let endpoints = endpoints.as_ref().map_err(Clone::clone)?;
                 self.retry_restore_lookup(|| {
-                    link_subject(endpoints, &agent, &tokens.id_token, &tokens.subject)
+                    link_subject(endpoints, &agent, tokens.id_token.expose(), &tokens.subject)
                 })
             })
         else {
@@ -843,7 +843,12 @@ impl AccountService {
         if state.last_generation != 0 || state.pending.is_some() || !state.restore_allowed {
             return None;
         }
-        if let Some(rotated) = tokens.refresh.as_deref().filter(|token| !token.is_empty()) {
+        if let Some(rotated) = tokens
+            .refresh
+            .as_ref()
+            .map(oidc::SecretToken::expose)
+            .filter(|token| !token.is_empty())
+        {
             let secret = Zeroizing::new(rotated.as_bytes().to_vec());
             if vault.store(REFRESH_VAULT_KEY, secret.as_slice()).is_err() {
                 // The successful grant may already have invalidated the old
@@ -1492,8 +1497,13 @@ impl AccountService {
                 &nonce,
             )
             .and_then(|tokens| {
-                link_subject(&endpoints, &agent, &tokens.id_token, &tokens.subject)
-                    .map(|(account, plan, profile)| (account, plan, profile, tokens, agent))
+                link_subject(
+                    &endpoints,
+                    &agent,
+                    tokens.id_token.expose(),
+                    &tokens.subject,
+                )
+                .map(|(account, plan, profile)| (account, plan, profile, tokens, agent))
             })
         });
         match outcome {
@@ -1510,7 +1520,7 @@ impl AccountService {
                     &account_id,
                     plan,
                     &profile,
-                    tokens.refresh.as_deref(),
+                    tokens.refresh.as_ref().map(oidc::SecretToken::expose),
                     &vault,
                 );
                 if completed {
@@ -2083,7 +2093,12 @@ where
 {
     match outcome {
         Ok(tokens) => {
-            if persist_rotated_refresh(service, generation, vault, tokens.refresh.as_deref()) {
+            if persist_rotated_refresh(
+                service,
+                generation,
+                vault,
+                tokens.refresh.as_ref().map(oidc::SecretToken::expose),
+            ) {
                 Ok(tokens)
             } else {
                 Err(lease::RefreshOutcome::Unavailable)
@@ -2516,7 +2531,7 @@ where
     if let Ok((account_id, _plan, profile)) = link_subject(
         &session.endpoints,
         &agent,
-        &tokens.id_token,
+        tokens.id_token.expose(),
         &tokens.subject,
     ) {
         let _ = service.apply_linked_profile(
@@ -2530,7 +2545,7 @@ where
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
         &agent,
-        &tokens.id_token,
+        tokens.id_token.expose(),
         &tokens.subject,
         &session.device_id,
     ) else {
@@ -2584,7 +2599,7 @@ where
     let Ok(compact) = lease::fetch_compact(
         &session.endpoints,
         agent,
-        &tokens.id_token,
+        tokens.id_token.expose(),
         &tokens.subject,
         &session.device_id,
     ) else {

@@ -3036,6 +3036,18 @@ fn measured_store_workload_is_bounded_and_restartable() {
     };
     let service = TradingService::start(measured_config.clone()).expect("service starts");
     service
+        .register_account(TradingAccount {
+            id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            display_name: "SIM • Measurement".to_string(),
+            environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
+        })
+        .expect("measurement account registers");
+    service
         .register_instrument(instrument())
         .expect("instrument registers");
     let write_started = std::time::Instant::now();
@@ -3072,6 +3084,10 @@ fn measured_store_workload_is_bounded_and_restartable() {
     let database_bytes = fs::metadata(&measured_config.database_path)
         .expect("database metadata")
         .len();
+    let quick_check_started = std::time::Instant::now();
+    super::store::preflight_existing_database(&measured_config.database_path)
+        .expect("quick_check passes");
+    let quick_check_elapsed = quick_check_started.elapsed();
     let reopen_started = std::time::Instant::now();
     let reopened = TradingService::start(measured_config).expect("service reopens");
     let snapshot = reopened.snapshot().expect("snapshot reloads");
@@ -3081,7 +3097,7 @@ fn measured_store_workload_is_bounded_and_restartable() {
         usize::try_from(EXECUTIONS).expect("count")
     );
     println!(
-        "D3 sqlite measurement: {EXECUTIONS} executions + {USER_RECORDS} user records in {write_elapsed:?}; reopen {reopen_elapsed:?}; database {database_bytes} bytes"
+        "D3 sqlite measurement: {EXECUTIONS} executions + {USER_RECORDS} user records in {write_elapsed:?}; quick_check {quick_check_elapsed:?}; reopen {reopen_elapsed:?}; database {database_bytes} bytes"
     );
     reopened
         .shutdown(Duration::from_secs(10))

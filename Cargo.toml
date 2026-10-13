@@ -18,6 +18,7 @@ members = [
     "crates/domain/trading",
     "crates/contracts",
     "crates/observability",
+    "crates/platform_sys",
     "crates/platform_runtime",
     "crates/provider_history",
     "crates/ui/chart_integration",

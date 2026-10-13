@@ -258,12 +258,7 @@ fn write_report_atomically(path: &Path, report: &LiveMarketGateEvidence) -> Resu
     if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > LIVE_MARKET_GATE_MAXIMUM_REPORT_BYTES {
         return Err("live market gate evidence exceeds its bound".to_string());
     }
-    let temporary = path.with_extension("json.tmp");
-    remove_if_present(&temporary)?;
-    fs::write(&temporary, encoded)
-        .map_err(|_| "live market gate evidence could not be written".to_string())?;
-    remove_if_present(path)?;
-    fs::rename(&temporary, path)
+    aeris_platform_sys::fs::write_file_durably(path, &encoded)
         .map_err(|_| "live market gate evidence could not be committed".to_string())
 }
 

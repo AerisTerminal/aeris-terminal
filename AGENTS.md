@@ -84,7 +84,24 @@ violations and missing verification explicitly, and never describe them as satis
 - Do not restore `apps/engine`, `local_engine_client`, a secondary market process, local process transport, or market autostart.
 - UI-thread code performs no blocking network, disk, process, or shutdown work. Background workers do
   not mutate GPUI state directly.
-- Workspace-wide `unsafe_code` remains forbidden.
+- `unsafe` is isolated to target-specific FFI under `crates/platform_sys/src/windows/` and
+  `crates/platform_sys/src/macos/`, whose blocks require documented, single-operation safety
+  justifications. Until the M8.3 FFI consolidation, only the exact `platform_runtime` FFI files
+  allowlisted by `tools/naming_check` are additional exceptions.
+- `platform_sys` is a leaf crate. Only `platform_runtime`, `trading_runtime`, and `observability`
+  may depend on it directly.
+- Secret-bearing types whose names contain `Token`, `Secret`, `Password`, or `Credential` must not
+  derive `Debug`, and those values must not use debug formatting. Only the exact reviewed,
+  non-secret or transitively redacting wrappers in `tools/naming_check` are exceptions.
+- Durable file replacement is owned by `platform_sys::fs`: staging uses a unique temporary in the
+  destination directory, synchronizes file contents before replacement, and synchronizes the
+  parent directory on Unix. Production code must use this writer instead of raw `fs::write` or
+  `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
+  `tools/naming_check`. Do not add another atomic-file FFI implementation.
+- Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
+  lock. They must not overlap the production data root, probe production vault entries, migrate
+  legacy state, write installed-app identity, promote launchers, or run updates. Only the explicit
+  cTrader borrowing flag may route the exact cTrader broker-connection vault key to production.
 
 Architecture assertions in `tools/naming_check` are authoritative when they are stricter than prose.
 

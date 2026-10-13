@@ -15,6 +15,7 @@ use aeris_account::{AccountId, PlanId};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 /// Authorization URL parameters for one login transaction.
 pub struct AuthorizationRequest<'a> {
@@ -220,18 +221,43 @@ fn url_encode(value: &str) -> String {
     encoded
 }
 
+/// Secret token material that is cleared when its last owner is dropped.
+///
+/// The inner value is available only through an explicit exposure method and
+/// debug formatting never includes it. Deliberately do not implement `Clone`
+/// or `Display`: token ownership must stay visible and formatting must not
+/// accidentally disclose credentials.
+#[derive(Eq, PartialEq)]
+pub struct SecretToken(Zeroizing<String>);
+
+impl SecretToken {
+    pub(super) fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    pub(super) fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for SecretToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecretToken([REDACTED])")
+    }
+}
+
 /// Verified token outcome for one login transaction. Access material stays
 /// in engine memory and never leaves the account-runtime ownership boundary or enters logs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedTokens {
     /// OIDC subject linked to the canonical account.
     pub subject: String,
     /// Bearer proof for the control-plane link call (memory only).
-    pub access: String,
+    pub access: SecretToken,
     /// Identity proof for control-plane calls (memory only).
-    pub id_token: String,
+    pub id_token: SecretToken,
     /// Refresh material for vault storage (opaque to logs).
-    pub refresh: Option<String>,
+    pub refresh: Option<SecretToken>,
 }
 
 /// Exchanges one authorization code and validates the ID token.
@@ -289,9 +315,12 @@ pub fn exchange_code(
     )?;
     Ok(VerifiedTokens {
         subject,
-        access: token.bearer,
-        id_token: token.identity,
-        refresh: token.refresh.filter(|token| !token.is_empty()),
+        access: SecretToken::new(token.bearer),
+        id_token: SecretToken::new(token.identity),
+        refresh: token
+            .refresh
+            .filter(|token| !token.is_empty())
+            .map(SecretToken::new),
     })
 }
 
@@ -369,9 +398,12 @@ pub fn refresh_grant(
     .map_err(|_| RefreshGrantError::Unavailable)?;
     Ok(VerifiedTokens {
         subject,
-        access: token.bearer.clone(),
-        id_token: token.identity,
-        refresh: token.refresh.filter(|token| !token.is_empty()),
+        access: SecretToken::new(token.bearer),
+        id_token: SecretToken::new(token.identity),
+        refresh: token
+            .refresh
+            .filter(|token| !token.is_empty())
+            .map(SecretToken::new),
     })
 }
 
@@ -643,8 +675,8 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthorizationRequest, OidcEndpoints, audience_matches, authorization_url,
-        control_plane_origin, nonce_matches, split_jwt, url_encode,
+        AuthorizationRequest, OidcEndpoints, SecretToken, VerifiedTokens, audience_matches,
+        authorization_url, control_plane_origin, nonce_matches, split_jwt, url_encode,
     };
 
     fn endpoints() -> OidcEndpoints {
@@ -657,6 +689,23 @@ mod tests {
             revocation_endpoint: "https://auth.example.test/api/auth/oauth2/revoke".to_string(),
             link_endpoint: "https://auth.example.test/api/aeris/link".to_string(),
             lease_endpoint: "https://auth.example.test/api/aeris/lease".to_string(),
+        }
+    }
+
+    #[test]
+    fn verified_token_debug_output_redacts_every_secret() {
+        let tokens = VerifiedTokens {
+            subject: "subject-1".to_string(),
+            access: SecretToken::new("access-secret".to_string()),
+            id_token: SecretToken::new("identity-secret".to_string()),
+            refresh: Some(SecretToken::new("refresh-secret".to_string())),
+        };
+
+        let debug = format!("{tokens:?}");
+        assert!(debug.contains("subject-1"));
+        assert_eq!(debug.matches("[REDACTED]").count(), 3);
+        for secret in ["access-secret", "identity-secret", "refresh-secret"] {
+            assert!(!debug.contains(secret));
         }
     }
 

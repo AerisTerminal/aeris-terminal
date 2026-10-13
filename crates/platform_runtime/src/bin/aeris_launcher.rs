@@ -52,9 +52,19 @@ const EARLY_DESKTOP_STARTUP_WINDOW: Duration = Duration::from_secs(5);
 const EARLY_DESKTOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn main() {
+    let _log_guard = native_install_root()
+        .map_err(|error| error.to_string())
+        .and_then(|root| {
+            aeris_observability::install_log_sink(root.join("logs").join("launcher.log"))
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|error| {
+            aeris_observability::diagnostic!("Aeris launcher diagnostics could not start: {error}");
+        })
+        .ok();
     let no_arguments = std::env::args_os().len() == 1;
     if let Err(error) = run(std::env::args_os().skip(1)) {
-        eprintln!("Aeris lifecycle: {error}");
+        aeris_observability::diagnostic!("Aeris lifecycle: {error}");
         if no_arguments {
             show_user_launch_error(&error);
         }
@@ -64,26 +74,8 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn show_user_launch_error(error: &str) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const SCRIPT: &str = "$shell=New-Object -ComObject WScript.Shell; [void]$shell.Popup($env:AERIS_LAUNCH_ERROR,0,'Aeris Terminal',16)";
     let message = user_launch_error_message(error);
-    let _ = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            SCRIPT,
-        ])
-        .env("AERIS_LAUNCH_ERROR", message)
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = aeris_platform_runtime::message_box("Aeris Terminal", &message);
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -318,7 +310,7 @@ fn persist_stable_launcher(source: &Path, destination: &Path) -> Result<(), Stri
         .open(&staging)
         .and_then(|file| file.sync_all())
         .map_err(|_| "stable launcher staging copy could not be committed".to_string())?;
-    fs::rename(&staging, destination)
+    replace_file_atomically(&staging, destination)
         .map_err(|_| "stable launcher could not be committed".to_string())
 }
 
@@ -434,7 +426,7 @@ fn install_remote_update(
         .install(signed, &bundle_root, hooks)
         .map_err(|error| error.to_string())?;
     if let Err(error) = spawn_active_launcher_promotion(installer) {
-        eprintln!("Aeris Terminal launcher promotion deferred: {error}");
+        aeris_observability::diagnostic!("Aeris Terminal launcher promotion deferred: {error}");
     }
     remove_download_bundle(&downloads_root, &bundle_root)?;
     Ok(())
@@ -640,7 +632,7 @@ where
     // every same-generation launch so one transient failure cannot strand an
     // old launcher that lacks newer lifecycle commands.
     if let Err(error) = promote() {
-        eprintln!("Aeris Terminal launcher promotion deferred: {error}");
+        aeris_observability::diagnostic!("Aeris Terminal launcher promotion deferred: {error}");
     }
     true
 }
@@ -676,7 +668,7 @@ fn update_and_restart(
         remove_download_bundle(&prepared.downloads_root, &prepared.bundle_root)
     })();
     if let Err(update_error) = update_result {
-        eprintln!("Aeris Terminal update deferred: {update_error}");
+        aeris_observability::diagnostic!("Aeris Terminal update deferred: {update_error}");
         // The desktop has already yielded ownership to this launcher. Recover
         // whatever transaction state is safely recoverable, then relaunch the
         // verified active release so a transient update failure does not make
@@ -1422,7 +1414,7 @@ fn reconstruct_release_file_with_fetch(
     drop(output);
     verify_release_file(&partial_path, target)
         .map_err(|_| "reconstructed release artifact hash verification failed".to_string())?;
-    fs::rename(&partial_path, &final_path)
+    replace_file_atomically(&partial_path, &final_path)
         .map_err(|_| "verified reconstructed release artifact could not be committed".to_string())
 }
 
@@ -1592,7 +1584,7 @@ fn download_release_file(
     let mut offset = partial_length(&partial_path, expected.size)?;
     if offset == expected.size {
         if verify_release_file(&partial_path, expected).is_ok() {
-            fs::rename(&partial_path, &final_path)
+            replace_file_atomically(&partial_path, &final_path)
                 .map_err(|_| "verified release artifact could not be committed".to_string())?;
             return Ok(());
         }
@@ -1637,7 +1629,7 @@ fn download_release_file(
         let _ = fs::remove_file(&partial_path);
         return Err("release artifact hash verification failed".to_string());
     }
-    fs::rename(&partial_path, &final_path)
+    replace_file_atomically(&partial_path, &final_path)
         .map_err(|_| "verified release artifact could not be committed".to_string())?;
     Ok(())
 }
@@ -1817,7 +1809,7 @@ fn remove_relocated_binary(staged: &Path) {
             dir.display(),
             log.display()
         );
-        if fs::write(&bat, body).is_err() {
+        if aeris_platform_runtime::fs::write_file_durably(&bat, body.as_bytes()).is_err() {
             return;
         }
         let _ = Command::new("cmd")
@@ -1884,7 +1876,9 @@ fn launch_active_desktop(
     let quarantined = match read_quarantined_release(install_root) {
         Ok(quarantined) => quarantined,
         Err(error) => {
-            eprintln!("Aeris Terminal failed-release quarantine could not be read: {error}");
+            aeris_observability::diagnostic!(
+                "Aeris Terminal failed-release quarantine could not be read: {error}"
+            );
             None
         }
     };
@@ -1903,7 +1897,7 @@ fn launch_active_desktop(
     let mut child = match spawn_desktop_release(installer, &active, suppress_launcher_promotion) {
         Ok(child) => child,
         Err(error) if retained.is_some() => {
-            eprintln!(
+            aeris_observability::diagnostic!(
                 "Aeris Terminal active release {} failed to start; restoring retained known-good release",
                 active.install_generation
             );
@@ -1917,7 +1911,7 @@ fn launch_active_desktop(
     }
     match observe_early_desktop_startup(&mut child, EARLY_DESKTOP_STARTUP_WINDOW) {
         Ok(EarlyDesktopStartup::ExitedUnsuccessfully) => {
-            eprintln!(
+            aeris_observability::diagnostic!(
                 "Aeris Terminal active release {} exited during startup; restoring retained known-good release",
                 active.install_generation
             );
@@ -1933,12 +1927,16 @@ fn launch_active_desktop(
             if should_promote_after_probation(&active, launcher_generation)
                 && let Err(error) = spawn_active_launcher_promotion(installer)
             {
-                eprintln!("Aeris Terminal launcher promotion deferred: {error}");
+                aeris_observability::diagnostic!(
+                    "Aeris Terminal launcher promotion deferred: {error}"
+                );
             }
             Ok(())
         }
         Err(error) => {
-            eprintln!("Aeris Terminal startup observation degraded: {error}");
+            aeris_observability::diagnostic!(
+                "Aeris Terminal startup observation degraded: {error}"
+            );
             Ok(())
         }
     }
@@ -2075,6 +2073,11 @@ struct DesktopReadinessReport {
     workspace_revision: u64,
     provider_count: usize,
     workspace_restored: bool,
+    validation_mode: ReadinessFlag,
+    instance_lock: ReadinessFlag,
+    log_path: String,
+    vault_namespace: String,
+    borrowed_stored_ctrader: ReadinessFlag,
     services: DesktopServiceReadiness,
 }
 
@@ -2090,6 +2093,10 @@ struct DesktopServiceReadiness {
 #[derive(serde::Deserialize)]
 #[serde(transparent)]
 struct ServiceReady(bool);
+
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+struct ReadinessFlag(bool);
 
 impl NativeHooks {
     fn desktop(&self, release: &ActiveRelease) -> PathBuf {
@@ -2166,12 +2173,17 @@ impl LifecycleHooks for NativeHooks {
                 .map_err(redacted)?;
             Self::wait_for_child(child)?;
             let readiness: DesktopReadinessReport = read_bounded_json(&report)?;
-            if readiness.schema_version != 4
+            if readiness.schema_version != 5
                 || readiness.release_identity != candidate.release_identity
                 || readiness.install_generation != candidate.install_generation
                 || readiness.desktop_process_id == 0
                 || readiness.provider_count == 0
                 || !readiness.workspace_restored
+                || readiness.validation_mode.0
+                || !readiness.instance_lock.0
+                || readiness.log_path.is_empty()
+                || readiness.vault_namespace != "production"
+                || readiness.borrowed_stored_ctrader.0
                 || !readiness.services.market.0
                 || !readiness.services.account.0
                 || !readiness.services.trading.0

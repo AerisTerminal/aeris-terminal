@@ -2,9 +2,9 @@ use aeris_chart_integration::{
     ChartDrawingKind, ChartDrawingStamp, ChartIndicatorChrome, ChartType,
 };
 use aeris_contracts::InstrumentSearchCategories;
+use aeris_platform_runtime::fs::write_file_durably;
 use std::{
-    fs::{self, OpenOptions},
-    io::Write as _,
+    fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
@@ -634,7 +634,6 @@ pub fn load_chart_chrome_preferences() -> ChartChromePreferences {
 
 fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
     fs::read_to_string(path)
-        .or_else(|_| fs::read_to_string(chart_chrome_backup_path(path)))
         .ok()
         .as_deref()
         .map(parse_chart_chrome_preferences)
@@ -770,71 +769,9 @@ pub fn save_chart_chrome_preferences_to(
         fs::create_dir_all(parent)
             .map_err(|_| "desktop chart chrome directory could not be created".to_string())?;
     }
-    let staging = chart_chrome_staging_path(path);
-    let backup = chart_chrome_backup_path(path);
     let encoded = encode_chart_chrome_preferences(preferences);
-    let mut staging_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&staging)
-        .map_err(|_| "desktop chart chrome could not be written".to_string())?;
-    staging_file
-        .write_all(encoded.as_bytes())
-        .and_then(|()| staging_file.sync_all())
-        .map_err(|_| "desktop chart chrome could not be written".to_string())?;
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        sync_chart_chrome_directory(parent)?;
-    }
-    if path.exists() {
-        remove_chart_chrome_file_if_present(&backup)?;
-        fs::rename(path, &backup)
-            .map_err(|_| "desktop chart chrome could not be replaced".to_string())?;
-        #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            sync_chart_chrome_directory(parent)?;
-        }
-    }
-    if fs::rename(&staging, path).is_err() {
-        if !path.exists() && backup.exists() {
-            let _ = fs::rename(&backup, path);
-        }
-        return Err("desktop chart chrome could not be published".to_string());
-    }
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        sync_chart_chrome_directory(parent)?;
-    }
-    remove_chart_chrome_file_if_present(&backup)?;
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        sync_chart_chrome_directory(parent)?;
-    }
-    Ok(())
-}
-
-fn chart_chrome_staging_path(path: &Path) -> PathBuf {
-    path.with_extension("tmp")
-}
-
-fn chart_chrome_backup_path(path: &Path) -> PathBuf {
-    path.with_extension("bak")
-}
-
-fn remove_chart_chrome_file_if_present(path: &Path) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("desktop chart chrome could not be replaced".to_string()),
-    }
-}
-
-#[cfg(unix)]
-fn sync_chart_chrome_directory(path: &Path) -> Result<(), String> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| "desktop chart chrome directory could not be synchronized".to_string())
+    write_file_durably(path, encoded.as_bytes())
+        .map_err(|_| "desktop chart chrome could not be published".to_string())
 }
 
 #[cfg(test)]
@@ -842,8 +779,7 @@ mod tests {
     use super::{
         ChartChromePreferences, ChartChromeSaveState, DrawingFavorites, INDICATOR_SPECS,
         IndicatorKind, IndicatorLocation, IndicatorParameters, InstrumentSearchCategories,
-        TradingShortcutMode, WindowFrame, chart_chrome_backup_path, chart_chrome_staging_path,
-        encode_chart_chrome_preferences, filter_indicator_specs,
+        TradingShortcutMode, WindowFrame, encode_chart_chrome_preferences, filter_indicator_specs,
         load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
         wait_for_chart_chrome_generation,
@@ -864,8 +800,7 @@ mod tests {
 
     fn remove_chart_chrome_test_files(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(chart_chrome_staging_path(path));
-        let _ = std::fs::remove_file(chart_chrome_backup_path(path));
+        let _ = std::fs::remove_file(path.with_extension("bak"));
     }
 
     fn starred_trend_line_and_star() -> DrawingFavorites {
@@ -1081,10 +1016,9 @@ mod tests {
     }
 
     #[test]
-    fn chart_chrome_load_recovers_committed_preferences_from_backup_boundary() {
-        let path = temporary_chart_chrome_path("backup-recovery");
-        let backup = chart_chrome_backup_path(&path);
-        let staging = chart_chrome_staging_path(&path);
+    fn chart_chrome_loader_needs_no_backup_file() {
+        let path = temporary_chart_chrome_path("no-backup-needed");
+        let backup = path.with_extension("bak");
         let committed = ChartChromePreferences {
             indicator_name_labels_visible: false,
             indicator_value_labels_visible: true,
@@ -1096,27 +1030,19 @@ mod tests {
             trading_shortcuts: TradingShortcutMode::Confirm,
             drawing_context_toolbar_origin: None,
         };
-        let pending = ChartChromePreferences {
-            indicator_name_labels_visible: true,
-            indicator_value_labels_visible: false,
-            indicator_price_lines_visible: true,
-            chart_type: ChartType::Line,
-            symbol_search_categories: InstrumentSearchCategories::ALL,
-            window_frame: WindowFrame::Framed,
-            drawing_favorites: DrawingFavorites::default(),
-            trading_shortcuts: TradingShortcutMode::Confirm,
-            drawing_context_toolbar_origin: None,
-        };
         save_chart_chrome_preferences_to(&path, committed).expect("committed preferences save");
-
-        std::fs::rename(&path, &backup).expect("crash boundary moves current to backup");
-        std::fs::write(&staging, encode_chart_chrome_preferences(pending))
-            .expect("pending staging writes");
+        std::fs::write(&backup, "chart_type=line\n").expect("obsolete backup fixture writes");
 
         assert_eq!(
             load_chart_chrome_preferences_from(&path),
             committed,
-            "a crash after current-to-backup must retain the last committed preferences"
+            "the durable destination is authoritative even when an obsolete backup exists"
+        );
+        std::fs::remove_file(&path).expect("current fixture removes");
+        assert_eq!(
+            load_chart_chrome_preferences_from(&path),
+            ChartChromePreferences::default(),
+            "the loader must not fall back to an obsolete backup"
         );
         remove_chart_chrome_test_files(&path);
     }
@@ -1179,8 +1105,6 @@ mod tests {
         let state = state.lock().expect("save state locks");
         assert!(!state.worker_active);
         assert!(state.latest.is_none());
-        assert!(!chart_chrome_staging_path(&path).exists());
-        assert!(!chart_chrome_backup_path(&path).exists());
         drop(state);
         remove_chart_chrome_test_files(&path);
     }

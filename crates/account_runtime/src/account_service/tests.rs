@@ -4,7 +4,7 @@ use super::{
     AccountRestoreReadiness, AccountService, AccountServiceConfig, DEVICE_VAULT_KEY,
     LEASE_DIRECTORY_VAULT_KEY, LEASE_VAULT_KEY, LOGIN_TIMEOUT, LocalRestore, REFRESH_VAULT_KEY,
     RejectedRestoreMarker, UnavailableVault, claim_profile_refresh, configured_auth_issuer,
-    oidc::{self, AccountProfile, VerifiedTokens},
+    oidc::{self, AccountProfile, SecretToken, VerifiedTokens},
 };
 use aeris_account::{AccountId, PlanId};
 use aeris_contracts::{AccountSessionState, AccountView};
@@ -921,9 +921,9 @@ fn rotated_refresh_store_failure_fails_current_session_closed() {
     let failing = AllMutationFailureVault { inner: &vault };
     let tokens = VerifiedTokens {
         subject: "subject".to_string(),
-        access: "access".to_string(),
-        id_token: "identity".to_string(),
-        refresh: Some("rotated-refresh".to_string()),
+        access: SecretToken::new("access".to_string()),
+        id_token: SecretToken::new("identity".to_string()),
+        refresh: Some(SecretToken::new("rotated-refresh".to_string())),
     };
 
     let outcome = super::accept_refresh_grant(
@@ -1852,9 +1852,9 @@ fn verified_restore(
         },
         VerifiedTokens {
             subject: "subject-1".to_string(),
-            access: "access-token".to_string(),
-            id_token: "verified-id-token".to_string(),
-            refresh: refresh.map(str::to_string),
+            access: SecretToken::new("access-token".to_string()),
+            id_token: SecretToken::new("verified-id-token".to_string()),
+            refresh: refresh.map(|token| SecretToken::new(token.to_string())),
         },
     )
 }

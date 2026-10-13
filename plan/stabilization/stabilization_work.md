@@ -138,19 +138,19 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | UI-08 | Medium | Trading state duplicated per pane and polled from the render path | M6.10 | open |
 | UI-09 | Medium | Persistence lacks versioning, duplicates atomic-write logic, and silently resets on corruption | M7.7 (duplication/backup), M7.8 | open |
 | UI-10 | Medium | Control flow depends on matching display strings | M5.1 (runtime part), M6.8, M6.11 | open |
-| UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | open |
+| UI-11 | Medium | Discarded results and fragmented error presentation | M1.4 (exit park part), M6.2 (most), M6.4 (restore setters), M6.12 | exit park closed in this commit; remainder open |
 | UI-12 | Medium (bloat; not a runtime risk) | Dormant account and placeholder code compiled into production | M7.2 | open |
 | UI-13 | Low | Hardcoded colours outside the design system | M7.1 | open |
 | UI-14 | Medium | Chart analytics and transforms in the integration glue | M7.3 (requests), M7.9 (hollow), M7.10 (sweeps), M7.11 (tape) | open |
 | UI-15 | Medium | Tests are coupled to implementation details | M7.12 | open |
 | UI-16 | Low | Frame loop does unrelated work on every frame | M7.6 | open |
 | PL-01 | High | Dormant release, launcher, rollout, and updater stack | M8.1 (kept and isolated per D2) | open |
-| PL-02 | High | `unsafe_code` forbid is not enforced in platform_runtime | M1.5 (start), M8.3 | open |
-| PL-03 | High | Diagnostics are lost in Windows release builds; no panic hook or log file | M1.7 | open |
-| PL-04 | High | No single-instance lock | M1.8 | open |
-| PL-05 | Medium-High | Trading SQLite store lacks busy timeout, integrity check, and corruption recovery | M1.9 | open |
-| PL-06 | Medium | Five atomic-write implementations; trading `write_atomic` is not atomic | M1.5 (primitive), M1.6 | open |
-| PL-07 | Medium | Dormant account_runtime with latent defects and a heavy dependency stack | M1.4 (part), M8.4 (rest) | open |
+| PL-02 | High | `unsafe_code` forbid is not enforced in platform_runtime | M1.5 (start), M8.3 | platform_sys boundary started in this commit; remaining FFI migration open |
+| PL-03 | High | Diagnostics are lost in Windows release builds; no panic hook or log file | M1.7 | closed in this commit |
+| PL-04 | High | No single-instance lock | M1.8 | closed in this commit |
+| PL-05 | Medium-High | Trading SQLite store lacks busy timeout, integrity check, and corruption recovery | M1.9 | closed in this commit |
+| PL-06 | Medium | Five atomic-write implementations; trading `write_atomic` is not atomic | M1.5 (primitive), M1.6 | closed in this commit |
+| PL-07 | Medium | Dormant account_runtime with latent defects and a heavy dependency stack | M1.4 (part), M8.4 (rest) | token safety closed in this commit; remainder open |
 | PL-08 | Medium | `naming_check` pins source text and is co-edited with the code it checks | M8.12 | open |
 | PL-09 | High | CI is manual-only | M1.2 | closed in this commit |
 | PL-10 | Medium | Stale physical-pacing tooling and display_timing module | M8.3 (display_timing), M8.11 | open |
@@ -172,8 +172,8 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | LC-07 | Medium | Authenticode checked via PowerShell text parsing; silently skipped without a thumbprint | M8.2 | open |
 | LC-08 | Medium | Block-delivery errors swallowed without a record | M8.6 | open |
 | LC-09 | Medium | Probation misses a hung or parked desktop | M8.8 | open |
-| LC-10 | Medium | Some release publishes are not durable (plain renames) | M1.5 (primitive), M1.6 | open |
-| LC-11 | Medium | Readiness report written non-atomically; schema declared twice | M1.6 (durable-write part), M8.5 | open |
+| LC-10 | Medium | Some release publishes are not durable (plain renames) | M1.5 (primitive), M1.6 | closed in this commit |
+| LC-11 | Medium | Readiness report written non-atomically; schema declared twice | M1.6 (durable-write part), M8.5 | durable write closed in this commit; shared schema remains open |
 | LC-12 | High | Uninstall deletes user data without asking; Axiusflow installer lines remain | M8.6 | open |
 | LC-13 | Low | `.bat` self-delete with unescaped paths | M8.2 | open |
 | LC-14 | Low | Launcher shows errors by spawning PowerShell | M8.2 | open |
@@ -184,11 +184,11 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | LC-19 | Low | `minimum_version` mixes product semver with generation numbering | M8.6 | open |
 | LC-20 | Low | Six build-time release variables read in five places; partial config compiles silently | M8.2 | open |
 | LC-21 | Medium | No end-to-end download, readiness-schema contract, producer or durable-write crash tests | M8.7 | open |
-| AC-01 | High | Tokens derive `Clone + Debug`; any `{:?}` leaks them | M1.4 | open |
+| AC-01 | High | Tokens derive `Clone + Debug`; any `{:?}` leaks them | M1.4 | closed in this commit |
 | AC-02 | Medium | Profile vault limit (4096) exceeds the Windows 2560-byte cap; no size precheck | M8.4 | open |
 | AC-03 | Medium | Vault I/O runs under the account state mutex | M8.4 | open |
 | AC-04 | High (when enabled) | OIDC issuer comes from a runtime environment variable | M8.4 | open |
-| AC-05 | High | Exit path can park the thread forever, leaving a zombie process | M1.4 | open |
+| AC-05 | High | Exit path can park the thread forever, leaving a zombie process | M1.4 | closed in this commit |
 | AC-06 | Medium | Poisoned credential-access mutex fails permanently | M8.4 | open |
 | AC-07 | Medium | GPUI reqwest client installed only to fetch the avatar image | M8.10 | open |
 | AC-08 | Info | Unverified that an empty issuer spawns no network work | M8.4 | open |
@@ -248,12 +248,23 @@ Status: in progress
   - Both legacy Day3 encodings restore, unsupported panes are repaired or skipped with a notice, and desktop cadence construction is forbidden.
   - Hyperliquid's official candle-snapshot contract and a representative public `3d` response were checked first; opens were UTC-aligned and exactly 259,200,000 milliseconds apart.
   - Verified by runtime/desktop round-trip, legacy migration, repair-notice, naming, and real Hyperliquid 3D restart checks.
-- [ ] M1.4 bounded-exit-and-secret-tokens - Exit never parks forever; tokens are redacted and zeroized
-- [ ] M1.5 platform-sys-durable-writer - New `platform_sys` crate with the single durable file writer and unsafe isolation rule
-- [ ] M1.6 adopt-durable-writer - Replace every hand-rolled file writer, including the non-atomic trading export
-- [ ] M1.7 diagnostics-log-sink-panic-hook - Rotating log file, panic crash files and a fatal-startup dialog
-- [ ] M1.8 single-instance-and-validation-mode - Per-data-folder instance lock and validation mode with an isolated vault namespace
-- [ ] M1.9 sqlite-hardening-migrations - SQLite busy timeout, integrity check, quarantine, table-driven migrations and pre-migration backup
+- [x] M1.4 bounded-exit-and-secret-tokens - Exit never parks forever; tokens are redacted and zeroized
+  - Exit and readiness perform one bounded account-refresh quiesce wait; failure is logged and exits nonzero without parking.
+  - `VerifiedTokens` now uses non-cloneable, zeroizing `SecretToken` values with redacted debug output.
+- [x] M1.5 platform-sys-durable-writer - New `platform_sys` crate with the single durable file writer and unsafe isolation rule
+  - Added the leaf `platform_sys` crate, durable staged-file primitives, crash/drop tests, and an exact interim unsafe allowlist.
+- [x] M1.6 adopt-durable-writer - Replace every hand-rolled file writer, including the non-atomic trading export
+  - Workspace, chart chrome, trading export, readiness, lifecycle, launcher and chart export writes use the durable writer.
+  - Removed write-time `.bak` rotation and verified uncommitted trading exports preserve the previous file.
+- [x] M1.7 diagnostics-log-sink-panic-hook - Rotating log file, panic crash files and a fatal-startup dialog
+  - Added bounded rotating logs, durable panic reports, native fatal dialogs and debug-only `--force-diagnostics-panic`.
+  - Validation produced `logs/aeris.log` and one crash report containing the forced panic and backtrace.
+- [x] M1.8 single-instance-and-validation-mode - Per-data-folder instance lock and validation mode with an isolated vault namespace
+  - Added safe `--validation-root`, hashed validation vault namespaces, scoped cTrader borrowing and per-root instance locks.
+  - Readiness schema 5 reports the lock, log path and validation context; validation disables release side effects.
+- [x] M1.9 sqlite-hardening-migrations - SQLite busy timeout, integrity check, quarantine, table-driven migrations and pre-migration backup
+  - Added quick-check corruption errors, confirmed-only quarantine, contiguous migrations, pre-migration backups and clean checkpoints.
+  - A 999,424-byte fixture with 500 executions and 2,000 user records measured `quick_check` at 2.4027 ms.
 
 ### M2 market foundations
 
@@ -391,6 +402,13 @@ the repo root `AGENTS.md`.
   read-only `permissions`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1`.
   `pull_request_target`, `secrets.` references and self-hosted runners are forbidden on the
   pull-request path; `tools/naming_check` enforces the shape (M1.2, this commit).
+- `platform_sys` is the only new unsafe boundary. Only its platform-specific source files may add unsafe code;
+  the remaining pre-existing `platform_runtime` FFI files stay on an exact interim allowlist until M8.3.
+- Durable file publication goes through `platform_sys::fs`; production raw `fs::write` and `fs::rename` calls are
+  rejected outside the exact lifecycle/build allowlist.
+- Secret-bearing types use reviewed redacting wrappers and cannot derive or use debug formatting in production.
+- Each data root has one process owner. Validation roots and vault namespaces are isolated unless the explicit
+  stored-cTrader borrowing flag is present.
 
 ## 6. Progress log
 
@@ -399,6 +417,12 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.1 docs(stabilization): add the stabilization tracking document and plan/stabilization report copies - created the tracker with all 93 findings, decisions D1-D18 plus reconciled decisions and all 89 items; copied the 11 research reports into `reports/` and the architecture beside this file (redaction scan clean); `AGENTS.md` sanctions `plan/stabilization/` and records the tracking and restriction discipline; PL-11 closed by the deliberate rule change (D15).
 - 2026-10-13 M1.2 ci(workflows): run the full gate on hosted runners for pushes and pull requests - `.github/workflows/ci.yml` now triggers on push/pull_request (main) and workflow_dispatch on `windows-latest` (fmt, clippy, workspace tests, naming_check) and `ubuntu-latest` (fmt, naming_check) with read-only permissions, concurrency cancellation, no secrets and `AERIS_RITHMIC_KIT_DISABLED=1`; the naming_check CI-shape rule gained positive and negative tests and replaced the self-hosted pins; PL-09 closed.
 - 2026-10-13 M1.3 fix(market): unify chart interval cadence mapping - moved interval resolution and legacy inversion to `market_runtime`, persisted `ChartInterval` labels, repaired unsupported panes with notices, and restored both legacy Day3 encodings.
+- 2026-10-13 M1.4 feat(foundations): harden lifecycle persistence and diagnostics - bounded every account-refresh exit wait and introduced redacted, zeroizing token storage.
+- 2026-10-13 M1.5 feat(foundations): harden lifecycle persistence and diagnostics - added `platform_sys`, the durable staged writer, unsafe isolation and crash-boundary tests.
+- 2026-10-13 M1.6 feat(foundations): harden lifecycle persistence and diagnostics - adopted the durable writer across persistence, exports, readiness and release paths.
+- 2026-10-13 M1.7 feat(foundations): harden lifecycle persistence and diagnostics - added rotating logs, durable panic reports, fatal dialogs and `--force-diagnostics-panic`.
+- 2026-10-13 M1.8 feat(foundations): harden lifecycle persistence and diagnostics - added validation-root isolation, vault namespaces, readiness schema 5 and per-root instance locking.
+- 2026-10-13 M1.9 feat(foundations): harden lifecycle persistence and diagnostics - hardened SQLite open/shutdown, migrations, backups and confirmed-only corruption quarantine.
 
 ## 7. Known gaps / deferred
 

@@ -34,7 +34,7 @@ use sha2::Digest as _;
 use std::{
     error::Error,
     fs,
-    io::{Read, Write},
+    io::Read,
     num::NonZeroUsize,
     path::{Path, PathBuf},
     thread,
@@ -753,7 +753,7 @@ pub(crate) fn run(report_path: &Path) -> Result<(), Box<dyn Error>> {
     let report = collect_evidence()?;
     let mut encoded = serde_json::to_vec_pretty(&report)?;
     encoded.push(b'\n');
-    fs::write(report_path, encoded)?;
+    aeris_platform_runtime::fs::write_file_durably(report_path, &encoded)?;
     println!(
         "desktop_burst_conformance=deterministic_passed live_market_gate={} updates={} mailbox_high_water={} frame_schedules={} report={}",
         live_gate_label(report.live_market_gate),
@@ -1066,31 +1066,8 @@ fn write_endurance_evidence_atomically(
 }
 
 fn write_bytes_atomically(path: &Path, contents: &[u8]) -> Result<(), Box<dyn Error>> {
-    let temporary_path = temporary_sibling(path)?;
-    let result = (|| -> Result<(), Box<dyn Error>> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary_path)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary_path, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary_path);
-    }
-    result
-}
-
-fn temporary_sibling(path: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    let file_name = path
-        .file_name()
-        .ok_or("desktop endurance report path must name a file")?
-        .to_string_lossy();
-    Ok(path.with_file_name(format!(".{file_name}.{}.partial", std::process::id())))
+    aeris_platform_runtime::fs::write_file_durably(path, contents)?;
+    Ok(())
 }
 
 #[cfg(test)]

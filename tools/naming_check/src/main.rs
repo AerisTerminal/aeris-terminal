@@ -15,6 +15,7 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "node_modules",
     "target",
     "third_party",
+    "tmp",
 ];
 const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md"];
 const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
@@ -26,6 +27,19 @@ const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
 ];
 /// Legal and OS-owned filenames must keep their exact spelling, but only at these paths.
 const PLATFORM_PATH_EXCEPTIONS: &[&str] = &["LICENSE", "apps/desktop/packaging/macos/Info.plist"];
+const REVIEWED_SAFE_DEBUG_TYPES: &[&str] = &[
+    "ColorToken",
+    "CredentialSource",
+    "KeyringCredentialBackend",
+    "MemoryCredentialBackend",
+    "NativeCredentialVaultError",
+    "ProviderCredentialRequirement",
+    "RadiusToken",
+    "RithmicCredentialError",
+    "SpotToken",
+    // Every secret-bearing field uses SecretToken's explicit redacting Debug implementation.
+    "VerifiedTokens",
+];
 
 fn main() -> ExitCode {
     let root = match env::current_dir() {
@@ -73,11 +87,109 @@ fn inspect_directory(
                 violations.push(relative_to(root, &path));
             }
             inspect_directory(root, &path, violations)?;
-        } else if file_type.is_file() && !is_valid_file_name(&name, &relative_to(root, &path)) {
-            violations.push(relative_to(root, &path));
+        } else if file_type.is_file() {
+            let relative = relative_to(root, &path);
+            if !is_valid_file_name(&name, &relative) {
+                violations.push(relative.clone());
+            }
+            if path.extension().is_some_and(|extension| extension == "rs")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "src")
+                && let Ok(source) = fs::read_to_string(&path)
+                && contains_sensitive_debug(production_source_prefix(&source))
+            {
+                violations.push(relative);
+            }
         }
     }
     Ok(())
+}
+
+fn production_source_prefix(contents: &str) -> &str {
+    if contents.starts_with("#![cfg(test)]") {
+        return "";
+    }
+    for (index, _) in contents.match_indices("#[cfg(test)]") {
+        let after_attribute = &contents[index + "#[cfg(test)]".len()..];
+        let declaration = after_attribute
+            .trim_start_matches(['\r', '\n'])
+            .lines()
+            .next()
+            .unwrap_or_default();
+        if declaration.starts_with("mod ") && declaration.ends_with(" {") {
+            return &contents[..index];
+        }
+    }
+    contents
+}
+
+fn contains_sensitive_debug(source: &str) -> bool {
+    let lines = source.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        if line.contains("derive(") && line.contains("Debug") {
+            let declaration = lines
+                .iter()
+                .skip(index + 1)
+                .take(6)
+                .find_map(|candidate| declared_type_name(candidate));
+            if declaration.is_some_and(|name| {
+                is_sensitive_name(name) && !REVIEWED_SAFE_DEBUG_TYPES.contains(&name)
+            }) {
+                return true;
+            }
+        }
+        let lower = line.to_ascii_lowercase();
+        if (lower.contains(":?}") || lower.contains(":#?}"))
+            && ["token", "secret", "password", "credential"]
+                .iter()
+                .any(|word| debug_capture_contains(&lower, word))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn declared_type_name(line: &str) -> Option<&str> {
+    let line = line.trim();
+    ["struct ", "enum ", "type "]
+        .into_iter()
+        .find_map(|marker| {
+            let declaration = line
+                .strip_prefix(marker)
+                .or_else(|| {
+                    line.strip_prefix("pub ")
+                        .and_then(|line| line.strip_prefix(marker))
+                })
+                .or_else(|| {
+                    line.strip_prefix("pub(crate) ")
+                        .and_then(|line| line.strip_prefix(marker))
+                })?;
+            declaration
+                .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .next()
+                .filter(|name| !name.is_empty())
+        })
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["token", "secret", "password", "credential"]
+        .iter()
+        .any(|word| lower.contains(word))
+}
+
+fn debug_capture_contains(line: &str, word: &str) -> bool {
+    line.split('{').skip(1).any(|capture| {
+        capture
+            .split('}')
+            .next()
+            .is_some_and(|capture| capture.contains(":?") || capture.contains(":#?"))
+            && capture
+                .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .any(|identifier| identifier.contains(word))
+    })
 }
 
 fn should_skip_directory(name: &OsStr) -> bool {
@@ -124,6 +236,26 @@ mod tests {
         fs,
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn sensitive_debug_rule_rejects_derived_and_formatted_secrets() {
+        assert!(super::contains_sensitive_debug(
+            "#[derive(Clone, Debug)]\nstruct ApiCredential { value: String }\n"
+        ));
+        assert!(super::contains_sensitive_debug(
+            "fn leak(password: &str) { println!(\"{password:?}\"); }\n"
+        ));
+    }
+
+    #[test]
+    fn sensitive_debug_rule_accepts_reviewed_redaction_and_plain_values() {
+        assert!(!super::contains_sensitive_debug(
+            "#[derive(Debug)]\nstruct VerifiedTokens { access: SecretToken }\n"
+        ));
+        assert!(!super::contains_sensitive_debug(
+            "#[derive(Debug)]\nstruct MarketGeneration(u64);\n"
+        ));
+    }
 
     #[test]
     fn required_platform_filenames_are_scoped_to_their_real_paths() {
@@ -315,6 +447,174 @@ mod tests {
                 allowed.contains(&dependency),
                 "{relative} production dependency {dependency} is outside the pure core"
             );
+        }
+    }
+
+    const INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES: &[&str] = &[
+        "crates/platform_runtime/src/display_timing.rs",
+        "crates/platform_runtime/src/io_cancellation.rs",
+        "crates/platform_runtime/src/network_notifications.rs",
+        "crates/platform_runtime/src/power_notifications.rs",
+        "crates/platform_runtime/src/session_shutdown.rs",
+    ];
+
+    fn contains_unsafe_code(source: &str) -> bool {
+        source.contains("allow(unsafe_code)")
+            || source.contains("unsafe {")
+            || source.contains("unsafe fn ")
+            || source.contains("unsafe extern ")
+            || source.contains("unsafe impl ")
+            || source.contains("unsafe trait ")
+    }
+
+    fn unsafe_location_is_allowed(relative: &str) -> bool {
+        relative.starts_with("crates/platform_sys/src/windows/")
+            || relative.starts_with("crates/platform_sys/src/macos/")
+            || INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES.contains(&relative)
+    }
+
+    fn declares_platform_sys_dependency(manifest: &str) -> bool {
+        manifest
+            .lines()
+            .map(str::trim)
+            .any(|line| line.starts_with("aeris_platform_sys") && line.contains('='))
+    }
+
+    fn platform_sys_dependent_is_allowed(relative: &str) -> bool {
+        [
+            "crates/observability/Cargo.toml",
+            "crates/platform_runtime/Cargo.toml",
+            "crates/trading_runtime/Cargo.toml",
+        ]
+        .contains(&relative)
+    }
+
+    const RAW_FILE_MUTATION_ALLOWLIST: &[(&str, &str)] = &[
+        ("apps/desktop/build.rs", "fs::write("),
+        ("crates/platform_runtime/build.rs", "fs::write("),
+        (
+            "crates/platform_runtime/src/bin/aeris_launcher.rs",
+            "fs::rename(",
+        ),
+        ("crates/platform_runtime/src/data_root.rs", "fs::rename("),
+        ("crates/platform_runtime/src/lifecycle.rs", "fs::rename("),
+        ("crates/platform_sys/src/fs.rs", "fs::rename("),
+        ("crates/ui/design_system/build.rs", "fs::write("),
+    ];
+
+    fn raw_file_mutation_is_allowed(relative: &str, operation: &str) -> bool {
+        RAW_FILE_MUTATION_ALLOWLIST.contains(&(relative, operation))
+    }
+
+    #[test]
+    fn unsafe_location_rule_accepts_platform_ffi_and_rejects_other_sources() {
+        assert!(unsafe_location_is_allowed(
+            "crates/platform_sys/src/windows/fs.rs"
+        ));
+        assert!(unsafe_location_is_allowed(
+            "crates/platform_runtime/src/io_cancellation.rs"
+        ));
+        assert!(!unsafe_location_is_allowed(
+            "crates/market_runtime/src/provider.rs"
+        ));
+        assert!(contains_unsafe_code(
+            "#![allow(unsafe_code)]\nfn call() { unsafe { ffi() } }"
+        ));
+        assert!(!contains_unsafe_code(
+            "/// Reject an unsafe path.\nfn safe_call() {}"
+        ));
+    }
+
+    #[test]
+    fn unsafe_is_isolated_to_platform_sys_and_the_interim_exact_allowlist() {
+        let mut interim = BTreeSet::new();
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path).expect("source");
+            let production = production_prefix(&contents);
+            if !contains_unsafe_code(production) {
+                continue;
+            }
+            let relative = relative_string(&path);
+            assert!(
+                unsafe_location_is_allowed(&relative),
+                "{relative} contains unsafe code outside the platform FFI boundary"
+            );
+            if relative.starts_with("crates/platform_runtime/") {
+                interim.insert(relative);
+            }
+        }
+        assert_eq!(
+            interim,
+            INTERIM_PLATFORM_RUNTIME_UNSAFE_FILES
+                .iter()
+                .map(|path| (*path).to_string())
+                .collect(),
+            "the temporary platform_runtime FFI allowlist must stay exact until M8.3"
+        );
+    }
+
+    #[test]
+    fn platform_sys_dependent_rule_accepts_and_rejects_fixtures() {
+        assert!(declares_platform_sys_dependency(
+            "aeris_platform_sys = { path = \"../platform_sys\" }"
+        ));
+        assert!(!declares_platform_sys_dependency(
+            "aeris_platform_runtime = { path = \"../platform_runtime\" }"
+        ));
+        assert!(platform_sys_dependent_is_allowed(
+            "crates/trading_runtime/Cargo.toml"
+        ));
+        assert!(!platform_sys_dependent_is_allowed(
+            "apps/desktop/Cargo.toml"
+        ));
+    }
+
+    #[test]
+    fn platform_sys_is_leaf_and_has_only_allowed_dependents() {
+        assert_dependencies_are("crates/platform_sys/Cargo.toml", &[]);
+        for path in workspace_manifests() {
+            let contents = fs::read_to_string(&path).expect("manifest");
+            if declares_platform_sys_dependency(&contents) {
+                let relative = relative_string(&path);
+                assert!(
+                    platform_sys_dependent_is_allowed(&relative),
+                    "{relative} must not depend directly on aeris_platform_sys"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn raw_file_mutation_rule_accepts_and_rejects_fixtures() {
+        assert!(raw_file_mutation_is_allowed(
+            "crates/platform_sys/src/fs.rs",
+            "fs::rename("
+        ));
+        assert!(!raw_file_mutation_is_allowed(
+            "crates/platform_sys/src/fs.rs",
+            "fs::write("
+        ));
+        assert!(!raw_file_mutation_is_allowed(
+            "apps/desktop/src/desktop/local_state.rs",
+            "fs::rename("
+        ));
+    }
+
+    #[test]
+    fn production_raw_file_mutation_is_exactly_allowlisted() {
+        for path in production_rust_sources() {
+            let contents = fs::read_to_string(&path).expect("source");
+            let production = production_prefix(&contents);
+            let relative = relative_string(&path);
+            for operation in ["fs::write(", "fs::rename("] {
+                if !production.contains(operation) {
+                    continue;
+                }
+                assert!(
+                    raw_file_mutation_is_allowed(&relative, operation),
+                    "{relative} performs raw {operation} outside the exact allowlist"
+                );
+            }
         }
     }
 
@@ -766,7 +1066,7 @@ mod tests {
         }
 
         let main = manifest("apps/desktop/src/main.rs");
-        assert!(main.contains("desktop::run()"));
+        assert!(main.contains("desktop::run("));
         assert!(!main.contains("struct WorkspaceSurface"));
         let production = production_prefix(&main);
         for rendering_primitive in [
@@ -1141,6 +1441,7 @@ mod tests {
             }
         }
         let expected = BTreeSet::from([
+            "apps/desktop/src/desktop.rs::AccountRefreshExitClaim".to_string(),
             "crates/context_runtime/src/lib.rs::ContextCredentialStore".to_string(),
             "crates/context_runtime/src/lib.rs::ContextFetcher".to_string(),
             "crates/market_runtime/src/market_service/ctrader.rs::CtraderMarketLink".to_string(),
@@ -1761,10 +2062,11 @@ mod tests {
         let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
         assert!(
             lifecycle.contains("aeris_desktop::account::begin_refresh_quiesce()")
-                && lifecycle.contains("quiesce.wait()")
-                && lifecycle.contains("quiesce.retain_until_process_exit()")
+                && lifecycle.contains(
+                    "retain_account_refresh_quiesce_for_exit(account_refresh, \"desktop exit\")"
+                )
                 && lifecycle.contains("blocks_exit: true")
-                && lifecycle.contains("quit_after_shutdown_attempt(cx, false)")
+                && lifecycle.contains("quit_after_shutdown_attempt(cx)")
                 && lifecycle.contains("duplicate request must not bypass its durability fences"),
             "normal desktop shutdown must await account refresh durability off GPUI and block unsafe exit"
         );
@@ -1894,7 +2196,7 @@ mod tests {
         }
         let desktop = manifest("apps/desktop/src/desktop.rs");
         let run_start = desktop
-            .find("pub(super) fn run()")
+            .find("pub(super) fn run(")
             .expect("desktop entrypoint");
         let run_end = desktop[run_start..]
             .find("fn schedule_versioned_launcher_promotion")

@@ -216,7 +216,10 @@ impl TerminalApp {
             linked_sync_revisions: BTreeMap::new(),
             event_risk_dispatches: BTreeMap::new(),
             next_event_risk_check: Instant::now(),
-            updater: DesktopUpdater::new().ok(),
+            updater: aeris_platform_runtime::active_data_root()
+                .ok()
+                .filter(|root| root.allows_installed_app_side_effects())
+                .and_then(|_| DesktopUpdater::new().ok()),
             update_restart_persistence_pending: false,
             chart_chrome: init.chart_chrome,
             window_move_pending: false,

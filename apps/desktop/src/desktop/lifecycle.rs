@@ -14,6 +14,12 @@ impl std::fmt::Display for DesktopShutdownError {
     }
 }
 
+impl DesktopShutdownError {
+    pub(super) const fn blocks_exit(&self) -> bool {
+        self.blocks_exit
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct DesktopLifecycle {
     retirements: Rc<RefCell<Vec<Task<bool>>>>,
@@ -22,6 +28,7 @@ pub(super) struct DesktopLifecycle {
     shutdown_started: Rc<Cell<bool>>,
     trading: aeris_trading_runtime::TradingService,
     context: Option<aeris_context_runtime::ContextService>,
+    instance_lock: Option<Arc<aeris_platform_runtime::InstanceLock>>,
 }
 
 impl DesktopLifecycle {
@@ -29,6 +36,7 @@ impl DesktopLifecycle {
     pub(super) fn new(
         trading: aeris_trading_runtime::TradingService,
         context: aeris_context_runtime::ContextService,
+        instance_lock: aeris_platform_runtime::InstanceLock,
     ) -> Self {
         Self {
             retirements: Rc::new(RefCell::new(Vec::new())),
@@ -37,6 +45,7 @@ impl DesktopLifecycle {
             shutdown_started: Rc::new(Cell::new(false)),
             trading,
             context: Some(context),
+            instance_lock: Some(Arc::new(instance_lock)),
         }
     }
 
@@ -49,6 +58,7 @@ impl DesktopLifecycle {
             shutdown_started: Rc::new(Cell::new(false)),
             trading: super::tests::test_trading_service(),
             context: None,
+            instance_lock: None,
         }
     }
 
@@ -109,15 +119,14 @@ impl DesktopLifecycle {
         let market = engine_market_worker::started_market_runtime();
         let trading = self.trading.clone();
         let context = self.context.clone();
+        let instance_lock = self.instance_lock.clone();
         Some(cx.background_executor().spawn(async move {
             let mut account_failure = None;
             let mut failure = None;
-            match account_refresh {
-                Ok(quiesce) => match quiesce.wait() {
-                    Ok(()) => quiesce.retain_until_process_exit(),
-                    Err(error) => account_failure = Some(error),
-                },
-                Err(error) => account_failure = Some(error),
+            if let Err(error) =
+                retain_account_refresh_quiesce_for_exit(account_refresh, "desktop exit")
+            {
+                account_failure = Some(error);
             }
             for persistence in workspace_persistence {
                 if let Err(error) = persistence.wait(Duration::from_secs(2)) {
@@ -157,6 +166,7 @@ impl DesktopLifecycle {
             {
                 failure = Some(error);
             }
+            drop(instance_lock);
             if let Some(detail) = account_failure {
                 Err(DesktopShutdownError {
                     detail,
@@ -174,26 +184,21 @@ impl DesktopLifecycle {
     }
 
     pub(super) fn quit_after_shutdown(&self, cx: &mut App) {
-        self.quit_after_shutdown_attempt(cx, true);
+        self.quit_after_shutdown_attempt(cx);
     }
 
-    fn quit_after_shutdown_attempt(&self, cx: &mut App, retry_account_failure: bool) {
+    fn quit_after_shutdown_attempt(&self, cx: &mut App) {
         let Some(shutdown) = self.begin_quit(cx) else {
             // The first shutdown owner is still responsible for the eventual
             // quit. A duplicate request must not bypass its durability fences.
             return;
         };
-        let lifecycle = self.clone();
         cx.spawn(async move |cx| {
             if let Err(error) = shutdown.await {
                 let blocks_exit = error.blocks_exit;
                 diagnostic!("Aeris desktop shutdown failed: {error}");
                 if blocks_exit {
-                    lifecycle.shutdown_started.set(false);
-                    if retry_account_failure {
-                        cx.update(|cx| lifecycle.quit_after_shutdown_attempt(cx, false));
-                    }
-                    return;
+                    std::process::exit(1);
                 }
             }
             cx.update(|cx| cx.quit());

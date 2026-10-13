@@ -15,17 +15,18 @@ use aeris_trading::{
     OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
     TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
 };
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OpenFlags, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
-    fmt::Write as _,
+    fmt::{self, Write as _},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-pub(super) const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 19;
 const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -216,6 +217,233 @@ const MIGRATION_V18: &str =
 /// retired session's events can never be mistaken for current ones.
 const MIGRATION_V19: &str = "INSERT INTO metadata(key, value) VALUES ('venue_generation', 0);";
 
+struct Migration {
+    from: u32,
+    to: u32,
+    sql: &'static str,
+}
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 0,
+        to: 1,
+        sql: INITIAL_SCHEMA,
+    },
+    Migration {
+        from: 1,
+        to: 2,
+        sql: MIGRATION_V2,
+    },
+    Migration {
+        from: 2,
+        to: 3,
+        sql: MIGRATION_V3,
+    },
+    Migration {
+        from: 3,
+        to: 4,
+        sql: MIGRATION_V4,
+    },
+    Migration {
+        from: 4,
+        to: 5,
+        sql: MIGRATION_V5,
+    },
+    Migration {
+        from: 5,
+        to: 6,
+        sql: MIGRATION_V6,
+    },
+    Migration {
+        from: 6,
+        to: 7,
+        sql: MIGRATION_V7,
+    },
+    Migration {
+        from: 7,
+        to: 8,
+        sql: MIGRATION_V8,
+    },
+    Migration {
+        from: 8,
+        to: 9,
+        sql: MIGRATION_V9,
+    },
+    Migration {
+        from: 9,
+        to: 10,
+        sql: MIGRATION_V10,
+    },
+    Migration {
+        from: 10,
+        to: 11,
+        sql: MIGRATION_V11,
+    },
+    Migration {
+        from: 11,
+        to: 12,
+        sql: MIGRATION_V12,
+    },
+    Migration {
+        from: 12,
+        to: 13,
+        sql: MIGRATION_V13,
+    },
+    Migration {
+        from: 13,
+        to: 14,
+        sql: MIGRATION_V14,
+    },
+    Migration {
+        from: 14,
+        to: 15,
+        sql: MIGRATION_V15,
+    },
+    Migration {
+        from: 15,
+        to: 16,
+        sql: MIGRATION_V16,
+    },
+    Migration {
+        from: 16,
+        to: 17,
+        sql: MIGRATION_V17,
+    },
+    Migration {
+        from: 17,
+        to: 18,
+        sql: MIGRATION_V18,
+    },
+    Migration {
+        from: 18,
+        to: 19,
+        sql: MIGRATION_V19,
+    },
+];
+
+/// A failure opening or preparing the authoritative trading database.
+#[derive(Debug)]
+pub enum StoreError {
+    /// SQLite reported that the existing database does not pass `quick_check`.
+    Corrupt {
+        path: PathBuf,
+        newest_backup: Option<PathBuf>,
+        detail: String,
+    },
+    Other(String),
+}
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Corrupt {
+                path,
+                newest_backup,
+                detail,
+            } => {
+                write!(formatter, "trading database {} is corrupt", path.display())?;
+                if let Some(backup) = newest_backup {
+                    write!(formatter, "; newest backup: {}", backup.display())?;
+                }
+                write!(formatter, ": {detail}")
+            }
+            Self::Other(detail) => formatter.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+impl From<String> for StoreError {
+    fn from(detail: String) -> Self {
+        Self::Other(detail)
+    }
+}
+
+fn newest_backup(database_path: &Path) -> Option<PathBuf> {
+    let backups = database_path.parent()?.join("backups");
+    let mut candidates = fs::read_dir(backups)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("trading-v") && name.ends_with(".sqlite3"))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| backup_unix(path).unwrap_or(0));
+    candidates.pop()
+}
+
+fn backup_unix(path: &Path) -> Option<u128> {
+    path.file_stem()?.to_str()?.rsplit_once('-')?.1.parse().ok()
+}
+
+fn corrupt_error(path: &Path, detail: impl Into<String>) -> StoreError {
+    StoreError::Corrupt {
+        path: path.to_path_buf(),
+        newest_backup: newest_backup(path),
+        detail: detail.into(),
+    }
+}
+
+pub(super) fn preflight_existing_database(path: &Path) -> Result<(), StoreError> {
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {
+            corrupt_error(
+                path,
+                format!("quick_check could not open the file: {error}"),
+            )
+        })?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(5_000))
+        .map_err(|error| {
+            corrupt_error(path, format!("quick_check timeout setup failed: {error}"))
+        })?;
+    let detail = connection
+        .pragma_query_value(None, "quick_check", |row| row.get::<_, String>(0))
+        .map_err(|error| corrupt_error(path, format!("quick_check failed: {error}")))?;
+    if detail != "ok" {
+        return Err(corrupt_error(path, detail));
+    }
+    let version = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| {
+            corrupt_error(path, format!("schema version could not be read: {error}"))
+        })?;
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::Other(format!(
+            "trading database schema {version} is newer than supported schema {SCHEMA_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
+fn retain_newest_backups(directory: &Path, retention: usize) -> Result<(), String> {
+    let mut backups = fs::read_dir(directory)
+        .map_err(|error| format!("trading backup directory could not be read: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("trading-v") && name.ends_with(".sqlite3"))
+        })
+        .collect::<Vec<_>>();
+    backups.sort_by_key(|path| backup_unix(path).unwrap_or(0));
+    let remove_count = backups.len().saturating_sub(retention);
+    for backup in backups.into_iter().take(remove_count) {
+        fs::remove_file(&backup).map_err(|error| {
+            format!(
+                "retired trading backup {} could not be removed: {error}",
+                backup.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub(super) struct StoredState {
     pub revision: u64,
     pub next_sequence: u64,
@@ -354,131 +582,125 @@ pub(super) struct FillPolicyPersistence<'a> {
 }
 
 impl TradingStore {
-    pub(super) fn open(path: &Path, retention: TradingRetention) -> Result<Self, String> {
-        if path != Path::new(":memory:") {
-            let parent = path
-                .parent()
-                .ok_or_else(|| "trading database has no parent directory".to_string())?;
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("trading data directory could not be created: {error}"))?;
+    pub(super) fn open(path: &Path, retention: TradingRetention) -> Result<Self, StoreError> {
+        if path != Path::new(":memory:") && path.exists() {
+            preflight_existing_database(path)?;
         }
-        let connection = Connection::open(path)
-            .map_err(|error| format!("trading database could not be opened: {error}"))?;
+        if path != Path::new(":memory:") {
+            let parent = path.parent().ok_or_else(|| {
+                StoreError::Other("trading database has no parent directory".to_string())
+            })?;
+            fs::create_dir_all(parent).map_err(|error| {
+                StoreError::Other(format!(
+                    "trading data directory could not be created: {error}"
+                ))
+            })?;
+        }
+        let connection = Connection::open(path).map_err(|error| {
+            StoreError::Other(format!("trading database could not be opened: {error}"))
+        })?;
+        connection
+            .busy_timeout(std::time::Duration::from_millis(5_000))
+            .map_err(|error| {
+                StoreError::Other(format!("trading database busy timeout failed: {error}"))
+            })?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .and_then(|()| connection.pragma_update(None, "synchronous", "FULL"))
             .and_then(|()| connection.pragma_update(None, "foreign_keys", "ON"))
-            .map_err(|error| format!("trading database safety settings failed: {error}"))?;
+            .map_err(|error| {
+                StoreError::Other(format!("trading database safety settings failed: {error}"))
+            })?;
         let mut store = Self {
             connection,
             retention,
         };
         store.migrate()?;
-        store.ensure_default_strategy_templates()?;
-        store.enforce_retention()?;
+        store
+            .ensure_default_strategy_templates()
+            .map_err(StoreError::Other)?;
+        store.enforce_retention().map_err(StoreError::Other)?;
         Ok(store)
     }
 
-    fn migrate(&mut self) -> Result<(), String> {
+    fn migrate(&mut self) -> Result<(), StoreError> {
         let mut version = self
             .connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-            .map_err(|error| format!("trading schema version could not be read: {error}"))?;
+            .map_err(|error| {
+                StoreError::Other(format!("trading schema version could not be read: {error}"))
+            })?;
         if version > SCHEMA_VERSION {
-            return Err(format!(
+            return Err(StoreError::Other(format!(
                 "trading database schema {version} is newer than supported schema {SCHEMA_VERSION}"
-            ));
+            )));
         }
-        if version == 0 {
-            let transaction = self
-                .connection
-                .transaction()
-                .map_err(|error| format!("trading migration could not start: {error}"))?;
-            transaction
-                .execute_batch(INITIAL_SCHEMA)
-                .map_err(|error| format!("trading schema migration failed: {error}"))?;
-            transaction
-                .pragma_update(None, "user_version", 1_u32)
-                .map_err(|error| {
-                    format!("trading schema version could not be committed: {error}")
+        if version < SCHEMA_VERSION {
+            self.back_up_before_migration(version)?;
+        }
+        while version < SCHEMA_VERSION {
+            let migration = MIGRATIONS
+                .iter()
+                .find(|migration| migration.from == version)
+                .ok_or_else(|| {
+                    StoreError::Other(format!(
+                        "trading schema migration from version {version} is missing"
+                    ))
                 })?;
-            transaction
-                .commit()
-                .map_err(|error| format!("trading migration could not commit: {error}"))?;
-            version = 1;
-        }
-        if version == 1 {
-            self.apply_migration(2, MIGRATION_V2)?;
-            version = 2;
-        }
-        if version == 2 {
-            self.apply_migration(3, MIGRATION_V3)?;
-            version = 3;
-        }
-        if version == 3 {
-            self.apply_migration(4, MIGRATION_V4)?;
-            version = 4;
-        }
-        if version == 4 {
-            self.apply_migration(5, MIGRATION_V5)?;
-            version = 5;
-        }
-        if version == 5 {
-            self.apply_migration(6, MIGRATION_V6)?;
-            version = 6;
-        }
-        if version == 6 {
-            self.apply_migration(7, MIGRATION_V7)?;
-            version = 7;
-        }
-        if version == 7 {
-            self.apply_migration(8, MIGRATION_V8)?;
-            version = 8;
-        }
-        if version == 8 {
-            self.apply_migration(9, MIGRATION_V9)?;
-            version = 9;
-        }
-        if version == 9 {
-            self.apply_migration(10, MIGRATION_V10)?;
-            version = 10;
-        }
-        if version == 10 {
-            self.apply_migration(11, MIGRATION_V11)?;
-            version = 11;
-        }
-        if version == 11 {
-            self.apply_migration(12, MIGRATION_V12)?;
-            version = 12;
-        }
-        if version == 12 {
-            self.apply_migration(13, MIGRATION_V13)?;
-            version = 13;
-        }
-        if version == 13 {
-            self.apply_migration(14, MIGRATION_V14)?;
-            version = 14;
-        }
-        if version == 14 {
-            self.apply_migration(15, MIGRATION_V15)?;
-            version = 15;
-        }
-        if version == 15 {
-            self.apply_migration(16, MIGRATION_V16)?;
-            version = 16;
-        }
-        if version == 16 {
-            self.apply_migration(17, MIGRATION_V17)?;
-            version = 17;
-        }
-        if version == 17 {
-            self.apply_migration(18, MIGRATION_V18)?;
-            version = 18;
-        }
-        if version == 18 {
-            self.apply_migration(SCHEMA_VERSION, MIGRATION_V19)?;
+            self.apply_migration(migration.to, migration.sql)
+                .map_err(StoreError::Other)?;
+            version = migration.to;
         }
         Ok(())
+    }
+
+    fn back_up_before_migration(&self, old_version: u32) -> Result<(), StoreError> {
+        let database_path = self.connection.path().map(Path::new);
+        let Some(database_path) = database_path
+            .filter(|path| !path.as_os_str().is_empty() && *path != Path::new(":memory:"))
+        else {
+            return Ok(());
+        };
+        let trading_directory = database_path.parent().ok_or_else(|| {
+            StoreError::Other("trading database has no parent directory".to_string())
+        })?;
+        let backups = trading_directory.join("backups");
+        fs::create_dir_all(&backups).map_err(|error| {
+            StoreError::Other(format!(
+                "trading backup directory could not be created: {error}"
+            ))
+        })?;
+        let unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| StoreError::Other("system clock precedes Unix epoch".to_string()))?
+            .as_millis();
+        let backup = backups.join(format!("trading-v{old_version}-{unix}.sqlite3"));
+        self.connection
+            .execute("VACUUM INTO ?1", params![backup.to_string_lossy().as_ref()])
+            .map_err(|error| {
+                StoreError::Other(format!(
+                    "trading migration backup could not be created: {error}"
+                ))
+            })?;
+        retain_newest_backups(&backups, 3).map_err(StoreError::Other)
+    }
+
+    pub(super) fn checkpoint_for_shutdown(&self) -> Result<(), String> {
+        let (busy, _, _) = self
+            .connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?,
+                ))
+            })
+            .map_err(|error| format!("trading WAL truncate checkpoint failed: {error}"))?;
+        if busy == 0 {
+            Ok(())
+        } else {
+            Err("trading WAL truncate checkpoint could not acquire the database lock".to_string())
+        }
     }
 
     fn apply_migration(&mut self, version: u32, sql: &str) -> Result<(), String> {
@@ -3371,20 +3593,205 @@ fn write_json(path: &Path, values: &[Value]) -> Result<(), String> {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes)
-        .map_err(|error| format!("trading export could not be written: {error}"))?;
-    if path.exists() {
-        fs::remove_file(path)
-            .map_err(|error| format!("old trading export could not be replaced: {error}"))?;
-    }
-    fs::rename(&temporary, path)
+    aeris_platform_sys::fs::write_file_durably(path, bytes)
         .map_err(|error| format!("trading export could not be committed: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    fn temporary_database(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "aeris-trading-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("fixture root");
+        root.join("trading.sqlite3")
+    }
+
+    fn create_schema_at(connection: &Connection, version: u32) {
+        for migration in MIGRATIONS.iter().take(version as usize) {
+            assert_eq!(migration.from + 1, migration.to);
+            connection
+                .execute_batch(migration.sql)
+                .expect("historical migration");
+        }
+        connection
+            .pragma_update(None, "user_version", version)
+            .expect("historical version");
+    }
+
+    #[test]
+    fn migrations_are_contiguous_and_every_historical_version_reaches_head() {
+        assert_eq!(MIGRATIONS.len(), SCHEMA_VERSION as usize);
+        for (expected, migration) in (0..SCHEMA_VERSION).zip(MIGRATIONS) {
+            assert_eq!(migration.from, expected);
+            assert_eq!(migration.to, expected + 1);
+        }
+        for version in 0..SCHEMA_VERSION {
+            let connection = Connection::open_in_memory().expect("in-memory database");
+            create_schema_at(&connection, version);
+            let mut store = TradingStore {
+                connection,
+                retention: TradingRetention::default(),
+            };
+            store.migrate().expect("historical schema migrates");
+            let actual: u32 = store
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .expect("version");
+            assert_eq!(actual, SCHEMA_VERSION, "starting at v{version}");
+        }
+    }
+
+    #[test]
+    fn open_applies_database_safety_pragmas() {
+        let path = temporary_database("pragmas");
+        let store =
+            TradingStore::open(&path, TradingRetention::default()).expect("store opens safely");
+        let journal: String = store
+            .connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("journal mode");
+        let synchronous: u32 = store
+            .connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .expect("synchronous");
+        let foreign_keys: u32 = store
+            .connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .expect("foreign keys");
+        let busy_timeout: u32 = store
+            .connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("busy timeout");
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        assert_eq!(synchronous, 2);
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(busy_timeout, 5_000);
+        drop(store);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn quick_check_rejects_corrupt_and_truncated_files_without_changing_bytes() {
+        for (name, bytes) in [
+            ("corrupt", b"not a sqlite database".to_vec()),
+            ("truncated", b"SQLite format 3\0partial".to_vec()),
+        ] {
+            let path = temporary_database(name);
+            fs::write(&path, &bytes).expect("invalid fixture");
+            let Err(error) = TradingStore::open(&path, TradingRetention::default()) else {
+                panic!("invalid database unexpectedly opened");
+            };
+            assert!(matches!(error, StoreError::Corrupt { .. }));
+            assert_eq!(fs::read(&path).expect("fixture reads"), bytes);
+            fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+        }
+    }
+
+    #[test]
+    fn newer_schema_is_byte_identical_after_rejection() {
+        let path = temporary_database("newer");
+        let connection = Connection::open(&path).expect("fixture opens");
+        create_schema_at(&connection, SCHEMA_VERSION);
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .expect("newer version");
+        drop(connection);
+        let before = fs::read(&path).expect("fixture reads");
+        let Err(error) = TradingStore::open(&path, TradingRetention::default()) else {
+            panic!("newer database unexpectedly opened");
+        };
+        assert!(error.to_string().contains("newer"));
+        assert_eq!(fs::read(&path).expect("fixture reads"), before);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn migration_backs_up_old_schema_and_retains_three() {
+        let path = temporary_database("backup");
+        let connection = Connection::open(&path).expect("fixture opens");
+        create_schema_at(&connection, 18);
+        drop(connection);
+        let backups = path.parent().expect("parent").join("backups");
+        fs::create_dir_all(&backups).expect("backups");
+        for unix in 1..=3 {
+            fs::write(
+                backups.join(format!("trading-v17-{unix:013}.sqlite3")),
+                b"old",
+            )
+            .expect("old backup");
+        }
+        let store =
+            TradingStore::open(&path, TradingRetention::default()).expect("migration succeeds");
+        drop(store);
+        let retained = fs::read_dir(&backups)
+            .expect("backups read")
+            .map(|entry| entry.expect("entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(retained.len(), 3);
+        let v18 = retained
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("trading-v18-"))
+            })
+            .expect("v18 backup");
+        let backup_connection =
+            Connection::open_with_flags(v18, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("backup");
+        let version: u32 = backup_connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("backup version");
+        assert_eq!(version, 18);
+        drop(backup_connection);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn shutdown_checkpoint_truncates_wal() {
+        let path = temporary_database("checkpoint");
+        let store =
+            TradingStore::open(&path, TradingRetention::default()).expect("store opens safely");
+        store
+            .connection
+            .execute(
+                "INSERT INTO user_records(kind,id,revision,updated_unix_nanos,json)
+                 VALUES ('note','checkpoint',1,1,'{}')",
+                [],
+            )
+            .expect("WAL write");
+        store.checkpoint_for_shutdown().expect("checkpoint");
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        assert!(fs::metadata(wal).is_ok_and(|metadata| metadata.len() == 0));
+        drop(store);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn dropped_export_stage_preserves_previous_content() {
+        let root =
+            std::env::temp_dir().join(format!("aeris-trading-export-drop-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("fixture root");
+        let path = root.join("executions.csv");
+        write_atomic(&path, b"previous\n").expect("previous export");
+        let mut staged =
+            aeris_platform_sys::fs::StagedFile::create(&path).expect("export stage creates");
+        staged.write_all(b"replacement\n").expect("stage writes");
+        drop(staged);
+        assert_eq!(
+            fs::read(&path).expect("previous export reads"),
+            b"previous\n"
+        );
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
 
     #[test]
     fn legacy_tastytrade_future_contract_uses_exact_instrument_display_symbol() {
@@ -3610,6 +4017,7 @@ mod tests {
             store
                 .migrate()
                 .expect_err("newer schema rejected")
+                .to_string()
                 .contains("newer")
         );
     }

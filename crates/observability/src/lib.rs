@@ -4,7 +4,11 @@ mod diagnostic_output;
 mod feed_diagnostics;
 mod overhead;
 
-pub use diagnostic_output::write_diagnostic;
+pub use aeris_platform_sys::fs::write_file_durably;
+pub use diagnostic_output::{
+    DEFAULT_LOG_FILE_BYTES, LOG_CHANNEL_CAPACITY, LogSinkGuard, install_log_sink,
+    install_panic_hook, write_diagnostic,
+};
 pub use feed_diagnostics::{
     ClockRelativeAge, DiagnosticsError, DiagnosticsQueue, FeedConnectionState, FeedCounter,
     FeedCounterSnapshot, FeedDiagnostics, FeedDiagnosticsSnapshot, FeedIdentity, FeedRateSnapshot,

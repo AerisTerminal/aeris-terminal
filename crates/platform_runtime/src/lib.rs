@@ -2,10 +2,10 @@
 //!
 //! Consumers depend on capabilities rather than branching on operating-system names.
 
-mod atomic_file;
 pub mod browser;
 mod capability;
 mod credential_vault;
+pub mod data_root;
 mod display_timing;
 mod dns;
 pub mod hosted_broker;
@@ -22,10 +22,17 @@ mod rollout;
 mod session_shutdown;
 mod user_notifications;
 
-pub use atomic_file::replace_file_atomically;
+pub use aeris_platform_sys::fs;
+pub use aeris_platform_sys::fs::replace_file as replace_file_atomically;
+pub use aeris_platform_sys::ui::{confirm_message_box, message_box};
 pub use browser::{MAXIMUM_AUTHORIZATION_URL_BYTES, open_system_browser};
 pub use capability::CapabilityAvailability;
 pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredentialVaultError};
+pub use data_root::{
+    DataRoot, DataRootError, DataRootMode, InstanceLock, ParsedDataRootArguments, active_data_root,
+    initialize_data_root, migrate_legacy_native_data_root, native_data_root,
+    parse_data_root_arguments,
+};
 pub use display_timing::{
     DisplayEnvironment, DisplayOutput, DisplayTimingError, NativeDisplayProbe, PresentationClock,
 };
@@ -42,8 +49,8 @@ pub use lifecycle::{
     ROLLBACK_COMPATIBILITY_FILENAME, ROLLBACK_COMPATIBILITY_SCHEMA_VERSION, ReleaseChannelPointer,
     ReleaseFile, ReleaseFileRole, ReleaseInstaller, ReleaseInstallerMetadata, ReleaseManifest,
     ReleasePolicy, RollbackCompatibilityMetadata, RolloutMetadata, SignedReleaseManifest,
-    UninstallOutcome, UpdateOutcome, VaultEntry, migrate_legacy_native_data_root, native_data_root,
-    native_install_root, native_installation_inventory, sign_release_manifest, verify_release_file,
+    UninstallOutcome, UpdateOutcome, VaultEntry, native_install_root,
+    native_installation_inventory, sign_release_manifest, verify_release_file,
     verify_release_manifest, verify_release_manifest_signature,
 };
 pub use live_market_gate::{

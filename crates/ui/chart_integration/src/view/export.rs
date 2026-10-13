@@ -462,7 +462,8 @@ fn unix_now() -> i64 {
 
 fn write_png(export: &ChartCapture, path: &Path) -> Result<(), String> {
     let png = export.render_png()?;
-    std::fs::write(path, png).map_err(|error| format!("{}: {error}", path.display()))
+    aeris_observability::write_file_durably(path, &png)
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 #[cfg(test)]
