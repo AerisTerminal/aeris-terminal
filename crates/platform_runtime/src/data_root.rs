@@ -28,6 +28,14 @@ pub struct DataRoot {
     vault_namespace: String,
 }
 
+/// Installed-application side effects forbidden in isolated validation runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstalledAppSideEffect {
+    LauncherPromotion,
+    Update,
+    NotificationIdentityRegistration,
+}
+
 impl DataRoot {
     #[must_use]
     pub fn mode(&self) -> &DataRootMode {
@@ -60,10 +68,20 @@ impl DataRoot {
         &self.vault_namespace
     }
 
-    /// Whether installed-app identity, promotion, and update side effects are permitted.
+    /// Whether the named installed-app side effect is permitted.
     #[must_use]
-    pub fn allows_installed_app_side_effects(&self) -> bool {
+    pub fn allows_installed_app_side_effect(&self, _side_effect: InstalledAppSideEffect) -> bool {
         !self.is_validation()
+    }
+
+    /// Runs an installed-application side effect only when this data root permits it.
+    pub fn run_installed_app_side_effect<T>(
+        &self,
+        side_effect: InstalledAppSideEffect,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        self.allows_installed_app_side_effect(side_effect)
+            .then(action)
     }
 }
 
@@ -176,7 +194,11 @@ pub fn initialize_data_root(mode: DataRootMode) -> Result<&'static DataRoot, Dat
     ACTIVE_DATA_ROOT
         .set(resolved)
         .map_err(|_| DataRootError::AlreadyInitialized)?;
-    active_data_root()
+    let active = active_data_root()?;
+    if active.borrow_stored_ctrader() {
+        crate::credential_vault::log_validation_borrow_once();
+    }
+    Ok(active)
 }
 
 /// Returns the initialized process policy.
@@ -211,13 +233,13 @@ fn resolve_data_root(mode: DataRootMode, production: &Path) -> Result<DataRoot, 
                 return Err(DataRootError::ValidationRootOverlapsProduction);
             }
             let digest = canonical_root_digest(&path);
-            let vault_namespace =
-                digest[..6]
-                    .iter()
-                    .fold(String::with_capacity(12), |mut output, byte| {
-                        let _ = write!(output, "{byte:02x}");
-                        output
-                    });
+            let suffix = digest[..6]
+                .iter()
+                .fold(String::with_capacity(12), |mut output, byte| {
+                    let _ = write!(output, "{byte:02x}");
+                    output
+                });
+            let vault_namespace = format!("com.aeris.terminal.validation.{suffix}");
             Ok(DataRoot {
                 mode: DataRootMode::Validation {
                     root: canonical_base,
@@ -230,6 +252,8 @@ fn resolve_data_root(mode: DataRootMode, production: &Path) -> Result<DataRoot, 
     }
 }
 
+/// Hashes the canonical or lexically normalized absolute selected data root
+/// (including its terminal `Aeris` component) in native OS-string encoding.
 fn canonical_root_digest(path: &Path) -> [u8; 32] {
     let mut hasher = Sha256::new();
     #[cfg(unix)]
@@ -573,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_disables_installed_app_side_effects() {
+    fn validation_disables_all_installed_app_side_effect_actions() {
         let validation_parent = temp_root("side-effects");
         let validation = resolve_data_root(
             DataRootMode::Validation {
@@ -583,13 +607,50 @@ mod tests {
             &temp_root("side-effects-production").join("Aeris"),
         )
         .expect("validation root");
-        assert!(!validation.allows_installed_app_side_effects());
+        let mut validation_invocations = 0_u8;
+        for side_effect in [
+            InstalledAppSideEffect::LauncherPromotion,
+            InstalledAppSideEffect::Update,
+            InstalledAppSideEffect::NotificationIdentityRegistration,
+        ] {
+            assert!(!validation.allows_installed_app_side_effect(side_effect));
+            assert_eq!(
+                validation.run_installed_app_side_effect(side_effect, || {
+                    validation_invocations += 1;
+                }),
+                None
+            );
+        }
+        assert_eq!(validation_invocations, 0);
+        let digest = canonical_root_digest(validation.path());
+        let suffix = digest[..6].iter().fold(String::new(), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        });
+        assert_eq!(
+            validation.vault_namespace(),
+            format!("com.aeris.terminal.validation.{suffix}")
+        );
         let production = resolve_data_root(
             DataRootMode::Production,
             &validation_parent.join("production"),
         )
         .expect("production root");
-        assert!(production.allows_installed_app_side_effects());
+        let mut production_invocations = 0_u8;
+        for side_effect in [
+            InstalledAppSideEffect::LauncherPromotion,
+            InstalledAppSideEffect::Update,
+            InstalledAppSideEffect::NotificationIdentityRegistration,
+        ] {
+            assert!(production.allows_installed_app_side_effect(side_effect));
+            assert_eq!(
+                production.run_installed_app_side_effect(side_effect, || {
+                    production_invocations += 1;
+                }),
+                Some(())
+            );
+        }
+        assert_eq!(production_invocations, 3);
         fs::remove_dir_all(validation_parent).expect("cleanup");
     }
 }

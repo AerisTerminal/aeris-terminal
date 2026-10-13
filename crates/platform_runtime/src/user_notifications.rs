@@ -106,7 +106,12 @@ fn start_dispatcher() -> Result<NotificationDispatcher, NativeUserNotificationEr
 
 fn notification_worker(receiver: &mpsc::Receiver<NativeUserNotification>) {
     #[cfg(target_os = "windows")]
-    register_windows_application_identity();
+    if let Ok(root) = crate::active_data_root() {
+        root.run_installed_app_side_effect(
+            crate::InstalledAppSideEffect::NotificationIdentityRegistration,
+            register_windows_application_identity,
+        );
+    }
     while let Ok(notification) = receiver.recv() {
         let mut native = notify_rust::Notification::new();
         native

@@ -340,6 +340,7 @@ fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
             1
         }
     };
+    let _ = aeris_observability::flush_diagnostics();
     std::process::exit(exit_code);
 }
 
@@ -4266,7 +4267,7 @@ fn quarantine_trading_database(database: &std::path::Path) -> Result<std::path::
         let source = std::path::PathBuf::from(format!("{}{suffix}", database.display()));
         if source.exists() {
             let destination = std::path::PathBuf::from(format!("{}{suffix}", quarantine.display()));
-            std::fs::rename(&source, &destination).map_err(|error| {
+            aeris_platform_runtime::fs::move_file(&source, &destination).map_err(|error| {
                 format!(
                     "trading sidecar {} could not be quarantined: {error}",
                     source.display()
@@ -4274,7 +4275,7 @@ fn quarantine_trading_database(database: &std::path::Path) -> Result<std::path::
             })?;
         }
     }
-    std::fs::rename(database, &quarantine).map_err(|error| {
+    aeris_platform_runtime::fs::move_file(database, &quarantine).map_err(|error| {
         format!(
             "trading database {} could not be quarantined: {error}",
             database.display()
@@ -5637,6 +5638,7 @@ pub(super) fn run(
     {
         if let Err(error) = run_desktop_readiness_command(command_arguments.into_iter().skip(1)) {
             diagnostic!("Aeris desktop readiness failed: {error}");
+            let _ = aeris_observability::flush_diagnostics();
             std::process::exit(1);
         }
         return;
@@ -5644,12 +5646,17 @@ pub(super) fn run(
     if let Err(error) = aeris_platform_runtime::migrate_legacy_native_data_root() {
         diagnostic!("Aeris legacy local state migration deferred: {error}");
     }
-    let installed_app_side_effects = aeris_platform_runtime::active_data_root()
-        .is_ok_and(aeris_platform_runtime::DataRoot::allows_installed_app_side_effects);
-    if installed_app_side_effects
-        && command_arguments.is_empty()
-        && let Err(error) = schedule_versioned_launcher_promotion()
-    {
+    let launcher_promotion = command_arguments.is_empty().then(|| {
+        aeris_platform_runtime::active_data_root()
+            .ok()
+            .and_then(|root| {
+                root.run_installed_app_side_effect(
+                    aeris_platform_runtime::InstalledAppSideEffect::LauncherPromotion,
+                    schedule_versioned_launcher_promotion,
+                )
+            })
+    });
+    if let Some(Some(Err(error))) = launcher_promotion {
         diagnostic!("Aeris launcher promotion deferred: {error}");
     }
     let trading = match start_trading_service() {
@@ -5773,9 +5780,11 @@ fn run_desktop(configured: ConfiguredDesktop, lifecycle: DesktopLifecycle) {
             gpui_base::init(cx);
             cx.set_global(base_theme(&AerisTheme::dark()));
             install_platform_http_client(cx);
-            if aeris_platform_runtime::active_data_root()
-                .is_ok_and(aeris_platform_runtime::DataRoot::allows_installed_app_side_effects)
-            {
+            if aeris_platform_runtime::active_data_root().is_ok_and(|root| {
+                root.allows_installed_app_side_effect(
+                    aeris_platform_runtime::InstalledAppSideEffect::NotificationIdentityRegistration,
+                )
+            }) {
                 cx.set_app_identity(
                     aeris_platform_runtime::APPLICATION_IDENTIFIER,
                     aeris_platform_runtime::APPLICATION_NAME,
@@ -5823,6 +5832,7 @@ fn mount_desktop(
                 let blocks_exit = error.blocks_exit();
                 diagnostic!("Aeris desktop shutdown failed: {error}");
                 if blocks_exit {
+                    let _ = aeris_observability::flush_diagnostics();
                     std::process::exit(1);
                 }
             }

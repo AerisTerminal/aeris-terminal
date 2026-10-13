@@ -15,6 +15,13 @@ use keyring::{Entry, Error as KeyringError};
 
 static NATIVE_CREDENTIAL_ACCESS: Mutex<()> = Mutex::new(());
 static BORROWED_CTRADER_LOGGED: AtomicBool = AtomicBool::new(false);
+const BORROWED_CTRADER_NOTICE: &str = "vault: borrowing stored cTrader connection";
+
+fn log_borrowed_ctrader_once(logged: &AtomicBool, emit: impl FnOnce(&str)) {
+    if !logged.swap(true, Ordering::AcqRel) {
+        emit(BORROWED_CTRADER_NOTICE);
+    }
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 trait NativeCredentialBackend: fmt::Debug + Send + Sync {
@@ -235,18 +242,8 @@ impl NativeCredentialVault {
                     && key == "broker_connection"
             }
         };
-        if production_access
-            && matches!(self.routing, VaultRouting::Validation { .. })
-            && !BORROWED_CTRADER_LOGGED.swap(true, Ordering::AcqRel)
-        {
-            aeris_observability::diagnostic!(
-                "Validation mode is borrowing the stored production cTrader broker connection"
-            );
-        }
         let namespace = match &self.routing {
-            VaultRouting::Validation { namespace, .. } if !production_access => {
-                format!("aeris-validation-{namespace}")
-            }
+            VaultRouting::Validation { namespace, .. } if !production_access => namespace.clone(),
             VaultRouting::Production | VaultRouting::Validation { .. } => "aeris".to_string(),
         };
         let service = previous_backend_identifier(&namespace, "service", &self.service);
@@ -266,6 +263,12 @@ impl NativeCredentialVault {
         };
         operation(self.backend.as_ref(), &service, &canonical_key, &legacy)
     }
+}
+
+pub(crate) fn log_validation_borrow_once() {
+    log_borrowed_ctrader_once(&BORROWED_CTRADER_LOGGED, |notice| {
+        aeris_observability::diagnostic!("{notice}");
+    });
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -390,13 +393,13 @@ fn legacy_services(service: &str) -> &'static [(&'static str, &'static str)] {
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialVault, KeyringError, NativeCredentialBackend, NativeCredentialVault,
-        NativeCredentialVaultError, backend_identifier, legacy_backend_identifier,
-        validate_identifier,
+        BORROWED_CTRADER_NOTICE, CredentialVault, KeyringError, NativeCredentialBackend,
+        NativeCredentialVault, NativeCredentialVaultError, backend_identifier,
+        legacy_backend_identifier, log_borrowed_ctrader_once, validate_identifier,
     };
     use std::{
         collections::BTreeMap,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, atomic::AtomicBool},
     };
 
     type MemorySecrets = Arc<Mutex<BTreeMap<(String, String), Vec<u8>>>>;
@@ -670,6 +673,21 @@ mod tests {
                 .load("broker_connection")
                 .expect("other service load"),
             None
+        );
+    }
+
+    #[test]
+    fn validation_ctrader_borrow_notice_is_exact_and_emitted_once() {
+        let logged = AtomicBool::new(false);
+        let notices = Mutex::new(Vec::new());
+        for _ in 0..3 {
+            log_borrowed_ctrader_once(&logged, |notice| {
+                notices.lock().expect("notices").push(notice.to_string());
+            });
+        }
+        assert_eq!(
+            notices.into_inner().expect("notices"),
+            [BORROWED_CTRADER_NOTICE.to_string()]
         );
     }
 }

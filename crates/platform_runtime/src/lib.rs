@@ -29,9 +29,9 @@ pub use browser::{MAXIMUM_AUTHORIZATION_URL_BYTES, open_system_browser};
 pub use capability::CapabilityAvailability;
 pub use credential_vault::{CredentialVault, NativeCredentialVault, NativeCredentialVaultError};
 pub use data_root::{
-    DataRoot, DataRootError, DataRootMode, InstanceLock, ParsedDataRootArguments, active_data_root,
-    initialize_data_root, migrate_legacy_native_data_root, native_data_root,
-    parse_data_root_arguments,
+    DataRoot, DataRootError, DataRootMode, InstalledAppSideEffect, InstanceLock,
+    ParsedDataRootArguments, active_data_root, initialize_data_root,
+    migrate_legacy_native_data_root, native_data_root, parse_data_root_arguments,
 };
 pub use display_timing::{
     DisplayEnvironment, DisplayOutput, DisplayTimingError, NativeDisplayProbe, PresentationClock,
