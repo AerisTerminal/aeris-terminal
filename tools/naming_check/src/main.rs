@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn ci_cargo_packages_and_targets_exist_in_the_workspace() {
         // Validate executable targets as well as artifact names: an obsolete package
-        // must fail here before a self-hosted lane reaches its performance step.
+        // must fail here before a hosted lane burns its timeout on a missing target.
         let manifests = workspace_manifests();
         for workflow in [
             ".github/workflows/ci.yml",
@@ -2007,28 +2007,229 @@ mod tests {
             }
         }
     }
-    #[test]
-    fn supported_os_deterministic_gates_remain_required() {
-        let workflow = manifest(".github/workflows/ci.yml");
-        for runner in [
-            "runs-on: [self-hosted, axiusflow, linux]",
-            "runs-on: [self-hosted, axiusflow, windows]",
-        ] {
-            assert!(
-                workflow.contains(runner),
-                "CI lost the required native gate {runner}"
+    /// The required shape of the push/pull-request CI workflow (architecture
+    /// section 3.10, naming rule 12). Returns one label per violation; an
+    /// empty list means the workflow matches the hosted-runner gate shape.
+    fn push_ci_shape_violations(workflow: &str) -> Vec<&'static str> {
+        let mut violations = Vec::new();
+        for trigger in ["push:", "pull_request:", "workflow_dispatch:"] {
+            if !workflow.contains(trigger) {
+                violations.push("CI must trigger on push, pull_request and workflow_dispatch");
+            }
+        }
+        if !workflow.contains("branches: [main]") {
+            violations.push("push and pull_request triggers must target main");
+        }
+        if workflow.contains("pull_request_target") {
+            violations.push("pull_request_target hands fork code a write token and is forbidden");
+        }
+        if workflow.contains("self-hosted") {
+            violations.push(
+                "a pull_request workflow must never run on self-hosted runners (they hold credentials)",
             );
         }
-        // The account carries no paid Actions quota: a GitHub-hosted runner
-        // fails every lane at startup, so the matrix must stay self-hosted.
-        for hosted in [
-            "runs-on: ubuntu-latest",
+        if !(workflow.contains("permissions:") && workflow.contains("contents: read")) {
+            violations.push("CI must declare read-only permissions (contents: read)");
+        }
+        if !(workflow.contains("concurrency:") && workflow.contains("cancel-in-progress: true")) {
+            violations.push("CI must cancel superseded runs (concurrency with cancel-in-progress)");
+        }
+        for runner in ["runs-on: windows-latest", "runs-on: ubuntu-latest"] {
+            if !workflow.contains(runner) {
+                violations
+                    .push("CI must keep both hosted lanes (windows-latest and ubuntu-latest)");
+            }
+        }
+        if workflow.contains("secrets.") {
+            violations.push("public-repository CI must not reference secrets");
+        }
+        if workflow.matches("timeout-minutes:").count() < 2 {
+            violations.push("every CI job must declare timeout-minutes");
+        }
+        violations
+    }
+
+    /// A workflow text with every required element of the hosted push/PR gate
+    /// shape; negative tests mutate it one requirement at a time.
+    const COMPLIANT_PUSH_CI: &str = r#"name: CI
+# Kit-gated Rithmic code is skipped on hosted runners.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  AERIS_RITHMIC_KIT_DISABLED: "1"
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - run: cargo fmt --all -- --check
+  ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - run: cargo run -p aeris_naming_check --locked
+"#;
+
+    #[test]
+    fn push_ci_shape_accepts_a_compliant_hosted_workflow() {
+        assert_eq!(
+            push_ci_shape_violations(COMPLIANT_PUSH_CI),
+            Vec::<&'static str>::new(),
+            "a workflow with the required triggers, permissions, concurrency and hosted lanes must pass"
+        );
+    }
+
+    #[test]
+    fn push_ci_shape_rejects_pull_request_target() {
+        let workflow = COMPLIANT_PUSH_CI.replacen(
+            "  workflow_dispatch:",
+            "  pull_request_target:\n    branches: [main]\n  workflow_dispatch:",
+            1,
+        );
+        let violations = push_ci_shape_violations(&workflow);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("pull_request_target")),
+            "a pull_request_target trigger must be rejected, got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn push_ci_shape_rejects_a_self_hosted_pull_request_runner() {
+        let workflow = COMPLIANT_PUSH_CI.replacen(
             "runs-on: windows-latest",
-            "runs-on: macos-latest",
+            "runs-on: [self-hosted, windows]",
+            1,
+        );
+        let violations = push_ci_shape_violations(&workflow);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("self-hosted")),
+            "a self-hosted runner on a pull_request workflow must be rejected, got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn push_ci_shape_rejects_missing_read_only_permissions() {
+        let workflow = COMPLIANT_PUSH_CI.replacen("permissions:\n  contents: read\n", "", 1);
+        let violations = push_ci_shape_violations(&workflow);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("permissions")),
+            "missing read-only permissions must be rejected, got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn push_ci_shape_rejects_missing_concurrency() {
+        let workflow = COMPLIANT_PUSH_CI.replacen(
+            "concurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true\n",
+            "",
+            1,
+        );
+        let violations = push_ci_shape_violations(&workflow);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("concurrency")),
+            "missing concurrency cancellation must be rejected, got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn hosted_push_ci_shape_remains_required() {
+        let workflow = manifest(".github/workflows/ci.yml");
+        assert_eq!(
+            push_ci_shape_violations(&workflow),
+            Vec::<&'static str>::new(),
+            "ci.yml must keep the required hosted-runner push/pull-request shape"
+        );
+        // The header must document why hosted runners skip the Rithmic kit.
+        assert!(
+            workflow.contains("kit-gated Rithmic"),
+            "the CI header must state that kit-gated Rithmic code is skipped on hosted runners"
+        );
+        // The windows-latest lane runs the full local gate in gate order.
+        let (windows, ubuntu) = workflow
+            .split_once("runs-on: ubuntu-latest")
+            .expect("ci.yml keeps an ubuntu-latest lane after the windows-latest lane");
+        let mut windows_offset = 0;
+        for gate in [
+            "cargo fmt --all -- --check",
+            "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+            "cargo test --workspace --all-features --locked",
+            "cargo run -p aeris_naming_check --locked",
+        ] {
+            let found = windows[windows_offset..]
+                .find(gate)
+                .unwrap_or_else(|| panic!("the windows-latest lane lost or reordered {gate}"));
+            windows_offset += found + gate.len();
+        }
+        let mut ubuntu_offset = 0;
+        for gate in [
+            "cargo fmt --all -- --check",
+            "cargo test -p aeris_naming_check --locked",
+            "cargo run -p aeris_naming_check --locked",
+        ] {
+            let found = ubuntu[ubuntu_offset..]
+                .find(gate)
+                .unwrap_or_else(|| panic!("the ubuntu-latest lane lost or reordered {gate}"));
+            ubuntu_offset += found + gate.len();
+        }
+    }
+
+    #[test]
+    fn hosted_push_ci_keeps_bounded_environment_and_pinned_actions() {
+        let workflow = manifest(".github/workflows/ci.yml");
+        // The toolchain comes from rust-toolchain.toml on both lanes, and
+        // hosted runs emulate a machine without the licensed provider kit.
+        assert_eq!(
+            workflow.matches("rustup show").count(),
+            2,
+            "both lanes must install the pinned toolchain from rust-toolchain.toml"
+        );
+        for environment in [
+            "AERIS_RITHMIC_KIT_DISABLED: \"1\"",
+            "CARGO_INCREMENTAL: \"0\"",
+            "CARGO_PROFILE_DEV_DEBUG: line-tables-only",
         ] {
             assert!(
-                !workflow.contains(hosted),
-                "CI must stay on zero-cost self-hosted runners, found {hosted}"
+                workflow.contains(environment),
+                "hosted lanes lost the bounded-build environment {environment}"
+            );
+        }
+        // Every third-party action is pinned to a full 40-hex commit SHA.
+        let uses_lines = workflow
+            .lines()
+            .filter(|line| line.contains("uses:"))
+            .count();
+        assert!(uses_lines > 0, "ci.yml must keep its checkout step");
+        for line in workflow.lines().filter(|line| line.contains("uses:")) {
+            let reference = line
+                .split('@')
+                .nth(1)
+                .unwrap_or_else(|| panic!("action must pin a revision: {line}"));
+            let sha: String = reference.chars().take(40).collect();
+            assert!(
+                sha.len() == 40
+                    && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && !reference
+                        .chars()
+                        .nth(40)
+                        .is_some_and(|next| next.is_ascii_hexdigit()),
+                "third-party action must pin a full 40-hex commit SHA: {line}"
             );
         }
         // The public chart dependency must not require runner credentials.
@@ -2039,35 +2240,16 @@ mod tests {
                 && !workflow.contains("git config --global"),
             "CI must fetch public Aeris Charts without credential rewriting"
         );
-        for gate in [
-            "cargo fmt --all -- --check",
-            "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
-            "cargo build --workspace --all-targets --all-features --locked",
-            "cargo test --workspace --all-features --locked",
-        ] {
-            assert_eq!(
-                workflow.matches(gate).count(),
-                2,
-                "every native OS lane must run {gate}"
-            );
-        }
-        for evidence_test in [
-            "./tools/test_evidence_verifiers.ps1",
-            "./tools/test_desktop_endurance_workflow.ps1",
-        ] {
-            assert_eq!(
-                workflow.matches(evidence_test).count(),
-                1,
-                "the Windows lane must keep the current evidence-schema regression {evidence_test}"
-            );
-        }
-        for artifact in [
-            "market-data-performance-linux",
-            "market-data-performance-windows",
+        // Stale pacing/evidence verifiers and the market-data performance lane
+        // stay off the push/pull_request path (they leave with their tools).
+        for retired_step in [
+            "test_evidence_verifiers.ps1",
+            "test_desktop_endurance_workflow.ps1",
+            "market_data_performance",
         ] {
             assert!(
-                workflow.contains(artifact),
-                "CI lost provenance-bound market-data evidence {artifact}"
+                !workflow.contains(retired_step),
+                "the push/pull_request gate must not run the retired step {retired_step}"
             );
         }
         for production_release_contract in [
@@ -2081,11 +2263,6 @@ mod tests {
                 "production release publication must stay out of GitHub Actions: found {production_release_contract}"
             );
         }
-        assert!(
-            !workflow.contains("workspace-macos")
-                && !workflow.contains("runs-on: [self-hosted, axiusflow, macos]"),
-            "deferred macOS qualification must not leave an unserviceable required lane queued"
-        );
         assert!(
             !workflow.contains("continue-on-error"),
             "CI must keep platform-specific failures visible"
@@ -2209,10 +2386,10 @@ mod tests {
     }
 
     #[test]
-    fn workflows_never_run_fork_pull_requests() {
-        // Self-hosted lanes run on maintainer hardware, one holding provider
-        // credentials. A pull-request trigger would let fork code reach them
-        // whenever the repository is public.
+    fn workflows_never_use_pull_request_target() {
+        // Hosted lanes run untrusted fork code only as `pull_request`, where
+        // the token is read-only and secrets are withheld. `pull_request_target`
+        // would hand fork code a write token, so it is forbidden everywhere.
         let workflows = fs::read_dir(repository_root().join(".github/workflows"))
             .expect("workflow directory is readable")
             .map(|entry| entry.expect("workflow entry is readable").path())
@@ -2221,8 +2398,8 @@ mod tests {
         for path in workflows {
             let workflow = fs::read_to_string(&path).expect("workflow");
             assert!(
-                !workflow.contains("pull_request"),
-                "{} must not run on pull requests",
+                !workflow.contains("pull_request_target"),
+                "{} must never use pull_request_target",
                 relative_string(&path)
             );
         }

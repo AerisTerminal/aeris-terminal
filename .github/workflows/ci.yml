@@ -1,67 +1,39 @@
 name: CI
 
-# Zero-cost execution policy: lanes run ONLY on maintainer-owned self-hosted
-# runners. GitHub-hosted (`*-latest`) runners are forbidden here because the
-# account carries no paid Actions quota. Register each runner with the
-# `axiusflow` label plus its OS label; a lane with no registered runner
-# queues until its timeout and fails closed — never silently green.
+# Deterministic gates run on GitHub-hosted runners: the repository is public,
+# so `windows-latest` and `ubuntu-latest` minutes are free, and every push or
+# pull request to `main` gets the full local gate without maintainer hardware.
+# Hosted runners have no licensed Rithmic provider kit, so kit-gated Rithmic
+# code is skipped here (`AERIS_RITHMIC_KIT_DISABLED=1`) and stays local-only.
+# Live, credentialed and performance lanes stay manual: `live_market_gates.yml`
+# and the macOS workflows are `workflow_dispatch`-only.
 on:
-  # Dispatch one completed, locally verified batch; routine pushes must not
-  # start heavy builds on the maintainer's workstation.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# One maintainer machine serves the lanes. Keep manual runs for the same
-# ref from overlapping.
+# Cancel superseded runs of the same ref so a fresh push never queues behind
+# a stale one.
 concurrency:
-  group: aeris-ci-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  workspace-linux:
-    runs-on: [self-hosted, axiusflow, linux]
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install desktop build libraries
-        run: tools/setup_linux_desktop.sh --system
-      - name: Free runner disk space
-        # Best-effort only: the GitHub-hosted lanes needed this because the
-        # debug plus release artifacts exceeded default free space. A
-        # maintainer-owned runner is sized by its owner, so absent paths or a
-        # sudo password prompt must never fail the lane.
-        run: |
-          sudo -n rm -rf /usr/share/dotnet || true
-          sudo -n rm -rf /opt/ghc || true
-          sudo -n rm -rf /usr/local/share/boost || true
-          sudo -n rm -rf /usr/local/lib/android || true
-          sudo -n rm -rf /usr/share/swift || true
-          sudo -n apt-get clean || true
-          df -h /
-      - name: Install pinned Rust toolchain
-        run: rustup show
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Build workspace
-        run: cargo build --workspace --all-targets --all-features --locked
-      - name: Test workspace
-        run: cargo test --workspace --all-features --locked
-      - name: Check local market-data performance
-        run: cargo run -p aeris_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
-      - name: Upload market-data baseline
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: market-data-performance-linux
-          path: .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
-          retention-days: 30
+env:
+  AERIS_RITHMIC_KIT_DISABLED: "1"
+  # Keep the hosted-runner disk within limits: no incremental artifacts and
+  # line-only debug tables in dev builds.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-  workspace-windows:
-    runs-on: [self-hosted, axiusflow, windows]
-    timeout-minutes: 60
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain
@@ -70,20 +42,21 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Build workspace
-        run: cargo build --workspace --all-targets --all-features --locked
       - name: Test workspace
         run: cargo test --workspace --all-features --locked
-      - name: Test Windows evidence tooling
-        shell: pwsh
-        run: |
-          & ./tools/test_evidence_verifiers.ps1
-          & ./tools/test_desktop_endurance_workflow.ps1
-      - name: Check local market-data performance
-        run: cargo run -p aeris_market_engine --example market_data_performance --release --locked -- .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
-      - name: Upload market-data baseline
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: market-data-performance-windows
-          path: .cache/evidence/market_data_performance_${{ github.run_id }}_${{ github.run_attempt }}.json
-          retention-days: 30
+      - name: Check naming and architecture assertions
+        run: cargo run -p aeris_naming_check --locked
+
+  ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test naming and architecture assertions
+        run: cargo test -p aeris_naming_check --locked
+      - name: Check naming and architecture assertions
+        run: cargo run -p aeris_naming_check --locked

@@ -151,7 +151,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | PL-06 | Medium | Five atomic-write implementations; trading `write_atomic` is not atomic | M1.5 (primitive), M1.6 | open |
 | PL-07 | Medium | Dormant account_runtime with latent defects and a heavy dependency stack | M1.4 (part), M8.4 (rest) | open |
 | PL-08 | Medium | `naming_check` pins source text and is co-edited with the code it checks | M8.12 | open |
-| PL-09 | High | CI is manual-only | M1.2 | open |
+| PL-09 | High | CI is manual-only | M1.2 | closed in this commit |
 | PL-10 | Medium | Stale physical-pacing tooling and display_timing module | M8.3 (display_timing), M8.11 | open |
 | PL-11 | Low | `plan/` directory contradicts the AGENTS documentation rule | M1.1 (rule change; `plan/` kept per D15), M8.12 (Readme/.gitignore part) | closed in this commit |
 | PL-12 | Medium | Vendored `gpui_base` is unlinted and oversized | M8.11 | open |
@@ -224,7 +224,24 @@ Status: in progress
   - Deviation from `library/tracking.md` layout: report copies sit under `reports/` (not `audit/` +
     `design/`), following the binding `architecture.md` section 7 and validation contract.
   - Verification: `aeris_naming_check` and the full workspace gate green with the new files.
-- [ ] M1.2 hosted-ci-push-pr - CI on push and pull request with GitHub-hosted runners
+- [x] M1.2 hosted-ci-push-pr - CI on push and pull request with GitHub-hosted runners
+  - Rewrote `.github/workflows/ci.yml`: triggers `push`/`pull_request` (main) and `workflow_dispatch`,
+    top-level `permissions: contents: read`, concurrency with cancel-in-progress, no secrets and no
+    self-hosted labels. `windows-latest` runs fmt, clippy `-D warnings`, the workspace tests
+    (all-features, locked) and naming_check with job timeouts, the toolchain from
+    `rust-toolchain.toml` and `AERIS_RITHMIC_KIT_DISABLED=1` / `CARGO_INCREMENTAL=0` /
+    `CARGO_PROFILE_DEV_DEBUG=line-tables-only`; `ubuntu-latest` runs fmt plus the naming_check
+    test and binary. The self-hosted-only header is replaced (kit-gated Rithmic code is documented
+    as skipped on hosted runners) and the stale evidence-verifier and performance steps are off the
+    push path (they leave with their tools in M8.11); actions stay pinned to full commit SHAs.
+  - naming_check CI-shape rule 12 landed: `push_ci_shape_violations` with one positive and four
+    negative tests (pull_request_target, self-hosted runner on a pull_request workflow, missing
+    read-only permissions, missing concurrency) plus `hosted_push_ci_shape_remains_required` on the
+    real file replace `workflows_never_run_fork_pull_requests` and the self-hosted shape pin;
+    `workflows_never_use_pull_request_target` keeps the fork-safety guarantee for every workflow.
+  - Verification: full local gate green with `AERIS_RITHMIC_KIT_DISABLED=1` (VAL-FND-006); the
+    post-push GitHub Actions run URL is recorded here by the orchestrator after the milestone push.
+  - Closes PL-09.
 - [ ] M1.3 unified-interval-mapping - Fix Day3 workspace restore with one runtime-owned interval/cadence mapping
 - [ ] M1.4 bounded-exit-and-secret-tokens - Exit never parks forever; tokens are redacted and zeroized
 - [ ] M1.5 platform-sys-durable-writer - New `platform_sys` crate with the single durable file writer and unsafe isolation rule
@@ -361,12 +378,18 @@ the repo root `AGENTS.md`.
 - Every commit that introduces or changes an architecture restriction (a `tools/naming_check` rule, a
   crate boundary, a writer or CI rule) also updates the repo `AGENTS.md` in the same commit (M1.1,
   this commit).
+- CI runs on GitHub-hosted runners on `push`/`pull_request` to `main` and `workflow_dispatch`:
+  `windows-latest` runs the full local gate and `ubuntu-latest` runs fmt plus naming_check, with
+  read-only `permissions`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1`.
+  `pull_request_target`, `secrets.` references and self-hosted runners are forbidden on the
+  pull-request path; `tools/naming_check` enforces the shape (M1.2, this commit).
 
 ## 6. Progress log
 
 Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line note>`.
 
 - 2026-10-13 M1.1 docs(stabilization): add the stabilization tracking document and plan/stabilization report copies - created the tracker with all 93 findings, decisions D1-D18 plus reconciled decisions and all 89 items; copied the 11 research reports into `reports/` and the architecture beside this file (redaction scan clean); `AGENTS.md` sanctions `plan/stabilization/` and records the tracking and restriction discipline; PL-11 closed by the deliberate rule change (D15).
+- 2026-10-13 M1.2 ci(workflows): run the full gate on hosted runners for pushes and pull requests - `.github/workflows/ci.yml` now triggers on push/pull_request (main) and workflow_dispatch on `windows-latest` (fmt, clippy, workspace tests, naming_check) and `ubuntu-latest` (fmt, naming_check) with read-only permissions, concurrency cancellation, no secrets and `AERIS_RITHMIC_KIT_DISABLED=1`; the naming_check CI-shape rule gained positive and negative tests and replaced the self-hosted pins; PL-09 closed.
 
 ## 7. Known gaps / deferred
 

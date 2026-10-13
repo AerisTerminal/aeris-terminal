@@ -196,6 +196,14 @@ cargo test --workspace --all-features --locked
 Do not suppress a new failure just to make a gate green. Fix failures caused by the change and report
 independent baseline failures precisely.
 
+CI runs the same gates on GitHub-hosted runners. `.github/workflows/ci.yml` triggers on `push` and
+`pull_request` to `main` and on `workflow_dispatch`: `windows-latest` runs fmt, clippy, the workspace
+tests and `aeris_naming_check`, and `ubuntu-latest` runs fmt and naming_check. The workflow keeps
+`permissions: contents: read`, concurrency cancellation and `AERIS_RITHMIC_KIT_DISABLED=1` (hosted
+runners have no Rithmic kit; kit-gated code is skipped there). `pull_request_target`, `secrets.`
+references and self-hosted runners are forbidden on the pull-request path; live, credentialed and
+performance lanes stay `workflow_dispatch`-only. `tools/naming_check` enforces this shape.
+
 ## Release workflow
 
 Production release publication is disabled while the Aeris domain and AWS backend are unconfigured. Do not publish, install, or point clients at the former Axiusflow endpoint. The retired publication workflow must not be restored. Design and verify a new AWS release path when the maintainer requests deployment.
