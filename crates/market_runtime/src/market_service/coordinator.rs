@@ -1311,6 +1311,10 @@ impl Coordinator<'_> {
 
 #[cfg(test)]
 mod tests {
+    mod characterization {
+        include!("tests/characterization.rs");
+    }
+
     use super::*;
     use crate::market_service::{
         FormingBar, HISTORY_FAILED_RETRY_COOLDOWN, HISTORY_RETRY_DELAY,

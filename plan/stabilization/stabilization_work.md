@@ -213,7 +213,7 @@ the same commit as the feature.
 
 ### M1 foundations
 
-Status: in progress
+Status: validated (2026-10-13), pushed (f2170311)
 
 - [x] M1.1 stabilization-tracking-doc - Create the stabilization tracking document and allow `plan/stabilization` in AGENTS.md
   - Created `plan/stabilization/stabilization_work.md` (this file) with all 93 finding IDs, decisions
@@ -240,8 +240,10 @@ Status: in progress
     read-only permissions, missing concurrency) plus `hosted_push_ci_shape_remains_required` on the
     real file replace `workflows_never_run_fork_pull_requests` and the self-hosted shape pin;
     `workflows_never_use_pull_request_target` keeps the fork-safety guarantee for every workflow.
-  - Verification: full local gate green with `AERIS_RITHMIC_KIT_DISABLED=1` (VAL-FND-006); the
-    post-push GitHub Actions run URL is recorded here by the orchestrator after the milestone push.
+  - Verification: full local gate green with `AERIS_RITHMIC_KIT_DISABLED=1` (VAL-FND-006).
+    No post-push CI run occurred for `f2170311`: on 2026-10-13 `gh workflow list --all`
+    reported `CI` as `disabled_manually`. Only the maintainer can re-enable it; the local
+    gate is not a substitute for a hosted run.
   - Closes PL-09.
   - Scrutiny follow-up: every workflow now rejects self-hosted runners combined with `push` or
     `pull_request`, including inline and quoted YAML trigger forms; live and macOS lanes remain manual-only.
@@ -310,9 +312,15 @@ Status: in progress
 
 ### M2 market foundations
 
-Status: pending
+Status: in progress
 
-- [ ] M2.1 market-characterization-tests - Characterization tests at the coordinator command/event boundary
+- [x] M2.1 market-characterization-tests - Characterization tests at the coordinator command/event boundary
+  - Four scripted command/event scenarios pin reseed continuity, overflow covering snapshots,
+    retired history completion rejection and symbol/interval changes without session replacement.
+    Tests inspect published events and replies, not coordinator maps.
+  - `aeris_naming_check` requires each test name individually; the test suite verifies all
+    four removal cases. Full local fmt, workspace clippy, workspace tests and naming gate passed.
+    MD-17 is partly addressed; replay migration remains M3.11.
 - [ ] M2.2 market-benchmark-baseline - Hot-path and coordinator benchmark baseline
 - [ ] M2.3 market-injectable-clock - Injected clock for the market coordinator
 - [ ] M2.4 reconnect-policy - One jittered, capped, budgeted reconnect policy
@@ -452,6 +460,8 @@ the repo root `AGENTS.md`.
   (M1.7, 3c42981b).
 - Each data root has one process owner. Validation roots and vault namespaces are isolated unless the explicit
   stored-cTrader borrowing flag is present (M1.8, 3c42981b).
+- The four market coordinator characterization cases and exact test names remain in the boundary
+  test file, checked by `aeris_naming_check` (M2.1, this commit).
 
 ## 6. Progress log
 
@@ -478,6 +488,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.8 fix(validation): report only real cTrader venue attachments - corrected attachment diagnostics and covered root overlap and exact-key vault read/write isolation.
 - 2026-10-13 M1.2 fix(ci): correct live gate runner guidance - removed the obsolete hosted-runner ban from the live gate comment without changing workflow behavior.
 - 2026-10-13 M1.8 fix(validation): keep unconfigured cTrader startup diagnostics silent - suppressed the disconnected catalog warm-up line and bounded the isolated diagnostic test; full gate and isolated desktop/panic checks passed.
+- 2026-10-13 M2.1 test(market): characterize coordinator market handoffs - pinned four command/event scenarios and registered their exact names; backfilled the M1 validated/pushed state and recorded the disabled hosted CI workflow.
 
 ## 7. Known gaps / deferred
 
@@ -502,3 +513,6 @@ From `reports/work_items.md` ("Deferred / out of scope") plus mission-accepted l
   code-signing certificate and key custody, the AWS release endpoint, and the macOS workflows.
 - Manual checks only the maintainer can run: logoff flush (M8.3), VM install and uninstall (M8.6),
   Rithmic login through the native vault (M6.9).
+- As checked with `gh workflow list --all` on 2026-10-13, the GitHub `CI` workflow is
+  `disabled_manually`; consequently there was no post-push run for M1 head `f2170311`.
+  Re-enabling it requires the maintainer; no Actions setting was changed.
