@@ -5,11 +5,70 @@ use super::{
 use crate::hyperliquid_realtime::HyperliquidRealtimeEvent;
 use crate::rithmic_realtime::RithmicRealtimeEvent;
 use aeris_contracts::MarketSessionStatus;
+use aeris_market_engine::fence::{Epoch, EpochSequence, ProviderTag};
+use std::collections::BTreeMap;
 
 pub(super) struct ProviderEvent {
     pub(super) provider: &'static str,
+    pub(super) generation: Epoch<ProviderTag>,
+    pub(super) wire_generation: u64,
+    pub(super) kind: ProviderEventKind,
+}
+
+/// Untrusted adapter identity. The coordinator registry stamps it before dispatch.
+pub(super) struct WireProviderEvent {
+    pub(super) provider: &'static str,
     pub(super) generation: u64,
     pub(super) kind: ProviderEventKind,
+}
+
+/// Owns the only mint for adapter generations. Never retains retired sessions.
+#[derive(Default)]
+pub(super) struct ProviderEpochRegistry {
+    sequence: EpochSequence<ProviderTag>,
+    active: BTreeMap<String, (u64, Epoch<ProviderTag>)>,
+    stale_events: u64,
+    stale_history: u64,
+}
+
+impl ProviderEpochRegistry {
+    pub(super) fn stamp(&mut self, provider: &str, wire: u64) -> Option<Epoch<ProviderTag>> {
+        if wire == 0
+            || self
+                .active
+                .get(provider)
+                .is_some_and(|(current, _)| wire < *current)
+        {
+            return None;
+        }
+        if let Some((current, epoch)) = self.active.get(provider)
+            && *current == wire
+        {
+            return Some(*epoch);
+        }
+        let epoch = self.sequence.next();
+        self.active.insert(provider.to_owned(), (wire, epoch));
+        Some(epoch)
+    }
+
+    pub(super) fn accepts(&self, provider: &str, epoch: Epoch<ProviderTag>) -> bool {
+        self.active
+            .get(provider)
+            .is_some_and(|(_, current)| current == &epoch)
+    }
+
+    pub(super) fn drop_event(&mut self) {
+        self.stale_events = self.stale_events.saturating_add(1);
+    }
+
+    pub(super) fn drop_history(&mut self) {
+        self.stale_history = self.stale_history.saturating_add(1);
+    }
+
+    #[cfg(test)]
+    pub(super) fn stale_counts(&self) -> (u64, u64) {
+        (self.stale_events, self.stale_history)
+    }
 }
 
 pub(super) enum ProviderTradeBatch {
@@ -74,7 +133,7 @@ pub(super) enum ProviderEventKind {
 }
 
 impl ProviderEvent {
-    pub(super) fn rithmic(event: RithmicRealtimeEvent) -> Self {
+    pub(super) fn rithmic(event: RithmicRealtimeEvent) -> WireProviderEvent {
         use RithmicRealtimeEvent as Wire;
         let generation = event.generation();
         let kind = match event {
@@ -108,14 +167,14 @@ impl ProviderEvent {
             Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
             Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
         };
-        Self {
+        WireProviderEvent {
             provider: "rithmic",
             generation,
             kind,
         }
     }
 
-    pub(super) fn hyperliquid(event: HyperliquidRealtimeEvent) -> Self {
+    pub(super) fn hyperliquid(event: HyperliquidRealtimeEvent) -> WireProviderEvent {
         use HyperliquidRealtimeEvent as Wire;
         let generation = match &event {
             Wire::Connecting(g)
@@ -161,14 +220,14 @@ impl ProviderEvent {
             Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
             Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
         };
-        Self {
+        WireProviderEvent {
             provider: "hyperliquid",
             generation,
             kind,
         }
     }
 
-    pub(super) fn ctrader(event: super::ctrader::RealtimeEvent) -> Self {
+    pub(super) fn ctrader(event: super::ctrader::RealtimeEvent) -> WireProviderEvent {
         use super::ctrader::RealtimeEvent as Wire;
         let generation = event.generation();
         let kind = match event {
@@ -191,14 +250,14 @@ impl ProviderEvent {
             Wire::Quote(_, quote) => ProviderEventKind::Quote(quote),
             Wire::Depth(_, depth) => ProviderEventKind::Depth(depth),
         };
-        Self {
+        WireProviderEvent {
             provider: "ctrader",
             generation,
             kind,
         }
     }
 
-    pub(super) fn tastytrade(event: super::tastytrade::RealtimeEvent) -> Self {
+    pub(super) fn tastytrade(event: super::tastytrade::RealtimeEvent) -> WireProviderEvent {
         use super::tastytrade::RealtimeEvent as Wire;
         let generation = event.generation();
         let kind = match event {
@@ -231,7 +290,7 @@ impl ProviderEvent {
                 truncated,
             },
         };
-        Self {
+        WireProviderEvent {
             provider: "tastytrade",
             generation,
             kind,

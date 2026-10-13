@@ -1013,6 +1013,7 @@ fn history_request(
     HistoryRequest {
         series: series.clone(),
         provider_generation: ProviderGeneration(NonZeroU64::new(generation).expect("generation")),
+        provider_epoch: aeris_market_engine::fence::EpochSequence::default().next(),
         instrument: Some(instrument.clone()),
         maximum_bars,
         range,
@@ -1737,7 +1738,7 @@ fn host_fault_bumps_the_generation_and_fences_retired_requests_and_events() {
         .try_send(history_request(&series, &demo, 1, 10, None))
         .expect("history queue accepts");
     let retired = harness.completion();
-    let Command::HistoryCompleted(_, generation, _, Err(error)) = retired else {
+    let Command::HistoryCompleted(_, generation, _, Err(error), _) = retired else {
         panic!("retired history answers an error");
     };
     assert_eq!(generation, ProviderGeneration(NonZeroU64::new(1).unwrap()));
@@ -1749,7 +1750,7 @@ fn host_fault_bumps_the_generation_and_fences_retired_requests_and_events() {
         .try_send(history_request(&series, &demo, 2, 10, None))
         .expect("history queue accepts");
     let served = harness.completion();
-    let Command::HistoryCompleted(_, generation, _, Ok(snapshot)) = served else {
+    let Command::HistoryCompleted(_, generation, _, Ok(snapshot), _) = served else {
         panic!("current-generation history is served");
     };
     assert_eq!(generation, ProviderGeneration(NonZeroU64::new(2).unwrap()));
@@ -2046,7 +2047,7 @@ fn live_account_history_is_served_by_the_live_host() {
         .try_send(history_request(&series, &gold, 1, 10, None))
         .expect("history queue accepts");
     let served = harness.completion();
-    let Command::HistoryCompleted(_, _, _, Ok(snapshot)) = served else {
+    let Command::HistoryCompleted(_, _, _, Ok(snapshot), _) = served else {
         panic!("live history is served");
     };
     assert_eq!(snapshot.price_scale, 2);

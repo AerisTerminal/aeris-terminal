@@ -283,7 +283,7 @@ impl Coordinator<'_> {
                 status,
                 valid_from_utc_ms,
                 valid_until_utc_ms,
-            } => self.handle_provider_event(super::ProviderEvent {
+            } => self.handle_provider_event(super::WireProviderEvent {
                 provider: match self.providers.descriptor(provider) {
                     Some(descriptor) => descriptor.id,
                     None => return,

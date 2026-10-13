@@ -125,6 +125,9 @@ the check.
 - Dated provider calendar updates enter the coordinator behind the current provider-generation
   fence and expire into the instrument's recurring calendar or Unknown. Session, week and month
   trade-built bars and tape trading dates use that same calendar, not fixed daily seconds.
+- Provider events and history completions carry registry-minted `Epoch<ProviderTag>` identities;
+  the coordinator rejects retired epochs by equality and counts their drops. Adapter wire
+  generation numbers never serve as market event identities.
 - Stall recovery considers every live candle and trade series while its calendar is open;
   closed sessions never recover for silence, and unknown sessions use a longer threshold.
   Practice session checks use the same calendar for every provider.

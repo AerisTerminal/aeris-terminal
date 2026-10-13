@@ -466,6 +466,7 @@ pub(super) fn run_history_worker(
             request.provider_generation,
             request.range,
             result,
+            request.provider_epoch,
         );
         loop {
             if shutdown.load(Ordering::Acquire) {
@@ -960,6 +961,10 @@ impl Coordinator<'_> {
         let request = HistoryRequest {
             series: series.clone(),
             provider_generation: generation,
+            provider_epoch: self
+                .provider_epochs
+                .stamp(&series.provider_id, generation.0.get())
+                .ok_or("history request belongs to a retired provider session")?,
             instrument,
             maximum_bars,
             range,
@@ -1932,6 +1937,7 @@ mod tests {
         HistoryRequest {
             series: test_series(instrument_id),
             provider_generation: ProviderGeneration(NonZeroU64::MIN),
+            provider_epoch: aeris_market_engine::fence::EpochSequence::default().next(),
             instrument: None,
             maximum_bars: 10,
             range: None,
@@ -2187,11 +2193,11 @@ mod tests {
         );
         assert!(matches!(
             completions_rx.try_recv(),
-            Ok(Command::HistoryCompleted(series, _, None, Ok(_))) if series.instrument_id == "first"
+            Ok(Command::HistoryCompleted(series, _, None, Ok(_), _)) if series.instrument_id == "first"
         ));
         assert!(matches!(
             completions_rx.try_recv(),
-            Ok(Command::HistoryCompleted(series, _, None, Ok(_))) if series.instrument_id == "second"
+            Ok(Command::HistoryCompleted(series, _, None, Ok(_), _)) if series.instrument_id == "second"
         ));
     }
 

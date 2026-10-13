@@ -375,7 +375,10 @@ Status: in progress
   - Trade handoffs use calendar session/day, week and month buckets rather than elapsed daily seconds or CME-only buckets. Coordinator owns the installed calendar; tape dates, watchdog and trade-built bars read its current source. Contiguous contract hours still roll daily at the local opening time.
   - Dated provider projections and holidays arrive through generation-fenced provider calendar events, take precedence while valid, and then fall back to contract/exchange rules or Unknown. The tastytrade catalog worker publishes bounded updates when its cached calendar changes and on instrument selection.
   - Tests cover CME daily rolls in normal and DST weeks, Day3 session rolls, all six non-CME weekly/monthly cases, tape trading dates, provider holidays and validity expiry. Scoped tests/Clippy and the full local fmt, workspace Clippy/tests/naming gate pass. The single M2 GUI pass remains scheduled after M2.10.
-- [ ] M2.8 typed-epoch-fencing - `Epoch<Tag>` and `Fenced<T>` replace raw generations at the provider boundary
+- [x] M2.8 typed-epoch-fencing - `Epoch<Tag>` and `Fenced<T>` replace raw generations at the provider boundary
+  - Added non-arithmetic `Epoch<Tag>`, exhaustion-safe `EpochSequence`, `Fenced` and equality-only `Fence` in market_engine. The coordinator registry alone stamps adapter wire generations; provider events and history completions carry typed provider epochs, including dated calendar updates.
+  - Stale provider events and history completions each increment their own bounded diagnostic count and cannot mutate current series or calendar state. Existing engine `ProviderGeneration` and `GenerationId` wrappers remain until their broader consumers migrate; raw adapter counters remain inside the wire boundary.
+  - Scoped runtime/engine/naming tests and full workspace fmt/Clippy/tests/naming gate passed; naming_check rejects raw generations in the typed ProviderEvent.
 - [ ] M2.9 command-fences-consumer-registry - Command fences and one consumer registry; remove the startup sentinel
 - [ ] M2.10 history-tracker - `HistoryTracker` with current and backfill lanes; trim unused `provider_history`
 
@@ -518,6 +521,7 @@ the repo root `AGENTS.md`.
 - Session/cadence resolution uses one provider-neutral calendar and one exchange-code table; generic calendar code cannot contain provider literals or import adapter calendars, and unsupported weekly/monthly live demand reports a typed error (M2.5, this commit).
 - Every live model's stall policy and every provider's practice-session check use calendar phases. Unknown sessions use a conservative 300-second stall threshold; closed sessions do not recover from silence (M2.6, this commit).
 - Dated provider calendar events are fenced at the coordinator and expire into the instrument's recurring calendar or Unknown; live session, week and month bars and tape dates use the same calendar (M2.7, this commit).
+- Typed provider events and history completions use registry-minted epochs and an equality fence; naming_check rejects a raw `ProviderEvent.generation` (M2.8, this commit).
 
 ## 6. Progress log
 
@@ -551,6 +555,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M2.5 feat(market): centralize calendar sources and exchange rules - shared CME calendar and venue table, resolved dated/weekly/continuous sessions and rejected unsupported weekly/monthly live demand explicitly.
 - 2026-10-13 M2.6 feat(market): recover stalled live series by calendar phase - applied the same injected-clock watchdog to candle and trade models and routed practice-session checks through the calendar.
 - 2026-10-13 M2.7 feat(market): roll live bars at calendar sessions - replaced fixed session durations and CME-only live buckets, integrated fenced dated provider holidays and calendar tape dates, and tested six non-CME week/month paths.
+- 2026-10-14 M2.8 feat(market): fence provider events and history with typed epochs - registry-stamped adapter generations, fenced dated calendar and history completions, counted retired inputs and pinned typed event fields.
 
 ## 7. Known gaps / deferred
 

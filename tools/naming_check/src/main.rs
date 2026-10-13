@@ -119,6 +119,18 @@ fn main() -> ExitCode {
             }
         }
     }
+    let event_path = "crates/market_runtime/src/market_service/provider_event.rs";
+    let event_file = root.join(event_path);
+    match fs::read_to_string(&event_file) {
+        Ok(source) if public_provider_event_has_raw_generation(&source) => {
+            violations.push(relative_to(&root, &event_file));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("failed to read provider event boundary: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
 
     if violations.is_empty() {
         println!("snake_case naming check passed");
@@ -159,6 +171,21 @@ fn violates_calendar_boundary(path: &str, source: &str) -> bool {
         return true;
     }
     production.contains("RithmicExchangeCalendar")
+}
+
+fn public_provider_event_has_raw_generation(source: &str) -> bool {
+    let production = production_source_prefix(source);
+    let Some(event) = production.split("struct ProviderEvent {").nth(1) else {
+        return true;
+    };
+    let Some(fields) = event.split('}').next() else {
+        return true;
+    };
+    let fields: Vec<_> = fields
+        .split([',', '\n'])
+        .map(|field| field.trim().trim_start_matches("pub(super) ").trim())
+        .collect();
+    fields.contains(&"generation: u64") || !fields.contains(&"generation: Epoch<ProviderTag>")
 }
 
 fn inspect_directory(
@@ -444,6 +471,21 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::production_source_prefix as production_prefix;
+
+    #[test]
+    fn public_provider_event_requires_typed_epoch_even_after_test_module() {
+        assert!(super::public_provider_event_has_raw_generation(
+            "pub(super) struct ProviderEvent { generation: u64 }\n"
+        ));
+        assert!(!super::public_provider_event_has_raw_generation(
+            "#[cfg(test)] mod tests { struct ProviderEvent { generation: u64 } }\n\
+             pub(super) struct ProviderEvent { generation: Epoch<ProviderTag>, kind: EventKind }"
+        ));
+        assert!(super::public_provider_event_has_raw_generation(
+            "#[cfg(test)] mod tests { struct ProviderEvent { generation: Epoch<ProviderTag> } }\n\
+             pub(super) struct ProviderEvent { generation: u64 }"
+        ));
+    }
     use std::{
         collections::BTreeSet,
         fs,

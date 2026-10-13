@@ -6,6 +6,7 @@
 
 mod data_lease;
 mod demand;
+pub mod fence;
 mod provider_manager;
 mod publication;
 mod series_store;

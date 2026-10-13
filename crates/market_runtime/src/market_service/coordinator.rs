@@ -6,11 +6,12 @@ use super::{
     MAXIMUM_STUDY_POINTS_PER_OUTPUT, MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
     MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS, MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine,
     MarketServiceStatus, MarketStream, NonZeroUsize, Ordering, PriceAlertRegistry,
-    ProviderConnectionState, ProviderDispatch, ProviderGeneration, ProviderHealth,
-    ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderSessionSlot,
-    ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply,
-    SeriesLive, SeriesLiveMap, StreamRequirements, StudyMarketLeaseChangeKind, StudyRuntime,
-    StudyRuntimeConfig, authorize_consumer, publish_state, thread,
+    ProviderConnectionState, ProviderDispatch, ProviderEpochRegistry, ProviderGeneration,
+    ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry,
+    ProviderSessionSlot, ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver,
+    RecvTimeoutError, Reply, SeriesLive, SeriesLiveMap, StreamRequirements,
+    StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig, authorize_consumer,
+    publish_state, thread,
 };
 #[cfg(test)]
 use super::{CandleLiveHandoff, TradeLiveHandoff};
@@ -140,6 +141,7 @@ impl<'a> Coordinator<'a> {
             providers,
             clock,
             calendar: super::calendar::MarketCalendarService::default(),
+            provider_epochs: ProviderEpochRegistry::default(),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -526,6 +528,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) providers: ProviderDispatch<'a>,
     pub(super) clock: Arc<dyn super::clock::Clock>,
     pub(super) calendar: super::calendar::MarketCalendarService,
+    pub(super) provider_epochs: ProviderEpochRegistry,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
@@ -641,8 +644,18 @@ impl Coordinator<'_> {
                     wake.pending.store(false, Ordering::Release);
                 }
             }
-            Command::HistoryCompleted(series, generation, range, result) => {
-                self.history_completed(&series, generation, range, result);
+            Command::HistoryCompleted(series, generation, range, result, epoch) => {
+                if !self.provider_epochs.accepts(&series.provider_id, epoch)
+                    || self
+                        .engine
+                        .provider_status(&series.provider_id)
+                        .and_then(|status| status.generation)
+                        != Some(generation)
+                {
+                    self.provider_epochs.drop_history();
+                } else {
+                    self.history_completed(&series, generation, range, result);
+                }
             }
             command @ (Command::BrokerAuthorizationChanged(..)
             | Command::AvailableStreams(..)
@@ -1784,6 +1797,7 @@ mod tests {
             },
             clock: Arc::new(super::super::clock::SystemClock),
             calendar: super::super::calendar::MarketCalendarService::default(),
+            provider_epochs: ProviderEpochRegistry::default(),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -4139,6 +4153,62 @@ mod tests {
     }
 
     #[test]
+    fn retired_provider_and_history_epochs_are_dropped_once_each() {
+        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+        let (mut coordinator, _) = connected_rithmic_coordinator();
+        let previous = coordinator
+            .provider_epochs
+            .stamp("rithmic", 1)
+            .expect("first session minted by registry");
+        let series = series();
+        let before = coordinator.engine.series_snapshot(&series);
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", ProviderGeneration(nonzero(2)))
+            .expect("new provider session");
+        coordinator
+            .provider_epochs
+            .stamp("rithmic", 2)
+            .expect("new session minted by registry");
+        let phase = coordinator
+            .calendar
+            .phase(&instrument().instrument_id, 1_800_000_000_000);
+        coordinator.handle_provider_event(super::super::WireProviderEvent {
+            provider: "rithmic",
+            generation: 1,
+            kind: super::super::ProviderEventKind::Calendar {
+                instrument_id: instrument().instrument_id.clone(),
+                status: MarketSessionStatus {
+                    instrument_id: instrument().instrument_id,
+                    phase: MarketSessionPhase::Closed,
+                    source: MarketSessionSource::ProviderCalendar,
+                    session_start_unix_nanos: None,
+                    session_end_unix_nanos: None,
+                    next_open_unix_nanos: None,
+                },
+                valid_from_utc_ms: 1_799_999_999_000,
+                valid_until_utc_ms: 1_800_000_001_000,
+            },
+        });
+        assert_eq!(
+            coordinator
+                .calendar
+                .phase(&instrument().instrument_id, 1_800_000_000_000),
+            phase
+        );
+        assert_eq!(coordinator.provider_epochs.stale_counts(), (1, 0));
+        coordinator.handle_command(Command::HistoryCompleted(
+            series.clone(),
+            ProviderGeneration(nonzero(1)),
+            None,
+            Err("retired history".into()),
+            previous,
+        ));
+        assert_eq!(coordinator.provider_epochs.stale_counts(), (1, 1));
+        assert_eq!(coordinator.engine.series_snapshot(&series), before);
+    }
+
+    #[test]
     fn provider_holiday_event_is_generation_fenced_and_closes_watchdog_calendar() {
         use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
         use chrono::{DateTime, Utc};
@@ -4152,7 +4222,7 @@ mod tests {
             coordinator.calendar.phase(&instrument_id, midday),
             aeris_instruments::SessionPhase::Open
         );
-        let event = |generation| super::super::ProviderEvent {
+        let event = |generation| super::super::WireProviderEvent {
             provider: "rithmic",
             generation,
             kind: super::super::ProviderEventKind::Calendar {

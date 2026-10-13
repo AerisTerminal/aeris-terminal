@@ -2129,14 +2129,41 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    pub(super) fn handle_provider_event(&mut self, event: ProviderEvent) {
+    pub(super) fn handle_provider_event(&mut self, wire: super::WireProviderEvent) {
+        let engine_generation = self
+            .engine
+            .provider_status(wire.provider)
+            .and_then(|status| status.generation)
+            .map(|generation| generation.0.get());
+        if wire.generation == 0
+            || wire.generation < self.session(wire.provider).generation_floor
+            || engine_generation.is_some_and(|current| wire.generation < current)
+        {
+            self.provider_epochs.drop_event();
+            return;
+        }
+        let Some(epoch) = self.provider_epochs.stamp(wire.provider, wire.generation) else {
+            self.provider_epochs.drop_event();
+            return;
+        };
+        self.dispatch_provider_event(ProviderEvent {
+            provider: wire.provider,
+            generation: epoch,
+            wire_generation: wire.generation,
+            kind: wire.kind,
+        });
+    }
+
+    fn dispatch_provider_event(&mut self, event: ProviderEvent) {
         if !self.accepts_provider_event(&event) {
+            self.provider_epochs.drop_event();
             return;
         }
         let ProviderEvent {
             provider,
-            generation,
+            wire_generation: generation,
             kind,
+            ..
         } = event;
         let Some(descriptor) = self.providers.descriptor(provider) else {
             return;
@@ -2230,10 +2257,12 @@ impl Coordinator<'_> {
     fn accepts_provider_event(&self, event: &ProviderEvent) -> bool {
         self.sessions.get(event.provider).is_some_and(|session| {
             !session.suspended
-                && event.generation >= session.generation_floor
+                && self
+                    .provider_epochs
+                    .accepts(event.provider, event.generation)
                 && (session
                     .stop_pending
-                    .is_none_or(|pending| pending.0.get() != event.generation)
+                    .is_none_or(|pending| pending.0.get() != event.wire_generation)
                     || matches!(event.kind, ProviderEventKind::Disconnected(_)))
         })
     }

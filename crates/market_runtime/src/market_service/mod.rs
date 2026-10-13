@@ -231,6 +231,7 @@ enum Command {
         ProviderGeneration,
         Option<HistoryRange>,
         Result<HistorySnapshot, String>,
+        aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
     ),
 }
 
@@ -356,6 +357,7 @@ impl<T> CatalogPublisher<T> {
 struct HistoryRequest {
     series: BarSeriesKey,
     provider_generation: ProviderGeneration,
+    provider_epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
     instrument: Option<InstallProviderInstrument>,
     maximum_bars: usize,
     range: Option<HistoryRange>,
@@ -724,7 +726,8 @@ mod provider_event;
 mod realtime;
 mod watchdog;
 use provider_event::{
-    ProviderCandle, ProviderDisconnect, ProviderEvent, ProviderEventKind, ProviderTradeBatch,
+    ProviderCandle, ProviderDisconnect, ProviderEpochRegistry, ProviderEvent, ProviderEventKind,
+    ProviderTradeBatch, WireProviderEvent,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1533,7 +1536,7 @@ enum ProviderCatalogCommand {
 }
 
 enum ProviderRuntimeEvent {
-    Realtime(ProviderEvent),
+    Realtime(WireProviderEvent),
     DisplayDepth(&'static str, ProviderDisplayDepthEvent),
     Catalog(&'static str, ProviderCatalogEvent),
 }

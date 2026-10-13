@@ -461,6 +461,7 @@ fn request() -> HistoryRequest {
             definition_version: 1,
         },
         provider_generation: ProviderGeneration(id(1).unwrap()),
+        provider_epoch: aeris_market_engine::fence::EpochSequence::default().next(),
         instrument: Some(instrument),
         maximum_bars: 1600,
         range: None,
