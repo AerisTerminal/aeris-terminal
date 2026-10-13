@@ -267,6 +267,8 @@ Status: in progress
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added bounded rotating logs, durable panic reports, native fatal dialogs and debug-only `--force-diagnostics-panic`.
   - Validation produced `logs/aeris.log` and one crash report containing the forced panic and backtrace.
+  - Scrutiny follow-up: rotation uses `aeris.N.log`, drop notices use the contract text, child-panic
+    evidence checks every field and the previous hook, and process exits explicitly flush within two seconds.
 - [x] M1.8 single-instance-and-validation-mode - Per-data-folder instance lock and validation mode with an isolated vault namespace
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added safe `--validation-root`, hashed validation vault namespaces, scoped cTrader borrowing and per-root instance locks.
@@ -436,6 +438,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.9 feat(foundations): harden lifecycle persistence and diagnostics - hardened SQLite open/shutdown, migrations, backups and confirmed-only corruption quarantine.
 - 2026-10-13 M1.2 fix(ci): enforce safe triggers across every workflow - closed scrutiny B1 with cross-workflow self-hosted trigger checks and repaired M1 tracking metadata.
 - 2026-10-13 M1.6 fix(persistence): recover staged and legacy state safely - closed scrutiny B2-B4 with shared staged-file recognition, read-only backup fallback and complete production-source scanning.
+- 2026-10-13 M1.7 fix(observability): flush exact diagnostics before exit - closed scrutiny B5-B7 with contract log names/text, complete panic evidence and bounded explicit exit flushing.
 
 ## 7. Known gaps / deferred
 

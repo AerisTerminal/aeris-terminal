@@ -15,6 +15,7 @@ fn main() {
                 let message = format!("Aeris startup arguments are invalid: {error}");
                 aeris_observability::diagnostic!("{message}");
                 let _ = aeris_platform_runtime::message_box("Aeris Terminal", &message);
+                let _ = aeris_observability::flush_diagnostics();
                 std::process::exit(2);
             }
         };
@@ -28,6 +29,7 @@ fn main() {
             let message = format!("Aeris diagnostics path is unavailable: {error}");
             aeris_observability::diagnostic!("{message}");
             let _ = aeris_platform_runtime::message_box("Aeris Terminal", &message);
+            let _ = aeris_observability::flush_diagnostics();
             std::process::exit(1);
         }
     };
@@ -42,6 +44,7 @@ fn main() {
         }
         Err(error) => {
             aeris_observability::diagnostic!("Aeris instance lock failed: {error}");
+            let _ = aeris_observability::flush_diagnostics();
             std::process::exit(1);
         }
     };

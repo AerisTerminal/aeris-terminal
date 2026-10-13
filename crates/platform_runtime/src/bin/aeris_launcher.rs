@@ -68,6 +68,7 @@ fn main() {
         if no_arguments {
             show_user_launch_error(&error);
         }
+        let _ = aeris_observability::flush_diagnostics();
         std::process::exit(1);
     }
 }

@@ -35,6 +35,7 @@ struct ActiveSink {
 
 enum Command {
     Line { text: String, dropped_before: u64 },
+    Flush(SyncSender<()>),
     Shutdown(SyncSender<()>),
 }
 
@@ -89,14 +90,45 @@ impl Drop for LogSinkGuard {
 
 /// Installs one process-wide, nonblocking rotating log sink.
 ///
-/// The current file is limited to 4 MiB and `.1` through `.4` retain the four
-/// previous files. Standard error remains active.
+/// The current file is limited to 4 MiB and `aeris.1.log` through
+/// `aeris.4.log` retain the four previous files. Standard error remains active.
 ///
 /// # Errors
 /// Returns an error if the directory/file cannot be opened, the writer cannot
 /// be started, or a sink is already installed.
 pub fn install_log_sink(path: impl AsRef<Path>) -> io::Result<LogSinkGuard> {
     start_log_sink(path.as_ref(), DEFAULT_LOG_FILE_BYTES, true)
+}
+
+/// Gives the active diagnostics writer a bounded opportunity to durably flush
+/// every line accepted before this call.
+#[must_use]
+pub fn flush_diagnostics() -> bool {
+    let sender = {
+        let Ok(active) = active_sink().lock() else {
+            return false;
+        };
+        let Some(sink) = active.as_ref() else {
+            return true;
+        };
+        sink.sender.clone()
+    };
+    let deadline = Instant::now() + GUARD_TIMEOUT;
+    let (done_sender, done_receiver) = mpsc::sync_channel(1);
+    let mut command = Command::Flush(done_sender);
+    loop {
+        match sender.try_send(command) {
+            Ok(()) => break,
+            Err(TrySendError::Full(returned)) if Instant::now() < deadline => {
+                command = returned;
+                thread::yield_now();
+            }
+            Err(_) => return false,
+        }
+    }
+    done_receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .is_ok()
 }
 
 fn start_log_sink(path: &Path, maximum_bytes: u64, register: bool) -> io::Result<LogSinkGuard> {
@@ -201,12 +233,16 @@ fn run_writer(receiver: &Receiver<Command>, mut file: File, path: &Path, maximum
                 dropped_before,
             } => {
                 if dropped_before > 0 {
-                    let notice = formatted_line(&format!(
-                        "diagnostic lines dropped before this line: {dropped_before}"
-                    ));
+                    let notice =
+                        formatted_line(&format!("diagnostics dropped {dropped_before} lines"));
                     write_rotating(&mut file, path, maximum_bytes, &mut size, &notice);
                 }
                 write_rotating(&mut file, path, maximum_bytes, &mut size, &text);
+            }
+            Command::Flush(done) => {
+                let _ = file.flush();
+                let _ = file.sync_all();
+                let _ = done.send(());
             }
             Command::Shutdown(done) => {
                 let _ = file.flush();
@@ -235,9 +271,15 @@ fn write_rotating(file: &mut File, path: &Path, maximum_bytes: u64, size: &mut u
 }
 
 fn rotated_path(path: &Path, index: usize) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(format!(".{index}"));
-    PathBuf::from(name)
+    let file_name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    let rotated_name = match file_name.rsplit_once('.') {
+        Some((stem, extension)) => format!("{stem}.{index}.{extension}"),
+        None => format!("{file_name}.{index}"),
+    };
+    path.with_file_name(rotated_name)
 }
 
 fn rotate(path: &Path) -> io::Result<()> {
@@ -331,6 +373,7 @@ mod tests {
     use std::process::Command as ProcessCommand;
 
     const PANIC_CHILD: &str = "AERIS_OBSERVABILITY_PANIC_CHILD";
+    const FLUSH_EXIT_CHILD: &str = "AERIS_OBSERVABILITY_FLUSH_EXIT_CHILD";
 
     fn fixture(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -356,11 +399,18 @@ mod tests {
                 .expect("line");
         }
         drop(guard);
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("aeris.log")
+        );
         assert!(path.exists());
         for index in 1..=4 {
-            assert!(rotated_path(&path, index).exists());
+            let rotated = root.join(format!("aeris.{index}.log"));
+            assert_eq!(rotated_path(&path, index), rotated);
+            assert!(rotated.exists());
         }
-        assert!(!rotated_path(&path, 5).exists());
+        assert!(!root.join("aeris.5.log").exists());
+        assert!(!root.join("aeris.log.1").exists());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -384,10 +434,11 @@ mod tests {
         run_writer(&receiver, file, &path, 1024);
         done_receiver.recv().expect("done");
         let contents = fs::read_to_string(&path).expect("contents");
-        assert!(
-            contents.find("dropped before").expect("notice")
-                < contents.find("next-line").expect("line")
-        );
+        let lines = contents.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("diagnostics dropped 7 lines"));
+        assert!(!lines[0].contains("dropped before"));
+        assert_eq!(lines[1], "next-line");
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -454,6 +505,9 @@ mod tests {
     #[test]
     fn panic_child_writes_durable_bounded_report() {
         if let Some(root) = std::env::var_os(PANIC_CHILD) {
+            panic::set_hook(Box::new(|info| {
+                eprintln!("previous panic hook observed: {info}");
+            }));
             install_panic_hook(&root, "test-release", 42).expect("panic hook");
             panic!("forced diagnostics panic");
         }
@@ -466,28 +520,75 @@ mod tests {
             )
             .expect("old crash");
         }
-        let status = ProcessCommand::new(std::env::current_exe().expect("test executable"))
+        let old_names = fs::read_dir(&root)
+            .expect("old reports")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        let output = ProcessCommand::new(std::env::current_exe().expect("test executable"))
             .args([
                 "--exact",
                 "diagnostic_output::tests::panic_child_writes_durable_bounded_report",
                 "--nocapture",
             ])
             .env(PANIC_CHILD, &root)
-            .status()
+            .output()
             .expect("panic child");
-        assert!(!status.success());
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).expect("panic stderr");
+        assert!(stderr.contains("previous panic hook observed:"));
+        assert!(stderr.contains("forced diagnostics panic"));
         let mut reports = fs::read_dir(&root)
             .expect("reports")
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         reports.sort_by_key(std::fs::DirEntry::file_name);
         assert_eq!(reports.len(), MAXIMUM_CRASH_REPORTS);
-        let report = fs::read_to_string(reports.last().expect("new report").path())
-            .expect("report contents");
+        let new_reports = reports
+            .iter()
+            .filter(|entry| !old_names.contains(&entry.file_name()))
+            .collect::<Vec<_>>();
+        assert_eq!(new_reports.len(), 1);
+        let report = fs::read_to_string(new_reports[0].path()).expect("report contents");
         assert!(report.contains("message=forced diagnostics panic"));
         assert!(report.contains("release_identity=test-release"));
         assert!(report.contains("install_generation=42"));
-        assert!(report.contains("backtrace="));
+        assert!(report.contains(
+            "thread=diagnostic_output::tests::panic_child_writes_durable_bounded_report"
+        ));
+        assert!(report.contains("location=crates\\observability\\src\\diagnostic_output.rs:"));
+        let backtrace = report.split_once("backtrace=").expect("backtrace field").1;
+        assert_ne!(backtrace.trim(), "");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn explicit_flush_persists_the_final_line_before_process_exit() {
+        if let Some(root) = std::env::var_os(FLUSH_EXIT_CHILD) {
+            let _guard = install_log_sink(PathBuf::from(root).join("aeris.log")).expect("sink");
+            crate::diagnostic!("final child diagnostic");
+            assert!(flush_diagnostics());
+            std::process::exit(0);
+        }
+        let root = fixture("flush-exit");
+        fs::create_dir_all(&root).expect("fixture");
+        let status = ProcessCommand::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "diagnostic_output::tests::explicit_flush_persists_the_final_line_before_process_exit",
+                "--nocapture",
+            ])
+            .env(FLUSH_EXIT_CHILD, &root)
+            .status()
+            .expect("flush child");
+        assert!(status.success());
+        let contents = fs::read_to_string(root.join("aeris.log")).expect("contents");
+        assert!(
+            contents
+                .lines()
+                .last()
+                .is_some_and(|line| line.ends_with("] final child diagnostic"))
+        );
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
