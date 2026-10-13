@@ -2,12 +2,12 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-pub(super) trait Clock: Send + Sync {
+pub(crate) trait Clock: Send + Sync {
     fn monotonic(&self) -> Instant;
     fn wall_nanos(&self) -> Option<i64>;
 }
 
-pub(super) struct SystemClock;
+pub(crate) struct SystemClock;
 
 impl Clock for SystemClock {
     fn monotonic(&self) -> Instant {
@@ -26,7 +26,7 @@ impl Clock for SystemClock {
 }
 
 #[cfg(test)]
-pub(super) struct ScriptedClock {
+pub(crate) struct ScriptedClock {
     origin: Instant,
     elapsed: std::sync::Mutex<std::time::Duration>,
     wall_nanos: std::sync::atomic::AtomicI64,
@@ -34,7 +34,7 @@ pub(super) struct ScriptedClock {
 
 #[cfg(test)]
 impl ScriptedClock {
-    pub(super) fn new(wall_nanos: i64) -> Self {
+    pub(crate) fn new(wall_nanos: i64) -> Self {
         Self {
             origin: Instant::now(),
             elapsed: std::sync::Mutex::new(std::time::Duration::ZERO),

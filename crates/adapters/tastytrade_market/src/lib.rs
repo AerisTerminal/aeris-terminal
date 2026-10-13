@@ -83,6 +83,49 @@ pub enum MarketCollection {
 const TASTYTRADE_API_ORIGIN: &str = "https://api.tastyworks.com";
 const MAXIMUM_RESPONSE_BYTES: usize = 512 * 1024;
 
+/// Redacted REST failure; only server-directed retry timing crosses to the
+/// market runtime. Response bodies and authorization headers stay local.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TastytradeRequestError {
+    RateLimited { retry_after: Duration },
+    Other(String),
+}
+
+impl std::fmt::Display for TastytradeRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited { .. } => f.write_str("Tastytrade API rate limited"),
+            Self::Other(detail) => f.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for TastytradeRequestError {}
+
+impl From<String> for TastytradeRequestError {
+    fn from(detail: String) -> Self {
+        Self::Other(detail)
+    }
+}
+
+impl From<&str> for TastytradeRequestError {
+    fn from(detail: &str) -> Self {
+        Self::Other(detail.to_owned())
+    }
+}
+
+fn retry_after(header: Option<&str>, now: SystemTime) -> Option<Duration> {
+    let value = header?.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    SystemTime::from(date)
+        .duration_since(now)
+        .ok()
+        .or(Some(Duration::ZERO))
+}
+
 /// Ephemeral streaming credentials; never publish them to the UI or logs.
 #[derive(Deserialize)]
 pub struct QuoteToken {
@@ -178,7 +221,7 @@ impl TastytradeBrokerClient {
         path: &str,
         query: &[(&str, &str)],
         stop: &Arc<AtomicBool>,
-    ) -> Result<T, String> {
+    ) -> Result<T, TastytradeRequestError> {
         if !path.starts_with('/') || path.contains(['?', '#']) {
             return Err("Tastytrade API path is invalid".into());
         }
@@ -206,6 +249,7 @@ impl TastytradeBrokerClient {
             let result = request
                 .config()
                 .timeout_global(Some(Duration::from_secs(10)))
+                .http_status_as_error(false)
                 .max_redirects(0)
                 .build()
                 .header("Authorization", authorization.as_str())
@@ -217,12 +261,30 @@ impl TastytradeBrokerClient {
                 .call();
             let mut response = match result {
                 Ok(response) => response,
-                Err(ureq::Error::StatusCode(401)) if !refreshed => {
+                Err(ureq::Error::Timeout(_)) => {
+                    return Err("Tastytrade API request timed out".into());
+                }
+                Err(error) => return Err(format!("Tastytrade API request failed: {error}").into()),
+            };
+            match response.status().as_u16() {
+                401 if !refreshed => {
                     self.clear_access_token();
                     refreshed = true;
                     continue;
                 }
-                Err(ureq::Error::StatusCode(429)) if limited < 4 => {
+                429 => {
+                    if let Some(retry_after) = retry_after(
+                        response
+                            .headers()
+                            .get("Retry-After")
+                            .and_then(|header| header.to_str().ok()),
+                        SystemTime::now(),
+                    ) {
+                        return Err(TastytradeRequestError::RateLimited { retry_after });
+                    }
+                    if limited >= 4 {
+                        return Err("Tastytrade rate limit persists; retry later".into());
+                    }
                     limited += 1;
                     let mut jitter = [0_u8; 1];
                     getrandom::fill(&mut jitter).map_err(|_| "System random source unavailable")?;
@@ -236,17 +298,14 @@ impl TastytradeBrokerClient {
                     }
                     continue;
                 }
-                Err(ureq::Error::StatusCode(401)) => {
+                401 => {
                     return Err("Tastytrade authorization expired; connect again".into());
                 }
-                Err(ureq::Error::StatusCode(429)) => {
-                    return Err("Tastytrade rate limit persists; retry later".into());
+                200..=299 => {}
+                status => {
+                    return Err(format!("Tastytrade API request failed: status {status}").into());
                 }
-                Err(ureq::Error::Timeout(_)) => {
-                    return Err("Tastytrade API request timed out".into());
-                }
-                Err(error) => return Err(format!("Tastytrade API request failed: {error}")),
-            };
+            }
             let mut bytes = Zeroizing::new(Vec::new());
             response
                 .body_mut()
@@ -269,7 +328,7 @@ impl TastytradeBrokerClient {
         &mut self,
         capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
-    ) -> Result<QuoteToken, String> {
+    ) -> Result<QuoteToken, TastytradeRequestError> {
         #[derive(Deserialize)]
         struct Response {
             data: ProviderQuoteToken,
@@ -304,7 +363,7 @@ impl TastytradeBrokerClient {
                     .map_or(true, |now| expiry <= now.as_secs())
             })
         {
-            return Err("Broker quote-token response is invalid".to_string());
+            return Err("Broker quote-token response is invalid".into());
         }
         Ok(token)
     }
@@ -320,16 +379,18 @@ impl TastytradeBrokerClient {
         let mut instruments = Vec::new();
         for page in 0..100 {
             let offset = page.to_string();
-            let response: catalog::CatalogPage = self.get(
-                capability,
-                "/instruments/futures",
-                &[
-                    ("page-offset", &offset),
-                    ("per-page", "100"),
-                    ("only-active-futures", "true"),
-                ],
-                stop,
-            )?;
+            let response: catalog::CatalogPage = self
+                .get(
+                    capability,
+                    "/instruments/futures",
+                    &[
+                        ("page-offset", &offset),
+                        ("per-page", "100"),
+                        ("only-active-futures", "true"),
+                    ],
+                    stop,
+                )
+                .map_err(|error| error.to_string())?;
             let items = response.validated()?;
             let complete = items.len() < 100;
             instruments.extend(items);
@@ -348,12 +409,14 @@ impl TastytradeBrokerClient {
         capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
     ) -> Result<[MarketSession; 2], String> {
-        let response: serde_json::Value = self.get(
-            capability,
-            "/market-time/futures/sessions/current",
-            &[],
-            stop,
-        )?;
+        let response: serde_json::Value = self
+            .get(
+                capability,
+                "/market-time/futures/sessions/current",
+                &[],
+                stop,
+            )
+            .map_err(|error| error.to_string())?;
         parse_futures_sessions(response)
     }
 
@@ -365,12 +428,14 @@ impl TastytradeBrokerClient {
         capability: &HostedBrokerConnection,
         stop: &Arc<AtomicBool>,
     ) -> Result<MarketSession, String> {
-        let response: serde_json::Value = self.get(
-            capability,
-            "/market-time/equities/sessions/current",
-            &[],
-            stop,
-        )?;
+        let response: serde_json::Value = self
+            .get(
+                capability,
+                "/market-time/equities/sessions/current",
+                &[],
+                stop,
+            )
+            .map_err(|error| error.to_string())?;
         parse_equity_session(&response)
     }
 
@@ -386,12 +451,14 @@ impl TastytradeBrokerClient {
         if query.len() > 128 || query.chars().any(char::is_control) {
             return Err("Tastytrade search query invalid".into());
         }
-        let page: catalog::SearchPage = self.get(
-            capability,
-            "/instruments/search",
-            &[("query", query), ("limit", "100")],
-            stop,
-        )?;
+        let page: catalog::SearchPage = self
+            .get(
+                capability,
+                "/instruments/search",
+                &[("query", query), ("limit", "100")],
+                stop,
+            )
+            .map_err(|error| error.to_string())?;
         page.validated()
     }
 
@@ -410,12 +477,14 @@ impl TastytradeBrokerClient {
             return Err("Tastytrade instrument identity is invalid".into());
         }
         let symbol = percent_encode_path_segment(&instrument.symbol);
-        let response: serde_json::Value = self.get(
-            capability,
-            &format!("/instruments/{collection}/{symbol}"),
-            &[],
-            stop,
-        )?;
+        let response: serde_json::Value = self
+            .get(
+                capability,
+                &format!("/instruments/{collection}/{symbol}"),
+                &[],
+                stop,
+            )
+            .map_err(|error| error.to_string())?;
         ResolvedInstrument::from_response(&response, instrument)
     }
 }
@@ -616,6 +685,18 @@ fn valid_streamer_url(url: &str) -> bool {
 mod tests {
     use super::*;
     use std::{io::Write as _, net::TcpListener, thread};
+
+    #[test]
+    fn retry_after_seconds_and_http_date_are_typed() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(retry_after(Some("17"), now), Some(Duration::from_secs(17)));
+        assert_eq!(retry_after(Some("garbage"), now), None);
+        let later = chrono::DateTime::<chrono::Utc>::from(now + Duration::from_secs(42));
+        assert_eq!(
+            retry_after(Some(&later.to_rfc2822()), now),
+            Some(Duration::from_secs(42))
+        );
+    }
 
     fn fake_api(responses: Vec<(&'static str, u16, String)>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local fixture");

@@ -260,30 +260,29 @@ impl BrokerApi {
             }
         }
     }
-    fn call<T>(
+    fn call<T, E: From<String>>(
         &self,
         stop: &Arc<AtomicBool>,
-        operation: impl FnOnce(
-            &mut TastytradeBrokerClient,
-            &HostedBrokerConnection,
-        ) -> Result<T, String>,
-    ) -> Result<T, String> {
+        operation: impl FnOnce(&mut TastytradeBrokerClient, &HostedBrokerConnection) -> Result<T, E>,
+    ) -> Result<T, E> {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| "Tastytrade request lane failed")?;
+            .map_err(|_| E::from("Tastytrade request lane failed".to_string()))?;
         if stop.load(Ordering::Acquire) {
-            return Err("Tastytrade request cancelled".into());
+            return Err(E::from("Tastytrade request cancelled".to_string()));
         }
         if state.capability.is_none() {
-            state.capability = Some(broker_authorization::load_connection()?);
+            state.capability = Some(broker_authorization::load_connection().map_err(E::from)?);
         }
         let BrokerApiState {
             client, capability, ..
         } = &mut *state;
         operation(
             client,
-            capability.as_ref().ok_or("Tastytrade connection missing")?,
+            capability
+                .as_ref()
+                .ok_or_else(|| E::from("Tastytrade connection missing".to_string()))?,
         )
     }
     pub(super) fn with_client<T>(
@@ -1662,7 +1661,7 @@ struct TokenRequest {
 struct TokenReply {
     identity: u64,
     generation: u64,
-    result: Result<QuoteToken, String>,
+    result: Result<QuoteToken, aeris_tastytrade_market_adapter::TastytradeRequestError>,
 }
 fn run_tokens(
     requests: &Receiver<TokenRequest>,
@@ -1727,7 +1726,7 @@ struct Worker {
     ordinal: u64,
     demand_dirty: bool,
     candle_from_ms: BTreeMap<String, i64>,
-    failures: u8,
+    backoff: super::reconnect::Backoff,
     /// Set only while tastytrade authorization is withdrawn.
     paused: bool,
     trade_batches: BTreeMap<String, (bool, Vec<IndexedTradeMutation>)>,
@@ -1758,7 +1757,11 @@ impl Worker {
             ordinal: 0,
             demand_dirty: true,
             candle_from_ms: BTreeMap::new(),
-            failures: 0,
+            backoff: super::reconnect::Backoff::new(
+                super::reconnect::ReconnectPolicy::tastytrade(),
+                &super::clock::SystemClock,
+                0x5441_5354,
+            ),
             paused: false,
             trade_batches: BTreeMap::new(),
             candle_batches: BTreeMap::new(),
@@ -1786,7 +1789,8 @@ impl Worker {
             let result = (|| {
                 self.connect()?;
                 if self.socket.is_some() && self.connected_at.elapsed() >= Duration::from_secs(60) {
-                    self.failures = 0;
+                    self.backoff
+                        .healthy_for(self.connected_at, &super::clock::SystemClock);
                 }
                 self.reconcile()?;
                 self.start_history()?;
@@ -1847,7 +1851,7 @@ impl Worker {
                     self.pending_token = None;
                     self.cached_token = None;
                     self.paused = !ready;
-                    self.failures = 0;
+                    self.backoff.reset();
                     self.retry_at = Instant::now();
                     if !ready {
                         self.socket = None;
@@ -1865,7 +1869,19 @@ impl Worker {
                 continue;
             }
             self.pending_token = None;
-            let token = reply.result?;
+            let token = match reply.result {
+                Ok(token) => token,
+                Err(aeris_tastytrade_market_adapter::TastytradeRequestError::RateLimited {
+                    retry_after,
+                }) => {
+                    self.recover_with_class(
+                        "Tastytrade API rate limited".into(),
+                        super::reconnect::RetryClass::RateLimited { retry_after },
+                    );
+                    return Ok(());
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             self.install_token(&token)?;
             self.cached_token = Some(token);
         }
@@ -2542,6 +2558,10 @@ impl Worker {
         }
     }
     fn recover(&mut self, error: String) {
+        self.recover_with_class(error, super::reconnect::RetryClass::Transient);
+    }
+
+    fn recover_with_class(&mut self, error: String, class: super::reconnect::RetryClass) {
         diagnostic!("Aeris tastytrade transport recovery: {error}");
         self.socket = None;
         self.tape = None;
@@ -2551,12 +2571,14 @@ impl Worker {
         self.candle_batches.clear();
         self.quotes.clear();
         self.cancel_histories(&error);
-        self.failures = self.failures.saturating_add(1);
         // Transport failures never park the session: a parked worker leaves every
         // demanded series waiting on history until the user reconnects. The capped
         // backoff bounds provider traffic to one token request per retry interval;
         // only an explicit authorization change pauses the worker.
-        self.retry_at = Instant::now() + recovery_delay(self.failures);
+        let super::reconnect::RetryDecision::Wait(delay) = self.backoff.failure(class) else {
+            unreachable!("tastytrade transport retry has no budget");
+        };
+        self.retry_at = Instant::now() + delay;
         if let Err(publish_error) = self.publish(RealtimeEvent::Recovering(self.epoch(), error)) {
             diagnostic!("Aeris tastytrade provider state publication failed: {publish_error}");
         }
@@ -2580,10 +2602,6 @@ impl Worker {
         self.crossed_quotes_withheld = 0;
         self.crossed_quotes_reported_at = Some(now);
     }
-}
-
-fn recovery_delay(failures: u8) -> Duration {
-    Duration::from_secs(3u64.saturating_mul(1u64 << failures.min(4)))
 }
 
 pub(super) fn start_record(

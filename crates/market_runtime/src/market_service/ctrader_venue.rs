@@ -5,9 +5,13 @@
 //! serves, their symbol price scales, and when the session last dropped, so a reconnect
 //! can replay what the owner missed.
 
+use super::super::{
+    clock::SystemClock,
+    reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
+};
 use super::{
-    BTreeMap, BTreeSet, DISCONNECTED_DETAIL, Duration, Failure, HostFault, Instant, Mutex,
-    Receiver, Route, Worker, classify, now_nanos, parse_instrument_id, request_error,
+    BTreeMap, BTreeSet, DISCONNECTED_DETAIL, Failure, HostFault, Instant, Mutex, Receiver, Route,
+    Worker, classify, now_nanos, parse_instrument_id, request_error,
 };
 use aeris_ctrader_open_api_adapter::{
     ProtoMessage,
@@ -31,9 +35,6 @@ use aeris_trading::{
 
 /// Venue requests handled per worker turn, so market events keep flowing.
 const REQUESTS_PER_TURN: usize = 16;
-/// Retry bounds while the demo session cannot be opened (for example, not connected).
-const FIRST_OPEN_RETRY: Duration = Duration::from_secs(5);
-const MAXIMUM_OPEN_RETRY: Duration = Duration::from_secs(300);
 /// Symbol specifications kept for trading; the cache restarts when it fills.
 const MAXIMUM_SPECS: usize = 1024;
 /// Deal-list requests one replay may make while splitting truncated windows.
@@ -89,7 +90,8 @@ pub(super) struct VenueRelay {
     /// When the demo session dropped while serving; the next turn reconciles from then.
     resync_since_millis: Option<i64>,
     /// While the demo session cannot be opened, requests are refused until this time.
-    unavailable: Option<(Instant, Duration, String)>,
+    unavailable: Option<(Instant, String)>,
+    backoff: Backoff,
 }
 
 impl VenueRelay {
@@ -101,6 +103,7 @@ impl VenueRelay {
             specs: BTreeMap::new(),
             resync_since_millis: None,
             unavailable: None,
+            backoff: Backoff::new(ReconnectPolicy::venue(), &SystemClock, 0x5645_4e55),
         }
     }
 }
@@ -543,6 +546,7 @@ impl Worker {
     pub(super) fn retry_venue_now(&mut self) {
         if let Some(relay) = self.venue.as_mut() {
             relay.unavailable = None;
+            relay.backoff.reset();
         }
     }
 
@@ -553,7 +557,7 @@ impl Worker {
         if self.venue.is_none() || Instant::now() < self.retry_at || self.epoch_state.paused {
             return Ok(());
         }
-        if let Some((until, _, reason)) = self
+        if let Some((until, reason)) = self
             .venue
             .as_ref()
             .and_then(|relay| relay.unavailable.clone())
@@ -565,21 +569,23 @@ impl Worker {
         let had_demo = self.hosts.contains_key(&false);
         match self.venue_turn() {
             Err(fault) if !had_demo && !self.hosts.contains_key(&false) => {
-                let delay = self
+                if self
                     .venue
                     .as_ref()
-                    .and_then(|relay| relay.unavailable.as_ref())
-                    .map_or(FIRST_OPEN_RETRY, |(_, delay, _)| {
-                        delay.saturating_mul(2).min(MAXIMUM_OPEN_RETRY)
-                    });
-                if delay == FIRST_OPEN_RETRY && fault.detail != DISCONNECTED_DETAIL {
+                    .is_some_and(|relay| relay.backoff.attempts() == 0)
+                    && fault.detail != DISCONNECTED_DETAIL
+                {
                     diagnostic!(
                         "Aeris cTrader trading is waiting for a session: {}",
                         fault.detail
                     );
                 }
                 if let Some(relay) = self.venue.as_mut() {
-                    relay.unavailable = Some((Instant::now() + delay, delay, fault.detail.clone()));
+                    let RetryDecision::Wait(delay) = relay.backoff.failure(RetryClass::Transient)
+                    else {
+                        unreachable!("venue has no retry budget");
+                    };
+                    relay.unavailable = Some((Instant::now() + delay, fault.detail.clone()));
                 }
                 self.refuse_queued(&fault.detail);
                 Ok(())
@@ -588,6 +594,7 @@ impl Worker {
             Ok(()) => {
                 if let Some(relay) = self.venue.as_mut() {
                     relay.unavailable = None;
+                    relay.backoff.reset();
                 }
                 Ok(())
             }

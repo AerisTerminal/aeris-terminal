@@ -1755,6 +1755,8 @@ mod tests {
             "crates/context_runtime/src/lib.rs::ContextCredentialStore".to_string(),
             "crates/context_runtime/src/lib.rs::ContextFetcher".to_string(),
             "crates/market_runtime/src/market_service/ctrader.rs::CtraderMarketLink".to_string(),
+            // The market owner and provider workers share one injectable time boundary.
+            "crates/market_runtime/src/market_service/clock.rs::Clock".to_string(),
             "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),

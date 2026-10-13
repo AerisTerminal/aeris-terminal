@@ -37,6 +37,10 @@ use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::hyperliquid_market_screen::{RetainedMarketStatistics, instrument_summary};
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
+use crate::market_service::{
+    clock::{Clock, SystemClock},
+    reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
+};
 
 /// Public account and entitlement identity for credential-free market data.
 pub(crate) const HYPERLIQUID_PUBLIC_ACCOUNT_ID: &str = "hyperliquid-public";
@@ -522,8 +526,11 @@ pub(crate) fn run(
     stop: &Arc<AtomicBool>,
     ws_generation: &Arc<AtomicU64>,
     wake: &ProviderCoordinatorWake,
-    reconnect_delay: Duration,
+    _reconnect_delay: Duration,
 ) {
+    let clock = SystemClock;
+    let mut backoff = Backoff::new(ReconnectPolicy::hyperliquid(), &clock, 0x4859_5045);
+    let mut healthy_since = None;
     let mut generation = ws_generation.load(Ordering::Acquire).max(1);
     let mut demand = HyperliquidDemand::default();
     let mut stopped = true;
@@ -531,16 +538,7 @@ pub(crate) fn run(
         if stop.load(Ordering::Acquire) {
             return;
         }
-        // Drain controls; newest demand wins, Stop parks the socket.
-        while let Ok(control) = controls.try_recv() {
-            match control {
-                HyperliquidRealtimeControl::Subscribe(next) => {
-                    demand = next;
-                    stopped = false;
-                }
-                HyperliquidRealtimeControl::Stop => stopped = true,
-            }
-        }
+        drain_controls(controls, &mut demand, &mut stopped);
         if stopped {
             match controls.recv_timeout(CATALOG_POLL_INTERVAL) {
                 Ok(HyperliquidRealtimeControl::Subscribe(next)) => {
@@ -564,29 +562,34 @@ pub(crate) fn run(
         }
         if wake.overflowed("hyperliquid", generation) {
             generation = generation.saturating_add(1);
-            thread_sleep(reconnect_delay, stop);
+            reconnect_sleep(&mut backoff, stop);
             continue;
         }
         match MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
-            Ok((mut socket, _shutdown)) => match run_session(
-                &mut socket,
-                generation,
-                &mut demand,
-                controls,
-                events,
-                stop,
-                wake,
-            ) {
-                SessionExit::Closed if !wake.overflowed("hyperliquid", generation) => return,
-                SessionExit::Closed => {}
-                SessionExit::Parked => {
-                    diagnostic!("Aeris Hyperliquid realtime parked by demand owner");
-                    stopped = true;
+            Ok((mut socket, _shutdown)) => {
+                healthy_since = Some(clock.monotonic());
+                match run_session(
+                    &mut socket,
+                    generation,
+                    &mut demand,
+                    controls,
+                    events,
+                    stop,
+                    wake,
+                ) {
+                    SessionExit::Closed if !wake.overflowed("hyperliquid", generation) => return,
+                    SessionExit::Closed => {}
+                    SessionExit::Parked => {
+                        diagnostic!("Aeris Hyperliquid realtime parked by demand owner");
+                        stopped = true;
+                        backoff.reset();
+                        healthy_since = None;
+                    }
+                    SessionExit::Reconnect(reason) => {
+                        diagnostic!("Aeris Hyperliquid realtime reconnecting: {reason}");
+                    }
                 }
-                SessionExit::Reconnect(reason) => {
-                    diagnostic!("Aeris Hyperliquid realtime reconnecting: {reason}");
-                }
-            },
+            }
             Err(error) => {
                 if stop.load(Ordering::Acquire) {
                     return;
@@ -615,9 +618,36 @@ pub(crate) fn run(
         }
         generation = generation.saturating_add(1).max(1);
         if !stopped {
-            thread_sleep(reconnect_delay, stop);
+            if let Some(since) = healthy_since.take() {
+                backoff.healthy_for(since, &clock);
+            }
+            reconnect_sleep(&mut backoff, stop);
         }
     }
+}
+
+fn drain_controls(
+    controls: &Receiver<HyperliquidRealtimeControl>,
+    demand: &mut HyperliquidDemand,
+    stopped: &mut bool,
+) {
+    // Newest demand wins; stopping parks rather than closing the worker.
+    while let Ok(control) = controls.try_recv() {
+        match control {
+            HyperliquidRealtimeControl::Subscribe(next) => {
+                *demand = next;
+                *stopped = false;
+            }
+            HyperliquidRealtimeControl::Stop => *stopped = true,
+        }
+    }
+}
+
+fn reconnect_sleep(backoff: &mut Backoff, stop: &Arc<AtomicBool>) {
+    let RetryDecision::Wait(delay) = backoff.failure(RetryClass::Transient) else {
+        unreachable!("Hyperliquid has no retry budget");
+    };
+    thread_sleep(delay, stop);
 }
 
 #[derive(PartialEq, Eq)]

@@ -1407,7 +1407,24 @@ fn repeated_transport_failures_keep_recovering_with_capped_backoff() {
         ));
         assert!(worker.retry_at <= before + Duration::from_secs(48) + Duration::from_secs(1));
     }
-    assert_eq!(recovery_delay(1), Duration::from_secs(6));
-    assert_eq!(recovery_delay(4), Duration::from_secs(48));
-    assert_eq!(recovery_delay(u8::MAX), Duration::from_secs(48));
+    assert_eq!(worker.backoff.attempts(), 8);
+}
+
+#[test]
+fn server_rate_limit_overrides_tastytrade_reconnect_deadline() {
+    let (mut worker, output) = live_worker(4);
+    let before = Instant::now();
+    worker.recover_with_class(
+        "Tastytrade API rate limited".into(),
+        crate::market_service::reconnect::RetryClass::RateLimited {
+            retry_after: Duration::from_secs(17),
+        },
+    );
+    assert!(worker.retry_at >= before + Duration::from_secs(17));
+    assert!(worker.retry_at <= Instant::now() + Duration::from_secs(17));
+    assert_eq!(worker.backoff.attempts(), 0);
+    assert!(matches!(
+        output.try_recv().unwrap(),
+        RealtimeEvent::Recovering(1, detail) if detail == "Tastytrade API rate limited"
+    ));
 }

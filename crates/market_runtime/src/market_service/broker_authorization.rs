@@ -422,7 +422,11 @@ fn verify_entitlement(
     capability: &HostedBrokerConnection,
     stop: &Arc<AtomicBool>,
 ) -> Result<String, String> {
-    let _token = api.with_client(stop, |client| client.quote_token(capability, stop))?;
+    let _token = api.with_client(stop, |client| {
+        client
+            .quote_token(capability, stop)
+            .map_err(|error| error.to_string())
+    })?;
     let _futures = api.futures(stop)?;
     // This checks the actual API entitlement, not the brokerage website display.
     // No feed/order-book claim is made before the DXLink live path is verified.

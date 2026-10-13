@@ -20,6 +20,10 @@ use super::{
     SearchProviderInstruments, SelectProviderInstrument, SyncSender, TopOfBookQuote, TrySendError,
     VecDeque, mpsc, thread,
 };
+use super::{
+    clock::SystemClock,
+    reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
+};
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
     ProviderSessionHours,
@@ -119,7 +123,6 @@ const EVENT_POLL: Duration = Duration::from_millis(5);
 const EVENTS_PER_HOST_TURN: usize = 128;
 const IDLE_STOP: Duration = Duration::from_secs(30);
 const RECONCILE_RETRY: Duration = Duration::from_secs(5);
-const MAXIMUM_FAILURES: u8 = 5;
 const HEALTHY_SESSION: Duration = Duration::from_mins(1);
 const MAXIMUM_HISTORY_PAGES: usize = 8;
 const MAXIMUM_SYMBOLS_PER_REQUEST: usize = 64;
@@ -1159,7 +1162,7 @@ struct Worker {
     demand_dirty: bool,
     candle_symbols: BTreeMap<(bool, u64, u64, i32), BTreeSet<String>>,
     epoch_state: EpochState,
-    failures: u8,
+    backoff: Backoff,
     healthy_since: Option<Instant>,
     retry_at: Instant,
     reconcile_at: Instant,
@@ -1190,7 +1193,7 @@ impl Worker {
             demand_dirty: false,
             candle_symbols: BTreeMap::new(),
             epoch_state: EpochState::default(),
-            failures: 0,
+            backoff: Backoff::new(ReconnectPolicy::ctrader(), &SystemClock, 0x4354_5241),
             healthy_since: None,
             retry_at: Instant::now(),
             reconcile_at: Instant::now(),
@@ -1268,7 +1271,7 @@ impl Worker {
             .healthy_since
             .is_some_and(|since| since.elapsed() >= self.config.healthy_after)
         {
-            self.failures = 0;
+            self.backoff.reset();
             self.healthy_since = None;
         }
         Ok(())
@@ -1305,7 +1308,7 @@ impl Worker {
                     self.epoch_state.open = false;
                     self.demand_dirty = true;
                     self.epoch_state.paused = !ready;
-                    self.failures = 0;
+                    self.backoff.reset();
                     self.retry_at = Instant::now();
                 }
             }
@@ -2185,8 +2188,7 @@ impl Worker {
         self.candle_symbols.clear();
         let _ = self.publish(RealtimeEvent::Disconnected(self.epoch()));
     }
-    /// The only reconnect policy for cTrader sessions: exponential local
-    /// backoff with a retry limit, or exactly the server-directed wait.
+    /// The only reconnect policy for cTrader sessions.
     fn recover(&mut self, fault: HostFault) {
         let HostFault {
             detail: error,
@@ -2199,23 +2201,32 @@ impl Worker {
         self.candle_symbols.clear();
         self.demand_dirty = true;
         self.healthy_since = None;
-        let delay = if let Some(wait) = wait {
-            wait
-        } else {
-            self.failures = self.failures.saturating_add(1);
-            self.epoch_state.paused = self.failures >= MAXIMUM_FAILURES;
-            Duration::from_secs(3u64.saturating_mul(1u64 << self.failures.min(4)))
-        };
-        self.retry_at = Instant::now() + delay;
+        let decision = self.backoff.failure(match wait {
+            Some(retry_after) => RetryClass::RateLimited { retry_after },
+            None if error == DISCONNECTED_DETAIL => RetryClass::Fatal,
+            None => RetryClass::Transient,
+        });
+        self.epoch_state.paused = matches!(
+            decision,
+            RetryDecision::Failed { .. } | RetryDecision::Fatal
+        );
+        if let RetryDecision::Wait(delay) = decision {
+            self.retry_at = Instant::now() + delay;
+        }
         if !self.epoch_state.open {
             return;
         }
         self.epoch_state.open = false;
         let generation = self.epoch();
-        let event = if self.epoch_state.paused {
+        let event = if matches!(decision, RetryDecision::Fatal) {
+            RealtimeEvent::Failed(generation, format!("cTrader: {error}"))
+        } else if self.epoch_state.paused {
             RealtimeEvent::Failed(
                 generation,
-                format!("{error}. Automatic retry limit reached; connect cTrader to retry."),
+                format!(
+                    "cTrader: {} reconnect attempts failed; last error: {error}",
+                    self.backoff.attempts()
+                ),
             )
         } else {
             RealtimeEvent::Recovering(generation, error)

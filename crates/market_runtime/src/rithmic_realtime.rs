@@ -938,6 +938,12 @@ fn serve_demand(
     environment: &mut EnvironmentMonitors,
 ) -> DemandExit {
     let mut transport_recovery = false;
+    let mut replacing = false;
+    let mut recovery = crate::market_service::reconnect::Backoff::new(
+        crate::market_service::reconnect::ReconnectPolicy::rithmic_recovery(),
+        &crate::market_service::clock::SystemClock,
+        0x5249_5448,
+    );
     loop {
         let mut stop_requested = false;
         while let Ok(control) = channels.realtime_controls.try_recv() {
@@ -961,9 +967,10 @@ fn serve_demand(
             }
             return DemandExit::Idle(generation);
         }
-        let reconnect_delay = reconnect_backoff_delay(transport_recovery, channels.reconnect_delay);
-        if !reconnect_delay.is_zero() {
-            thread::park_timeout(reconnect_delay);
+        // The adapter scheduler alone retries transport. Non-transport
+        // replacements are bounded here and never race an immediate login.
+        if let Some(delay) = replacement_delay(replacing, transport_recovery, &mut recovery) {
+            thread::park_timeout(delay);
         }
         let (environment_events, environment_state) = environment.parts();
         match run_demand(
@@ -982,6 +989,7 @@ fn serve_demand(
                 demand = replacement;
                 generation = next_generation(replaced, demand.requested_generation());
                 transport_recovery = replacement_transport_recovery;
+                replacing = true;
             }
             SelectionExit::Idle { generation } => {
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(generation, None));
@@ -993,6 +1001,22 @@ fn serve_demand(
             }
         }
     }
+}
+
+fn replacement_delay(
+    replacing: bool,
+    transport_recovery: bool,
+    recovery: &mut crate::market_service::reconnect::Backoff,
+) -> Option<Duration> {
+    if !replacing || transport_recovery {
+        return None;
+    }
+    let crate::market_service::reconnect::RetryDecision::Wait(delay) =
+        recovery.failure(crate::market_service::reconnect::RetryClass::Transient)
+    else {
+        unreachable!("Rithmic non-transport recovery has no budget");
+    };
+    Some(delay.max(Duration::from_secs(1)))
 }
 
 /// Generation label for demand served by a handed-over catalog login.
@@ -1095,14 +1119,6 @@ enum SelectionExit {
     Idle {
         generation: u64,
     },
-}
-
-const fn reconnect_backoff_delay(transport_recovery: bool, configured: Duration) -> Duration {
-    if transport_recovery {
-        configured
-    } else {
-        Duration::ZERO
-    }
 }
 
 fn publish_live_catalog_selection(
@@ -1838,6 +1854,28 @@ mod tests {
     use aeris_rithmic_protocol_adapter::{
         RithmicCatalogEvent as AdapterCatalogEvent, RithmicEnvironmentEvent,
     };
+
+    #[test]
+    fn reconnect_transport_uses_only_adapter_and_nontransport_is_bounded() {
+        use crate::market_service::{
+            clock::ScriptedClock,
+            reconnect::{Backoff, ReconnectPolicy},
+        };
+        let clock = ScriptedClock::new(42);
+        let mut backoff = Backoff::new(ReconnectPolicy::rithmic_recovery(), &clock, 10);
+        assert_eq!(super::replacement_delay(false, false, &mut backoff), None);
+        assert_eq!(super::replacement_delay(true, true, &mut backoff), None);
+        assert_eq!(
+            backoff.attempts(),
+            0,
+            "transport must not stack another retry"
+        );
+        for _ in 0..20 {
+            let delay = super::replacement_delay(true, false, &mut backoff).unwrap();
+            assert!(delay >= std::time::Duration::from_secs(1));
+            assert!(delay <= std::time::Duration::from_secs(30));
+        }
+    }
 
     #[test]
     fn oversized_consumer_search_bound_is_capped_at_the_session_limit() {

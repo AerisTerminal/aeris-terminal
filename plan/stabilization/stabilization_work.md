@@ -110,7 +110,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | open |
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
-| MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | open |
+| MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in this commit |
 | MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | open |
 | MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | open |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
@@ -352,7 +352,17 @@ Status: in progress
     `watchdog_uses_scripted_clock_without_waiting` pass in under one second.
     Existing public session-status requests use the caller-supplied wall timestamp;
     provider calendar resolution remains M2.5.
-- [ ] M2.4 reconnect-policy - One jittered, capped, budgeted reconnect policy
+- [x] M2.4 reconnect-policy - One jittered, capped, budgeted reconnect policy
+  - `Backoff` provides clock-seeded deterministic full/equal jitter, caps, healthy reset,
+    server-directed rate-limit waits and typed budget exhaustion. Hyperliquid market
+    and display-depth workers use full jitter from 500 ms to 30 s; cTrader has
+    a five-attempt failure with the last cause, while tastytrade and the shared
+    cTrader venue reuse bounded backoff.
+  - Rithmic transport keeps only its adapter retry ticket; non-transport live
+    replacement waits at least one second. A scripted adapter retry asserts
+    exactly one concurrent ticker login. Tests cover policy bounds, capped
+    retries, rate-limit headers and recovery, and cTrader failure publication.
+    The blocked-network instance log is deferred to the single M2 milestone probe.
 - [ ] M2.5 market-calendar-service - Provider-neutral market calendar and session service
 - [ ] M2.6 provider-neutral-watchdog - Stall watchdog and practice session answer for every provider
 - [ ] M2.7 calendar-session-live-bars - Session-day, weekly and monthly live bars follow the calendar
@@ -493,6 +503,9 @@ the repo root `AGENTS.md`.
   test file, checked by `aeris_naming_check` (M2.1, this commit).
 - Coordinator-owned watchdog, history retry and trade-handoff timestamps come from
   the injected clock; only `SystemClock` reads system time (M2.3, this commit).
+- Provider reconnect attempts use capped policy backoff; Rithmic transport has
+  only the adapter scheduler and a separate bounded non-transport delay
+  (M2.4, this commit).
 
 ## 6. Progress log
 
@@ -522,6 +535,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M2.1 test(market): characterize coordinator market handoffs - pinned four command/event scenarios and registered their exact names; backfilled the M1 validated/pushed state and recorded the disabled hosted CI workflow.
 - 2026-10-13 M2.2 perf(market): record engine and coordinator baselines - measured release workloads and added a manual-only CI performance job.
 - 2026-10-13 M2.3 feat(market): inject coordinator clock into recovery timing - shared a monotonic/wall clock with handoffs, watchdog and history retries; scripted tests advance without sleeps.
+- 2026-10-13 M2.4 feat(market): bound provider reconnect policies - replaced fixed Hyperliquid retry, budgeted cTrader with real-cause failure, jittered tastytrade and bounded Rithmic non-transport recovery.
 
 ## 7. Known gaps / deferred
 

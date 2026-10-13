@@ -115,6 +115,9 @@ the check.
   lifecycle refactors cannot silently drop the baseline.
 - Coordinator-owned watchdog, history retry and trade-handoff timestamps use the injected
   `market_service::clock::Clock`; direct system time belongs only in `SystemClock`.
+- Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;
+  the Rithmic adapter alone retries transport, while its non-transport session replacements
+  wait at least one second. Never stack a coordinator transport retry on that adapter.
 - Verify protocol fields, precision, timestamp meaning, ordering, snapshot semantics, and recovery
   against current provider documentation or representative observed responses before depending on them.
 - Keep provider identity, local ingestion order, and continuity evidence separate. Never infer sequence

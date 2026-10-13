@@ -85,8 +85,14 @@ pub(crate) fn run(
     events: &SyncSender<HyperliquidDisplayDepthEvent>,
     stop: &Arc<AtomicBool>,
     wake: &ProviderCoordinatorWake,
-    reconnect_delay: Duration,
+    _reconnect_delay: Duration,
 ) {
+    let clock = crate::market_service::clock::SystemClock;
+    let mut backoff = crate::market_service::reconnect::Backoff::new(
+        crate::market_service::reconnect::ReconnectPolicy::hyperliquid(),
+        &clock,
+        0x4445_5054,
+    );
     let mut demand = HyperliquidDisplayDepthDemand::default();
     let mut display_generation = 0u64;
     loop {
@@ -116,6 +122,7 @@ pub(crate) fn run(
         ) {
             return;
         }
+        let started = Instant::now();
         if let Ok((mut socket, _shutdown)) =
             MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop)
         {
@@ -129,14 +136,24 @@ pub(crate) fn run(
                 wake,
             ) {
                 SessionExit::Closed => return,
-                SessionExit::Parked => continue,
-                SessionExit::Reconnect => {}
+                SessionExit::Parked => {
+                    backoff.reset();
+                    continue;
+                }
+                SessionExit::Reconnect => {
+                    backoff.healthy_for(started, &clock);
+                }
             }
         }
         if stop.load(Ordering::Acquire) {
             return;
         }
-        sleep_cancellable(reconnect_delay, stop);
+        let crate::market_service::reconnect::RetryDecision::Wait(delay) =
+            backoff.failure(crate::market_service::reconnect::RetryClass::Transient)
+        else {
+            unreachable!("Hyperliquid has no reconnect budget");
+        };
+        sleep_cancellable(delay, stop);
     }
 }
 

@@ -270,7 +270,7 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                 coordinator.rithmic_failed(
                     provider,
                     generation,
-                    "Market data retry limit reached; reconnect the provider in Accounts",
+                    "Rithmic: adapter transport retry scheduler exhausted; reconnect in Accounts",
                 );
                 diagnostic!(
                     "Aeris market {provider} stopped after retry limit at generation {generation}"

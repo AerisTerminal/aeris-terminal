@@ -2327,7 +2327,7 @@ fn server_directed_waits_replace_the_backoff_and_do_not_count_as_failures() {
         wait: Duration::from_secs(120),
     });
     harness.drive();
-    assert_eq!(harness.worker.failures, 0);
+    assert_eq!(harness.worker.backoff.attempts(), 0);
     let wait = retry_after(&harness);
     assert!(
         wait > Duration::from_secs(110) && wait <= Duration::from_secs(120),
@@ -2347,7 +2347,7 @@ fn server_directed_waits_replace_the_backoff_and_do_not_count_as_failures() {
         wait: Duration::from_secs(300),
     });
     harness.drive();
-    assert_eq!(harness.worker.failures, 0);
+    assert_eq!(harness.worker.backoff.attempts(), 0);
     assert!(harness.worker.hosts.is_empty());
     assert!(retry_after(&harness) > Duration::from_secs(290));
     assert!(!harness.worker.epoch_state.paused);
@@ -2358,20 +2358,34 @@ fn local_failures_back_off_exponentially_and_pause_at_the_retry_limit() {
     let mut harness = harness(scripted(), Duration::ZERO);
     harness.demand(demo_series_demand());
     let mut waits = Vec::new();
-    for _ in 0..MAXIMUM_FAILURES {
+    for _ in 0..5 {
         harness.worker.retry_at = Instant::now();
         harness.drive();
         harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
         harness.drive();
-        waits.push(retry_after(&harness).as_secs_f64().ceil());
+        if !harness.worker.epoch_state.paused {
+            waits.push(retry_after(&harness).as_secs_f64().ceil());
+        }
     }
-    assert_eq!(waits, [6.0, 12.0, 24.0, 48.0, 48.0]);
+    assert!(
+        waits
+            .iter()
+            .zip([3.0, 6.0, 12.0, 24.0])
+            .all(|(wait, max)| *wait >= max / 2.0 && *wait <= max)
+    );
+    assert_eq!(
+        waits.len(),
+        4,
+        "the fifth failure must not schedule a sixth attempt"
+    );
     assert!(harness.worker.epoch_state.paused);
     assert!(
         harness
             .take_events()
             .iter()
-            .any(|event| matches!(event, RealtimeEvent::Failed(..))),
+            .any(|event| matches!(event, RealtimeEvent::Failed(_, detail)
+                if detail.contains("cTrader: 5 reconnect attempts failed")
+                    && detail.contains("last error: cTrader session: Reconnect"))),
         "the retry limit publishes a terminal failure"
     );
 }
@@ -2383,12 +2397,12 @@ fn a_healthy_session_clears_the_retry_count() {
     harness.demand(demo_series_demand());
     harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
     harness.drive();
-    assert_eq!(harness.worker.failures, 1);
+    assert_eq!(harness.worker.backoff.attempts(), 1);
 
     harness.worker.retry_at = Instant::now();
     harness.drive();
     assert!(harness.worker.epoch_state.open);
-    assert_eq!(harness.worker.failures, 0);
+    assert_eq!(harness.worker.backoff.attempts(), 0);
 }
 
 #[test]
@@ -2992,7 +3006,11 @@ mod venue_relay {
         script.lock().unwrap().open_fault = Some(SessionFault::NeedsReconnect);
         let (mut harness, venue) = attached(script);
         assert_eq!(venue.updates(), []);
-        assert_eq!(harness.worker.failures, 0, "market recovery is not charged");
+        assert_eq!(
+            harness.worker.backoff.attempts(),
+            0,
+            "market recovery is not charged"
+        );
         venue
             .requests
             .send(VenueRequest::Place(limit_order(
@@ -3015,7 +3033,7 @@ mod venue_relay {
             1,
             "the backoff holds the next attempt"
         );
-        assert_eq!(harness.worker.failures, 0);
+        assert_eq!(harness.worker.backoff.attempts(), 0);
     }
 
     #[test]

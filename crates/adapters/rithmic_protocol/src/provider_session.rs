@@ -3721,13 +3721,38 @@ mod tests {
         assert_eq!(retries.ticket(), None);
     }
 
+    fn counted_runtime_task() -> (Arc<SessionTask>, Arc<std::sync::atomic::AtomicUsize>) {
+        let active_logins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak_logins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scripted_session = runtime_task();
+        let task: Arc<SessionTask> = {
+            let active_logins = Arc::clone(&active_logins);
+            let peak_logins = Arc::clone(&peak_logins);
+            Arc::new(
+                move |config, generation, credentials, stop, abort, commands, emitter| {
+                    let current = active_logins.fetch_add(1, Ordering::AcqRel) + 1;
+                    peak_logins.fetch_max(current, Ordering::AcqRel);
+                    scripted_session(
+                        config,
+                        generation,
+                        credentials,
+                        stop,
+                        abort,
+                        commands,
+                        emitter,
+                    );
+                    active_logins.fetch_sub(1, Ordering::AcqRel);
+                },
+            )
+        };
+        (task, peak_logins)
+    }
+
     #[test]
     fn vault_callbacks_drive_shared_runtime_recovery_and_exact_retry() {
-        let (driver, events) = RithmicProviderDriver::with_task(
-            config(),
-            callback_limits(8, 64 * 1_024),
-            runtime_task(),
-        );
+        let (task, peak_logins) = counted_runtime_task();
+        let (driver, events) =
+            RithmicProviderDriver::with_task(config(), callback_limits(8, 64 * 1_024), task);
         let mut worker = open_worker(driver);
         let mut retries = RithmicRetryScheduler::default();
         let first = worker
@@ -3792,6 +3817,11 @@ mod tests {
             .expect("due retry starts")
             .expect("exact recovery ticket is consumed");
         assert_eq!(second, generation(2));
+        assert_eq!(
+            peak_logins.load(Ordering::Acquire),
+            1,
+            "a transport failure must retire its login before retry"
+        );
 
         let (foreign_driver, foreign_events) =
             RithmicProviderDriver::with_task(config(), callback_limits(2, 4_096), runtime_task());

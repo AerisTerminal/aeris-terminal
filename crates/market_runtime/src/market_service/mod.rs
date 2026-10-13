@@ -58,7 +58,8 @@ use crate::rithmic_realtime::{
 };
 
 mod alerts;
-mod clock;
+pub(crate) mod clock;
+pub(crate) mod reconnect;
 use alerts::PriceAlertRegistry;
 
 const COMMAND_CAPACITY: usize = 64;
@@ -75,7 +76,6 @@ const HISTORY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_FAILED_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 const HISTORY_CAPACITY_EXHAUSTED: &str = "provider history capacity is temporarily exhausted";
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
-const PROVIDER_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 64;
 const MAXIMUM_STUDIES: usize = MAXIMUM_CONSUMERS * 16;
@@ -1107,7 +1107,7 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
             .with(MarketStream::Quotes)
             .with(MarketStream::Depth),
     },
-    reconnect_delay: PROVIDER_RECONNECT_DELAY,
+    reconnect_delay: Duration::from_secs(1),
     gap_policy: CandleGapPolicy::Contiguous,
     history_source: HistorySourceKind::DedicatedWorker("aeris-rithmic-history"),
     connection_kind: ProviderConnectionKind::NativeCredentials,
@@ -1158,7 +1158,7 @@ const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     presentation: &HYPERLIQUID_PRESENTATION,
     account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID,
     capabilities: RITHMIC_DESCRIPTOR.capabilities,
-    reconnect_delay: PROVIDER_RECONNECT_DELAY,
+    reconnect_delay: Duration::from_millis(500),
     gap_policy: CandleGapPolicy::Contiguous,
     history_source: HistorySourceKind::DedicatedWorker("aeris-hyperliquid-history"),
     connection_kind: ProviderConnectionKind::Public,
