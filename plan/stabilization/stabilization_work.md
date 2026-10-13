@@ -387,6 +387,7 @@ Status: in progress
   - One tracker replaces all eight coordinator ledgers and the retry tuple. Exact provider/demand/lane/sequence tickets travel through worker and provider completions; deferred, in-flight, retry, coverage, detached and cancellation state are pruned together.
   - The worker blocks on a full bounded completion channel and serves the oldest backfill every fourth slot. Removed the unused provider-history scheduler modules while preserving model/handoff/error and Rithmic conformance; fixed misplaced history comments.
   - Tracker API, boundary characterization, full fmt/workspace Clippy/workspace tests/naming passed. In an isolated desktop, BTC-USDC 1m history grew from 1,599 to 4,003 bars after panning, with zero interior gaps; ETH search, 1D chart and restart restore succeeded.
+  - Scrutiny round 1: empty current-history completions now dispatch the deferred viewport backfill using the completed ticket's provider epoch; current failure/retry also drains it. Scripted-clock tests cover both empty branches, non-empty, retry and retired-epoch completion. Scoped and full gates passed.
 
 ### M3 market lifecycle
 
@@ -566,6 +567,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M2.8 feat(market): fence provider events and history with typed epochs - registry-stamped adapter generations, fenced dated calendar and history completions, counted retired inputs and pinned typed event fields.
 - 2026-10-14 M2.9 feat(market): unify catalog command fences and consumer retirement - removed the startup sentinel and five pending maps, separated startup/picker searches, and centralized consumer cleanup.
 - 2026-10-14 M2.10 feat(market): centralize history lanes and exact completion tickets - replaced eight maps, bounded retry/deferral and provider-history scheduler with a single tracker; verified older Hyperliquid chart pages without gaps.
+- 2026-10-14 M2.10 fix(market): drain deferred backfill after empty current history - closed the M2 scrutiny blocker with ticket-fenced dispatch and scripted completion-path regressions.
 
 ## 7. Known gaps / deferred
 

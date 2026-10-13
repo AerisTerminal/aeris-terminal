@@ -1087,9 +1087,7 @@ impl Coordinator<'_> {
             }
             Err(error) => {
                 let retry = self.schedule_history_retry(series, generation, range, &error);
-                if range.is_some() {
-                    self.dispatch_deferred_history(series, generation);
-                }
+                self.dispatch_deferred_history(ticket, generation);
                 if !retry {
                     if range.is_none() {
                         let _ = self.cancel_live_history_reseed(series);
@@ -1125,7 +1123,7 @@ impl Coordinator<'_> {
             return;
         };
         if snapshot.bars.is_empty() {
-            self.handle_empty_history(series, ticket.provider, generation, range, &snapshot);
+            self.handle_empty_history(ticket, generation, range, &snapshot);
             return;
         }
         let repaired_timestamp_span = range.and_then(|_| {
@@ -1212,17 +1210,18 @@ impl Coordinator<'_> {
         for (consumer_id, consumer_generation, viewport) in viewport_demands {
             let _ = self.request_viewport_history(consumer_id, consumer_generation, viewport);
         }
-        self.dispatch_deferred_history(series, generation);
+        self.dispatch_deferred_history(ticket, generation);
     }
 
     fn handle_empty_history(
         &mut self,
-        series: &BarSeriesKey,
-        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+        ticket: &HistoryTicket,
         generation: ProviderGeneration,
         range: Option<HistoryRange>,
         snapshot: &HistorySnapshot,
     ) {
+        let series = &ticket.series;
+        let epoch = ticket.provider;
         if let Some(range) = range {
             if let Some(coverage) = self.history.coverage_mut(series, epoch) {
                 if snapshot.backwards_exhausted {
@@ -1233,7 +1232,7 @@ impl Coordinator<'_> {
                     none @ None => *none = Some(range),
                 }
             }
-            self.dispatch_deferred_history(series, generation);
+            self.dispatch_deferred_history(ticket, generation);
             return;
         }
         let _ = self.cancel_live_history_reseed(series);
@@ -1241,6 +1240,7 @@ impl Coordinator<'_> {
             // A live edge is already installed; this was only a refill of a
             // detached window and the live handoff remains authoritative.
             self.history_failed(series, generation);
+            self.dispatch_deferred_history(ticket, generation);
             return;
         }
         let recorded = match self.history.current_empty(series, epoch) {
@@ -1275,6 +1275,7 @@ impl Coordinator<'_> {
             EMPTY_CURRENT_HISTORY_DETAIL
         };
         self.broadcast_series_resolution_for(series, SeriesLoadState::Empty, Some(detail));
+        self.dispatch_deferred_history(ticket, generation);
     }
 
     pub(super) fn current_history_known_empty(
@@ -1379,14 +1380,20 @@ impl Coordinator<'_> {
         }
     }
 
-    fn dispatch_deferred_history(&mut self, series: &BarSeriesKey, generation: ProviderGeneration) {
-        let Some(epoch) = self
+    fn dispatch_deferred_history(
+        &mut self,
+        ticket: &HistoryTicket,
+        generation: ProviderGeneration,
+    ) {
+        let series = &ticket.series;
+        if self
             .provider_epochs
             .current(&series.provider_id, generation.0.get())
-        else {
+            != Some(ticket.provider)
+        {
             return;
-        };
-        let Some(deferred) = self.history.take_deferred(series, epoch) else {
+        }
+        let Some(deferred) = self.history.take_deferred(series, ticket.provider) else {
             return;
         };
         let range = match deferred {

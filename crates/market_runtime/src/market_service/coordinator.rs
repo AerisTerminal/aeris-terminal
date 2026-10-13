@@ -4642,6 +4642,190 @@ mod tests {
         assert!(request.range.is_none());
     }
 
+    fn current_request_with_deferred_viewport_backfill() -> (
+        Coordinator<'static>,
+        std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        super::super::HistoryRequest,
+        BarSeriesKey,
+    ) {
+        use super::super::clock::{Clock, ScriptedClock};
+
+        let clock = Arc::new(ScriptedClock::new(1_000_000_000));
+        let (mut coordinator, history_receiver) = connected_rithmic_coordinator();
+        coordinator.clock = clock.clone() as Arc<dyn Clock>;
+        let selected = series();
+        let provider_generation = ProviderGeneration(nonzero(1));
+        let consumer_id = consumer(1);
+        register(&mut coordinator, consumer_id);
+        coordinator
+            .engine
+            .set_series_demand_with_streams(
+                consumer_id,
+                generation(1),
+                &selected,
+                StreamRequirements::BARS,
+            )
+            .expect("series demand installs");
+        coordinator
+            .engine
+            .install_history(provider_generation, &selected, 2, 0, minute_bars(10, 10))
+            .expect("retained current history installs");
+        coordinator
+            .enqueue_history_request(&selected, provider_generation, None)
+            .expect("current-edge refresh starts");
+        let current = history_receiver.try_recv().expect("current request");
+        assert!(current.range.is_none());
+
+        let minute = 60_000_000_000;
+        let viewport = Viewport::try_new(5 * minute, 9 * minute).expect("older viewport");
+        coordinator
+            .engine
+            .set_viewport(consumer_id, generation(1), viewport)
+            .expect("viewport installs");
+        coordinator
+            .request_viewport_history(consumer_id, generation(1), viewport)
+            .expect("viewport backfill defers behind current");
+        assert_no_history_request(&history_receiver, "backfill must wait for current");
+        (coordinator, history_receiver, current, selected)
+    }
+
+    fn assert_deferred_backfill_dispatched(
+        coordinator: &Coordinator<'_>,
+        history_receiver: &std::sync::mpsc::Receiver<super::super::HistoryRequest>,
+        current: &super::super::HistoryRequest,
+        selected: &BarSeriesKey,
+    ) {
+        let minute = 60_000_000_000;
+        let backfill = history_receiver
+            .try_recv()
+            .expect("completion alone dispatches the deferred backfill");
+        assert_eq!(&backfill.ticket.series, selected);
+        assert_eq!(backfill.ticket.provider, current.ticket.provider);
+        assert_eq!(backfill.ticket.demand, current.ticket.demand);
+        assert_eq!(
+            backfill.ticket.lane,
+            super::super::history::tracker::LaneKind::Backfill
+        );
+        assert!(backfill.range.is_some_and(|range| {
+            range.start_unix_nanos < 5 * minute && range.end_unix_nanos == 10 * minute
+        }));
+        assert_eq!(
+            coordinator
+                .history
+                .inflight(selected, current.ticket.provider)
+                .map(|(ticket, _)| ticket),
+            Some(&backfill.ticket)
+        );
+        assert_no_history_request(history_receiver, "exactly one backfill is dispatched");
+    }
+
+    #[test]
+    fn empty_current_completion_dispatches_deferred_viewport_backfill_without_another_trigger() {
+        let (mut coordinator, history_receiver, current, selected) =
+            current_request_with_deferred_viewport_backfill();
+        let minute = 60_000_000_000;
+
+        coordinator.history_completed(
+            &current.ticket,
+            current.provider_generation,
+            None,
+            Ok(empty_history_snapshot(20 * minute)),
+        );
+        assert_deferred_backfill_dispatched(&coordinator, &history_receiver, &current, &selected);
+    }
+
+    #[test]
+    fn empty_current_completion_with_live_handoff_drains_deferred_backfill() {
+        let (mut coordinator, history_receiver, current, selected) =
+            current_request_with_deferred_viewport_backfill();
+        let mut live = TradeLiveHandoff::new(&selected, current.provider_generation, "CME", None)
+            .expect("trade handoff");
+        live.history_state = LiveHistoryState::Ready;
+        coordinator.series_live.insert_trade(selected.clone(), live);
+
+        coordinator.history_completed(
+            &current.ticket,
+            current.provider_generation,
+            None,
+            Ok(empty_history_snapshot(20 * 60_000_000_000)),
+        );
+        assert_deferred_backfill_dispatched(&coordinator, &history_receiver, &current, &selected);
+    }
+
+    #[test]
+    fn failed_current_completion_drains_deferred_backfill_and_retains_retry() {
+        let (mut coordinator, history_receiver, current, selected) =
+            current_request_with_deferred_viewport_backfill();
+        coordinator.history_completed(
+            &current.ticket,
+            current.provider_generation,
+            None,
+            Err("scripted current failure".to_string()),
+        );
+        assert_deferred_backfill_dispatched(&coordinator, &history_receiver, &current, &selected);
+        assert!(
+            coordinator
+                .history
+                .pending(
+                    &selected,
+                    current.ticket.provider,
+                    super::super::history::tracker::LaneKind::Current
+                )
+                .is_some(),
+            "the failed current edge remains scheduled for retry"
+        );
+    }
+
+    #[test]
+    fn nonempty_current_completion_drains_deferred_backfill() {
+        let (mut coordinator, history_receiver, current, selected) =
+            current_request_with_deferred_viewport_backfill();
+        coordinator.history_completed(
+            &current.ticket,
+            current.provider_generation,
+            None,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: minute_bars(10, 10),
+                forming: None,
+                handoff_boundary_unix_nanos: None,
+                backwards_exhausted: false,
+            }),
+        );
+        assert_deferred_backfill_dispatched(&coordinator, &history_receiver, &current, &selected);
+    }
+
+    #[test]
+    fn stale_current_completion_does_not_dispatch_retired_backfill() {
+        let (mut coordinator, history_receiver, current, selected) =
+            current_request_with_deferred_viewport_backfill();
+        coordinator
+            .engine
+            .begin_provider_session("rithmic", ProviderGeneration(nonzero(2)))
+            .expect("new provider session begins");
+        let next_epoch = history_epoch(&mut coordinator, "rithmic", ProviderGeneration(nonzero(2)));
+        assert_ne!(next_epoch, current.ticket.provider);
+
+        coordinator.history_completed(
+            &current.ticket,
+            current.provider_generation,
+            None,
+            Ok(empty_history_snapshot(20 * 60_000_000_000)),
+        );
+        assert_no_history_request(
+            &history_receiver,
+            "stale completion cannot dispatch retired viewport work",
+        );
+        assert!(
+            coordinator
+                .history
+                .coverage(&selected, current.ticket.provider)
+                .is_none(),
+            "retired epoch and its deferred request are pruned together"
+        );
+    }
+
     fn send_fixture_trade(
         coordinator: &mut Coordinator<'_>,
         selected: &BarSeriesKey,
