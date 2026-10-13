@@ -22,6 +22,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt::{self, Write as _},
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -330,6 +331,11 @@ pub enum StoreError {
         newest_backup: Option<PathBuf>,
         detail: String,
     },
+    /// The database was written by a version of Aeris with a newer schema.
+    NewerSchema {
+        found: u32,
+        supported: u32,
+    },
     Other(String),
 }
 
@@ -347,6 +353,10 @@ impl fmt::Display for StoreError {
                 }
                 write!(formatter, ": {detail}")
             }
+            Self::NewerSchema { found, supported } => write!(
+                formatter,
+                "trading database schema {found} is newer than supported schema {supported}"
+            ),
             Self::Other(detail) => formatter.write_str(detail),
         }
     }
@@ -389,33 +399,113 @@ fn corrupt_error(path: &Path, detail: impl Into<String>) -> StoreError {
 }
 
 pub(super) fn preflight_existing_database(path: &Path) -> Result<(), StoreError> {
-    let connection =
-        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {
+    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+    let mut header = [0_u8; SQLITE_HEADER.len()];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|error| {
+            corrupt_error(path, format!("SQLite header could not be read: {error}"))
+        })?;
+    if &header != SQLITE_HEADER {
+        return Err(corrupt_error(path, "SQLite header is missing or invalid"));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| corrupt_error(path, "database path has no file name"))?;
+    let scratch = parent.join(format!(
+        ".{}.preflight-{}-{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
+    fs::create_dir(&scratch).map_err(|error| {
+        corrupt_error(
+            path,
+            format!("quick_check scratch directory could not be created: {error}"),
+        )
+    })?;
+    let copy = scratch.join(file_name);
+    let checked = (|| {
+        fs::copy(path, &copy).map_err(|error| {
+            corrupt_error(path, format!("quick_check database copy failed: {error}"))
+        })?;
+        for suffix in ["-wal", "-shm"] {
+            let source = PathBuf::from(format!("{}{suffix}", path.display()));
+            if source.is_file() {
+                fs::copy(
+                    &source,
+                    scratch.join(format!("{}{suffix}", file_name.to_string_lossy())),
+                )
+                .map_err(|error| {
+                    corrupt_error(path, format!("quick_check sidecar copy failed: {error}"))
+                })?;
+            }
+        }
+        preflight_database_copy(path, &copy)
+    })();
+    let _ = fs::remove_dir_all(scratch);
+    checked
+}
+
+fn preflight_database_copy(original_path: &Path, copy_path: &Path) -> Result<(), StoreError> {
+    let connection = Connection::open_with_flags(copy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| {
             corrupt_error(
-                path,
+                original_path,
                 format!("quick_check could not open the file: {error}"),
             )
         })?;
     connection
         .busy_timeout(std::time::Duration::from_millis(5_000))
         .map_err(|error| {
-            corrupt_error(path, format!("quick_check timeout setup failed: {error}"))
+            corrupt_error(
+                original_path,
+                format!("quick_check timeout setup failed: {error}"),
+            )
         })?;
     let detail = connection
         .pragma_query_value(None, "quick_check", |row| row.get::<_, String>(0))
-        .map_err(|error| corrupt_error(path, format!("quick_check failed: {error}")))?;
+        .map_err(|error| corrupt_error(original_path, format!("quick_check failed: {error}")))?;
     if detail != "ok" {
-        return Err(corrupt_error(path, detail));
+        return Err(corrupt_error(original_path, detail));
     }
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
         .map_err(|error| {
-            corrupt_error(path, format!("schema version could not be read: {error}"))
+            corrupt_error(
+                original_path,
+                format!("schema version could not be read: {error}"),
+            )
         })?;
+    if version == 0 {
+        let user_tables: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                corrupt_error(
+                    original_path,
+                    format!("SQLite schema could not be inspected: {error}"),
+                )
+            })?;
+        if user_tables == 0 {
+            return Err(corrupt_error(
+                original_path,
+                "existing SQLite database has no Aeris schema",
+            ));
+        }
+    }
     if version > SCHEMA_VERSION {
-        return Err(StoreError::Other(format!(
-            "trading database schema {version} is newer than supported schema {SCHEMA_VERSION}"
-        )));
+        return Err(StoreError::NewerSchema {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
     }
     Ok(())
 }
@@ -583,7 +673,8 @@ pub(super) struct FillPolicyPersistence<'a> {
 
 impl TradingStore {
     pub(super) fn open(path: &Path, retention: TradingRetention) -> Result<Self, StoreError> {
-        if path != Path::new(":memory:") && path.exists() {
+        let existed = path != Path::new(":memory:") && path.exists();
+        if existed {
             preflight_existing_database(path)?;
         }
         if path != Path::new(":memory:") {
@@ -615,7 +706,7 @@ impl TradingStore {
             connection,
             retention,
         };
-        store.migrate()?;
+        store.migrate(existed)?;
         store
             .ensure_default_strategy_templates()
             .map_err(StoreError::Other)?;
@@ -623,7 +714,7 @@ impl TradingStore {
         Ok(store)
     }
 
-    fn migrate(&mut self) -> Result<(), StoreError> {
+    fn migrate(&mut self, back_up_existing_database: bool) -> Result<(), StoreError> {
         let mut version = self
             .connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
@@ -631,11 +722,12 @@ impl TradingStore {
                 StoreError::Other(format!("trading schema version could not be read: {error}"))
             })?;
         if version > SCHEMA_VERSION {
-            return Err(StoreError::Other(format!(
-                "trading database schema {version} is newer than supported schema {SCHEMA_VERSION}"
-            )));
+            return Err(StoreError::NewerSchema {
+                found: version,
+                supported: SCHEMA_VERSION,
+            });
         }
-        if version < SCHEMA_VERSION {
+        if back_up_existing_database && version < SCHEMA_VERSION {
             self.back_up_before_migration(version)?;
         }
         while version < SCHEMA_VERSION {
@@ -3600,6 +3692,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash as _, Hasher as _};
     use std::io::Write as _;
 
     fn temporary_database(name: &str) -> PathBuf {
@@ -3627,6 +3721,39 @@ mod tests {
             .expect("historical version");
     }
 
+    fn file_hash(path: &Path) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        fs::read(path).expect("fixture reads").hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Deterministically creates a sanitized v18 database without relying on a checked-in binary
+    /// whose SQLite page layout could vary between library versions.
+    fn create_sanitized_v18_fixture(path: &Path) {
+        let connection = Connection::open(path).expect("v18 fixture opens");
+        create_schema_at(&connection, 18);
+        connection
+            .execute(
+                "INSERT INTO user_records(kind,id,revision,updated_unix_nanos,json)
+                 VALUES ('note','sanitized-v18-record',7,123456789,'{\"text\":\"fixture\"}')",
+                [],
+            )
+            .expect("v18 fixture row");
+    }
+
+    #[test]
+    #[ignore = "writes the documented sanitized fixture path for desktop validation"]
+    fn generate_sanitized_v18_fixture_for_validation() {
+        let path = std::env::var_os("AERIS_V18_FIXTURE_OUT")
+            .map(PathBuf::from)
+            .expect("set AERIS_V18_FIXTURE_OUT to the output trading.sqlite3 path");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent");
+        }
+        create_sanitized_v18_fixture(&path);
+        println!("generated sanitized v18 fixture at {}", path.display());
+    }
+
     #[test]
     fn migrations_are_contiguous_and_every_historical_version_reaches_head() {
         assert_eq!(MIGRATIONS.len(), SCHEMA_VERSION as usize);
@@ -3641,12 +3768,46 @@ mod tests {
                 connection,
                 retention: TradingRetention::default(),
             };
-            store.migrate().expect("historical schema migrates");
+            store.migrate(false).expect("historical schema migrates");
             let actual: u32 = store
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .expect("version");
             assert_eq!(actual, SCHEMA_VERSION, "starting at v{version}");
+        }
+    }
+
+    #[test]
+    fn every_row_bearing_historical_version_preserves_rows_when_migrated() {
+        for version in 1..SCHEMA_VERSION {
+            let connection = Connection::open_in_memory().expect("in-memory database");
+            create_schema_at(&connection, version);
+            connection
+                .execute(
+                    "INSERT INTO user_records(kind,id,revision,updated_unix_nanos,json)
+                     VALUES ('note','migration-sentinel',41,987654321,'{\"safe\":true}')",
+                    [],
+                )
+                .expect("historical row");
+            let mut store = TradingStore {
+                connection,
+                retention: TradingRetention::default(),
+            };
+            store.migrate(false).expect("historical schema migrates");
+            let preserved: (u32, i64, String) = store
+                .connection
+                .query_row(
+                    "SELECT revision, updated_unix_nanos, json
+                     FROM user_records WHERE kind = 'note' AND id = 'migration-sentinel'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("historical row survives");
+            assert_eq!(
+                preserved,
+                (41, 987_654_321, "{\"safe\":true}".to_string()),
+                "starting at v{version}"
+            );
         }
     }
 
@@ -3680,24 +3841,110 @@ mod tests {
     }
 
     #[test]
-    fn quick_check_rejects_corrupt_and_truncated_files_without_changing_bytes() {
+    fn quick_check_rejects_empty_headerless_and_truncated_files_without_changing_hash() {
         for (name, bytes) in [
-            ("corrupt", b"not a sqlite database".to_vec()),
+            ("empty", Vec::new()),
+            ("headerless", vec![0_u8; 4_096]),
             ("truncated", b"SQLite format 3\0partial".to_vec()),
         ] {
             let path = temporary_database(name);
             fs::write(&path, &bytes).expect("invalid fixture");
+            let before_hash = file_hash(&path);
             let Err(error) = TradingStore::open(&path, TradingRetention::default()) else {
                 panic!("invalid database unexpectedly opened");
             };
             assert!(matches!(error, StoreError::Corrupt { .. }));
+            assert_eq!(file_hash(&path), before_hash);
             assert_eq!(fs::read(&path).expect("fixture reads"), bytes);
             fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
         }
     }
 
     #[test]
-    fn newer_schema_is_byte_identical_after_rejection() {
+    fn existing_sqlite_file_without_an_aeris_schema_is_corrupt_and_unchanged() {
+        let path = temporary_database("empty-sqlite");
+        let connection = Connection::open(&path).expect("empty SQLite fixture");
+        connection
+            .execute_batch("VACUUM;")
+            .expect("materialize header");
+        drop(connection);
+        let before_hash = file_hash(&path);
+
+        let Err(error) = TradingStore::open(&path, TradingRetention::default()) else {
+            panic!("existing empty SQLite file must not be initialized");
+        };
+
+        assert!(matches!(error, StoreError::Corrupt { .. }));
+        assert_eq!(file_hash(&path), before_hash);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn quick_check_rejects_a_corrupt_database_page_without_changing_hash() {
+        let path = temporary_database("corrupt-page");
+        let connection = Connection::open(&path).expect("fixture opens");
+        create_schema_at(&connection, SCHEMA_VERSION);
+        connection
+            .execute_batch(
+                "INSERT INTO user_records(kind,id,revision,updated_unix_nanos,json)
+                 VALUES ('note','large-record',1,1,printf('%.*c', 12000, 'x'));",
+            )
+            .expect("large fixture row");
+        drop(connection);
+        let mut bytes = fs::read(&path).expect("fixture reads");
+        let page_size = match u16::from_be_bytes([bytes[16], bytes[17]]) {
+            1 => 65_536,
+            size => usize::from(size),
+        };
+        assert!(bytes.len() >= page_size * 2, "fixture has multiple pages");
+        bytes[page_size..page_size * 2].fill(0xff);
+        fs::write(&path, &bytes).expect("corrupt fixture writes");
+        let before_hash = file_hash(&path);
+        let Err(error) = TradingStore::open(&path, TradingRetention::default()) else {
+            panic!("page-corrupt database unexpectedly opened");
+        };
+        assert!(matches!(error, StoreError::Corrupt { .. }));
+        assert_eq!(file_hash(&path), before_hash);
+        assert_eq!(fs::read(&path).expect("fixture reads"), bytes);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn preflight_never_changes_an_existing_wal_database_or_its_sidecars() {
+        let path = temporary_database("wal-preflight");
+        let connection = Connection::open(&path).expect("fixture opens");
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("WAL mode");
+        create_schema_at(&connection, SCHEMA_VERSION);
+        connection
+            .execute(
+                "INSERT INTO user_records(kind,id,revision,updated_unix_nanos,json)
+                 VALUES ('note','wal-record',1,1,'{}')",
+                [],
+            )
+            .expect("WAL fixture row");
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(wal.is_file());
+        assert!(shm.is_file());
+        let before = [
+            (path.clone(), file_hash(&path)),
+            (wal.clone(), file_hash(&wal)),
+            (shm.clone(), file_hash(&shm)),
+        ];
+
+        preflight_existing_database(&path).expect("copied WAL database passes preflight");
+
+        for (file, hash) in before {
+            assert_eq!(file_hash(&file), hash, "{} changed", file.display());
+        }
+        drop(connection);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn newer_schema_preserves_file_hash_after_typed_rejection() {
         let path = temporary_database("newer");
         let connection = Connection::open(&path).expect("fixture opens");
         create_schema_at(&connection, SCHEMA_VERSION);
@@ -3706,10 +3953,18 @@ mod tests {
             .expect("newer version");
         drop(connection);
         let before = fs::read(&path).expect("fixture reads");
+        let before_hash = file_hash(&path);
         let Err(error) = TradingStore::open(&path, TradingRetention::default()) else {
             panic!("newer database unexpectedly opened");
         };
-        assert!(error.to_string().contains("newer"));
+        assert!(matches!(
+            error,
+            StoreError::NewerSchema {
+                found,
+                supported
+            } if found == SCHEMA_VERSION + 1 && supported == SCHEMA_VERSION
+        ));
+        assert_eq!(file_hash(&path), before_hash);
         assert_eq!(fs::read(&path).expect("fixture reads"), before);
         fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
     }
@@ -3717,9 +3972,7 @@ mod tests {
     #[test]
     fn migration_backs_up_old_schema_and_retains_three() {
         let path = temporary_database("backup");
-        let connection = Connection::open(&path).expect("fixture opens");
-        create_schema_at(&connection, 18);
-        drop(connection);
+        create_sanitized_v18_fixture(&path);
         let backups = path.parent().expect("parent").join("backups");
         fs::create_dir_all(&backups).expect("backups");
         for unix in 1..=3 {
@@ -3751,7 +4004,91 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("backup version");
         assert_eq!(version, 18);
+        let preserved: String = backup_connection
+            .query_row(
+                "SELECT json FROM user_records
+                 WHERE kind = 'note' AND id = 'sanitized-v18-record'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sanitized row is present in backup");
+        assert_eq!(preserved, "{\"text\":\"fixture\"}");
         drop(backup_connection);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn fresh_and_current_databases_do_not_create_migration_backups() {
+        let fresh_path = temporary_database("fresh-no-backup");
+        let fresh =
+            TradingStore::open(&fresh_path, TradingRetention::default()).expect("fresh store");
+        drop(fresh);
+        assert!(
+            !fresh_path
+                .parent()
+                .expect("parent")
+                .join("backups")
+                .exists()
+        );
+
+        let current_path = temporary_database("current-no-backup");
+        let connection = Connection::open(&current_path).expect("current fixture");
+        create_schema_at(&connection, SCHEMA_VERSION);
+        drop(connection);
+        let current =
+            TradingStore::open(&current_path, TradingRetention::default()).expect("current store");
+        drop(current);
+        assert!(
+            !current_path
+                .parent()
+                .expect("parent")
+                .join("backups")
+                .exists()
+        );
+
+        fs::remove_dir_all(fresh_path.parent().expect("parent")).expect("fixture cleanup");
+        fs::remove_dir_all(current_path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    #[ignore = "manual release-mode 50k-order quick_check measurement"]
+    fn measured_quick_check_on_deterministic_50k_order_database() {
+        const ORDERS: u32 = 50_000;
+        let path = temporary_database("quick-check-50k");
+        let connection = Connection::open(&path).expect("measurement fixture");
+        create_schema_at(&connection, SCHEMA_VERSION);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,
+                     venue_id)
+                 VALUES ('account','Sanitized','simulated','USD',2,'aeris-sim');
+                 INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+                 VALUES ('instrument',2,0,'{}');
+                 WITH RECURSIVE sequence(value) AS (
+                     VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < 50000
+                 )
+                 INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                     time_in_force,quantity_units,quantity_scale,limit_units,limit_scale,
+                     stop_units,stop_scale,status,submitted_unix_nanos,provenance_json,
+                     filled_units,filled_scale)
+                 SELECT printf('order-%05d',value),printf('client-%05d',value),'account',
+                     'instrument','buy','market','day',1,0,NULL,NULL,NULL,NULL,'working',
+                     value,'{}',0,0 FROM sequence;",
+            )
+            .expect("deterministic orders");
+        let count: u32 = connection
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .expect("order count");
+        assert_eq!(count, ORDERS);
+        drop(connection);
+
+        let started = std::time::Instant::now();
+        preflight_existing_database(&path).expect("quick_check passes");
+        let elapsed = started.elapsed();
+        println!(
+            "SQLite quick_check: {ORDERS} deterministic orders, {} bytes, {elapsed:?}",
+            fs::metadata(&path).expect("database metadata").len()
+        );
         fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
     }
 
@@ -3863,7 +4200,7 @@ mod tests {
             connection,
             retention: TradingRetention::default(),
         };
-        store.migrate().expect("schema five migration");
+        store.migrate(false).expect("schema five migration");
 
         let version = store
             .connection
@@ -3960,7 +4297,7 @@ mod tests {
             connection,
             retention: TradingRetention::default(),
         };
-        store.migrate().expect("v18 and v19 migrations");
+        store.migrate(false).expect("v18 and v19 migrations");
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -4008,14 +4345,14 @@ mod tests {
             connection: Connection::open_in_memory().expect("in-memory database"),
             retention: TradingRetention::default(),
         };
-        store.migrate().expect("fresh schema");
+        store.migrate(false).expect("fresh schema");
         store
             .connection
             .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .expect("newer version");
         assert!(
             store
-                .migrate()
+                .migrate(false)
                 .expect_err("newer schema rejected")
                 .to_string()
                 .contains("newer")
@@ -4032,7 +4369,7 @@ mod tests {
             connection,
             retention: TradingRetention::default(),
         };
-        store.migrate().expect("current schema");
+        store.migrate(false).expect("current schema");
         store
             .connection
             .execute_batch(

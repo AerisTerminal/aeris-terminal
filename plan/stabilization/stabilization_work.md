@@ -278,7 +278,17 @@ Status: in progress
 - [x] M1.9 sqlite-hardening-migrations - SQLite busy timeout, integrity check, quarantine, table-driven migrations and pre-migration backup
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added quick-check corruption errors, confirmed-only quarantine, contiguous migrations, pre-migration backups and clean checkpoints.
-  - A 999,424-byte fixture with 500 executions and 2,000 user records measured `quick_check` at 2.4027 ms.
+  - Scrutiny follow-up: damaged/headerless files and newer schemas return typed non-mutating errors;
+    migrations preserve rows for every historical version, and fresh/current databases create no backup.
+  - Deterministic v18 generator: set `AERIS_V18_FIXTURE_OUT` and run
+    `cargo test -p aeris_trading_runtime --locked generate_sanitized_v18_fixture_for_validation -- --ignored --nocapture`.
+    The generated validation fixture SHA-256 was `10e47e62016a7eabc3aba0072a2fea5809c6ad7329e40e5180cb167451164506`.
+  - On Windows 11 Pro 10.0.26300, Intel Core i7-13700K, 31.7 GiB RAM, a 50,000-order,
+    7,032,832-byte fixture measured `PRAGMA quick_check` at 32.7642 ms in the debug test profile and
+    18.1913 ms in release. Both are below 250 ms, so `quick_check` remains inline during store open.
+  - Scrutiny recheck follow-up: preflight of an existing database now inspects a scratch copy of the
+    database plus its `-wal`/`-shm` sidecars, so declining quarantine leaves every file under
+    `trading\` byte-identical (VAL-FND-032).
 
 ### M2 market foundations
 
@@ -442,6 +452,8 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.6 fix(persistence): recover staged and legacy state safely - closed scrutiny B2-B4 with shared staged-file recognition, read-only backup fallback and complete production-source scanning.
 - 2026-10-13 M1.7 fix(observability): flush exact diagnostics before exit - closed scrutiny B5-B7 with contract log names/text, complete panic evidence and bounded explicit exit flushing.
 - 2026-10-13 M1.8 fix(validation): isolate identity and vault side effects - closed scrutiny B8-B9 with one side-effect policy, exact vault namespace derivation and exact once-only borrowing diagnostics.
+- 2026-10-13 M1.9 fix(trading): reject unsafe journals and preserve migrations - closed scrutiny B10-B14 with typed newer-schema errors, non-mutating corruption checks, correct backup eligibility, historical-row fixtures and measured integrity-check placement.
+- 2026-10-13 M1.9 fix(trading): reject unsafe journals and preserve migrations - closed the VAL-FND-032 recheck: WAL databases are preflighted on a scratch copy so a declined quarantine keeps every trading file byte-identical.
 
 ## 7. Known gaps / deferred
 
