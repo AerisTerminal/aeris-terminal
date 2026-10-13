@@ -8,7 +8,6 @@ use super::{
     ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation, now_unix_nanos,
     provider_display_name,
 };
-use aeris_contracts::ProviderDailyBarCadence;
 use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
 pub(crate) fn replay_runtime_snapshot(
@@ -356,76 +355,15 @@ pub(crate) fn series_key(
     interval: ChartInterval,
 ) -> Result<BarSeriesKey, String> {
     validate_product_identity(product)?;
-    let period = match interval {
-        // Second bars need native provider history; a provider whose history starts at one
-        // minute would open a seconds chart with no bars at all.
-        ChartInterval::Second1
-        | ChartInterval::Second5
-        | ChartInterval::Second10
-        | ChartInterval::Second15
-        | ChartInterval::Second30
-            if !super::provider_supports_interval(product.provider.as_str(), interval) =>
-        {
-            return Err(format!(
+    let presentation =
+        super::provider_presentation(product.provider.as_str()).ok_or_else(|| {
+            format!(
                 "{} chart interval is unsupported",
                 provider_display_name(product.provider.as_str())
-            ));
-        }
-        ChartInterval::Second1 => BarPeriod::time(1),
-        ChartInterval::Second5 => BarPeriod::time(5),
-        ChartInterval::Second10 => BarPeriod::time(10),
-        ChartInterval::Second15 => BarPeriod::time(15),
-        ChartInterval::Second30 => BarPeriod::time(30),
-        ChartInterval::Minute1 => BarPeriod::time(60),
-        ChartInterval::Minute3 => BarPeriod::time(180),
-        ChartInterval::Minute5 => BarPeriod::time(300),
-        ChartInterval::Minute15 => BarPeriod::time(900),
-        ChartInterval::Minute30 => BarPeriod::time(1_800),
-        ChartInterval::Hour1 => BarPeriod::time(3_600),
-        ChartInterval::Hour2 => BarPeriod::time(7_200),
-        ChartInterval::Hour4 => BarPeriod::time(14_400),
-        ChartInterval::Hour8 => BarPeriod::time(28_800),
-        ChartInterval::Hour12 => BarPeriod::time(43_200),
-        ChartInterval::Day1 => match super::provider_presentation(product.provider.as_str())
-            .map(|descriptor| descriptor.daily_bars)
-        {
-            Some(ProviderDailyBarCadence::TradingSession) => BarPeriod::session(1),
-            Some(ProviderDailyBarCadence::FixedDay) => BarPeriod::time(86_400),
-            None => {
-                return Err(format!(
-                    "{} chart interval is unsupported",
-                    provider_display_name(product.provider.as_str())
-                ));
-            }
-        },
-        ChartInterval::Week1 => BarPeriod::week(1),
-        ChartInterval::Month1 => BarPeriod::month(1),
-        // Hyperliquid serves a native 3-day candle; Rithmic has no Day3
-        // series. Tick candles exist on neither public path: Hyperliquid
-        // exposes no tick history and the Rithmic test feed prints none.
-        ChartInterval::Day3
-            if super::provider_supports_interval(
-                product.provider.as_str(),
-                ChartInterval::Day3,
-            ) =>
-        {
-            BarPeriod::session(3)
-        }
-        ChartInterval::Tick100 | ChartInterval::Day3 => {
-            return Err(format!(
-                "{} chart interval is unsupported",
-                provider_display_name(product.provider.as_str())
-            ));
-        }
-    }
-    .map_err(|error| error.to_string())?;
-    Ok(BarSeriesKey {
-        provider_id: product.provider.clone(),
-        instrument_id: product.instrument_id.clone(),
-        entitlement_id: product.entitlement_id.clone(),
-        period,
-        definition_version: 1,
-    })
+            )
+        })?;
+    aeris_market_runtime::resolve_series_key(product, interval, presentation)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn replay_bar_definition(series: &BarSeriesKey) -> Result<BarDefinition, String> {

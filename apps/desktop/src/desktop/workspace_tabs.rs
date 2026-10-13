@@ -178,7 +178,7 @@ impl TerminalApp {
             workspace_persistence,
             persisted_layout,
             persisted_active_workspace_id,
-            workspace_error: None,
+            workspace_error: init.workspace_notice,
             workspace_drag: None,
             watchlist_drag: None,
             watchlist_scroll: ScrollHandle::new(),

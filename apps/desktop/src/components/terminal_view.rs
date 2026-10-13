@@ -1512,6 +1512,7 @@ pub(super) fn terminal_root(
             chart_settings_templates: Vec::new(),
             watchlist_entries: Vec::new(),
             drawing_templates: Vec::new(),
+            workspace_notice: None,
         },
         lifecycle,
         window,
@@ -1530,6 +1531,7 @@ pub(super) struct TerminalShellInit {
     pub(super) chart_settings_templates: Vec<WorkspaceChartSettingsTemplateState>,
     pub(super) watchlist_entries: Vec<WorkspaceWatchlistEntryState>,
     pub(super) drawing_templates: Vec<WorkspaceDrawingTemplateState>,
+    pub(super) workspace_notice: Option<String>,
 }
 
 fn terminal_shell_root(
@@ -1606,16 +1608,21 @@ pub(super) fn restored_workspace_shell_plan(
     }
 }
 
+pub(super) struct WorkspaceTabsRestore<'a> {
+    pub(super) state: &'a WorkspaceState,
+    pub(super) notice: Option<String>,
+}
+
 pub(super) fn workspace_tabs_root(
     mut market_panes: Vec<engine_market_worker::WorkspaceMarketPane>,
-    restored: &WorkspaceState,
+    restored: WorkspaceTabsRestore<'_>,
     workspace_factory: engine_market_worker::WorkspaceMarketFactory,
     lifecycle: &DesktopLifecycle,
     chart_chrome: chart_chrome::ChartChromePreferences,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<TerminalApp> {
-    let plan = restored_workspace_shell_plan(restored);
+    let plan = restored_workspace_shell_plan(restored.state);
     let mut workspaces = Vec::with_capacity(plan.workspace_tabs.len());
     for tab in plan.workspace_tabs {
         let mut panes = Vec::with_capacity(tab.panes.len());
@@ -1688,9 +1695,10 @@ pub(super) fn workspace_tabs_root(
             workspace_factory: Some(workspace_factory),
             workspace_shell: WorkspaceShellKind::Tabs,
             chart_chrome,
-            chart_settings_templates: restored.chart_settings_templates.clone(),
-            watchlist_entries: restored.watchlist_entries.clone(),
-            drawing_templates: restored.drawing_templates.clone(),
+            chart_settings_templates: restored.state.chart_settings_templates.clone(),
+            watchlist_entries: restored.state.watchlist_entries.clone(),
+            drawing_templates: restored.state.drawing_templates.clone(),
+            workspace_notice: restored.notice,
         },
         lifecycle,
         window,

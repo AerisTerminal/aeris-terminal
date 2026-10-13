@@ -3,6 +3,7 @@
 //! `Aeris` owns provider connections, canonical market state, on-demand
 //! history, and realtime fanout inside the desktop process. There is no secondary local process, serialized runtime transport, or restart-replay layer here.
 
+mod cadence;
 mod hyperliquid_display_depth;
 mod hyperliquid_history;
 mod hyperliquid_market_screen;
@@ -11,6 +12,11 @@ pub mod market_service;
 mod rithmic_history;
 mod rithmic_realtime;
 pub mod study;
+
+pub use cadence::{
+    CadenceError, legacy_interval, legacy_series_period, persisted_interval, resolve_cadence,
+    resolve_series_key,
+};
 
 /// Maximum durable alerts owned by one market consumer.
 pub const MAXIMUM_PRICE_ALERTS_PER_CONSUMER: usize = 32;

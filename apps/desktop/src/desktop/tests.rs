@@ -32,15 +32,15 @@ use super::{
     timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
     timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
-    workspace_label, workspace_maximize_transition, workspace_series, workspace_split_ratio,
-    workspace_switch, wrapped_workspace_index,
+    workspace_label, workspace_maximize_transition, workspace_split_ratio, workspace_switch,
+    wrapped_workspace_index,
 };
 #[cfg(feature = "diagnostics")]
 use super::{FOREGROUND_INTERACTION_SAMPLE_CAPACITY, ForegroundInteractionDiagnostics};
 use aeris_chart_integration::{AerisChartTheme, ChartSplitDirection, PriceAxisMenuState};
 use aeris_contracts::{
     InstallProviderInstrument, ProviderCatalogRejectionReason, ProviderInstrumentSummary,
-    SeriesCadence, WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
+    WorkspaceLayoutState, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
 };
 
 pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
@@ -2066,10 +2066,7 @@ fn saved_workspace_boot_fixture() -> WorkspaceState {
     first_instrument.instrument_id = "hyperliquid:perp:ETH".to_string();
     first_instrument.provider_symbol = "ETH".to_string();
     first_instrument.display_symbol = "ETH-USDC".to_string();
-    let first_series = first.series.as_mut().expect("default series");
-    first_series.instrument_id = first_instrument.instrument_id.clone();
-    first_series.cadence = SeriesCadence::FixedSeconds as i32;
-    first_series.cadence_value = 300;
+    first.interval = ChartInterval::Minute5.label().to_string();
 
     let mut second: WorkspacePaneState = first.clone();
     second.pane_id = 8;
@@ -2081,11 +2078,7 @@ fn saved_workspace_boot_fixture() -> WorkspaceState {
     second_instrument.instrument_id = "hyperliquid:perp:SOL".to_string();
     second_instrument.provider_symbol = "SOL".to_string();
     second_instrument.display_symbol = "SOL-USDC".to_string();
-    let second_instrument_id = second_instrument.instrument_id.clone();
-    let second_series = second.series.as_mut().expect("second series");
-    second_series.instrument_id = second_instrument_id;
-    second_series.cadence = SeriesCadence::FixedSeconds as i32;
-    second_series.cadence_value = 3_600;
+    second.interval = ChartInterval::Hour1.label().to_string();
     tab.panes.push(second);
     tab.layout = Some(WorkspaceLayoutState {
         pane_id: 0,
@@ -2469,22 +2462,15 @@ fn hyperliquid_catalog_rejections_never_name_rithmic() {
 }
 
 #[test]
-fn persisted_calendar_series_keep_week_and_month_identity() {
-    let instrument = InstallProviderInstrument {
-        provider: "rithmic".to_string(),
-        instrument_id: "instrument:rithmic:btc:usd".to_string(),
-        entitlement_id: super::provider_presentation(super::TerminalProvider::Rithmic)
-            .expect("Rithmic descriptor")
-            .selection_entitlement_id
-            .to_string(),
-        ..InstallProviderInstrument::default()
-    };
-    let week = workspace_series(ChartInterval::Week1, &instrument);
-    let month = workspace_series(ChartInterval::Month1, &instrument);
-    assert_eq!(week.cadence, SeriesCadence::CalendarWeeks as i32);
-    assert_eq!(month.cadence, SeriesCadence::CalendarMonths as i32);
-    assert_eq!(week.cadence_value, 1);
-    assert_eq!(month.cadence_value, 1);
+fn persisted_calendar_intervals_use_stable_chart_interval_labels() {
+    assert_eq!(
+        aeris_market_runtime::persisted_interval(ChartInterval::Week1.label()),
+        Some(ChartInterval::Week1)
+    );
+    assert_eq!(
+        aeris_market_runtime::persisted_interval(ChartInterval::Month1.label()),
+        Some(ChartInterval::Month1)
+    );
     assert!(super::provider_intervals(TerminalProvider::Rithmic).contains(&ChartInterval::Month1));
 }
 

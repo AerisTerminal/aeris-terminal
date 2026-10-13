@@ -287,6 +287,9 @@ pub struct WorkspacePaneState {
     /// Side-panel width in logical pixels.
     #[prost(uint32, tag = "12")]
     pub side_panel_width: u32,
+    /// Stable `ChartInterval` label. Empty means the legacy `series` cadence must be read.
+    #[prost(string, tag = "14")]
+    pub interval: String,
     /// Order-book share when both side-panel components are visible.
     #[prost(uint32, tag = "13")]
     pub side_panel_split_basis_points: u32,

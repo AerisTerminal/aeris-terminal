@@ -535,7 +535,7 @@ mod tests {
         let now_millis = i64::try_from(now_millis).expect("millis fit");
         let page = fetch_candle_snapshot(&CandleSnapshotRequest {
             wire_coin: "BTC",
-            period: aeris_market_data::BarPeriod::session(3).expect("3d"),
+            period: aeris_market_data::BarPeriod::time(259_200).expect("3d"),
             start_millis: 0,
             end_millis: now_millis,
             now_millis,

@@ -48,6 +48,7 @@ fn workspace_tab() -> WorkspaceTabState {
             side_panel_visibility: 3,
             side_panel_width: 420,
             side_panel_split_basis_points: 5_000,
+            interval: "1m".into(),
             chart: Some(WorkspaceChartState {
                 studies: vec![WorkspaceChartStudyState {
                     local_id: 1,

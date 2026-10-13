@@ -122,15 +122,15 @@ use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderConnectionKind,
     ProviderInstrumentSearchResult, ProviderInstrumentSummary, SearchProviderInstruments,
-    SelectProviderInstrument, SeriesCadence, SeriesKey, WorkspaceBigTradesState,
-    WorkspaceChartAppearanceState, WorkspaceChartIndicatorState, WorkspaceChartLegendState,
-    WorkspaceChartSettingsTemplateState, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceDrawingTemplateState, WorkspaceInstrumentDrawingsState, WorkspaceLayoutState,
-    WorkspaceOrderFlowSettingsState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspacePriceAlertState, WorkspacePriceAxisState, WorkspaceSplitAxis, WorkspaceState,
-    WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
-    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
-    WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    SelectProviderInstrument, SeriesKey, WorkspaceBigTradesState, WorkspaceChartAppearanceState,
+    WorkspaceChartIndicatorState, WorkspaceChartLegendState, WorkspaceChartSettingsTemplateState,
+    WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
+    WorkspaceInstrumentDrawingsState, WorkspaceLayoutState, WorkspaceOrderFlowSettingsState,
+    WorkspacePaneKind, WorkspacePaneState, WorkspacePriceAlertState, WorkspacePriceAxisState,
+    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDecimalState, WorkspaceStudyDependencyKind,
+    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
+    WorkspaceTabState, WorkspaceVolumeSettingsState, WorkspaceWatchlistEntryState,
+    workspace_study_setting_state,
 };
 use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
@@ -278,7 +278,8 @@ use terminal_chrome::{
     terminal_header, watchlist_step, window_move_gesture_transition, workspace_title_bar,
 };
 use terminal_view::{
-    TerminalShellInit, WorkspaceSplitDrag, terminal_root, workspace_tab_strip, workspace_tabs_root,
+    TerminalShellInit, WorkspaceSplitDrag, WorkspaceTabsRestore, terminal_root,
+    workspace_tab_strip, workspace_tabs_root,
 };
 use time_sales_panel::TimeSalesPanelState;
 use toaster::Toaster;
@@ -5050,25 +5051,6 @@ fn workspace_label(index: usize) -> String {
     format!("Workspace {}", index + 1)
 }
 
-fn workspace_series(interval: ChartInterval, instrument: &InstallProviderInstrument) -> SeriesKey {
-    let (cadence, cadence_value) = match interval {
-        ChartInterval::Week1 => (SeriesCadence::CalendarWeeks, 1),
-        _ => match interval.aggregation() {
-            ChartAggregation::Trades(value) => (SeriesCadence::Trades, value.get()),
-            ChartAggregation::FixedSeconds(value) => (SeriesCadence::FixedSeconds, value.get()),
-            ChartAggregation::CalendarMonth => (SeriesCadence::CalendarMonths, 1),
-        },
-    };
-    SeriesKey {
-        provider: instrument.provider.clone(),
-        instrument_id: instrument.instrument_id.clone(),
-        cadence_value,
-        definition_revision: 1,
-        entitlement_id: instrument.entitlement_id.clone(),
-        cadence: cadence as i32,
-    }
-}
-
 fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<WorkspaceTabState> {
     workspaces
         .iter()
@@ -5103,7 +5085,7 @@ fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<Workspace
                             consumer_id: pane.consumer_id,
                             kind: WorkspacePaneKind::Chart as i32,
                             instrument: Some(instrument.clone()),
-                            series: Some(workspace_series(surface.interval, &instrument)),
+                            series: None,
                             viewport_start_unix_nanos: viewport.map(|range| range.0),
                             viewport_end_unix_nanos: viewport.map(|range| range.1),
                             size_basis_points: pane_weights
@@ -5121,6 +5103,7 @@ fn workspace_layout_tabs(workspaces: &[WorkspaceTab], cx: &App) -> Vec<Workspace
                                 .to_u32()
                                 .unwrap_or(400),
                             side_panel_split_basis_points: surface.side_panel_split_basis_points,
+                            interval: surface.interval.label().to_string(),
                         })
                     })
                     .collect(),
@@ -5328,6 +5311,7 @@ struct ConfiguredDesktop {
     workspace_factory: Option<engine_market_worker::WorkspaceMarketFactory>,
     layout: DesktopLayout,
     chart_chrome: chart_chrome::ChartChromePreferences,
+    workspace_notice: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -5351,64 +5335,69 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
     let command = arguments.next();
     let mut layout = DesktopLayout::Windows;
     let mut workspace_factory = None;
-    let (market_workers, workspace_panes, lifecycle) = if let Some(argument) = command {
-        #[cfg(feature = "diagnostics")]
-        if argument == "--desktop-conformance" {
-            run_desktop_conformance_command(arguments)?;
-            return Ok(None);
-        }
-        #[cfg(feature = "diagnostics")]
-        if argument == "--desktop-endurance" {
-            run_desktop_endurance_command(arguments)?;
-            return Ok(None);
-        }
-        if argument == "--rithmic" {
-            if arguments.next().is_some() {
-                diagnostic!("usage: aeris_desktop --rithmic");
+    let (market_workers, workspace_panes, lifecycle, workspace_notice) =
+        if let Some(argument) = command {
+            #[cfg(feature = "diagnostics")]
+            if argument == "--desktop-conformance" {
+                run_desktop_conformance_command(arguments)?;
+                return Ok(None);
+            }
+            #[cfg(feature = "diagnostics")]
+            if argument == "--desktop-endurance" {
+                run_desktop_endurance_command(arguments)?;
+                return Ok(None);
+            }
+            if argument == "--rithmic" {
+                if arguments.next().is_some() {
+                    diagnostic!("usage: aeris_desktop --rithmic");
+                    exit_after_account_refresh_quiesce(2);
+                }
+                let lifecycle = configure_desktop_state();
+                (
+                    vec![engine_market_worker::start_rithmic_catalog()?],
+                    Vec::new(),
+                    lifecycle,
+                    String::new(),
+                )
+            } else if argument == "--multi-chart" {
+                if arguments.next().is_some() {
+                    diagnostic!("usage: aeris_desktop --multi-chart");
+                    exit_after_account_refresh_quiesce(2);
+                }
+                let lifecycle = configure_desktop_state();
+                (
+                    engine_market_worker::start_multi_chart()?,
+                    Vec::new(),
+                    lifecycle,
+                    String::new(),
+                )
+            } else if argument == "--workspace-tabs" {
+                if arguments.next().is_some() {
+                    diagnostic!("usage: aeris_desktop --workspace-tabs");
+                    exit_after_account_refresh_quiesce(2);
+                }
+                let lifecycle = configure_desktop_state();
+                layout = DesktopLayout::WorkspaceTabs;
+                let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
+                let workspace_notice = group.restore_notices.join("\n");
+                workspace_factory = Some(group.factory);
+                (Vec::new(), group.initial, lifecycle, workspace_notice)
+            } else {
+                diagnostic!("unsupported argument: {}", argument.to_string_lossy());
                 exit_after_account_refresh_quiesce(2);
             }
-            let lifecycle = configure_desktop_state();
-            (
-                vec![engine_market_worker::start_rithmic_catalog()?],
-                Vec::new(),
-                lifecycle,
-            )
-        } else if argument == "--multi-chart" {
-            if arguments.next().is_some() {
-                diagnostic!("usage: aeris_desktop --multi-chart");
-                exit_after_account_refresh_quiesce(2);
-            }
-            let lifecycle = configure_desktop_state();
-            (
-                engine_market_worker::start_multi_chart()?,
-                Vec::new(),
-                lifecycle,
-            )
-        } else if argument == "--workspace-tabs" {
-            if arguments.next().is_some() {
-                diagnostic!("usage: aeris_desktop --workspace-tabs");
-                exit_after_account_refresh_quiesce(2);
-            }
+        } else {
+            // The installed desktop is a persisted workspace, not the legacy
+            // single-chart/window bootstrap. Starting through the workspace group
+            // restores pane identity, symbol, interval, viewport and layout and
+            // mounts the persistence owner used for subsequent durable changes.
             let lifecycle = configure_desktop_state();
             layout = DesktopLayout::WorkspaceTabs;
             let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
+            let workspace_notice = group.restore_notices.join("\n");
             workspace_factory = Some(group.factory);
-            (Vec::new(), group.initial, lifecycle)
-        } else {
-            diagnostic!("unsupported argument: {}", argument.to_string_lossy());
-            exit_after_account_refresh_quiesce(2);
-        }
-    } else {
-        // The installed desktop is a persisted workspace, not the legacy
-        // single-chart/window bootstrap. Starting through the workspace group
-        // restores pane identity, symbol, interval, viewport and layout and
-        // mounts the persistence owner used for subsequent durable changes.
-        let lifecycle = configure_desktop_state();
-        layout = DesktopLayout::WorkspaceTabs;
-        let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
-        workspace_factory = Some(group.factory);
-        (Vec::new(), group.initial, lifecycle)
-    };
+            (Vec::new(), group.initial, lifecycle, workspace_notice)
+        };
     Ok(Some(ConfiguredDesktop {
         market_workers,
         workspace_panes,
@@ -5416,6 +5405,7 @@ fn configured_market_workers() -> Result<Option<ConfiguredDesktop>, String> {
         workspace_factory,
         layout,
         chart_chrome: chart_chrome::load_chart_chrome_preferences(),
+        workspace_notice: (!workspace_notice.is_empty()).then_some(workspace_notice),
     }))
 }
 
@@ -5570,6 +5560,7 @@ fn mount_desktop(
     let workspace_factory = configured.workspace_factory;
     let layout = configured.layout;
     let chart_chrome = configured.chart_chrome;
+    let workspace_notice = configured.workspace_notice;
     if let Err(error) = bind_desktop_keys(cx) {
         diagnostic!("Aeris keyboard shortcuts are invalid: {error}");
         return None;
@@ -5626,7 +5617,10 @@ fn mount_desktop(
             let build = move |window: &mut Window, cx: &mut App| {
                 workspace_tabs_root(
                     workspace_panes,
-                    &restored_workspace,
+                    WorkspaceTabsRestore {
+                        state: &restored_workspace,
+                        notice: workspace_notice,
+                    },
                     workspace_factory,
                     &lifecycle,
                     chart_chrome,

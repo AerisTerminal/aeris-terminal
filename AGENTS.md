@@ -77,6 +77,8 @@ violations and missing verification explicitly, and never describe them as satis
   cancellation behavior.
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
   or canonical candle state.
+- The desktop stores `ChartInterval` and must not construct `SeriesCadence`; interval-to-cadence mapping
+  belongs to `market_runtime`.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a
   second desktop-owned market-state model.
 - Do not restore `apps/engine`, `local_engine_client`, a secondary market process, local process transport, or market autostart.

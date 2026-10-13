@@ -66,9 +66,9 @@ pub fn hyperliquid_interval_for_period(period: BarPeriod) -> Result<&'static str
             28_800 => Ok("8h"),
             43_200 => Ok("12h"),
             86_400 => Ok("1d"),
+            259_200 => Ok("3d"),
             _ => Err("hyperliquid history is unavailable for this interval".to_string()),
         },
-        BarPeriod::Session { days: 3 } => Ok("3d"),
         BarPeriod::Week { weeks: 1 } => Ok("1w"),
         BarPeriod::Month { months: 1 } => Ok("1M"),
         _ => Err("hyperliquid history is unavailable for this interval".to_string()),
@@ -93,7 +93,7 @@ pub fn period_for_hyperliquid_interval(interval: &str) -> Result<BarPeriod, Stri
         "8h" => BarPeriod::time(28_800).map_err(|error| error.to_string()),
         "12h" => BarPeriod::time(43_200).map_err(|error| error.to_string()),
         "1d" => BarPeriod::time(86_400).map_err(|error| error.to_string()),
-        "3d" => BarPeriod::session(3).map_err(|error| error.to_string()),
+        "3d" => BarPeriod::time(259_200).map_err(|error| error.to_string()),
         "1w" => BarPeriod::week(1).map_err(|error| error.to_string()),
         "1M" => BarPeriod::month(1).map_err(|error| error.to_string()),
         _ => Err("hyperliquid interval is unsupported".to_string()),
@@ -518,6 +518,14 @@ mod tests {
         assert_eq!(
             period_for_hyperliquid_interval("1h").unwrap(),
             BarPeriod::time(3_600).unwrap()
+        );
+        assert_eq!(
+            hyperliquid_interval_for_period(BarPeriod::time(259_200).unwrap()),
+            Ok("3d")
+        );
+        assert_eq!(
+            period_for_hyperliquid_interval("3d").unwrap(),
+            BarPeriod::time(259_200).unwrap()
         );
     }
 }

@@ -1217,19 +1217,8 @@ fn runtime_study_streams(streams: &[i32]) -> Result<StreamRequirements, String> 
 }
 
 fn runtime_study_series(series: &SeriesKey) -> Result<BarSeriesKey, String> {
-    let cadence = SeriesCadence::try_from(series.cadence)
-        .map_err(|_| "study series cadence is unknown".to_string())?;
-    let period = match cadence {
-        SeriesCadence::FixedSeconds => aeris_market_data::BarPeriod::time(series.cadence_value),
-        SeriesCadence::Trades => aeris_market_data::BarPeriod::tick(series.cadence_value),
-        SeriesCadence::SessionDays => aeris_market_data::BarPeriod::session(series.cadence_value),
-        SeriesCadence::CalendarWeeks => aeris_market_data::BarPeriod::week(series.cadence_value),
-        SeriesCadence::CalendarMonths => aeris_market_data::BarPeriod::month(series.cadence_value),
-        SeriesCadence::Unspecified => {
-            return Err("study series cadence is unspecified".to_string());
-        }
-    }
-    .map_err(|error| error.to_string())?;
+    let period = aeris_market_runtime::legacy_series_period(series)
+        .ok_or_else(|| "study series cadence is unsupported".to_string())?;
     let series = BarSeriesKey {
         provider_id: series.provider.clone(),
         instrument_id: series.instrument_id.clone(),

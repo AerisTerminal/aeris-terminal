@@ -71,6 +71,7 @@ documents wherever they disagree.
 | D16 | Git | Workers commit on `main`; orchestrator pushes each validated milestone to `origin/main` (fetch first, never force). |
 | D17 | Validation | Validators may launch the real desktop in an isolated data folder while the user keeps their own desktop closed; cTrader demo (stored connection) and Hyperliquid public data may be used live; Rithmic live excluded. |
 | D18 | Gates | Milestone gate: full workspace fmt / clippy -D warnings / test / naming_check. Workers scope to the touched crate while iterating and run the full gate before cross-crate commits. |
+| D19 | Delivery | One worker per milestone; crate-scoped checks while iterating; full gate and real-path verification once per milestone; then one commit per work item. |
 
 Reconciled decisions recorded in `architecture.md` (binding there; noted here so they are not lost):
 
@@ -98,7 +99,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 
 | Finding | Severity | Title | Closed by | Status |
 |---|---|---|---|---|
-| MD-01 | High | A persisted 3-day chart pane cannot be restored because the workspace writer and reader disagree | M1.3 | open |
+| MD-01 | High | A persisted 3-day chart pane cannot be restored because the workspace writer and reader disagree | M1.3 | closed in this commit |
 | MD-02 | High | The stalled-live recovery watchdog only works for tastytrade | M2.6 (market), M4.8 (trading) | open |
 | MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | open |
 | MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | open |
@@ -242,7 +243,11 @@ Status: in progress
   - Verification: full local gate green with `AERIS_RITHMIC_KIT_DISABLED=1` (VAL-FND-006); the
     post-push GitHub Actions run URL is recorded here by the orchestrator after the milestone push.
   - Closes PL-09.
-- [ ] M1.3 unified-interval-mapping - Fix Day3 workspace restore with one runtime-owned interval/cadence mapping
+- [x] M1.3 unified-interval-mapping - Fix Day3 workspace restore with one runtime-owned interval/cadence mapping
+  - `market_runtime::cadence` now owns interval resolution and the legacy inverse; workspace panes persist stable `ChartInterval` labels.
+  - Both legacy Day3 encodings restore, unsupported panes are repaired or skipped with a notice, and desktop cadence construction is forbidden.
+  - Hyperliquid's official candle-snapshot contract and a representative public `3d` response were checked first; opens were UTC-aligned and exactly 259,200,000 milliseconds apart.
+  - Verified by runtime/desktop round-trip, legacy migration, repair-notice, naming, and real Hyperliquid 3D restart checks.
 - [ ] M1.4 bounded-exit-and-secret-tokens - Exit never parks forever; tokens are redacted and zeroized
 - [ ] M1.5 platform-sys-durable-writer - New `platform_sys` crate with the single durable file writer and unsafe isolation rule
 - [ ] M1.6 adopt-durable-writer - Replace every hand-rolled file writer, including the non-atomic trading export
@@ -370,6 +375,9 @@ Status: pending
 Rules added during the mission. Each entry names the commit that introduced it and mirrors the rule in
 the repo root `AGENTS.md`.
 
+- Desktop production code stores `ChartInterval` and never constructs `SeriesCadence`; the sole mapping belongs
+  to `market_runtime::cadence` and is enforced by `desktop_never_constructs_series_cadence` (M1.3, this commit).
+
 - `plan/stabilization/` is the one sanctioned planning location in the repo; the "no planning
   documents" rule applies everywhere else (M1.1, this commit).
 - Every feature commit updates `plan/stabilization/stabilization_work.md` in the same commit: check the
@@ -390,6 +398,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 
 - 2026-10-13 M1.1 docs(stabilization): add the stabilization tracking document and plan/stabilization report copies - created the tracker with all 93 findings, decisions D1-D18 plus reconciled decisions and all 89 items; copied the 11 research reports into `reports/` and the architecture beside this file (redaction scan clean); `AGENTS.md` sanctions `plan/stabilization/` and records the tracking and restriction discipline; PL-11 closed by the deliberate rule change (D15).
 - 2026-10-13 M1.2 ci(workflows): run the full gate on hosted runners for pushes and pull requests - `.github/workflows/ci.yml` now triggers on push/pull_request (main) and workflow_dispatch on `windows-latest` (fmt, clippy, workspace tests, naming_check) and `ubuntu-latest` (fmt, naming_check) with read-only permissions, concurrency cancellation, no secrets and `AERIS_RITHMIC_KIT_DISABLED=1`; the naming_check CI-shape rule gained positive and negative tests and replaced the self-hosted pins; PL-09 closed.
+- 2026-10-13 M1.3 fix(market): unify chart interval cadence mapping - moved interval resolution and legacy inversion to `market_runtime`, persisted `ChartInterval` labels, repaired unsupported panes with notices, and restored both legacy Day3 encodings.
 
 ## 7. Known gaps / deferred
 

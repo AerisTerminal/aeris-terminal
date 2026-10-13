@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 
 use aeris_contracts::{
     InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency, PriceAlertStatus,
-    SeriesCadence, SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
+    SeriesKey, WorkspaceChartAppearanceState, WorkspaceChartSettingsTemplateState,
     WorkspaceChartStudyState, WorkspaceDrawingTemplateState, WorkspaceLayoutState,
     WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis, WorkspaceState,
     WorkspaceStudyDependencyKind, WorkspaceStudyMarketStream, WorkspaceTabState,
     WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
+use aeris_market_data::ChartInterval;
 use prost::Message as _;
 
 const WORKSPACE_FILE: &str = "workspace-state.pb";
@@ -269,20 +270,12 @@ pub(super) fn default_workspace() -> WorkspaceState {
         price_increment: None,
         ..Default::default()
     };
-    let series = SeriesKey {
-        provider: instrument.provider.clone(),
-        instrument_id: instrument.instrument_id.clone(),
-        cadence_value: 60,
-        definition_revision: 1,
-        entitlement_id: instrument.entitlement_id.clone(),
-        cadence: SeriesCadence::FixedSeconds as i32,
-    };
     let pane = WorkspacePaneState {
         pane_id: 1,
         consumer_id: 1,
         kind: WorkspacePaneKind::Chart as i32,
         instrument: Some(instrument.clone()),
-        series: Some(series),
+        series: None,
         viewport_start_unix_nanos: None,
         viewport_end_unix_nanos: None,
         size_basis_points: 10_000,
@@ -291,6 +284,7 @@ pub(super) fn default_workspace() -> WorkspaceState {
         side_panel_visibility: 0,
         side_panel_width: 400,
         side_panel_split_basis_points: 5_000,
+        interval: ChartInterval::Minute1.label().to_string(),
     };
     WorkspaceState {
         provider: "hyperliquid".to_string(),
@@ -701,9 +695,7 @@ fn valid_study_series(series: &SeriesKey) -> bool {
         && !series.instrument_id.is_empty()
         && !series.entitlement_id.is_empty()
         && series.definition_revision != 0
-        && series.cadence_value != 0
-        && SeriesCadence::try_from(series.cadence)
-            .is_ok_and(|cadence| cadence != SeriesCadence::Unspecified)
+        && aeris_market_runtime::legacy_series_period(series).is_some()
 }
 
 #[cfg(test)]
@@ -993,10 +985,7 @@ mod tests {
             .expect("chart state")
             .price_alerts
             .push(price_alert(alert_instrument));
-        let series = first.series.as_mut().expect("default series");
-        series.instrument_id = instrument.instrument_id.clone();
-        series.cadence = SeriesCadence::FixedSeconds as i32;
-        series.cadence_value = 300;
+        first.interval = ChartInterval::Minute5.label().to_string();
 
         let mut second = first.clone();
         second.pane_id = 8;
@@ -1017,16 +1006,7 @@ mod tests {
             .as_mut()
             .expect("second instrument")
             .display_symbol = "SOL-USDC".to_string();
-        let second_instrument_id = second
-            .instrument
-            .as_ref()
-            .expect("second instrument")
-            .instrument_id
-            .clone();
-        let second_series = second.series.as_mut().expect("second series");
-        second_series.instrument_id = second_instrument_id;
-        second_series.cadence = SeriesCadence::FixedSeconds as i32;
-        second_series.cadence_value = 3_600;
+        second.interval = ChartInterval::Hour1.label().to_string();
         tab.panes.push(second);
         tab.layout = Some(WorkspaceLayoutState {
             pane_id: 0,
@@ -1054,6 +1034,37 @@ mod tests {
 
         let parent = path.parent().expect("temporary workspace parent");
         std::fs::remove_dir_all(parent).expect("temporary workspace cleanup");
+    }
+
+    #[test]
+    fn workspace_writer_and_reader_round_trip_every_chart_interval_for_every_provider() {
+        for presentation in aeris_market_runtime::built_in_provider_presentations() {
+            for interval in ChartInterval::ALL {
+                let path = temporary_workspace_path();
+                let mut workspace = default_workspace();
+                let pane = &mut workspace.workspace_tabs[0].panes[0];
+                pane.interval = interval.label().to_string();
+                pane.series = None;
+                pane.instrument
+                    .as_mut()
+                    .expect("default instrument")
+                    .provider = presentation.id.to_string();
+
+                save_workspace_to_path(&workspace, &path).expect("workspace saves");
+                let restored = load_workspace_from_path(&path).expect("workspace reloads");
+                assert_eq!(
+                    aeris_market_runtime::persisted_interval(
+                        &restored.workspace_tabs[0].panes[0].interval
+                    ),
+                    Some(interval),
+                    "{} {}",
+                    presentation.id,
+                    interval.label()
+                );
+                std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
+                    .expect("temporary workspace cleanup");
+            }
+        }
     }
 
     #[test]
@@ -1118,10 +1129,6 @@ mod tests {
             instrument.provider_symbol = symbol.to_string();
             instrument.display_symbol = symbol.to_string();
             instrument.entitlement_id = entitlement.to_string();
-            let series = pane.series.as_mut().expect("series");
-            series.provider = provider.to_string();
-            series.instrument_id = instrument_id.to_string();
-            series.entitlement_id = entitlement.to_string();
 
             let sanitized = sanitize_workspace(workspace);
             let pane = sanitized.workspace_tabs[0].panes.first().expect("pane");
@@ -1134,7 +1141,7 @@ mod tests {
                 pane.instrument.as_ref().expect("instrument").entitlement_id,
                 entitlement
             );
-            assert_eq!(pane.series.as_ref().expect("series").provider, provider);
+            assert_eq!(pane.interval, ChartInterval::Minute1.label());
         }
     }
 

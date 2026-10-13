@@ -21,11 +21,11 @@ use aeris_application::{
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
     ProviderInstrumentSummary, ProviderState, STARTUP_CATALOG_COMMAND_GENERATION,
-    SearchProviderInstruments, SelectProviderInstrument, SeriesCadence, SeriesKey, SeriesLoadState,
-    WorkspacePaneKind, WorkspaceState,
+    SearchProviderInstruments, SelectProviderInstrument, SeriesLoadState, WorkspacePaneKind,
+    WorkspaceState,
 };
 #[cfg(test)]
-use aeris_contracts::{WorkspacePaneState, WorkspaceTabState};
+use aeris_contracts::{SeriesKey, WorkspacePaneState, WorkspaceTabState};
 use aeris_instruments::{
     AssetClass, InstrumentId, InstrumentLifecycle, InstrumentPrecision, InstrumentRevision,
 };
@@ -143,6 +143,7 @@ pub(super) struct WorkspaceMarketPane {
 pub(super) struct WorkspaceMarketGroup {
     pub initial: Vec<WorkspaceMarketPane>,
     pub factory: WorkspaceMarketFactory,
+    pub restore_notices: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -333,6 +334,10 @@ pub(super) fn start_workspace_tabs(
     let mut initial = Vec::new();
     let mut endpoints = Vec::new();
     let plan = restored_workspace_boot_plan(workspace)?;
+    for notice in &plan.notices {
+        aeris_observability::diagnostic!("Aeris workspace pane repair: {notice}");
+    }
+    let restore_notices = plan.notices.clone();
     for pane in plan.panes {
         let (worker, endpoint) = worker_endpoint(
             pane.workspace_id,
@@ -358,6 +363,7 @@ pub(super) fn start_workspace_tabs(
             next_pane_id: Arc::new(AtomicU64::new(plan.maximum_pane_id.saturating_add(1))),
             next_consumer_id: Arc::new(AtomicU64::new(plan.maximum_consumer_id.saturating_add(1))),
         },
+        restore_notices,
     })
 }
 
@@ -373,6 +379,7 @@ pub(super) struct RestoredWorkspacePaneSpec {
 
 pub(super) struct RestoredWorkspaceBootPlan {
     pub(super) panes: Vec<RestoredWorkspacePaneSpec>,
+    pub(super) notices: Vec<String>,
     maximum_workspace_id: u64,
     maximum_pane_id: u64,
     maximum_consumer_id: u64,
@@ -381,11 +388,12 @@ pub(super) struct RestoredWorkspaceBootPlan {
 pub(super) fn restored_workspace_boot_plan(
     workspace: &WorkspaceState,
 ) -> Result<RestoredWorkspaceBootPlan, String> {
-    let panes = restored_workspace_pane_specs(workspace)?;
+    let (panes, notices) = restored_workspace_pane_specs(workspace)?;
     let (maximum_workspace_id, maximum_pane_id, maximum_consumer_id) =
         workspace_identity_high_watermarks(workspace);
     Ok(RestoredWorkspaceBootPlan {
         panes,
+        notices,
         maximum_workspace_id,
         maximum_pane_id,
         maximum_consumer_id,
@@ -394,22 +402,67 @@ pub(super) fn restored_workspace_boot_plan(
 
 fn restored_workspace_pane_specs(
     workspace: &WorkspaceState,
-) -> Result<Vec<RestoredWorkspacePaneSpec>, String> {
+) -> Result<(Vec<RestoredWorkspacePaneSpec>, Vec<String>), String> {
     let mut panes = Vec::new();
+    let mut notices = Vec::new();
     for tab in &workspace.workspace_tabs {
         for pane in &tab.panes {
             if WorkspacePaneKind::try_from(pane.kind).ok() != Some(WorkspacePaneKind::Chart) {
                 continue;
             }
-            let instrument = pane
-                .instrument
-                .clone()
-                .ok_or_else(|| "workspace chart instrument is missing".to_string())?;
+            let Some(instrument) = pane.instrument.clone() else {
+                notices.push(format!(
+                    "Pane {} was skipped because its instrument is missing",
+                    pane.pane_id
+                ));
+                continue;
+            };
+            let Some(presentation) = provider_presentation(&instrument.provider) else {
+                notices.push(format!(
+                    "Pane {} was skipped because its provider is unavailable",
+                    pane.pane_id
+                ));
+                continue;
+            };
+            let requested =
+                aeris_market_runtime::persisted_interval(&pane.interval).or_else(|| {
+                    pane.series
+                        .as_ref()
+                        .and_then(aeris_market_runtime::legacy_interval)
+                });
+            let interval = requested
+                .filter(|interval| {
+                    aeris_market_runtime::resolve_cadence(*interval, presentation).is_ok()
+                })
+                .or_else(|| {
+                    let offered = presentation
+                        .chart_interval_labels
+                        .iter()
+                        .filter_map(|label| aeris_market_runtime::persisted_interval(label))
+                        .collect::<Vec<_>>();
+                    requested
+                        .unwrap_or(ChartInterval::Minute1)
+                        .nearest_offered(&offered)
+                });
+            let Some(interval) = interval else {
+                notices.push(format!(
+                    "Pane {} was skipped because it has no supported chart interval",
+                    pane.pane_id
+                ));
+                continue;
+            };
+            if requested != Some(interval) {
+                notices.push(format!(
+                    "Pane {} used an unsupported chart interval and was repaired to {}",
+                    pane.pane_id,
+                    interval.label()
+                ));
+            }
             panes.push(RestoredWorkspacePaneSpec {
                 workspace_id: tab.workspace_id,
                 pane_id: pane.pane_id,
                 consumer_id: pane.consumer_id,
-                interval: pane_interval(pane.series.as_ref(), &instrument.provider)?,
+                interval,
                 instrument,
                 restored_viewport: pane
                     .viewport_start_unix_nanos
@@ -421,7 +474,7 @@ fn restored_workspace_pane_specs(
     if panes.is_empty() {
         return Err("persisted workspace contains no chart panes".to_string());
     }
-    Ok(panes)
+    Ok((panes, notices))
 }
 
 fn workspace_identity_high_watermarks(workspace: &WorkspaceState) -> (u64, u64, u64) {
@@ -444,51 +497,6 @@ fn workspace_identity_high_watermarks(workspace: &WorkspaceState) -> (u64, u64, 
             )
         },
     )
-}
-
-fn pane_interval(series: Option<&SeriesKey>, provider: &str) -> Result<ChartInterval, String> {
-    let series = series.ok_or_else(|| "workspace chart series is missing".to_string())?;
-    let unsupported = || {
-        format!(
-            "workspace chart cadence is unsupported by {}",
-            provider_display_name(provider)
-        )
-    };
-    let supported = |interval| {
-        provider_supports_interval(provider, interval)
-            .then_some(interval)
-            .ok_or_else(unsupported)
-    };
-    match SeriesCadence::try_from(series.cadence) {
-        Ok(SeriesCadence::FixedSeconds) => match series.cadence_value {
-            1 => supported(ChartInterval::Second1),
-            5 => supported(ChartInterval::Second5),
-            10 => supported(ChartInterval::Second10),
-            15 => supported(ChartInterval::Second15),
-            30 => supported(ChartInterval::Second30),
-            60 => Ok(ChartInterval::Minute1),
-            180 => Ok(ChartInterval::Minute3),
-            300 => Ok(ChartInterval::Minute5),
-            1_800 => Ok(ChartInterval::Minute30),
-            900 => Ok(ChartInterval::Minute15),
-            3_600 => Ok(ChartInterval::Hour1),
-            7_200 => Ok(ChartInterval::Hour2),
-            14_400 => Ok(ChartInterval::Hour4),
-            28_800 => Ok(ChartInterval::Hour8),
-            43_200 => Ok(ChartInterval::Hour12),
-            86_400 => Ok(ChartInterval::Day1),
-            _ => Err(unsupported()),
-        },
-        Ok(SeriesCadence::SessionDays)
-            if series.cadence_value == 3
-                && provider_supports_interval(provider, ChartInterval::Day3) =>
-        {
-            Ok(ChartInterval::Day3)
-        }
-        Ok(SeriesCadence::CalendarWeeks) if series.cadence_value == 1 => Ok(ChartInterval::Week1),
-        Ok(SeriesCadence::CalendarMonths) if series.cadence_value == 1 => Ok(ChartInterval::Month1),
-        _ => Err(unsupported()),
-    }
 }
 
 struct WorkerEndpoint {
@@ -673,15 +681,6 @@ fn provider_presentation(
     aeris_market_runtime::built_in_provider_presentations()
         .iter()
         .find(|descriptor| descriptor.id == provider)
-}
-
-fn provider_supports_interval(provider: &str, interval: ChartInterval) -> bool {
-    provider_presentation(provider).is_some_and(|descriptor| {
-        descriptor
-            .chart_interval_labels
-            .iter()
-            .any(|label| *label == interval.label())
-    })
 }
 
 /// Identity every pushed engine event is checked against.
@@ -1181,20 +1180,64 @@ mod tests {
 
     #[test]
     fn restored_hyperliquid_day3_pane_keeps_its_native_interval() {
-        let series = SeriesKey {
-            cadence: SeriesCadence::SessionDays as i32,
-            cadence_value: 3,
-            ..SeriesKey::default()
+        // Use the historical protobuf wire values so this stays a reader fixture,
+        // rather than another desktop cadence construction site.
+        for (cadence, cadence_value) in [(1, 259_200), (3, 3)] {
+            let series = SeriesKey {
+                cadence,
+                cadence_value,
+                ..SeriesKey::default()
+            };
+            let pane = WorkspacePaneState {
+                pane_id: 7,
+                consumer_id: 9,
+                kind: WorkspacePaneKind::Chart as i32,
+                instrument: Some(default_hyperliquid_product()),
+                series: Some(series),
+                interval: String::new(),
+                generation: 1,
+                ..WorkspacePaneState::default()
+            };
+            let workspace = WorkspaceState {
+                workspace_tabs: vec![WorkspaceTabState {
+                    workspace_id: 1,
+                    panes: vec![pane],
+                    ..WorkspaceTabState::default()
+                }],
+                ..WorkspaceState::default()
+            };
+            let plan = restored_workspace_boot_plan(&workspace).expect("legacy Day3 restores");
+            assert_eq!(plan.panes[0].interval, ChartInterval::Day3);
+            assert_eq!(plan.notices, Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn one_unsupported_pane_repairs_without_discarding_other_panes() {
+        let pane = |pane_id, interval: &str| WorkspacePaneState {
+            pane_id,
+            consumer_id: pane_id,
+            kind: WorkspacePaneKind::Chart as i32,
+            instrument: Some(default_hyperliquid_product()),
+            interval: interval.to_string(),
+            generation: 1,
+            ..WorkspacePaneState::default()
+        };
+        let workspace = WorkspaceState {
+            workspace_tabs: vec![WorkspaceTabState {
+                workspace_id: 1,
+                panes: vec![pane(1, "1m"), pane(2, "100t")],
+                ..WorkspaceTabState::default()
+            }],
+            ..WorkspaceState::default()
         };
 
-        assert_eq!(
-            pane_interval(Some(&series), "hyperliquid"),
-            Ok(ChartInterval::Day3)
-        );
-        assert_eq!(
-            pane_interval(Some(&series), "rithmic"),
-            Err("workspace chart cadence is unsupported by Rithmic".to_string())
-        );
+        let plan = restored_workspace_boot_plan(&workspace).expect("workspace repairs");
+        assert_eq!(plan.panes.len(), 2);
+        assert_eq!(plan.panes[0].interval, ChartInterval::Minute1);
+        assert_eq!(plan.panes[1].interval, ChartInterval::Minute1);
+        assert_eq!(plan.notices.len(), 1);
+        assert!(plan.notices[0].contains("Pane 2"));
     }
 
     #[test]
@@ -2559,7 +2602,7 @@ mod tests {
         let day3 = series_key(&product, ChartInterval::Day3).expect("HL day3 series");
         assert_eq!(
             day3.period,
-            BarPeriod::session(3).expect("three-day session period validates")
+            BarPeriod::time(259_200).expect("three-day fixed period validates")
         );
         // Tick candles exist on neither public path.
         assert!(series_key(&product, ChartInterval::Tick100).is_err());

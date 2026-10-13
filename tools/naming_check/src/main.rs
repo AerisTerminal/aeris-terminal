@@ -596,6 +596,33 @@ mod tests {
         }
     }
 
+    fn constructs_series_cadence(source: &str) -> bool {
+        production_prefix(source).contains("SeriesCadence::")
+    }
+
+    #[test]
+    fn series_cadence_construction_rule_accepts_and_rejects_fixtures() {
+        assert!(!constructs_series_cadence(
+            "fn restore() { aeris_market_runtime::legacy_interval(series); }"
+        ));
+        assert!(constructs_series_cadence(
+            "fn persist() { let cadence = SeriesCadence::FixedSeconds; }"
+        ));
+    }
+
+    #[test]
+    fn desktop_never_constructs_series_cadence() {
+        for path in production_sources_under("apps/desktop/src") {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            assert!(
+                !constructs_series_cadence(&contents),
+                "{} constructs SeriesCadence; cadence mapping belongs to market_runtime",
+                relative_string(&path)
+            );
+        }
+    }
+
     #[test]
     fn market_engine_has_one_lock_free_mutable_owner() {
         let owner = manifest("crates/market_engine/src/lib.rs");
