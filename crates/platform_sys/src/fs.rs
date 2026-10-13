@@ -147,13 +147,13 @@ pub fn move_file(source: &Path, destination: &Path) -> io::Result<()> {
 /// Returns an error when the directory cannot be read or a matching temporary
 /// cannot be removed.
 pub fn remove_stale_temporaries(directory: &Path, file_name: &str) -> io::Result<usize> {
-    let prefix = format!(".{file_name}.");
     let mut removed = 0;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&prefix) && name.ends_with(".tmp") && entry.file_type()?.is_file() {
+        if staged_temporary_destination_name(&name) == Some(file_name)
+            && entry.file_type()?.is_file()
+        {
             fs::remove_file(entry.path())?;
             removed += 1;
         }
@@ -166,6 +166,29 @@ fn temporary_name(file_name: &std::ffi::OsStr, process_id: u32, sequence: u64) -
     name.push(file_name);
     name.push(format!(".{process_id}-{sequence}.tmp"));
     name
+}
+
+/// Returns the destination file name encoded by an exact staged-file temporary name.
+///
+/// Names not emitted by [`StagedFile`] are rejected. Staged names containing a
+/// non-Unicode destination cannot be inspected through this portable API.
+#[must_use]
+pub fn staged_temporary_destination_name(file_name: &std::ffi::OsStr) -> Option<&str> {
+    let name = file_name.to_str()?;
+    let body = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (destination, identity) = body.rsplit_once('.')?;
+    if destination.is_empty() {
+        return None;
+    }
+    let (process_id, sequence) = identity.split_once('-')?;
+    if process_id.is_empty()
+        || sequence.is_empty()
+        || process_id.parse::<u32>().ok()?.to_string() != process_id
+        || sequence.parse::<u64>().ok()?.to_string() != sequence
+    {
+        return None;
+    }
+    Some(destination)
 }
 
 #[cfg(target_os = "windows")]
@@ -247,6 +270,7 @@ mod tests {
         let root = fixture_root("stale");
         fs::create_dir_all(&root).expect("fixture root");
         fs::write(root.join(".state.7-4.tmp"), b"stale").expect("stale temporary");
+        fs::write(root.join(".state.invalid.tmp"), b"unrelated").expect("unrelated temporary");
         fs::write(root.join(".other.7-4.tmp"), b"other").expect("other temporary");
         fs::create_dir(root.join(".state.8-5.tmp")).expect("matching directory");
 
@@ -255,6 +279,7 @@ mod tests {
             1
         );
         assert!(root.join(".other.7-4.tmp").exists());
+        assert!(root.join(".state.invalid.tmp").exists());
         assert!(root.join(".state.8-5.tmp").is_dir());
         fs::remove_dir_all(root).expect("remove fixture");
     }

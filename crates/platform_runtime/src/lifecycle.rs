@@ -595,7 +595,9 @@ impl ReleaseInstaller {
                 .file_name()
                 .into_string()
                 .map_err(|_| LifecycleError::JournalCorrupt)?;
-            if file_name.starts_with('.') && file_name.ends_with(".json.next") {
+            if aeris_platform_sys::fs::staged_temporary_destination_name(entry.file_name().as_ref())
+                .is_some()
+            {
                 continue;
             }
             let metadata = entry
@@ -725,8 +727,9 @@ impl ReleaseInstaller {
         self.audit_release(&active, &self.policy)?;
         let retained = self.retained_known_good_release()?;
         let expected_release_count = usize::from(retained.is_some()).saturating_add(1);
-        if count_entries(&self.lifecycle_root.join("active"))? != 1
-            || count_entries(&self.lifecycle_root.join("manifests"))? != expected_release_count
+        if count_release_record_entries(&self.lifecycle_root.join("active"))? != 1
+            || count_release_record_entries(&self.lifecycle_root.join("manifests"))?
+                != expected_release_count
             || count_entries(&self.install_root.join("versions"))? != expected_release_count
         {
             return Err(LifecycleError::UpdatePendingCleanup);
@@ -1101,7 +1104,7 @@ impl ReleaseInstaller {
             self.lifecycle_root.join("active"),
             self.lifecycle_root.join("manifests"),
         ] {
-            remove_file_if_present(&directory.join(format!(".{name}.next")))
+            aeris_platform_sys::fs::remove_stale_temporaries(&directory, &name)
                 .map_err(|_| LifecycleError::UpdatePendingCleanup)?;
         }
         Ok(())
@@ -1417,12 +1420,14 @@ impl ReleaseInstaller {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
         let active_root = self.lifecycle_root.join("active");
-        if count_entries(&active_root)? != 1 {
+        if count_release_record_entries(&active_root)? != 1 {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
         let retained = self.retained_known_good_release()?;
         let expected_release_count = usize::from(retained.is_some()).saturating_add(1);
-        if count_entries(&self.lifecycle_root.join("manifests"))? != expected_release_count {
+        if count_release_record_entries(&self.lifecycle_root.join("manifests"))?
+            != expected_release_count
+        {
             return Err(LifecycleError::UpdatePendingCleanup);
         }
         let versions = self.install_root.join("versions");
@@ -2125,6 +2130,21 @@ fn count_entries(path: &Path) -> Result<usize, LifecycleError> {
         })
 }
 
+fn count_release_record_entries(path: &Path) -> Result<usize, LifecycleError> {
+    fs::read_dir(path)
+        .map_err(|_| LifecycleError::UpdatePendingCleanup)?
+        .try_fold(0_usize, |count, entry| {
+            let entry = entry.map_err(|_| LifecycleError::UpdatePendingCleanup)?;
+            Ok(count
+                + usize::from(
+                    aeris_platform_sys::fs::staged_temporary_destination_name(
+                        entry.file_name().as_ref(),
+                    )
+                    .is_none(),
+                ))
+        })
+}
+
 struct LifecycleLock {
     path: PathBuf,
     file: Option<File>,
@@ -2339,6 +2359,7 @@ mod tests {
         };
         let _lock =
             LifecycleLock::acquire(Path::new(&path)).expect("child acquires lifecycle lock");
+        let _ = aeris_observability::flush_diagnostics();
         std::process::exit(0);
     }
 
@@ -2869,7 +2890,7 @@ mod tests {
     }
 
     #[test]
-    fn active_release_ignores_uncommitted_next_pointer() {
+    fn active_release_ignores_an_abandoned_staged_pointer() {
         let root = temporary_root("ignore-next-pointer");
         let (first, key, first_bundle) = release(&root, 1);
         let installer = ReleaseInstaller::new(
@@ -2887,29 +2908,32 @@ mod tests {
             install_generation: 2,
             directory_name: "00000000000000000002-release-2".to_string(),
         };
-        let temporary = installer
+        let destination = installer
             .lifecycle_root
             .join("active")
-            .join(format!(".{}.next", pointer_name(&uncommitted)));
-        fs::write(
-            &temporary,
-            serde_json::to_vec(&uncommitted).expect("pointer encodes"),
-        )
-        .expect("temporary pointer writes");
+            .join(pointer_name(&uncommitted));
+        let mut staged =
+            aeris_platform_sys::fs::StagedFile::create(&destination).expect("stage pointer");
+        staged
+            .write_all(&serde_json::to_vec(&uncommitted).expect("pointer encodes"))
+            .expect("stage pointer bytes");
+        std::mem::forget(staged);
 
         assert_eq!(
             installer.active_release().expect("active read"),
-            Some(active)
+            Some(active.clone())
         );
         assert_eq!(
-            installer.audit_active_release(),
-            Err(LifecycleError::UpdatePendingCleanup)
+            installer
+                .audit_active_release()
+                .expect("audit ignores staging"),
+            Some(active)
         );
         let _ = remove_owned_path(&root);
     }
 
     #[test]
-    fn preactivation_recovery_removes_pointer_and_manifest_temporary_files() {
+    fn preactivation_recovery_removes_abandoned_staged_pointer_and_manifest_files() {
         let root = temporary_root("preactivation-next-cleanup");
         let (first, key, first_bundle) = release(&root, 1);
         let installer = ReleaseInstaller::new(
@@ -2928,16 +2952,17 @@ mod tests {
             directory_name: "00000000000000000002-release-2".to_string(),
         };
         let name = pointer_name(&candidate);
-        let pointer_temporary = installer
-            .lifecycle_root
-            .join("active")
-            .join(format!(".{name}.next"));
-        let manifest_temporary = installer
-            .lifecycle_root
-            .join("manifests")
-            .join(format!(".{name}.next"));
-        fs::write(&pointer_temporary, b"partial-pointer").expect("temporary pointer");
-        fs::write(&manifest_temporary, b"partial-manifest").expect("temporary manifest");
+        for directory in [
+            installer.lifecycle_root.join("active"),
+            installer.lifecycle_root.join("manifests"),
+        ] {
+            let mut staged = aeris_platform_sys::fs::StagedFile::create(&directory.join(&name))
+                .expect("stage release record");
+            staged
+                .write_all(b"partial release record")
+                .expect("stage partial record");
+            std::mem::forget(staged);
+        }
         installer
             .write_update_journal(&UpdateJournal {
                 state: UpdateState::ProcessesStopped,
@@ -2948,8 +2973,21 @@ mod tests {
             .expect("preactivation journal");
 
         installer.recover(&Hooks::default()).expect("recover");
-        assert!(!pointer_temporary.exists());
-        assert!(!manifest_temporary.exists());
+        for directory in [
+            installer.lifecycle_root.join("active"),
+            installer.lifecycle_root.join("manifests"),
+        ] {
+            assert!(
+                fs::read_dir(directory)
+                    .expect("release record directory")
+                    .all(
+                        |entry| aeris_platform_sys::fs::staged_temporary_destination_name(
+                            entry.expect("release record entry").file_name().as_ref()
+                        ) != Some(name.as_str())
+                    ),
+                "recovery must remove abandoned staged release records"
+            );
+        }
         assert_eq!(
             installer
                 .audit_active_release()

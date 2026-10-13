@@ -113,11 +113,24 @@ fn load_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
 }
 
 fn load_recoverable_workspace_from_path(path: &Path) -> Result<Option<WorkspaceState>, String> {
+    let backup = backup_path(path);
     if path.is_file() {
-        load_workspace_from_path(path).map(Some)
-    } else {
-        Ok(None)
+        return match load_workspace_from_path(path) {
+            Ok(workspace) => Ok(Some(workspace)),
+            Err(_) if backup.is_file() => load_workspace_from_path(&backup).map(Some),
+            Err(primary_error) => Err(primary_error),
+        };
     }
+    backup
+        .is_file()
+        .then(|| load_workspace_from_path(&backup))
+        .transpose()
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".bak");
+    PathBuf::from(name)
 }
 
 fn load_legacy_workspace_from_path(path: &Path) -> Result<WorkspaceState, String> {
@@ -1173,11 +1186,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_loader_uses_only_the_committed_destination() {
+    fn workspace_loader_prefers_the_committed_destination_and_falls_back_to_backup() {
         let path = temporary_workspace_path();
         let current = workspace_with_revision(12);
         write_workspace_artifact(&path, &current);
-        write_workspace_artifact(&path.with_extension("pb.bak"), &workspace_with_revision(11));
+        let backup = backup_path(&path);
+        let previous = workspace_with_revision(11);
+        write_workspace_artifact(&backup, &previous);
         write_workspace_artifact(&path.with_extension("pb.tmp"), &workspace_with_revision(13));
 
         assert_eq!(
@@ -1188,9 +1203,23 @@ mod tests {
         );
 
         std::fs::write(&path, b"corrupt current").expect("corrupt current writes");
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("backup recovery succeeds")
+                .expect("backup is present"),
+            previous,
+            "a corrupt destination falls back to the read-only backup"
+        );
         assert!(
-            load_recoverable_workspace_from_path(&path).is_err(),
-            "a corrupt destination must not load unpublished recovery artifacts"
+            backup.is_file(),
+            "loading must not rotate or remove the backup"
+        );
+        std::fs::remove_file(&path).expect("current workspace removes");
+        assert_eq!(
+            load_recoverable_workspace_from_path(&path)
+                .expect("missing-primary recovery succeeds")
+                .expect("backup is present"),
+            previous
         );
         std::fs::remove_dir_all(path.parent().expect("temporary workspace parent"))
             .expect("temporary workspace cleanup");

@@ -261,6 +261,8 @@ Status: in progress
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Workspace, chart chrome, trading export, readiness, lifecycle, launcher and chart export writes use the durable writer.
   - Removed write-time `.bak` rotation and verified uncommitted trading exports preserve the previous file.
+  - Scrutiny follow-up: lifecycle scans and audits share the exact `StagedFile` name parser; read-only
+    workspace and chart-chrome `.bak` recovery remains available without restoring backup rotation.
 - [x] M1.7 diagnostics-log-sink-panic-hook - Rotating log file, panic crash files and a fatal-startup dialog
   - Commit `3c42981b` bundled M1.4-M1.9; this accepted history is documented rather than rewritten.
   - Added bounded rotating logs, durable panic reports, native fatal dialogs and debug-only `--force-diagnostics-panic`.
@@ -433,6 +435,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M1.8 feat(foundations): harden lifecycle persistence and diagnostics - added validation-root isolation, vault namespaces, readiness schema 5 and per-root instance locking.
 - 2026-10-13 M1.9 feat(foundations): harden lifecycle persistence and diagnostics - hardened SQLite open/shutdown, migrations, backups and confirmed-only corruption quarantine.
 - 2026-10-13 M1.2 fix(ci): enforce safe triggers across every workflow - closed scrutiny B1 with cross-workflow self-hosted trigger checks and repaired M1 tracking metadata.
+- 2026-10-13 M1.6 fix(persistence): recover staged and legacy state safely - closed scrutiny B2-B4 with shared staged-file recognition, read-only backup fallback and complete production-source scanning.
 
 ## 7. Known gaps / deferred
 

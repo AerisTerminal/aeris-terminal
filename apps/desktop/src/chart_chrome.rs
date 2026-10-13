@@ -634,6 +634,7 @@ pub fn load_chart_chrome_preferences() -> ChartChromePreferences {
 
 fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
     fs::read_to_string(path)
+        .or_else(|_| fs::read_to_string(path.with_extension("bak")))
         .ok()
         .as_deref()
         .map(parse_chart_chrome_preferences)
@@ -1016,8 +1017,8 @@ mod tests {
     }
 
     #[test]
-    fn chart_chrome_loader_needs_no_backup_file() {
-        let path = temporary_chart_chrome_path("no-backup-needed");
+    fn chart_chrome_loader_prefers_current_and_falls_back_to_read_only_backup() {
+        let path = temporary_chart_chrome_path("backup-recovery");
         let backup = path.with_extension("bak");
         let committed = ChartChromePreferences {
             indicator_name_labels_visible: false,
@@ -1041,8 +1042,15 @@ mod tests {
         std::fs::remove_file(&path).expect("current fixture removes");
         assert_eq!(
             load_chart_chrome_preferences_from(&path),
-            ChartChromePreferences::default(),
-            "the loader must not fall back to an obsolete backup"
+            ChartChromePreferences {
+                chart_type: ChartType::Line,
+                ..ChartChromePreferences::default()
+            },
+            "the loader must fall back to the existing backup"
+        );
+        assert!(
+            backup.is_file(),
+            "loading must not rotate or remove the backup"
         );
         remove_chart_chrome_test_files(&path);
     }
