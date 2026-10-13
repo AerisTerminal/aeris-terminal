@@ -263,6 +263,7 @@ impl Coordinator<'_> {
             .and_modify(|current| *current = (*current).max(instrument.session_generation))
             .or_insert(instrument.session_generation);
         self.catalog.insert(key, instrument.clone());
+        self.calendar.resolve(instrument, None);
         self.reconcile_order_books();
         Ok(())
     }
@@ -276,6 +277,25 @@ impl Coordinator<'_> {
             return;
         }
         match event {
+            ProviderCatalogEvent::Calendar {
+                generation,
+                instrument_id,
+                status,
+                valid_from_utc_ms,
+                valid_until_utc_ms,
+            } => self.handle_provider_event(super::ProviderEvent {
+                provider: match self.providers.descriptor(provider) {
+                    Some(descriptor) => descriptor.id,
+                    None => return,
+                },
+                generation,
+                kind: super::ProviderEventKind::Calendar {
+                    instrument_id,
+                    status,
+                    valid_from_utc_ms,
+                    valid_until_utc_ms,
+                },
+            }),
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.restore_provider_catalog_health(&result.provider);
                 self.handle_catalog_search(result);

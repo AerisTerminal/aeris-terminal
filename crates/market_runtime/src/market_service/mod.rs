@@ -28,7 +28,6 @@ use aeris_contracts::{
     SeriesLoadState,
 };
 use aeris_hyperliquid_market_adapter::hyperliquid_interval_for_period;
-use aeris_instruments::calendar::{ExchangeCalendar, ExchangeCalendarPeriod};
 use aeris_market_data::{
     AggressorSide, AggressorTradeVolumes, BarPeriod, BarSeriesKey, DepthSnapshot, MarketBar,
     MarketTrade, OrderBook, OrderBookApplyOutcome, OrderBookState as CanonicalOrderBookState,
@@ -679,6 +678,7 @@ struct ConsumerEvents {
 
 struct ProviderOrderBook {
     instrument: InstallProviderInstrument,
+    calendar: calendar::MarketCalendarService,
     trade_continuity: TradeContinuity,
     top_of_book_only: bool,
     /// Set while no current demand subscribes depth. Providers stop maintaining the
@@ -762,6 +762,7 @@ struct CandleLiveHandoff {
 
 struct TradeLiveHandoff {
     clock: Arc<dyn clock::Clock>,
+    calendar: calendar::MarketCalendarService,
     series: BarSeriesKey,
     generation: ProviderGeneration,
     cadence: TradeLiveCadence,
@@ -795,17 +796,9 @@ struct TradeLiveHandoff {
 }
 
 enum TradeLiveCadence {
-    Fixed {
-        seconds: i64,
-    },
-    Tick {
-        trades: u32,
-        forming: u32,
-    },
-    Calendar {
-        calendar: ExchangeCalendar,
-        period: ExchangeCalendarPeriod,
-    },
+    Fixed { seconds: i64 },
+    Tick { trades: u32, forming: u32 },
+    Calendar { period: calendar::CalendarBarPeriod },
 }
 
 /// One live publication for a series. Live handoffs publish only incremental
@@ -1586,6 +1579,13 @@ enum ProviderCatalogEvent {
     ScreenCompleted(ProviderMarketScreen),
     ScreenRejected(ProviderCatalogRejected),
     RefreshFailed(String),
+    Calendar {
+        generation: u64,
+        instrument_id: String,
+        status: aeris_contracts::MarketSessionStatus,
+        valid_from_utc_ms: i64,
+        valid_until_utc_ms: i64,
+    },
 }
 
 impl From<RithmicCatalogEvent> for ProviderCatalogEvent {
@@ -1661,6 +1661,19 @@ impl From<tastytrade::CatalogEvent> for ProviderCatalogEvent {
                 selection,
             },
             tastytrade::CatalogEvent::RefreshFailed(detail) => Self::RefreshFailed(detail),
+            tastytrade::CatalogEvent::Calendar {
+                generation,
+                instrument_id,
+                status,
+                valid_from_utc_ms,
+                valid_until_utc_ms,
+            } => Self::Calendar {
+                generation,
+                instrument_id,
+                status,
+                valid_from_utc_ms,
+                valid_until_utc_ms,
+            },
         }
     }
 }

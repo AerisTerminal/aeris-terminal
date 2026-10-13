@@ -10,6 +10,7 @@ use aeris_contracts::{
     ProviderSessionHours,
 };
 use aeris_instruments::{CalendarSourceKind, SessionPhase, SessionWindow};
+use chrono::{DateTime, Datelike, Utc};
 
 pub(crate) use venue::{ExchangeRule, Venue, instrument_venue};
 
@@ -32,9 +33,15 @@ pub fn source_kind_for(instrument: &InstallProviderInstrument) -> CalendarSource
     }
 }
 
-/// Dated provider-published phase and the next known opening.
+/// Provider projection valid only over its advertised interval. The underlying
+/// schedule remains available once that projection expires.
 #[derive(Clone, Debug)]
-pub struct ProviderCalendar(pub MarketSessionStatus);
+pub struct ProviderCalendar {
+    pub status: MarketSessionStatus,
+    pub valid_from_utc_ms: i64,
+    pub valid_until_utc_ms: i64,
+    fallback: Box<CalendarSource>,
+}
 
 /// One instrument's selected calendar. A provider calendar takes precedence over
 /// contract hours, which take precedence over exchange and continuous rules.
@@ -45,6 +52,15 @@ pub enum CalendarSource {
     ExchangeRule(ExchangeRule),
     AlwaysOpen,
     Unknown,
+}
+
+/// Period identity for live trade aggregation; unlike elapsed seconds these
+/// identities change at exchange session boundaries, including DST changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarBarPeriod {
+    Session(u32),
+    Week,
+    Month,
 }
 
 impl CalendarSource {
@@ -61,7 +77,7 @@ impl CalendarSource {
 }
 
 /// Session lookup by installed instrument identity.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MarketCalendarService {
     sources: BTreeMap<String, CalendarSource>,
 }
@@ -83,6 +99,15 @@ impl fmt::Display for CalendarSessionError {
 }
 
 impl MarketCalendarService {
+    /// Copy only this instrument's calendar into a bounded live handoff.
+    #[must_use]
+    pub fn for_instrument(&self, instrument_id: &str) -> Self {
+        let mut calendar = Self::default();
+        if let Some(source) = self.sources.get(instrument_id) {
+            calendar.insert(instrument_id.into(), source.clone());
+        }
+        calendar
+    }
     /// Select a source in descending order of specificity. A missing or
     /// unavailable provider projection must not shadow contract hours.
     pub fn resolve(
@@ -90,11 +115,7 @@ impl MarketCalendarService {
         instrument: &InstallProviderInstrument,
         provider_status: Option<MarketSessionStatus>,
     ) {
-        let source = if let Some(status) =
-            provider_status.filter(|status| status.source == MarketSessionSource::ProviderCalendar)
-        {
-            CalendarSource::ProviderCalendar(ProviderCalendar(status))
-        } else if let Some(hours) = instrument
+        let source = if let Some(hours) = instrument
             .contract_metadata
             .as_ref()
             .map(|metadata| &metadata.session_hours)
@@ -110,7 +131,56 @@ impl MarketCalendarService {
         } else {
             CalendarSource::Unknown
         };
-        self.insert(instrument.instrument_id.clone(), source);
+        let instrument_id = instrument.instrument_id.clone();
+        self.insert(instrument_id.clone(), source);
+        if let Some(status) =
+            provider_status.filter(|status| status.source == MarketSessionSource::ProviderCalendar)
+            && let (Some(start), Some(end)) = (
+                status.session_start_unix_nanos,
+                status.session_end_unix_nanos,
+            )
+        {
+            self.publish_provider_calendar(
+                &instrument_id,
+                status,
+                start.div_euclid(1_000_000),
+                end.div_euclid(1_000_000),
+            );
+        }
+    }
+
+    /// Replace a dated provider projection without losing the catalog schedule.
+    /// A malformed or open-ended interval cannot shadow an exchange rule.
+    pub fn publish_provider_calendar(
+        &mut self,
+        instrument_id: &str,
+        status: MarketSessionStatus,
+        valid_from_utc_ms: i64,
+        valid_until_utc_ms: i64,
+    ) {
+        if status.source != MarketSessionSource::ProviderCalendar
+            || status.instrument_id != instrument_id
+            || valid_from_utc_ms >= valid_until_utc_ms
+        {
+            return;
+        }
+        let previous = self
+            .sources
+            .remove(instrument_id)
+            .unwrap_or(CalendarSource::Unknown);
+        let fallback = match previous {
+            CalendarSource::ProviderCalendar(provider) => provider.fallback,
+            other => Box::new(other),
+        };
+        self.sources.insert(
+            instrument_id.into(),
+            CalendarSource::ProviderCalendar(ProviderCalendar {
+                status,
+                valid_from_utc_ms,
+                valid_until_utc_ms,
+                fallback,
+            }),
+        );
     }
 
     pub fn insert(&mut self, instrument_id: String, source: CalendarSource) {
@@ -154,6 +224,119 @@ impl MarketCalendarService {
             open_utc_ms: status.session_start_unix_nanos?.div_euclid(1_000_000),
             close_utc_ms: status.session_end_unix_nanos?.div_euclid(1_000_000),
         })
+    }
+
+    /// Start of the session containing a trade. Provider history uses the same
+    /// opening instant for daily bars rather than the trade's arrival instant.
+    #[must_use]
+    pub fn session_open(&self, instrument_id: &str, at_utc_ms: i64) -> Option<i64> {
+        if let Some(CalendarSource::ContractHours(hours)) = self.sources.get(instrument_id) {
+            return matches!(
+                self.phase(instrument_id, at_utc_ms),
+                SessionPhase::Open | SessionPhase::Extended
+            )
+            .then(|| {
+                weekly_hours::daily_open(hours, at_utc_ms.saturating_mul(1_000_000))
+                    .map(|open| open.div_euclid(1_000_000))
+            })
+            .flatten();
+        }
+        let window = self.session_window(instrument_id, at_utc_ms)?;
+        if window.open_utc_ms <= at_utc_ms && at_utc_ms < window.close_utc_ms {
+            return Some(window.open_utc_ms);
+        }
+        // Prints just before an evening reopen belong to the preceding daily
+        // candle, not tomorrow's session. Do not invent a session on a holiday.
+        if self.sources.get(instrument_id).is_some_and(|source| {
+            matches!(source, CalendarSource::ProviderCalendar(provider)
+                if (provider.valid_from_utc_ms..provider.valid_until_utc_ms).contains(&at_utc_ms))
+        }) || window.open_utc_ms - at_utc_ms > 2 * 3_600_000
+        {
+            return None;
+        }
+        let prior = at_utc_ms.checked_sub(2 * 3_600_000)?;
+        let window = self.session_window(instrument_id, prior)?;
+        (window.open_utc_ms <= prior && prior < window.close_utc_ms).then_some(window.open_utc_ms)
+    }
+
+    /// Date (Unix days) attributed to a print by the instrument's calendar.
+    /// CME's trading date starts on the previous evening.
+    #[must_use]
+    pub fn trading_day(&self, instrument_id: &str, at_utc_ms: i64) -> Option<i64> {
+        let source = match self.sources.get(instrument_id)? {
+            CalendarSource::ProviderCalendar(provider) => provider.fallback.as_ref(),
+            source => source,
+        };
+        if let CalendarSource::ExchangeRule(ExchangeRule::CmeGlobex) = source {
+            return aeris_instruments::calendar::ExchangeCalendar::for_code("CME")
+                .map(|rule| rule.trading_day(at_utc_ms.div_euclid(1_000)));
+        }
+        if matches!(source, CalendarSource::Unknown) {
+            return None;
+        }
+        let open = self
+            .session_open(instrument_id, at_utc_ms)
+            .unwrap_or(at_utc_ms);
+        if let CalendarSource::ExchangeRule(ExchangeRule::Cfe) = source {
+            // Evening sessions are assigned to the following local trading
+            // date, including the Sunday reopen after the weekend.
+            let at = DateTime::<Utc>::from_timestamp_millis(open)?;
+            let local = at.with_timezone(&chrono_tz::America::Chicago);
+            return Some(
+                local
+                    .date_naive()
+                    .succ_opt()?
+                    .and_hms_opt(0, 0, 0)?
+                    .and_utc()
+                    .timestamp()
+                    .div_euclid(86_400),
+            );
+        }
+        if let CalendarSource::ContractHours(hours) = source {
+            let timezone: chrono_tz::Tz = hours.first()?.timezone.parse().ok()?;
+            let local = DateTime::<Utc>::from_timestamp_millis(open)?.with_timezone(&timezone);
+            let roll = hours
+                .iter()
+                .any(|segment| segment.open_seconds > 0 && segment.open_seconds < 86_400);
+            let day = if roll {
+                local.date_naive().succ_opt()?
+            } else {
+                local.date_naive()
+            };
+            return Some(
+                day.and_hms_opt(0, 0, 0)?
+                    .and_utc()
+                    .timestamp()
+                    .div_euclid(86_400),
+            );
+        }
+        Some(open.div_euclid(86_400_000))
+    }
+
+    /// Identity of a live bar. A provider holiday has no live bucket, and a
+    /// dated provider projection is consulted before recurring exchange rules.
+    #[must_use]
+    pub fn bar_bucket(
+        &self,
+        instrument_id: &str,
+        at_utc_ms: i64,
+        period: CalendarBarPeriod,
+    ) -> Option<i64> {
+        if self.session_open(instrument_id, at_utc_ms).is_none()
+            && self.phase(instrument_id, at_utc_ms) != SessionPhase::AlwaysOpen
+        {
+            return None;
+        }
+        let day = self.trading_day(instrument_id, at_utc_ms)?;
+        match period {
+            CalendarBarPeriod::Session(days) if days > 0 => Some(day.div_euclid(i64::from(days))),
+            CalendarBarPeriod::Session(_) => None,
+            CalendarBarPeriod::Week => Some((day + 3).div_euclid(7)),
+            CalendarBarPeriod::Month => {
+                let date = DateTime::<Utc>::from_timestamp(day.checked_mul(86_400)?, 0)?;
+                Some(i64::from(date.year()) * 12 + i64::from(date.month()))
+            }
+        }
     }
 
     #[must_use]
@@ -205,13 +388,23 @@ impl MarketCalendarService {
         let Some(at) = at_utc_ms.checked_mul(1_000_000) else {
             return unknown();
         };
-        match self.sources.get(instrument_id) {
-            Some(CalendarSource::ProviderCalendar(provider)) => provider.0.clone(),
-            Some(CalendarSource::ContractHours(hours)) => {
+        let source = match self.sources.get(instrument_id) {
+            Some(CalendarSource::ProviderCalendar(provider))
+                if (provider.valid_from_utc_ms..provider.valid_until_utc_ms)
+                    .contains(&at_utc_ms) =>
+            {
+                return provider.status.clone();
+            }
+            Some(CalendarSource::ProviderCalendar(provider)) => provider.fallback.as_ref(),
+            Some(source) => source,
+            None => return unknown(),
+        };
+        match source {
+            CalendarSource::ContractHours(hours) => {
                 weekly_hours::weekly_hours_status(instrument_id, hours, at).unwrap_or_else(unknown)
             }
-            Some(CalendarSource::ExchangeRule(rule)) => rule.status(instrument_id, at),
-            Some(CalendarSource::AlwaysOpen) => MarketSessionStatus {
+            CalendarSource::ExchangeRule(rule) => rule.status(instrument_id, at),
+            CalendarSource::AlwaysOpen => MarketSessionStatus {
                 phase: MarketSessionPhase::AlwaysOpen,
                 source: MarketSessionSource::Continuous,
                 ..unknown()
@@ -267,8 +460,8 @@ mod tests {
                 instrument_id: id.clone(),
                 phase: MarketSessionPhase::Closed,
                 source: MarketSessionSource::ProviderCalendar,
-                session_start_unix_nanos: None,
-                session_end_unix_nanos: None,
+                session_start_unix_nanos: Some(ms("2026-08-17T13:00:00Z") * 1_000_000),
+                session_end_unix_nanos: Some(ms("2026-08-17T15:00:00Z") * 1_000_000),
                 next_open_unix_nanos: None,
             }),
         );
@@ -343,6 +536,64 @@ mod tests {
         assert_eq!(
             calendar.require_practice_session("unknown", saturday),
             Err(CalendarSessionError::Unknown)
+        );
+    }
+
+    #[test]
+    fn provider_calendar_expires_into_exchange_rule() {
+        let instrument = InstallProviderInstrument {
+            instrument_id: "future".into(),
+            venue_id: "CME".into(),
+            ..Default::default()
+        };
+        let mut calendar = MarketCalendarService::default();
+        calendar.resolve(&instrument, None);
+        let monday = ms("2026-08-17T18:00:00Z");
+        calendar.publish_provider_calendar(
+            "future",
+            MarketSessionStatus {
+                instrument_id: "future".into(),
+                phase: MarketSessionPhase::Closed,
+                source: MarketSessionSource::ProviderCalendar,
+                session_start_unix_nanos: None,
+                session_end_unix_nanos: None,
+                next_open_unix_nanos: None,
+            },
+            monday - 60_000,
+            monday + 60_000,
+        );
+        assert_eq!(calendar.phase("future", monday), SessionPhase::Closed);
+        assert_eq!(
+            calendar.phase("future", monday + 120_000),
+            SessionPhase::Open,
+            "a holiday projection cannot shadow exchange rules after its dated window"
+        );
+    }
+
+    #[test]
+    fn provider_holiday_overrides_an_open_exchange_rule() {
+        let mut calendar = MarketCalendarService::default();
+        calendar.insert(
+            "future".into(),
+            CalendarSource::ExchangeRule(ExchangeRule::CmeGlobex),
+        );
+        let midday = ms("2026-08-17T18:00:00Z");
+        calendar.publish_provider_calendar(
+            "future",
+            MarketSessionStatus {
+                instrument_id: "future".into(),
+                phase: MarketSessionPhase::Closed,
+                source: MarketSessionSource::ProviderCalendar,
+                session_start_unix_nanos: None,
+                session_end_unix_nanos: None,
+                next_open_unix_nanos: None,
+            },
+            midday - 3_600_000,
+            midday + 3_600_000,
+        );
+        assert_eq!(
+            calendar.require_practice_session("future", midday),
+            Err(CalendarSessionError::Closed)
         );
     }
 
@@ -499,6 +750,36 @@ mod tests {
         assert_eq!(
             calendar.phase("fx", ms("2026-10-12T16:00:00Z")),
             SessionPhase::Open
+        );
+    }
+
+    #[test]
+    fn fx_daily_roll_does_not_follow_merged_weekly_open() {
+        let mut calendar = MarketCalendarService::default();
+        let hours = [7, 1, 2, 3, 4, 5]
+            .into_iter()
+            .map(|weekday| ProviderSessionHours {
+                weekday,
+                open_seconds: if weekday == 7 { 17 * 3_600 } else { 0 },
+                close_seconds: if weekday == 5 { 17 * 3_600 } else { 86_400 },
+                timezone: "America/New_York".into(),
+            })
+            .collect();
+        calendar.insert("fx".into(), CalendarSource::ContractHours(hours));
+        let before = ms("2026-08-17T20:59:00Z");
+        let after = ms("2026-08-17T21:01:00Z");
+        assert_eq!(calendar.phase("fx", before), SessionPhase::Open);
+        assert_eq!(
+            calendar.session_open("fx", before),
+            Some(ms("2026-08-16T21:00:00Z"))
+        );
+        assert_eq!(
+            calendar.session_open("fx", after),
+            Some(ms("2026-08-17T21:00:00Z"))
+        );
+        assert_ne!(
+            calendar.bar_bucket("fx", before, CalendarBarPeriod::Session(1)),
+            calendar.bar_bucket("fx", after, CalendarBarPeriod::Session(1))
         );
     }
 }

@@ -1,9 +1,8 @@
 use super::{
     AggressorSide, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CandleGapPolicy, CandleLiveHandoff,
-    CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, ExchangeCalendar,
-    ExchangeCalendarPeriod, FailureStage, FormingBar, HyperliquidInstrumentDemand,
-    IndexedTradeMutation, InstallProviderInstrument, LIVE_BUFFER_CAPACITY,
-    LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
+    CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, FailureStage, FormingBar,
+    HyperliquidInstrumentDemand, IndexedTradeMutation, InstallProviderInstrument,
+    LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
     MAXIMUM_RECENT_LADDER_TRADES, MarketBar, MarketStream, MarketTrade, NonZeroUsize, OrderBook,
     OrderBookApplyOutcome, Ordering, ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent,
     ProviderEvent, ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
@@ -105,8 +104,11 @@ impl ProviderOrderBook {
         top_of_book_only: bool,
     ) -> Self {
         let trade_session_generation = instrument.session_generation;
+        let mut calendar = super::calendar::MarketCalendarService::default();
+        calendar.resolve(&instrument, None);
         Self {
             instrument,
+            calendar,
             trade_continuity,
             top_of_book_only,
             depth_unsubscribed: false,
@@ -145,6 +147,7 @@ impl ProviderOrderBook {
             self.invalidate_live_market(instrument.session_generation);
         }
         self.instrument = instrument;
+        self.calendar.resolve(&self.instrument, None);
     }
 
     fn invalidate_live_market(&mut self, session_generation: u64) -> bool {
@@ -251,13 +254,14 @@ impl ProviderOrderBook {
         let ingestion_ordinal = self.next_trade_ingestion_ordinal;
         self.next_trade_ingestion_ordinal = self.next_trade_ingestion_ordinal.saturating_add(1);
         let timestamps = &trade.metadata.timestamps;
-        let trading_day = ExchangeCalendar::for_code(&self.instrument.venue_id).map(|calendar| {
-            let timestamp_nanos = timestamps
-                .exchange_unix_nanos
-                .or(timestamps.provider_unix_nanos)
-                .unwrap_or(timestamps.received_unix_nanos);
-            calendar.trading_day(timestamp_nanos.div_euclid(1_000_000_000))
-        });
+        let timestamp_nanos = timestamps
+            .exchange_unix_nanos
+            .or(timestamps.provider_unix_nanos)
+            .unwrap_or(timestamps.received_unix_nanos);
+        let trading_day = self.calendar.trading_day(
+            &self.instrument.instrument_id,
+            timestamp_nanos.div_euclid(1_000_000),
+        );
         let retained = crate::RetainedMarketTrade {
             ingestion_ordinal,
             observed_unix_nanos,
@@ -426,6 +430,7 @@ impl TradeLiveHandoff {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn with_clock(
         series: &BarSeriesKey,
         generation: ProviderGeneration,
@@ -433,6 +438,26 @@ impl TradeLiveHandoff {
         candle: Option<(CandleGapPolicy, String)>,
         clock: std::sync::Arc<dyn super::clock::Clock>,
     ) -> Option<Self> {
+        let mut calendar = super::calendar::MarketCalendarService::default();
+        calendar.resolve(
+            &InstallProviderInstrument {
+                instrument_id: series.instrument_id.clone(),
+                venue_id: venue_id.into(),
+                ..Default::default()
+            },
+            None,
+        );
+        Self::with_calendar(series, generation, candle, clock, calendar)
+    }
+
+    pub(super) fn with_calendar(
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+        candle: Option<(CandleGapPolicy, String)>,
+        clock: std::sync::Arc<dyn super::clock::Clock>,
+        calendar: super::calendar::MarketCalendarService,
+    ) -> Option<Self> {
+        use super::calendar::CalendarBarPeriod;
         let cadence = match series.period {
             BarPeriod::Tick { trades } => TradeLiveCadence::Tick {
                 trades,
@@ -441,19 +466,23 @@ impl TradeLiveHandoff {
             BarPeriod::Time { seconds } => TradeLiveCadence::Fixed {
                 seconds: i64::from(seconds),
             },
-            BarPeriod::Session { days } => TradeLiveCadence::Fixed {
-                seconds: i64::from(days) * 86_400,
+            BarPeriod::Session { days } => TradeLiveCadence::Calendar {
+                period: CalendarBarPeriod::Session(days),
             },
             BarPeriod::Week { weeks: 1 } => TradeLiveCadence::Calendar {
-                calendar: ExchangeCalendar::for_code(venue_id)?,
-                period: ExchangeCalendarPeriod::Week,
+                period: CalendarBarPeriod::Week,
             },
             BarPeriod::Month { months: 1 } => TradeLiveCadence::Calendar {
-                calendar: ExchangeCalendar::for_code(venue_id)?,
-                period: ExchangeCalendarPeriod::Month,
+                period: CalendarBarPeriod::Month,
             },
             BarPeriod::Week { .. } | BarPeriod::Month { .. } => return None,
         };
+        if matches!(cadence, TradeLiveCadence::Calendar { .. })
+            && calendar.source_kind(&series.instrument_id)
+                == aeris_instruments::CalendarSourceKind::Unknown
+        {
+            return None;
+        }
         let (gap_policy, candle_symbol) = candle
             .map_or((CandleGapPolicy::Contiguous, None), |(policy, symbol)| {
                 (policy, Some(symbol))
@@ -461,6 +490,7 @@ impl TradeLiveHandoff {
         Some(Self {
             last_publication_at: clock.monotonic(),
             clock,
+            calendar,
             series: series.clone(),
             generation,
             cadence,
@@ -894,14 +924,24 @@ impl TradeLiveHandoff {
                         )?
                     }
                 }
-                TradeLiveCadence::Calendar { calendar, period } => {
-                    let last_bucket = calendar.bucket(last.exchange_timestamp_seconds, period);
-                    let trade_bucket =
-                        calendar.bucket(exchange_nanos.div_euclid(1_000_000_000), period);
-                    if last_bucket == trade_bucket {
-                        updated_rithmic_bar(last, trade, exchange_nanos)?
+                TradeLiveCadence::Calendar { period } => {
+                    let last_bucket = self.calendar.bar_bucket(
+                        &self.series.instrument_id,
+                        last.exchange_timestamp_unix_nanos.div_euclid(1_000_000),
+                        period,
+                    );
+                    let trade_bucket = self.calendar.bar_bucket(
+                        &self.series.instrument_id,
+                        exchange_nanos.div_euclid(1_000_000),
+                        period,
+                    );
+                    let Some(trade_bucket) = trade_bucket else {
+                        continue;
+                    };
+                    if last_bucket == Some(trade_bucket) {
+                        updated_rithmic_bar(last, trade, last.exchange_timestamp_unix_nanos)?
                     } else {
-                        started_rithmic_bar(last, trade, exchange_nanos)?
+                        started_rithmic_bar(last, trade, self.calendar_bar_open(exchange_nanos))?
                     }
                 }
                 TradeLiveCadence::Tick { .. } => unreachable!(),
@@ -1091,12 +1131,27 @@ impl TradeLiveHandoff {
                 trade_seconds >= open_seconds
                     && trade_seconds < open_seconds.saturating_add(seconds)
             }
-            TradeLiveCadence::Calendar { calendar, period } => {
-                calendar.bucket(open_nanos.div_euclid(1_000_000_000), period)
-                    == calendar.bucket(exchange_nanos.div_euclid(1_000_000_000), period)
+            TradeLiveCadence::Calendar { period } => {
+                self.calendar.bar_bucket(
+                    &self.series.instrument_id,
+                    open_nanos.div_euclid(1_000_000),
+                    period,
+                ) == self.calendar.bar_bucket(
+                    &self.series.instrument_id,
+                    exchange_nanos.div_euclid(1_000_000),
+                    period,
+                )
             }
             TradeLiveCadence::Tick { .. } => false,
         }
+    }
+
+    fn calendar_bar_open(&self, exchange_nanos: i64) -> i64 {
+        let millis = exchange_nanos.div_euclid(1_000_000);
+        self.calendar
+            .session_open(&self.series.instrument_id, millis)
+            .unwrap_or(millis)
+            .saturating_mul(1_000_000)
     }
 
     pub(super) fn apply_trade(&mut self, trade: &MarketTrade) -> Result<bool, String> {
@@ -1173,14 +1228,24 @@ impl TradeLiveHandoff {
                     updated_rithmic_bar(last, trade, exchange_nanos)?
                 }
             }
-            TradeLiveCadence::Calendar { calendar, period } => {
-                let last_bucket = calendar.bucket(last.exchange_timestamp_seconds, period);
-                let trade_bucket =
-                    calendar.bucket(exchange_nanos.div_euclid(1_000_000_000), period);
-                if last_bucket == trade_bucket {
-                    updated_rithmic_bar(last, trade, exchange_nanos)?
+            TradeLiveCadence::Calendar { period } => {
+                let last_bucket = self.calendar.bar_bucket(
+                    &self.series.instrument_id,
+                    last.exchange_timestamp_unix_nanos.div_euclid(1_000_000),
+                    period,
+                );
+                let trade_bucket = self.calendar.bar_bucket(
+                    &self.series.instrument_id,
+                    exchange_nanos.div_euclid(1_000_000),
+                    period,
+                );
+                let Some(trade_bucket) = trade_bucket else {
+                    return Ok(false);
+                };
+                if last_bucket == Some(trade_bucket) {
+                    updated_rithmic_bar(last, trade, last.exchange_timestamp_unix_nanos)?
                 } else {
-                    started_rithmic_bar(last, trade, exchange_nanos)?
+                    started_rithmic_bar(last, trade, self.calendar_bar_open(exchange_nanos))?
                 }
             }
         };
@@ -2010,12 +2075,12 @@ impl Coordinator<'_> {
                             })
                         })
                         .transpose()?;
-                    if let Some(mut handoff) = TradeLiveHandoff::with_clock(
+                    if let Some(mut handoff) = TradeLiveHandoff::with_calendar(
                         series,
                         generation,
-                        &instrument.venue_id,
                         candle,
                         std::sync::Arc::clone(&self.clock),
+                        self.calendar.for_instrument(&instrument.instrument_id),
                     ) {
                         handoff.connected = connected;
                         self.series_live.insert_trade(series.clone(), handoff);
@@ -2065,26 +2130,34 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn handle_provider_event(&mut self, event: ProviderEvent) {
+        if !self.accepts_provider_event(&event) {
+            return;
+        }
         let ProviderEvent {
             provider,
             generation,
             kind,
         } = event;
-        let Some(session) = self.sessions.get(provider) else {
-            return;
-        };
-        if session.suspended
-            || generation < session.generation_floor
-            || (session
-                .stop_pending
-                .is_some_and(|pending| pending.0.get() == generation)
-                && !matches!(kind, ProviderEventKind::Disconnected(_)))
-        {
-            return;
-        }
         let Some(descriptor) = self.providers.descriptor(provider) else {
             return;
         };
+        if let ProviderEventKind::Calendar {
+            instrument_id,
+            status,
+            valid_from_utc_ms,
+            valid_until_utc_ms,
+        } = kind
+        {
+            self.accept_provider_calendar(
+                provider,
+                generation,
+                &instrument_id,
+                status,
+                valid_from_utc_ms,
+                valid_until_utc_ms,
+            );
+            return;
+        }
         match kind {
             ProviderEventKind::Connecting => match descriptor.live_model {
                 super::LiveModel::TradeBuilt => self.rithmic_connecting(provider, generation),
@@ -2148,6 +2221,61 @@ impl Coordinator<'_> {
                     "the provider requested trade recovery",
                 );
             }
+            ProviderEventKind::Calendar { .. } => {
+                unreachable!("calendar update handled before dispatch")
+            }
+        }
+    }
+
+    fn accepts_provider_event(&self, event: &ProviderEvent) -> bool {
+        self.sessions.get(event.provider).is_some_and(|session| {
+            !session.suspended
+                && event.generation >= session.generation_floor
+                && (session
+                    .stop_pending
+                    .is_none_or(|pending| pending.0.get() != event.generation)
+                    || matches!(event.kind, ProviderEventKind::Disconnected(_)))
+        })
+    }
+
+    fn accept_provider_calendar(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        instrument_id: &str,
+        status: aeris_contracts::MarketSessionStatus,
+        valid_from_utc_ms: i64,
+        valid_until_utc_ms: i64,
+    ) {
+        // A retired session's holiday must never close the new session.
+        if self
+            .engine
+            .provider_status(provider)
+            .and_then(|status| status.generation)
+            .is_none_or(|current| current.0.get() != generation)
+            || !self
+                .catalog
+                .contains_key(&(provider.into(), instrument_id.into()))
+        {
+            return;
+        }
+        self.calendar.publish_provider_calendar(
+            instrument_id,
+            status,
+            valid_from_utc_ms,
+            valid_until_utc_ms,
+        );
+        let calendar = self.calendar.for_instrument(instrument_id);
+        for (series, live) in self.series_live.trade_iter_mut() {
+            if series.provider_id == provider && series.instrument_id == instrument_id {
+                live.calendar = calendar.clone();
+            }
+        }
+        if let Some(book) = self
+            .order_books
+            .get_mut(&(provider.into(), instrument_id.into()))
+        {
+            book.calendar = calendar;
         }
     }
 
@@ -3562,16 +3690,9 @@ impl Coordinator<'_> {
                 .provider_status(&series.provider_id)
                 .filter(|status| status.generation == Some(generation))
                 .map_or(ProviderHealth::Disconnected, |status| status.health);
-            let phase = self
-                .catalog
-                .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                .and_then(|instrument| {
-                    let at = at_utc_ms?;
-                    let mut calendar = super::calendar::MarketCalendarService::default();
-                    calendar.resolve(instrument, None);
-                    Some(calendar.phase(&instrument.instrument_id, at))
-                })
-                .unwrap_or(aeris_instruments::SessionPhase::Unknown);
+            let phase = at_utc_ms.map_or(aeris_instruments::SessionPhase::Unknown, |at| {
+                self.calendar.phase(&series.instrument_id, at)
+            });
             if super::watchdog::stalled(
                 now,
                 last_progress,
@@ -4032,6 +4153,222 @@ mod tests {
             period: BarPeriod::tick(2).expect("tick period"),
             definition_version: 1,
         }
+    }
+
+    #[test]
+    fn session_live_bars_follow_cme_provider_opens_across_dst() {
+        use chrono::{DateTime, Utc};
+        let at = |text: &str| {
+            text.parse::<DateTime<Utc>>()
+                .expect("fixture instant")
+                .timestamp_nanos_opt()
+                .expect("fixture range")
+        };
+        for (old_open, next_open, before, after) in [
+            (
+                "2026-02-09T23:00:00Z",
+                "2026-02-10T23:00:00Z",
+                "2026-02-10T22:59:00Z",
+                "2026-02-10T23:01:00Z",
+            ),
+            (
+                "2026-03-09T22:00:00Z",
+                "2026-03-10T22:00:00Z",
+                "2026-03-10T21:59:00Z",
+                "2026-03-10T22:01:00Z",
+            ),
+        ] {
+            let mut series = rithmic_tick_series();
+            series.period = BarPeriod::session(1).expect("daily");
+            let mut live =
+                TradeLiveHandoff::new(&series, generation(), "CME", None).expect("daily handoff");
+            live.seed(2, 0, &[bar(10, at(old_open), 10_000)], None, Some(0))
+                .expect("provider daily bar");
+            live.connected = true;
+            live.accept_trade(&rithmic_trade(1, at(before), 10_100))
+                .expect("old session");
+            live.accept_trade(&rithmic_trade(2, at(after), 10_200))
+                .expect("new session");
+            assert_eq!(live.bars.len(), 2);
+            assert_eq!(
+                live.bars[0].close, 10_100,
+                "the pre-roll trade updates the prior daily bar"
+            );
+            assert_eq!(live.bars[0].exchange_timestamp_unix_nanos, at(old_open));
+            assert_eq!(live.bars[1].exchange_timestamp_unix_nanos, at(next_open));
+        }
+    }
+
+    #[test]
+    fn session_day3_closes_only_on_a_calendar_roll() {
+        use chrono::{DateTime, Utc};
+        let at = |text: &str| {
+            text.parse::<DateTime<Utc>>()
+                .expect("instant")
+                .timestamp_nanos_opt()
+                .expect("range")
+        };
+        let mut series = rithmic_tick_series();
+        series.period = BarPeriod::session(3).expect("three sessions");
+        let mut live = TradeLiveHandoff::new(&series, generation(), "CME", None).expect("handoff");
+        live.seed(
+            2,
+            0,
+            &[bar(10, at("2026-03-09T22:00:00Z"), 10_000)],
+            None,
+            Some(0),
+        )
+        .expect("seed");
+        live.connected = true;
+        live.accept_trade(&rithmic_trade(1, at("2026-03-10T21:59:00Z"), 10_100))
+            .expect("before roll");
+        live.accept_trade(&rithmic_trade(2, at("2026-03-10T22:01:00Z"), 10_200))
+            .expect("roll");
+        assert_eq!(
+            live.bars.len(),
+            2,
+            "three-session boundary follows trading dates"
+        );
+    }
+
+    #[test]
+    fn six_non_cme_week_and_month_live_series_follow_calendar() {
+        use super::super::calendar::{CalendarSource, ExchangeRule};
+        use aeris_contracts::ProviderSessionHours;
+        for (label, source, weekly_before, weekly_after, monthly_before, monthly_after) in [
+            (
+                "ctrader-fx",
+                CalendarSource::ContractHours(
+                    (1..=7)
+                        .map(|weekday| ProviderSessionHours {
+                            weekday,
+                            open_seconds: 0,
+                            close_seconds: 86_400,
+                            timezone: "America/New_York".into(),
+                        })
+                        .collect(),
+                ),
+                "2026-08-28T18:00:00Z",
+                "2026-08-31T18:00:00Z",
+                "2026-08-31T18:00:00Z",
+                "2026-09-01T18:00:00Z",
+            ),
+            (
+                "tastytrade-equity",
+                CalendarSource::ExchangeRule(ExchangeRule::UsEquity),
+                "2026-08-28T15:00:00Z",
+                "2026-08-31T15:00:00Z",
+                "2026-08-31T15:00:00Z",
+                "2026-09-01T15:00:00Z",
+            ),
+            (
+                "cfe",
+                CalendarSource::ExchangeRule(ExchangeRule::Cfe),
+                "2026-08-28T19:00:00Z",
+                "2026-08-30T23:00:00Z",
+                "2026-08-31T19:00:00Z",
+                "2026-09-01T19:00:00Z",
+            ),
+        ] {
+            for (period, before, after) in [
+                (
+                    BarPeriod::week(1).expect("week"),
+                    weekly_before,
+                    weekly_after,
+                ),
+                (
+                    BarPeriod::month(1).expect("month"),
+                    monthly_before,
+                    monthly_after,
+                ),
+            ] {
+                assert_calendar_live_roll(label, source.clone(), period, before, after);
+            }
+        }
+    }
+
+    fn assert_calendar_live_roll(
+        label: &str,
+        source: super::super::calendar::CalendarSource,
+        period: BarPeriod,
+        before: &str,
+        after: &str,
+    ) {
+        use super::super::calendar::MarketCalendarService;
+        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+        use chrono::{DateTime, Utc};
+        let at = |text: &str| {
+            text.parse::<DateTime<Utc>>()
+                .expect("instant")
+                .timestamp_nanos_opt()
+                .expect("range")
+        };
+        let mut calendar = MarketCalendarService::default();
+        calendar.insert(label.into(), source);
+        if label == "tastytrade-equity" {
+            let first = at(before).div_euclid(1_000_000);
+            calendar.publish_provider_calendar(
+                label,
+                MarketSessionStatus {
+                    instrument_id: label.into(),
+                    phase: MarketSessionPhase::Regular,
+                    source: MarketSessionSource::ProviderCalendar,
+                    session_start_unix_nanos: Some(at(before) - 3_600_000_000_000),
+                    session_end_unix_nanos: Some(at(before) + 3_600_000_000_000),
+                    next_open_unix_nanos: None,
+                },
+                first - 3_600_000,
+                first + 3_600_000,
+            );
+        }
+        let mut series = rithmic_tick_series();
+        series.instrument_id = label.into();
+        series.period = period;
+        let mut live = TradeLiveHandoff::with_calendar(
+            &series,
+            generation(),
+            None,
+            std::sync::Arc::new(super::super::clock::SystemClock),
+            calendar,
+        )
+        .expect("calendar handoff");
+        live.seed(
+            2,
+            0,
+            &[bar(10, at(before) - 3_600_000_000_000, 10_000)],
+            None,
+            Some(0),
+        )
+        .expect("seed");
+        live.connected = true;
+        let mut first = rithmic_trade(1, at(before), 10_100);
+        first.metadata.instrument_id = label.into();
+        let mut second = rithmic_trade(2, at(after), 10_200);
+        second.metadata.instrument_id = label.into();
+        live.accept_trade(&first).expect("forming update");
+        assert_eq!(live.bars.len(), 1, "{label}: forming {period:?}");
+        live.accept_trade(&second).expect("calendar roll");
+        assert_eq!(live.bars.len(), 2, "{label}: boundary {period:?}");
+        let mut book = ProviderOrderBook::new(
+            InstallProviderInstrument {
+                provider: series.provider_id.clone(),
+                instrument_id: label.into(),
+                entitlement_id: series.entitlement_id.clone(),
+                session_generation: 1,
+                ..Default::default()
+            },
+            super::super::TradeContinuity::Sequence,
+            true,
+        );
+        book.calendar = live.calendar.for_instrument(label);
+        assert!(book.accept_recent_trade(&first));
+        assert!(
+            book.recent_trades
+                .back()
+                .and_then(|trade| trade.trading_day)
+                .is_some(),
+            "{label}: calendar supplies tape trading day"
+        );
     }
 
     fn rithmic_trade(sequence: u64, timestamp: i64, price: i64) -> MarketTrade {

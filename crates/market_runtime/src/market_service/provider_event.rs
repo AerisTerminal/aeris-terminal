@@ -4,6 +4,7 @@ use super::{
 };
 use crate::hyperliquid_realtime::HyperliquidRealtimeEvent;
 use crate::rithmic_realtime::RithmicRealtimeEvent;
+use aeris_contracts::MarketSessionStatus;
 
 pub(super) struct ProviderEvent {
     pub(super) provider: &'static str,
@@ -64,6 +65,12 @@ pub(super) enum ProviderEventKind {
     },
     CandleRecovery(String),
     TradeRecovery(InstallProviderInstrument),
+    Calendar {
+        instrument_id: String,
+        status: MarketSessionStatus,
+        valid_from_utc_ms: i64,
+        valid_until_utc_ms: i64,
+    },
 }
 
 impl ProviderEvent {

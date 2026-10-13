@@ -1172,7 +1172,27 @@ impl MarketService {
             None
         };
         let mut calendar = MarketCalendarService::default();
-        calendar.resolve(instrument, provider_calendar);
+        calendar.resolve(instrument, None);
+        if let Some(status) = provider_calendar {
+            let valid_from = if status.phase == aeris_contracts::MarketSessionPhase::Closed {
+                now_unix_nanos
+            } else {
+                status.session_start_unix_nanos.unwrap_or(now_unix_nanos)
+            };
+            let valid_until = if status.phase == aeris_contracts::MarketSessionPhase::Closed {
+                status.next_open_unix_nanos
+            } else {
+                status.session_end_unix_nanos
+            };
+            if let Some(valid_until) = valid_until {
+                calendar.publish_provider_calendar(
+                    &instrument.instrument_id,
+                    status,
+                    valid_from.div_euclid(1_000_000),
+                    valid_until.div_euclid(1_000_000),
+                );
+            }
+        }
         calendar
     }
 

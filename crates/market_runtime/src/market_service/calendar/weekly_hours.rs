@@ -15,6 +15,28 @@ use chrono_tz::Tz;
 const SEARCH_DAYS: i64 = 8;
 const SECONDS_PER_DAY: u32 = 86_400;
 
+/// Trading-day roll within a continuous weekly session. Adjacent published
+/// segments are merged for open/closed status, but a daily candle must still
+/// roll at the contract's local opening time on every trading day.
+pub(super) fn daily_open(hours: &[ProviderSessionHours], at_unix_nanos: i64) -> Option<i64> {
+    let first = hours.first()?;
+    let zone: Tz = first.timezone.parse().ok()?;
+    let roll = hours
+        .iter()
+        .filter(|segment| segment.open_seconds > 0 && segment.open_seconds < SECONDS_PER_DAY)
+        .map(|segment| segment.open_seconds)
+        .min()
+        .unwrap_or(0);
+    let at = DateTime::from_timestamp_nanos(at_unix_nanos);
+    let today = at.with_timezone(&zone).date_naive();
+    let candidate = local_instant(zone, today, roll)?;
+    if candidate <= at_unix_nanos {
+        Some(candidate)
+    } else {
+        local_instant(zone, today.pred_opt()?, roll)
+    }
+}
+
 /// Returns the session status the weekly `hours` imply at `now_unix_nanos`, or
 /// `None` when there are no hours or they cannot be placed in time.
 pub(super) fn weekly_hours_status(

@@ -101,8 +101,8 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 |---|---|---|---|---|
 | MD-01 | High | A persisted 3-day chart pane cannot be restored because the workspace writer and reader disagree | M1.3 | closed in ab5ff341 |
 | MD-02 | High | The stalled-live recovery watchdog only works for tastytrade | M2.6 (market), M4.8 (trading) | market part closed in this commit; trading gate M4.8 open |
-| MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | open |
-| MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | open |
+| MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | closed in this commit |
+| MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | closed in this commit |
 | MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | open |
 | MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | open |
 | MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | open |
@@ -371,7 +371,10 @@ Status: in progress
   - Candle and trade handoffs use the injected clock for last progress. The watchdog evaluates both models for every provider against the calendar's open/extended/always-open phase, never retries while closed, and uses a 300-second threshold for unknown sessions (30 seconds while open). It no longer calls the tastytrade broker API from the coordinator.
   - Practice session admission retrieves the installed instrument from the coordinator and asks the same calendar for all providers; unknown and closed phases produce distinct errors. Removed the superseded tastytrade-only practice gate.
   - Scripted cTrader open/closed and Rithmic CME no-trades recovery tests assert one current history request while open and none while closed; pure tests cover all four providers, unknown grace and practice crypto/CME/unknown cases. Full local fmt, workspace clippy/tests and naming gate passed. MD-02 market half closed; the trading-side gate remains M4.8.
-- [ ] M2.7 calendar-session-live-bars - Session-day, weekly and monthly live bars follow the calendar
+- [x] M2.7 calendar-session-live-bars - Session-day, weekly and monthly live bars follow the calendar
+  - Trade handoffs use calendar session/day, week and month buckets rather than elapsed daily seconds or CME-only buckets. Coordinator owns the installed calendar; tape dates, watchdog and trade-built bars read its current source. Contiguous contract hours still roll daily at the local opening time.
+  - Dated provider projections and holidays arrive through generation-fenced provider calendar events, take precedence while valid, and then fall back to contract/exchange rules or Unknown. The tastytrade catalog worker publishes bounded updates when its cached calendar changes and on instrument selection.
+  - Tests cover CME daily rolls in normal and DST weeks, Day3 session rolls, all six non-CME weekly/monthly cases, tape trading dates, provider holidays and validity expiry. Scoped tests/Clippy and the full local fmt, workspace Clippy/tests/naming gate pass. The single M2 GUI pass remains scheduled after M2.10.
 - [ ] M2.8 typed-epoch-fencing - `Epoch<Tag>` and `Fenced<T>` replace raw generations at the provider boundary
 - [ ] M2.9 command-fences-consumer-registry - Command fences and one consumer registry; remove the startup sentinel
 - [ ] M2.10 history-tracker - `HistoryTracker` with current and backfill lanes; trim unused `provider_history`
@@ -514,6 +517,7 @@ the repo root `AGENTS.md`.
   (M2.4, this commit).
 - Session/cadence resolution uses one provider-neutral calendar and one exchange-code table; generic calendar code cannot contain provider literals or import adapter calendars, and unsupported weekly/monthly live demand reports a typed error (M2.5, this commit).
 - Every live model's stall policy and every provider's practice-session check use calendar phases. Unknown sessions use a conservative 300-second stall threshold; closed sessions do not recover from silence (M2.6, this commit).
+- Dated provider calendar events are fenced at the coordinator and expire into the instrument's recurring calendar or Unknown; live session, week and month bars and tape dates use the same calendar (M2.7, this commit).
 
 ## 6. Progress log
 
@@ -546,6 +550,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-13 M2.4 feat(market): bound provider reconnect policies - replaced fixed Hyperliquid retry, budgeted cTrader with real-cause failure, jittered tastytrade and bounded Rithmic non-transport recovery.
 - 2026-10-13 M2.5 feat(market): centralize calendar sources and exchange rules - shared CME calendar and venue table, resolved dated/weekly/continuous sessions and rejected unsupported weekly/monthly live demand explicitly.
 - 2026-10-13 M2.6 feat(market): recover stalled live series by calendar phase - applied the same injected-clock watchdog to candle and trade models and routed practice-session checks through the calendar.
+- 2026-10-13 M2.7 feat(market): roll live bars at calendar sessions - replaced fixed session durations and CME-only live buckets, integrated fenced dated provider holidays and calendar tape dates, and tested six non-CME week/month paths.
 
 ## 7. Known gaps / deferred
 

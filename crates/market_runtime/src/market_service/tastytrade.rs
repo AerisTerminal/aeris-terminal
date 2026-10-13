@@ -127,6 +127,13 @@ pub(super) enum CatalogEvent {
         selection: bool,
     },
     RefreshFailed(String),
+    Calendar {
+        generation: u64,
+        instrument_id: String,
+        status: MarketSessionStatus,
+        valid_from_utc_ms: i64,
+        valid_until_utc_ms: i64,
+    },
 }
 /// Retained search results by consumer and whether they answer the startup
 /// re-resolution. A picker search on the same consumer must not retire the
@@ -683,12 +690,15 @@ pub(super) fn run_catalog(
     let mut authorization_epoch = api.authorization_epoch.load(Ordering::Acquire);
     let mut refresh_at = Instant::now();
     let mut selection_generation = 0u64;
+    let mut calendar_instruments = BTreeMap::<String, InstallProviderInstrument>::new();
+    let mut calendar_revision = api.calendar_revision();
     while !stop.load(Ordering::Acquire) {
         let current_epoch = api.authorization_epoch.load(Ordering::Acquire);
         if current_epoch != authorization_epoch {
             authorization_epoch = current_epoch;
             futures.clear();
             searches.clear();
+            calendar_instruments.clear();
             refresh_at = Instant::now() + Duration::from_mins(30);
         }
         if let Some(detail) = refresh_catalog(&mut futures, &mut refresh_at, api, stop)
@@ -696,77 +706,246 @@ pub(super) fn run_catalog(
         {
             return;
         }
-        while let Ok(reply) = replies.try_recv() {
-            if let Some(event) = remote_search_event(reply, &mut searches, generation, api)
-                && events.send(event).is_err()
-            {
-                break;
-            }
+        if publish_calendar_updates(
+            api,
+            generation,
+            events,
+            &calendar_instruments,
+            &mut calendar_revision,
+        )
+        .is_err()
+        {
+            return;
         }
-        let control = match controls.recv_timeout(Duration::from_millis(100)) {
-            Ok(control) => control,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => return,
+        publish_remote_search_replies(&replies, events, &mut searches, generation, api);
+        let control = match next_catalog_control(controls) {
+            Ok(Some(control)) => control,
+            Ok(None) => continue,
+            Err(()) => return,
         };
         let (consumer, command, selection) = match &control {
             CatalogControl::Search(s) => (s.consumer_id, s.search_generation, false),
             CatalogControl::Select(s) => (s.consumer_id, s.selection_generation, true),
         };
-        let result: Result<CatalogEvent, String> = (|| match control {
-            CatalogControl::Search(search) => {
-                // Equities come only from the slow remote search; skip it when excluded.
-                let needs_remote = search.categories.equities
-                    && !search.query.is_empty()
-                    && !search.query.starts_with('/');
-                let result =
-                    search_catalog(&search, &mut futures, &mut searches, api, stop, generation);
-                if result.is_ok() && needs_remote {
-                    remote_tx
-                        .try_send(RemoteSearchRequest {
-                            search,
-                            authorization_epoch,
-                        })
-                        .map_err(|_| "Tastytrade equity search queue is full")?;
-                }
-                result.map(|event| match event {
-                    CatalogEvent::Search(result) if needs_remote => {
-                        CatalogEvent::SearchPreliminary(result)
-                    }
-                    other => other,
-                })
-            }
-            CatalogControl::Select(selection) => resolve_selection(
-                &selection,
-                &futures,
-                &searches,
+        let result = process_catalog_control(
+            control,
+            &mut futures,
+            &mut searches,
+            &mut selection_generation,
+            &CatalogWorkerContext {
+                remote_tx: &remote_tx,
+                authorization_epoch,
                 api,
                 stop,
                 generation,
-                &mut selection_generation,
-            ),
-        })();
+            },
+        );
         if api.authorization_epoch.load(Ordering::Acquire) != authorization_epoch {
             continue;
         }
-        let event = result.unwrap_or_else(|error| {
-            diagnostic!("Aeris tastytrade catalog request failed: {error}");
-            CatalogEvent::Rejected {
-                rejection: ProviderCatalogRejected {
-                    consumer_id: consumer,
-                    provider: "tastytrade".into(),
-                    provider_generation: Some(generation.load(Ordering::Acquire)),
-                    command_generation: command,
-                    reason: ProviderCatalogRejectionReason::SearchRejected,
-                },
-                selection,
-            }
-        });
-        if events.send(event).is_err() && stop.load(Ordering::Acquire) {
+        let event = catalog_result(result, consumer, command, selection, generation);
+        if publish_catalog_result(
+            event,
+            events,
+            &mut calendar_instruments,
+            api,
+            generation,
+            stop,
+        )
+        .is_err()
+        {
             return;
         }
     }
     drop(remote_tx);
     let _ = remote_worker.join();
+}
+
+struct CatalogWorkerContext<'a> {
+    remote_tx: &'a SyncSender<RemoteSearchRequest>,
+    authorization_epoch: u64,
+    api: &'a BrokerApi,
+    stop: &'a Arc<AtomicBool>,
+    generation: &'a Arc<AtomicU64>,
+}
+
+fn process_catalog_control(
+    control: CatalogControl,
+    futures: &mut Vec<FutureInstrument>,
+    searches: &mut CatalogSearches,
+    selection_generation: &mut u64,
+    context: &CatalogWorkerContext<'_>,
+) -> Result<CatalogEvent, String> {
+    match control {
+        CatalogControl::Search(search) => {
+            let needs_remote = search.categories.equities
+                && !search.query.is_empty()
+                && !search.query.starts_with('/');
+            let result = search_catalog(
+                &search,
+                futures,
+                searches,
+                context.api,
+                context.stop,
+                context.generation,
+            );
+            if result.is_ok() && needs_remote {
+                context
+                    .remote_tx
+                    .try_send(RemoteSearchRequest {
+                        search,
+                        authorization_epoch: context.authorization_epoch,
+                    })
+                    .map_err(|_| "Tastytrade equity search queue is full")?;
+            }
+            result.map(|event| match event {
+                CatalogEvent::Search(result) if needs_remote => {
+                    CatalogEvent::SearchPreliminary(result)
+                }
+                other => other,
+            })
+        }
+        CatalogControl::Select(selection) => resolve_selection(
+            &selection,
+            futures,
+            searches,
+            context.api,
+            context.stop,
+            context.generation,
+            selection_generation,
+        ),
+    }
+}
+
+fn next_catalog_control(controls: &Receiver<CatalogControl>) -> Result<Option<CatalogControl>, ()> {
+    match controls.recv_timeout(Duration::from_millis(100)) {
+        Ok(control) => Ok(Some(control)),
+        Err(RecvTimeoutError::Timeout) => Ok(None),
+        Err(RecvTimeoutError::Disconnected) => Err(()),
+    }
+}
+
+fn publish_catalog_result(
+    event: CatalogEvent,
+    events: &CatalogPublisher<CatalogEvent>,
+    instruments: &mut BTreeMap<String, InstallProviderInstrument>,
+    api: &BrokerApi,
+    generation: &AtomicU64,
+    stop: &AtomicBool,
+) -> Result<(), ()> {
+    let selected_calendar = remember_calendar_instrument(&event, instruments, api, generation);
+    if events.send(event).is_err() && stop.load(Ordering::Acquire) {
+        return Err(());
+    }
+    if let Some(update) = selected_calendar {
+        events.send(update).map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn publish_remote_search_replies(
+    replies: &Receiver<RemoteSearchReply>,
+    events: &CatalogPublisher<CatalogEvent>,
+    searches: &mut CatalogSearches,
+    generation: &AtomicU64,
+    api: &BrokerApi,
+) {
+    while let Ok(reply) = replies.try_recv() {
+        if let Some(event) = remote_search_event(reply, searches, generation, api)
+            && events.send(event).is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn catalog_result(
+    result: Result<CatalogEvent, String>,
+    consumer: u64,
+    command: u64,
+    selection: bool,
+    generation: &AtomicU64,
+) -> CatalogEvent {
+    result.unwrap_or_else(|error| {
+        diagnostic!("Aeris tastytrade catalog request failed: {error}");
+        CatalogEvent::Rejected {
+            rejection: ProviderCatalogRejected {
+                consumer_id: consumer,
+                provider: "tastytrade".into(),
+                provider_generation: Some(generation.load(Ordering::Acquire)),
+                command_generation: command,
+                reason: ProviderCatalogRejectionReason::SearchRejected,
+            },
+            selection,
+        }
+    })
+}
+
+fn publish_calendar_updates(
+    api: &BrokerApi,
+    generation: &AtomicU64,
+    events: &CatalogPublisher<CatalogEvent>,
+    instruments: &BTreeMap<String, InstallProviderInstrument>,
+    last_revision: &mut u64,
+) -> Result<(), ()> {
+    let revision = api.calendar_revision();
+    if revision != *last_revision {
+        *last_revision = revision;
+        for instrument in instruments.values() {
+            if let Some(update) = calendar_update(api, instrument, generation) {
+                events.send(update).map_err(|_| ())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remember_calendar_instrument(
+    event: &CatalogEvent,
+    instruments: &mut BTreeMap<String, InstallProviderInstrument>,
+    api: &BrokerApi,
+    generation: &AtomicU64,
+) -> Option<CatalogEvent> {
+    let CatalogEvent::Selection { instrument, .. } = event else {
+        return None;
+    };
+    if instruments.len() < super::MAXIMUM_CATALOG_INSTRUMENTS
+        || instruments.contains_key(&instrument.instrument_id)
+    {
+        instruments.insert(instrument.instrument_id.clone(), instrument.clone());
+    }
+    calendar_update(api, instrument, generation)
+}
+
+fn calendar_update(
+    api: &BrokerApi,
+    instrument: &InstallProviderInstrument,
+    generation: &AtomicU64,
+) -> Option<CatalogEvent> {
+    let now = now_nanos().ok()?;
+    let status =
+        api.market_session_status(&instrument.instrument_id, &instrument.provider_symbol, now);
+    if status.source != MarketSessionSource::ProviderCalendar {
+        return None;
+    }
+    let valid_from = if status.phase == MarketSessionPhase::Closed {
+        now
+    } else {
+        status.session_start_unix_nanos.unwrap_or(now)
+    };
+    let valid_until = if status.phase == MarketSessionPhase::Closed {
+        status.next_open_unix_nanos
+    } else {
+        status.session_end_unix_nanos
+    }?
+    .min(now.saturating_add(Duration::from_mins(6).as_nanos().try_into().ok()?));
+    (valid_from < valid_until).then(|| CatalogEvent::Calendar {
+        generation: generation.load(Ordering::Acquire),
+        instrument_id: instrument.instrument_id.clone(),
+        status,
+        valid_from_utc_ms: valid_from.div_euclid(1_000_000),
+        valid_until_utc_ms: valid_until.div_euclid(1_000_000),
+    })
 }
 fn refresh_catalog(
     futures: &mut Vec<FutureInstrument>,

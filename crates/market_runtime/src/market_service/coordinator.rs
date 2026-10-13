@@ -139,6 +139,7 @@ impl<'a> Coordinator<'a> {
             }),
             providers,
             clock,
+            calendar: super::calendar::MarketCalendarService::default(),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -524,6 +525,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) studies: StudyRuntime,
     pub(super) providers: ProviderDispatch<'a>,
     pub(super) clock: Arc<dyn super::clock::Clock>,
+    pub(super) calendar: super::calendar::MarketCalendarService,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
@@ -1360,6 +1362,7 @@ impl Coordinator<'_> {
                 // Keep canonical revisions monotonic across metadata refreshes;
                 // transport generations are fenced by provider_depth itself.
                 book.update_instrument(instrument);
+                book.calendar = self.calendar.for_instrument(&book.instrument.instrument_id);
                 book.set_depth_subscribed(depth_subscribed);
             } else {
                 let Some(descriptor) = self.providers.descriptor(&instrument.provider) else {
@@ -1371,6 +1374,7 @@ impl Coordinator<'_> {
                     descriptor.trade_continuity,
                     !descriptor.presentation.depth_available,
                 );
+                book.calendar = self.calendar.for_instrument(&book.instrument.instrument_id);
                 book.set_depth_subscribed(depth_subscribed);
                 self.order_books.insert(identity, book);
             }
@@ -1452,18 +1456,8 @@ impl Coordinator<'_> {
             .catalog
             .get(&(series.provider_id.clone(), series.instrument_id.clone()))
             .is_some_and(|instrument| {
-                super::calendar::source_kind_for(instrument)
+                self.calendar.source_kind(&instrument.instrument_id)
                     == aeris_instruments::CalendarSourceKind::Unknown
-                    || (self
-                        .providers
-                        .descriptor(&series.provider_id)
-                        .is_some_and(|descriptor| {
-                            descriptor.live_model == super::LiveModel::TradeBuilt
-                        })
-                        && aeris_instruments::calendar::ExchangeCalendar::for_code(
-                            &instrument.venue_id,
-                        )
-                        .is_none())
             })
         {
             let error = "weekly or monthly live series requires a supported instrument calendar";
@@ -1789,6 +1783,7 @@ mod tests {
                 lanes: Vec::new(),
             },
             clock: Arc::new(super::super::clock::SystemClock),
+            calendar: super::super::calendar::MarketCalendarService::default(),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -3694,23 +3689,7 @@ mod tests {
             let clock = Arc::new(ScriptedClock::new(at_nanos));
             let mut coordinator = coordinator();
             coordinator.clock = Arc::clone(&clock) as Arc<dyn Clock>;
-            let mut installed = hyperliquid_instrument();
-            installed.provider = "ctrader".into();
-            installed.instrument_id = "instrument:ctrader:FX:EURUSD".into();
-            installed.provider_symbol = "EURUSD".into();
-            installed.venue_id = String::new();
-            installed.contract_metadata =
-                Some(Box::new(aeris_contracts::ProviderContractMetadata {
-                    session_hours: (1..=5)
-                        .map(|weekday| aeris_contracts::ProviderSessionHours {
-                            weekday,
-                            open_seconds: 0,
-                            close_seconds: 86_400,
-                            timezone: "UTC".into(),
-                        })
-                        .collect(),
-                    ..Default::default()
-                }));
+            let installed = ctrader_watchdog_fixture();
             let selected = BarSeriesKey {
                 provider_id: installed.provider.clone(),
                 instrument_id: installed.instrument_id.clone(),
@@ -3751,8 +3730,9 @@ mod tests {
             );
             coordinator.catalog.insert(
                 (installed.provider.clone(), installed.instrument_id.clone()),
-                installed,
+                installed.clone(),
             );
+            coordinator.calendar.resolve(&installed, None);
             let mut live = CandleLiveHandoff::with_clock(
                 selected.clone(),
                 provider_generation,
@@ -3785,6 +3765,26 @@ mod tests {
                 "{at}"
             );
         }
+    }
+
+    fn ctrader_watchdog_fixture() -> InstallProviderInstrument {
+        let mut installed = hyperliquid_instrument();
+        installed.provider = "ctrader".into();
+        installed.instrument_id = "instrument:ctrader:FX:EURUSD".into();
+        installed.provider_symbol = "EURUSD".into();
+        installed.venue_id = String::new();
+        installed.contract_metadata = Some(Box::new(aeris_contracts::ProviderContractMetadata {
+            session_hours: (1..=5)
+                .map(|weekday| aeris_contracts::ProviderSessionHours {
+                    weekday,
+                    open_seconds: 0,
+                    close_seconds: 86_400,
+                    timezone: "UTC".into(),
+                })
+                .collect(),
+            ..Default::default()
+        }));
+        installed
     }
 
     #[test]
@@ -4139,6 +4139,53 @@ mod tests {
     }
 
     #[test]
+    fn provider_holiday_event_is_generation_fenced_and_closes_watchdog_calendar() {
+        use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
+        use chrono::{DateTime, Utc};
+        let midday = "2026-08-17T18:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("fixture")
+            .timestamp_millis();
+        let (mut coordinator, _) = connected_rithmic_coordinator();
+        let instrument_id = instrument().instrument_id;
+        assert_eq!(
+            coordinator.calendar.phase(&instrument_id, midday),
+            aeris_instruments::SessionPhase::Open
+        );
+        let event = |generation| super::super::ProviderEvent {
+            provider: "rithmic",
+            generation,
+            kind: super::super::ProviderEventKind::Calendar {
+                instrument_id: instrument_id.clone(),
+                status: MarketSessionStatus {
+                    instrument_id: instrument_id.clone(),
+                    phase: MarketSessionPhase::Closed,
+                    source: MarketSessionSource::ProviderCalendar,
+                    session_start_unix_nanos: None,
+                    session_end_unix_nanos: None,
+                    next_open_unix_nanos: None,
+                },
+                valid_from_utc_ms: midday - 60_000,
+                valid_until_utc_ms: midday + 60_000,
+            },
+        };
+        coordinator.handle_provider_event(event(0));
+        assert_eq!(
+            coordinator.calendar.phase(&instrument_id, midday),
+            aeris_instruments::SessionPhase::Open
+        );
+        coordinator.handle_provider_event(event(1));
+        assert_eq!(
+            coordinator.calendar.phase(&instrument_id, midday),
+            aeris_instruments::SessionPhase::Closed
+        );
+        assert_eq!(
+            coordinator.calendar.phase(&instrument_id, midday + 120_000),
+            aeris_instruments::SessionPhase::Open
+        );
+    }
+
+    #[test]
     fn calendar_unknown_week_and_month_publish_explicit_market_demand_error() {
         let (mut coordinator, _) = connected_rithmic_coordinator();
         let consumer = consumer(1);
@@ -4146,6 +4193,7 @@ mod tests {
         coordinator.events.entry(consumer).or_default();
         let mut installed = instrument();
         installed.venue_id = "UNKNOWN".into();
+        coordinator.calendar.resolve(&installed, None);
         coordinator.catalog.insert(
             (installed.provider.clone(), installed.instrument_id.clone()),
             installed,
