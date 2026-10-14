@@ -193,6 +193,9 @@ fn violates_calendar_boundary(path: &str, source: &str) -> bool {
 
 fn violates_series_lifecycle_boundary(path: &str, source: &str) -> bool {
     let production = production_source_prefix(source);
+    if production.contains("SeriesLiveMap") {
+        return true;
+    }
     if path.ends_with("/coordinator.rs")
         && !production.contains("series: lifecycle::SeriesLifecycles")
     {
@@ -214,6 +217,10 @@ fn violates_series_lifecycle_boundary(path: &str, source: &str) -> bool {
         return true;
     }
     false
+}
+
+fn contains_retired_series_map(source: &str) -> bool {
+    production_source_prefix(source).contains("SeriesLiveMap")
 }
 
 fn public_provider_event_has_raw_generation(source: &str) -> bool {
@@ -260,9 +267,16 @@ fn inspect_directory(
                     .components()
                     .any(|component| component.as_os_str() == "src")
                 && let Ok(source) = fs::read_to_string(&path)
-                && contains_sensitive_debug(&production_source_prefix(&source))
             {
-                violations.push(relative);
+                let in_market_service = relative
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .starts_with("crates/market_runtime/src/market_service/");
+                if contains_sensitive_debug(&production_source_prefix(&source))
+                    || (in_market_service && contains_retired_series_map(&source))
+                {
+                    violations.push(relative);
+                }
             }
         }
     }
@@ -681,6 +695,20 @@ mod tests {
         assert!(production.contains("fn before()"));
         assert!(production.contains("fn after() { forbidden(); }"));
         assert!(!production.contains("fn hidden()"));
+    }
+
+    #[test]
+    fn retired_series_map_is_rejected_in_production_but_not_test_fixtures() {
+        assert!(!super::contains_retired_series_map(
+            "struct SeriesLifecycles;\n#[cfg(test)] mod tests { fn fixture() { let _ = \"SeriesLiveMap\"; } }\n"
+        ));
+        assert!(super::contains_retired_series_map(
+            "struct SeriesLifecycles;\n#[cfg(test)] mod tests { fn fixture() {} }\nstruct SeriesLiveMap;\n"
+        ));
+        assert!(super::violates_series_lifecycle_boundary(
+            "crates/market_runtime/src/market_service/lifecycle/mod.rs",
+            "struct SeriesLiveMap;"
+        ));
     }
 
     #[test]

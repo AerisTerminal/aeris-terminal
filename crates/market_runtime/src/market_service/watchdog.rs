@@ -5,8 +5,6 @@ use std::time::{Duration, Instant};
 use aeris_instruments::SessionPhase;
 use aeris_market_engine::ProviderHealth;
 
-use super::LiveHistoryState;
-
 pub(super) const OPEN_STALL_THRESHOLD: Duration = Duration::from_secs(30);
 /// Unknown calendars receive ten times the open-market grace period.
 pub(super) const UNKNOWN_STALL_THRESHOLD: Duration = Duration::from_secs(300);
@@ -17,9 +15,9 @@ pub(super) fn stalled(
     health: ProviderHealth,
     phase: SessionPhase,
     connected: bool,
-    history: LiveHistoryState,
+    history_ready: bool,
 ) -> bool {
-    if health != ProviderHealth::Online || !connected || history != LiveHistoryState::Ready {
+    if health != ProviderHealth::Online || !connected || !history_ready {
         return false;
     }
     let threshold = match phase {
@@ -49,14 +47,7 @@ mod tests {
             ("hyperliquid", SessionPhase::AlwaysOpen),
         ] {
             assert!(
-                stalled(
-                    now,
-                    old,
-                    ProviderHealth::Online,
-                    phase,
-                    true,
-                    LiveHistoryState::Ready
-                ),
+                stalled(now, old, ProviderHealth::Online, phase, true, true),
                 "{provider}"
             );
         }
@@ -72,7 +63,7 @@ mod tests {
             ProviderHealth::Online,
             SessionPhase::Closed,
             true,
-            LiveHistoryState::Ready,
+            true,
         ));
     }
 
@@ -85,7 +76,7 @@ mod tests {
             ProviderHealth::Online,
             SessionPhase::Unknown,
             true,
-            LiveHistoryState::Ready,
+            true,
         ));
         assert!(stalled(
             now,
@@ -94,7 +85,7 @@ mod tests {
             ProviderHealth::Online,
             SessionPhase::Unknown,
             true,
-            LiveHistoryState::Ready,
+            true,
         ));
     }
 }

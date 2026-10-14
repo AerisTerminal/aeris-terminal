@@ -1,5 +1,7 @@
-//! Coordinator-owned per-series candle lifecycle.
+//! Coordinator-owned per-series market lifecycle.
 mod handlers;
+mod trade_model;
+pub(super) use trade_model::TradeModel;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -13,8 +15,8 @@ use aeris_market_engine::ProviderGeneration;
 use aeris_market_engine::fence::{Epoch, ProviderTag};
 
 use super::{
-    CandleGapPolicy, Coordinator, LIVE_BUFFER_CAPACITY, SeriesLoadState, TradeLiveHandoff,
-    clock::Clock, history::tracker::HistoryTicket,
+    CandleGapPolicy, Coordinator, IndexedTradeMutation, LIVE_BUFFER_CAPACITY, MarketTrade,
+    SeriesLoadState, TradeHandoffSeed, clock::Clock, history::tracker::HistoryTicket,
 };
 pub(super) use crate::SeriesPresentationStatus as PresentationStatus;
 
@@ -25,14 +27,13 @@ pub(crate) struct FormingBar {
     pub(crate) trades: Option<u32>,
 }
 
-/// M3.1 moves candle ownership here; trade-built state enters this same map in M3.2.
-pub(super) enum SeriesLive {
-    TradeBuilt(TradeLiveHandoff),
-    ProviderCandles(SeriesLifecycle),
+enum LifecycleModel {
+    TradeHandoff(Box<TradeModel>),
+    CandleOverlay,
 }
 
 #[derive(Default)]
-pub(super) struct SeriesLifecycles(pub(super) BTreeMap<BarSeriesKey, SeriesLive>);
+pub(super) struct SeriesLifecycles(BTreeMap<BarSeriesKey, SeriesLifecycle>);
 
 impl SeriesLifecycles {
     pub(super) fn trade_contains_key(&self, series: &BarSeriesKey) -> bool {
@@ -49,97 +50,95 @@ impl SeriesLifecycles {
     pub(super) fn candles_are_empty(&self) -> bool {
         self.candle_keys().next().is_none()
     }
-    pub(super) fn trade(&self, series: &BarSeriesKey) -> Option<&TradeLiveHandoff> {
-        match self.0.get(series)? {
-            SeriesLive::TradeBuilt(live) => Some(live),
-            SeriesLive::ProviderCandles(_) => None,
-        }
+    pub(super) fn trade(&self, series: &BarSeriesKey) -> Option<&TradeModel> {
+        self.0.get(series)?.trade_model()
     }
-    pub(super) fn trade_mut(&mut self, series: &BarSeriesKey) -> Option<&mut TradeLiveHandoff> {
-        match self.0.get_mut(series)? {
-            SeriesLive::TradeBuilt(live) => Some(live),
-            SeriesLive::ProviderCandles(_) => None,
-        }
+    pub(super) fn trade_mut(&mut self, series: &BarSeriesKey) -> Option<&mut TradeModel> {
+        self.0.get_mut(series)?.trade_model_mut()
+    }
+    pub(super) fn trade_lifecycle(&self, series: &BarSeriesKey) -> Option<&SeriesLifecycle> {
+        self.0
+            .get(series)
+            .filter(|live| live.trade_model().is_some())
+    }
+    pub(super) fn trade_lifecycle_mut(
+        &mut self,
+        series: &BarSeriesKey,
+    ) -> Option<&mut SeriesLifecycle> {
+        self.0
+            .get_mut(series)
+            .filter(|live| live.trade_model().is_some())
     }
     pub(super) fn candle(&self, series: &BarSeriesKey) -> Option<&SeriesLifecycle> {
-        match self.0.get(series)? {
-            SeriesLive::ProviderCandles(live) => Some(live),
-            SeriesLive::TradeBuilt(_) => None,
-        }
+        self.0.get(series).filter(|live| live.is_candle())
     }
     pub(super) fn candle_mut(&mut self, series: &BarSeriesKey) -> Option<&mut SeriesLifecycle> {
-        match self.0.get_mut(series)? {
-            SeriesLive::ProviderCandles(live) => Some(live),
-            SeriesLive::TradeBuilt(_) => None,
-        }
+        self.0.get_mut(series).filter(|live| live.is_candle())
     }
-    pub(super) fn insert_trade(&mut self, series: BarSeriesKey, live: TradeLiveHandoff) {
-        self.0.insert(series, SeriesLive::TradeBuilt(live));
+    pub(super) fn insert_trade(&mut self, series: BarSeriesKey, live: TradeModel) {
+        self.0.insert(series, SeriesLifecycle::from_trade(live));
     }
     pub(super) fn insert_candle(&mut self, series: BarSeriesKey, live: SeriesLifecycle) {
-        self.0.insert(series, SeriesLive::ProviderCandles(live));
+        self.0.insert(series, live);
     }
     pub(super) fn trade_keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
-        self.0.iter().filter_map(|(series, live)| {
-            matches!(live, SeriesLive::TradeBuilt(_)).then_some(series)
-        })
+        self.0
+            .iter()
+            .filter_map(|(series, live)| live.trade_model().map(|_| series))
     }
     pub(super) fn candle_keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
-        self.0.iter().filter_map(|(series, live)| {
-            matches!(live, SeriesLive::ProviderCandles(_)).then_some(series)
-        })
+        self.0
+            .iter()
+            .filter_map(|(series, live)| live.is_candle().then_some(series))
+    }
+    pub(super) fn keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
+        self.0.keys()
+    }
+    pub(super) fn iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&BarSeriesKey, &mut SeriesLifecycle)> {
+        self.0.iter_mut()
     }
     pub(super) fn candle_iter(&self) -> impl Iterator<Item = (&BarSeriesKey, &SeriesLifecycle)> {
-        self.0.iter().filter_map(|(series, live)| match live {
-            SeriesLive::ProviderCandles(live) => Some((series, live)),
-            SeriesLive::TradeBuilt(_) => None,
-        })
+        self.0.iter().filter(|(_, live)| live.is_candle())
     }
     pub(super) fn candle_iter_mut(
         &mut self,
     ) -> impl Iterator<Item = (&BarSeriesKey, &mut SeriesLifecycle)> {
-        self.0.iter_mut().filter_map(|(series, live)| match live {
-            SeriesLive::ProviderCandles(live) => Some((series, live)),
-            SeriesLive::TradeBuilt(_) => None,
-        })
+        self.0.iter_mut().filter(|(_, live)| live.is_candle())
     }
-    pub(super) fn trade_values_mut(&mut self) -> impl Iterator<Item = &mut TradeLiveHandoff> {
-        self.0.values_mut().filter_map(|live| match live {
-            SeriesLive::TradeBuilt(live) => Some(live),
-            SeriesLive::ProviderCandles(_) => None,
-        })
-    }
-    pub(super) fn candle_values_mut(&mut self) -> impl Iterator<Item = &mut SeriesLifecycle> {
-        self.0.values_mut().filter_map(|live| match live {
-            SeriesLive::ProviderCandles(live) => Some(live),
-            SeriesLive::TradeBuilt(_) => None,
-        })
+    pub(super) fn values_mut(&mut self) -> impl Iterator<Item = &mut SeriesLifecycle> {
+        self.0.values_mut()
     }
     pub(super) fn trade_iter_mut(
         &mut self,
-    ) -> impl Iterator<Item = (&BarSeriesKey, &mut TradeLiveHandoff)> {
-        self.0.iter_mut().filter_map(|(series, live)| match live {
-            SeriesLive::TradeBuilt(live) => Some((series, live)),
-            SeriesLive::ProviderCandles(_) => None,
-        })
+    ) -> impl Iterator<Item = (&BarSeriesKey, &mut TradeModel)> {
+        self.0
+            .iter_mut()
+            .filter_map(|(series, live)| live.trade_model_mut().map(|model| (series, model)))
+    }
+    pub(super) fn trade_lifecycle_iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&BarSeriesKey, &mut SeriesLifecycle)> {
+        self.0
+            .iter_mut()
+            .filter(|(_, live)| live.trade_model().is_some())
     }
     pub(super) fn retain_trades(
         &mut self,
-        mut keep: impl FnMut(&BarSeriesKey, &mut TradeLiveHandoff) -> bool,
+        mut keep: impl FnMut(&BarSeriesKey, &mut TradeModel) -> bool,
     ) {
-        self.0.retain(|series, live| match live {
-            SeriesLive::TradeBuilt(live) => keep(series, live),
-            SeriesLive::ProviderCandles(_) => true,
+        self.0.retain(|series, live| {
+            live.trade_model_mut()
+                .is_none_or(|model| keep(series, model))
         });
     }
     pub(super) fn retain_candles(
         &mut self,
         mut keep: impl FnMut(&BarSeriesKey, &mut SeriesLifecycle) -> bool,
     ) {
-        self.0.retain(|series, live| match live {
-            SeriesLive::ProviderCandles(live) => keep(series, live),
-            SeriesLive::TradeBuilt(_) => true,
-        });
+        self.0
+            .retain(|series, live| !live.is_candle() || keep(series, live));
     }
 }
 
@@ -263,12 +262,14 @@ impl EffectBuf {
 }
 
 pub(super) struct SeriesLifecycle {
+    model: LifecycleModel,
     pub(super) clock: Arc<dyn Clock>,
     pub(super) series: BarSeriesKey,
     pub(super) generation: ProviderGeneration,
     pub(super) gap_policy: CandleGapPolicy,
-    pub(super) wire_coin: String,
-    pub(super) interval: String,
+    pub(super) wire_symbol: String,
+    wire_coin: String,
+    wire_interval: String,
     pub(super) price_scale: u8,
     pub(super) quantity_scale: u8,
     pub(super) bars: Vec<MarketBar>,
@@ -283,21 +284,225 @@ pub(super) struct SeriesLifecycle {
 }
 
 impl SeriesLifecycle {
+    pub(super) fn from_trade(trade: TradeModel) -> Self {
+        let mut lifecycle = Self::with_clock(
+            trade.series.clone(),
+            trade.generation,
+            "",
+            "",
+            trade.gap_policy,
+            Arc::clone(&trade.clock),
+        );
+        lifecycle.wire_symbol = trade.candle_symbol.clone().unwrap_or_default();
+        lifecycle.connected = trade.connected;
+        lifecycle.model = LifecycleModel::TradeHandoff(Box::new(trade));
+        lifecycle
+    }
+
+    fn is_candle(&self) -> bool {
+        matches!(self.model, LifecycleModel::CandleOverlay)
+    }
+
+    pub(super) fn matches_candle_symbol(
+        &self,
+        symbol: &super::provider_event::ProviderCandleSymbol,
+    ) -> bool {
+        symbol.matches(
+            &self.wire_symbol,
+            self.is_candle().then_some(self.wire_coin.as_str()),
+            self.is_candle().then_some(self.wire_interval.as_str()),
+        )
+    }
+
+    pub(super) fn trade_model(&self) -> Option<&TradeModel> {
+        match &self.model {
+            LifecycleModel::TradeHandoff(model) => Some(model.as_ref()),
+            LifecycleModel::CandleOverlay => None,
+        }
+    }
+
+    pub(super) fn trade_model_mut(&mut self) -> Option<&mut TradeModel> {
+        match &mut self.model {
+            LifecycleModel::TradeHandoff(model) => Some(model.as_mut()),
+            LifecycleModel::CandleOverlay => None,
+        }
+    }
+
+    pub(super) fn begin_trade_history_reseed(&mut self) {
+        if !self.history_ready() {
+            return;
+        }
+        let Some(trade) = self.trade_model_mut() else {
+            return;
+        };
+        trade.begin_history_reseed();
+        self.state = SeriesState::Recovering {
+            reason: RecoveryReason::DetachedWindow,
+            ticket: None,
+        };
+    }
+
+    pub(super) fn cancel_trade_history_reseed(&mut self) -> Result<(), String> {
+        if !matches!(
+            self.state,
+            SeriesState::Recovering {
+                reason: RecoveryReason::DetachedWindow,
+                ..
+            }
+        ) {
+            return Ok(());
+        }
+        let Some(trade) = self.trade_model_mut() else {
+            return Ok(());
+        };
+        trade.cancel_history_reseed()?;
+        self.state = SeriesState::Live {
+            last_progress: self.clock.monotonic(),
+            observed_live: false,
+        };
+        Ok(())
+    }
+
+    pub(super) fn seed_trade(&mut self, seed: TradeHandoffSeed<'_>) -> Result<(), String> {
+        let Some(trade) = self.trade_model_mut() else {
+            return Err("Trade-built lifecycle is unavailable".into());
+        };
+        trade.seed(
+            seed.price_scale,
+            seed.quantity_scale,
+            seed.bars,
+            seed.forming,
+            seed.handoff_boundary_unix_nanos,
+        )?;
+        self.state = SeriesState::Live {
+            last_progress: self.clock.monotonic(),
+            observed_live: false,
+        };
+        Ok(())
+    }
+
+    pub(super) fn recover_trade(&mut self, reason: RecoveryReason) {
+        let Some(trade) = self.trade_model_mut() else {
+            return;
+        };
+        trade.dirty = false;
+        trade.buffered.clear();
+        trade.pending_publications.clear();
+        trade.pending_corrections.clear();
+        self.state = SeriesState::Recovering {
+            reason,
+            ticket: None,
+        };
+    }
+
+    pub(super) fn reset_trade(&mut self, generation: ProviderGeneration) {
+        if let Some(trade) = self.trade_model_mut() {
+            trade.reset(generation);
+            self.generation = generation;
+            self.connected = false;
+            self.epoch = None;
+            self.state = SeriesState::Requested { provider: None };
+        }
+    }
+
+    pub(super) fn mark_trade_online(&mut self) -> bool {
+        let ready = self.history_ready();
+        let Some(trade) = self.trade_model_mut() else {
+            return false;
+        };
+        trade.connected = true;
+        self.connected = true;
+        if ready {
+            self.state = SeriesState::Live {
+                last_progress: self.clock.monotonic(),
+                observed_live: false,
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn accept_trade(&mut self, trade: &MarketTrade) -> Result<(), String> {
+        let ready = self.history_ready();
+        let Some(model) = self.trade_model_mut() else {
+            return Err("Trade-built lifecycle is unavailable".into());
+        };
+        if ready {
+            model.accept_trade(trade)?;
+        } else {
+            model.buffer_trade(trade)?;
+        }
+        self.mark_trade_progress();
+        Ok(())
+    }
+
+    pub(super) fn accept_indexed_trade(
+        &mut self,
+        change: &IndexedTradeMutation,
+    ) -> Result<(), String> {
+        let ready = self.history_ready();
+        let Some(model) = self.trade_model_mut() else {
+            return Err("Trade-built lifecycle is unavailable".into());
+        };
+        if ready {
+            model.accept_indexed_trade(change)?;
+        } else {
+            model.buffer_indexed_trade(change)?;
+        }
+        self.mark_trade_progress();
+        Ok(())
+    }
+
+    pub(super) fn accept_trade_candle(
+        &mut self,
+        symbol: &str,
+        candle: super::ProviderCandle,
+    ) -> Result<(), String> {
+        let ready = self.history_ready();
+        let Some(model) = self.trade_model_mut() else {
+            return Err("Trade-built lifecycle is unavailable".into());
+        };
+        if ready {
+            model.accept_provider_candle(symbol, candle)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn take_trade_publication(&mut self) -> Option<super::LiveSeriesPublication> {
+        if !self.history_ready() {
+            return None;
+        }
+        self.trade_model_mut()?.take_publication()
+    }
+
+    fn mark_trade_progress(&mut self) {
+        if self.history_ready() && self.trade_model().is_some_and(|model| model.dirty) {
+            self.state = SeriesState::Live {
+                last_progress: self.clock.monotonic(),
+                observed_live: true,
+            };
+        }
+    }
+
     pub(super) fn with_clock(
         series: BarSeriesKey,
         generation: ProviderGeneration,
-        wire_coin: String,
-        interval: String,
+        wire_coin: &str,
+        interval: &str,
         gap_policy: CandleGapPolicy,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
+            model: LifecycleModel::CandleOverlay,
             clock,
             series,
             generation,
             gap_policy,
-            wire_coin,
-            interval,
+            wire_symbol: format!("{wire_coin}{{={interval}}}"),
+            wire_coin: wire_coin.to_owned(),
+            wire_interval: interval.to_owned(),
             price_scale: 0,
             quantity_scale: 0,
             bars: Vec::new(),
@@ -721,8 +926,8 @@ mod tests {
         let lifecycle = SeriesLifecycle::with_clock(
             series.clone(),
             ProviderGeneration(NonZeroU64::new(1).expect("generation")),
-            "BTC".into(),
-            "1m".into(),
+            "BTC",
+            "1m",
             CandleGapPolicy::Contiguous,
             clock.clone(),
         );
@@ -754,6 +959,267 @@ mod tests {
             &mut effects,
         );
         effects
+    }
+
+    #[test]
+    fn cached_candle_demand_identity_matches_wire_fields_without_event_formatting() {
+        use super::super::provider_event::ProviderCandleSymbol;
+
+        let (live, _, _, _) = fixture();
+        let event = |coin: &str, interval: &str| ProviderCandleSymbol::CoinInterval {
+            coin: coin.into(),
+            interval: interval.into(),
+        };
+        assert!(live.matches_candle_symbol(&event("BTC", "1m")));
+        assert!(!live.matches_candle_symbol(&event("ETH", "1m")));
+        assert!(!live.matches_candle_symbol(&event("BTC", "5m")));
+        assert!(live.matches_candle_symbol(&ProviderCandleSymbol::Wire("BTC{=1m}".into())));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum LifecycleCase {
+        CandleOverlay,
+        Indexed,
+        Sequence,
+    }
+
+    fn case_fixture(
+        case: LifecycleCase,
+    ) -> (
+        SeriesLifecycle,
+        Arc<ScriptedClock>,
+        Epoch<ProviderTag>,
+        HistoryTicket,
+    ) {
+        let (mut live, clock, epoch, mut ticket) = fixture();
+        if !matches!(case, LifecycleCase::CandleOverlay) {
+            live.series.provider_id = match case {
+                LifecycleCase::Indexed => "tastytrade",
+                LifecycleCase::Sequence => "rithmic",
+                LifecycleCase::CandleOverlay => unreachable!(),
+            }
+            .into();
+            live.series.instrument_id = format!("{}:BTC", live.series.provider_id);
+            ticket.series = live.series.clone();
+            live = SeriesLifecycle::from_trade(
+                TradeModel::with_clock(&live.series, live.generation, "CME", None, clock.clone())
+                    .expect("time-series trade model"),
+            );
+        }
+        (live, clock, epoch, ticket)
+    }
+
+    fn bar_at(minute: i64, sequence: u64) -> MarketBar {
+        let nanos = minute * 60_000_000_000;
+        MarketBar {
+            source_sequence: sequence,
+            exchange_timestamp_seconds: nanos.div_euclid(1_000_000_000),
+            exchange_timestamp_unix_nanos: nanos,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+        }
+    }
+
+    fn seed_case(
+        case: LifecycleCase,
+        live: &mut SeriesLifecycle,
+        completed: &[MarketBar],
+        forming: MarketBar,
+    ) {
+        let handoff_boundary = forming.exchange_timestamp_unix_nanos;
+        let forming = Some(FormingBar {
+            bar: forming,
+            trades: Some(1),
+        });
+        match case {
+            LifecycleCase::CandleOverlay => {
+                live.seed(2, 0, completed, forming).expect("candle seam");
+            }
+            LifecycleCase::Indexed | LifecycleCase::Sequence => {
+                live.seed_trade(TradeHandoffSeed {
+                    price_scale: 2,
+                    quantity_scale: 0,
+                    bars: completed,
+                    forming,
+                    handoff_boundary_unix_nanos: Some(handoff_boundary),
+                })
+                .expect("trade seam");
+            }
+        }
+    }
+
+    fn ingest_case(case: LifecycleCase, live: &mut SeriesLifecycle) {
+        use aeris_market_data::{AggressorSide, EventMetadata, QualifiedTimestamp};
+
+        if matches!(case, LifecycleCase::CandleOverlay) {
+            live.accept_bar(bar_at(3, 4)).expect("next candle");
+            return;
+        }
+        let timestamp = bar_at(3, 4).exchange_timestamp_unix_nanos + 1;
+        let trade = MarketTrade {
+            metadata: EventMetadata {
+                provider_id: live.series.provider_id.clone(),
+                instrument_id: live.series.instrument_id.clone(),
+                entitlement_id: live.series.entitlement_id.clone(),
+                source_sequence: 7,
+                session_generation: 1,
+                timestamps: QualifiedTimestamp {
+                    exchange_unix_nanos: Some(timestamp),
+                    provider_unix_nanos: None,
+                    received_unix_nanos: timestamp,
+                },
+            },
+            trade_id: "next".into(),
+            price: 101,
+            quantity: 1,
+            aggressor: AggressorSide::Unknown,
+        };
+        match case {
+            LifecycleCase::Indexed => live
+                .accept_indexed_trade(&IndexedTradeMutation {
+                    index: "next".into(),
+                    kind: super::super::IndexedTradeKind::New,
+                    source_sequence: 7,
+                    trade: Some(trade),
+                })
+                .expect("indexed mutation"),
+            LifecycleCase::Sequence => live.accept_trade(&trade).expect("sequence trade"),
+            LifecycleCase::CandleOverlay => unreachable!(),
+        }
+    }
+
+    fn assert_contiguous_one_forming(case: LifecycleCase, live: &SeriesLifecycle) {
+        let (completed, forming) = match case {
+            LifecycleCase::CandleOverlay => (
+                live.bars.as_slice(),
+                live.forming.expect("one forming candle").bar,
+            ),
+            LifecycleCase::Indexed | LifecycleCase::Sequence => {
+                let model = live.trade_model().expect("trade model");
+                let (forming, completed) = model.bars.split_last().expect("forming bar");
+                assert_eq!(model.forming_tail_sequence, Some(forming.source_sequence));
+                (completed, *forming)
+            }
+        };
+        assert_eq!(
+            completed
+                .iter()
+                .map(|bar| bar.exchange_timestamp_unix_nanos)
+                .collect::<Vec<_>>(),
+            (0..3)
+                .map(|minute| bar_at(minute, 1).exchange_timestamp_unix_nanos)
+                .collect::<Vec<_>>(),
+            "{case:?}: contiguous completed history"
+        );
+        assert_eq!(
+            forming.exchange_timestamp_unix_nanos,
+            bar_at(3, 4).exchange_timestamp_unix_nanos,
+            "{case:?}: exactly one open period"
+        );
+    }
+
+    #[test]
+    fn lifecycle_contract_is_shared_by_candle_indexed_and_sequence_models() {
+        for case in [
+            LifecycleCase::CandleOverlay,
+            LifecycleCase::Indexed,
+            LifecycleCase::Sequence,
+        ] {
+            let (mut live, clock, epoch, ticket) = case_fixture(case);
+            let online = step(
+                &mut live,
+                clock.as_ref(),
+                SessionPhase::AlwaysOpen,
+                SeriesInput::Online(epoch),
+            );
+            assert!(
+                matches!(live.state(), SeriesState::Seeding { .. }),
+                "{case:?}"
+            );
+            assert!(
+                online
+                    .iter()
+                    .any(|effect| effect == SeriesEffect::RequestHistory)
+            );
+            step(
+                &mut live,
+                clock.as_ref(),
+                SessionPhase::AlwaysOpen,
+                SeriesInput::HistoryRequested(&ticket),
+            );
+            let stale = HistoryTicket {
+                seq: 2,
+                ..ticket.clone()
+            };
+            step(
+                &mut live,
+                clock.as_ref(),
+                SessionPhase::AlwaysOpen,
+                SeriesInput::Seeded(Some(&stale)),
+            );
+            assert_eq!(live.stale_inputs, 1, "{case:?}: retired ticket rejected");
+            assert!(!live.history_ready());
+            step(
+                &mut live,
+                clock.as_ref(),
+                SessionPhase::AlwaysOpen,
+                SeriesInput::Seeded(Some(&ticket)),
+            );
+            seed_case(case, &mut live, &[bar_at(0, 1), bar_at(1, 2)], bar_at(2, 3));
+            live.connected = true;
+            if live.trade_model().is_some() {
+                live.mark_trade_online();
+            }
+            assert!(live.history_ready(), "{case:?}: history-ready");
+            ingest_case(case, &mut live);
+            assert_contiguous_one_forming(case, &live);
+            step(
+                &mut live,
+                clock.as_ref(),
+                SessionPhase::Open,
+                SeriesInput::Recover(RecoveryReason::SequenceGap),
+            );
+            if live.trade_model().is_some() {
+                live.recover_trade(RecoveryReason::SequenceGap);
+            }
+            assert!(
+                matches!(
+                    live.state(),
+                    SeriesState::Recovering {
+                        reason: RecoveryReason::SequenceGap,
+                        ..
+                    }
+                ),
+                "{case:?}"
+            );
+            let rejoin_ticket = HistoryTicket {
+                seq: 3,
+                ..ticket.clone()
+            };
+            step(
+                &mut live,
+                clock.as_ref(),
+                SessionPhase::Open,
+                SeriesInput::HistoryRequested(&rejoin_ticket),
+            );
+            step(
+                &mut live,
+                clock.as_ref(),
+                SessionPhase::Open,
+                SeriesInput::Seeded(Some(&rejoin_ticket)),
+            );
+            seed_case(
+                case,
+                &mut live,
+                &[bar_at(0, 1), bar_at(1, 2), bar_at(2, 3)],
+                bar_at(3, 4),
+            );
+            assert_contiguous_one_forming(case, &live);
+            assert!(live.history_ready(), "{case:?}: rejoined after recovery");
+        }
     }
 
     #[test]

@@ -550,7 +550,7 @@ impl Coordinator<'_> {
         } else if self.provider_uses_candles(&series.provider_id) {
             self.restore_candle_from_snapshot(series, snapshot)?;
         } else {
-            self.start_rithmic_realtime_from_snapshot(series, snapshot)?;
+            self.restore_trade_from_snapshot(series, snapshot)?;
         }
         Ok(needs_covering_repair)
     }
@@ -820,8 +820,8 @@ impl Coordinator<'_> {
             if let Some(live) = self.series.candle_mut(series) {
                 live.begin_history_reseed();
             }
-        } else if let Some(live) = self.series.trade_mut(series) {
-            live.begin_history_reseed();
+        } else if let Some(live) = self.series.trade_lifecycle_mut(series) {
+            live.begin_trade_history_reseed();
         }
     }
 
@@ -830,8 +830,8 @@ impl Coordinator<'_> {
             if let Some(live) = self.series.candle_mut(series) {
                 live.cancel_history_reseed()?;
             }
-        } else if let Some(live) = self.series.trade_mut(series) {
-            live.cancel_history_reseed()?;
+        } else if let Some(live) = self.series.trade_lifecycle_mut(series) {
+            live.cancel_trade_history_reseed()?;
         }
         Ok(())
     }
@@ -1211,7 +1211,7 @@ impl Coordinator<'_> {
             let realigned = if self.provider_uses_candles(&series.provider_id) {
                 self.restore_candle_from_snapshot(series, &canonical)
             } else {
-                self.start_rithmic_realtime_from_snapshot(series, &canonical)
+                self.restore_trade_from_snapshot(series, &canonical)
             };
             if realigned.is_err() {
                 self.history_failed(series, generation);
@@ -1382,8 +1382,8 @@ impl Coordinator<'_> {
 
     fn live_history_ready(&self, series: &BarSeriesKey) -> bool {
         self.series
-            .trade(series)
-            .is_some_and(|live| live.history_state == super::LiveHistoryState::Ready)
+            .trade_lifecycle(series)
+            .is_some_and(super::lifecycle::SeriesLifecycle::history_ready)
             || self
                 .series
                 .candle(series)
@@ -1530,9 +1530,8 @@ impl Coordinator<'_> {
                 self.fail_history_handoff(series, &error);
                 return None;
             }
-        } else if let Err(error) = self.finish_rithmic_history_handoff(
+        } else if let Err(error) = self.install_trade_seed(
             series,
-            generation,
             TradeHandoffSeed {
                 price_scale,
                 quantity_scale,
@@ -1696,99 +1695,6 @@ impl Coordinator<'_> {
             replace_window: detached_from_live || rejoining_current,
             detached_from_live,
         })
-    }
-
-    /// Seeds the live aggregator from installed history and drains its buffer.
-    /// Closed buckets seed completed history, the last forming bucket seeds the
-    /// open period, and trades buffered during the fetch close the seam.
-    pub(super) fn start_rithmic_realtime_from_snapshot(
-        &mut self,
-        series: &BarSeriesKey,
-        snapshot: &aeris_market_engine::SeriesSnapshot,
-    ) -> Result<(), String> {
-        self.ensure_realtime(series)?;
-        // A retained series whose newest bar is still forming hands that bar over
-        // as the open period rather than as closed history, so the first live
-        // trade revises it instead of being dropped against a bar the provider
-        // never closed.
-        let (bars, forming) = match snapshot.bars.split_last() {
-            Some((last, head)) if snapshot.forming => (
-                head,
-                Some(FormingBar {
-                    bar: *last,
-                    trades: None,
-                }),
-            ),
-            _ => (snapshot.bars.as_ref(), None),
-        };
-        let handoff_boundary_unix_nanos = snapshot
-            .bars
-            .last()
-            .map(|bar| bar.exchange_timestamp_unix_nanos);
-        if self.seed_rithmic_history(
-            series,
-            snapshot.provider_generation,
-            TradeHandoffSeed {
-                price_scale: snapshot.price_scale,
-                quantity_scale: snapshot.quantity_scale,
-                bars,
-                forming,
-                handoff_boundary_unix_nanos,
-            },
-        ) {
-            Ok(())
-        } else {
-            Err("Rithmic cached history/live handoff failed".to_string())
-        }
-    }
-
-    pub(super) fn finish_rithmic_history_handoff(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        seed: TradeHandoffSeed<'_>,
-    ) -> Result<(), String> {
-        if self.providers.live_model(&series.provider_id) != Some(super::LiveModel::TradeBuilt) {
-            return Ok(());
-        }
-        self.ensure_realtime(series)?;
-        self.seed_rithmic_history(series, generation, seed)
-            .then_some(())
-            .ok_or_else(|| "Rithmic history/live handoff failed".to_string())
-    }
-
-    pub(super) fn seed_rithmic_history(
-        &mut self,
-        series: &BarSeriesKey,
-        _generation: ProviderGeneration,
-        seed: TradeHandoffSeed<'_>,
-    ) -> bool {
-        let Some(live) = self.series.trade_mut(series) else {
-            return true;
-        };
-        let TradeHandoffSeed {
-            price_scale,
-            quantity_scale,
-            bars,
-            forming,
-            handoff_boundary_unix_nanos,
-        } = seed;
-        if live
-            .seed(
-                price_scale,
-                quantity_scale,
-                bars,
-                forming,
-                handoff_boundary_unix_nanos,
-            )
-            .is_ok()
-        {
-            return true;
-        }
-        live.history_state = super::LiveHistoryState::AwaitingHistory;
-        live.dirty = false;
-        self.broadcast_series_recovery_for(series, "Rithmic history/live handoff failed");
-        false
     }
 
     pub(super) fn prune_history_tracking(&mut self) {

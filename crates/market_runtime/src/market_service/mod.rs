@@ -705,13 +705,8 @@ struct IndexedTradeMutation {
     trade: Option<MarketTrade>,
 }
 
-#[derive(Clone)]
-enum TradeLiveUpdate {
-    Append(MarketTrade),
-    Indexed(IndexedTradeMutation),
-}
-
 mod lifecycle;
+use lifecycle::TradeModel;
 mod provider_event;
 mod realtime;
 mod watchdog;
@@ -719,54 +714,6 @@ use provider_event::{
     ProviderCandle, ProviderDisconnect, ProviderEpochRegistry, ProviderEvent, ProviderEventKind,
     ProviderTradeBatch, WireProviderEvent,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LiveHistoryState {
-    AwaitingHistory,
-    Ready,
-    Reseeding,
-}
-
-struct TradeLiveHandoff {
-    clock: Arc<dyn clock::Clock>,
-    calendar: calendar::MarketCalendarService,
-    series: BarSeriesKey,
-    generation: ProviderGeneration,
-    cadence: TradeLiveCadence,
-    gap_policy: CandleGapPolicy,
-    candle_symbol: Option<String>,
-    price_scale: u8,
-    quantity_scale: u8,
-    bars: Vec<MarketBar>,
-    buffered: VecDeque<TradeLiveUpdate>,
-    pending_publications: VecDeque<MarketBar>,
-    pending_corrections: VecDeque<MarketBar>,
-    connected: bool,
-    history_state: LiveHistoryState,
-    dirty: bool,
-    /// The sequence of the period the provider caught open, when it caught one.
-    ///
-    /// Live trades revise an open period in place; they may never touch a period
-    /// the provider has closed. Without this the two are indistinguishable, and
-    /// the first trade of a freshly seeded chart was dropped rather than folded
-    /// into the candle it belongs to.
-    forming_tail_sequence: Option<u64>,
-    live_session_generation: Option<u64>,
-    last_trade_sequence: Option<u64>,
-    history_boundary_unix_nanos: i64,
-    overlay_base: Option<MarketBar>,
-    indexed_overlay: BTreeMap<String, MarketTrade>,
-    provider_candle_count: Option<u64>,
-    provider_candle_timestamp: Option<i64>,
-    last_publication_at: Instant,
-    last_trade_at: Option<Instant>,
-}
-
-enum TradeLiveCadence {
-    Fixed { seconds: i64 },
-    Tick { trades: u32, forming: u32 },
-    Calendar { period: calendar::CalendarBarPeriod },
-}
 
 /// One live publication for a series. Live handoffs publish only incremental
 /// tails; covering history remains owned by `MarketEngine` and is never copied

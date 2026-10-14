@@ -104,7 +104,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | closed in this commit |
 | MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | closed in this commit |
 | MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | open |
-| MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | open |
+| MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | closed in this commit |
 | MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in this commit |
 | MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | open |
 | MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in this commit |
@@ -112,9 +112,9 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
 | MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in this commit |
 | MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup closed in this commit; remaining wrappers/order-book demand open |
-| MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | open |
+| MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | closed in this commit; the bounded Indexed correction overlay still recomputes its retained bars |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
-| MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history doc comments closed in this commit; other items open |
+| MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments and M3.2 trade retention, demand-dirty and provider wording closed in this commit; other items open |
 | MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | open |
 | TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | open |
@@ -410,7 +410,10 @@ Status: in progress
   - Moved cTrader and Hyperliquid candle state, the single forming bar, seed/recovery transitions, bounded publications and presentation status into `lifecycle::SeriesLifecycle`; removed the old candle handlers and publisher. History uses its exact tracker ticket and the engine remains the canonical completed-bar owner.
   - Scripted lifecycle transitions, published status order, four coordinator characterization scenarios, crate-scoped tests and the full fmt/workspace Clippy/workspace test/naming gate passed. Isolated Hyperliquid 1m had 1,599 bars, zero gaps and forming updates; EURUSD demo had 1,600 bars and live updates.
   - EURUSD's 10 interior gaps are provider omissions, not Aeris-created: an opt-in diagnostic of the **raw decoded cTrader trendbar page** showed exactly 10 gaps (44 missing minutes; starts in UTC seconds: 1791923340, 1791925200, 1791925320, 1791925500, 1791927060, 1791927180, 1791927480, 1791927660, 1791933900, 1791934320). The pre-M3 M2 binary on a separate isolated root showed the same 10 gaps over the overlapping interval; no history-page seam falls in these 10 gaps. The temporary raw-page logger was removed after capture. No credentials or account identifiers were recorded.
-- [ ] M3.2 series-lifecycle-trade-path - Port trade-built providers and delete the duplicated lifecycle
+- [x] M3.2 series-lifecycle-trade-path - Port trade-built providers and delete the duplicated lifecycle
+  - CandleOverlay, Indexed tastytrade and Sequence Rithmic series share `SeriesLifecycle.state` and one bounded publication turn; trade aggregation lives in `lifecycle/trade_model.rs`. Removed the split trade registry, state enum, named Rithmic handlers/publisher and redundant history handoffs.
+  - Hyperliquid candle events compare the cached demand coin/interval without formatting a wire symbol per event. Indexed recent trades prune by time, provider errors are neutral, and demand reconciliation no longer doubles `demand_dirty`. The bounded Indexed correction overlay still recomputes retained bars.
+  - One table-driven suite exercises all three models, exact ticket rejection, recovery, contiguous completed bars and one forming bar; a scripted adapter-confirmed Rithmic SequenceGap recovers through covering history to Live. The naming gate rejects `SeriesLiveMap` in production with positive/negative scanner fixtures. Scoped and full fmt/workspace Clippy/workspace test/naming gates passed; Rithmic live qualification remains excluded.
 - [ ] M3.3 engine-series-tail - Series-tail accessor; remove full-series copies from hot and existence paths
 - [ ] M3.4 coordinator-dirty-publication - Dirty-set publication and deadline timers in the coordinator loop
 - [ ] M3.5 provider-capabilities - `ProviderCapabilities` and `ProviderPresentation` replace descriptor flags and literals
@@ -548,6 +551,7 @@ the repo root `AGENTS.md`.
 - Catalog callbacks use coordinator-owned command fences by consumer/provider/kind; startup resolution has an explicit lane and consumer retirement uses one registry cleanup path (M2.9, this commit).
 - `HistoryTracker` owns current/backfill retry, deferral, empty coverage, detached windows and cancellation behind exact provider/demand/sequence tickets; no parallel coordinator history maps (M2.10, this commit).
 - Candle series control and forming state belong to `lifecycle::SeriesLifecycles`; candle handlers and direct clocks in `lifecycle/` are forbidden (M3.1, this commit).
+- Trade-built series share that lifecycle owner; `SeriesLiveMap` cannot return to market-service production source (M3.2, this commit).
 
 ## 6. Progress log
 
@@ -588,6 +592,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M2.1/M2.5/M2.6 test(market): close user-testing boundary and calendar coverage gaps - moved characterization observations to the command/event boundary; completed the calendar/status matrix and five scripted recovery request checks; full gate green.
 - 2026-10-14 M2.1 test(market): drive characterization through coordinator channels - removed direct clock assignment and benchmark turn calls; verified four boundary scenarios and the full gate.
 - 2026-10-14 M3.1 feat(market): centralize candle series lifecycle - migrated both candle providers to the lifecycle owner, retained four coordinator scenarios, and verified live Hyperliquid and raw cTrader provider omissions against the pre-M3 binary.
+- 2026-10-14 M3.2 feat(market): centralize trade series lifecycle - unified candle/trade control and publication, cached candle wire identity, fenced scripted SequenceGap reseed and one-forming continuity; full workspace gate green.
 
 ## 7. Known gaps / deferred
 

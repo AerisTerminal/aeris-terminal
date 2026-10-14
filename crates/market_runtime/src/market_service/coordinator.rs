@@ -1,21 +1,21 @@
-use super::lifecycle::{self, SeriesLifecycles, SeriesLive};
+use super::lifecycle::{self, SeriesLifecycles};
 use super::{
     Arc, AtomicBool, BTreeMap, BTreeSet, BarSeriesKey, COORDINATOR_TICK, ClientId, Command,
     ConsumerEvents, ConsumerId, ConsumerIdentity, ConsumerResourceClass, DemandWaiter, Duration,
-    EngineError, GenerationId, InstallProviderInstrument, Instant, LiveHistoryState,
-    MAXIMUM_STUDIES, MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS,
-    MAXIMUM_STUDY_POINTS_PER_OUTPUT, MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
-    MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS, MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine,
-    MarketServiceStatus, MarketStream, NonZeroUsize, Ordering, PriceAlertRegistry,
-    ProviderConnectionState, ProviderDispatch, ProviderEpochRegistry, ProviderGeneration,
-    ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent, ProviderRuntimeRegistry,
-    ProviderSessionSlot, ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver,
-    RecvTimeoutError, Reply, StreamRequirements, StudyMarketLeaseChangeKind, StudyRuntime,
-    StudyRuntimeConfig, authorize_consumer, publish_state, thread,
+    EngineError, GenerationId, InstallProviderInstrument, Instant, MAXIMUM_STUDIES,
+    MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT,
+    MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE, MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS,
+    MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine, MarketServiceStatus, MarketStream, NonZeroUsize,
+    Ordering, PriceAlertRegistry, ProviderConnectionState, ProviderDispatch, ProviderEpochRegistry,
+    ProviderGeneration, ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent,
+    ProviderRuntimeRegistry, ProviderSessionSlot, ProviderState, REALTIME_CAPACITY,
+    REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply, StreamRequirements,
+    StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig, authorize_consumer,
+    publish_state, thread,
 };
 #[cfg(test)]
 use super::{
-    TradeLiveHandoff,
+    TradeModel,
     lifecycle::{SeriesLifecycle, SeriesState},
 };
 use crate::{
@@ -110,8 +110,7 @@ fn coordinator_turn(
     coordinator.studies.begin_turn();
     let drained = drain_coordinator_events(coordinator);
     coordinator.broadcast_dirty_trade_tapes();
-    coordinator.publish_rithmic_live();
-    coordinator.publish_lifecycle_candles();
+    coordinator.publish_lifecycle_live();
     coordinator.recover_stalled_live_series();
     coordinator.recover_overflowed_series_queues();
     for flush in demand_flushers {
@@ -247,20 +246,12 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
             let Some(descriptor) = coordinator.providers.descriptor(provider) else {
                 continue;
             };
-            match descriptor.live_model {
-                super::LiveModel::TradeBuilt => {
-                    coordinator.rithmic_recovering(
-                        provider,
-                        generation,
-                        descriptor.overflow_recovery_detail,
-                    );
-                }
-                super::LiveModel::ProviderCandles => coordinator.mark_provider_candle_recovering(
-                    provider,
-                    generation,
-                    descriptor.overflow_recovery_detail,
-                ),
-            }
+            coordinator.mark_lifecycle_recovering(
+                provider,
+                generation,
+                descriptor.live_model,
+                descriptor.overflow_recovery_detail,
+            );
             diagnostic!(
                 "Aeris market {provider} event queue overflowed at generation {generation}"
             );
@@ -268,7 +259,7 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
         for (provider, slot) in wake.slots.iter() {
             let generation = slot.pending_failure.swap(0, Ordering::AcqRel);
             if generation != 0 {
-                coordinator.rithmic_failed(
+                coordinator.mark_lifecycle_failed(
                     provider,
                     generation,
                     "Rithmic: adapter transport retry scheduler exhausted; reconnect in Accounts",
@@ -448,8 +439,7 @@ fn benchmark_turn(coordinator: &mut Coordinator<'_>) {
     coordinator.studies.begin_turn();
     drain_coordinator_events(coordinator);
     coordinator.broadcast_dirty_trade_tapes();
-    coordinator.publish_rithmic_live();
-    coordinator.publish_lifecycle_candles();
+    coordinator.publish_lifecycle_live();
     coordinator.recover_stalled_live_series();
     coordinator.recover_overflowed_series_queues();
     coordinator.stop_realtime_if_idle();
@@ -508,16 +498,12 @@ fn study_market_series_live_ready(
     let Some(provider_generation) = provider.generation else {
         return false;
     };
-    match series_live.0.get(&input.series) {
-        Some(SeriesLive::TradeBuilt(live)) => {
-            live.generation == provider_generation
-                && live.connected
-                && live.history_state == LiveHistoryState::Ready
-        }
-        Some(SeriesLive::ProviderCandles(live)) => {
+    if let Some(live) = series_live.trade_lifecycle(&input.series) {
+        live.generation == provider_generation && live.connected && live.history_ready()
+    } else {
+        series_live.candle(&input.series).is_some_and(|live| {
             live.generation == provider_generation && live.connected && live.history_ready()
-        }
-        None => false,
+        })
     }
 }
 
@@ -602,8 +588,7 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn begin_shutdown(&mut self) {
-        self.publish_rithmic_live();
-        self.publish_lifecycle_candles();
+        self.publish_lifecycle_live();
         self.history.cancel_all();
         for provider in self.providers.records.keys().copied().collect::<Vec<_>>() {
             let _ = self
@@ -670,9 +655,10 @@ impl Coordinator<'_> {
                 {
                     self.session_mut(provider).generation_floor =
                         generation.0.get().saturating_add(1);
-                    self.mark_provider_candle_recovering(
+                    self.mark_lifecycle_recovering(
                         provider,
                         generation.0.get(),
+                        descriptor.live_model,
                         descriptor.authorization_revoked_detail,
                     );
                     let _ = self.engine.end_provider_session(provider, generation);
@@ -1561,12 +1547,13 @@ mod tests {
         include!("tests/characterization.rs");
     }
 
+    use super::super::lifecycle::RecoveryReason;
     use super::*;
     use crate::market_service::{
         FormingBar, HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange,
-        HistorySnapshot, INITIAL_HISTORY_BARS, LiveHistoryState, MAXIMUM_HISTORY_RETRIES,
-        MAXIMUM_STORED_BARS, ProviderCatalogDispatch, ProviderDispatchRecord,
-        ProviderDisplayDepthEvent, ProviderRealtimeDispatch, SeriesLoadState,
+        HistorySnapshot, INITIAL_HISTORY_BARS, MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
+        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderDisplayDepthEvent,
+        ProviderRealtimeDispatch, SeriesLoadState,
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -2211,7 +2198,7 @@ mod tests {
             (selected.provider.clone(), selected.instrument_id.clone()),
             order_book,
         );
-        let mut live_handoff = TradeLiveHandoff::new(
+        let mut live_handoff = TradeModel::new(
             &selected_series,
             ProviderGeneration(nonzero(1)),
             &selected.venue_id,
@@ -2219,10 +2206,10 @@ mod tests {
         )
         .expect("live handoff");
         live_handoff.connected = true;
-        live_handoff.history_state = LiveHistoryState::Ready;
         coordinator
             .series
             .insert_trade(selected_series.clone(), live_handoff);
+        set_trade_history_ready(&mut coordinator, &selected_series);
         let input = StudyMarketInput {
             series: selected_series,
             streams: StreamRequirements::BARS
@@ -2274,6 +2261,81 @@ mod tests {
             )
             .expect("trade study registers");
         (coordinator, selected, selected_series, study_id)
+    }
+
+    #[test]
+    fn explicit_rithmic_sequence_gap_reseeds_without_trade_ordinal_inference() {
+        use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
+
+        let (mut coordinator, _, series, _) = trade_recovery_study_fixture();
+        assert!(
+            coordinator
+                .series
+                .trade_lifecycle(&series)
+                .is_some_and(SeriesLifecycle::history_ready)
+        );
+        history_epoch(&mut coordinator, "rithmic", ProviderGeneration(nonzero(1)));
+        coordinator.handle_provider_event(super::super::provider_event::ProviderEvent::rithmic(
+            RithmicRealtimeEvent::Recovering(1, Some(ProviderInvalidationReason::SequenceGap)),
+        ));
+        assert!(
+            !coordinator
+                .series
+                .trade_lifecycle(&series)
+                .is_some_and(SeriesLifecycle::history_ready),
+            "adapter-confirmed sequence gap must retire the live seam"
+        );
+        assert!(matches!(
+            coordinator
+                .series
+                .trade_lifecycle_mut(&series)
+                .map(|live| live.state()),
+            Some(SeriesState::Recovering {
+                reason: super::super::lifecycle::RecoveryReason::SequenceGap,
+                ..
+            }),
+        ));
+        let provider_generation = ProviderGeneration(nonzero(1));
+        let mut forming = minute_bars(4, 1)[0];
+        forming.source_sequence = 5;
+        finish_history(
+            &mut coordinator,
+            &series,
+            provider_generation,
+            None,
+            Ok(HistorySnapshot {
+                price_scale: 2,
+                quantity_scale: 0,
+                bars: minute_bars(0, 4),
+                forming: Some(FormingBar {
+                    bar: forming,
+                    trades: Some(1),
+                }),
+                handoff_boundary_unix_nanos: Some(forming.exchange_timestamp_unix_nanos),
+                backwards_exhausted: false,
+            }),
+        );
+        coordinator.mark_lifecycle_online("rithmic", 1, super::super::LiveModel::TradeBuilt);
+        coordinator.publish_lifecycle_live();
+        let live = coordinator
+            .series
+            .trade_lifecycle(&series)
+            .expect("reseeded trade lifecycle");
+        assert!(live.history_ready(), "explicit gap reseeds into Live");
+        let model = live.trade_model().expect("trade model");
+        assert_eq!(model.forming_tail_sequence, Some(forming.source_sequence));
+        assert_eq!(
+            model
+                .bars
+                .iter()
+                .map(|bar| bar.exchange_timestamp_unix_nanos)
+                .collect::<Vec<_>>(),
+            minute_bars(0, 5)
+                .iter()
+                .map(|bar| bar.exchange_timestamp_unix_nanos)
+                .collect::<Vec<_>>(),
+            "completed history is contiguous with exactly one forming bar"
+        );
     }
 
     struct OutputAncestryRecoveryFixture {
@@ -2372,17 +2434,23 @@ mod tests {
         }
     }
 
-    fn assert_rithmic_history_state(
-        coordinator: &Coordinator<'_>,
-        series: &BarSeriesKey,
-        expected: LiveHistoryState,
-    ) {
-        assert_eq!(
+    fn set_trade_history_ready(coordinator: &mut Coordinator<'_>, series: &BarSeriesKey) {
+        let live = coordinator
+            .series
+            .trade_lifecycle_mut(series)
+            .expect("trade lifecycle");
+        live.state = SeriesState::Live {
+            last_progress: live.clock.monotonic(),
+            observed_live: false,
+        };
+    }
+
+    fn assert_rithmic_history_ready(coordinator: &Coordinator<'_>, series: &BarSeriesKey) {
+        assert!(
             coordinator
                 .series
-                .trade(series)
-                .map(|live| live.history_state),
-            Some(expected)
+                .trade_lifecycle(series)
+                .is_some_and(SeriesLifecycle::history_ready)
         );
     }
 
@@ -2441,7 +2509,7 @@ mod tests {
             .last()
             .map(|bar| bar.exchange_timestamp_unix_nanos)
             .expect("history boundary");
-        let mut live = TradeLiveHandoff::new(&series, provider_generation, "CME", None)
+        let mut live = TradeModel::new(&series, provider_generation, "CME", None)
             .expect("Rithmic live handoff");
         live.seed(2, 0, &bars, None, Some(boundary))
             .expect("live handoff seeds from current history");
@@ -2632,7 +2700,7 @@ mod tests {
             None,
             Ok(current_rejoin_snapshot(live_timestamp)),
         );
-        coordinator.publish_rithmic_live();
+        coordinator.publish_lifecycle_live();
         assert!(
             coordinator
                 .history
@@ -2764,9 +2832,13 @@ mod tests {
             !coordinator.series_live_if_ready(&series),
             "a historical canonical window cannot advertise live readiness"
         );
+        let coverage_before = coordinator
+            .series
+            .trade(&series)
+            .and_then(TradeModel::coverage);
         coordinator
             .series
-            .trade_mut(&series)
+            .trade_lifecycle_mut(&series)
             .expect("live handoff remains allocated")
             .accept_trade(&rithmic_trade_for_series(&series, 1, live_timestamp))
             .expect("live handoff keeps ingesting while detached");
@@ -2774,11 +2846,21 @@ mod tests {
             coordinator
                 .series
                 .trade(&series)
-                .and_then(TradeLiveHandoff::coverage)
+                .and_then(TradeModel::coverage)
                 .map(|(_, end)| end),
-            Some(live_timestamp)
+            coverage_before.map(|(_, end)| end),
+            "a detached seam buffers trades rather than mutating the stale live model"
         );
-        coordinator.publish_rithmic_live();
+        assert_eq!(
+            coordinator
+                .series
+                .trade(&series)
+                .expect("retained trade model")
+                .buffered
+                .len(),
+            1
+        );
+        coordinator.publish_lifecycle_live();
         let after_suppressed_live = coordinator
             .engine
             .series_snapshot(&series)
@@ -2801,7 +2883,7 @@ mod tests {
             Ok(current_rejoin_snapshot(live_timestamp)),
         );
         assert!(!coordinator.history.is_detached(&series, epoch));
-        coordinator.publish_rithmic_live();
+        coordinator.publish_lifecycle_live();
         let rejoined = coordinator
             .engine
             .series_snapshot(&series)
@@ -3284,15 +3366,15 @@ mod tests {
         assert!(live.trades().is_some_and(|trades| !trades.is_empty()));
         assert!(live.depth().is_some());
 
-        for recovery_state in [
-            LiveHistoryState::Reseeding,
-            LiveHistoryState::AwaitingHistory,
+        for recovery_reason in [
+            RecoveryReason::DetachedWindow,
+            RecoveryReason::ProviderReconnected,
         ] {
             coordinator
                 .series
-                .trade_mut(&input.series)
+                .trade_lifecycle_mut(&input.series)
                 .expect("series handoff")
-                .history_state = recovery_state;
+                .recover_trade(recovery_reason);
             assert_eq!(
                 coordinator
                     .engine
@@ -3312,11 +3394,7 @@ mod tests {
                 "bar-aligned non-bar views must be fenced until this series is history-ready"
             );
         }
-        coordinator
-            .series
-            .trade_mut(&input.series)
-            .expect("series handoff")
-            .history_state = LiveHistoryState::Ready;
+        set_trade_history_ready(&mut coordinator, &input.series);
         assert!(
             study_live_market_data(
                 &coordinator.engine,
@@ -3328,7 +3406,12 @@ mod tests {
             "series live views resume after the history seam is ready"
         );
 
-        coordinator.rithmic_recovering("rithmic", 1, "test recovery");
+        coordinator.mark_lifecycle_recovering(
+            "rithmic",
+            1,
+            super::super::LiveModel::TradeBuilt,
+            "test recovery",
+        );
         assert!(
             study_live_market_data(
                 &coordinator.engine,
@@ -3356,15 +3439,30 @@ mod tests {
             .trade(&selected_series)
             .expect("series live handoff exists");
         assert!(live.connected);
-        assert_eq!(live.history_state, LiveHistoryState::Ready);
+        assert!(
+            coordinator
+                .series
+                .trade_lifecycle(&selected_series)
+                .is_some_and(SeriesLifecycle::history_ready)
+        );
 
         // Start a new forming minute with the maximum representable volume, then
         // publish it so the study's canonical primary timeline includes that row.
         let mut first =
             rithmic_trade_for_series(&selected_series, 1, 180_i64.saturating_mul(1_000_000_000));
         first.quantity = i64::MAX;
-        coordinator.rithmic_trade("rithmic", 1, &first);
-        coordinator.publish_rithmic_live();
+        coordinator.accept_lifecycle_trade("rithmic", 1, &first);
+        assert!(matches!(
+            coordinator
+                .series
+                .trade_lifecycle_mut(&selected_series)
+                .map(|live| live.state()),
+            Some(SeriesState::Live {
+                observed_live: true,
+                ..
+            })
+        ));
+        coordinator.publish_lifecycle_live();
         let generation_before_failure = coordinator
             .studies
             .output_series(study_id.output(0))
@@ -3385,7 +3483,14 @@ mod tests {
         // once against a bar the handoff has just declared stale.
         let second =
             rithmic_trade_for_series(&selected_series, 2, 181_i64.saturating_mul(1_000_000_000));
-        coordinator.rithmic_trade("rithmic", 1, &second);
+        coordinator.accept_lifecycle_trade("rithmic", 1, &second);
+        assert!(matches!(
+            coordinator
+                .series
+                .trade_lifecycle_mut(&selected_series)
+                .map(|live| live.state()),
+            Some(SeriesState::Recovering { .. })
+        ));
 
         assert_eq!(
             coordinator
@@ -3395,13 +3500,12 @@ mod tests {
             Some(ProviderHealth::Online),
             "one-series aggregation recovery must not replace provider-session ownership"
         );
-        assert_eq!(
-            coordinator
+        assert!(
+            !coordinator
                 .series
-                .trade(&selected_series)
+                .trade_lifecycle(&selected_series)
                 .expect("series handoff remains retained")
-                .history_state,
-            LiveHistoryState::AwaitingHistory
+                .history_ready()
         );
         assert_eq!(
             coordinator
@@ -3473,8 +3577,8 @@ mod tests {
                 },
             )
             .expect("MTF study registers");
-        assert_rithmic_history_state(&coordinator, &primary, LiveHistoryState::Ready);
-        assert_rithmic_history_state(&coordinator, &secondary, LiveHistoryState::Ready);
+        assert_rithmic_history_ready(&coordinator, &primary);
+        assert_rithmic_history_ready(&coordinator, &secondary);
         let generation_before_recovery = coordinator
             .studies
             .output_series(study_id.output(0))
@@ -3483,9 +3587,9 @@ mod tests {
 
         coordinator
             .series
-            .trade_mut(&primary)
+            .trade_lifecycle_mut(&primary)
             .expect("primary handoff remains installed")
-            .history_state = LiveHistoryState::AwaitingHistory;
+            .recover_trade(RecoveryReason::ProviderReconnected);
         let quote_timestamp = 30_i64.saturating_mul(1_000_000_000);
         coordinator.provider_quote(
             "rithmic",
@@ -3502,11 +3606,7 @@ mod tests {
             "a quote-driven MTF wave must not execute against a recovering BARS-only primary"
         );
 
-        coordinator
-            .series
-            .trade_mut(&primary)
-            .expect("primary handoff remains installed")
-            .history_state = LiveHistoryState::Ready;
+        set_trade_history_ready(&mut coordinator, &primary);
         coordinator.provider_quote(
             "rithmic",
             selected.session_generation,
@@ -3532,8 +3632,8 @@ mod tests {
             secondary,
             consumer_study,
         } = output_ancestry_recovery_fixture();
-        assert_rithmic_history_state(&coordinator, &primary, LiveHistoryState::Ready);
-        assert_rithmic_history_state(&coordinator, &secondary, LiveHistoryState::Ready);
+        assert_rithmic_history_ready(&coordinator, &primary);
+        assert_rithmic_history_ready(&coordinator, &secondary);
         let generation_before_recovery = coordinator
             .studies
             .output_series(consumer_study.output(0))
@@ -3542,9 +3642,9 @@ mod tests {
 
         coordinator
             .series
-            .trade_mut(&primary)
+            .trade_lifecycle_mut(&primary)
             .expect("producer handoff remains installed")
-            .history_state = LiveHistoryState::AwaitingHistory;
+            .recover_trade(RecoveryReason::ProviderReconnected);
         let quote_timestamp = 30_i64.saturating_mul(1_000_000_000);
         coordinator.provider_quote(
             "rithmic",
@@ -3561,11 +3661,7 @@ mod tests {
             "a ready quote dependency must not bypass recovering producer market ancestry"
         );
 
-        coordinator
-            .series
-            .trade_mut(&primary)
-            .expect("producer handoff remains installed")
-            .history_state = LiveHistoryState::Ready;
+        set_trade_history_ready(&mut coordinator, &primary);
         coordinator.provider_quote(
             "rithmic",
             selected.session_generation,
@@ -3680,12 +3776,21 @@ mod tests {
             )
             .expect("demand installs");
         let provider_generation = ProviderGeneration(nonzero(1));
-        let mut live = TradeLiveHandoff::new(&selected_series, provider_generation, "CME", None)
+        let live = TradeModel::new(&selected_series, provider_generation, "CME", None)
             .expect("live handoff");
-        live.history_state = LiveHistoryState::Ready;
-        coordinator.series.insert_trade(selected_series, live);
+        coordinator
+            .series
+            .insert_trade(selected_series.clone(), live);
+        set_trade_history_ready(&mut coordinator, &selected_series);
 
-        coordinator.rithmic_online("rithmic", 1);
+        coordinator.mark_lifecycle_online("rithmic", 1, super::super::LiveModel::TradeBuilt);
+        assert!(matches!(
+            coordinator
+                .series
+                .trade_lifecycle_mut(&selected_series)
+                .map(|live| live.state()),
+            Some(SeriesState::Live { .. })
+        ));
 
         assert!(matches!(
             coordinator
@@ -3723,8 +3828,8 @@ mod tests {
         let mut live = SeriesLifecycle::new(
             selected_series.clone(),
             provider_generation,
-            "BTC".to_string(),
-            "1m".to_string(),
+            "BTC",
+            "1m",
             super::super::CandleGapPolicy::Contiguous,
         );
         live.state = SeriesState::Live {
@@ -3733,7 +3838,11 @@ mod tests {
         };
         coordinator.series.insert_candle(selected_series, live);
 
-        coordinator.mark_provider_candle_online("hyperliquid", 1);
+        coordinator.mark_lifecycle_online(
+            "hyperliquid",
+            1,
+            super::super::LiveModel::ProviderCandles,
+        );
 
         assert!(matches!(
             coordinator
@@ -3779,8 +3888,8 @@ mod tests {
             SeriesLifecycle::with_clock(
                 series.clone(),
                 provider_generation,
-                "BTC".into(),
-                "1m".into(),
+                "BTC",
+                "1m",
                 super::super::CandleGapPolicy::Contiguous,
                 clock.clone(),
             ),
@@ -3884,8 +3993,8 @@ mod tests {
             let mut live = SeriesLifecycle::with_clock(
                 selected.clone(),
                 provider_generation,
-                "EURUSD".into(),
-                "1m".into(),
+                "EURUSD",
+                "1m",
                 super::super::CandleGapPolicy::SessionGapsAllowed,
                 Arc::clone(&clock) as Arc<dyn Clock>,
             );
@@ -4650,7 +4759,7 @@ mod tests {
                 StreamRequirements::BARS,
             )
             .expect("series demanded");
-        let mut live = TradeLiveHandoff::with_clock(
+        let mut live = TradeModel::with_clock(
             &selected,
             provider_generation,
             "CME",
@@ -4659,18 +4768,17 @@ mod tests {
         )
         .expect("trade handoff");
         live.connected = true;
-        live.history_state = LiveHistoryState::Ready;
         coordinator.series.insert_trade(selected.clone(), live);
+        set_trade_history_ready(&mut coordinator, &selected);
         clock.advance(super::super::watchdog::OPEN_STALL_THRESHOLD + Duration::from_secs(1));
         coordinator.recover_stalled_live_series();
         assert!(history_rx.try_recv().is_ok(), "current history requested");
-        assert_eq!(
-            coordinator
+        assert!(
+            !coordinator
                 .series
-                .trade(&selected)
+                .trade_lifecycle(&selected)
                 .expect("trade handoff")
-                .history_state,
-            LiveHistoryState::AwaitingHistory
+                .history_ready()
         );
         coordinator.recover_stalled_live_series();
         assert_no_history_request(&history_rx, "Rithmic recovery is requested only once");
@@ -4786,8 +4894,8 @@ mod tests {
             let mut live = SeriesLifecycle::with_clock(
                 selected.clone(),
                 provider_generation,
-                "BTC".into(),
-                "1m".into(),
+                "BTC",
+                "1m",
                 super::super::CandleGapPolicy::Contiguous,
                 Arc::clone(clock) as Arc<dyn Clock>,
             );
@@ -4798,7 +4906,7 @@ mod tests {
             };
             coordinator.series.insert_candle(selected.clone(), live);
         } else {
-            let mut live = TradeLiveHandoff::with_clock(
+            let mut live = TradeModel::with_clock(
                 selected,
                 provider_generation,
                 &installed.venue_id,
@@ -4807,8 +4915,8 @@ mod tests {
             )
             .expect("trade handoff");
             live.connected = true;
-            live.history_state = LiveHistoryState::Ready;
             coordinator.series.insert_trade(selected.clone(), live);
+            set_trade_history_ready(coordinator, selected);
         }
     }
 
@@ -5036,10 +5144,10 @@ mod tests {
     fn empty_current_completion_with_live_handoff_drains_deferred_backfill() {
         let (mut coordinator, history_receiver, current, selected) =
             current_request_with_deferred_viewport_backfill();
-        let mut live = TradeLiveHandoff::new(&selected, current.provider_generation, "CME", None)
+        let live = TradeModel::new(&selected, current.provider_generation, "CME", None)
             .expect("trade handoff");
-        live.history_state = LiveHistoryState::Ready;
         coordinator.series.insert_trade(selected.clone(), live);
+        set_trade_history_ready(&mut coordinator, &selected);
 
         coordinator.history_completed(
             &current.ticket,
@@ -5724,7 +5832,12 @@ mod tests {
             .series
             .trade(&selected)
             .expect("Rithmic live handoff is recreated");
-        assert_eq!(live.history_state, LiveHistoryState::Ready);
+        assert!(
+            coordinator
+                .series
+                .trade_lifecycle(&selected)
+                .is_some_and(SeriesLifecycle::history_ready)
+        );
         assert_eq!(live.coverage(), Some((0, 0)));
         let demand = coordinator
             .rithmic_realtime_demand()
@@ -5813,7 +5926,13 @@ mod tests {
             .trade(&selected)
             .expect("current-generation live handoff is recreated");
         assert_eq!(live.generation, ProviderGeneration(nonzero(2)));
-        assert_eq!(live.history_state, LiveHistoryState::AwaitingHistory);
+        assert!(
+            !coordinator
+                .series
+                .trade_lifecycle(&selected)
+                .expect("trade lifecycle")
+                .history_ready()
+        );
         let events = coordinator.events.get(&consumer).expect("consumer outbox");
         assert!(matches!(
             events.series.front(),
@@ -6001,9 +6120,9 @@ mod tests {
         assert!(coordinator.engine.has_subscription(&selected));
         let live = coordinator
             .series
-            .trade(&selected)
+            .trade_lifecycle(&selected)
             .expect("Rithmic handoff is recreated before reconnect");
-        assert_eq!(live.history_state, LiveHistoryState::AwaitingHistory);
+        assert!(!live.history_ready());
         assert_eq!(live.generation, first_generation);
         assert!(matches!(
             history_receiver.try_recv(),
@@ -6022,10 +6141,10 @@ mod tests {
         assert_eq!(provider.health, ProviderHealth::Connecting);
         let live = coordinator
             .series
-            .trade(&selected)
+            .trade_lifecycle(&selected)
             .expect("Rithmic handoff survives reconnect");
         assert_eq!(live.generation, second_generation);
-        assert_eq!(live.history_state, LiveHistoryState::AwaitingHistory);
+        assert!(!live.history_ready());
         let history = history_receiver
             .try_recv()
             .expect("new provider session enqueues covering history");

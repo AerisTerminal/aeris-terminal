@@ -1,11 +1,12 @@
 use super::{
     DepthSnapshot, IndexedTradeMutation, InstallProviderInstrument, MarketBar, MarketTrade,
-    TopOfBookQuote,
+    TopOfBookQuote, lifecycle::RecoveryReason,
 };
 use crate::hyperliquid_realtime::HyperliquidRealtimeEvent;
 use crate::rithmic_realtime::RithmicRealtimeEvent;
 use aeris_contracts::MarketSessionStatus;
 use aeris_market_engine::fence::{Epoch, EpochSequence, ProviderTag};
+use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 use std::collections::BTreeMap;
 
 pub(super) struct ProviderEvent {
@@ -90,6 +91,10 @@ pub(super) struct ProviderCandle {
 
 #[derive(Clone, Copy)]
 pub(super) enum ProviderDisconnect {
+    SequenceGap {
+        detail: &'static str,
+        auto_recover: bool,
+    },
     Recover {
         detail: &'static str,
         auto_recover: bool,
@@ -108,6 +113,7 @@ pub(super) enum ProviderEventKind {
     Recovering {
         detail: &'static str,
         provider_detail: Option<String>,
+        recovery_reason: Option<RecoveryReason>,
     },
     Failed(String),
     Disconnected(ProviderDisconnect),
@@ -124,7 +130,7 @@ pub(super) enum ProviderEventKind {
     Quote(TopOfBookQuote),
     Depth(DepthSnapshot),
     Candle {
-        symbol: String,
+        symbol: ProviderCandleSymbol,
         candle: ProviderCandle,
     },
     CandleRecovery(String),
@@ -135,6 +141,30 @@ pub(super) enum ProviderEventKind {
         valid_from_utc_ms: i64,
         valid_until_utc_ms: i64,
     },
+}
+
+pub(super) enum ProviderCandleSymbol {
+    Wire(String),
+    CoinInterval { coin: String, interval: String },
+}
+
+impl ProviderCandleSymbol {
+    pub(super) fn matches(&self, wire: &str, coin: Option<&str>, interval: Option<&str>) -> bool {
+        match self {
+            Self::Wire(symbol) => symbol == wire,
+            Self::CoinInterval {
+                coin: candidate,
+                interval: candidate_interval,
+            } => coin == Some(candidate) && interval == Some(candidate_interval),
+        }
+    }
+
+    pub(super) fn wire(&self) -> Option<&str> {
+        match self {
+            Self::Wire(symbol) => Some(symbol),
+            Self::CoinInterval { .. } => None,
+        }
+    }
 }
 
 impl ProviderEvent {
@@ -151,11 +181,18 @@ impl ProviderEvent {
             Wire::Recovering(_, reason) => ProviderEventKind::Recovering {
                 detail: super::realtime::rithmic_invalidation_detail(reason),
                 provider_detail: None,
+                recovery_reason: (reason == Some(ProviderInvalidationReason::SequenceGap))
+                    .then_some(RecoveryReason::SequenceGap),
             },
             Wire::Disconnected(_, reason) => {
                 let detail = super::realtime::rithmic_invalidation_detail(reason);
                 let auto_recover = super::realtime::rithmic_auto_recovers(reason);
-                let disposition = if reason.is_some() {
+                let disposition = if reason == Some(ProviderInvalidationReason::SequenceGap) {
+                    ProviderDisconnect::SequenceGap {
+                        detail,
+                        auto_recover,
+                    }
+                } else if reason.is_some() {
                     ProviderDisconnect::Fail {
                         detail,
                         auto_recover,
@@ -199,13 +236,14 @@ impl ProviderEvent {
             Wire::Recovering(_) => ProviderEventKind::Recovering {
                 detail: "Hyperliquid live session is recovering",
                 provider_detail: None,
+                recovery_reason: None,
             },
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
                 detail: "Hyperliquid live session is recovering",
                 auto_recover: false,
             }),
             Wire::Candle(_, coin, interval, candle) => ProviderEventKind::Candle {
-                symbol: format!("{coin}{{={interval}}}"),
+                symbol: ProviderCandleSymbol::CoinInterval { coin, interval },
                 candle: ProviderCandle {
                     bar: MarketBar {
                         source_sequence: 1,
@@ -241,11 +279,12 @@ impl ProviderEvent {
             Wire::Recovering(_, detail) => ProviderEventKind::Recovering {
                 detail: "cTrader feed requires recovery",
                 provider_detail: Some(detail),
+                recovery_reason: None,
             },
             Wire::Failed(_, detail) => ProviderEventKind::Failed(detail),
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
             Wire::Candle(_, symbol, bar) => ProviderEventKind::Candle {
-                symbol,
+                symbol: ProviderCandleSymbol::Wire(symbol),
                 candle: ProviderCandle {
                     bar,
                     trade_count: None,
@@ -272,10 +311,11 @@ impl ProviderEvent {
             Wire::Recovering(_, detail) => ProviderEventKind::Recovering {
                 detail: "Tastytrade feed requires recovery",
                 provider_detail: Some(detail),
+                recovery_reason: None,
             },
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
             Wire::Candle(_, symbol, bar, count, trade_watermark) => ProviderEventKind::Candle {
-                symbol,
+                symbol: ProviderCandleSymbol::Wire(symbol),
                 candle: ProviderCandle {
                     bar,
                     trade_count: Some(count),

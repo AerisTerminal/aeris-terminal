@@ -443,12 +443,14 @@ impl Coordinator<'_> {
         consumer_id: ConsumerId,
         series: &BarSeriesKey,
     ) -> SeriesLoadState {
-        if self.series.trade(series).is_some_and(|live| {
-            live.connected && live.history_state == super::LiveHistoryState::Ready
-        }) || self
+        if self
             .series
-            .candle(series)
+            .trade_lifecycle(series)
             .is_some_and(|live| live.connected && live.history_ready())
+            || self
+                .series
+                .candle(series)
+                .is_some_and(|live| live.connected && live.history_ready())
         {
             SeriesLoadState::Live
         } else if self.engine.has_publication(consumer_id) {
