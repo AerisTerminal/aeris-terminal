@@ -2040,6 +2040,8 @@ mod tests {
             // The market owner and provider workers share one injectable time boundary.
             "crates/market_runtime/src/market_service/clock.rs::Clock".to_string(),
             "crates/market_runtime/src/market_service/mod.rs::HistorySource".to_string(),
+            // One bounded catalog command/event boundary for all registered provider workers.
+            "crates/market_runtime/src/market_service/mod.rs::ProviderCatalogChannel".to_string(),
             "crates/adapters/rithmic_protocol/src/history_adapter.rs::RithmicHistoryTransport"
                 .to_string(),
             "crates/adapters/rithmic_protocol/src/provider_runtime.rs::ProviderSessionDriver"

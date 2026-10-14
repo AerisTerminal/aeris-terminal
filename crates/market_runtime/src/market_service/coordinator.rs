@@ -1795,8 +1795,8 @@ mod tests {
     use crate::market_service::{
         FormingBar, HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange,
         HistorySnapshot, INITIAL_HISTORY_BARS, MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
-        ProviderCatalogDispatch, ProviderDispatchRecord, ProviderDisplayDepthEvent,
-        ProviderRealtimeDispatch, SeriesLoadState,
+        ProviderDispatchRecord, ProviderDisplayDepthEvent, ProviderRealtimeDispatch,
+        SeriesLoadState,
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -2903,7 +2903,7 @@ mod tests {
                 history: history_tx,
                 lifecycle: None,
                 realtime: ProviderRealtimeDispatch::Disabled,
-                catalog: ProviderCatalogDispatch::Disabled,
+                catalog: None,
             },
         );
         finish_history(
@@ -4229,7 +4229,7 @@ mod tests {
                     history: Box::leak(Box::new(history_tx)),
                     lifecycle: None,
                     realtime: super::super::ProviderRealtimeDispatch::Disabled,
-                    catalog: super::super::ProviderCatalogDispatch::Disabled,
+                    catalog: None,
                 },
             );
             coordinator.catalog.insert(
@@ -4524,7 +4524,7 @@ mod tests {
                 history: history_tx,
                 lifecycle: None,
                 realtime: ProviderRealtimeDispatch::Disabled,
-                catalog: ProviderCatalogDispatch::Disabled,
+                catalog: None,
             },
         );
 
@@ -4704,7 +4704,7 @@ mod tests {
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
-                catalog: super::super::ProviderCatalogDispatch::Disabled,
+                catalog: None,
             },
         );
         coordinator.handle_provider_event(super::super::ProviderEvent::rithmic(
@@ -4740,7 +4740,7 @@ mod tests {
                         controls: Box::leak(Box::new(controls)),
                         events: Box::leak(Box::new(event_receiver)),
                     },
-                    catalog: ProviderCatalogDispatch::Disabled,
+                    catalog: None,
                 },
             )]),
             lanes: vec![super::super::ProviderEventLane::Realtime("rithmic")],
@@ -4927,7 +4927,7 @@ mod tests {
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
-                catalog: super::super::ProviderCatalogDispatch::Disabled,
+                catalog: None,
             },
         );
         let instrument = InstallProviderInstrument {
@@ -5092,7 +5092,7 @@ mod tests {
                 history: Box::leak(Box::new(history_tx)),
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
-                catalog: super::super::ProviderCatalogDispatch::Disabled,
+                catalog: None,
             },
         );
         coordinator.catalog.insert(
@@ -6330,7 +6330,7 @@ mod tests {
                 history: history_sender,
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
-                catalog: super::super::ProviderCatalogDispatch::Disabled,
+                catalog: None,
             },
         );
         let consumer = consumer(1);

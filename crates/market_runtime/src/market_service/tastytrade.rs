@@ -4,7 +4,7 @@ use super::{
     COMMAND_CAPACITY, CatalogPublisher, Command, Coordinator, Duration, FormingBar,
     HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, IndexedTradeKind, IndexedTradeMutation,
     InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, MAXIMUM_CONSUMERS, MarketBar,
-    MarketTrade, Mutex, Ordering, ProviderCatalogChannelSet, ProviderCatalogChannels,
+    MarketTrade, Mutex, Ordering, ProviderCatalogChannelImpl, ProviderCatalogChannels,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderCoordinatorWake,
     ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRuntimeLifecycle,
     ProviderRuntimeRecord, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver,
@@ -2943,10 +2943,11 @@ pub(super) fn start_record(
         },
         catalog: ProviderCatalogChannels {
             enabled: true,
-            channels: ProviderCatalogChannelSet::Tastytrade {
-                controls: catalog_controls,
-                events: catalog_events,
-            },
+            channels: Box::new(ProviderCatalogChannelImpl::new(
+                catalog_controls,
+                catalog_events,
+                super::runtime::dispatch_tastytrade_catalog,
+            )),
         },
         workers: vec![catalog_worker, token_worker, provider_worker],
     })

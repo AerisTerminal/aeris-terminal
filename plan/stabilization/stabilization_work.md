@@ -429,6 +429,7 @@ Status: in progress
 - [ ] M3.6 provider-session-registry - `ProviderSession` trait and `ProviderRegistry`
   - Part 1/3: tastytrade HTTP transport is borrowed outside the catalog-cache mutex and returned on all paths; authorization revocation retires an in-flight transport. Two regression tests and the full workspace gate passed. Registry and per-provider idle work remain before this item can be checked.
   - Part 2/3: idle release and stop-overlap check only the stopping provider's own series, book and alert demand; a scripted two-provider book test guards the overlap. Full workspace gate passed with the CI debug profile and one Cargo job.
+  - Part 3/5: catalog command/response dispatch now has one bounded, provider-keyed channel boundary. Deleted `ProviderCatalogChannelSet` and `ProviderCatalogDispatch`; channel tests cover typed round trip, capacity and screen entitlement. The registry-minted pre-connect epoch, realtime channel/dispatch removal, `ProviderSession` and desktop session check remain; item is deliberately unchecked. Catalog migration preceded the epoch move without adding a second epoch or retry owner.
 - [ ] M3.7 instrument-leases-feed-contract - Trading feed domain contract and MarketEngine instrument leases
 - [ ] M3.8 trading-quote-feed - Market-side trading quote feed driven by instrument demand
 - [ ] M3.9 fenced-events-waitable-outbox - Every consumer event is fenced; the bridge blocks on a waitable outbox
@@ -564,6 +565,7 @@ the repo root `AGENTS.md`.
 - Candle series control and forming state belong to `lifecycle::SeriesLifecycles`; candle handlers and direct clocks in `lifecycle/` are forbidden (M3.1, this commit).
 - Trade-built series share that lifecycle owner; `SeriesLiveMap` cannot return to market-service production source (M3.2, this commit).
 - Generic market-service lifecycle/history/calendar/quote/outbox/coordinator/realtime/runtime/publication source contains no provider-id literals, including after test modules; provider replay aggregation does not live on `ChartInterval` (M3.5, this commit).
+- Provider catalog command/event traffic crosses one bounded `ProviderCatalogChannel`; provider-specific wire commands are translated within its registered channel (M3.6, this commit).
 
 ## 6. Progress log
 
@@ -610,6 +612,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M3.5 refactor(market): separate provider capabilities from presentation - removed descriptor behavior flags and generic provider-id literals, corrected Rithmic presentation, relocated replay aggregation to its adapter, and passed the full workspace gate.
 - 2026-10-15 M3.6 refactor(market): release tastytrade state lock during HTTP (M3.6 part 1/3) - isolated the exclusive transport from its bounded catalog cache and fenced authorization revocation; full gate green, registry work follows.
 - 2026-10-15 M3.6 fix(market): scope idle-stop overlap to its provider (M3.6 part 2/3) - per-provider demand prevents an unrelated order book from reopening a stopped session; full gate green.
+- 2026-10-15 M3.6 refactor(market): unify bounded catalog dispatch (M3.6 part 3/5) - deleted four-arm catalog channel/dispatch enums, preserved provider-specific screen and overflow behavior; full gate green.
 
 ## 7. Known gaps / deferred
 

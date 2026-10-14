@@ -13,7 +13,7 @@ use super::{
     Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, COMMAND_CAPACITY,
     CatalogPublisher, Command, Coordinator, DepthSnapshot, Duration, FormingBar, HISTORY_CAPACITY,
     HistoryRequest, HistorySnapshot, InstallProviderInstrument, Instant, MAXIMUM_CONSUMERS,
-    MarketBar, Mutex, Ordering, ProviderCatalogChannelSet, ProviderCatalogChannels,
+    MarketBar, Mutex, Ordering, ProviderCatalogChannelImpl, ProviderCatalogChannels,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderCoordinatorWake,
     ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRuntimeLifecycle,
     ProviderRuntimeRecord, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver,
@@ -2333,10 +2333,11 @@ fn spawn_record(
         },
         catalog: ProviderCatalogChannels {
             enabled: true,
-            channels: ProviderCatalogChannelSet::Ctrader {
-                controls: catalog_controls,
-                events: catalog_events,
-            },
+            channels: Box::new(ProviderCatalogChannelImpl::new(
+                catalog_controls,
+                catalog_events,
+                super::runtime::dispatch_ctrader_catalog,
+            )),
         },
         workers: vec![worker],
     })

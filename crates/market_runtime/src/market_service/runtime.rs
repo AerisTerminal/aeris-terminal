@@ -4,18 +4,18 @@ use super::{
     Duration, GenerationId, HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource,
     InstallProviderInstrument, Instant, LiveHyperliquidHistory, LiveRithmicHistory, MarketEngine,
     MarketRuntime, MarketService, MarketServiceStatus, Mutex, NativeStudyRegistration, Ordering,
-    OwnedCoordinatorChannels, ProviderCatalogChannelSet, ProviderCatalogChannels,
-    ProviderCatalogCommand, ProviderCatalogDispatch, ProviderCoordinatorWake, ProviderDispatch,
-    ProviderDispatchRecord, ProviderEventLane, ProviderRealtimeChannelSet,
-    ProviderRealtimeChannels, ProviderRealtimeDispatch, ProviderRuntimeEvent,
-    ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec,
-    REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl,
-    RithmicRealtimeControl, ScreenProviderMarkets, SearchProviderInstruments,
-    SelectProviderInstrument, StartedProviderRuntime, StreamRequirements, StudyInstanceId,
-    SyncSender, TrySendError, Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc,
-    spawn_coordinator, spawn_history_worker, thread, try_send_hyperliquid_catalog,
-    try_send_rithmic_catalog, validate_provider_instrument, validate_provider_screen,
-    validate_provider_search, validate_provider_selection,
+    OwnedCoordinatorChannels, ProviderCatalogChannelImpl, ProviderCatalogChannels,
+    ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
+    ProviderEventLane, ProviderRealtimeChannelSet, ProviderRealtimeChannels,
+    ProviderRealtimeDispatch, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
+    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, RithmicRealtimeControl,
+    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
+    StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
+    Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc, spawn_coordinator,
+    spawn_history_worker, thread, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
+    validate_provider_instrument, validate_provider_screen, validate_provider_search,
+    validate_provider_selection,
 };
 use crate::MarketRuntimeEvent;
 use crate::hyperliquid_display_depth::{
@@ -24,6 +24,68 @@ use crate::hyperliquid_display_depth::{
 use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidRealtimeControl};
 use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_contracts::ProviderPresentationDescriptor;
+
+fn dispatch_rithmic_catalog(
+    controls: &SyncSender<RithmicCatalogControl>,
+    provider: &str,
+    command: ProviderCatalogCommand,
+) -> Result<(), String> {
+    let control = match command {
+        ProviderCatalogCommand::Search(value) => RithmicCatalogControl::Search(value),
+        ProviderCatalogCommand::Select(value) => RithmicCatalogControl::Select(value),
+        ProviderCatalogCommand::Screen(_) => {
+            return Err(format!("{provider} does not provide a market screen"));
+        }
+    };
+    try_send_rithmic_catalog(controls, control, provider)
+}
+
+fn dispatch_hyperliquid_catalog(
+    controls: &SyncSender<HyperliquidCatalogControl>,
+    provider: &str,
+    command: ProviderCatalogCommand,
+) -> Result<(), String> {
+    let control = match command {
+        ProviderCatalogCommand::Search(value) => HyperliquidCatalogControl::Search(value),
+        ProviderCatalogCommand::Select(value) => HyperliquidCatalogControl::Select(value),
+        ProviderCatalogCommand::Screen(value) => HyperliquidCatalogControl::Screen(value),
+    };
+    try_send_hyperliquid_catalog(controls, control, provider)
+}
+
+pub(super) fn dispatch_tastytrade_catalog(
+    controls: &SyncSender<super::tastytrade::CatalogControl>,
+    provider: &str,
+    command: ProviderCatalogCommand,
+) -> Result<(), String> {
+    let control = match command {
+        ProviderCatalogCommand::Search(value) => super::tastytrade::CatalogControl::Search(value),
+        ProviderCatalogCommand::Select(value) => super::tastytrade::CatalogControl::Select(value),
+        ProviderCatalogCommand::Screen(_) => {
+            return Err(format!("{provider} does not provide a market screen"));
+        }
+    };
+    controls
+        .try_send(control)
+        .map_err(|_| "Provider catalog capacity is exhausted or unavailable".to_string())
+}
+
+pub(super) fn dispatch_ctrader_catalog(
+    controls: &SyncSender<super::ctrader::CatalogControl>,
+    provider: &str,
+    command: ProviderCatalogCommand,
+) -> Result<(), String> {
+    let control = match command {
+        ProviderCatalogCommand::Search(value) => super::ctrader::CatalogControl::Search(value),
+        ProviderCatalogCommand::Select(value) => super::ctrader::CatalogControl::Select(value),
+        ProviderCatalogCommand::Screen(_) => {
+            return Err(format!("{provider} does not provide a market screen"));
+        }
+    };
+    controls
+        .try_send(control)
+        .map_err(|_| "Provider catalog capacity is exhausted or unavailable".to_string())
+}
 
 impl HistorySource for LiveRithmicHistory {
     fn fetch(&mut self, request: &HistoryRequest) -> Result<HistorySnapshot, String> {
@@ -334,10 +396,11 @@ impl ProviderRuntimeRegistry {
             },
             catalog: ProviderCatalogChannels {
                 enabled,
-                channels: ProviderCatalogChannelSet::Rithmic {
-                    controls: catalog_controls,
-                    events: catalog_events,
-                },
+                channels: Box::new(ProviderCatalogChannelImpl::new(
+                    catalog_controls,
+                    catalog_events,
+                    dispatch_rithmic_catalog,
+                )),
             },
             workers: started.workers,
         })
@@ -431,10 +494,11 @@ impl ProviderRuntimeRegistry {
             },
             catalog: ProviderCatalogChannels {
                 enabled,
-                channels: ProviderCatalogChannelSet::Hyperliquid {
-                    controls: catalog_controls,
-                    events: catalog_events,
-                },
+                channels: Box::new(ProviderCatalogChannelImpl::new(
+                    catalog_controls,
+                    catalog_events,
+                    dispatch_hyperliquid_catalog,
+                )),
             },
             workers: started.workers,
         })
@@ -574,29 +638,10 @@ impl ProviderRuntimeRegistry {
                     },
                     _ => ProviderRealtimeDispatch::Disabled,
                 };
-                let catalog = match &record.catalog.channels {
-                    ProviderCatalogChannelSet::Tastytrade { controls, events }
-                        if record.catalog.enabled =>
-                    {
-                        ProviderCatalogDispatch::Tastytrade { controls, events }
-                    }
-                    ProviderCatalogChannelSet::Ctrader { controls, events }
-                        if record.catalog.enabled =>
-                    {
-                        ProviderCatalogDispatch::Ctrader { controls, events }
-                    }
-                    ProviderCatalogChannelSet::Rithmic { controls, events }
-                        if record.catalog.enabled =>
-                    {
-                        ProviderCatalogDispatch::Rithmic { controls, events }
-                    }
-                    ProviderCatalogChannelSet::Hyperliquid { controls, events }
-                        if record.catalog.enabled =>
-                    {
-                        ProviderCatalogDispatch::Hyperliquid { controls, events }
-                    }
-                    _ => ProviderCatalogDispatch::Disabled,
-                };
+                let catalog = record
+                    .catalog
+                    .enabled
+                    .then_some(record.catalog.channels.as_ref());
                 (
                     *provider_id,
                     ProviderDispatchRecord {
@@ -617,7 +662,7 @@ impl ProviderRuntimeRegistry {
             if !matches!(record.realtime, ProviderRealtimeDispatch::Disabled) {
                 lanes.push(ProviderEventLane::Realtime(provider_id));
             }
-            if !matches!(record.catalog, ProviderCatalogDispatch::Disabled) {
+            if record.catalog.is_some() {
                 lanes.push(ProviderEventLane::Catalog(provider_id));
             }
             if matches!(
@@ -793,27 +838,12 @@ impl ProviderDispatch<'_> {
                     ProviderRealtimeDispatch::Disabled => None,
                 }
             }
-            ProviderEventLane::Catalog(provider_id) => {
-                match &self.records.get(provider_id)?.catalog {
-                    ProviderCatalogDispatch::Tastytrade { events, .. } => events
-                        .try_recv()
-                        .ok()
-                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
-                    ProviderCatalogDispatch::Ctrader { events, .. } => events
-                        .try_recv()
-                        .ok()
-                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
-                    ProviderCatalogDispatch::Rithmic { events, .. } => events
-                        .try_recv()
-                        .ok()
-                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
-                    ProviderCatalogDispatch::Hyperliquid { events, .. } => events
-                        .try_recv()
-                        .ok()
-                        .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event.into())),
-                    ProviderCatalogDispatch::Disabled => None,
-                }
-            }
+            ProviderEventLane::Catalog(provider_id) => self
+                .records
+                .get(provider_id)?
+                .catalog?
+                .try_recv()
+                .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event)),
             ProviderEventLane::DisplayDepth(provider_id) => {
                 match &self.records.get(provider_id)?.realtime {
                     ProviderRealtimeDispatch::Hyperliquid { display_events, .. } => display_events
@@ -858,79 +888,10 @@ impl ProviderDispatch<'_> {
             .records
             .get(provider_id)
             .ok_or_else(|| format!("{provider_id} catalog worker is unavailable"))?;
-        match command {
-            ProviderCatalogCommand::Search(search) => match &record.catalog {
-                ProviderCatalogDispatch::Tastytrade { controls, .. } => controls
-                    .try_send(super::tastytrade::CatalogControl::Search(search))
-                    .map_err(|_| {
-                        "Provider catalog capacity is exhausted or unavailable".to_string()
-                    }),
-                ProviderCatalogDispatch::Ctrader { controls, .. } => controls
-                    .try_send(super::ctrader::CatalogControl::Search(search))
-                    .map_err(|_| {
-                        "Provider catalog capacity is exhausted or unavailable".to_string()
-                    }),
-                ProviderCatalogDispatch::Rithmic { controls, .. } => try_send_rithmic_catalog(
-                    controls,
-                    RithmicCatalogControl::Search(search),
-                    provider_id,
-                ),
-                ProviderCatalogDispatch::Hyperliquid { controls, .. } => {
-                    try_send_hyperliquid_catalog(
-                        controls,
-                        HyperliquidCatalogControl::Search(search),
-                        provider_id,
-                    )
-                }
-                ProviderCatalogDispatch::Disabled => {
-                    Err(format!("{provider_id} catalog worker is unavailable"))
-                }
-            },
-            ProviderCatalogCommand::Select(selection) => match &record.catalog {
-                ProviderCatalogDispatch::Tastytrade { controls, .. } => controls
-                    .try_send(super::tastytrade::CatalogControl::Select(selection))
-                    .map_err(|_| {
-                        "Provider catalog capacity is exhausted or unavailable".to_string()
-                    }),
-                ProviderCatalogDispatch::Ctrader { controls, .. } => controls
-                    .try_send(super::ctrader::CatalogControl::Select(selection))
-                    .map_err(|_| {
-                        "Provider catalog capacity is exhausted or unavailable".to_string()
-                    }),
-                ProviderCatalogDispatch::Rithmic { controls, .. } => try_send_rithmic_catalog(
-                    controls,
-                    RithmicCatalogControl::Select(selection),
-                    provider_id,
-                ),
-                ProviderCatalogDispatch::Hyperliquid { controls, .. } => {
-                    try_send_hyperliquid_catalog(
-                        controls,
-                        HyperliquidCatalogControl::Select(selection),
-                        provider_id,
-                    )
-                }
-                ProviderCatalogDispatch::Disabled => {
-                    Err(format!("{provider_id} catalog worker is unavailable"))
-                }
-            },
-            ProviderCatalogCommand::Screen(screen) => match &record.catalog {
-                ProviderCatalogDispatch::Hyperliquid { controls, .. } => {
-                    try_send_hyperliquid_catalog(
-                        controls,
-                        HyperliquidCatalogControl::Screen(screen),
-                        provider_id,
-                    )
-                }
-                ProviderCatalogDispatch::Tastytrade { .. }
-                | ProviderCatalogDispatch::Ctrader { .. }
-                | ProviderCatalogDispatch::Rithmic { .. } => {
-                    Err(format!("{provider_id} does not provide a market screen"))
-                }
-                ProviderCatalogDispatch::Disabled => {
-                    Err(format!("{provider_id} catalog worker is unavailable"))
-                }
-            },
-        }
+        record
+            .catalog
+            .ok_or_else(|| format!("{provider_id} catalog worker is unavailable"))?
+            .send(provider_id, command)
     }
 
     pub(super) fn send_control(
@@ -1908,6 +1869,7 @@ impl MarketService {
 
 #[cfg(test)]
 mod tests {
+    use super::super::ProviderCatalogChannel;
     use super::*;
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -1915,6 +1877,93 @@ mod tests {
         StudyPaneTarget, StudyPlotKind, StudyPointStyle, StudyScaleTarget, StudySettings,
     };
     use aeris_market_data::{BarPeriod, MarketBar};
+
+    #[test]
+    fn catalog_channel_dispatches_and_converts_without_provider_enum() {
+        let (control_tx, control_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let (event_tx, event_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let channel = super::super::ProviderCatalogChannelImpl::new(
+            control_tx,
+            event_rx,
+            dispatch_rithmic_catalog,
+        );
+        channel
+            .send(
+                "rithmic",
+                ProviderCatalogCommand::Search(SearchProviderInstruments::default()),
+            )
+            .expect("bounded catalog request");
+        assert!(matches!(
+            control_rx.try_recv(),
+            Ok(RithmicCatalogControl::Search(_))
+        ));
+        event_tx
+            .send(
+                crate::rithmic_realtime::RithmicCatalogEvent::SearchCompleted(
+                    aeris_contracts::ProviderInstrumentSearchResult::default(),
+                ),
+            )
+            .expect("bounded catalog response");
+        assert!(matches!(
+            channel.try_recv(),
+            Some(super::super::ProviderCatalogEvent::SearchCompleted(_))
+        ));
+    }
+
+    #[test]
+    fn catalog_channel_preserves_provider_screen_and_capacity_rules() {
+        let (rithmic_tx, rithmic_rx) = mpsc::sync_channel(1);
+        let (_, rithmic_events) =
+            mpsc::sync_channel::<crate::rithmic_realtime::RithmicCatalogEvent>(1);
+        let rithmic =
+            ProviderCatalogChannelImpl::new(rithmic_tx, rithmic_events, dispatch_rithmic_catalog);
+        assert!(
+            rithmic
+                .send(
+                    "rithmic",
+                    ProviderCatalogCommand::Screen(ScreenProviderMarkets::default())
+                )
+                .is_err()
+        );
+        rithmic
+            .send(
+                "rithmic",
+                ProviderCatalogCommand::Search(SearchProviderInstruments::default()),
+            )
+            .expect("first control fits");
+        assert!(
+            rithmic
+                .send(
+                    "rithmic",
+                    ProviderCatalogCommand::Select(SelectProviderInstrument::default())
+                )
+                .is_err(),
+            "a full bounded catalog channel refuses another control"
+        );
+        assert!(matches!(
+            rithmic_rx.try_recv(),
+            Ok(RithmicCatalogControl::Search(_))
+        ));
+
+        let (hyperliquid_tx, hyperliquid_rx) = mpsc::sync_channel(1);
+        let (_, hyperliquid_events) =
+            mpsc::sync_channel::<crate::hyperliquid_realtime::HyperliquidCatalogEvent>(1);
+        let hyperliquid = ProviderCatalogChannelImpl::new(
+            hyperliquid_tx,
+            hyperliquid_events,
+            dispatch_hyperliquid_catalog,
+        );
+        hyperliquid
+            .send(
+                "hyperliquid",
+                ProviderCatalogCommand::Screen(ScreenProviderMarkets::default()),
+            )
+            .expect("public provider supports market screens");
+        assert!(matches!(
+            hyperliquid_rx.try_recv(),
+            Ok(HyperliquidCatalogControl::Screen(_))
+        ));
+    }
 
     struct RecordingStudyHistory {
         calls: Arc<Mutex<Vec<String>>>,

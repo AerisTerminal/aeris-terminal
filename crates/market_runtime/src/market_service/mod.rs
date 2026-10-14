@@ -47,9 +47,9 @@ use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
 };
 use crate::hyperliquid_realtime::{
-    HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidCandleDemand, HyperliquidCatalogControl,
-    HyperliquidCatalogEvent, HyperliquidDemand, HyperliquidInstrumentDemand,
-    HyperliquidRealtimeControl, HyperliquidRealtimeEvent,
+    HYPERLIQUID_PUBLIC_ACCOUNT_ID, HyperliquidCandleDemand, HyperliquidCatalogEvent,
+    HyperliquidDemand, HyperliquidInstrumentDemand, HyperliquidRealtimeControl,
+    HyperliquidRealtimeEvent,
 };
 use crate::rithmic_realtime::{
     RithmicCatalogControl, RithmicCatalogEvent, RithmicInstrumentDemand, RithmicRealtimeControl,
@@ -1206,26 +1206,44 @@ enum ProviderRealtimeChannelSet {
 
 struct ProviderCatalogChannels {
     enabled: bool,
-    channels: ProviderCatalogChannelSet,
+    channels: Box<dyn ProviderCatalogChannel>,
 }
 
-enum ProviderCatalogChannelSet {
-    Tastytrade {
-        controls: SyncSender<tastytrade::CatalogControl>,
-        events: Receiver<tastytrade::CatalogEvent>,
-    },
-    Ctrader {
-        controls: SyncSender<ctrader::CatalogControl>,
-        events: Receiver<ctrader::CatalogEvent>,
-    },
-    Rithmic {
-        controls: SyncSender<RithmicCatalogControl>,
-        events: Receiver<RithmicCatalogEvent>,
-    },
-    Hyperliquid {
-        controls: SyncSender<HyperliquidCatalogControl>,
-        events: Receiver<HyperliquidCatalogEvent>,
-    },
+trait ProviderCatalogChannel: Send {
+    fn try_recv(&self) -> Option<ProviderCatalogEvent>;
+    fn send(&self, provider_id: &str, command: ProviderCatalogCommand) -> Result<(), String>;
+}
+
+struct ProviderCatalogChannelImpl<C, E> {
+    controls: SyncSender<C>,
+    events: Receiver<E>,
+    dispatch: fn(&SyncSender<C>, &str, ProviderCatalogCommand) -> Result<(), String>,
+}
+
+impl<C, E> ProviderCatalogChannelImpl<C, E> {
+    fn new(
+        controls: SyncSender<C>,
+        events: Receiver<E>,
+        dispatch: fn(&SyncSender<C>, &str, ProviderCatalogCommand) -> Result<(), String>,
+    ) -> Self {
+        Self {
+            controls,
+            events,
+            dispatch,
+        }
+    }
+}
+
+impl<C: Send, E: Into<ProviderCatalogEvent> + Send> ProviderCatalogChannel
+    for ProviderCatalogChannelImpl<C, E>
+{
+    fn try_recv(&self) -> Option<ProviderCatalogEvent> {
+        self.events.try_recv().ok().map(Into::into)
+    }
+
+    fn send(&self, provider_id: &str, command: ProviderCatalogCommand) -> Result<(), String> {
+        (self.dispatch)(&self.controls, provider_id, command)
+    }
 }
 
 struct ProviderRuntimeRecord {
@@ -1305,7 +1323,7 @@ struct ProviderDispatchRecord<'a> {
     history: &'a SyncSender<HistoryRequest>,
     lifecycle: Option<&'a ProviderRuntimeLifecycle>,
     realtime: ProviderRealtimeDispatch<'a>,
-    catalog: ProviderCatalogDispatch<'a>,
+    catalog: Option<&'a dyn ProviderCatalogChannel>,
 }
 
 enum ProviderRealtimeDispatch<'a> {
@@ -1355,26 +1373,6 @@ impl<'a> ProviderRealtimeDispatch<'a> {
             _ => None,
         }
     }
-}
-
-enum ProviderCatalogDispatch<'a> {
-    Tastytrade {
-        controls: &'a SyncSender<tastytrade::CatalogControl>,
-        events: &'a Receiver<tastytrade::CatalogEvent>,
-    },
-    Ctrader {
-        controls: &'a SyncSender<ctrader::CatalogControl>,
-        events: &'a Receiver<ctrader::CatalogEvent>,
-    },
-    Rithmic {
-        controls: &'a SyncSender<RithmicCatalogControl>,
-        events: &'a Receiver<RithmicCatalogEvent>,
-    },
-    Hyperliquid {
-        controls: &'a SyncSender<HyperliquidCatalogControl>,
-        events: &'a Receiver<HyperliquidCatalogEvent>,
-    },
-    Disabled,
 }
 
 enum ProviderCatalogCommand {
