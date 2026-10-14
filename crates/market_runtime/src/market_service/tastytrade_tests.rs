@@ -2,6 +2,36 @@
 
 use super::*;
 use aeris_tastytrade_market_adapter::SessionWindow;
+
+#[test]
+fn broker_http_operation_does_not_hold_catalog_cache_mutex() {
+    let api = BrokerApi::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    api.with_client(&stop, |_| {
+        assert!(
+            api.state.try_lock().is_ok(),
+            "HTTP must not block catalog cache reads"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn broker_authorization_retires_an_inflight_http_lane_without_restoring_its_capability() {
+    let api = BrokerApi::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    api.with_client(&stop, |_| {
+        api.clear().unwrap();
+        assert!(api.state.try_lock().is_ok());
+        Ok(())
+    })
+    .unwrap();
+    let borrowed = api.borrow_http(&stop).unwrap();
+    assert!(borrowed.lane.as_ref().unwrap().capability.is_none());
+    assert!(!api.connection_ready());
+}
+
 #[test]
 fn resolved_instrument_cache_reuses_identity_and_clears_on_authorization_change() {
     let api = BrokerApi::default();

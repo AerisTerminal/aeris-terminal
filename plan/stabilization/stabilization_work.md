@@ -427,6 +427,7 @@ Status: in progress
   - Generic lifecycle/history/calendar/coordinator/realtime/runtime/publication files reject provider-id literals in production, including after test modules; fixture tests cover each path (quotes and outbox when introduced). Provider-specific invalidation wording moved to provider-event translation. The remaining provider dispatch enums are deliberately M3.6.
   - Workspace fmt, Clippy `-D warnings`, tests and naming_check passed. Characterization (4), lifecycle (12), aggregation and descriptor matrix suites passed; no Rithmic live session or GUI run (internal-only item; M3.4 GUI validation completed).
 - [ ] M3.6 provider-session-registry - `ProviderSession` trait and `ProviderRegistry`
+  - Part 1/3: tastytrade HTTP transport is borrowed outside the catalog-cache mutex and returned on all paths; authorization revocation retires an in-flight transport. Two regression tests and the full workspace gate passed. Registry and per-provider idle work remain before this item can be checked.
 - [ ] M3.7 instrument-leases-feed-contract - Trading feed domain contract and MarketEngine instrument leases
 - [ ] M3.8 trading-quote-feed - Market-side trading quote feed driven by instrument demand
 - [ ] M3.9 fenced-events-waitable-outbox - Every consumer event is fenced; the bridge blocks on a waitable outbox
@@ -606,6 +607,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M3.3 perf(market): share segmented series for study and live publication - replaced full-series study/live/existence copies, unified study dispatch and measured 128-byte tail payload at all three history sizes; full gate green.
 - 2026-10-14 M3.4 perf(market): sleep between dirty market publications and deadlines - removed idle coordinator sweeps, preserved deadline recovery and measured lower isolated one-chart desktop CPU against archived M2.2 source; full gate green.
 - 2026-10-14 M3.5 refactor(market): separate provider capabilities from presentation - removed descriptor behavior flags and generic provider-id literals, corrected Rithmic presentation, relocated replay aggregation to its adapter, and passed the full workspace gate.
+- 2026-10-15 M3.6 refactor(market): release tastytrade state lock during HTTP (M3.6 part 1/3) - isolated the exclusive transport from its bounded catalog cache and fenced authorization revocation; full gate green, registry work follows.
 
 ## 7. Known gaps / deferred
 

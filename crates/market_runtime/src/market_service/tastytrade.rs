@@ -25,6 +25,7 @@ use aeris_tastytrade_market_adapter::{
     QuoteToken, ResolvedInstrument, SearchInstrument, Subscription, SubscriptionChangeBudget,
     SubscriptionChangeError, TastytradeBrokerClient, TradePrint,
 };
+use std::sync::Condvar;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const ENTITLEMENT: &str = "tastytrade-authorized";
@@ -209,9 +210,11 @@ impl RealtimeEvent {
 }
 
 /// One REST lane shares provider credentials and request limits across workers.
-#[derive(Default)]
 pub(super) struct BrokerApi {
     state: Mutex<BrokerApiState>,
+    http: Mutex<Option<HttpLane>>,
+    http_ready: Condvar,
+    connection_available: AtomicBool,
     futures_sessions: Mutex<Option<(Instant, [MarketSession; 2])>>,
     equity_session: Mutex<Option<(Instant, MarketSession)>>,
     calendar_revision: AtomicU64,
@@ -219,17 +222,88 @@ pub(super) struct BrokerApi {
     startup_search_control: Mutex<BTreeMap<u64, (u64, Arc<AtomicBool>)>>,
     authorization_epoch: AtomicU64,
 }
+impl Default for BrokerApi {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            http: Mutex::new(Some(HttpLane::default())),
+            http_ready: Condvar::new(),
+            connection_available: AtomicBool::new(false),
+            futures_sessions: Mutex::default(),
+            equity_session: Mutex::default(),
+            calendar_revision: AtomicU64::new(0),
+            search_control: Mutex::default(),
+            startup_search_control: Mutex::default(),
+            authorization_epoch: AtomicU64::new(0),
+        }
+    }
+}
 #[derive(Default)]
 struct BrokerApiState {
-    client: TastytradeBrokerClient,
-    capability: Option<HostedBrokerConnection>,
     futures: Option<(Instant, Vec<FutureInstrument>)>,
     searches: BTreeMap<String, (Instant, Vec<SearchInstrument>)>,
     search_order: VecDeque<String>,
     instruments: BTreeMap<(String, String), (Instant, Result<ResolvedInstrument, String>)>,
     instrument_order: VecDeque<(String, String)>,
 }
+#[derive(Default)]
+struct HttpLane {
+    client: TastytradeBrokerClient,
+    capability: Option<HostedBrokerConnection>,
+}
+
+/// The transport is exclusive, but its lock is never held while making a request.
+/// A revoked authorization invalidates the token when the borrowed lane returns.
+struct BorrowedHttpLane<'a> {
+    api: &'a BrokerApi,
+    lane: Option<HttpLane>,
+    epoch: u64,
+}
+impl Drop for BorrowedHttpLane<'_> {
+    fn drop(&mut self) {
+        if let Some(mut lane) = self.lane.take() {
+            if self.api.authorization_epoch.load(Ordering::Acquire) != self.epoch {
+                lane.client.clear_access_token();
+                lane.capability = None;
+                self.api
+                    .connection_available
+                    .store(false, Ordering::Release);
+            }
+            let mut slot = self
+                .api
+                .http
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some(lane);
+            self.api.http_ready.notify_one();
+        }
+    }
+}
 impl BrokerApi {
+    fn borrow_http(&self, stop: &Arc<AtomicBool>) -> Result<BorrowedHttpLane<'_>, String> {
+        let mut slot = self
+            .http
+            .lock()
+            .map_err(|_| "Tastytrade request lane failed")?;
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return Err("Tastytrade request cancelled".into());
+            }
+            if let Some(lane) = slot.take() {
+                return Ok(BorrowedHttpLane {
+                    api: self,
+                    lane: Some(lane),
+                    epoch: self.authorization_epoch.load(Ordering::Acquire),
+                });
+            }
+            // A bounded wait lets cancellation terminate while another HTTP call is in flight.
+            let (next, _) = self
+                .http_ready
+                .wait_timeout(slot, Duration::from_millis(100))
+                .map_err(|_| "Tastytrade request lane failed")?;
+            slot = next;
+        }
+    }
     pub(super) fn register_search(
         &self,
         consumer: u64,
@@ -296,19 +370,18 @@ impl BrokerApi {
         stop: &Arc<AtomicBool>,
         operation: impl FnOnce(&mut TastytradeBrokerClient, &HostedBrokerConnection) -> Result<T, E>,
     ) -> Result<T, E> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| E::from("Tastytrade request lane failed".to_string()))?;
-        if stop.load(Ordering::Acquire) {
-            return Err(E::from("Tastytrade request cancelled".to_string()));
+        let mut borrowed = self.borrow_http(stop).map_err(E::from)?;
+        let lane = borrowed
+            .lane
+            .as_mut()
+            .ok_or_else(|| E::from("Tastytrade request lane failed".to_string()))?;
+        if lane.capability.is_none() {
+            lane.capability = Some(broker_authorization::load_connection().map_err(E::from)?);
+            self.connection_available.store(true, Ordering::Release);
         }
-        if state.capability.is_none() {
-            state.capability = Some(broker_authorization::load_connection().map_err(E::from)?);
-        }
-        let BrokerApiState {
+        let HttpLane {
             client, capability, ..
-        } = &mut *state;
+        } = lane;
         operation(
             client,
             capability
@@ -321,23 +394,23 @@ impl BrokerApi {
         stop: &Arc<AtomicBool>,
         operation: impl FnOnce(&mut TastytradeBrokerClient) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "Tastytrade request lane failed")?;
-        if stop.load(Ordering::Acquire) {
-            return Err("Tastytrade request cancelled".into());
-        }
-        operation(&mut state.client)
+        let mut borrowed = self.borrow_http(stop)?;
+        operation(
+            &mut borrowed
+                .lane
+                .as_mut()
+                .ok_or("Tastytrade request lane failed")?
+                .client,
+        )
     }
     pub(super) fn clear(&self) -> Result<(), String> {
         self.cancel_searches();
+        self.authorization_epoch.fetch_add(1, Ordering::AcqRel);
+        self.connection_available.store(false, Ordering::Release);
         let mut state = self
             .state
             .lock()
             .map_err(|_| "Tastytrade request lane failed")?;
-        state.client.clear_access_token();
-        state.capability = None;
         state.futures = None;
         state.searches.clear();
         state.search_order.clear();
@@ -347,7 +420,6 @@ impl BrokerApi {
             .futures_sessions
             .lock()
             .map_err(|_| "Tastytrade session cache failed")?;
-        self.authorization_epoch.fetch_add(1, Ordering::AcqRel);
         *sessions = None;
         *self
             .equity_session
@@ -403,34 +475,36 @@ impl BrokerApi {
                 }
             }
         };
+        if stop.load(Ordering::Acquire) || cancellation.load(Ordering::Acquire) {
+            return Err("Tastytrade request cancelled".into());
+        }
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Tastytrade request lane failed")?;
+            if let Some((fetched, items)) = state.searches.get(query)
+                && fetched.elapsed() < Duration::from_secs(30)
+            {
+                let items = items.clone();
+                state.search_order.retain(|entry| entry != query);
+                state.search_order.push_back(query.to_string());
+                return Ok(items);
+            }
+        }
+        let epoch = self.authorization_epoch.load(Ordering::Acquire);
+        let items = self.call(stop, |client, capability| {
+            client.search(capability, query, &cancellation)
+        })?;
+        if stop.load(Ordering::Acquire) || cancellation.load(Ordering::Acquire) {
+            return Err("Tastytrade search superseded".into());
+        }
         let mut state = self
             .state
             .lock()
             .map_err(|_| "Tastytrade request lane failed")?;
-        if stop.load(Ordering::Acquire) || cancellation.load(Ordering::Acquire) {
-            return Err("Tastytrade request cancelled".into());
-        }
-        if let Some((fetched, items)) = state.searches.get(query)
-            && fetched.elapsed() < Duration::from_secs(30)
-        {
-            let items = items.clone();
-            state.search_order.retain(|entry| entry != query);
-            state.search_order.push_back(query.to_string());
-            return Ok(items);
-        }
-        if state.capability.is_none() {
-            state.capability = Some(broker_authorization::load_connection()?);
-        }
-        let BrokerApiState {
-            client, capability, ..
-        } = &mut *state;
-        let items = client.search(
-            capability.as_ref().ok_or("Tastytrade connection missing")?,
-            query,
-            &cancellation,
-        )?;
-        if stop.load(Ordering::Acquire) || cancellation.load(Ordering::Acquire) {
-            return Err("Tastytrade search superseded".into());
+        if self.authorization_epoch.load(Ordering::Acquire) != epoch {
+            return Err("Tastytrade search authorization retired".into());
         }
         state.search_order.retain(|entry| entry != query);
         if state.search_order.len() >= 32
@@ -445,25 +519,28 @@ impl BrokerApi {
         Ok(items)
     }
     pub(super) fn futures(&self, stop: &Arc<AtomicBool>) -> Result<Vec<FutureInstrument>, String> {
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Tastytrade request lane failed")?;
+            if let Some((fetched, futures)) = &state.futures
+                && fetched.elapsed() < Duration::from_mins(30)
+            {
+                return Ok(futures.clone());
+            }
+        }
+        let epoch = self.authorization_epoch.load(Ordering::Acquire);
+        let futures = self.call(stop, |client, capability| {
+            client.active_futures(capability, stop)
+        })?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| "Tastytrade request lane failed")?;
-        if let Some((fetched, futures)) = &state.futures
-            && fetched.elapsed() < Duration::from_mins(30)
-        {
-            return Ok(futures.clone());
+        if self.authorization_epoch.load(Ordering::Acquire) != epoch {
+            return Err("Tastytrade futures request retired".into());
         }
-        if state.capability.is_none() {
-            state.capability = Some(broker_authorization::load_connection()?);
-        }
-        let BrokerApiState {
-            client, capability, ..
-        } = &mut *state;
-        let futures = client.active_futures(
-            capability.as_ref().ok_or("Tastytrade connection missing")?,
-            stop,
-        )?;
         state.futures = Some((Instant::now(), futures.clone()));
         Ok(futures)
     }
@@ -472,10 +549,6 @@ impl BrokerApi {
         instrument: &SearchInstrument,
         stop: &Arc<AtomicBool>,
     ) -> Result<ResolvedInstrument, String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "Tastytrade request lane failed")?;
         if stop.load(Ordering::Acquire) {
             return Err("Tastytrade request cancelled".into());
         }
@@ -483,32 +556,38 @@ impl BrokerApi {
             instrument.instrument_type.clone(),
             instrument.symbol.clone(),
         );
-        if let Some((fetched, resolved)) = state.instruments.get(&key)
-            && fetched.elapsed()
-                < if resolved.is_ok() {
-                    Duration::from_mins(30)
-                } else {
-                    Duration::from_secs(1)
-                }
         {
-            let resolved = resolved.clone();
-            state.instrument_order.retain(|entry| entry != &key);
-            state.instrument_order.push_back(key);
-            return resolved;
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Tastytrade request lane failed")?;
+            if let Some((fetched, resolved)) = state.instruments.get(&key)
+                && fetched.elapsed()
+                    < if resolved.is_ok() {
+                        Duration::from_mins(30)
+                    } else {
+                        Duration::from_secs(1)
+                    }
+            {
+                let resolved = resolved.clone();
+                state.instrument_order.retain(|entry| entry != &key);
+                state.instrument_order.push_back(key);
+                return resolved;
+            }
         }
-        if state.capability.is_none() {
-            state.capability = Some(broker_authorization::load_connection()?);
-        }
-        let BrokerApiState {
-            client, capability, ..
-        } = &mut *state;
-        let resolved = client.instrument(
-            capability.as_ref().ok_or("Tastytrade connection missing")?,
-            instrument,
-            stop,
-        );
+        let epoch = self.authorization_epoch.load(Ordering::Acquire);
+        let resolved = self.call(stop, |client, capability| {
+            client.instrument(capability, instrument, stop)
+        });
         if stop.load(Ordering::Acquire) {
             return Err("Tastytrade request cancelled".into());
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "Tastytrade request lane failed")?;
+        if self.authorization_epoch.load(Ordering::Acquire) != epoch {
+            return Err("Tastytrade instrument request retired".into());
         }
         state.instrument_order.retain(|entry| entry != &key);
         if state.instrument_order.len() >= 64
@@ -526,9 +605,7 @@ impl BrokerApi {
         self.state.lock().is_ok_and(|state| state.futures.is_some())
     }
     fn connection_ready(&self) -> bool {
-        self.state
-            .lock()
-            .is_ok_and(|state| state.capability.is_some())
+        self.connection_available.load(Ordering::Acquire)
     }
     fn refresh_futures_sessions(&self, stop: &Arc<AtomicBool>) -> Result<(), String> {
         let epoch = self.authorization_epoch.load(Ordering::Acquire);
