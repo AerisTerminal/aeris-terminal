@@ -133,6 +133,7 @@ pub struct MarketServiceStatus {
 
 struct MarketRuntime {
     shutdown: Arc<AtomicBool>,
+    shutdown_wake: SyncSender<Command>,
     broker_api: Arc<tastytrade::BrokerApi>,
     ctrader: ctrader::CtraderShared,
     provider_presentations: Vec<ProviderPresentationDescriptor>,
@@ -146,6 +147,8 @@ struct MarketRuntime {
 impl Drop for MarketRuntime {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        // A full queue already makes the coordinator runnable.
+        let _ = self.shutdown_wake.try_send(Command::ProviderWake);
         self.broker_api.cancel_searches();
     }
 }

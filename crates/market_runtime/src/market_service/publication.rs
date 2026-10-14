@@ -10,7 +10,6 @@ use crate::{
 };
 use aeris_observability::diagnostic;
 use std::sync::Arc;
-use std::time::Instant;
 
 pub(super) fn fail_waiters(
     events: &mut BTreeMap<ConsumerId, ConsumerEvents>,
@@ -747,7 +746,7 @@ impl Coordinator<'_> {
     /// slow consumers keep one latest bounded replacement instead of accumulating
     /// an unbounded event queue.
     pub(super) fn broadcast_dirty_trade_tapes(&mut self) {
-        let now = Instant::now();
+        let now = self.clock.monotonic();
         let dirty = self
             .order_books
             .iter()
@@ -793,7 +792,7 @@ impl Coordinator<'_> {
             .collect::<Vec<_>>()
             .into();
         order_book.trade_tape_dirty = false;
-        order_book.trade_tape_published_at = Some(Instant::now());
+        order_book.trade_tape_published_at = Some(self.clock.monotonic());
         for (consumer_id, generation) in consumers {
             let Some(snapshot) =
                 trade_tape_snapshot(consumer_id, generation, order_book, Arc::clone(&trades))

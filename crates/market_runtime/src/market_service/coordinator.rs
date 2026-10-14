@@ -32,6 +32,21 @@ pub(super) struct OwnedCoordinatorChannels {
     pub(super) providers: ProviderRuntimeRegistry,
 }
 
+#[derive(Clone, Copy, Default)]
+struct TimerKey(u8);
+
+impl TimerKey {
+    const WATCHDOG: u8 = 1;
+    const HISTORY_RETRY: u8 = 2;
+    const SESSION_TRANSITION: u8 = 4;
+    const TRADE_TAPE: u8 = 8;
+    const CONTROL_RETRY: u8 = 16;
+
+    fn contains(self, timer: u8) -> bool {
+        self.0 & timer != 0
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum StudyChange<'a> {
     Ready(super::StudyInstanceId),
@@ -92,13 +107,7 @@ fn run_coordinator(
             coordinator.begin_shutdown();
             return;
         }
-        if !coordinator_turn(
-            &mut coordinator,
-            commands,
-            &demand_flushers,
-            shutdown,
-            COORDINATOR_TICK,
-        ) {
+        if !coordinator_turn(&mut coordinator, commands, &demand_flushers, shutdown, None) {
             if shutdown.load(Ordering::Acquire) {
                 drain_shutdown_provider_events(&mut coordinator);
                 coordinator.begin_shutdown();
@@ -109,31 +118,68 @@ fn run_coordinator(
 }
 
 /// Runs one production coordinator turn through the bounded provider lanes and
-/// command receiver. Tests use this same entry with a zero wait, not a state hook.
+/// command receiver. A quiet coordinator blocks until a command or a real deadline.
 fn coordinator_turn(
     coordinator: &mut Coordinator<'_>,
     commands: &Receiver<Command>,
     demand_flushers: &[for<'a> fn(&mut Coordinator<'a>)],
     shutdown: &AtomicBool,
-    timeout: Duration,
+    test_wait: Option<Duration>,
 ) -> bool {
     coordinator.studies.begin_turn();
     let drained = drain_coordinator_events(coordinator);
-    coordinator.broadcast_dirty_trade_tapes();
-    coordinator.publish_lifecycle_live();
-    coordinator.recover_stalled_live_series();
-    coordinator.recover_overflowed_series_queues();
-    for flush in demand_flushers {
-        flush(coordinator);
+    let now = coordinator.clock.monotonic();
+    let due = coordinator.take_due_timers(now);
+    let active = coordinator.pending_activity || drained > 0;
+    coordinator.pending_activity = false;
+    if active || due.contains(TimerKey::TRADE_TAPE) {
+        coordinator.broadcast_dirty_trade_tapes();
     }
-    coordinator.stop_realtime_if_idle();
-    coordinator.retry_history();
-    match commands.recv_timeout(if drained >= REALTIME_DRAIN_BUDGET {
-        Duration::ZERO
+    if active || !coordinator.dirty_series.is_empty() {
+        coordinator.publish_lifecycle_live();
+        coordinator.recover_overflowed_series_queues();
+    }
+    if active {
+        coordinator.control_retry = false;
+        for flush in demand_flushers {
+            flush(coordinator);
+        }
+        coordinator.stop_realtime_if_idle();
+    }
+    if due.contains(TimerKey::CONTROL_RETRY) && !active {
+        coordinator.control_retry = false;
+        for flush in demand_flushers {
+            flush(coordinator);
+        }
+        coordinator.stop_realtime_if_idle();
+    }
+    if due.contains(TimerKey::WATCHDOG | TimerKey::SESSION_TRANSITION) {
+        coordinator.recover_stalled_live_series();
+    }
+    if due.contains(TimerKey::HISTORY_RETRY) {
+        coordinator.retry_history();
+    }
+    if active || !coordinator.dirty_series.is_empty() || due.0 != 0 {
+        coordinator.refresh_deadlines();
+    }
+    let wait = if drained >= REALTIME_DRAIN_BUDGET {
+        Some(Duration::ZERO)
     } else {
-        timeout
-    }) {
-        Ok(command) if !shutdown.load(Ordering::Acquire) => coordinator.handle_command(command),
+        match (coordinator.next_wait(), test_wait) {
+            (Some(deadline), Some(cap)) => Some(deadline.min(cap)),
+            (None, cap) => cap,
+            (deadline, None) => deadline,
+        }
+    };
+    let received = match wait {
+        Some(timeout) => commands.recv_timeout(timeout),
+        None => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
+    };
+    match received {
+        Ok(command) if !shutdown.load(Ordering::Acquire) => {
+            coordinator.handle_command(command);
+            coordinator.pending_activity = true;
+        }
         Ok(_) | Err(RecvTimeoutError::Disconnected) => return false,
         Err(RecvTimeoutError::Timeout) => {}
     }
@@ -185,6 +231,10 @@ impl<'a> Coordinator<'a> {
             history: super::history::tracker::HistoryTracker::default(),
             events: BTreeMap::new(),
             series: lifecycle::SeriesLifecycles::default(),
+            dirty_series: BTreeSet::new(),
+            deadlines: BTreeMap::new(),
+            pending_activity: true,
+            control_retry: false,
             series_effects: super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),
             display_depth: BTreeMap::new(),
@@ -283,9 +333,9 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
     drained
 }
 
-/// Offline, bounded coordinator workload for comparing subsequent hot-path
-/// changes. CPU is active coordinator work in 63 simulated 16 ms turns, not
-/// process-wide CPU (which would include unrelated worker threads).
+/// Offline, bounded coordinator workload. Idle work is zero when no deadline
+/// or command exists; loaded work uses 63 batches of 64 canonical series.
+/// CPU is active coordinator work, not process-wide CPU.
 pub(super) fn performance_baseline() -> Result<serde_json::Value, String> {
     use serde_json::json;
     use std::num::NonZeroU64;
@@ -296,9 +346,8 @@ pub(super) fn performance_baseline() -> Result<serde_json::Value, String> {
     let capacity = super::CONSUMER_SERIES_QUEUE_CAPACITY;
     let generation = ProviderGeneration(NonZeroU64::MIN);
     let idle_started = Instant::now();
-    for _ in 0..TURNS {
-        benchmark_turn(&mut coordinator);
-    }
+    // No coordinator turns occur in a simulated second with no deadlines.
+    debug_assert!(coordinator.next_wait().is_none());
     let idle_nanos = idle_started.elapsed().as_nanos();
     let loaded_started = Instant::now();
     for revision in 0..TURNS {
@@ -317,7 +366,7 @@ pub(super) fn performance_baseline() -> Result<serde_json::Value, String> {
                 events.publish_series_update(MarketRuntimeEvent::SeriesUpdate(update));
             }
         }
-        benchmark_turn(&mut coordinator);
+        benchmark_active_turn(&mut coordinator);
         for events in coordinator.events.values_mut() {
             while events.pop().is_some() {}
         }
@@ -329,12 +378,12 @@ pub(super) fn performance_baseline() -> Result<serde_json::Value, String> {
         "simulated_seconds": 1,
         "idle_coordinator_cpu_nanos_per_second": idle_nanos,
         "loaded_coordinator_cpu_nanos_per_second": loaded_nanos,
-        "idle_wakeups_per_second": TURNS,
+        "idle_wakeups_per_second": 0,
         "loaded_wakeups_per_second": TURNS,
         "overflow_capacity": capacity,
         "covering_snapshot_nanos": overflow_nanos,
         "overflow_events_dropped": capacity,
-        "cpu_measurement": "active single-thread coordinator workload over 63 simulated 16ms turns",
+        "cpu_measurement": "active single-thread coordinator workload: zero idle turns; 63 loaded batches of 64 series",
     }))
 }
 
@@ -445,15 +494,14 @@ fn benchmark_overflow(
     Ok(overflow_nanos)
 }
 
-fn benchmark_turn(coordinator: &mut Coordinator<'_>) {
+fn benchmark_active_turn(coordinator: &mut Coordinator<'_>) {
     coordinator.studies.begin_turn();
     drain_coordinator_events(coordinator);
     coordinator.broadcast_dirty_trade_tapes();
     coordinator.publish_lifecycle_live();
-    coordinator.recover_stalled_live_series();
     coordinator.recover_overflowed_series_queues();
     coordinator.stop_realtime_if_idle();
-    coordinator.retry_history();
+    coordinator.refresh_deadlines();
 }
 
 fn benchmark_bar(sequence: u64) -> aeris_market_data::MarketBar {
@@ -472,6 +520,123 @@ fn benchmark_bar(sequence: u64) -> aeris_market_data::MarketBar {
 
 #[cfg(test)]
 mod performance_tests {
+    #[test]
+    fn scripted_idle_coordinator_has_no_publication_tick() {
+        let (mut coordinator, _) = super::benchmark_coordinator().expect("fixture");
+        let clock = std::sync::Arc::new(super::super::clock::ScriptedClock::new(0));
+        coordinator.clock = clock.clone();
+        coordinator.refresh_deadlines();
+        assert_eq!(coordinator.next_wait(), None);
+        clock.advance(std::time::Duration::from_secs(60));
+        assert_eq!(coordinator.next_wait(), None);
+    }
+
+    #[test]
+    fn publication_cap_exists_only_while_series_is_dirty() {
+        let (mut coordinator, keys) = super::benchmark_coordinator().expect("fixture");
+        assert_eq!(coordinator.next_wait(), None);
+        coordinator.dirty_series.insert(keys[0].clone());
+        assert_eq!(coordinator.next_wait(), Some(super::COORDINATOR_TICK));
+        coordinator.dirty_series.clear();
+        assert_eq!(coordinator.next_wait(), None);
+    }
+
+    #[test]
+    fn scripted_watchdog_deadline_waits_without_periodic_ticks() {
+        use super::super::clock::{Clock, ScriptedClock};
+        use super::super::lifecycle::{SeriesLifecycle, SeriesState};
+        let (mut coordinator, keys) = super::benchmark_coordinator().expect("fixture");
+        let clock = std::sync::Arc::new(ScriptedClock::new(0));
+        coordinator.clock = clock.clone();
+        coordinator
+            .engine
+            .set_provider_health(
+                "synthetic",
+                super::ProviderGeneration(std::num::NonZeroU64::MIN),
+                super::ProviderHealth::Online,
+            )
+            .expect("provider online");
+        let mut live = SeriesLifecycle::with_clock(
+            keys[0].clone(),
+            super::ProviderGeneration(std::num::NonZeroU64::MIN),
+            "",
+            "",
+            super::super::CandleGapPolicy::Contiguous,
+            clock.clone(),
+        );
+        live.connected = true;
+        live.state = SeriesState::Live {
+            last_progress: clock.monotonic(),
+            observed_live: true,
+        };
+        coordinator.series.insert_candle(keys[0].clone(), live);
+        coordinator.refresh_deadlines();
+        assert_eq!(
+            coordinator.next_wait(),
+            Some(std::time::Duration::from_secs(300))
+        );
+        clock.advance(std::time::Duration::from_secs(299));
+        assert_eq!(
+            coordinator.next_wait(),
+            Some(std::time::Duration::from_secs(1))
+        );
+        clock.advance(std::time::Duration::from_secs(1));
+        assert!(
+            coordinator
+                .take_due_timers(clock.monotonic())
+                .contains(super::TimerKey::WATCHDOG)
+        );
+    }
+
+    #[test]
+    fn one_dirty_series_does_not_publish_untouched_series() {
+        use super::super::clock::{Clock, ScriptedClock};
+        use super::super::lifecycle::{SeriesLifecycle, SeriesState};
+        let (mut coordinator, keys) = super::benchmark_coordinator().expect("fixture");
+        let clock = std::sync::Arc::new(ScriptedClock::new(0));
+        for (index, key) in keys.iter().take(2).enumerate() {
+            let mut live = SeriesLifecycle::with_clock(
+                key.clone(),
+                super::ProviderGeneration(std::num::NonZeroU64::MIN),
+                "",
+                "",
+                super::super::CandleGapPolicy::Contiguous,
+                clock.clone(),
+            );
+            live.connected = true;
+            live.price_scale = 2;
+            live.state = SeriesState::Live {
+                last_progress: clock.monotonic(),
+                observed_live: true,
+            };
+            if index == 0 {
+                let mut bar = super::benchmark_bar(2);
+                bar.close = 200;
+                live.pending_publications.push_back(bar);
+                live.dirty = true;
+            }
+            coordinator.series.insert_candle(key.clone(), live);
+        }
+        coordinator.publish_lifecycle_live();
+        let published = coordinator
+            .events
+            .get_mut(&super::ConsumerId(std::num::NonZeroU64::MIN))
+            .and_then(super::ConsumerEvents::pop);
+        assert!(matches!(
+            published,
+            Some(super::MarketRuntimeEvent::SeriesUpdate(_))
+        ));
+        assert!(
+            coordinator
+                .events
+                .get_mut(&super::ConsumerId(
+                    std::num::NonZeroU64::new(2).expect("second consumer")
+                ))
+                .and_then(super::ConsumerEvents::pop)
+                .is_none()
+        );
+    }
+
     #[test]
     fn offline_coordinator_overflow_replaces_updates_with_covering_snapshot() {
         let profile = super::performance_baseline().expect("offline coordinator baseline");
@@ -547,6 +712,10 @@ pub(super) struct Coordinator<'a> {
     pub(super) history: super::history::tracker::HistoryTracker,
     pub(super) events: BTreeMap<ConsumerId, ConsumerEvents>,
     pub(super) series: lifecycle::SeriesLifecycles,
+    pub(super) dirty_series: BTreeSet<BarSeriesKey>,
+    deadlines: BTreeMap<Instant, TimerKey>,
+    pending_activity: bool,
+    pub(super) control_retry: bool,
     pub(super) series_effects: super::lifecycle::EffectBuf,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
     /// Provider-aggregated depth used only for DOM presentation.
@@ -568,6 +737,123 @@ pub(super) struct Coordinator<'a> {
 }
 
 impl Coordinator<'_> {
+    pub(super) fn collect_dirty_series(&mut self) {
+        self.dirty_series.clear();
+        self.dirty_series
+            .extend(self.series.iter().filter_map(|(key, live)| {
+                let dirty = live.trade_model().map_or(
+                    live.dirty || !live.pending_publications.is_empty(),
+                    |model| {
+                        model.dirty
+                            || !model.pending_publications.is_empty()
+                            || !model.pending_corrections.is_empty()
+                    },
+                );
+                dirty.then(|| key.clone())
+            }));
+    }
+
+    fn take_due_timers(&mut self, now: Instant) -> TimerKey {
+        let mut due = TimerKey::default();
+        while let Some((&at, _)) = self.deadlines.first_key_value() {
+            if at > now {
+                break;
+            }
+            if let Some(timer) = self.deadlines.remove(&at) {
+                due.0 |= timer.0;
+            }
+        }
+        due
+    }
+
+    fn next_wait(&self) -> Option<Duration> {
+        let now = self.clock.monotonic();
+        let deadline = self
+            .deadlines
+            .first_key_value()
+            .map(|(at, _)| at.saturating_duration_since(now));
+        if self.dirty_series.is_empty() {
+            deadline
+        } else {
+            Some(deadline.map_or(COORDINATOR_TICK, |wait| wait.min(COORDINATOR_TICK)))
+        }
+    }
+
+    fn refresh_deadlines(&mut self) {
+        let now = self.clock.monotonic();
+        let wall_ms = self.clock.wall_nanos().map(|at| at.div_euclid(1_000_000));
+        let mut deadlines = BTreeMap::<Instant, TimerKey>::new();
+        if let Some(at) = self.history.next_retry_deadline() {
+            deadlines.entry(at).or_default().0 |= TimerKey::HISTORY_RETRY;
+        }
+        for (series, live) in self.series.iter() {
+            if !live.connected || !live.history_ready() {
+                continue;
+            }
+            if let Some(at_ms) = wall_ms
+                && let Some((transition, _)) =
+                    self.calendar.next_transition(&series.instrument_id, at_ms)
+                && let Some(delay_ms) = transition.checked_sub(at_ms)
+                && let Ok(delay_ms) = u64::try_from(delay_ms)
+            {
+                deadlines
+                    .entry(now + Duration::from_millis(delay_ms))
+                    .or_default()
+                    .0 |= TimerKey::SESSION_TRANSITION;
+            }
+            if self
+                .engine
+                .provider_status(&series.provider_id)
+                .is_none_or(|status| {
+                    status.generation != Some(live.generation)
+                        || status.health != ProviderHealth::Online
+                })
+            {
+                continue;
+            }
+            let phase = wall_ms.map_or(aeris_instruments::SessionPhase::Unknown, |at| {
+                self.calendar.phase(&series.instrument_id, at)
+            });
+            let threshold = match phase {
+                aeris_instruments::SessionPhase::Open
+                | aeris_instruments::SessionPhase::Extended
+                | aeris_instruments::SessionPhase::AlwaysOpen => {
+                    super::watchdog::OPEN_STALL_THRESHOLD
+                }
+                aeris_instruments::SessionPhase::Unknown => {
+                    super::watchdog::UNKNOWN_STALL_THRESHOLD
+                }
+                _ => continue,
+            };
+            let last = live.trade_model().map_or_else(
+                || live.last_progress(),
+                |model| Some(model.last_publication_at),
+            );
+            if let Some(last) = last {
+                deadlines.entry(last + threshold).or_default().0 |= TimerKey::WATCHDOG;
+            }
+        }
+        for book in self.order_books.values() {
+            if book.trade_tape_dirty {
+                let at = book
+                    .trade_tape_published_at
+                    .map_or(now, |last| last + COORDINATOR_TICK);
+                deadlines.entry(at).or_default().0 |= TimerKey::TRADE_TAPE;
+            }
+        }
+        if self.control_retry
+            || self.sessions.values().any(|session| {
+                session.pending.is_some() || session.demand_dirty || session.authorization.is_some()
+            })
+        {
+            deadlines
+                .entry(now + Duration::from_millis(100))
+                .or_default()
+                .0 |= TimerKey::CONTROL_RETRY;
+        }
+        self.deadlines = deadlines;
+    }
+
     pub(super) fn session(&self, provider: &str) -> &ProviderSessionSlot {
         self.sessions
             .get(provider)
@@ -1719,6 +2005,10 @@ mod tests {
             history: super::super::history::tracker::HistoryTracker::default(),
             events: BTreeMap::new(),
             series: super::super::lifecycle::SeriesLifecycles::default(),
+            dirty_series: BTreeSet::new(),
+            deadlines: BTreeMap::new(),
+            pending_activity: true,
+            control_retry: false,
             series_effects: super::super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),
             display_depth: BTreeMap::new(),

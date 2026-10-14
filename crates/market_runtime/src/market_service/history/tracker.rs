@@ -366,6 +366,31 @@ impl HistoryTracker {
             })
     }
 
+    /// Earliest actionable retry. A lane blocked by an in-flight request is
+    /// reconsidered when that request completes, rather than spinning at its
+    /// expired deadline.
+    pub(crate) fn next_retry_deadline(&self) -> Option<Instant> {
+        self.entries
+            .iter()
+            .flat_map(|((series, epoch), entry)| {
+                [LaneKind::Current, LaneKind::Backfill]
+                    .into_iter()
+                    .filter_map(move |kind| {
+                        let lane = entry.lane(kind);
+                        match lane.state {
+                            LaneState::RetryAt(at, _)
+                                if lane.attempts <= super::super::MAXIMUM_HISTORY_RETRIES
+                                    && self.inflight(series, *epoch).is_none() =>
+                            {
+                                Some(at)
+                            }
+                            _ => None,
+                        }
+                    })
+            })
+            .min()
+    }
+
     pub(crate) fn schedule(
         &mut self,
         series: BarSeriesKey,

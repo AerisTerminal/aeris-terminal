@@ -135,7 +135,7 @@ impl Boundary {
             &self.command_receiver,
             &[super::super::super::RITHMIC_DESCRIPTOR.flush_demand],
             &std::sync::atomic::AtomicBool::new(false),
-            std::time::Duration::ZERO,
+            Some(std::time::Duration::ZERO),
         ));
     }
 

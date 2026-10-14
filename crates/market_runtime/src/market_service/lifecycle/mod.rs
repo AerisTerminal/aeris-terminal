@@ -94,6 +94,12 @@ impl SeriesLifecycles {
     pub(super) fn keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
         self.0.keys()
     }
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&BarSeriesKey, &SeriesLifecycle)> {
+        self.0.iter()
+    }
+    pub(super) fn get_mut(&mut self, series: &BarSeriesKey) -> Option<&mut SeriesLifecycle> {
+        self.0.get_mut(series)
+    }
     pub(super) fn iter_mut(
         &mut self,
     ) -> impl Iterator<Item = (&BarSeriesKey, &mut SeriesLifecycle)> {
@@ -106,9 +112,6 @@ impl SeriesLifecycles {
         &mut self,
     ) -> impl Iterator<Item = (&BarSeriesKey, &mut SeriesLifecycle)> {
         self.0.iter_mut().filter(|(_, live)| live.is_candle())
-    }
-    pub(super) fn values_mut(&mut self) -> impl Iterator<Item = &mut SeriesLifecycle> {
-        self.0.values_mut()
     }
     pub(super) fn trade_iter_mut(
         &mut self,

@@ -563,10 +563,12 @@ impl Coordinator<'_> {
     }
 
     pub(in crate::market_service) fn publish_lifecycle_live(&mut self) {
+        self.collect_dirty_series();
         let ready = self
-            .series
-            .values_mut()
-            .filter_map(|live| {
+            .dirty_series
+            .iter()
+            .filter_map(|series| {
+                let live = self.series.get_mut(series)?;
                 let trade_built = live.trade_model().is_some();
                 let update = if trade_built {
                     live.take_trade_publication()?
@@ -614,5 +616,8 @@ impl Coordinator<'_> {
                 model.last_publication_at = self.clock.monotonic();
             }
         }
+        // A bounded trade correction may follow a queued tail in the next
+        // publication turn even if no further provider event arrives.
+        self.collect_dirty_series();
     }
 }

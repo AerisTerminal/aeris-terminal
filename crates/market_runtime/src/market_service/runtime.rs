@@ -1340,15 +1340,19 @@ impl MarketService {
                 Ok(started) => started,
                 Err(error) => {
                     shutdown.store(true, Ordering::Release);
+                    // A full queue already makes the coordinator runnable.
+                    let _ = commands.try_send(Command::ProviderWake);
                     join_runtime_workers(workers);
                     return Err(error);
                 }
             };
         workers.push(worker);
+        let shutdown_wake = commands.clone();
         Ok(Self {
             commands,
             runtime: Arc::new(MarketRuntime {
                 shutdown,
+                shutdown_wake,
                 broker_api,
                 ctrader,
                 provider_presentations,
@@ -1367,6 +1371,8 @@ impl MarketService {
     /// Returns an error when a worker panics or the complete shutdown exceeds `timeout`.
     pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
         self.runtime.shutdown.store(true, Ordering::Release);
+        // A full queue already makes the coordinator runnable.
+        let _ = self.commands.try_send(Command::ProviderWake);
         self.runtime.broker_api.cancel_searches();
         let mut workers = self
             .runtime

@@ -1382,15 +1382,17 @@ impl Coordinator<'_> {
             return;
         }
         if let Some(ready) = self.session(provider).authorization {
-            if self
+            let sent = self
                 .providers
                 .send_control(
                     provider,
                     super::ProviderControl::AuthorizationChanged(ready),
                 )
-                .is_ok_and(|sent| sent)
-            {
+                .is_ok_and(|sent| sent);
+            if sent {
                 self.session_mut(provider).authorization = None;
+            } else {
+                self.control_retry = true;
             }
             return;
         }
@@ -1402,22 +1404,27 @@ impl Coordinator<'_> {
             return;
         }
         if demand.candle_series.is_empty() && demand.instruments.is_empty() {
-            if self.session(provider).accepted.is_some()
-                && self
+            if self.session(provider).accepted.is_some() {
+                let sent = self
                     .providers
                     .send_control(provider, super::ProviderControl::Stop)
-                    .is_ok_and(|sent| sent)
-            {
-                self.session_mut(provider).accepted = Some(demand);
+                    .is_ok_and(|sent| sent);
+                if sent {
+                    self.session_mut(provider).accepted = Some(demand);
+                } else {
+                    self.control_retry = true;
+                }
             }
             return;
         }
-        if self
+        let sent = self
             .providers
             .send_control(provider, super::ProviderControl::Demand(demand.clone()))
-            .is_ok_and(|sent| sent)
-        {
+            .is_ok_and(|sent| sent);
+        if sent {
             self.session_mut(provider).accepted = Some(demand);
+        } else {
+            self.control_retry = true;
         }
     }
 
@@ -2470,7 +2477,7 @@ impl Coordinator<'_> {
                 self.session_mut("hyperliquid").demand_dirty = false;
                 self.session_mut("hyperliquid").engaged = !empty;
             }
-            // A full channel retries on the next coordinator tick; the
+            // A full channel retries at the explicit control deadline; the
             // worker coalesces to the newest set.
             (Ok(false), _) | (_, Ok(false)) => {}
             (Err(_), _) | (_, Err(_)) => {
@@ -2636,7 +2643,7 @@ impl Coordinator<'_> {
                 .send_control(provider, super::ProviderControl::Stop)
             {
                 Ok(true) => self.session_mut(provider).stop_pending = Some(generation),
-                Ok(false) => {}
+                Ok(false) => self.control_retry = true,
                 Err(_) => {
                     let session = self.session_mut(provider);
                     match descriptor.live_model {
