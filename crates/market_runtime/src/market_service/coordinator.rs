@@ -144,14 +144,14 @@ fn coordinator_turn(
         for flush in demand_flushers {
             flush(coordinator);
         }
-        coordinator.stop_realtime_if_idle();
+        coordinator.release_idle();
     }
     if due.contains(TimerKey::CONTROL_RETRY) && !active {
         coordinator.control_retry = false;
         for flush in demand_flushers {
             flush(coordinator);
         }
-        coordinator.stop_realtime_if_idle();
+        coordinator.release_idle();
     }
     if due.contains(TimerKey::WATCHDOG | TimerKey::SESSION_TRANSITION) {
         coordinator.recover_stalled_live_series();
@@ -500,7 +500,7 @@ fn benchmark_active_turn(coordinator: &mut Coordinator<'_>) {
     coordinator.broadcast_dirty_trade_tapes();
     coordinator.publish_lifecycle_live();
     coordinator.recover_overflowed_series_queues();
-    coordinator.stop_realtime_if_idle();
+    coordinator.release_idle();
     coordinator.refresh_deadlines();
 }
 
@@ -1088,7 +1088,7 @@ impl Coordinator<'_> {
                     });
                 if result.is_ok() {
                     self.mark_alert_demand_changed();
-                    self.stop_realtime_if_idle();
+                    self.release_idle();
                 }
                 let _ = reply.send(result);
             }
@@ -1725,7 +1725,7 @@ impl Coordinator<'_> {
             // without starting provider/history work; a later Foreground resource
             // transition restores the engine subscription and rebuilds realtime
             // through `handle_resource_class`.
-            self.stop_realtime_if_idle();
+            self.release_idle();
             let _ = reply.send(Ok(()));
             return;
         }
@@ -1736,7 +1736,7 @@ impl Coordinator<'_> {
         // switch, so the idle check below tore down the provider session that a
         // presentation change is never allowed to touch.
         let realtime = self.ensure_realtime(series);
-        self.stop_realtime_if_idle();
+        self.release_idle();
         if let Err(error) = realtime {
             let _ = reply.send(Err(error));
             return;
@@ -6106,6 +6106,25 @@ mod tests {
             coordinator.series.trade_contains_key(&selected),
             "the idle-stop completion must restart rather than retire restored demand"
         );
+    }
+
+    #[test]
+    fn idle_stop_overlap_only_counts_the_stopping_providers_order_book() {
+        let mut coordinator = coordinator();
+        let mut other = instrument();
+        other.provider = "hyperliquid".into();
+        other.instrument_id = "instrument:hyperliquid:BTC".into();
+        coordinator.order_books.insert(
+            (other.provider.clone(), other.instrument_id.clone()),
+            ProviderOrderBook::new(other.clone(), super::super::TradeContinuity::Indexed, false),
+        );
+        assert!(coordinator.has_provider_live_demand("hyperliquid"));
+        assert!(!coordinator.has_provider_live_demand("rithmic"));
+        coordinator.order_books.insert(
+            ("rithmic".into(), "instrument:rithmic:CME:MNQU6".into()),
+            ProviderOrderBook::new(instrument(), super::super::TradeContinuity::Sequence, false),
+        );
+        assert!(coordinator.has_provider_live_demand("rithmic"));
     }
 
     #[test]

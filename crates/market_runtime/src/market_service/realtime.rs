@@ -1918,21 +1918,7 @@ impl Coordinator<'_> {
         descriptor: super::ProviderDescriptor,
     ) {
         self.session_mut(provider).stop_pending = None;
-        let demanded = match descriptor.capabilities.live_model {
-            super::LiveModel::TradeBuilt => {
-                self.series
-                    .trade_keys()
-                    .any(|series| series.provider_id == provider)
-                    || self.price_alerts.has_active_provider(provider)
-            }
-            super::LiveModel::ProviderCandles => {
-                self.series
-                    .candle_keys()
-                    .any(|series| series.provider_id == provider)
-                    || !self.order_books.is_empty()
-                    || self.price_alerts.has_active_provider(provider)
-            }
-        };
+        let demanded = self.has_provider_live_demand(provider);
         if demanded {
             match descriptor.capabilities.live_model {
                 super::LiveModel::TradeBuilt => {
@@ -2075,7 +2061,7 @@ impl Coordinator<'_> {
         }
         if demand_changed {
             self.mark_provider_alert_demand_changed(&trade.metadata.provider_id);
-            self.stop_realtime_if_idle();
+            self.release_idle();
         }
     }
 
@@ -2540,7 +2526,7 @@ impl Coordinator<'_> {
         self.prune_history_tracking();
         self.prune_unused_live_series();
         self.evict_unreferenced_series();
-        self.stop_realtime_if_idle();
+        self.release_idle();
     }
     /// Hands the worker a replacement subscription set the control channel refused.
     pub(super) fn flush_rithmic_demand(&mut self) {
@@ -2592,7 +2578,16 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn stop_realtime_if_idle(&mut self) {
+    pub(super) fn has_provider_live_demand(&self, provider: &str) -> bool {
+        self.series
+            .trade_keys()
+            .chain(self.series.candle_keys())
+            .any(|series| series.provider_id == provider)
+            || self.order_books.keys().any(|(id, _)| id == provider)
+            || !self.provider_demand(provider).instruments.is_empty()
+    }
+
+    pub(super) fn release_idle(&mut self) {
         let descriptors = self
             .providers
             .records
@@ -2604,16 +2599,9 @@ impl Coordinator<'_> {
                 continue;
             }
             let provider = descriptor.id;
-            let demanded = match descriptor.capabilities.live_model {
-                super::LiveModel::TradeBuilt => self
-                    .series
-                    .trade_keys()
-                    .any(|series| series.provider_id == provider),
-                super::LiveModel::ProviderCandles => self
-                    .series
-                    .candle_keys()
-                    .any(|series| series.provider_id == provider),
-            } || self.price_alerts.has_active_provider(provider);
+            // Ask for this provider's full demand, including depth and quote-only
+            // subscriptions. Another provider's active book must not keep it alive.
+            let demanded = self.has_provider_live_demand(provider);
             let session = self.session(provider);
             let engaged = match descriptor.capabilities.live_model {
                 super::LiveModel::TradeBuilt => session.accepted.is_some(),

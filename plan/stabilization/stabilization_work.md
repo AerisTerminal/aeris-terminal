@@ -428,6 +428,7 @@ Status: in progress
   - Workspace fmt, Clippy `-D warnings`, tests and naming_check passed. Characterization (4), lifecycle (12), aggregation and descriptor matrix suites passed; no Rithmic live session or GUI run (internal-only item; M3.4 GUI validation completed).
 - [ ] M3.6 provider-session-registry - `ProviderSession` trait and `ProviderRegistry`
   - Part 1/3: tastytrade HTTP transport is borrowed outside the catalog-cache mutex and returned on all paths; authorization revocation retires an in-flight transport. Two regression tests and the full workspace gate passed. Registry and per-provider idle work remain before this item can be checked.
+  - Part 2/3: idle release and stop-overlap check only the stopping provider's own series, book and alert demand; a scripted two-provider book test guards the overlap. Full workspace gate passed with the CI debug profile and one Cargo job.
 - [ ] M3.7 instrument-leases-feed-contract - Trading feed domain contract and MarketEngine instrument leases
 - [ ] M3.8 trading-quote-feed - Market-side trading quote feed driven by instrument demand
 - [ ] M3.9 fenced-events-waitable-outbox - Every consumer event is fenced; the bridge blocks on a waitable outbox
@@ -608,6 +609,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M3.4 perf(market): sleep between dirty market publications and deadlines - removed idle coordinator sweeps, preserved deadline recovery and measured lower isolated one-chart desktop CPU against archived M2.2 source; full gate green.
 - 2026-10-14 M3.5 refactor(market): separate provider capabilities from presentation - removed descriptor behavior flags and generic provider-id literals, corrected Rithmic presentation, relocated replay aggregation to its adapter, and passed the full workspace gate.
 - 2026-10-15 M3.6 refactor(market): release tastytrade state lock during HTTP (M3.6 part 1/3) - isolated the exclusive transport from its bounded catalog cache and fenced authorization revocation; full gate green, registry work follows.
+- 2026-10-15 M3.6 fix(market): scope idle-stop overlap to its provider (M3.6 part 2/3) - per-provider demand prevents an unrelated order book from reopening a stopped session; full gate green.
 
 ## 7. Known gaps / deferred
 
