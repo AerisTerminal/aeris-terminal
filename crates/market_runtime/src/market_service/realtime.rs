@@ -1,3 +1,4 @@
+use super::coordinator::StudyChange;
 use super::lifecycle::{RecoveryReason, SeriesInput, SeriesLifecycle, SeriesState};
 use super::{
     AggressorSide, BTreeMap, BTreeSet, BarSeriesKey, CandleGapPolicy, CanonicalOrderBookState,
@@ -18,7 +19,8 @@ use crate::hyperliquid_display_depth::{
     HyperliquidDisplayBookDemand, HyperliquidDisplayDepthControl, HyperliquidDisplayDepthDemand,
 };
 use crate::study::{
-    StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyQuoteView, StudyTradeWindow,
+    StudyDepthView, StudyLiveMarketData, StudyMarketInput, StudyNonBarChange, StudyQuoteView,
+    StudyTradeWindow,
 };
 use aeris_observability::diagnostic;
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
@@ -691,13 +693,13 @@ impl Coordinator<'_> {
         stream: MarketStream,
         observed_unix_nanos: i64,
     ) {
-        match self.execute_study_non_bar_change(
+        match self.execute_study_change(StudyChange::NonBar(StudyNonBarChange {
             provider_id,
             instrument_id,
             entitlement_id,
             stream,
             observed_unix_nanos,
-        ) {
+        })) {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {
@@ -855,8 +857,8 @@ impl Coordinator<'_> {
                 Err(error) => {
                     let canonical = self
                         .engine
-                        .series_snapshot(series)
-                        .and_then(|snapshot| snapshot.bars.last().copied());
+                        .series_segments(series)
+                        .and_then(aeris_market_engine::SeriesSegments::last);
                     return Err(format!(
                         "{error}; handoff bar sequence={} time={} canonical_tail={canonical:?}",
                         bar.source_sequence, bar.exchange_timestamp_unix_nanos
@@ -868,7 +870,8 @@ impl Coordinator<'_> {
                     events.publish_series_update(series_update_message(&publication));
                 }
             }
-            match self.execute_study_bar_change(series, exchange_timestamp_unix_nanos) {
+            match self.execute_study_change(StudyChange::Bar(series, exchange_timestamp_unix_nanos))
+            {
                 Ok(batch) => {
                     self.publish_study_outputs(&batch.executed);
                     for error in batch.errors {
@@ -901,9 +904,9 @@ impl Coordinator<'_> {
         {
             return Ok(());
         }
-        if self.engine.series_snapshot(series).is_some_and(|snapshot| {
-            snapshot.forming
-                && snapshot.bars.last().is_some_and(|tail| {
+        if self.engine.series_segments(series).is_some_and(|segments| {
+            segments.forming
+                && segments.last().is_some_and(|tail| {
                     tail.source_sequence == bar.source_sequence
                         && tail.exchange_timestamp_unix_nanos == bar.exchange_timestamp_unix_nanos
                 })
@@ -921,17 +924,14 @@ impl Coordinator<'_> {
             .engine
             .replace_realtime_completed_bar(generation, series, price_scale, quantity_scale, bar)
             .map_err(|error| {
-                let canonical = self
-                    .engine
-                    .series_snapshot(series)
-                    .and_then(|snapshot| snapshot.bars.last().copied());
+                let canonical = self.engine.series_segments(series).and_then(aeris_market_engine::SeriesSegments::last);
                 format!(
                     "{error}; completed correction sequence={} time={} canonical_tail={canonical:?}",
                     bar.source_sequence, bar.exchange_timestamp_unix_nanos
                 )
             })?;
         self.publish_installed_history(&publications);
-        match self.execute_study_bar_change(series, exchange_timestamp_unix_nanos) {
+        match self.execute_study_change(StudyChange::Bar(series, exchange_timestamp_unix_nanos)) {
             Ok(batch) => {
                 self.publish_study_outputs(&batch.executed);
                 for error in batch.errors {

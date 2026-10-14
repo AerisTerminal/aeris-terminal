@@ -103,7 +103,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-02 | High | The stalled-live recovery watchdog only works for tastytrade | M2.6 (market), M4.8 (trading) | market part closed in this commit; trading gate M4.8 open |
 | MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | closed in this commit |
 | MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | closed in this commit |
-| MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | open |
+| MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | copy part closed in this commit; idle CPU M3.4 open |
 | MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | closed in this commit |
 | MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in this commit |
 | MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | open |
@@ -111,7 +111,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
 | MD-12 | Medium | Reconnect policy has no backoff, and the "retry limit" message is misleading | M2.4 | closed in this commit |
-| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup closed in this commit; remaining wrappers/order-book demand open |
+| MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup and study wrappers closed in this commit; order-book demand M3.8 open |
 | MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | closed in this commit; the bounded Indexed correction overlay still recomputes its retained bars |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
 | MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments and M3.2 trade retention, demand-dirty and provider wording closed in this commit; other items open |
@@ -414,7 +414,10 @@ Status: in progress
   - CandleOverlay, Indexed tastytrade and Sequence Rithmic series share `SeriesLifecycle.state` and one bounded publication turn; trade aggregation lives in `lifecycle/trade_model.rs`. Removed the split trade registry, state enum, named Rithmic handlers/publisher and redundant history handoffs.
   - Hyperliquid candle events compare the cached demand coin/interval without formatting a wire symbol per event. Indexed recent trades prune by time, provider errors are neutral, and demand reconciliation no longer doubles `demand_dirty`. The bounded Indexed correction overlay still recomputes retained bars.
   - One table-driven suite exercises all three models, exact ticket rejection, recovery, contiguous completed bars and one forming bar; a scripted adapter-confirmed Rithmic SequenceGap recovers through covering history to Live. The naming gate rejects `SeriesLiveMap` in production with positive/negative scanner fixtures. Scoped and full fmt/workspace Clippy/workspace test/naming gates passed; Rithmic live qualification remains excluded.
-- [ ] M3.3 engine-series-tail - Series-tail accessor; remove full-series copies from hot and existence paths
+- [x] M3.3 engine-series-tail - Series-tail accessor; remove full-series copies from hot and existence paths
+  - Added canonical `series_tail`, timestamp existence and borrowed/owned segmented views. Study calculations and output timelines share covering history and sealed 64-bar chunks, copying at most the open chunk; live diagnostics, study bounds and history/publication existence avoid full snapshots. One `execute_study_change` dispatch replaces the five coordinator wrappers. Full covering snapshots remain for recovery, repair and explicit resync.
+  - Release benchmark (Windows x86_64, 24 logical processors, 10,000 forming revisions, 63 publishes per size, bar-payload capacity lower bound, excludes allocator/header overhead): M2.2 baseline at 50,000 bars **3,200,064 bytes/publish**; M3.3 tail at 1,000 / 16,384 / 50,000 completed bars **128 / 128 / 128 bytes/publish** (50k:1k ratio **1.000**, limit 1.100). The 50k segmented study-view workload copied zero open-bar payload bytes per forming revision (293 ns/view for 256 ticks); the legacy full-copy reference was 3,200,000 bytes/tick (M2.2: 440,159 ns/tick; distinct workload, not a speedup claim). Evidence command: `cargo run -p aeris_market_engine --release --example market_data_performance --locked -- <out.json>`.
+  - Segmented bounds and chained study outputs match full canonical snapshots; chunk rollover and historical correction preserve immutable older views. Focused engine/runtime tests and Clippy plus workspace fmt/Clippy/tests/naming passed. Rithmic live was not used.
 - [ ] M3.4 coordinator-dirty-publication - Dirty-set publication and deadline timers in the coordinator loop
 - [ ] M3.5 provider-capabilities - `ProviderCapabilities` and `ProviderPresentation` replace descriptor flags and literals
 - [ ] M3.6 provider-session-registry - `ProviderSession` trait and `ProviderRegistry`
@@ -593,6 +596,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M2.1 test(market): drive characterization through coordinator channels - removed direct clock assignment and benchmark turn calls; verified four boundary scenarios and the full gate.
 - 2026-10-14 M3.1 feat(market): centralize candle series lifecycle - migrated both candle providers to the lifecycle owner, retained four coordinator scenarios, and verified live Hyperliquid and raw cTrader provider omissions against the pre-M3 binary.
 - 2026-10-14 M3.2 feat(market): centralize trade series lifecycle - unified candle/trade control and publication, cached candle wire identity, fenced scripted SequenceGap reseed and one-forming continuity; full workspace gate green.
+- 2026-10-14 M3.3 perf(market): share segmented series for study and live publication - replaced full-series study/live/existence copies, unified study dispatch and measured 128-byte tail payload at all three history sizes; full gate green.
 
 ## 7. Known gaps / deferred
 

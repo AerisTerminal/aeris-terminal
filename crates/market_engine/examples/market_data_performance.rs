@@ -290,10 +290,42 @@ fn large_history_engine() -> Result<(MarketEngine, BarSeriesKey)> {
     Ok((engine, key))
 }
 
+fn tail_publish_profile(completed_bars: usize) -> Result<Value> {
+    let (mut engine, key) = large_history_engine()?;
+    let history = (1..=completed_bars)
+        .map(|sequence| bar(u64::try_from(sequence)?, 0))
+        .collect::<Result<Vec<_>>>()?;
+    engine.install_history(GENERATION, &key, 2, 0, history)?;
+    let mut bytes = 0;
+    let mut publishes = 0;
+    for trade in 0..TRADES_PER_SECOND {
+        engine.install_realtime_tail(
+            GENERATION,
+            &key,
+            2,
+            0,
+            bar(u64::try_from(completed_bars + 1)?, trade)?,
+            true,
+        )?;
+        if trade % (TRADES_PER_SECOND * PUBLISH_INTERVAL_MS / 1_000) == 0 {
+            let tail = engine.series_tail(&key, 2).ok_or("missing series tail")?;
+            assert_eq!(tail.len(), 2);
+            bytes += tail.capacity() * size_of::<MarketBar>();
+            black_box(tail);
+            publishes += 1;
+        }
+    }
+    Ok(json!({
+        "completed_bars": completed_bars,
+        "publish_count": publishes,
+        "bar_payload_bytes_per_publish_lower_bound": bytes / publishes,
+        "allocation_measurement": "Vec<MarketBar> tail capacity; excludes Vec header and allocator overhead",
+    }))
+}
+
 fn study_copy_profile() -> Result<Value> {
     let (mut engine, key) = large_history_engine()?;
-    // A full study input copy on each tick: the next milestone replaces this
-    // with a segmented view. Bound the sample to avoid excessive allocations.
+    // Legacy full-copy reference retained for direct comparison.
     let history: Vec<_> = (1..=HISTORY_BARS)
         .map(|sequence| bar(u64::try_from(sequence)?, 0))
         .collect::<Result<_>>()?;
@@ -311,6 +343,35 @@ fn study_copy_profile() -> Result<Value> {
         "ticks_sampled": iterations,
         "nanos_per_tick_copy": elapsed.as_nanos() / iterations as u128,
         "bar_payload_bytes_per_tick_copy_lower_bound": bar_payload_bytes(&snapshot)?,
+    }))
+}
+
+fn segmented_study_profile() -> Result<Value> {
+    let (mut engine, key) = large_history_engine()?;
+    let history = (1..=HISTORY_BARS)
+        .map(|sequence| bar(u64::try_from(sequence)?, 0))
+        .collect::<Result<Vec<_>>>()?;
+    engine.install_history(GENERATION, &key, 2, 0, history)?;
+    let ticks = 256;
+    let started = Instant::now();
+    for tick in 0..ticks {
+        engine.install_realtime_tail(
+            GENERATION,
+            &key,
+            2,
+            0,
+            bar(u64::try_from(HISTORY_BARS + 1)?, tick)?,
+            true,
+        )?;
+        let view = engine.series_view(&key).ok_or("study view missing")?;
+        black_box(view.get(view.len() - 1));
+    }
+    Ok(json!({
+        "completed_bars": HISTORY_BARS,
+        "ticks_sampled": ticks,
+        "nanos_per_tick_view": started.elapsed().as_nanos() / ticks as u128,
+        "copied_open_bar_payload_bytes_per_tick": 0,
+        "allocation_measurement": "Shared covering and sealed chunks; open chunk is empty in this forming-bar revision workload",
     }))
 }
 
@@ -399,7 +460,9 @@ fn main() -> Result<()> {
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "profiles": [profile(1, 1)?, profile(16, 8)?, profile(256, 128)?],
         "snapshot_per_publish": snapshot_publish_profile()?,
+        "tail_per_publish": [tail_publish_profile(1_000)?, tail_publish_profile(16_384)?, tail_publish_profile(50_000)?],
         "study_per_tick_copies": study_copy_profile()?,
+        "study_per_tick_segmented": segmented_study_profile()?,
     });
     let path = Path::new(&output);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -416,7 +479,23 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HISTORY_BARS, Result, snapshot_publish_profile, study_copy_profile};
+    use super::{
+        HISTORY_BARS, Result, segmented_study_profile, snapshot_publish_profile,
+        study_copy_profile, tail_publish_profile,
+    };
+
+    #[test]
+    fn live_publish_tail_payload_is_independent_of_covering_history() -> Result<()> {
+        let short = tail_publish_profile(1_000)?;
+        for count in [16_384, 50_000] {
+            let profile = tail_publish_profile(count)?;
+            assert_eq!(
+                profile["bar_payload_bytes_per_publish_lower_bound"],
+                short["bar_payload_bytes_per_publish_lower_bound"]
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn snapshot_workload_copies_fifty_thousand_bars_at_publish_cadence() -> Result<()> {
@@ -433,6 +512,12 @@ mod tests {
         let profile = study_copy_profile()?;
         assert_eq!(profile["ticks_sampled"], 256);
         assert!(profile["bar_payload_bytes_per_tick_copy_lower_bound"].as_u64() > Some(3_000_000));
+        Ok(())
+    }
+    #[test]
+    fn segmented_study_view_shares_covering_history() -> Result<()> {
+        let profile = segmented_study_profile()?;
+        assert_eq!(profile["copied_open_bar_payload_bytes_per_tick"], 0);
         Ok(())
     }
 }

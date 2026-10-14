@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use aeris_market_data::{BarPeriod, DepthSnapshot, EventMetadata, QualifiedTimestamp};
+use aeris_market_data::{BarPeriod, DepthSnapshot, EventMetadata, MarketBar, QualifiedTimestamp};
 use aeris_market_engine::{
     MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig, ProviderGeneration,
 };
@@ -89,6 +89,75 @@ fn bars() -> Vec<MarketBar> {
             volume: 1_500,
         },
     ]
+}
+
+#[test]
+fn segmented_study_bounds_equal_full_snapshot_for_covering_and_live_tail() {
+    let mut engine = engine(1);
+    let source = series("ES-SEGMENTED");
+    engine
+        .install_history(ProviderGeneration(NonZeroU64::MIN), &source, 2, 0, bars())
+        .expect("covering history");
+    for index in 3..=4 {
+        engine
+            .install_realtime_tail(
+                ProviderGeneration(NonZeroU64::MIN),
+                &source,
+                2,
+                0,
+                bar(
+                    index,
+                    (i64::try_from(index).expect("small index") - 1) * 60,
+                    11_000,
+                ),
+                true,
+            )
+            .expect("live append");
+    }
+    let runtime = StudyRuntime::new(config(1));
+    let definition = definition(
+        "segment_equivalence",
+        vec![market(source.clone(), StreamRequirements::BARS)],
+        1,
+        StudyInvalidationPolicy::SameRange,
+    );
+    let full = engine
+        .series_snapshot(&source)
+        .expect("full canonical image");
+    assert_eq!(
+        runtime.primary_timeline_len(&engine, &definition),
+        Some(full.bars.len())
+    );
+    for bar in full.bars.iter() {
+        for time in [
+            bar.exchange_timestamp_unix_nanos - 1,
+            bar.exchange_timestamp_unix_nanos,
+        ] {
+            assert_eq!(
+                runtime.primary_lower_bound(&engine, &definition, time),
+                Some(full.bars.partition_point(|candidate| candidate.exchange_timestamp_unix_nanos < time))
+            );
+            assert_eq!(
+                runtime.primary_upper_bound(&engine, &definition, time),
+                Some(
+                    full.bars.partition_point(
+                        |candidate| candidate.exchange_timestamp_unix_nanos <= time
+                    )
+                )
+            );
+            let expected = full.bars.iter().rposition(|candidate| {
+                candidate.exchange_timestamp_unix_nanos <= time
+                    && candidate
+                        .exchange_timestamp_unix_nanos
+                        .checked_add(60_000_000_000)
+                        .is_some_and(|end| time < end)
+            });
+            assert_eq!(
+                runtime.primary_row_containing(&engine, &definition, time),
+                expected
+            );
+        }
+    }
 }
 
 fn bar(source_sequence: u64, offset_seconds: i64, close: i64) -> MarketBar {
@@ -1768,14 +1837,8 @@ fn live_append_and_revision_recompute_only_timestamp_mapped_rows_through_the_dag
             .expect("append recalculates"),
         vec![fixture.producer, fixture.consumer]
     );
-    let producer_id = StudyOutputId {
-        study_id: fixture.producer,
-        output_index: 0,
-    };
-    let consumer_id = StudyOutputId {
-        study_id: fixture.consumer,
-        output_index: 0,
-    };
+    let producer_id = fixture.producer.output(0);
+    let consumer_id = fixture.consumer.output(0);
     assert_eq!(
         fixture
             .runtime
@@ -1835,6 +1898,44 @@ fn live_append_and_revision_recompute_only_timestamp_mapped_rows_through_the_dag
             .expect("consumer")
             .values(),
         &[Some(63_000.0), Some(66_000.0), Some(72_000.0)]
+    );
+    assert_study_outputs_equal_full_snapshot(&fixture, producer_id, consumer_id);
+}
+
+fn assert_study_outputs_equal_full_snapshot(
+    fixture: &NativeChainFixture,
+    producer_id: StudyOutputId,
+    consumer_id: StudyOutputId,
+) {
+    // The full canonical snapshot is the pre-segmentation reference.
+    let full = fixture
+        .engine
+        .series_snapshot(&fixture.source)
+        .expect("full reference");
+    let expected = full
+        .bars
+        .iter()
+        .map(|bar| Some(f64::from(i32::try_from(bar.close).expect("fixture fits i32")) * 3.0))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fixture
+            .runtime
+            .output_series(producer_id)
+            .expect("producer")
+            .values(),
+        expected
+    );
+    let doubled = expected
+        .iter()
+        .map(|value| value.map(|v| v * 2.0))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fixture
+            .runtime
+            .output_series(consumer_id)
+            .expect("consumer")
+            .values(),
+        doubled
     );
 }
 
@@ -2949,7 +3050,10 @@ fn native_market_input_is_a_zero_copy_fixed_point_view_of_canonical_state() {
         input.publication_generation(),
         canonical.publication_generation
     );
-    assert!(std::ptr::eq(input.bars().as_ptr(), canonical.bars.as_ptr()));
+    assert!(std::ptr::eq(
+        input.bars().get(0).expect("first"),
+        std::ptr::from_ref(&canonical.bars[0])
+    ));
 
     let close = input.field(StudyBarField::Close);
     assert_eq!(close.len(), 2);

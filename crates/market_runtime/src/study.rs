@@ -8,11 +8,10 @@
 
 use crate::RetainedMarketTrade;
 use aeris_market_data::{
-    AggressorSide, BarSeriesKey, DepthLevel, MarketBar, OrderBook, OrderBookState, QuoteLevel,
-    TopOfBookQuote,
+    AggressorSide, BarSeriesKey, DepthLevel, OrderBook, OrderBookState, QuoteLevel, TopOfBookQuote,
 };
 use aeris_market_engine::{
-    ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, MarketStream, SeriesSnapshot,
+    ConsumerId, EngineError, MarketDataLeaseId, MarketEngine, MarketStream, SeriesView,
     StreamRequirements,
 };
 use std::{
@@ -97,14 +96,13 @@ pub enum StudyBarField {
     Volume,
 }
 
-/// Zero-copy native study view over one canonical `MarketEngine` snapshot.
+/// Segmented native study view over one canonical `MarketEngine` series.
 ///
-/// Cloning this value clones only the snapshot `Arc`; bar storage remains owned
-/// by `MarketEngine`. Exact exchange timestamps, fixed-point values, scales, and
-/// provider/publication generations therefore stay identical to canonical state.
+/// Covering history and completed chunks are shared; only the bounded open
+/// chunk is copied so a calculation can safely outlive an engine mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StudyMarketSeries {
-    snapshot: Arc<SeriesSnapshot>,
+    view: SeriesView,
 }
 
 /// One retained provider-neutral aggressor trade exposed to native studies.
@@ -391,32 +389,32 @@ impl<'a> StudyLiveMarketData<'a> {
 }
 
 impl StudyMarketSeries {
-    fn new(snapshot: Arc<SeriesSnapshot>) -> Self {
-        Self { snapshot }
+    fn new(view: SeriesView) -> Self {
+        Self { view }
     }
 
     /// Returns the canonical series identity.
     #[must_use]
     pub fn series(&self) -> &BarSeriesKey {
-        &self.snapshot.series
+        self.view.series()
     }
 
     /// Returns the immutable canonical bars without copying them.
     #[must_use]
-    pub fn bars(&self) -> &[MarketBar] {
-        &self.snapshot.bars
+    pub fn bars(&self) -> &SeriesView {
+        &self.view
     }
 
     /// Returns whether the last canonical bar is still forming.
     #[must_use]
     pub fn forming(&self) -> bool {
-        self.snapshot.forming
+        self.view.forming
     }
 
     /// Returns the canonical publication generation observed by this view.
     #[must_use]
     pub fn publication_generation(&self) -> u64 {
-        self.snapshot.publication_generation
+        self.view.publication_generation
     }
 
     /// Returns one fixed-point OHLCV field view over the canonical bars.
@@ -426,11 +424,11 @@ impl StudyMarketSeries {
             StudyBarField::Open
             | StudyBarField::High
             | StudyBarField::Low
-            | StudyBarField::Close => self.snapshot.price_scale,
-            StudyBarField::Volume => self.snapshot.quantity_scale,
+            | StudyBarField::Close => self.view.price_scale(),
+            StudyBarField::Volume => self.view.quantity_scale(),
         };
         StudyBarFieldSeries {
-            bars: &self.snapshot.bars,
+            bars: &self.view,
             field,
             scale,
         }
@@ -440,7 +438,7 @@ impl StudyMarketSeries {
 /// Non-owning fixed-point field projection over canonical bars.
 #[derive(Clone, Copy, Debug)]
 pub struct StudyBarFieldSeries<'a> {
-    bars: &'a [MarketBar],
+    bars: &'a SeriesView,
     field: StudyBarField,
     scale: u8,
 }
@@ -448,13 +446,13 @@ pub struct StudyBarFieldSeries<'a> {
 impl StudyBarFieldSeries<'_> {
     /// Returns the number of canonical rows.
     #[must_use]
-    pub const fn len(self) -> usize {
+    pub fn len(self) -> usize {
         self.bars.len()
     }
 
     /// Returns whether no canonical rows are available.
     #[must_use]
-    pub const fn is_empty(self) -> bool {
+    pub fn is_empty(self) -> bool {
         self.bars.is_empty()
     }
 
@@ -1075,41 +1073,38 @@ const STUDY_OUTPUT_VALUE_BRANCH_FACTOR: usize = 32;
 struct StudyOutputTimeline(Arc<StudyOutputTimelineInner>);
 
 struct StudyOutputTimelineInner {
-    snapshot: Arc<SeriesSnapshot>,
+    view: SeriesView,
     materialized: OnceLock<Arc<[i64]>>,
 }
 
 impl StudyOutputTimeline {
-    fn market(snapshot: Arc<SeriesSnapshot>) -> Self {
+    fn market(view: SeriesView) -> Self {
         Self(Arc::new(StudyOutputTimelineInner {
-            snapshot,
+            view,
             materialized: OnceLock::new(),
         }))
     }
 
     fn len(&self) -> usize {
-        self.0.snapshot.bars.len()
+        self.0.view.len()
     }
 
     fn timestamp(&self, index: usize) -> Option<i64> {
         self.0
-            .snapshot
-            .bars
+            .view
             .get(index)
             .map(|bar| bar.exchange_timestamp_unix_nanos)
     }
 
     fn lower_bound(&self, timestamp_unix_nanos: i64) -> usize {
         self.0
-            .snapshot
-            .bars
+            .view
             .partition_point(|bar| bar.exchange_timestamp_unix_nanos < timestamp_unix_nanos)
     }
 
     fn upper_bound(&self, timestamp_unix_nanos: i64) -> usize {
         self.0
-            .snapshot
-            .bars
+            .view
             .partition_point(|bar| bar.exchange_timestamp_unix_nanos <= timestamp_unix_nanos)
     }
 
@@ -1118,8 +1113,7 @@ impl StudyOutputTimeline {
             .materialized
             .get_or_init(|| {
                 self.0
-                    .snapshot
-                    .bars
+                    .view
                     .iter()
                     .map(|bar| bar.exchange_timestamp_unix_nanos)
                     .collect::<Vec<_>>()
@@ -2854,7 +2848,7 @@ impl StudyRuntime {
             });
         };
         Ok(engine
-            .series_snapshot(&input.series)
+            .series_view(&input.series)
             .map(StudyMarketSeries::new))
     }
 
@@ -3614,36 +3608,54 @@ impl StudyRuntime {
         definition: &StudyDefinition,
         observed_unix_nanos: i64,
     ) -> Option<usize> {
-        let snapshot = match definition.dependencies.first()? {
-            StudyDependency::Market(input) => engine.series_snapshot(&input.series)?,
+        let dependency = definition.dependencies.first()?;
+        let index = match dependency {
+            StudyDependency::Market(input) => engine
+                .series_segments(&input.series)?
+                .partition_point(|bar| bar.exchange_timestamp_unix_nanos <= observed_unix_nanos)
+                .checked_sub(1)?,
+            StudyDependency::Output(output) => self
+                .outputs
+                .get(output)?
+                .timeline
+                .upper_bound(observed_unix_nanos)
+                .checked_sub(1)?,
+        };
+        let (bar, next, forming, period) = match dependency {
+            StudyDependency::Market(input) => {
+                let segments = engine.series_segments(&input.series)?;
+                (
+                    segments.get(index)?,
+                    segments.get(index + 1),
+                    segments.forming,
+                    input.series.period,
+                )
+            }
             StudyDependency::Output(output) => {
-                Arc::clone(&self.outputs.get(output)?.timeline.0.snapshot)
+                let view = &self.outputs.get(output)?.timeline.0.view;
+                (
+                    *view.get(index)?,
+                    view.get(index + 1).copied(),
+                    view.forming,
+                    view.series().period,
+                )
             }
         };
-        let upper = snapshot
-            .bars
-            .partition_point(|bar| bar.exchange_timestamp_unix_nanos <= observed_unix_nanos);
-        if upper == 0 {
-            return None;
-        }
-        let index = upper - 1;
-        let bar = snapshot.bars.get(index)?;
-        if let Some(duration) = snapshot.series.period.duration_nanos() {
+        if let Some(duration) = period.duration_nanos() {
             return bar
                 .exchange_timestamp_unix_nanos
                 .checked_add(duration)
                 .is_some_and(|end_exclusive| observed_unix_nanos < end_exclusive)
                 .then_some(index);
         }
-        if let Some(next) = snapshot.bars.get(index + 1) {
+        if let Some(next) = next {
             return (observed_unix_nanos < next.exchange_timestamp_unix_nanos).then_some(index);
         }
         // Tick/calendar periods do not expose a fixed nanosecond duration. The
         // newest row can own later live non-bar events only while it is explicitly
         // the forming canonical tail; a completed last row must not absorb an
         // arbitrary future event.
-        (snapshot.forming || observed_unix_nanos == bar.exchange_timestamp_unix_nanos)
-            .then_some(index)
+        (forming || observed_unix_nanos == bar.exchange_timestamp_unix_nanos).then_some(index)
     }
 
     fn propagate_output_change(
@@ -3729,9 +3741,7 @@ impl StudyRuntime {
         definition: &StudyDefinition,
     ) -> Option<usize> {
         match definition.dependencies.first()? {
-            StudyDependency::Market(input) => {
-                Some(engine.series_snapshot(&input.series)?.bars.len())
-            }
+            StudyDependency::Market(input) => engine.series_bar_count(&input.series),
             StudyDependency::Output(output) => Some(self.outputs.get(output)?.len()),
         }
     }
@@ -3744,8 +3754,8 @@ impl StudyRuntime {
     ) -> Option<usize> {
         match definition.dependencies.first()? {
             StudyDependency::Market(input) => {
-                let snapshot = engine.series_snapshot(&input.series)?;
-                Some(snapshot.bars.partition_point(|bar| {
+                let segments = engine.series_segments(&input.series)?;
+                Some(segments.partition_point(|bar| {
                     bar.exchange_timestamp_unix_nanos < exchange_timestamp_unix_nanos
                 }))
             }
@@ -3766,8 +3776,8 @@ impl StudyRuntime {
     ) -> Option<usize> {
         match definition.dependencies.first()? {
             StudyDependency::Market(input) => {
-                let snapshot = engine.series_snapshot(&input.series)?;
-                Some(snapshot.bars.partition_point(|bar| {
+                let segments = engine.series_segments(&input.series)?;
+                Some(segments.partition_point(|bar| {
                     bar.exchange_timestamp_unix_nanos <= exchange_timestamp_unix_nanos
                 }))
             }
@@ -3858,8 +3868,8 @@ impl StudyRuntime {
         for dependency in &definition.dependencies {
             match dependency {
                 StudyDependency::Market(input) => {
-                    let snapshot = engine.series_snapshot(&input.series)?;
-                    inputs.push(ResolvedStudyInput::Market(StudyMarketSeries::new(snapshot)));
+                    let view = engine.series_view(&input.series)?;
+                    inputs.push(ResolvedStudyInput::Market(StudyMarketSeries::new(view)));
                 }
                 StudyDependency::Output(output) => {
                     let series = self.outputs.get(output).cloned()?;
@@ -3904,7 +3914,7 @@ impl StudyRuntime {
     ///
     /// Provider capability checks and capacity are preflighted before any lease
     /// mutation. A cached series, when present, remains readable directly from
-    /// `MarketEngine::series_snapshot`; this method does not duplicate its bars.
+    /// `MarketEngine::series_view`; this method does not duplicate covering bars.
     ///
     /// # Errors
     /// Returns an error when a requested stream set is unsupported, the engine's
@@ -4215,9 +4225,7 @@ impl StudyRuntime {
 
 fn primary_timeline(input: &ResolvedStudyInput) -> StudyOutputTimeline {
     match input {
-        ResolvedStudyInput::Market(series) => {
-            StudyOutputTimeline::market(Arc::clone(&series.snapshot))
-        }
+        ResolvedStudyInput::Market(series) => StudyOutputTimeline::market(series.view.clone()),
         ResolvedStudyInput::Output(series) => series.timeline.clone(),
     }
 }

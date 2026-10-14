@@ -30,9 +30,224 @@ pub struct SeriesTail {
     pub bar: MarketBar,
 }
 
+/// Borrowed canonical image in storage order; no covering snapshot is materialized.
+#[derive(Clone, Copy)]
+pub struct SeriesSegments<'a> {
+    covering: &'a [MarketBar],
+    sealed: &'a [Arc<[MarketBar]>],
+    open: &'a [MarketBar],
+    tail: Option<MarketBar>,
+    pub forming: bool,
+}
+
+impl SeriesSegments<'_> {
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.covering.len()
+            + self.sealed.len() * COMPLETED_CHUNK_BARS
+            + self.open.len()
+            + usize::from(self.tail.is_some())
+    }
+
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn get(self, index: usize) -> Option<MarketBar> {
+        if let Some(bar) = self.covering.get(index) {
+            return Some(*bar);
+        }
+        let index = index.checked_sub(self.covering.len())?;
+        let sealed_len = self.sealed.len() * COMPLETED_CHUNK_BARS;
+        if index < sealed_len {
+            return self
+                .sealed
+                .get(index / COMPLETED_CHUNK_BARS)?
+                .get(index % COMPLETED_CHUNK_BARS)
+                .copied();
+        }
+        let index = index - sealed_len;
+        self.open
+            .get(index)
+            .copied()
+            .or_else(|| (index == self.open.len()).then_some(self.tail).flatten())
+    }
+
+    #[must_use]
+    pub fn first(self) -> Option<MarketBar> {
+        self.get(0)
+    }
+
+    #[must_use]
+    pub fn last(self) -> Option<MarketBar> {
+        self.tail
+            .or_else(|| self.open.last().copied())
+            .or_else(|| self.sealed.last().and_then(|chunk| chunk.last().copied()))
+            .or_else(|| self.covering.last().copied())
+    }
+
+    /// Returns the number of bars satisfying a monotone predicate.
+    #[must_use]
+    pub fn partition_point(self, mut predicate: impl FnMut(&MarketBar) -> bool) -> usize {
+        let covering = self.covering.partition_point(&mut predicate);
+        if covering < self.covering.len() {
+            return covering;
+        }
+        let chunks = self
+            .sealed
+            .partition_point(|chunk| chunk.last().is_some_and(&mut predicate));
+        let mut completed = chunks * COMPLETED_CHUNK_BARS;
+        if let Some(chunk) = self.sealed.get(chunks) {
+            return covering + completed + chunk.partition_point(&mut predicate);
+        }
+        let index = self.open.partition_point(&mut predicate);
+        completed += index;
+        if index < self.open.len() {
+            return covering + completed;
+        }
+        covering + completed + usize::from(self.tail.is_some_and(|bar| predicate(&bar)))
+    }
+}
+
+const COMPLETED_CHUNK_BARS: usize = 64;
+
+#[derive(Default)]
+struct CompletedTail {
+    sealed: Arc<Vec<Arc<[MarketBar]>>>,
+    open: Vec<MarketBar>,
+}
+
+impl CompletedTail {
+    fn len(&self) -> usize {
+        self.sealed.len() * COMPLETED_CHUNK_BARS + self.open.len()
+    }
+
+    fn last(&self) -> Option<&MarketBar> {
+        self.open
+            .last()
+            .or_else(|| self.sealed.last().and_then(|chunk| chunk.last()))
+    }
+
+    fn push(&mut self, bar: MarketBar) {
+        self.open.push(bar);
+        if self.open.len() == COMPLETED_CHUNK_BARS {
+            let sealed =
+                std::mem::replace(&mut self.open, Vec::with_capacity(COMPLETED_CHUNK_BARS));
+            Arc::make_mut(&mut self.sealed).push(sealed.into());
+        }
+    }
+
+    fn find_mut(&mut self, bar: &MarketBar) -> Option<&mut MarketBar> {
+        if let Some(index) = self.open.iter().position(|candidate| {
+            candidate.source_sequence == bar.source_sequence
+                && candidate.exchange_timestamp_unix_nanos == bar.exchange_timestamp_unix_nanos
+        }) {
+            return self.open.get_mut(index);
+        }
+        let (chunk_index, index) =
+            self.sealed
+                .iter()
+                .enumerate()
+                .find_map(|(chunk_index, chunk)| {
+                    chunk
+                        .iter()
+                        .position(|candidate| {
+                            candidate.source_sequence == bar.source_sequence
+                                && candidate.exchange_timestamp_unix_nanos
+                                    == bar.exchange_timestamp_unix_nanos
+                        })
+                        .map(|index| (chunk_index, index))
+                })?;
+        Arc::make_mut(&mut self.sealed)
+            .get_mut(chunk_index)
+            .and_then(|chunk| Arc::make_mut(chunk).get_mut(index))
+    }
+}
+
+/// Immutable segmented study input; cloning shares history and sealed tail chunks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeriesView {
+    covering: Arc<SeriesSnapshot>,
+    sealed: Arc<Vec<Arc<[MarketBar]>>>,
+    open: Vec<MarketBar>,
+    tail: Option<MarketBar>,
+    pub forming: bool,
+    pub publication_generation: u64,
+}
+
+impl SeriesView {
+    #[must_use]
+    pub fn series(&self) -> &BarSeriesKey {
+        &self.covering.series
+    }
+    #[must_use]
+    pub fn price_scale(&self) -> u8 {
+        self.covering.price_scale
+    }
+    #[must_use]
+    pub fn quantity_scale(&self) -> u8 {
+        self.covering.quantity_scale
+    }
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.covering.bars.len()
+            + self.sealed.len() * COMPLETED_CHUNK_BARS
+            + self.open.len()
+            + usize::from(self.tail.is_some())
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&MarketBar> {
+        let Some(index) = index.checked_sub(self.covering.bars.len()) else {
+            return self.covering.bars.get(index);
+        };
+        let sealed_len = self.sealed.len() * COMPLETED_CHUNK_BARS;
+        if index < sealed_len {
+            return self
+                .sealed
+                .get(index / COMPLETED_CHUNK_BARS)?
+                .get(index % COMPLETED_CHUNK_BARS);
+        }
+        let index = index - sealed_len;
+        self.open.get(index).or_else(|| {
+            (index == self.open.len())
+                .then_some(self.tail.as_ref())
+                .flatten()
+        })
+    }
+    #[must_use]
+    pub fn partition_point(&self, mut predicate: impl FnMut(&MarketBar) -> bool) -> usize {
+        let covering = self.covering.bars.partition_point(&mut predicate);
+        if covering < self.covering.bars.len() {
+            return covering;
+        }
+        let chunks = self
+            .sealed
+            .partition_point(|chunk| chunk.last().is_some_and(&mut predicate));
+        let mut count = covering + chunks * COMPLETED_CHUNK_BARS;
+        if let Some(chunk) = self.sealed.get(chunks) {
+            return count + chunk.partition_point(&mut predicate);
+        }
+        let index = self.open.partition_point(&mut predicate);
+        count += index;
+        if index < self.open.len() {
+            return count;
+        }
+        count + usize::from(self.tail.is_some_and(|bar| predicate(&bar)))
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &MarketBar> {
+        (0..self.len()).filter_map(|index| self.get(index))
+    }
+}
+
 struct StoredSeries {
     covering: Arc<SeriesSnapshot>,
-    completed_tail: Vec<MarketBar>,
+    completed_tail: CompletedTail,
     tail: Option<SeriesTail>,
 }
 
@@ -416,10 +631,7 @@ impl SeriesStore {
             .latest_publication_generation()
             .checked_add(1)
             .ok_or(EngineError::CapacityOverflow)?;
-        if let Some(completed) = current.completed_tail.iter_mut().find(|candidate| {
-            candidate.source_sequence == bar.source_sequence
-                && candidate.exchange_timestamp_unix_nanos == bar.exchange_timestamp_unix_nanos
-        }) {
+        if let Some(completed) = current.completed_tail.find_mut(&bar) {
             *completed = bar;
         } else {
             let Some(position) = current.covering.bars.iter().position(|candidate| {
@@ -460,6 +672,50 @@ impl SeriesStore {
 
     pub(crate) fn get(&self, series: &BarSeriesKey) -> Option<Arc<SeriesSnapshot>> {
         self.series.get(series).map(StoredSeries::snapshot)
+    }
+
+    pub(crate) fn segments(&self, series: &BarSeriesKey) -> Option<SeriesSegments<'_>> {
+        let stored = self.series.get(series)?;
+        Some(SeriesSegments {
+            covering: &stored.covering.bars,
+            sealed: &stored.completed_tail.sealed,
+            open: &stored.completed_tail.open,
+            tail: stored.tail.map(|tail| tail.bar),
+            forming: stored.tail.is_some_and(|tail| tail.forming)
+                || stored.tail.is_none() && stored.covering.forming,
+        })
+    }
+
+    pub(crate) fn view(&self, series: &BarSeriesKey) -> Option<SeriesView> {
+        let stored = self.series.get(series)?;
+        Some(SeriesView {
+            covering: Arc::clone(&stored.covering),
+            sealed: Arc::clone(&stored.completed_tail.sealed),
+            open: stored.completed_tail.open.clone(),
+            tail: stored.tail.map(|tail| tail.bar),
+            forming: stored.tail.is_some_and(|tail| tail.forming)
+                || stored.tail.is_none() && stored.covering.forming,
+            publication_generation: stored.latest_publication_generation(),
+        })
+    }
+
+    pub(crate) fn tail(&self, series: &BarSeriesKey, n: usize) -> Option<Vec<MarketBar>> {
+        let segments = self.segments(series)?;
+        let len = segments.len();
+        let start = len.saturating_sub(n);
+        let mut tail = Vec::with_capacity(len - start);
+        tail.extend((start..len).filter_map(|index| segments.get(index)));
+        Some(tail)
+    }
+
+    pub(crate) fn contains_time(&self, series: &BarSeriesKey, timestamp: i64) -> bool {
+        self.segments(series).is_some_and(|segments| {
+            let index =
+                segments.partition_point(|bar| bar.exchange_timestamp_unix_nanos < timestamp);
+            segments
+                .get(index)
+                .is_some_and(|bar| bar.exchange_timestamp_unix_nanos == timestamp)
+        })
     }
 
     pub(crate) fn compatible_source(
@@ -558,7 +814,7 @@ impl SeriesStore {
     #[cfg(test)]
     pub(crate) fn completed_bars(&self, series: &BarSeriesKey) -> Option<Arc<[MarketBar]>> {
         self.series.get(series).map(|stored| {
-            if stored.completed_tail.is_empty() {
+            if stored.completed_tail.len() == 0 {
                 return Arc::clone(&stored.covering.bars);
             }
             let mut bars = Vec::with_capacity(
@@ -569,7 +825,10 @@ impl SeriesStore {
                     .saturating_add(stored.completed_tail.len()),
             );
             bars.extend_from_slice(&stored.covering.bars);
-            bars.extend_from_slice(&stored.completed_tail);
+            for chunk in stored.completed_tail.sealed.iter() {
+                bars.extend_from_slice(chunk);
+            }
+            bars.extend_from_slice(&stored.completed_tail.open);
             bars.into()
         })
     }
@@ -592,12 +851,15 @@ impl StoredSeries {
     }
 
     fn snapshot(&self) -> Arc<SeriesSnapshot> {
-        if self.completed_tail.is_empty() && self.tail.is_none() {
+        if self.completed_tail.len() == 0 && self.tail.is_none() {
             return Arc::clone(&self.covering);
         }
         let mut bars = Vec::with_capacity(self.bar_count());
         bars.extend_from_slice(&self.covering.bars);
-        bars.extend_from_slice(&self.completed_tail);
+        for chunk in self.completed_tail.sealed.iter() {
+            bars.extend_from_slice(chunk);
+        }
+        bars.extend_from_slice(&self.completed_tail.open);
         if let Some(tail) = self.tail {
             bars.push(tail.bar);
         }
@@ -684,7 +946,7 @@ fn replacement_series(
     if let Some(tail) = retained_tail {
         return Ok(StoredSeries {
             covering,
-            completed_tail: Vec::new(),
+            completed_tail: CompletedTail::default(),
             tail: Some(SeriesTail {
                 provider_generation,
                 publication_generation,
@@ -706,7 +968,7 @@ fn stored_series(
     if !realtime || !snapshot.forming {
         return Ok(StoredSeries {
             covering: Arc::clone(snapshot),
-            completed_tail: Vec::new(),
+            completed_tail: CompletedTail::default(),
             tail: None,
         });
     }
@@ -721,7 +983,7 @@ fn stored_series(
             forming: false,
             bars: completed.into(),
         }),
-        completed_tail: Vec::new(),
+        completed_tail: CompletedTail::default(),
         tail: Some(SeriesTail {
             provider_generation: snapshot.provider_generation,
             publication_generation: snapshot.publication_generation,

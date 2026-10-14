@@ -866,7 +866,7 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn broadcast_series_recovery_for(&mut self, selected: &BarSeriesKey, detail: &str) {
-        let state = if self.engine.series_snapshot(selected).is_some() {
+        let state = if self.engine.series_bar_count(selected).is_some() {
             SeriesLoadState::Partial
         } else {
             SeriesLoadState::Resolving

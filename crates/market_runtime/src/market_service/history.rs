@@ -1,3 +1,4 @@
+use super::coordinator::StudyChange;
 use super::lifecycle::CandleHandoffSeed;
 use super::{
     ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, Command, ConsumerId, Coordinator,
@@ -1000,8 +1001,8 @@ impl Coordinator<'_> {
         };
         // DXLink time-series subscriptions have a fromTime but no end bound.
         // Preserve the edge adjacent to retained history and queue the rest.
-        let extends_newer = self.engine.series_snapshot(series).is_some_and(|snapshot| {
-            snapshot.bars.last().is_some_and(|last| {
+        let extends_newer = self.engine.series_segments(series).is_some_and(|segments| {
+            segments.last().is_some_and(|last| {
                 requested.start_unix_nanos >= last.exchange_timestamp_unix_nanos
             })
         });
@@ -1022,8 +1023,8 @@ impl Coordinator<'_> {
         self.history
             .coverage(series, epoch)
             .is_some_and(|coverage| coverage.backwards_exhausted)
-            && self.engine.series_snapshot(series).is_some_and(|snapshot| {
-                snapshot.bars.first().is_some_and(|first| {
+            && self.engine.series_segments(series).is_some_and(|segments| {
+                segments.first().is_some_and(|first| {
                     requested.end_unix_nanos <= first.exchange_timestamp_unix_nanos
                 })
             })
@@ -1049,7 +1050,7 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         _generation: ProviderGeneration,
     ) {
-        if self.engine.series_snapshot(series).is_some() {
+        if self.engine.series_bar_count(series).is_some() {
             self.pending.remove(series);
             self.broadcast_series_resolution_for(
                 series,
@@ -1169,7 +1170,7 @@ impl Coordinator<'_> {
                     )
                 })
         });
-        let replacing_existing = self.engine.series_snapshot(series).is_some();
+        let replacing_existing = self.engine.series_bar_count(series).is_some();
         let Some(prepared) = self.prepare_history_repair(series, generation, range, snapshot)
         else {
             if range.is_none() {
@@ -1306,7 +1307,7 @@ impl Coordinator<'_> {
                 super::lifecycle::SeriesInput::HistoryEmpty(Some(ticket)),
             );
         }
-        let detail = if self.engine.series_snapshot(series).is_some() {
+        let detail = if self.engine.series_bar_count(series).is_some() {
             EMPTY_CURRENT_HISTORY_RETAINED_DETAIL
         } else {
             EMPTY_CURRENT_HISTORY_DETAIL
@@ -1396,13 +1397,10 @@ impl Coordinator<'_> {
         repaired_timestamp_span: Option<(i64, i64)>,
     ) {
         let study_execution = match repaired_timestamp_span {
-            Some((first_changed_unix_nanos, last_changed_unix_nanos)) => self
-                .execute_study_history_range_change(
-                    series,
-                    first_changed_unix_nanos,
-                    last_changed_unix_nanos,
-                ),
-            None => self.execute_studies_ready_for_market(series),
+            Some((first_changed_unix_nanos, last_changed_unix_nanos)) => self.execute_study_change(
+                StudyChange::History(series, first_changed_unix_nanos, last_changed_unix_nanos),
+            ),
+            None => self.execute_study_change(StudyChange::Market(series)),
         };
         match study_execution {
             Ok(batch) => {

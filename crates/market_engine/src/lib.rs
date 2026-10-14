@@ -19,7 +19,7 @@ pub use provider_manager::{
     ProviderCapabilities, ProviderConfig, ProviderHealth, ProviderRequest, ProviderStatus,
 };
 pub use publication::{ConsumerPublication, ConsumerSeriesUpdate};
-pub use series_store::{SeriesSnapshot, SeriesTailOperation};
+pub use series_store::{SeriesSegments, SeriesSnapshot, SeriesTailOperation, SeriesView};
 pub use subscription_registry::SubscriptionStatus;
 
 use aeris_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
@@ -1014,6 +1014,25 @@ impl MarketEngine {
     #[must_use]
     pub fn series_snapshot(&self, series: &BarSeriesKey) -> Option<Arc<SeriesSnapshot>> {
         self.series.get(series)
+    }
+    /// Reads only the requested canonical tail, including the forming bar.
+    #[must_use]
+    pub fn series_tail(&self, series: &BarSeriesKey, n: usize) -> Option<Vec<MarketBar>> {
+        self.series.tail(series, n)
+    }
+    /// Borrows all canonical segments for indexed study reads without a full-series copy.
+    #[must_use]
+    pub fn series_segments(&self, series: &BarSeriesKey) -> Option<SeriesSegments<'_>> {
+        self.series.segments(series)
+    }
+    /// Shares covering history and sealed chunks, copying at most the open chunk.
+    #[must_use]
+    pub fn series_view(&self, series: &BarSeriesKey) -> Option<SeriesView> {
+        self.series.view(series)
+    }
+    #[must_use]
+    pub fn series_contains_time(&self, series: &BarSeriesKey, timestamp: i64) -> bool {
+        self.series.contains_time(series, timestamp)
     }
 
     #[must_use]
@@ -2331,6 +2350,84 @@ mod tests {
         engine
             .begin_provider_session("rithmic", provider_generation(2))
             .expect("reconnect advances the provider generation");
+    }
+
+    #[test]
+    fn segmented_tail_and_timestamp_lookup_match_canonical_snapshot() {
+        let mut engine = engine(1, 1, 16);
+        let key = series("rithmic:spot:BTC-USD");
+        engine
+            .install_history(provider_generation(1), &key, 2, 0, bars(4))
+            .expect("history");
+        for index in 4..7 {
+            engine
+                .install_realtime_tail(
+                    provider_generation(1),
+                    &key,
+                    2,
+                    0,
+                    bars(7)[index],
+                    index == 6,
+                )
+                .expect("tail");
+        }
+        let canonical = engine.series_snapshot(&key).expect("canonical");
+        let segments = engine.series_segments(&key).expect("segments");
+        assert_eq!(segments.len(), canonical.bars.len());
+        for (index, bar) in canonical.bars.iter().enumerate() {
+            assert_eq!(segments.get(index), Some(*bar));
+            assert!(engine.series_contains_time(&key, bar.exchange_timestamp_unix_nanos));
+        }
+        assert!(
+            !engine.series_contains_time(&key, canonical.bars[0].exchange_timestamp_unix_nanos + 1)
+        );
+        assert_eq!(
+            engine.series_tail(&key, 2),
+            Some(canonical.bars[5..].to_vec())
+        );
+        assert_eq!(engine.series_tail(&key, 0), Some(Vec::new()));
+        assert_eq!(engine.series_tail(&key, 100), Some(canonical.bars.to_vec()));
+    }
+    #[test]
+    fn sealed_study_chunks_preserve_old_views_and_exact_corrections() {
+        let mut engine = engine(1, 1, 180);
+        let key = series("rithmic:spot:BTC-USD");
+        let input = bars(140);
+        engine
+            .install_history(provider_generation(1), &key, 2, 0, input[..4].to_vec())
+            .expect("history");
+        for bar in &input[4..] {
+            engine
+                .install_realtime_tail(provider_generation(1), &key, 2, 0, *bar, true)
+                .expect("live append");
+        }
+        let old = engine.series_view(&key).expect("view");
+        let mut corrected = input[10];
+        corrected.close += 1;
+        engine
+            .replace_realtime_completed_bar(provider_generation(1), &key, 2, 0, corrected)
+            .expect("sealed chunk correction");
+        let new = engine.series_view(&key).expect("new view");
+        let canonical = engine.series_snapshot(&key).expect("snapshot");
+        assert_eq!(old.get(10), Some(&input[10]));
+        assert_eq!(new.get(10), Some(&corrected));
+        for (index, bar) in canonical.bars.iter().enumerate() {
+            assert_eq!(new.get(index), Some(bar));
+            assert_eq!(
+                engine
+                    .series_segments(&key)
+                    .and_then(|segments| segments.get(index)),
+                Some(*bar)
+            );
+            assert_eq!(
+                new.partition_point(|candidate| candidate.exchange_timestamp_unix_nanos
+                    <= bar.exchange_timestamp_unix_nanos),
+                canonical
+                    .bars
+                    .partition_point(|candidate| candidate.exchange_timestamp_unix_nanos
+                        <= bar.exchange_timestamp_unix_nanos)
+            );
+        }
     }
 
     #[test]
