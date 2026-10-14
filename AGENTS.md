@@ -42,6 +42,7 @@ violations and missing verification explicitly, and never describe them as satis
   delete changes you do not own.
 - Prefer one coherent implementation batch. Commit only after the relevant checks pass.
 - Use the existing `type(scope): outcome` commit style and push verified work directly to `origin/main`.
+- Never add agent or harness attribution to commits (no `Co-authored-by`, `Generated-by`, or mentions of Droid, Claude, Cursor, or any other coding agent in commit messages or trailers).
 - Never force-push or use destructive Git commands.
 
 ## How to work
@@ -285,6 +286,44 @@ The local launcher and signed lifecycle code remain for future integration; deve
 - Every commit that introduces or changes an architecture restriction (a `tools/naming_check` rule, a
   crate boundary, a writer or CI rule) must also update this `AGENTS.md` in the same commit, so the
   rule lives where future agents read it.
+
+## Business outreach CRM
+
+Outreach to prop firms, brokers and providers is tracked in a self-hosted Twenty CRM on the
+maintainer's machine. Twenty is the source of truth for outreach status, not this repository.
+
+- Twenty runs in Docker from `C:\Users\devraj\twenty-crm` (compose project `twenty`, image tag pinned
+  in `.env`) at `http://localhost:4747`, bound to loopback only (`127.0.0.1` and `[::1]`; Windows
+  resolves `localhost` to `::1` first, so dropping the IPv6 binding adds ~2s to every connection).
+  Containers restart automatically. The REST API allows 100 requests per 60s per key; batch and retry.
+- Use the REST API at `http://localhost:4747/rest/` with the bearer key stored in
+  `C:\Users\devraj\twenty-crm\api_key.txt`. Never print, log or commit that key, the `.env` file, or
+  any contact data. Contact names, emails and deal notes never enter this public repository.
+- Data model: a Company per firm, a Person per contact linked to the company, and one Opportunity per
+  outreach relationship, named after the firm (chart-engine deals end in ` - Chart engine`).
+  Company `companyType` says what the firm is (prop firm, futures FCM or IB, stock, FX/CFD or
+  multi-asset broker, crypto exchange, data feed / infrastructure, trading platform, broker tech
+  vendor, exchange, professional trading firm, fintech/media). Opportunity custom fields:
+  `aerisRole` (supported in Aeris, pitch the Aeris platform, broker connection, data/infra supplier,
+  competing platform, chart engine licensing, not a target), `fit` (strong, good, check connection
+  first, good fit via NinjaTrader request, later, not a fit) with a one-line `fitReason`, plus `outreachStatus`, `priority`, `platforms`, `sentAs`,
+  `firstContactAt`, `lastActivityAt`, `whatHappened` and `nextAction`; the standard `amount` holds
+  any quoted annual price.
+- After sending outreach or reading a reply, update the matching Opportunity in the same task: set
+  `outreachStatus` and `lastActivityAt`, append a dated line to `whatHappened`, set `nextAction`, and
+  revise `fit` and `fitReason` when the reply changes them. Create the Company (with `companyType`),
+  Person and Opportunity (with `aerisRole`, `fit` and `fitReason`) first for a firm that is not in
+  the CRM yet.
+- Supported in Aeris is only for connections that are approved and working (Rithmic, cTrader,
+  tastytrade). A firm that has closed gets `outreachStatus` out of business and `fit` not a fit, with
+  the closure date and source in `fitReason`. Saved Opportunity views split the list into Supported
+  in Aeris, Active pipeline, Later (needs new work) and Dead ends; keep a deal's role and fit accurate
+  so it lands in the right view.
+- Tradovate/NinjaTrader-only firms are not out of reach: Tradovate gives no API access for prop or
+  evaluation accounts, so approval comes from NinjaTrader, and prop-firm requests are the lever. Pitch
+  them and ask them to request Aeris support from NinjaTrader/Tradovate.
+- Email only addresses confirmed from the firm's own site or an existing thread, and never claim live
+  order routing or performance that has not been verified.
 
 ## Delivery
 
