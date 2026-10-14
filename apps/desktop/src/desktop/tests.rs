@@ -4158,7 +4158,7 @@ fn desktop_provider_labels_and_default_queries_come_from_runtime_descriptors() {
     };
     assert_eq!(
         super::provider_ready_message(super::TerminalProvider::Rithmic, &product),
-        "MNQ · Rithmic spot"
+        "MNQ · Rithmic"
     );
     assert_eq!(
         super::provider_ready_message(super::TerminalProvider::Hyperliquid, &product),

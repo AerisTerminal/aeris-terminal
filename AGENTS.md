@@ -118,6 +118,10 @@ the check.
 - Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;
   the Rithmic adapter alone retries transport, while its non-transport session replacements
   wait at least one second. Never stack a coordinator transport retry on that adapter.
+- Generic market-service lifecycle, history, calendar, quote, outbox, coordinator, realtime,
+  runtime and publication code must not contain provider identity literals. Provider-specific
+  capabilities and user-facing presentation metadata are declared with provider registration;
+  provider wire aggregation belongs to its adapter, not `ChartInterval`.
 - Market session and cadence decisions use the provider-neutral market calendar. Exchange
   codes share one normalization table; generic calendar code contains no provider identity
   literals and does not import an adapter-owned exchange calendar. Unknown week/month

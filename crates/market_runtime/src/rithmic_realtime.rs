@@ -40,6 +40,7 @@ use aeris_rithmic_protocol_adapter::{
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
 
 const CALLBACK_CAPACITY: usize = 256;
+pub(crate) const WORKER_NAME: &str = "aeris-rithmic-provider";
 const CALLBACK_BYTES: usize = 8 * 1024 * 1024;
 const CALLBACK_DEPTH_LEVELS: usize = 4_096;
 /// Tight bound for adapter/control queues that cannot wake the blocking

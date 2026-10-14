@@ -309,8 +309,8 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
             coordinator.mark_lifecycle_recovering(
                 provider,
                 generation,
-                descriptor.live_model,
-                descriptor.overflow_recovery_detail,
+                descriptor.capabilities.live_model,
+                descriptor.capabilities.overflow_recovery_detail,
             );
             diagnostic!(
                 "Aeris market {provider} event queue overflowed at generation {generation}"
@@ -322,7 +322,7 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                 coordinator.mark_lifecycle_failed(
                     provider,
                     generation,
-                    "Rithmic: adapter transport retry scheduler exhausted; reconnect in Accounts",
+                    "Adapter transport retry scheduler exhausted; reconnect in Accounts",
                 );
                 diagnostic!(
                     "Aeris market {provider} stopped after retry limit at generation {generation}"
@@ -936,7 +936,8 @@ impl Coordinator<'_> {
         match command {
             Command::BrokerAuthorizationChanged(provider, ready, reply) => {
                 let Some(descriptor) = self.providers.descriptor(provider).filter(|descriptor| {
-                    descriptor.connection_kind == super::ProviderConnectionKind::BrokerCapability
+                    descriptor.capabilities.connection_kind
+                        == super::ProviderConnectionKind::BrokerCapability
                 }) else {
                     let _ = reply.send(Err("Broker market-data provider is unavailable".into()));
                     return;
@@ -954,8 +955,8 @@ impl Coordinator<'_> {
                     self.mark_lifecycle_recovering(
                         provider,
                         generation.0.get(),
-                        descriptor.live_model,
-                        descriptor.authorization_revoked_detail,
+                        descriptor.capabilities.live_model,
+                        descriptor.capabilities.authorization_revoked_detail,
                     );
                     let _ = self.engine.end_provider_session(provider, generation);
                 }
@@ -965,7 +966,7 @@ impl Coordinator<'_> {
                     if ready {
                         None
                     } else {
-                        Some(descriptor.authorization_revoked_detail)
+                        Some(descriptor.capabilities.authorization_revoked_detail)
                     },
                 );
                 let _ = reply.send(Ok(()));
@@ -1582,8 +1583,8 @@ impl Coordinator<'_> {
                 };
                 let mut book = ProviderOrderBook::new(
                     instrument,
-                    descriptor.trade_continuity,
-                    !descriptor.presentation.depth_available,
+                    descriptor.capabilities.trade_continuity,
+                    descriptor.capabilities.depth.is_none(),
                 );
                 book.calendar = self.calendar.for_instrument(&book.instrument.instrument_id);
                 book.set_depth_subscribed(depth_subscribed);

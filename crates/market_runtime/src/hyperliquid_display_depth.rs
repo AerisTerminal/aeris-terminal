@@ -20,6 +20,7 @@ use crate::{
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const WORKER_NAME: &str = "aeris-hyperliquid-display-depth";
 const READ_TIMEOUT: Duration = Duration::from_millis(2);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const MESSAGE_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);

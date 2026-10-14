@@ -38,6 +38,99 @@ const LEGACY_HISTORY_PAYLOAD_BYTES: usize = LEGACY_HISTORY_PAYLOAD_MAGIC.len() +
 /// Non-secret account scope for Rithmic Test market-data history.
 pub const RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID: &str = "rithmic_test_market_data";
 
+/// Exact provider replay aggregation for a chart interval.
+#[must_use]
+pub fn rithmic_chart_aggregation(interval: ChartInterval) -> RithmicChartAggregation {
+    use ChartInterval as I;
+    match interval {
+        I::Tick100 => RithmicChartAggregation::Trades {
+            trades_per_bar: NonZeroU16::new(100).unwrap_or(NonZeroU16::MIN),
+        },
+        I::Second1 => rithmic_time(RithmicTimeUnit::Second, 1),
+        I::Second5 => rithmic_time(RithmicTimeUnit::Second, 5),
+        I::Second10 => rithmic_time(RithmicTimeUnit::Second, 10),
+        I::Second15 => rithmic_time(RithmicTimeUnit::Second, 15),
+        I::Second30 => rithmic_time(RithmicTimeUnit::Second, 30),
+        I::Minute1 => rithmic_time(RithmicTimeUnit::Minute, 1),
+        I::Minute3 => rithmic_time(RithmicTimeUnit::Minute, 3),
+        I::Minute5 => rithmic_time(RithmicTimeUnit::Minute, 5),
+        I::Minute15 => rithmic_time(RithmicTimeUnit::Minute, 15),
+        I::Minute30 => rithmic_time(RithmicTimeUnit::Minute, 30),
+        I::Hour1 => rithmic_time(RithmicTimeUnit::Minute, 60),
+        I::Hour2 => rithmic_time(RithmicTimeUnit::Minute, 120),
+        I::Hour4 => rithmic_time(RithmicTimeUnit::Minute, 240),
+        I::Hour8 => rithmic_time(RithmicTimeUnit::Minute, 480),
+        I::Hour12 => rithmic_time(RithmicTimeUnit::Minute, 720),
+        I::Day1 => rithmic_time(RithmicTimeUnit::Day, 1),
+        I::Day3 => rithmic_time(RithmicTimeUnit::Day, 3),
+        I::Week1 => RithmicChartAggregation::DailySessions {
+            period: RithmicDailyAggregation::Week,
+        },
+        I::Month1 => RithmicChartAggregation::DailySessions {
+            period: RithmicDailyAggregation::Month,
+        },
+    }
+}
+
+fn rithmic_time(unit: RithmicTimeUnit, period: u16) -> RithmicChartAggregation {
+    RithmicChartAggregation::Time {
+        unit,
+        period: NonZeroU16::new(period).unwrap_or(NonZeroU16::MIN),
+    }
+}
+
+#[cfg(test)]
+mod chart_interval_tests {
+    use super::*;
+
+    #[test]
+    fn every_native_interval_has_exact_rithmic_aggregation() {
+        let expected = [
+            (ChartInterval::Second1, RithmicTimeUnit::Second, 1),
+            (ChartInterval::Second5, RithmicTimeUnit::Second, 5),
+            (ChartInterval::Second10, RithmicTimeUnit::Second, 10),
+            (ChartInterval::Second15, RithmicTimeUnit::Second, 15),
+            (ChartInterval::Second30, RithmicTimeUnit::Second, 30),
+            (ChartInterval::Minute1, RithmicTimeUnit::Minute, 1),
+            (ChartInterval::Minute3, RithmicTimeUnit::Minute, 3),
+            (ChartInterval::Minute5, RithmicTimeUnit::Minute, 5),
+            (ChartInterval::Minute15, RithmicTimeUnit::Minute, 15),
+            (ChartInterval::Minute30, RithmicTimeUnit::Minute, 30),
+            (ChartInterval::Hour1, RithmicTimeUnit::Minute, 60),
+            (ChartInterval::Hour2, RithmicTimeUnit::Minute, 120),
+            (ChartInterval::Hour4, RithmicTimeUnit::Minute, 240),
+            (ChartInterval::Hour8, RithmicTimeUnit::Minute, 480),
+            (ChartInterval::Hour12, RithmicTimeUnit::Minute, 720),
+            (ChartInterval::Day1, RithmicTimeUnit::Day, 1),
+            (ChartInterval::Day3, RithmicTimeUnit::Day, 3),
+        ];
+        for (interval, unit, period) in expected {
+            assert_eq!(
+                rithmic_chart_aggregation(interval),
+                RithmicChartAggregation::Time {
+                    unit,
+                    period: NonZeroU16::new(period).unwrap()
+                }
+            );
+        }
+        assert_eq!(
+            rithmic_chart_aggregation(ChartInterval::Tick100),
+            RithmicChartAggregation::Trades {
+                trades_per_bar: NonZeroU16::new(100).unwrap()
+            }
+        );
+        for (interval, period) in [
+            (ChartInterval::Week1, RithmicDailyAggregation::Week),
+            (ChartInterval::Month1, RithmicDailyAggregation::Month),
+        ] {
+            assert_eq!(
+                rithmic_chart_aggregation(interval),
+                RithmicChartAggregation::DailySessions { period }
+            );
+        }
+    }
+}
+
 /// Coarse Rithmic history adapter failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RithmicHistoryAdapterError {
@@ -669,10 +762,7 @@ pub fn collect_rithmic_chart_history<T: RithmicHistoryTransport>(
         .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
     let finish_seconds = i32::try_from(range.end_unix_nanos / NANOS_PER_SECOND_I64)
         .map_err(|_| RithmicHistoryAdapterError::InvalidRequest)?;
-    match interval
-        .rithmic_aggregation()
-        .ok_or(RithmicHistoryAdapterError::InvalidRequest)?
-    {
+    match rithmic_chart_aggregation(interval) {
         RithmicChartAggregation::Trades { trades_per_bar } => collect_tick_chart_history(
             transport,
             instrument,

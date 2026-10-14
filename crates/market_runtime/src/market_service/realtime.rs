@@ -23,62 +23,11 @@ use crate::study::{
     StudyTradeWindow,
 };
 use aeris_observability::diagnostic;
+#[cfg(test)]
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 
 const MAXIMUM_CANONICAL_DEPTH_LEVELS: usize = 4_096;
 const RECENT_TRADE_RETENTION_NANOS: i64 = 8 * 60 * 1_000_000_000;
-
-pub(super) const fn rithmic_invalidation_detail(
-    reason: Option<ProviderInvalidationReason>,
-) -> &'static str {
-    match reason {
-        Some(ProviderInvalidationReason::Transport) => "Rithmic transport connection failed",
-        Some(ProviderInvalidationReason::Authentication) => {
-            "Rithmic rejected the user ID or password for the selected system"
-        }
-        Some(ProviderInvalidationReason::PermissionDenied) => {
-            "Rithmic denied this login for Aeris; the account needs a paid market-data subscription and Aeris enabled by its broker or prop firm"
-        }
-        Some(ProviderInvalidationReason::AgreementRequired) => {
-            "Rithmic account requires an agreement before market data can stream"
-        }
-        Some(ProviderInvalidationReason::UnsupportedSystem) => {
-            "The selected Rithmic system is not offered on this server"
-        }
-        Some(ProviderInvalidationReason::SchemaMismatch) => {
-            "Rithmic protocol schema does not match the installed provider kit"
-        }
-        Some(ProviderInvalidationReason::HeartbeatSilence) => {
-            "Rithmic heartbeat response timed out"
-        }
-        Some(ProviderInvalidationReason::MessageSilence) => {
-            "Rithmic market-data stream stopped producing messages"
-        }
-        Some(ProviderInvalidationReason::SequenceGap) => {
-            "Rithmic market-data sequence continuity was lost"
-        }
-        Some(ProviderInvalidationReason::QueueOverflow) => {
-            "Rithmic callback queue overflowed before market data could be consumed"
-        }
-        Some(ProviderInvalidationReason::MalformedMessage) => {
-            "Rithmic sent market data that failed protocol validation"
-        }
-        None => "Rithmic live session is recovering",
-    }
-}
-
-pub(super) const fn rithmic_auto_recovers(reason: Option<ProviderInvalidationReason>) -> bool {
-    matches!(
-        reason,
-        None | Some(
-            ProviderInvalidationReason::Transport
-                | ProviderInvalidationReason::HeartbeatSilence
-                | ProviderInvalidationReason::MessageSilence
-                | ProviderInvalidationReason::SequenceGap
-                | ProviderInvalidationReason::QueueOverflow
-        )
-    )
-}
 
 pub(in crate::market_service) fn enqueue_bar_transition(
     queue: &mut VecDeque<MarketBar>,
@@ -945,7 +894,8 @@ impl Coordinator<'_> {
 
     #[cfg(test)]
     pub(super) fn rithmic_realtime_demand(&self) -> Result<RithmicRealtimeDemand, String> {
-        self.provider_demand("rithmic").rithmic_wire()
+        self.provider_demand(super::RITHMIC_DESCRIPTOR.id)
+            .rithmic_wire()
     }
 
     pub(super) fn provider_demand(&self, provider_id: &str) -> ProviderDemand {
@@ -976,7 +926,7 @@ impl Coordinator<'_> {
             if self
                 .providers
                 .descriptor(provider_id)
-                .is_some_and(|descriptor| descriptor.candle_wire_interval.is_some())
+                .is_some_and(|descriptor| descriptor.capabilities.candle_wire_interval.is_some())
             {
                 candle_series.push((series.clone(), streams, instrument.clone()));
             }
@@ -994,7 +944,7 @@ impl Coordinator<'_> {
         let alert_overrides_instrument = self
             .providers
             .descriptor(provider_id)
-            .is_some_and(|descriptor| descriptor.alert_overrides_instrument);
+            .is_some_and(|descriptor| descriptor.capabilities.alert_overrides_instrument);
         for instrument in self.price_alerts.active_instruments(provider_id) {
             instruments
                 .entry(instrument.instrument_id.clone())
@@ -1069,25 +1019,25 @@ impl Coordinator<'_> {
         if !self.providers.rithmic_realtime_enabled() {
             return Ok(());
         }
-        let neutral = self.provider_demand("rithmic");
+        let neutral = self.provider_demand(super::RITHMIC_DESCRIPTOR.id);
         let demand = neutral.rithmic_wire()?;
         if demand.instruments.is_empty() {
             return Ok(());
         }
-        if self.session("rithmic").accepted.as_ref() == Some(&neutral)
-            && self.session("rithmic").pending.is_none()
+        if self.session(super::RITHMIC_DESCRIPTOR.id).accepted.as_ref() == Some(&neutral)
+            && self.session(super::RITHMIC_DESCRIPTOR.id).pending.is_none()
         {
             return Ok(());
         }
-        if self
-            .providers
-            .send_control("rithmic", super::ProviderControl::Demand(neutral.clone()))?
-        {
-            let session = self.session_mut("rithmic");
+        if self.providers.send_control(
+            super::RITHMIC_DESCRIPTOR.id,
+            super::ProviderControl::Demand(neutral.clone()),
+        )? {
+            let session = self.session_mut(super::RITHMIC_DESCRIPTOR.id);
             session.pending = None;
             session.accepted = Some(neutral);
         } else {
-            self.session_mut("rithmic").pending = Some(neutral);
+            self.session_mut(super::RITHMIC_DESCRIPTOR.id).pending = Some(neutral);
         }
         Ok(())
     }
@@ -1114,21 +1064,27 @@ impl Coordinator<'_> {
             .engine
             .provider_status(&series.provider_id)
             .is_some_and(|status| status.health == ProviderHealth::Online);
-        match descriptor.live_model {
+        match descriptor.capabilities.live_model {
             super::LiveModel::TradeBuilt => {
                 if !self.series.trade_contains_key(series) {
                     let generation = self.provider_generation_for_series(series)?;
                     let instrument = self
                         .catalog
                         .get(&(series.provider_id.clone(), series.instrument_id.clone()))
-                        .ok_or_else(|| descriptor.instrument_missing_detail.to_string())?
+                        .ok_or_else(|| {
+                            descriptor
+                                .capabilities
+                                .instrument_missing_detail
+                                .to_string()
+                        })?
                         .clone();
                     let candle = descriptor
+                        .capabilities
                         .candle_wire_interval
                         .map(|wire_interval| {
                             wire_interval(series.period).map(|interval| {
                                 (
-                                    descriptor.gap_policy,
+                                    descriptor.capabilities.gap_policy,
                                     format!("{}{{={interval}}}", instrument.provider_symbol),
                                 )
                             })
@@ -1145,7 +1101,7 @@ impl Coordinator<'_> {
                         self.series.insert_trade(series.clone(), handoff);
                     }
                 }
-                match descriptor.trade_demand_policy {
+                match descriptor.capabilities.trade_demand_policy {
                     super::TradeDemandPolicy::Immediate => self.send_rithmic_demand()?,
                     super::TradeDemandPolicy::SessionManaged => {
                         self.flush_session_managed_demand(descriptor.id);
@@ -1153,7 +1109,7 @@ impl Coordinator<'_> {
                 }
             }
             super::LiveModel::ProviderCandles => {
-                if descriptor.candle_demand_policy
+                if descriptor.capabilities.candle_demand_policy
                     == super::CandleDemandPolicy::ReconcileAfterSelection
                 {
                     // Newest-wins controls may replace a queued idle Stop without a
@@ -1163,22 +1119,24 @@ impl Coordinator<'_> {
                 if !self.series.candle_contains_key(series) {
                     let generation = self.provider_generation_for_series(series)?;
                     let instrument = self.candle_instrument(series)?.clone();
-                    let interval =
-                        descriptor.candle_wire_interval.ok_or_else(|| {
-                            "provider candle interval is unavailable".to_string()
-                        })?(series.period)?;
+                    let interval = descriptor
+                        .capabilities
+                        .candle_wire_interval
+                        .ok_or_else(|| "provider candle interval is unavailable".to_string())?(
+                        series.period,
+                    )?;
                     let mut handoff = SeriesLifecycle::with_clock(
                         series.clone(),
                         generation,
                         &instrument.provider_symbol,
                         &interval,
-                        descriptor.gap_policy,
+                        descriptor.capabilities.gap_policy,
                         std::sync::Arc::clone(&self.clock),
                     );
                     handoff.connected = connected;
                     self.series.insert_candle(series.clone(), handoff);
                 }
-                if descriptor.candle_demand_policy
+                if descriptor.capabilities.candle_demand_policy
                     == super::CandleDemandPolicy::ReconcileAfterSelection
                 {
                     self.session_mut(&series.provider_id).demand_dirty = true;
@@ -1246,10 +1204,18 @@ impl Coordinator<'_> {
         }
         match kind {
             ProviderEventKind::Connecting => {
-                self.begin_lifecycle_session(provider, generation, descriptor.live_model);
+                self.begin_lifecycle_session(
+                    provider,
+                    generation,
+                    descriptor.capabilities.live_model,
+                );
             }
             ProviderEventKind::Connected | ProviderEventKind::Heartbeat(_) => {
-                self.mark_lifecycle_online(provider, generation, descriptor.live_model);
+                self.mark_lifecycle_online(
+                    provider,
+                    generation,
+                    descriptor.capabilities.live_model,
+                );
             }
             ProviderEventKind::Recovering {
                 detail,
@@ -1258,7 +1224,7 @@ impl Coordinator<'_> {
             } => self.handle_provider_recovering_event(
                 provider,
                 generation,
-                descriptor.live_model,
+                descriptor.capabilities.live_model,
                 detail,
                 provider_detail,
                 recovery_reason,
@@ -1270,7 +1236,12 @@ impl Coordinator<'_> {
                 self.handle_provider_disconnected(provider, generation, descriptor, reason);
             }
             ProviderEventKind::Trades(batch) => {
-                self.accept_provider_trades(provider, generation, descriptor.live_model, &batch);
+                self.accept_provider_trades(
+                    provider,
+                    generation,
+                    descriptor.capabilities.live_model,
+                    &batch,
+                );
             }
             ProviderEventKind::IndexedTrades {
                 instrument,
@@ -1776,7 +1747,7 @@ impl Coordinator<'_> {
         {
             return;
         }
-        let failed = match descriptor.live_model {
+        let failed = match descriptor.capabilities.live_model {
             super::LiveModel::TradeBuilt => {
                 let Some(wire) = symbol.wire() else {
                     return;
@@ -1786,7 +1757,8 @@ impl Coordinator<'_> {
                     .filter(|(series, live)| {
                         series.provider_id == provider
                             && live.generation == generation
-                            && (!descriptor.candle_requires_connected || live.connected)
+                            && (!descriptor.capabilities.candle_requires_connected
+                                || live.connected)
                             && live.matches_candle_symbol(symbol)
                     })
                     .filter_map(
@@ -1810,7 +1782,8 @@ impl Coordinator<'_> {
                     .filter(|(series, live)| {
                         series.provider_id == provider
                             && live.generation == generation
-                            && (!descriptor.candle_requires_connected || live.connected)
+                            && (!descriptor.capabilities.candle_requires_connected
+                                || live.connected)
                             && live.matches_candle_symbol(symbol)
                     })
                     .map(|(series, _)| series.clone())
@@ -1830,6 +1803,7 @@ impl Coordinator<'_> {
                 // evidence that a series answered empty now has data.
                 if !descriptor
                     .capabilities
+                    .engine
                     .streams
                     .contains(MarketStream::Trades)
                 {
@@ -1851,7 +1825,7 @@ impl Coordinator<'_> {
                 &series,
                 generation,
                 FailureStage::Aggregation,
-                descriptor.candle_correction_detail,
+                descriptor.capabilities.candle_correction_detail,
             );
         }
     }
@@ -1875,7 +1849,7 @@ impl Coordinator<'_> {
             self.handle_idle_stop_overlap(provider, generation, descriptor);
             return;
         }
-        match descriptor.live_model {
+        match descriptor.capabilities.live_model {
             super::LiveModel::TradeBuilt => {
                 self.session_mut(provider).accepted = None;
                 self.session_mut(provider).pending = None;
@@ -1903,12 +1877,12 @@ impl Coordinator<'_> {
                     self.mark_lifecycle_recovering(
                         provider,
                         generation,
-                        descriptor.live_model,
+                        descriptor.capabilities.live_model,
                         detail,
                     );
                 }
                 if auto_recover
-                    && descriptor.recovery_policy
+                    && descriptor.capabilities.recovery_policy
                         == super::ProviderRecoveryPolicy::CoordinatorReissuesDemand
                     && (self
                         .series
@@ -1927,7 +1901,12 @@ impl Coordinator<'_> {
                     | ProviderDisconnect::SequenceGap { detail, .. } => detail,
                     ProviderDisconnect::End => return,
                 };
-                self.mark_lifecycle_recovering(provider, generation, descriptor.live_model, detail);
+                self.mark_lifecycle_recovering(
+                    provider,
+                    generation,
+                    descriptor.capabilities.live_model,
+                    detail,
+                );
             }
         }
     }
@@ -1939,7 +1918,7 @@ impl Coordinator<'_> {
         descriptor: super::ProviderDescriptor,
     ) {
         self.session_mut(provider).stop_pending = None;
-        let demanded = match descriptor.live_model {
+        let demanded = match descriptor.capabilities.live_model {
             super::LiveModel::TradeBuilt => {
                 self.series
                     .trade_keys()
@@ -1955,17 +1934,19 @@ impl Coordinator<'_> {
             }
         };
         if demanded {
-            match descriptor.live_model {
+            match descriptor.capabilities.live_model {
                 super::LiveModel::TradeBuilt => {
                     self.session_mut(provider).accepted = None;
                     self.session_mut(provider).pending = None;
-                    if descriptor.trade_demand_policy == super::TradeDemandPolicy::Immediate {
+                    if descriptor.capabilities.trade_demand_policy
+                        == super::TradeDemandPolicy::Immediate
+                    {
                         let _ = self.send_rithmic_demand();
                     }
                     self.mark_lifecycle_recovering(
                         provider,
                         generation,
-                        descriptor.live_model,
+                        descriptor.capabilities.live_model,
                         "Trade-built realtime restarted after idle-stop overlap",
                     );
                 }
@@ -1975,7 +1956,7 @@ impl Coordinator<'_> {
                     self.mark_lifecycle_recovering(
                         provider,
                         generation,
-                        descriptor.live_model,
+                        descriptor.capabilities.live_model,
                         "Provider realtime restarted after idle-stop overlap",
                     );
                 }
@@ -2398,7 +2379,8 @@ impl Coordinator<'_> {
     /// implies an unrelated upstream subscription.
     #[cfg(test)]
     pub(super) fn hyperliquid_demand(&self) -> HyperliquidDemand {
-        self.provider_demand("hyperliquid").hyperliquid_wire()
+        self.provider_demand(super::HYPERLIQUID_DESCRIPTOR.id)
+            .hyperliquid_wire()
     }
 
     fn hyperliquid_display_depth_demand(
@@ -2407,7 +2389,7 @@ impl Coordinator<'_> {
     ) -> HyperliquidDisplayDepthDemand {
         let Some(provider_generation) = self
             .engine
-            .provider_status("hyperliquid")
+            .provider_status(super::HYPERLIQUID_DESCRIPTOR.id)
             .and_then(|status| status.generation)
         else {
             return HyperliquidDisplayDepthDemand::default();
@@ -2419,7 +2401,7 @@ impl Coordinator<'_> {
             .filter(|requested| requested.display_depth)
         {
             let Some(book) = self.order_books.get(&(
-                "hyperliquid".to_string(),
+                super::HYPERLIQUID_DESCRIPTOR.id.to_string(),
                 requested.instrument.instrument_id.clone(),
             )) else {
                 continue;
@@ -2449,39 +2431,43 @@ impl Coordinator<'_> {
     /// Hands the worker the rebuilt subscription set. The worker diffs it
     /// against live subscriptions, so presentation changes never reconnect.
     pub(super) fn flush_hyperliquid_demand(&mut self) {
-        if !self.sessions.contains_key("hyperliquid") {
+        if !self.sessions.contains_key(super::HYPERLIQUID_DESCRIPTOR.id) {
             return;
         }
-        if !self.session("hyperliquid").demand_dirty {
+        if !self.session(super::HYPERLIQUID_DESCRIPTOR.id).demand_dirty {
             return;
         }
-        let neutral = self.provider_demand("hyperliquid");
+        let neutral = self.provider_demand(super::HYPERLIQUID_DESCRIPTOR.id);
         let demand = neutral.hyperliquid_wire();
         let display_demand = self.hyperliquid_display_depth_demand(&neutral);
         let empty = demand.candles.is_empty()
             && demand.trades.is_empty()
             && demand.quotes.is_empty()
             && demand.books.is_empty();
-        if empty && !self.session("hyperliquid").engaged {
-            self.session_mut("hyperliquid").demand_dirty = false;
+        if empty && !self.session(super::HYPERLIQUID_DESCRIPTOR.id).engaged {
+            self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id)
+                .demand_dirty = false;
             return;
         }
-        let raw = self
-            .providers
-            .send_control("hyperliquid", super::ProviderControl::Demand(neutral));
+        let raw = self.providers.send_control(
+            super::HYPERLIQUID_DESCRIPTOR.id,
+            super::ProviderControl::Demand(neutral),
+        );
         let display = self.providers.send_hyperliquid_display_depth(
             HyperliquidDisplayDepthControl::Subscribe(display_demand),
         );
         match (raw, display) {
             (Ok(true), Ok(true)) => {
-                self.session_mut("hyperliquid").demand_dirty = false;
-                self.session_mut("hyperliquid").engaged = !empty;
+                self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id)
+                    .demand_dirty = false;
+                self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id).engaged = !empty;
             }
             // A full channel retries at the explicit control deadline; the
             // worker coalesces to the newest set.
             (Ok(false), _) | (_, Ok(false)) => {}
             (Err(_), _) | (_, Err(_)) => {
-                self.session_mut("hyperliquid").demand_dirty = false;
+                self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id)
+                    .demand_dirty = false;
             }
         }
     }
@@ -2523,7 +2509,8 @@ impl Coordinator<'_> {
                 .providers
                 .descriptor(&provider)
                 .is_some_and(|descriptor| {
-                    descriptor.trade_demand_policy == super::TradeDemandPolicy::Immediate
+                    descriptor.capabilities.trade_demand_policy
+                        == super::TradeDemandPolicy::Immediate
                 })
             {
                 let _ = self.send_rithmic_demand();
@@ -2557,21 +2544,25 @@ impl Coordinator<'_> {
     }
     /// Hands the worker a replacement subscription set the control channel refused.
     pub(super) fn flush_rithmic_demand(&mut self) {
-        if !self.sessions.contains_key("rithmic") {
+        if !self.sessions.contains_key(super::RITHMIC_DESCRIPTOR.id) {
             return;
         }
-        let Some(neutral) = self.session_mut("rithmic").pending.take() else {
+        let Some(neutral) = self
+            .session_mut(super::RITHMIC_DESCRIPTOR.id)
+            .pending
+            .take()
+        else {
             return;
         };
-        match self
-            .providers
-            .send_control("rithmic", super::ProviderControl::Demand(neutral.clone()))
-        {
+        match self.providers.send_control(
+            super::RITHMIC_DESCRIPTOR.id,
+            super::ProviderControl::Demand(neutral.clone()),
+        ) {
             Ok(true) => {
-                self.session_mut("rithmic").accepted = Some(neutral);
+                self.session_mut(super::RITHMIC_DESCRIPTOR.id).accepted = Some(neutral);
             }
             Ok(false) | Err(_) => {
-                self.session_mut("rithmic").pending = Some(neutral);
+                self.session_mut(super::RITHMIC_DESCRIPTOR.id).pending = Some(neutral);
             }
         }
     }
@@ -2589,7 +2580,7 @@ impl Coordinator<'_> {
 
     fn mark_provider_alert_demand_changed(&mut self, provider: &str) {
         if let Some(descriptor) = self.providers.descriptor(provider) {
-            match descriptor.alert_demand_update {
+            match descriptor.capabilities.alert_demand_update {
                 super::AlertDemandUpdate::Immediate => {
                     let _ = self.send_rithmic_demand();
                 }
@@ -2609,11 +2600,11 @@ impl Coordinator<'_> {
             .map(|record| record.descriptor)
             .collect::<Vec<_>>();
         for descriptor in descriptors {
-            if descriptor.idle_stop_policy != super::IdleStopPolicy::Coordinator {
+            if descriptor.capabilities.idle_stop_policy != super::IdleStopPolicy::Coordinator {
                 continue;
             }
             let provider = descriptor.id;
-            let demanded = match descriptor.live_model {
+            let demanded = match descriptor.capabilities.live_model {
                 super::LiveModel::TradeBuilt => self
                     .series
                     .trade_keys()
@@ -2624,7 +2615,7 @@ impl Coordinator<'_> {
                     .any(|series| series.provider_id == provider),
             } || self.price_alerts.has_active_provider(provider);
             let session = self.session(provider);
-            let engaged = match descriptor.live_model {
+            let engaged = match descriptor.capabilities.live_model {
                 super::LiveModel::TradeBuilt => session.accepted.is_some(),
                 super::LiveModel::ProviderCandles => session.engaged,
             };
@@ -2646,7 +2637,7 @@ impl Coordinator<'_> {
                 Ok(false) => self.control_retry = true,
                 Err(_) => {
                     let session = self.session_mut(provider);
-                    match descriptor.live_model {
+                    match descriptor.capabilities.live_model {
                         super::LiveModel::TradeBuilt => {
                             session.accepted = None;
                             session.pending = None;
@@ -4240,7 +4231,10 @@ mod tests {
             ProviderInvalidationReason::SchemaMismatch,
             ProviderInvalidationReason::MalformedMessage,
         ] {
-            assert!(!rithmic_auto_recovers(Some(reason)), "{reason:?}");
+            assert!(
+                !super::super::provider_event::rithmic_auto_recovers(Some(reason)),
+                "{reason:?}"
+            );
         }
         for reason in [
             ProviderInvalidationReason::Transport,
@@ -4249,8 +4243,11 @@ mod tests {
             ProviderInvalidationReason::SequenceGap,
             ProviderInvalidationReason::QueueOverflow,
         ] {
-            assert!(rithmic_auto_recovers(Some(reason)), "{reason:?}");
+            assert!(
+                super::super::provider_event::rithmic_auto_recovers(Some(reason)),
+                "{reason:?}"
+            );
         }
-        assert!(rithmic_auto_recovers(None));
+        assert!(super::super::provider_event::rithmic_auto_recovers(None));
     }
 }

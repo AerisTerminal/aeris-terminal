@@ -166,39 +166,6 @@ impl ChartInterval {
             Self::Month1 => ChartAggregation::CalendarMonth,
         }
     }
-
-    /// Rithmic request or deterministic daily-session aggregation required by this interval.
-    #[must_use]
-    pub fn rithmic_aggregation(self) -> Option<RithmicChartAggregation> {
-        match self {
-            Self::Tick100 => Some(RithmicChartAggregation::Trades {
-                trades_per_bar: NonZeroU16::new(100).unwrap_or(NonZeroU16::MIN),
-            }),
-            Self::Second1 => Some(rithmic_time(RithmicTimeUnit::Second, 1)),
-            Self::Second5 => Some(rithmic_time(RithmicTimeUnit::Second, 5)),
-            Self::Second10 => Some(rithmic_time(RithmicTimeUnit::Second, 10)),
-            Self::Second15 => Some(rithmic_time(RithmicTimeUnit::Second, 15)),
-            Self::Second30 => Some(rithmic_time(RithmicTimeUnit::Second, 30)),
-            Self::Minute1 => Some(rithmic_time(RithmicTimeUnit::Minute, 1)),
-            Self::Minute3 => Some(rithmic_time(RithmicTimeUnit::Minute, 3)),
-            Self::Minute5 => Some(rithmic_time(RithmicTimeUnit::Minute, 5)),
-            Self::Minute15 => Some(rithmic_time(RithmicTimeUnit::Minute, 15)),
-            Self::Minute30 => Some(rithmic_time(RithmicTimeUnit::Minute, 30)),
-            Self::Hour1 => Some(rithmic_time(RithmicTimeUnit::Minute, 60)),
-            Self::Hour2 => Some(rithmic_time(RithmicTimeUnit::Minute, 120)),
-            Self::Hour4 => Some(rithmic_time(RithmicTimeUnit::Minute, 240)),
-            Self::Hour8 => Some(rithmic_time(RithmicTimeUnit::Minute, 480)),
-            Self::Hour12 => Some(rithmic_time(RithmicTimeUnit::Minute, 720)),
-            Self::Day1 => Some(rithmic_time(RithmicTimeUnit::Day, 1)),
-            Self::Day3 => Some(rithmic_time(RithmicTimeUnit::Day, 3)),
-            Self::Week1 => Some(RithmicChartAggregation::DailySessions {
-                period: RithmicDailyAggregation::Week,
-            }),
-            Self::Month1 => Some(RithmicChartAggregation::DailySessions {
-                period: RithmicDailyAggregation::Month,
-            }),
-        }
-    }
 }
 
 impl fmt::Display for ChartInterval {
@@ -243,13 +210,6 @@ pub enum RithmicChartAggregation {
 
 fn fixed_seconds(seconds: u32) -> ChartAggregation {
     ChartAggregation::FixedSeconds(NonZeroU32::new(seconds).unwrap_or(NonZeroU32::MIN))
-}
-
-fn rithmic_time(unit: RithmicTimeUnit, period: u16) -> RithmicChartAggregation {
-    RithmicChartAggregation::Time {
-        unit,
-        period: NonZeroU16::new(period).unwrap_or(NonZeroU16::MIN),
-    }
 }
 
 fn split_typeahead_query(query: &str) -> Option<(&str, Option<char>)> {
@@ -307,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn second_intervals_are_fixed_seconds_and_native_rithmic_second_bars() {
+    fn second_intervals_are_fixed_seconds() {
         for (interval, seconds) in [
             (ChartInterval::Second1, 1_u16),
             (ChartInterval::Second5, 5),
@@ -318,13 +278,6 @@ mod tests {
             assert_eq!(
                 interval.aggregation(),
                 ChartAggregation::FixedSeconds(NonZeroU32::from(NonZeroU16::new(seconds).unwrap()))
-            );
-            assert_eq!(
-                interval.rithmic_aggregation(),
-                Some(RithmicChartAggregation::Time {
-                    unit: RithmicTimeUnit::Second,
-                    period: NonZeroU16::new(seconds).unwrap()
-                })
             );
             assert_eq!(interval.label(), format!("{seconds}s"));
         }
@@ -367,35 +320,6 @@ mod tests {
         assert_eq!(
             ChartInterval::Month1.aggregation(),
             ChartAggregation::CalendarMonth
-        );
-    }
-
-    #[test]
-    fn rithmic_capabilities_cover_every_exact_native_interval() {
-        assert_eq!(
-            ChartInterval::Tick100.rithmic_aggregation(),
-            Some(RithmicChartAggregation::Trades {
-                trades_per_bar: NonZeroU16::new(100).unwrap()
-            })
-        );
-        assert_eq!(
-            ChartInterval::Hour12.rithmic_aggregation(),
-            Some(RithmicChartAggregation::Time {
-                unit: RithmicTimeUnit::Minute,
-                period: NonZeroU16::new(720).unwrap()
-            })
-        );
-        assert_eq!(
-            ChartInterval::Week1.rithmic_aggregation(),
-            Some(RithmicChartAggregation::DailySessions {
-                period: RithmicDailyAggregation::Week
-            })
-        );
-        assert_eq!(
-            ChartInterval::Month1.rithmic_aggregation(),
-            Some(RithmicChartAggregation::DailySessions {
-                period: RithmicDailyAggregation::Month
-            })
         );
     }
 }

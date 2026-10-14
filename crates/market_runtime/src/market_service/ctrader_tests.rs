@@ -1083,36 +1083,36 @@ fn ctrader_descriptor_registers_candle_only_broker_capability() {
         .expect("cTrader is a built-in provider");
     assert_eq!(descriptor.id, DESCRIPTOR.id);
     assert_eq!(
-        descriptor.live_model,
+        descriptor.capabilities.live_model,
         super::super::LiveModel::ProviderCandles
     );
     assert_eq!(
-        descriptor.gap_policy,
+        descriptor.capabilities.gap_policy,
         super::super::CandleGapPolicy::SessionGapsAllowed
     );
     assert_eq!(
-        descriptor.history_source,
+        descriptor.capabilities.history.source,
         super::super::HistorySourceKind::ProviderSession
     );
     assert_eq!(
-        descriptor.connection_kind,
+        descriptor.capabilities.connection_kind,
         super::super::ProviderConnectionKind::BrokerCapability
     );
     assert_eq!(
-        descriptor.recovery_policy,
+        descriptor.capabilities.recovery_policy,
         super::super::ProviderRecoveryPolicy::WorkerReconcilesDemand
     );
     assert_eq!(
-        descriptor.idle_stop_policy,
+        descriptor.capabilities.idle_stop_policy,
         super::super::IdleStopPolicy::WorkerManaged
     );
     assert_eq!(
-        descriptor.authorization_revoked_detail,
+        descriptor.capabilities.authorization_revoked_detail,
         "cTrader disconnected"
     );
-    let streams = descriptor.capabilities.streams;
-    assert!(descriptor.capabilities.historical_bars);
-    assert!(descriptor.capabilities.realtime_bars);
+    let streams = descriptor.capabilities.engine.streams;
+    assert!(descriptor.capabilities.engine.historical_bars);
+    assert!(descriptor.capabilities.engine.realtime_bars);
     assert!(streams.contains(MarketStream::Bars));
     assert!(streams.contains(MarketStream::Quotes));
     assert!(streams.contains(MarketStream::Depth));
@@ -1129,7 +1129,12 @@ fn ctrader_descriptor_registers_candle_only_broker_capability() {
         ENTITLEMENT
     );
     for other in BUILT_IN_PROVIDER_DESCRIPTORS {
-        if other.capabilities.streams.contains(MarketStream::Trades) {
+        if other
+            .capabilities
+            .engine
+            .streams
+            .contains(MarketStream::Trades)
+        {
             assert!(
                 other.presentation.trades_available,
                 "{} streams trades and must present them",

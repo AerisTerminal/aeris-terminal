@@ -106,7 +106,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | closed in this commit |
 | MD-06 | High | Duplicate lifecycle state machines per `LiveModel` | M3.1 (candle half), M3.2 (trade half) | closed in this commit |
 | MD-07 | High | The history ledger is spread across eight parallel maps | M2.10 | closed in this commit |
-| MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | open |
+| MD-08 | Medium | Descriptor flags keep growing while the coordinator still hard-codes providers | M3.5, M3.6 | M3.5 capability/presentation split and literal ban closed in this commit; provider-session registry remains M3.6 |
 | MD-09 | Medium | The generic layer depends on provider-specific calendars, and there are three calendars | M2.5 | closed in this commit |
 | MD-10 | Medium | The desktop is not provider-neutral and owns series identity | M3.10 (series identity), M6.7 | open |
 | MD-11 | Medium | The desktop bridge polls every 2 ms and mixes mutex slots with a command channel | M3.8 (trading feed), M3.9, M4.7 (trading part) | open |
@@ -114,7 +114,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-13 | Medium | The coordinator is a god struct with duplicated cleanup | M2.9 (fence/cleanup), M3.3 (study wrappers), M3.8 (order-book demand) | command fences/consumer cleanup and study wrappers closed in this commit; order-book demand M3.8 open |
 | MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | closed in this commit; the bounded Indexed correction overlay still recomputes its retained bars |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
-| MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments and M3.2 trade retention, demand-dirty and provider wording closed in this commit; other items open |
+| MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments, M3.2 trade retention/demand-dirty/provider wording, and M3.5 Rithmic presentation and capability documentation closed; other items open |
 | MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | open |
 | TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | open |
@@ -422,7 +422,10 @@ Status: in progress
   - Coordinator blocks with no work and uses injected monotonic deadlines for watchdog, history retry, session transitions, tape publication and bounded control retries; only dirty series publish. Shutdown sends a bounded wake. Scripted idle/deadline and one-series publication tests, four characterization scenarios, workspace fmt/Clippy/tests and naming gate passed.
   - M2.2 release coordinator baseline (`20abd4cc` plus M2.2 diff, Windows x86_64, 24 logical processors, synthetic 64-series workload): idle active coordinator CPU 82,000/74,200 ns per simulated second, loaded 4,018,600/4,530,100 ns, idle/loaded 63 wakeups/s. M3.4 pre-commit release workload (same host, 64 series, 63 loaded batches; `cargo run -p aeris_market_runtime --release --example coordinator_performance --locked`): idle zero active turns and 0 ns/s, loaded 4,613,700/4,401,500 ns/s, idle 0 wakeups/s, loaded 63 wakeups/s. This is synthetic active single-thread time, not desktop process CPU; idle zero reflects no scheduled turns, and loaded CPU did not consistently improve.
   - Release desktop CPU, same host, fresh isolated validation roots, default live Hyperliquid BTC-USDC 1m, 30 s settle then one 60 s `Get-AerisProcessMetrics -CpuSampleSec 60` sample (% of one core): archived M2.2-era source at exact `20abd4cc`, kit disabled, **13.9%** (PID 35720); M3.4 pre-commit working tree, kit disabled, **12.8%** (PID 33228). Improvement 1.1 percentage points (~7.9% relative); one sample per revision, not a sustained-load guarantee. Each desktop and its host exited gracefully before the next launch; no production data root or stored cTrader connection was used.
-- [ ] M3.5 provider-capabilities - `ProviderCapabilities` and `ProviderPresentation` replace descriptor flags and literals
+- [x] M3.5 provider-capabilities - `ProviderCapabilities` and `ProviderPresentation` replace descriptor flags and literals
+  - Split internal provider registration into behavioral capabilities (engine streams, live model, calendar, history policy, concurrency, reconnect, depth and quote availability) and presentation metadata; corrected Rithmic selection scope and ready label, and moved interval-to-Rithmic replay aggregation to the adapter with exact interval tests.
+  - Generic lifecycle/history/calendar/coordinator/realtime/runtime/publication files reject provider-id literals in production, including after test modules; fixture tests cover each path (quotes and outbox when introduced). Provider-specific invalidation wording moved to provider-event translation. The remaining provider dispatch enums are deliberately M3.6.
+  - Workspace fmt, Clippy `-D warnings`, tests and naming_check passed. Characterization (4), lifecycle (12), aggregation and descriptor matrix suites passed; no Rithmic live session or GUI run (internal-only item; M3.4 GUI validation completed).
 - [ ] M3.6 provider-session-registry - `ProviderSession` trait and `ProviderRegistry`
 - [ ] M3.7 instrument-leases-feed-contract - Trading feed domain contract and MarketEngine instrument leases
 - [ ] M3.8 trading-quote-feed - Market-side trading quote feed driven by instrument demand
@@ -558,6 +561,7 @@ the repo root `AGENTS.md`.
 - `HistoryTracker` owns current/backfill retry, deferral, empty coverage, detached windows and cancellation behind exact provider/demand/sequence tickets; no parallel coordinator history maps (M2.10, this commit).
 - Candle series control and forming state belong to `lifecycle::SeriesLifecycles`; candle handlers and direct clocks in `lifecycle/` are forbidden (M3.1, this commit).
 - Trade-built series share that lifecycle owner; `SeriesLiveMap` cannot return to market-service production source (M3.2, this commit).
+- Generic market-service lifecycle/history/calendar/quote/outbox/coordinator/realtime/runtime/publication source contains no provider-id literals, including after test modules; provider replay aggregation does not live on `ChartInterval` (M3.5, this commit).
 
 ## 6. Progress log
 
@@ -601,6 +605,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M3.2 feat(market): centralize trade series lifecycle - unified candle/trade control and publication, cached candle wire identity, fenced scripted SequenceGap reseed and one-forming continuity; full workspace gate green.
 - 2026-10-14 M3.3 perf(market): share segmented series for study and live publication - replaced full-series study/live/existence copies, unified study dispatch and measured 128-byte tail payload at all three history sizes; full gate green.
 - 2026-10-14 M3.4 perf(market): sleep between dirty market publications and deadlines - removed idle coordinator sweeps, preserved deadline recovery and measured lower isolated one-chart desktop CPU against archived M2.2 source; full gate green.
+- 2026-10-14 M3.5 refactor(market): separate provider capabilities from presentation - removed descriptor behavior flags and generic provider-id literals, corrected Rithmic presentation, relocated replay aggregation to its adapter, and passed the full workspace gate.
 
 ## 7. Known gaps / deferred
 

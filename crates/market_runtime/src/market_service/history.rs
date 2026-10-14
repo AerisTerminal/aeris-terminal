@@ -991,7 +991,7 @@ impl Coordinator<'_> {
             .providers
             .descriptor(&series.provider_id)
             .is_some_and(|descriptor| {
-                descriptor.history_range_policy == super::HistoryRangePolicy::FromTimeOnly
+                descriptor.capabilities.history.range == super::HistoryRangePolicy::FromTimeOnly
             })
         {
             return (range, None);

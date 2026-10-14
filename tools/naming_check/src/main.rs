@@ -119,6 +119,13 @@ fn main() -> ExitCode {
             }
         }
     }
+    match generic_market_provider_violations(&root) {
+        Ok(found) => violations.extend(found),
+        Err(error) => {
+            eprintln!("failed to inspect generic market provider boundary: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     for path in [
         "crates/market_runtime/src/market_service/coordinator.rs",
         "crates/market_runtime/src/market_service/realtime.rs",
@@ -162,6 +169,43 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
+fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let generic_root = root.join("crates/market_runtime/src/market_service");
+    let mut files = [
+        "calendar/mod.rs",
+        "coordinator.rs",
+        "realtime.rs",
+        "runtime.rs",
+        "publication.rs",
+    ]
+    .into_iter()
+    .map(|name| generic_root.join(name))
+    .collect::<Vec<_>>();
+    for folder in ["lifecycle", "history"] {
+        for entry in fs::read_dir(generic_root.join(folder))? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    for name in ["quotes.rs", "outbox.rs"] {
+        let path = generic_root.join(name);
+        if path.exists() {
+            files.push(path);
+        }
+    }
+    let mut violations = Vec::new();
+    for file in files {
+        let relative = relative_to(root, &file);
+        let path = relative.to_string_lossy().replace('\\', "/");
+        if violates_generic_market_provider_boundary(&path, &fs::read_to_string(&file)?) {
+            violations.push(relative);
+        }
+    }
+    Ok(violations)
+}
+
 fn missing_market_characterization_tests(source: &str) -> Vec<&'static str> {
     MARKET_CHARACTERIZATION_TESTS
         .iter()
@@ -189,6 +233,28 @@ fn violates_calendar_boundary(path: &str, source: &str) -> bool {
         return true;
     }
     production.contains("RithmicExchangeCalendar")
+}
+fn violates_generic_market_provider_boundary(path: &str, source: &str) -> bool {
+    let generic = [
+        "/lifecycle/",
+        "/history/",
+        "/calendar/mod.rs",
+        "/quotes.rs",
+        "/outbox.rs",
+        "/coordinator.rs",
+        "/realtime.rs",
+        "/runtime.rs",
+        "/publication.rs",
+    ];
+    if !path.contains("/market_service/") || !generic.iter().any(|suffix| path.contains(suffix)) {
+        return false;
+    }
+    let production = production_source_prefix(source).to_ascii_lowercase();
+    production.split('"').skip(1).step_by(2).any(|literal| {
+        ["rithmic", "hyperliquid", "tastytrade", "ctrader"]
+            .iter()
+            .any(|name| literal.contains(name))
+    })
 }
 
 fn violates_series_lifecycle_boundary(path: &str, source: &str) -> bool {
@@ -574,6 +640,45 @@ mod tests {
             calendar,
             "#[cfg(test)] mod tests { fn fixture() { let _ = \"rithmic\"; } }\nfn source() { let _ = \"CME\"; }"
         ));
+    }
+    #[test]
+    fn generic_market_files_reject_provider_literals_even_after_test_modules() {
+        for path in [
+            "lifecycle/mod.rs",
+            "lifecycle/handlers.rs",
+            "history/mod.rs",
+            "history/tracker.rs",
+            "calendar/mod.rs",
+            "quotes.rs",
+            "outbox.rs",
+            "coordinator.rs",
+            "realtime.rs",
+            "runtime.rs",
+            "publication.rs",
+        ] {
+            let path = format!("crates/market_runtime/src/market_service/{path}");
+            for provider in ["rithmic", "hyperliquid", "tastytrade", "ctrader"] {
+                let fixture = format!(
+                    "#[cfg(test)] mod tests {{ fn fixture() {{ let _ = \"{provider}\"; }} }}\nfn production() {{ let _ = \"{provider}\"; }}"
+                );
+                assert!(
+                    super::violates_generic_market_provider_boundary(&path, &fixture),
+                    "{path}: {provider}"
+                );
+                let wording = format!("fn production() {{ let _ = \"Aeris {provider} worker\"; }}");
+                assert!(
+                    super::violates_generic_market_provider_boundary(&path, &wording),
+                    "{path}: embedded {provider}"
+                );
+            }
+            assert!(
+                !super::violates_generic_market_provider_boundary(
+                    &path,
+                    "#[cfg(test)] mod tests { fn fixture() { let _ = \"rithmic\"; } }\nfn production() { let _ = \"CME\"; }"
+                ),
+                "{path}"
+            );
+        }
     }
 
     #[test]

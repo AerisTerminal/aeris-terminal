@@ -101,35 +101,34 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
     let fourth = ProviderDescriptor {
         id: "fourth-test-provider",
         presentation: &FOURTH_PRESENTATION,
-        account_id: "fourth-test-account",
         capabilities: ProviderCapabilities {
-            historical_bars: true,
-            realtime_bars: false,
-            streams: StreamRequirements::BARS,
+            account_id: "fourth-test-account",
+            engine: EngineProviderCapabilities {
+                historical_bars: true,
+                realtime_bars: false,
+                streams: StreamRequirements::BARS,
+            },
+            calendar: CalendarCapability::InstrumentOrVenue,
+            depth: None,
+            quotes: None,
+            reconnect: reconnect::ReconnectPolicy::hyperliquid(),
+            history: ProviderHistoryCapabilities {
+                source: HistorySourceKind::ProviderSession,
+                range: HistoryRangePolicy::Bounded,
+                supported_period: rithmic_supported_period,
+            },
+            connection_kind: ProviderConnectionKind::Public,
+            recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
+            idle_stop_policy: IdleStopPolicy::WorkerManaged,
+            alert_demand_update: AlertDemandUpdate::WorkerManaged,
+            authorization_revoked_detail: "Fourth provider disconnected",
+            overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+            instrument_missing_detail: "Provider instrument is not installed",
+            ..RITHMIC_DESCRIPTOR.capabilities
         },
-        reconnect_delay: Duration::from_secs(2),
-        gap_policy: CandleGapPolicy::Contiguous,
-        history_source: HistorySourceKind::ProviderSession,
-        connection_kind: ProviderConnectionKind::Public,
-        recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
-        idle_stop_policy: IdleStopPolicy::WorkerManaged,
-        alert_demand_update: AlertDemandUpdate::WorkerManaged,
-        authorization_revoked_detail: "Fourth provider disconnected",
         start: ProviderRuntimeRegistry::start_tastytrade_runtime,
         flush_demand: |_| {},
         prepare_search: None,
-        live_model: LiveModel::TradeBuilt,
-        supported_period: rithmic_supported_period,
-        alert_overrides_instrument: false,
-        overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
-        history_range_policy: HistoryRangePolicy::Bounded,
-        trade_continuity: TradeContinuity::Sequence,
-        candle_requires_connected: false,
-        candle_correction_detail: "Provider candle correction requires covering history",
-        candle_wire_interval: None,
-        candle_demand_policy: CandleDemandPolicy::SessionManaged,
-        trade_demand_policy: TradeDemandPolicy::SessionManaged,
-        instrument_missing_detail: "Provider instrument is not installed",
     };
     let mut engine = configured_engine_from_descriptors(&[
         RITHMIC_DESCRIPTOR,
@@ -150,6 +149,49 @@ fn fourth_descriptor_registers_without_coordinator_changes() {
         engine
             .verify_provider_request(fourth.id, ProviderRequest::RealtimeBars)
             .is_err()
+    );
+}
+
+#[test]
+fn registered_provider_capabilities_match_presentations_and_streams() {
+    let descriptors = BUILT_IN_PROVIDER_DESCRIPTORS;
+    assert_eq!(descriptors.len(), 4);
+    for descriptor in descriptors {
+        let capabilities = descriptor.capabilities;
+        assert_eq!(descriptor.presentation.id, descriptor.id);
+        assert_eq!(
+            descriptor.presentation.depth_available,
+            capabilities.depth.is_some()
+        );
+        assert_eq!(
+            descriptor.presentation.trades_available,
+            capabilities.engine.streams.contains(MarketStream::Trades)
+        );
+        assert_eq!(
+            capabilities.quotes.is_some(),
+            capabilities.engine.streams.contains(MarketStream::Quotes)
+        );
+        assert!(capabilities.concurrency.maximum_sessions > 0);
+        assert_eq!(
+            capabilities.always_open,
+            descriptor.id == HYPERLIQUID_DESCRIPTOR.id
+        );
+    }
+    assert_eq!(
+        RITHMIC_PRESENTATION.selection_entitlement_id,
+        RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID
+    );
+    assert_eq!(RITHMIC_PRESENTATION.ready_label_suffix, "");
+    assert_eq!(
+        ctrader::DESCRIPTOR
+            .capabilities
+            .concurrency
+            .maximum_sessions,
+        2
+    );
+    assert_eq!(
+        tastytrade::DESCRIPTOR.capabilities.calendar,
+        CalendarCapability::ProviderPublished
     );
 }
 

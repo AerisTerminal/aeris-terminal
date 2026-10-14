@@ -23,6 +23,7 @@ use aeris_rithmic_protocol_adapter::{
     RITHMIC_LOGIN_VAULT_KEY, RITHMIC_VAULT_SERVICE, RithmicApplication, RithmicCredentialBytes,
     RithmicHistorySessionTransport, RithmicProviderInstrument, RithmicSession,
     RithmicSessionLimits, collect_rithmic_chart_history, collect_rithmic_trade_history,
+    rithmic_chart_aggregation,
 };
 use zeroize::Zeroize;
 
@@ -404,8 +405,7 @@ fn replay_envelope(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is invalid".to_string())?
         .as_secs();
-    if let Some(RithmicChartAggregation::DailySessions { period }) = interval.rithmic_aggregation()
-    {
+    if let RithmicChartAggregation::DailySessions { period } = rithmic_chart_aggregation(interval) {
         return aggregate_replay_envelope(now_seconds, period, maximum_visible_bars);
     }
     let interval_seconds = match interval.aggregation() {

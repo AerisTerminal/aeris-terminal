@@ -21,6 +21,9 @@ pub(crate) struct ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
+    pub(crate) const fn initial_delay(self) -> Duration {
+        self.initial
+    }
     pub(crate) const fn new(
         initial: Duration,
         multiplier: u32,

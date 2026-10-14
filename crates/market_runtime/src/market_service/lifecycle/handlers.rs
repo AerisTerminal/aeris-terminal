@@ -38,7 +38,7 @@ impl Coordinator<'_> {
                     .providers
                     .descriptor(provider)
                     .is_some_and(|descriptor| {
-                        descriptor.candle_demand_policy
+                        descriptor.capabilities.candle_demand_policy
                             == crate::market_service::CandleDemandPolicy::ReconcileAfterSelection
                     })
                 {

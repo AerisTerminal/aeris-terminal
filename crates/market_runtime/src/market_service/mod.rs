@@ -35,9 +35,10 @@ use aeris_market_data::{
 };
 use aeris_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
-    MarketEngine, MarketEngineConfig, MarketStream, ProviderCapabilities, ProviderConfig,
-    ProviderGeneration, ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation,
-    StreamRequirements, Viewport, WorkspaceId,
+    MarketEngine, MarketEngineConfig, MarketStream,
+    ProviderCapabilities as EngineProviderCapabilities, ProviderConfig, ProviderGeneration,
+    ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation, StreamRequirements,
+    Viewport, WorkspaceId,
 };
 use aeris_provider_history::HistoryRange;
 use aeris_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
@@ -740,26 +741,38 @@ struct LiveHyperliquidHistory(aeris_hyperliquid_market_adapter::HyperliquidHttpC
 #[derive(Clone, Copy)]
 struct ProviderDescriptor {
     id: &'static str,
-    presentation: &'static ProviderPresentationDescriptor,
-    account_id: &'static str,
+    presentation: ProviderPresentation,
     capabilities: ProviderCapabilities,
-    reconnect_delay: Duration,
+    start: ProviderRuntimeStarter,
+    flush_demand: for<'a> fn(&mut Coordinator<'a>),
+    prepare_search: Option<ProviderSearchPreparer>,
+}
+
+/// User-facing metadata; never used to decide market-session behavior.
+type ProviderPresentation = &'static ProviderPresentationDescriptor;
+
+/// Provider-owned market behavior consumed by the generic coordinator.
+#[derive(Clone, Copy)]
+struct ProviderCapabilities {
+    account_id: &'static str,
+    engine: EngineProviderCapabilities,
+    calendar: CalendarCapability,
+    always_open: bool,
+    concurrency: ConcurrencyLimits,
+    depth: Option<DepthCapabilities>,
+    quotes: Option<QuoteCapability>,
+    reconnect: reconnect::ReconnectPolicy,
     gap_policy: CandleGapPolicy,
-    history_source: HistorySourceKind,
+    history: ProviderHistoryCapabilities,
     connection_kind: ProviderConnectionKind,
     recovery_policy: ProviderRecoveryPolicy,
     idle_stop_policy: IdleStopPolicy,
     alert_demand_update: AlertDemandUpdate,
     /// Coordinator-facing detail published when broker authorization is revoked.
     authorization_revoked_detail: &'static str,
-    start: ProviderRuntimeStarter,
-    flush_demand: for<'a> fn(&mut Coordinator<'a>),
-    prepare_search: Option<ProviderSearchPreparer>,
     live_model: LiveModel,
-    supported_period: fn(BarPeriod) -> Result<(), String>,
     alert_overrides_instrument: bool,
     overflow_recovery_detail: &'static str,
-    history_range_policy: HistoryRangePolicy,
     trade_continuity: TradeContinuity,
     candle_requires_connected: bool,
     candle_correction_detail: &'static str,
@@ -767,6 +780,34 @@ struct ProviderDescriptor {
     candle_demand_policy: CandleDemandPolicy,
     trade_demand_policy: TradeDemandPolicy,
     instrument_missing_detail: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CalendarCapability {
+    ProviderPublished,
+    InstrumentOrVenue,
+}
+
+#[derive(Clone, Copy)]
+struct ConcurrencyLimits {
+    maximum_sessions: u8,
+}
+
+#[derive(Clone, Copy)]
+struct DepthCapabilities;
+
+/// Runtime dispatch and supported periods; the adapter's historical dataset
+/// limits remain in `aeris_provider_history::HistoryCapabilities`.
+#[derive(Clone, Copy)]
+struct ProviderHistoryCapabilities {
+    source: HistorySourceKind,
+    range: HistoryRangePolicy,
+    supported_period: fn(BarPeriod) -> Result<(), String>,
+}
+
+#[derive(Clone, Copy)]
+enum QuoteCapability {
+    DedicatedTopOfBook,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -867,9 +908,9 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
     search_hint: "Search Rithmic symbols",
     logo_key: "rithmic",
     catalog_symbol: ProviderCatalogSymbol::ProviderSymbol,
-    selection_entitlement_id: "crypto_public_realtime",
+    selection_entitlement_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
     catalog_refresh_on_startup: false,
-    ready_label_suffix: " spot",
+    ready_label_suffix: "",
     depth_available: true,
     search_categories_available: false,
     market_screen_available: false,
@@ -880,38 +921,49 @@ const RITHMIC_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentatio
 const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "rithmic",
     presentation: &RITHMIC_PRESENTATION,
-    account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
     capabilities: ProviderCapabilities {
-        historical_bars: true,
-        realtime_bars: true,
-        streams: StreamRequirements::BARS
-            .with(MarketStream::Trades)
-            .with(MarketStream::Quotes)
-            .with(MarketStream::Depth),
+        account_id: RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID,
+        engine: EngineProviderCapabilities {
+            historical_bars: true,
+            realtime_bars: true,
+            streams: StreamRequirements::BARS
+                .with(MarketStream::Trades)
+                .with(MarketStream::Quotes)
+                .with(MarketStream::Depth),
+        },
+        calendar: CalendarCapability::InstrumentOrVenue,
+        always_open: false,
+        concurrency: ConcurrencyLimits {
+            maximum_sessions: 1,
+        },
+        depth: Some(DepthCapabilities),
+        quotes: Some(QuoteCapability::DedicatedTopOfBook),
+        reconnect: reconnect::ReconnectPolicy::rithmic_recovery(),
+        gap_policy: CandleGapPolicy::Contiguous,
+        history: ProviderHistoryCapabilities {
+            source: HistorySourceKind::DedicatedWorker("aeris-rithmic-history"),
+            range: HistoryRangePolicy::Bounded,
+            supported_period: rithmic_supported_period,
+        },
+        connection_kind: ProviderConnectionKind::NativeCredentials,
+        recovery_policy: ProviderRecoveryPolicy::CoordinatorReissuesDemand,
+        idle_stop_policy: IdleStopPolicy::Coordinator,
+        alert_demand_update: AlertDemandUpdate::Immediate,
+        authorization_revoked_detail: "Rithmic disconnected",
+        live_model: LiveModel::TradeBuilt,
+        alert_overrides_instrument: false,
+        overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
+        trade_continuity: TradeContinuity::Sequence,
+        candle_requires_connected: false,
+        candle_correction_detail: "Provider candle correction requires covering history",
+        candle_wire_interval: None,
+        candle_demand_policy: CandleDemandPolicy::SessionManaged,
+        trade_demand_policy: TradeDemandPolicy::Immediate,
+        instrument_missing_detail: "Rithmic instrument is not installed",
     },
-    reconnect_delay: Duration::from_secs(1),
-    gap_policy: CandleGapPolicy::Contiguous,
-    history_source: HistorySourceKind::DedicatedWorker("aeris-rithmic-history"),
-    connection_kind: ProviderConnectionKind::NativeCredentials,
-    recovery_policy: ProviderRecoveryPolicy::CoordinatorReissuesDemand,
-    idle_stop_policy: IdleStopPolicy::Coordinator,
-    alert_demand_update: AlertDemandUpdate::Immediate,
-    authorization_revoked_detail: "Rithmic disconnected",
     start: ProviderRuntimeRegistry::start_rithmic_runtime,
     flush_demand: flush_rithmic_provider_demand,
     prepare_search: None,
-    live_model: LiveModel::TradeBuilt,
-    supported_period: rithmic_supported_period,
-    alert_overrides_instrument: false,
-    overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
-    history_range_policy: HistoryRangePolicy::Bounded,
-    trade_continuity: TradeContinuity::Sequence,
-    candle_requires_connected: false,
-    candle_correction_detail: "Provider candle correction requires covering history",
-    candle_wire_interval: None,
-    candle_demand_policy: CandleDemandPolicy::SessionManaged,
-    trade_demand_policy: TradeDemandPolicy::Immediate,
-    instrument_missing_detail: "Rithmic instrument is not installed",
 };
 
 const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresentationDescriptor {
@@ -938,24 +990,37 @@ const HYPERLIQUID_PRESENTATION: ProviderPresentationDescriptor = ProviderPresent
 const HYPERLIQUID_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     id: "hyperliquid",
     presentation: &HYPERLIQUID_PRESENTATION,
+    capabilities: HYPERLIQUID_CAPABILITIES,
+    start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
+    flush_demand: flush_hyperliquid_provider_demand,
+    prepare_search: None,
+};
+
+const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     account_id: HYPERLIQUID_PUBLIC_ACCOUNT_ID,
-    capabilities: RITHMIC_DESCRIPTOR.capabilities,
-    reconnect_delay: Duration::from_millis(500),
+    engine: RITHMIC_DESCRIPTOR.capabilities.engine,
+    calendar: CalendarCapability::InstrumentOrVenue,
+    always_open: true,
+    concurrency: ConcurrencyLimits {
+        maximum_sessions: 1,
+    },
+    depth: Some(DepthCapabilities),
+    quotes: Some(QuoteCapability::DedicatedTopOfBook),
+    reconnect: reconnect::ReconnectPolicy::hyperliquid(),
     gap_policy: CandleGapPolicy::Contiguous,
-    history_source: HistorySourceKind::DedicatedWorker("aeris-hyperliquid-history"),
+    history: ProviderHistoryCapabilities {
+        source: HistorySourceKind::DedicatedWorker("aeris-hyperliquid-history"),
+        range: HistoryRangePolicy::Bounded,
+        supported_period: hyperliquid_supported_period,
+    },
     connection_kind: ProviderConnectionKind::Public,
     recovery_policy: ProviderRecoveryPolicy::WorkerReconcilesDemand,
     idle_stop_policy: IdleStopPolicy::Coordinator,
     alert_demand_update: AlertDemandUpdate::MarkDirty,
     authorization_revoked_detail: "Hyperliquid disconnected",
-    start: ProviderRuntimeRegistry::start_hyperliquid_runtime,
-    flush_demand: flush_hyperliquid_provider_demand,
-    prepare_search: None,
     live_model: LiveModel::ProviderCandles,
-    supported_period: hyperliquid_supported_period,
     alert_overrides_instrument: false,
     overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
-    history_range_policy: HistoryRangePolicy::Bounded,
     trade_continuity: TradeContinuity::Sequence,
     candle_requires_connected: true,
     candle_correction_detail: "Hyperliquid candle replacement requires covering history",
@@ -1611,13 +1676,31 @@ fn configured_engine_from_descriptors(
         maximum_bars: NonZeroUsize::new(MAXIMUM_STORED_BARS).unwrap_or(NonZeroUsize::MIN),
     });
     for descriptor in descriptors {
+        let capabilities = &descriptor.capabilities;
+        if descriptor.presentation.id != descriptor.id
+            || descriptor.presentation.depth_available != capabilities.depth.is_some()
+            || descriptor.presentation.trades_available
+                != capabilities.engine.streams.contains(MarketStream::Trades)
+            || capabilities.concurrency.maximum_sessions == 0
+            || capabilities.always_open
+                && capabilities.calendar == CalendarCapability::ProviderPublished
+            || capabilities.depth.is_some()
+                != capabilities.engine.streams.contains(MarketStream::Depth)
+            || capabilities.quotes.is_some()
+                != capabilities.engine.streams.contains(MarketStream::Quotes)
+        {
+            return Err(format!(
+                "{} has inconsistent market capabilities",
+                descriptor.id
+            ));
+        }
         engine
             .register_provider(
                 descriptor.id.to_string(),
                 ProviderConfig {
-                    account_id: descriptor.account_id.to_string(),
-                    capabilities: descriptor.capabilities,
-                    reconnect_delay: descriptor.reconnect_delay,
+                    account_id: descriptor.capabilities.account_id.to_string(),
+                    capabilities: descriptor.capabilities.engine,
+                    reconnect_delay: descriptor.capabilities.reconnect.initial_delay(),
                 },
             )
             .map_err(|error| error.to_string())?;

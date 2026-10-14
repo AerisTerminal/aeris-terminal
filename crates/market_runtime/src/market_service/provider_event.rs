@@ -9,6 +9,58 @@ use aeris_market_engine::fence::{Epoch, EpochSequence, ProviderTag};
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 use std::collections::BTreeMap;
 
+pub(super) const fn rithmic_invalidation_detail(
+    reason: Option<ProviderInvalidationReason>,
+) -> &'static str {
+    match reason {
+        Some(ProviderInvalidationReason::Transport) => "Rithmic transport connection failed",
+        Some(ProviderInvalidationReason::Authentication) => {
+            "Rithmic rejected the user ID or password for the selected system"
+        }
+        Some(ProviderInvalidationReason::PermissionDenied) => {
+            "Rithmic denied this login for Aeris; the account needs a paid market-data subscription and Aeris enabled by its broker or prop firm"
+        }
+        Some(ProviderInvalidationReason::AgreementRequired) => {
+            "Rithmic account requires an agreement before market data can stream"
+        }
+        Some(ProviderInvalidationReason::UnsupportedSystem) => {
+            "The selected Rithmic system is not offered on this server"
+        }
+        Some(ProviderInvalidationReason::SchemaMismatch) => {
+            "Rithmic protocol schema does not match the installed provider kit"
+        }
+        Some(ProviderInvalidationReason::HeartbeatSilence) => {
+            "Rithmic heartbeat response timed out"
+        }
+        Some(ProviderInvalidationReason::MessageSilence) => {
+            "Rithmic market-data stream stopped producing messages"
+        }
+        Some(ProviderInvalidationReason::SequenceGap) => {
+            "Rithmic market-data sequence continuity was lost"
+        }
+        Some(ProviderInvalidationReason::QueueOverflow) => {
+            "Rithmic callback queue overflowed before market data could be consumed"
+        }
+        Some(ProviderInvalidationReason::MalformedMessage) => {
+            "Rithmic sent market data that failed protocol validation"
+        }
+        None => "Rithmic live session is recovering",
+    }
+}
+
+pub(super) const fn rithmic_auto_recovers(reason: Option<ProviderInvalidationReason>) -> bool {
+    matches!(
+        reason,
+        None | Some(
+            ProviderInvalidationReason::Transport
+                | ProviderInvalidationReason::HeartbeatSilence
+                | ProviderInvalidationReason::MessageSilence
+                | ProviderInvalidationReason::SequenceGap
+                | ProviderInvalidationReason::QueueOverflow
+        )
+    )
+}
+
 pub(super) struct ProviderEvent {
     pub(super) provider: &'static str,
     pub(super) generation: Epoch<ProviderTag>,
@@ -179,14 +231,14 @@ impl ProviderEvent {
                 "Rithmic reconnect could not start; check provider configuration".into(),
             ),
             Wire::Recovering(_, reason) => ProviderEventKind::Recovering {
-                detail: super::realtime::rithmic_invalidation_detail(reason),
+                detail: rithmic_invalidation_detail(reason),
                 provider_detail: None,
                 recovery_reason: (reason == Some(ProviderInvalidationReason::SequenceGap))
                     .then_some(RecoveryReason::SequenceGap),
             },
             Wire::Disconnected(_, reason) => {
-                let detail = super::realtime::rithmic_invalidation_detail(reason);
-                let auto_recover = super::realtime::rithmic_auto_recovers(reason);
+                let detail = rithmic_invalidation_detail(reason);
+                let auto_recover = rithmic_auto_recovers(reason);
                 let disposition = if reason == Some(ProviderInvalidationReason::SequenceGap) {
                     ProviderDisconnect::SequenceGap {
                         detail,

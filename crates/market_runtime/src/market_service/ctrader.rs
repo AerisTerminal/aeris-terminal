@@ -22,7 +22,7 @@ use super::{
 };
 use super::{
     clock::SystemClock,
-    reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
+    reconnect::{Backoff, RetryClass, RetryDecision},
 };
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
@@ -81,37 +81,48 @@ pub(super) const PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
 pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescriptor {
     id: PROVIDER,
     presentation: &PRESENTATION,
-    account_id: ENTITLEMENT,
     capabilities: super::ProviderCapabilities {
-        historical_bars: true,
-        realtime_bars: true,
-        streams: super::StreamRequirements::BARS
-            .with(super::MarketStream::Quotes)
-            .with(super::MarketStream::Depth),
+        account_id: ENTITLEMENT,
+        engine: super::EngineProviderCapabilities {
+            historical_bars: true,
+            realtime_bars: true,
+            streams: super::StreamRequirements::BARS
+                .with(super::MarketStream::Quotes)
+                .with(super::MarketStream::Depth),
+        },
+        calendar: super::CalendarCapability::InstrumentOrVenue,
+        always_open: false,
+        concurrency: super::ConcurrencyLimits {
+            maximum_sessions: 2,
+        },
+        depth: Some(super::DepthCapabilities),
+        quotes: Some(super::QuoteCapability::DedicatedTopOfBook),
+        reconnect: super::reconnect::ReconnectPolicy::ctrader(),
+        gap_policy: super::CandleGapPolicy::SessionGapsAllowed,
+        history: super::ProviderHistoryCapabilities {
+            source: super::HistorySourceKind::ProviderSession,
+            range: super::HistoryRangePolicy::Bounded,
+            supported_period,
+        },
+        connection_kind: super::ProviderConnectionKind::BrokerCapability,
+        recovery_policy: super::ProviderRecoveryPolicy::WorkerReconcilesDemand,
+        idle_stop_policy: super::IdleStopPolicy::WorkerManaged,
+        alert_demand_update: super::AlertDemandUpdate::WorkerManaged,
+        live_model: super::LiveModel::ProviderCandles,
+        alert_overrides_instrument: false,
+        overflow_recovery_detail: "cTrader queue overflow requires recovery",
+        trade_continuity: super::TradeContinuity::Sequence,
+        candle_requires_connected: true,
+        candle_correction_detail: "cTrader candle replacement requires covering history",
+        candle_wire_interval: Some(candle_interval),
+        candle_demand_policy: super::CandleDemandPolicy::SessionManaged,
+        trade_demand_policy: super::TradeDemandPolicy::SessionManaged,
+        instrument_missing_detail: "cTrader instrument is not installed",
+        authorization_revoked_detail: "cTrader disconnected",
     },
-    reconnect_delay: Duration::from_secs(3),
-    gap_policy: super::CandleGapPolicy::SessionGapsAllowed,
-    history_source: super::HistorySourceKind::ProviderSession,
-    connection_kind: super::ProviderConnectionKind::BrokerCapability,
-    recovery_policy: super::ProviderRecoveryPolicy::WorkerReconcilesDemand,
-    idle_stop_policy: super::IdleStopPolicy::WorkerManaged,
-    alert_demand_update: super::AlertDemandUpdate::WorkerManaged,
     start: super::ProviderRuntimeRegistry::start_ctrader_runtime,
     flush_demand,
     prepare_search: None,
-    live_model: super::LiveModel::ProviderCandles,
-    supported_period,
-    alert_overrides_instrument: false,
-    overflow_recovery_detail: "cTrader queue overflow requires recovery",
-    history_range_policy: super::HistoryRangePolicy::Bounded,
-    trade_continuity: super::TradeContinuity::Sequence,
-    candle_requires_connected: true,
-    candle_correction_detail: "cTrader candle replacement requires covering history",
-    candle_wire_interval: Some(candle_interval),
-    candle_demand_policy: super::CandleDemandPolicy::SessionManaged,
-    trade_demand_policy: super::TradeDemandPolicy::SessionManaged,
-    instrument_missing_detail: "cTrader instrument is not installed",
-    authorization_revoked_detail: "cTrader disconnected",
 };
 
 fn flush_demand(coordinator: &mut Coordinator<'_>) {
@@ -835,10 +846,12 @@ impl HistoryTask {
         }
     }
     fn plan(request: &HistoryRequest) -> Result<HistoryPlan, String> {
-        let instrument = request
-            .instrument
-            .as_ref()
-            .ok_or_else(|| DESCRIPTOR.instrument_missing_detail.to_string())?;
+        let instrument = request.instrument.as_ref().ok_or_else(|| {
+            DESCRIPTOR
+                .capabilities
+                .instrument_missing_detail
+                .to_string()
+        })?;
         let route = parse_instrument_id(&instrument.instrument_id)?;
         let period = trendbar_period(request.series.period)?;
         let scale = i32::try_from(instrument.price_scale)
@@ -1193,7 +1206,7 @@ impl Worker {
             demand_dirty: false,
             candle_symbols: BTreeMap::new(),
             epoch_state: EpochState::default(),
-            backoff: Backoff::new(ReconnectPolicy::ctrader(), &SystemClock, 0x4354_5241),
+            backoff: Backoff::new(DESCRIPTOR.capabilities.reconnect, &SystemClock, 0x4354_5241),
             healthy_since: None,
             retry_at: Instant::now(),
             reconcile_at: Instant::now(),

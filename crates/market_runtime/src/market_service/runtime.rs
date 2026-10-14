@@ -35,7 +35,7 @@ fn fetch_rithmic_history(request: &HistoryRequest) -> Result<HistorySnapshot, St
     let installed = request
         .instrument
         .as_ref()
-        .ok_or_else(|| "Rithmic instrument is not installed".to_string())?;
+        .ok_or_else(|| "Provider instrument is not installed".to_string())?;
     let snapshot = crate::rithmic_history::fetch(
         &request.series,
         request.provider_generation.0.get(),
@@ -58,7 +58,7 @@ impl HistorySource for LiveHyperliquidHistory {
         let installed = request
             .instrument
             .as_ref()
-            .ok_or_else(|| "Hyperliquid instrument is not installed".to_string())?;
+            .ok_or_else(|| "Provider instrument is not installed".to_string())?;
         let snapshot = crate::hyperliquid_history::fetch(
             &mut self.0,
             &request.series,
@@ -143,7 +143,8 @@ impl ProviderRuntimeRegistry {
         let cancellation = Arc::new(AtomicBool::new(false));
         let lifecycle = Arc::new(ProviderRuntimeLifecycle::default());
         let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
-        let super::HistorySourceKind::DedicatedWorker(worker_name) = spec.descriptor.history_source
+        let super::HistorySourceKind::DedicatedWorker(worker_name) =
+            spec.descriptor.capabilities.history.source
         else {
             return Err("Provider history source is not a dedicated worker".to_string());
         };
@@ -213,10 +214,10 @@ impl ProviderRuntimeRegistry {
             history,
             ..
         } = spec;
-        if descriptor.history_source != super::HistorySourceKind::ProviderSession
+        if descriptor.capabilities.history.source != super::HistorySourceKind::ProviderSession
             || history.is_some()
         {
-            return Err("Tastytrade history source must be runtime-owned".to_string());
+            return Err("Provider history source must be runtime-owned".to_string());
         }
         super::tastytrade::start_record(
             descriptor,
@@ -240,10 +241,10 @@ impl ProviderRuntimeRegistry {
             history,
             ..
         } = spec;
-        if descriptor.history_source != super::HistorySourceKind::ProviderSession
+        if descriptor.capabilities.history.source != super::HistorySourceKind::ProviderSession
             || history.is_some()
         {
-            return Err("cTrader history source must be runtime-owned".to_string());
+            return Err("Provider history source must be runtime-owned".to_string());
         }
         super::ctrader::start_record(
             descriptor,
@@ -286,14 +287,16 @@ impl ProviderRuntimeRegistry {
             let worker_lifecycle = Arc::clone(&started.lifecycle);
             let Some(reconnect_delay) = reconnect_delay else {
                 started.cancel_and_join();
-                return Err("Rithmic reconnect policy is unavailable".to_string());
+                return Err("Provider reconnect policy is unavailable".to_string());
             };
             let worker_activity = Arc::clone(active_workers);
             let provider = thread::Builder::new()
-                .name("aeris-rithmic-provider".to_string())
+                .name(crate::rithmic_realtime::WORKER_NAME.to_string())
                 .spawn(move || {
-                    let _activity =
-                        ActiveWorkerGuard::register("aeris-rithmic-provider", worker_activity);
+                    let _activity = ActiveWorkerGuard::register(
+                        crate::rithmic_realtime::WORKER_NAME,
+                        worker_activity,
+                    );
                     crate::rithmic_realtime::run(
                         &catalog_controls_rx,
                         &catalog_events_tx,
@@ -305,7 +308,7 @@ impl ProviderRuntimeRegistry {
                     );
                     if !worker_cancellation.load(Ordering::Acquire) {
                         worker_lifecycle
-                            .mark_terminal_failure("Rithmic provider runtime stopped unexpectedly");
+                            .mark_terminal_failure("Provider runtime stopped unexpectedly");
                     }
                 })
                 .map_err(|error| error.to_string());
@@ -376,7 +379,7 @@ impl ProviderRuntimeRegistry {
         if enabled {
             let Some(reconnect_delay) = reconnect_delay else {
                 started.cancel_and_join();
-                return Err("Hyperliquid reconnect policy is unavailable".to_string());
+                return Err("Provider reconnect policy is unavailable".to_string());
             };
             if let Err(error) = Self::spawn_hyperliquid_catalog(
                 &mut started,
@@ -448,9 +451,12 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::clone(&started.lifecycle);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("aeris-hyperliquid-catalog".to_string())
+            .name(crate::hyperliquid_realtime::CATALOG_WORKER_NAME.to_string())
             .spawn(move || {
-                let _activity = ActiveWorkerGuard::register("aeris-hyperliquid-catalog", activity);
+                let _activity = ActiveWorkerGuard::register(
+                    crate::hyperliquid_realtime::CATALOG_WORKER_NAME,
+                    activity,
+                );
                 crate::hyperliquid_realtime::run_catalog(
                     &controls,
                     &events,
@@ -460,7 +466,7 @@ impl ProviderRuntimeRegistry {
                 );
                 if !cancellation.load(Ordering::Acquire) {
                     lifecycle
-                        .mark_terminal_failure("Hyperliquid catalog runtime stopped unexpectedly");
+                        .mark_terminal_failure("Provider catalog runtime stopped unexpectedly");
                 }
             })
             .map_err(|error| error.to_string())?;
@@ -481,9 +487,12 @@ impl ProviderRuntimeRegistry {
         let lifecycle = Arc::clone(&started.lifecycle);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("aeris-hyperliquid-provider".to_string())
+            .name(crate::hyperliquid_realtime::PROVIDER_WORKER_NAME.to_string())
             .spawn(move || {
-                let _activity = ActiveWorkerGuard::register("aeris-hyperliquid-provider", activity);
+                let _activity = ActiveWorkerGuard::register(
+                    crate::hyperliquid_realtime::PROVIDER_WORKER_NAME,
+                    activity,
+                );
                 crate::hyperliquid_realtime::run(
                     &controls,
                     &events,
@@ -493,8 +502,7 @@ impl ProviderRuntimeRegistry {
                     reconnect_delay,
                 );
                 if !cancellation.load(Ordering::Acquire) {
-                    lifecycle
-                        .mark_terminal_failure("Hyperliquid provider runtime stopped unexpectedly");
+                    lifecycle.mark_terminal_failure("Provider runtime stopped unexpectedly");
                 }
             })
             .map_err(|error| error.to_string())?;
@@ -513,10 +521,12 @@ impl ProviderRuntimeRegistry {
         let cancellation = Arc::clone(&started.cancellation);
         let activity = Arc::clone(active_workers);
         let worker = thread::Builder::new()
-            .name("aeris-hyperliquid-display-depth".to_string())
+            .name(crate::hyperliquid_display_depth::WORKER_NAME.to_string())
             .spawn(move || {
-                let _activity =
-                    ActiveWorkerGuard::register("aeris-hyperliquid-display-depth", activity);
+                let _activity = ActiveWorkerGuard::register(
+                    crate::hyperliquid_display_depth::WORKER_NAME,
+                    activity,
+                );
                 crate::hyperliquid_display_depth::run(
                     &controls,
                     &events,
@@ -687,7 +697,7 @@ impl ProviderDispatch<'_> {
 
     pub(super) fn live_model(&self, provider_id: &str) -> Option<super::LiveModel> {
         self.descriptor(provider_id)
-            .map(|descriptor| descriptor.live_model)
+            .map(|descriptor| descriptor.capabilities.live_model)
     }
 
     pub(super) fn validate_period(
@@ -698,7 +708,7 @@ impl ProviderDispatch<'_> {
         let descriptor = self
             .descriptor(provider_id)
             .ok_or_else(|| "market provider is unsupported".to_string())?;
-        (descriptor.supported_period)(period)
+        (descriptor.capabilities.history.supported_period)(period)
     }
 
     pub(super) fn history(
@@ -720,7 +730,7 @@ impl ProviderDispatch<'_> {
 
     pub(super) fn rithmic_realtime_enabled(&self) -> bool {
         self.records
-            .get("rithmic")
+            .get(super::RITHMIC_DESCRIPTOR.id)
             .is_some_and(|record| record.realtime.rithmic_controls().is_some())
     }
 
@@ -853,12 +863,12 @@ impl ProviderDispatch<'_> {
                 ProviderCatalogDispatch::Tastytrade { controls, .. } => controls
                     .try_send(super::tastytrade::CatalogControl::Search(search))
                     .map_err(|_| {
-                        "Tastytrade catalog capacity is exhausted or unavailable".to_string()
+                        "Provider catalog capacity is exhausted or unavailable".to_string()
                     }),
                 ProviderCatalogDispatch::Ctrader { controls, .. } => controls
                     .try_send(super::ctrader::CatalogControl::Search(search))
                     .map_err(|_| {
-                        "cTrader catalog capacity is exhausted or unavailable".to_string()
+                        "Provider catalog capacity is exhausted or unavailable".to_string()
                     }),
                 ProviderCatalogDispatch::Rithmic { controls, .. } => try_send_rithmic_catalog(
                     controls,
@@ -880,12 +890,12 @@ impl ProviderDispatch<'_> {
                 ProviderCatalogDispatch::Tastytrade { controls, .. } => controls
                     .try_send(super::tastytrade::CatalogControl::Select(selection))
                     .map_err(|_| {
-                        "Tastytrade catalog capacity is exhausted or unavailable".to_string()
+                        "Provider catalog capacity is exhausted or unavailable".to_string()
                     }),
                 ProviderCatalogDispatch::Ctrader { controls, .. } => controls
                     .try_send(super::ctrader::CatalogControl::Select(selection))
                     .map_err(|_| {
-                        "cTrader catalog capacity is exhausted or unavailable".to_string()
+                        "Provider catalog capacity is exhausted or unavailable".to_string()
                     }),
                 ProviderCatalogDispatch::Rithmic { controls, .. } => try_send_rithmic_catalog(
                     controls,
@@ -948,7 +958,7 @@ impl ProviderDispatch<'_> {
                             Ok(()) => Ok(true),
                             Err(TrySendError::Full(_)) => Ok(false),
                             Err(TrySendError::Disconnected(_)) => {
-                                Err("Tastytrade live worker is unavailable".to_string())
+                                Err("Provider live worker is unavailable".to_string())
                             }
                         }
                     }
@@ -959,7 +969,7 @@ impl ProviderDispatch<'_> {
                             Ok(()) => Ok(true),
                             Err(TrySendError::Full(_)) => Ok(false),
                             Err(TrySendError::Disconnected(_)) => {
-                                Err("cTrader live worker is unavailable".to_string())
+                                Err("Provider live worker is unavailable".to_string())
                             }
                         }
                     }
@@ -970,7 +980,7 @@ impl ProviderDispatch<'_> {
                 let Some(record) = self.records.get(provider_id) else {
                     return Err(format!("{provider_id} live worker is unavailable"));
                 };
-                if record.descriptor.connection_kind
+                if record.descriptor.capabilities.connection_kind
                     != super::ProviderConnectionKind::BrokerCapability
                 {
                     return Err(format!(
@@ -985,7 +995,7 @@ impl ProviderDispatch<'_> {
                             Ok(()) => Ok(true),
                             Err(TrySendError::Full(_)) => Ok(false),
                             Err(TrySendError::Disconnected(_)) => {
-                                Err("Tastytrade live worker is unavailable".to_string())
+                                Err("Provider live worker is unavailable".to_string())
                             }
                         }
                     }
@@ -996,7 +1006,7 @@ impl ProviderDispatch<'_> {
                             Ok(()) => Ok(true),
                             Err(TrySendError::Full(_)) => Ok(false),
                             Err(TrySendError::Disconnected(_)) => {
-                                Err("cTrader live worker is unavailable".to_string())
+                                Err("Provider live worker is unavailable".to_string())
                             }
                         }
                     }
@@ -1014,8 +1024,8 @@ impl ProviderDispatch<'_> {
     ) -> Result<bool, String> {
         let Some(controls) = self
             .records
-            .get("rithmic")
-            .ok_or_else(|| "Rithmic live worker is unavailable".to_string())?
+            .get(super::RITHMIC_DESCRIPTOR.id)
+            .ok_or_else(|| "Provider live worker is unavailable".to_string())?
             .realtime
             .rithmic_controls()
         else {
@@ -1025,7 +1035,7 @@ impl ProviderDispatch<'_> {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => {
-                Err("Rithmic live worker is unavailable".to_string())
+                Err("Provider live worker is unavailable".to_string())
             }
         }
     }
@@ -1036,8 +1046,8 @@ impl ProviderDispatch<'_> {
     ) -> Result<bool, String> {
         let Some(controls) = self
             .records
-            .get("hyperliquid")
-            .ok_or_else(|| "Hyperliquid live worker is unavailable".to_string())?
+            .get(super::HYPERLIQUID_DESCRIPTOR.id)
+            .ok_or_else(|| "Provider live worker is unavailable".to_string())?
             .realtime
             .hyperliquid_controls()
         else {
@@ -1047,7 +1057,7 @@ impl ProviderDispatch<'_> {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => {
-                Err("Hyperliquid live worker is unavailable".to_string())
+                Err("Provider live worker is unavailable".to_string())
             }
         }
     }
@@ -1058,8 +1068,8 @@ impl ProviderDispatch<'_> {
     ) -> Result<bool, String> {
         let Some(controls) = self
             .records
-            .get("hyperliquid")
-            .ok_or_else(|| "Hyperliquid display-depth worker is unavailable".to_string())?
+            .get(super::HYPERLIQUID_DESCRIPTOR.id)
+            .ok_or_else(|| "Provider display-depth worker is unavailable".to_string())?
             .realtime
             .hyperliquid_display_controls()
         else {
@@ -1069,7 +1079,7 @@ impl ProviderDispatch<'_> {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => {
-                Err("Hyperliquid display-depth worker is unavailable".to_string())
+                Err("Provider display-depth worker is unavailable".to_string())
             }
         }
     }
@@ -1096,7 +1106,7 @@ impl ProviderDispatch<'_> {
                     Ok(()) => Ok(true),
                     Err(TrySendError::Full(_)) => Ok(false),
                     Err(TrySendError::Disconnected(_)) => {
-                        Err("Rithmic live worker is unavailable".to_string())
+                        Err("Provider live worker is unavailable".to_string())
                     }
                 }
             }
@@ -1159,8 +1169,14 @@ impl MarketService {
         instrument: &aeris_contracts::InstallProviderInstrument,
         now_unix_nanos: i64,
     ) -> super::calendar::MarketCalendarService {
-        use super::calendar::MarketCalendarService;
-        let provider_calendar = if instrument.provider == "tastytrade" {
+        use super::calendar::{CalendarSource, MarketCalendarService};
+        let capabilities = super::BUILT_IN_PROVIDER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.id == instrument.provider)
+            .map(|descriptor| descriptor.capabilities);
+        let provider_calendar = if capabilities.is_some_and(|capabilities| {
+            capabilities.calendar == super::CalendarCapability::ProviderPublished
+        }) {
             let status = self.runtime.broker_api.market_session_status(
                 &instrument.instrument_id,
                 &instrument.provider_symbol,
@@ -1173,6 +1189,9 @@ impl MarketService {
         };
         let mut calendar = MarketCalendarService::default();
         calendar.resolve(instrument, None);
+        if capabilities.is_some_and(|capabilities| capabilities.always_open) {
+            calendar.insert(instrument.instrument_id.clone(), CalendarSource::AlwaysOpen);
+        }
         if let Some(status) = provider_calendar {
             let valid_from = if status.phase == aeris_contracts::MarketSessionPhase::Closed {
                 now_unix_nanos
@@ -2042,10 +2061,16 @@ mod tests {
 
     #[test]
     fn fourth_descriptor_starts_without_coordinator_registration_edits() {
+        const FOURTH_PRESENTATION: aeris_contracts::ProviderPresentationDescriptor =
+            aeris_contracts::ProviderPresentationDescriptor {
+                id: "fourth-test-provider",
+                ..super::super::RITHMIC_PRESENTATION
+            };
         let mut spec = ProviderRuntimeSpec::rithmic(Box::new(LiveRithmicHistory), false);
         spec.descriptor.id = "fourth-test-provider";
-        spec.descriptor.account_id = "fourth-test-account";
-        spec.descriptor.history_source =
+        spec.descriptor.presentation = &FOURTH_PRESENTATION;
+        spec.descriptor.capabilities.account_id = "fourth-test-account";
+        spec.descriptor.capabilities.history.source =
             super::super::HistorySourceKind::DedicatedWorker("aeris-fourth-history");
         spec.descriptor.flush_demand = |_| {};
         let service = MarketService::start_composed(vec![spec]).expect("fourth runtime starts");

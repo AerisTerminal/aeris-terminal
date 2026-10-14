@@ -42,6 +42,9 @@ use crate::market_service::{
     reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
 };
 
+pub(crate) const CATALOG_WORKER_NAME: &str = "aeris-hyperliquid-catalog";
+pub(crate) const PROVIDER_WORKER_NAME: &str = "aeris-hyperliquid-provider";
+
 /// Public account and entitlement identity for credential-free market data.
 pub(crate) const HYPERLIQUID_PUBLIC_ACCOUNT_ID: &str = "hyperliquid-public";
 /// Entitlement revision pinned to the unauthenticated public feed.
