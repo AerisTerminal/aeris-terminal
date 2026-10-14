@@ -176,6 +176,7 @@ fn order_book_slot_keeps_only_the_latest_complete_publication() {
             series: None,
             state: SeriesLoadState::Resolving,
             detail: None,
+            presentation: None,
         })
     };
     events.order_book = Some(state(1));

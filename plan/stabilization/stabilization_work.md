@@ -404,9 +404,12 @@ Status: in progress
 
 ### M3 market lifecycle
 
-Status: pending
+Status: in progress
 
-- [ ] M3.1 series-lifecycle-candle-path - One per-series state machine, ported for candle providers
+- [x] M3.1 series-lifecycle-candle-path - One per-series state machine, ported for candle providers
+  - Moved cTrader and Hyperliquid candle state, the single forming bar, seed/recovery transitions, bounded publications and presentation status into `lifecycle::SeriesLifecycle`; removed the old candle handlers and publisher. History uses its exact tracker ticket and the engine remains the canonical completed-bar owner.
+  - Scripted lifecycle transitions, published status order, four coordinator characterization scenarios, crate-scoped tests and the full fmt/workspace Clippy/workspace test/naming gate passed. Isolated Hyperliquid 1m had 1,599 bars, zero gaps and forming updates; EURUSD demo had 1,600 bars and live updates.
+  - EURUSD's 10 interior gaps are provider omissions, not Aeris-created: an opt-in diagnostic of the **raw decoded cTrader trendbar page** showed exactly 10 gaps (44 missing minutes; starts in UTC seconds: 1791923340, 1791925200, 1791925320, 1791925500, 1791927060, 1791927180, 1791927480, 1791927660, 1791933900, 1791934320). The pre-M3 M2 binary on a separate isolated root showed the same 10 gaps over the overlapping interval; no history-page seam falls in these 10 gaps. The temporary raw-page logger was removed after capture. No credentials or account identifiers were recorded.
 - [ ] M3.2 series-lifecycle-trade-path - Port trade-built providers and delete the duplicated lifecycle
 - [ ] M3.3 engine-series-tail - Series-tail accessor; remove full-series copies from hot and existence paths
 - [ ] M3.4 coordinator-dirty-publication - Dirty-set publication and deadline timers in the coordinator loop
@@ -544,6 +547,7 @@ the repo root `AGENTS.md`.
 - Typed provider events and history completions use registry-minted epochs and an equality fence; naming_check rejects a raw `ProviderEvent.generation` (M2.8, this commit).
 - Catalog callbacks use coordinator-owned command fences by consumer/provider/kind; startup resolution has an explicit lane and consumer retirement uses one registry cleanup path (M2.9, this commit).
 - `HistoryTracker` owns current/backfill retry, deferral, empty coverage, detached windows and cancellation behind exact provider/demand/sequence tickets; no parallel coordinator history maps (M2.10, this commit).
+- Candle series control and forming state belong to `lifecycle::SeriesLifecycles`; candle handlers and direct clocks in `lifecycle/` are forbidden (M3.1, this commit).
 
 ## 6. Progress log
 
@@ -583,6 +587,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-14 M2.10 fix(market): drain deferred backfill after empty current history - closed the M2 scrutiny blocker with ticket-fenced dispatch and scripted completion-path regressions.
 - 2026-10-14 M2.1/M2.5/M2.6 test(market): close user-testing boundary and calendar coverage gaps - moved characterization observations to the command/event boundary; completed the calendar/status matrix and five scripted recovery request checks; full gate green.
 - 2026-10-14 M2.1 test(market): drive characterization through coordinator channels - removed direct clock assignment and benchmark turn calls; verified four boundary scenarios and the full gate.
+- 2026-10-14 M3.1 feat(market): centralize candle series lifecycle - migrated both candle providers to the lifecycle owner, retained four coordinator scenarios, and verified live Hyperliquid and raw cTrader provider omissions against the pre-M3 binary.
 
 ## 7. Known gaps / deferred
 

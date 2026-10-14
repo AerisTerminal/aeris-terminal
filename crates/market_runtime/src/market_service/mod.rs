@@ -608,17 +608,8 @@ struct ProviderSessionSlot {
     catalog_degraded: Option<ProviderGeneration>,
 }
 
-/// Everything one Hyperliquid series needs to close its history/live seam.
-struct CandleHandoffSeed<'a> {
-    price_scale: u8,
-    quantity_scale: u8,
-    /// Periods the provider closed, already installed as canonical history.
-    bars: &'a [MarketBar],
-    /// The period the provider caught open, held live rather than in history.
-    forming: Option<FormingBar>,
-}
-
 /// Everything one trade-built series needs to close its history/live seam.
+#[derive(Clone, Copy)]
 struct TradeHandoffSeed<'a> {
     price_scale: u8,
     quantity_scale: u8,
@@ -631,15 +622,7 @@ struct TradeHandoffSeed<'a> {
     handoff_boundary_unix_nanos: Option<i64>,
 }
 
-/// The period a provider page caught mid-flight, and how far into it the market
-/// already is.
-pub(crate) struct FormingBar {
-    pub(crate) bar: MarketBar,
-    /// Provider-observed trades already inside the open candle, when known.
-    /// Tick cadence requires this to resume a partial bundle; clock-driven
-    /// cadence uses it to reconcile an independent provider candle stream.
-    pub(crate) trades: Option<u32>,
-}
+pub(crate) use lifecycle::FormingBar;
 
 struct DemandWaiter {
     consumer_id: ConsumerId,
@@ -728,6 +711,7 @@ enum TradeLiveUpdate {
     Indexed(IndexedTradeMutation),
 }
 
+mod lifecycle;
 mod provider_event;
 mod realtime;
 mod watchdog;
@@ -741,32 +725,6 @@ enum LiveHistoryState {
     AwaitingHistory,
     Ready,
     Reseeding,
-}
-
-/// Shared canonical handoff for a series delivered as whole provider candles.
-///
-/// Unlike the trade-built Rithmic handoff, provider candles arrive whole:
-/// history seeds closed bars plus the open period, and live replacements
-/// merge by candle-open timestamp with exactly one forming candle. Sequence
-/// ingestion sequence numbers stay runtime-owned so a redelivered update can never look new.
-struct CandleLiveHandoff {
-    clock: Arc<dyn clock::Clock>,
-    last_progress_at: Instant,
-    series: BarSeriesKey,
-    generation: ProviderGeneration,
-    gap_policy: CandleGapPolicy,
-    wire_coin: String,
-    interval: String,
-    price_scale: u8,
-    quantity_scale: u8,
-    bars: Vec<MarketBar>,
-    forming: Option<MarketBar>,
-    /// Live updates that arrived before history seeded the seam, bounded.
-    buffered: VecDeque<MarketBar>,
-    pending_publications: VecDeque<MarketBar>,
-    connected: bool,
-    history_state: LiveHistoryState,
-    dirty: bool,
 }
 
 struct TradeLiveHandoff {
@@ -859,137 +817,6 @@ struct ProviderDescriptor {
     candle_demand_policy: CandleDemandPolicy,
     trade_demand_policy: TradeDemandPolicy,
     instrument_missing_detail: &'static str,
-}
-
-enum SeriesLive {
-    TradeBuilt(TradeLiveHandoff),
-    ProviderCandles(CandleLiveHandoff),
-}
-
-#[derive(Default)]
-struct SeriesLiveMap(BTreeMap<BarSeriesKey, SeriesLive>);
-
-impl SeriesLiveMap {
-    fn trade_contains_key(&self, series: &BarSeriesKey) -> bool {
-        self.trade(series).is_some()
-    }
-
-    fn candle_contains_key(&self, series: &BarSeriesKey) -> bool {
-        self.candle(series).is_some()
-    }
-
-    #[cfg(test)]
-    fn trades_are_empty(&self) -> bool {
-        self.trade_keys().next().is_none()
-    }
-
-    #[cfg(test)]
-    fn candles_are_empty(&self) -> bool {
-        self.candle_keys().next().is_none()
-    }
-
-    fn trade(&self, series: &BarSeriesKey) -> Option<&TradeLiveHandoff> {
-        match self.0.get(series)? {
-            SeriesLive::TradeBuilt(live) => Some(live),
-            SeriesLive::ProviderCandles(_) => None,
-        }
-    }
-
-    fn trade_mut(&mut self, series: &BarSeriesKey) -> Option<&mut TradeLiveHandoff> {
-        match self.0.get_mut(series)? {
-            SeriesLive::TradeBuilt(live) => Some(live),
-            SeriesLive::ProviderCandles(_) => None,
-        }
-    }
-
-    fn candle(&self, series: &BarSeriesKey) -> Option<&CandleLiveHandoff> {
-        match self.0.get(series)? {
-            SeriesLive::ProviderCandles(live) => Some(live),
-            SeriesLive::TradeBuilt(_) => None,
-        }
-    }
-
-    fn candle_mut(&mut self, series: &BarSeriesKey) -> Option<&mut CandleLiveHandoff> {
-        match self.0.get_mut(series)? {
-            SeriesLive::ProviderCandles(live) => Some(live),
-            SeriesLive::TradeBuilt(_) => None,
-        }
-    }
-
-    fn insert_trade(&mut self, series: BarSeriesKey, live: TradeLiveHandoff) {
-        self.0.insert(series, SeriesLive::TradeBuilt(live));
-    }
-
-    fn insert_candle(&mut self, series: BarSeriesKey, live: CandleLiveHandoff) {
-        self.0.insert(series, SeriesLive::ProviderCandles(live));
-    }
-
-    fn trade_keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
-        self.0.iter().filter_map(|(series, live)| {
-            matches!(live, SeriesLive::TradeBuilt(_)).then_some(series)
-        })
-    }
-
-    fn candle_keys(&self) -> impl Iterator<Item = &BarSeriesKey> {
-        self.0.iter().filter_map(|(series, live)| {
-            matches!(live, SeriesLive::ProviderCandles(_)).then_some(series)
-        })
-    }
-
-    fn candle_iter(&self) -> impl Iterator<Item = (&BarSeriesKey, &CandleLiveHandoff)> {
-        self.0.iter().filter_map(|(series, live)| match live {
-            SeriesLive::ProviderCandles(live) => Some((series, live)),
-            SeriesLive::TradeBuilt(_) => None,
-        })
-    }
-
-    fn candle_iter_mut(&mut self) -> impl Iterator<Item = (&BarSeriesKey, &mut CandleLiveHandoff)> {
-        self.0.iter_mut().filter_map(|(series, live)| match live {
-            SeriesLive::ProviderCandles(live) => Some((series, live)),
-            SeriesLive::TradeBuilt(_) => None,
-        })
-    }
-
-    fn trade_values_mut(&mut self) -> impl Iterator<Item = &mut TradeLiveHandoff> {
-        self.0.values_mut().filter_map(|live| match live {
-            SeriesLive::TradeBuilt(live) => Some(live),
-            SeriesLive::ProviderCandles(_) => None,
-        })
-    }
-
-    fn candle_values_mut(&mut self) -> impl Iterator<Item = &mut CandleLiveHandoff> {
-        self.0.values_mut().filter_map(|live| match live {
-            SeriesLive::ProviderCandles(live) => Some(live),
-            SeriesLive::TradeBuilt(_) => None,
-        })
-    }
-
-    fn trade_iter_mut(&mut self) -> impl Iterator<Item = (&BarSeriesKey, &mut TradeLiveHandoff)> {
-        self.0.iter_mut().filter_map(|(series, live)| match live {
-            SeriesLive::TradeBuilt(live) => Some((series, live)),
-            SeriesLive::ProviderCandles(_) => None,
-        })
-    }
-
-    fn retain_trades(
-        &mut self,
-        mut keep: impl FnMut(&BarSeriesKey, &mut TradeLiveHandoff) -> bool,
-    ) {
-        self.0.retain(|series, live| match live {
-            SeriesLive::TradeBuilt(live) => keep(series, live),
-            SeriesLive::ProviderCandles(_) => true,
-        });
-    }
-
-    fn retain_candles(
-        &mut self,
-        mut keep: impl FnMut(&BarSeriesKey, &mut CandleLiveHandoff) -> bool,
-    ) {
-        self.0.retain(|series, live| match live {
-            SeriesLive::ProviderCandles(live) => keep(series, live),
-            SeriesLive::TradeBuilt(_) => true,
-        });
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

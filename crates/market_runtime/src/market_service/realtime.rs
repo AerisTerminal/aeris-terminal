@@ -1,5 +1,6 @@
+use super::lifecycle::{RecoveryReason, SeriesInput, SeriesLifecycle, SeriesState};
 use super::{
-    AggressorSide, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CandleGapPolicy, CandleLiveHandoff,
+    AggressorSide, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, CandleGapPolicy,
     CanonicalOrderBookState, ConsumerId, Coordinator, DepthSnapshot, FailureStage, FormingBar,
     HyperliquidInstrumentDemand, IndexedTradeMutation, InstallProviderInstrument,
     LIVE_BUFFER_CAPACITY, LIVE_HANDOFF_HISTORY_BARS, LiveHistoryState, LiveSeriesPublication,
@@ -1362,7 +1363,7 @@ pub(super) fn started_rithmic_bar(
     })
 }
 
-impl CandleLiveHandoff {
+impl SeriesLifecycle {
     #[cfg(test)]
     pub(super) fn new(
         series: BarSeriesKey,
@@ -1381,34 +1382,6 @@ impl CandleLiveHandoff {
         )
     }
 
-    pub(super) fn with_clock(
-        series: BarSeriesKey,
-        generation: ProviderGeneration,
-        wire_coin: String,
-        interval: String,
-        gap_policy: CandleGapPolicy,
-        clock: std::sync::Arc<dyn super::clock::Clock>,
-    ) -> Self {
-        Self {
-            last_progress_at: clock.monotonic(),
-            clock,
-            series,
-            generation,
-            gap_policy,
-            wire_coin,
-            interval,
-            price_scale: 0,
-            quantity_scale: 0,
-            bars: Vec::new(),
-            forming: None,
-            buffered: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
-            pending_publications: VecDeque::with_capacity(LIVE_BUFFER_CAPACITY),
-            connected: false,
-            history_state: LiveHistoryState::AwaitingHistory,
-            dirty: false,
-        }
-    }
-
     pub(super) fn reset(&mut self, generation: ProviderGeneration) {
         self.generation = generation;
         self.bars.clear();
@@ -1416,9 +1389,9 @@ impl CandleLiveHandoff {
         self.buffered.clear();
         self.pending_publications.clear();
         self.connected = false;
-        self.history_state = LiveHistoryState::AwaitingHistory;
+        self.state = SeriesState::Requested { provider: None };
+        self.epoch = None;
         self.dirty = false;
-        self.last_progress_at = self.clock.monotonic();
     }
 
     pub(super) fn coverage(&self) -> Option<(i64, i64)> {
@@ -1426,34 +1399,47 @@ impl CandleLiveHandoff {
             .bars
             .first()
             .copied()
-            .or(self.forming)?
+            .or(self.forming.map(|forming| forming.bar))?
             .exchange_timestamp_unix_nanos;
         let last = self
             .forming
+            .map(|forming| forming.bar)
             .or_else(|| self.bars.last().copied())?
             .exchange_timestamp_unix_nanos;
         Some((first, last))
     }
 
     pub(super) fn begin_history_reseed(&mut self) {
-        if self.history_state != LiveHistoryState::Ready {
+        if !self.history_ready() {
             return;
         }
-        self.history_state = LiveHistoryState::Reseeding;
+        self.state = SeriesState::Recovering {
+            reason: RecoveryReason::DetachedWindow,
+            ticket: None,
+        };
         self.pending_publications.clear();
         self.dirty = false;
     }
 
     pub(super) fn cancel_history_reseed(&mut self) -> Result<(), String> {
-        if self.history_state != LiveHistoryState::Reseeding {
+        if !matches!(
+            self.state,
+            SeriesState::Recovering {
+                reason: RecoveryReason::DetachedWindow,
+                ..
+            }
+        ) {
             return Ok(());
         }
         let buffered = std::mem::take(&mut self.buffered);
-        self.history_state = LiveHistoryState::Ready;
-        self.last_progress_at = self.clock.monotonic();
+        self.state = SeriesState::Live {
+            last_progress: self.clock.monotonic(),
+            observed_live: true,
+        };
         for candle in &buffered {
             if self
                 .forming
+                .map(|forming| forming.bar)
                 .or_else(|| self.bars.last().copied())
                 .is_some_and(|tail| {
                     candle.exchange_timestamp_unix_nanos < tail.exchange_timestamp_unix_nanos
@@ -1484,9 +1470,9 @@ impl CandleLiveHandoff {
         forming: Option<FormingBar>,
     ) -> Result<(), String> {
         self.pending_publications.clear();
-        let forming = forming.map(|forming| forming.bar).filter(|forming| {
+        let forming = forming.filter(|forming| {
             bars.last()
-                .is_none_or(|last| last.source_sequence < forming.source_sequence)
+                .is_none_or(|last| last.source_sequence < forming.bar.source_sequence)
         });
         let start = bars.len().saturating_sub(LIVE_HANDOFF_HISTORY_BARS);
         let working = bars[start..].to_vec();
@@ -1502,17 +1488,20 @@ impl CandleLiveHandoff {
         if let Some(forming) = self.forming {
             enqueue_bar_transition(
                 &mut self.pending_publications,
-                forming,
+                forming.bar,
                 "Provider candle publication buffer overflowed",
             )?;
         }
         self.dirty = !self.pending_publications.is_empty();
         let buffered = std::mem::take(&mut self.buffered);
-        self.history_state = LiveHistoryState::Ready;
-        self.last_progress_at = self.clock.monotonic();
+        self.state = SeriesState::Live {
+            last_progress: self.clock.monotonic(),
+            observed_live: false,
+        };
         for candle in &buffered {
             if self
                 .forming
+                .map(|forming| forming.bar)
                 .or_else(|| self.bars.last().copied())
                 .is_some_and(|tail| {
                     candle.exchange_timestamp_unix_nanos < tail.exchange_timestamp_unix_nanos
@@ -1528,7 +1517,7 @@ impl CandleLiveHandoff {
     }
 
     pub(super) fn take_publication(&mut self) -> Option<LiveSeriesPublication> {
-        if !self.connected || self.history_state != LiveHistoryState::Ready || !self.dirty {
+        if !self.connected || !self.history_ready() || !self.dirty {
             return None;
         }
         let tails = self.pending_publications.drain(..).collect::<Vec<_>>();
@@ -1537,7 +1526,7 @@ impl CandleLiveHandoff {
     }
 
     pub(super) fn accept_bar(&mut self, bar: MarketBar) -> Result<(), String> {
-        if self.history_state == LiveHistoryState::Ready {
+        if self.history_ready() {
             if self.ingest(bar)? {
                 self.dirty = true;
             }
@@ -1555,7 +1544,10 @@ impl CandleLiveHandoff {
     /// extends it. A redelivered update therefore resolves to the identical
     /// bar instead of looking like a new one.
     fn ingest(&mut self, candle: MarketBar) -> Result<bool, String> {
-        let active = self.forming.or_else(|| self.bars.last().copied());
+        let active = self
+            .forming
+            .map(|forming| forming.bar)
+            .or_else(|| self.bars.last().copied());
         if self.gap_policy == CandleGapPolicy::Contiguous
             && let (Some(active), Some(duration)) = (active, self.series.period.duration_nanos())
             && candle.exchange_timestamp_unix_nanos > active.exchange_timestamp_unix_nanos
@@ -1566,12 +1558,13 @@ impl CandleLiveHandoff {
         }
         let sequence = match &self.forming {
             Some(forming)
-                if forming.exchange_timestamp_unix_nanos
+                if forming.bar.exchange_timestamp_unix_nanos
                     == candle.exchange_timestamp_unix_nanos =>
             {
-                forming.source_sequence
+                forming.bar.source_sequence
             }
             Some(forming) => forming
+                .bar
                 .source_sequence
                 .checked_add(1)
                 .ok_or_else(|| "Provider candle sequence overflowed".to_string())?,
@@ -1595,7 +1588,9 @@ impl CandleLiveHandoff {
             volume: candle.volume,
         };
         bar.validate().map_err(|error| error.to_string())?;
-        merge_live_candle(&mut self.bars, &mut self.forming, bar)?;
+        let mut forming = self.forming.map(|forming| forming.bar);
+        merge_live_candle(&mut self.bars, &mut forming, bar)?;
+        self.forming = forming.map(|bar| FormingBar { bar, trades: None });
         if self.bars.len() > LIVE_HANDOFF_HISTORY_BARS {
             let excess = self.bars.len() - LIVE_HANDOFF_HISTORY_BARS;
             self.bars.drain(..excess);
@@ -1606,13 +1601,16 @@ impl CandleLiveHandoff {
             "Provider candle publication buffer overflowed",
         )?;
         self.dirty = true;
-        self.last_progress_at = self.clock.monotonic();
+        self.state = SeriesState::Live {
+            last_progress: self.clock.monotonic(),
+            observed_live: true,
+        };
         Ok(true)
     }
 }
 
 impl Coordinator<'_> {
-    fn cancel_inflight_history_for_live_recovery(
+    pub(super) fn cancel_inflight_history_for_live_recovery(
         &self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
@@ -1661,7 +1659,7 @@ impl Coordinator<'_> {
         }
     }
 
-    fn clear_provider_display_depth(&mut self, provider: &str) {
+    pub(super) fn clear_provider_display_depth(&mut self, provider: &str) {
         let affected = self
             .display_depth
             .keys()
@@ -1674,7 +1672,11 @@ impl Coordinator<'_> {
         }
     }
 
-    fn invalidate_provider_live_market(&mut self, provider: &str, generation: ProviderGeneration) {
+    pub(super) fn invalidate_provider_live_market(
+        &mut self,
+        provider: &str,
+        generation: ProviderGeneration,
+    ) {
         let affected = self
             .order_books
             .iter_mut()
@@ -1772,7 +1774,7 @@ impl Coordinator<'_> {
         }
     }
 
-    fn install_live_tails(
+    pub(super) fn install_live_tails(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
@@ -1831,7 +1833,7 @@ impl Coordinator<'_> {
         Ok(())
     }
 
-    fn install_completed_live_correction(
+    pub(super) fn install_completed_live_correction(
         &mut self,
         series: &BarSeriesKey,
         generation: ProviderGeneration,
@@ -1898,9 +1900,9 @@ impl Coordinator<'_> {
         let mut candle_series = Vec::new();
         let mut missing_catalog = false;
         for series in self
-            .series_live
+            .series
             .trade_keys()
-            .chain(self.series_live.candle_keys())
+            .chain(self.series.candle_keys())
             .filter(|series| series.provider_id == provider_id)
         {
             let Some(streams) = self
@@ -2061,7 +2063,7 @@ impl Coordinator<'_> {
             .is_some_and(|status| status.health == ProviderHealth::Online);
         match descriptor.live_model {
             super::LiveModel::TradeBuilt => {
-                if !self.series_live.trade_contains_key(series) {
+                if !self.series.trade_contains_key(series) {
                     let generation = self.provider_generation_for_series(series)?;
                     let instrument = self
                         .catalog
@@ -2087,7 +2089,7 @@ impl Coordinator<'_> {
                         self.calendar.for_instrument(&instrument.instrument_id),
                     ) {
                         handoff.connected = connected;
-                        self.series_live.insert_trade(series.clone(), handoff);
+                        self.series.insert_trade(series.clone(), handoff);
                     }
                 }
                 match descriptor.trade_demand_policy {
@@ -2105,14 +2107,14 @@ impl Coordinator<'_> {
                     // Disconnected event. Retire that fence when demand resumes.
                     self.session_mut(&series.provider_id).stop_pending = None;
                 }
-                if !self.series_live.candle_contains_key(series) {
+                if !self.series.candle_contains_key(series) {
                     let generation = self.provider_generation_for_series(series)?;
                     let instrument = self.candle_instrument(series)?.clone();
                     let interval =
                         descriptor.candle_wire_interval.ok_or_else(|| {
                             "provider candle interval is unavailable".to_string()
                         })?(series.period)?;
-                    let mut handoff = CandleLiveHandoff::with_clock(
+                    let mut handoff = SeriesLifecycle::with_clock(
                         series.clone(),
                         generation,
                         instrument.provider_symbol,
@@ -2121,7 +2123,7 @@ impl Coordinator<'_> {
                         std::sync::Arc::clone(&self.clock),
                     );
                     handoff.connected = connected;
-                    self.series_live.insert_candle(series.clone(), handoff);
+                    self.series.insert_candle(series.clone(), handoff);
                 }
                 if descriptor.candle_demand_policy
                     == super::CandleDemandPolicy::ReconcileAfterSelection
@@ -2193,14 +2195,14 @@ impl Coordinator<'_> {
             ProviderEventKind::Connecting => match descriptor.live_model {
                 super::LiveModel::TradeBuilt => self.rithmic_connecting(provider, generation),
                 super::LiveModel::ProviderCandles => {
-                    self.candle_provider_connecting(provider, generation);
+                    self.begin_provider_candle_session(provider, generation);
                 }
             },
             ProviderEventKind::Connected | ProviderEventKind::Heartbeat(_) => {
                 match descriptor.live_model {
                     super::LiveModel::TradeBuilt => self.rithmic_online(provider, generation),
                     super::LiveModel::ProviderCandles => {
-                        self.candle_provider_online(provider, generation);
+                        self.mark_provider_candle_online(provider, generation);
                     }
                 }
             }
@@ -2213,7 +2215,7 @@ impl Coordinator<'_> {
                         self.rithmic_recovering(provider, generation, detail);
                     }
                     super::LiveModel::ProviderCandles => {
-                        self.candle_provider_recovering(provider, generation, detail);
+                        self.mark_provider_candle_recovering(provider, generation, detail);
                     }
                 }
                 if let Some(provider_detail) = provider_detail {
@@ -2299,7 +2301,7 @@ impl Coordinator<'_> {
             valid_until_utc_ms,
         );
         let calendar = self.calendar.for_instrument(instrument_id);
-        for (series, live) in self.series_live.trade_iter_mut() {
+        for (series, live) in self.series.trade_iter_mut() {
             if series.provider_id == provider && series.instrument_id == instrument_id {
                 live.calendar = calendar.clone();
             }
@@ -2413,7 +2415,7 @@ impl Coordinator<'_> {
             return;
         };
         let series = self
-            .series_live
+            .series
             .candle_iter()
             .filter(|(series, live)| {
                 series.provider_id == provider
@@ -2422,11 +2424,11 @@ impl Coordinator<'_> {
             })
             .map(|(series, _)| series.clone())
             .chain(
-                self.series_live
+                self.series
                     .trade_keys()
                     .filter(|series| series.provider_id == provider)
                     .filter_map(|series| {
-                        let live = self.series_live.trade(series)?;
+                        let live = self.series.trade(series)?;
                         (live.generation == generation
                             && live.candle_symbol.as_deref() == Some(symbol))
                         .then(|| series.clone())
@@ -2434,7 +2436,7 @@ impl Coordinator<'_> {
             )
             .collect::<Vec<_>>();
         for series in series {
-            if self.series_live.trade_contains_key(&series) {
+            if self.series.trade_contains_key(&series) {
                 self.rithmic_series_recovering(
                     &series,
                     generation,
@@ -2442,7 +2444,7 @@ impl Coordinator<'_> {
                     "Candle correction is reloading the available history",
                 );
             } else {
-                self.candle_series_recovering(
+                self.recover_candle_series(
                     &series,
                     generation,
                     FailureStage::Aggregation,
@@ -2489,7 +2491,7 @@ impl Coordinator<'_> {
             return;
         };
         let failed_series = self
-            .series_live
+            .series
             .trade_iter_mut()
             .filter(|(series, live)| {
                 series.provider_id == provider
@@ -2606,14 +2608,14 @@ impl Coordinator<'_> {
         let Ok(provider_generation) = id(generation).map(ProviderGeneration) else {
             return;
         };
-        let candidates = self.series_live.trade_keys().cloned().collect::<Vec<_>>();
+        let candidates = self.series.trade_keys().cloned().collect::<Vec<_>>();
         let affected = candidates
             .into_iter()
             .filter(|series| {
                 series.provider_id == provider
                     && series.instrument_id == instrument_id
                     && self
-                        .series_live
+                        .series
                         .trade(series)
                         .is_some_and(|live| live.generation == provider_generation)
             })
@@ -2646,7 +2648,8 @@ impl Coordinator<'_> {
         } else {
             let mut dirty_books = BTreeSet::new();
             for trade in trades {
-                if let Some(instrument_id) = self.candle_provider_trade(provider, generation, trade)
+                if let Some(instrument_id) =
+                    self.accept_provider_candle_trade(provider, generation, trade)
                 {
                     dirty_books.insert(instrument_id);
                 }
@@ -2714,7 +2717,7 @@ impl Coordinator<'_> {
         }
         let failed = match descriptor.live_model {
             super::LiveModel::TradeBuilt => self
-                .series_live
+                .series
                 .trade_iter_mut()
                 .filter(|(series, live)| {
                     series.provider_id == provider
@@ -2736,21 +2739,28 @@ impl Coordinator<'_> {
                 )
                 .collect::<Vec<_>>(),
             super::LiveModel::ProviderCandles => {
-                let mut matched = Vec::new();
-                let failed = self
-                    .series_live
-                    .candle_iter_mut()
+                let matched = self
+                    .series
+                    .candle_iter()
                     .filter(|(series, live)| {
                         series.provider_id == provider
                             && live.generation == generation
                             && (!descriptor.candle_requires_connected || live.connected)
                             && format!("{}{{={}}}", live.wire_coin, live.interval) == symbol
                     })
-                    .filter_map(|(series, live)| {
-                        matched.push((series.instrument_id.clone(), series.entitlement_id.clone()));
-                        live.accept_bar(candle.bar).is_err().then(|| series.clone())
-                    })
+                    .map(|(series, _)| series.clone())
                     .collect::<Vec<_>>();
+                let mut failed = Vec::new();
+                for series in &matched {
+                    self.transition_candle_series(series, SeriesInput::Candle);
+                    if self
+                        .series
+                        .candle_mut(series)
+                        .is_some_and(|live| live.accept_bar(candle.bar).is_err())
+                    {
+                        failed.push(series.clone());
+                    }
+                }
                 // Without a trade stream the first live candle is the only
                 // evidence that a series answered empty now has data.
                 if !descriptor
@@ -2758,12 +2768,12 @@ impl Coordinator<'_> {
                     .streams
                     .contains(MarketStream::Trades)
                 {
-                    for (instrument_id, entitlement_id) in matched {
+                    for series in matched {
                         self.request_current_history_after_live_trade(
                             provider,
                             generation,
-                            &instrument_id,
-                            &entitlement_id,
+                            &series.instrument_id,
+                            &series.entitlement_id,
                             candle.bar.exchange_timestamp_unix_nanos,
                         );
                     }
@@ -2779,7 +2789,7 @@ impl Coordinator<'_> {
                     FailureStage::Aggregation,
                     descriptor.candle_correction_detail,
                 ),
-                super::LiveModel::ProviderCandles => self.candle_series_recovering(
+                super::LiveModel::ProviderCandles => self.recover_candle_series(
                     &series,
                     generation,
                     FailureStage::Aggregation,
@@ -2832,7 +2842,7 @@ impl Coordinator<'_> {
                     && descriptor.recovery_policy
                         == super::ProviderRecoveryPolicy::CoordinatorReissuesDemand
                     && (self
-                        .series_live
+                        .series
                         .trade_keys()
                         .any(|series| series.provider_id == provider)
                         || self.price_alerts.has_active_provider(provider))
@@ -2847,7 +2857,7 @@ impl Coordinator<'_> {
                     | ProviderDisconnect::Fail { detail, .. } => detail,
                     ProviderDisconnect::End => return,
                 };
-                self.candle_provider_recovering(provider, generation, detail);
+                self.mark_provider_candle_recovering(provider, generation, detail);
             }
         }
     }
@@ -2861,13 +2871,13 @@ impl Coordinator<'_> {
         self.session_mut(provider).stop_pending = None;
         let demanded = match descriptor.live_model {
             super::LiveModel::TradeBuilt => {
-                self.series_live
+                self.series
                     .trade_keys()
                     .any(|series| series.provider_id == provider)
                     || self.price_alerts.has_active_provider(provider)
             }
             super::LiveModel::ProviderCandles => {
-                self.series_live
+                self.series
                     .candle_keys()
                     .any(|series| series.provider_id == provider)
                     || !self.order_books.is_empty()
@@ -2891,7 +2901,7 @@ impl Coordinator<'_> {
                 super::LiveModel::ProviderCandles => {
                     self.session_mut(provider).engaged = false;
                     self.session_mut(provider).demand_dirty = true;
-                    self.candle_provider_recovering(
+                    self.mark_provider_candle_recovering(
                         provider,
                         generation,
                         "Provider realtime restarted after idle-stop overlap",
@@ -2915,121 +2925,7 @@ impl Coordinator<'_> {
         self.broadcast_provider_for(provider, None);
     }
 
-    pub(super) fn candle_provider_connecting(&mut self, provider: &str, generation: u64) {
-        let Ok(generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        let current = self
-            .engine
-            .provider_status(provider)
-            .and_then(|status| status.generation);
-        if current.is_some_and(|current| generation < current) {
-            return;
-        }
-        if current.is_none_or(|current| generation > current)
-            && self
-                .engine
-                .begin_provider_session(provider, generation)
-                .is_err()
-        {
-            return;
-        }
-        if current.is_some_and(|current| generation > current) {
-            self.clear_provider_display_depth(provider);
-            self.invalidate_provider_live_market(provider, generation);
-            if self
-                .providers
-                .descriptor(provider)
-                .is_some_and(|descriptor| {
-                    descriptor.candle_demand_policy
-                        == super::CandleDemandPolicy::ReconcileAfterSelection
-                })
-            {
-                self.session_mut(provider).demand_dirty = true;
-            }
-            self.history.cancel_provider(provider);
-            let series = self
-                .series_live
-                .candle_keys()
-                .filter(|series| series.provider_id == provider)
-                .cloned()
-                .collect::<Vec<_>>();
-            for selected in &series {
-                if let Some(live) = self.series_live.candle_mut(selected) {
-                    live.reset(generation);
-                }
-                self.broadcast_series_recovery_for(
-                    selected,
-                    "Provider live session changed; covering history is reloading",
-                );
-            }
-            for selected in series {
-                self.request_series_history_recovery(&selected, generation);
-            }
-        }
-        if self
-            .engine
-            .set_provider_health(provider, generation, ProviderHealth::Connecting)
-            .is_err()
-        {
-            return;
-        }
-        self.broadcast_provider_for(provider, None);
-    }
-
-    pub(super) fn candle_provider_online(&mut self, provider: &str, generation: u64) {
-        let Ok(generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        if self
-            .engine
-            .provider_status(provider)
-            .and_then(|status| status.generation)
-            != Some(generation)
-        {
-            return;
-        }
-        if self
-            .engine
-            .set_provider_health(provider, generation, ProviderHealth::Online)
-            .is_err()
-        {
-            return;
-        }
-        self.broadcast_provider_for(provider, None);
-        let mut ready = Vec::new();
-        let missing = self
-            .series_live
-            .candle_iter_mut()
-            .filter(|(series, _)| series.provider_id == provider)
-            .filter_map(|(series, live)| {
-                if live.generation != generation {
-                    return None;
-                }
-                live.connected = true;
-                if live.history_state == LiveHistoryState::Ready {
-                    ready.push(series.clone());
-                    None
-                } else {
-                    Some(series.clone())
-                }
-            })
-            .collect::<Vec<_>>();
-        for series in ready {
-            self.series_live_if_ready(&series);
-        }
-        for series in missing {
-            if self
-                .provider_epochs
-                .current(&series.provider_id, generation.0.get())
-                .is_none_or(|epoch| self.history.inflight(&series, epoch).is_none())
-            {
-                self.request_series_history_recovery(&series, generation);
-            }
-        }
-    }
-
-    pub(super) fn candle_provider_trade(
+    pub(super) fn accept_provider_candle_trade(
         &mut self,
         provider: &str,
         generation: u64,
@@ -3049,16 +2945,19 @@ impl Coordinator<'_> {
         if trade.metadata.provider_id != provider
             || trade.metadata.session_generation != generation.0.get()
         {
-            self.candle_provider_recovering(
+            self.mark_provider_candle_recovering(
                 provider,
                 generation.0.get(),
                 "Provider live session identity requires recovery",
             );
-            for (series, live) in self.series_live.candle_iter_mut() {
+            for (series, live) in self.series.candle_iter_mut() {
                 if series.provider_id != provider {
                     continue;
                 }
-                live.history_state = LiveHistoryState::AwaitingHistory;
+                live.state = SeriesState::Recovering {
+                    reason: RecoveryReason::ProviderReconnected,
+                    ticket: None,
+                };
                 live.dirty = false;
                 live.buffered.clear();
                 live.pending_publications.clear();
@@ -3090,81 +2989,6 @@ impl Coordinator<'_> {
         trade_changed.then_some(instrument_id)
     }
 
-    pub(super) fn candle_series_recovering(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        _stage: FailureStage,
-        detail: &str,
-    ) {
-        if self
-            .series_live
-            .candle(series)
-            .is_some_and(|live| live.history_state == LiveHistoryState::AwaitingHistory)
-        {
-            return;
-        }
-        diagnostic!(
-            "Aeris market series recovery started for {}: {detail}",
-            super::LoggedInstrument(&series.instrument_id)
-        );
-        self.cancel_inflight_history_for_live_recovery(series, generation);
-        if let Some(live) = self.series_live.candle_mut(series) {
-            live.history_state = LiveHistoryState::AwaitingHistory;
-            live.dirty = false;
-            live.buffered.clear();
-            live.pending_publications.clear();
-        }
-        self.broadcast_series_recovery_for(series, detail);
-        if self
-            .provider_epochs
-            .current(&series.provider_id, generation.0.get())
-            .is_none_or(|epoch| self.history.inflight(series, epoch).is_none())
-        {
-            self.request_series_history_recovery(series, generation);
-        }
-    }
-
-    pub(super) fn candle_provider_recovering(
-        &mut self,
-        provider: &str,
-        generation: u64,
-        detail: &'static str,
-    ) {
-        let Ok(generation) = id(generation).map(ProviderGeneration) else {
-            return;
-        };
-        if self
-            .engine
-            .provider_status(provider)
-            .and_then(|status| status.generation)
-            != Some(generation)
-        {
-            return;
-        }
-        self.price_alerts.reset_provider_baselines(provider);
-        self.clear_provider_display_depth(provider);
-        self.session_mut(provider).demand_dirty = true;
-        if self.price_alerts.has_active_provider(provider) {
-            self.session_mut(provider).demand_dirty = true;
-        }
-        if self
-            .engine
-            .set_provider_health(provider, generation, ProviderHealth::Recovering)
-            .is_err()
-        {
-            return;
-        }
-        self.broadcast_provider_for(provider, Some(detail));
-        for (series, live) in self.series_live.candle_iter_mut() {
-            if series.provider_id != provider {
-                continue;
-            }
-            live.connected = false;
-        }
-        self.invalidate_provider_live_market(provider, generation);
-    }
-
     pub(super) fn rithmic_connecting(&mut self, provider: &str, generation: u64) {
         let Ok(generation) = id(generation).map(ProviderGeneration) else {
             return;
@@ -3188,13 +3012,13 @@ impl Coordinator<'_> {
             self.invalidate_provider_live_market(provider, generation);
             self.history.cancel_provider(provider);
             let series = self
-                .series_live
+                .series
                 .trade_keys()
                 .filter(|series| series.provider_id == provider)
                 .cloned()
                 .collect::<Vec<_>>();
             for selected in &series {
-                if let Some(live) = self.series_live.trade_mut(selected) {
+                if let Some(live) = self.series.trade_mut(selected) {
                     live.reset(generation);
                 }
                 self.broadcast_series_recovery_for(
@@ -3238,7 +3062,7 @@ impl Coordinator<'_> {
         self.broadcast_provider_for(provider, None);
         let mut ready = Vec::new();
         let missing = self
-            .series_live
+            .series
             .trade_iter_mut()
             .filter(|(series, _)| series.provider_id == provider)
             .filter_map(|(series, live)| {
@@ -3288,7 +3112,7 @@ impl Coordinator<'_> {
                 generation.0.get(),
                 "Rithmic live session identity requires recovery",
             );
-            for (series, live) in self.series_live.trade_iter_mut() {
+            for (series, live) in self.series.trade_iter_mut() {
                 if series.provider_id != provider {
                     continue;
                 }
@@ -3314,7 +3138,7 @@ impl Coordinator<'_> {
         // series must enter AwaitingHistory before the non-bar study wave runs,
         // while unaffected timeframes remain eligible.
         let failed = self
-            .series_live
+            .series
             .trade_iter_mut()
             .filter(|(series, live)| {
                 series.provider_id == provider
@@ -3357,7 +3181,7 @@ impl Coordinator<'_> {
         detail: &str,
     ) {
         if self
-            .series_live
+            .series
             .trade(series)
             .is_some_and(|live| live.history_state == LiveHistoryState::AwaitingHistory)
         {
@@ -3367,7 +3191,7 @@ impl Coordinator<'_> {
             "Aeris market series recovery started for {}: {detail}",
             super::LoggedInstrument(&series.instrument_id)
         );
-        if let Some(live) = self.series_live.trade_mut(series) {
+        if let Some(live) = self.series.trade_mut(series) {
             live.history_state = LiveHistoryState::AwaitingHistory;
             live.dirty = false;
             live.buffered.clear();
@@ -3570,13 +3394,13 @@ impl Coordinator<'_> {
             return;
         }
         self.broadcast_provider_for(provider, Some(detail));
-        for (series, live) in self.series_live.trade_iter_mut() {
+        for (series, live) in self.series.trade_iter_mut() {
             if series.provider_id != provider {
                 continue;
             }
             live.connected = false;
         }
-        for (series, live) in self.series_live.candle_iter_mut() {
+        for (series, live) in self.series.candle_iter_mut() {
             if series.provider_id == provider {
                 live.connected = false;
             }
@@ -3610,13 +3434,25 @@ impl Coordinator<'_> {
             return;
         }
         self.broadcast_provider_for(provider, Some(detail));
-        for (series, live) in self.series_live.trade_iter_mut() {
+        let candle_series = self
+            .series
+            .candle_keys()
+            .filter(|series| series.provider_id == provider)
+            .cloned()
+            .collect::<Vec<_>>();
+        for series in candle_series {
+            self.transition_candle_series(
+                &series,
+                SeriesInput::Failed(super::lifecycle::SeriesFailure::Provider(detail.to_owned())),
+            );
+        }
+        for (series, live) in self.series.trade_iter_mut() {
             if series.provider_id != provider {
                 continue;
             }
             live.connected = false;
         }
-        for (series, live) in self.series_live.candle_iter_mut() {
+        for (series, live) in self.series.candle_iter_mut() {
             if series.provider_id == provider {
                 live.connected = false;
             }
@@ -3626,7 +3462,7 @@ impl Coordinator<'_> {
 
     pub(super) fn publish_rithmic_live(&mut self) {
         let ready = self
-            .series_live
+            .series
             .trade_values_mut()
             .filter_map(|live| {
                 let update = live.take_publication()?;
@@ -3661,16 +3497,17 @@ impl Coordinator<'_> {
                     FailureStage::Publication,
                     "Live publication requires covering history",
                 );
-            } else if let Some(live) = self.series_live.trade_mut(&series) {
+            } else if let Some(live) = self.series.trade_mut(&series) {
                 live.last_publication_at = self.clock.monotonic();
             }
         }
     }
 
     pub(super) fn recover_stalled_live_series(&mut self) {
+        self.refresh_candle_session_phases();
         let now = self.clock.monotonic();
         let trade_candidates = self
-            .series_live
+            .series
             .trade_iter_mut()
             .filter_map(|(series, live)| {
                 (live.connected
@@ -3690,16 +3527,22 @@ impl Coordinator<'_> {
         let candidates = trade_candidates
             .into_iter()
             .chain(
-                self.series_live
+                self.series
                     .candle_iter()
                     .filter(|(_, live)| {
                         live.connected
-                            && live.history_state == LiveHistoryState::Ready
-                            && now.duration_since(live.last_progress_at)
-                                >= super::watchdog::OPEN_STALL_THRESHOLD
+                            && live.history_ready()
+                            && live.last_progress().is_some_and(|last| {
+                                now.duration_since(last) >= super::watchdog::OPEN_STALL_THRESHOLD
+                            })
                     })
                     .map(|(series, live)| {
-                        (series.clone(), live.generation, live.last_progress_at, true)
+                        (
+                            series.clone(),
+                            live.generation,
+                            live.last_progress().expect("filtered live state"),
+                            true,
+                        )
                     }),
             )
             .collect::<Vec<_>>();
@@ -3728,10 +3571,10 @@ impl Coordinator<'_> {
                 LiveHistoryState::Ready,
             ) {
                 if candle {
-                    self.candle_series_recovering(
+                    self.recover_candle_series_for_reason(
                         &series,
                         generation,
-                        FailureStage::Publication,
+                        RecoveryReason::StalledWhileOpen,
                         "Live candle series stalled while the market was open",
                     );
                 } else {
@@ -3742,6 +3585,40 @@ impl Coordinator<'_> {
                         "Live trade series stalled while the market was open",
                     );
                 }
+            }
+        }
+    }
+
+    fn refresh_candle_session_phases(&mut self) {
+        if let Some(at_utc_ms) = self
+            .clock
+            .wall_nanos()
+            .map(|nanos| nanos.div_euclid(1_000_000))
+        {
+            let changes = self
+                .series
+                .candle_iter()
+                .filter(|(_, live)| live.connected && live.history_ready())
+                .filter_map(|(series, live)| {
+                    let phase = self.calendar.phase(&series.instrument_id, at_utc_ms);
+                    match (live.state(), phase) {
+                        (
+                            SeriesState::Live { .. },
+                            aeris_instruments::SessionPhase::Closed
+                            | aeris_instruments::SessionPhase::Break,
+                        )
+                        | (
+                            SeriesState::Dormant { .. },
+                            aeris_instruments::SessionPhase::Open
+                            | aeris_instruments::SessionPhase::Extended
+                            | aeris_instruments::SessionPhase::AlwaysOpen,
+                        ) => Some((series.clone(), phase)),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            for (series, phase) in changes {
+                self.transition_candle_series(&series, SeriesInput::PhaseChanged(phase));
             }
         }
     }
@@ -3760,12 +3637,17 @@ impl Coordinator<'_> {
             return false;
         }
         let ready =
-            self.series_live.trade(series).is_some_and(|live| {
+            self.series.trade(series).is_some_and(|live| {
                 live.connected && live.history_state == LiveHistoryState::Ready
-            }) || self.series_live.candle(series).is_some_and(|live| {
-                live.connected && live.history_state == LiveHistoryState::Ready
-            });
+            }) || self
+                .series
+                .candle(series)
+                .is_some_and(|live| live.connected && live.history_ready());
         if ready {
+            let presentation = self
+                .series
+                .candle(series)
+                .map(SeriesLifecycle::presentation);
             for (consumer_id, events) in &mut self.events {
                 let Some(demand) = self.engine.current_demand(*consumer_id) else {
                     continue;
@@ -3785,6 +3667,11 @@ impl Coordinator<'_> {
                     SeriesLoadState::Live,
                     None,
                 ));
+                if let (Some(presentation), Some(super::MarketRuntimeEvent::SeriesState(state))) =
+                    (presentation, events.series_state.as_mut())
+                {
+                    state.presentation = Some(presentation);
+                }
             }
         }
         ready
@@ -3884,47 +3771,6 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn publish_candle_live(&mut self) {
-        let ready = self
-            .series_live
-            .candle_values_mut()
-            .filter_map(|live| {
-                let update = live.take_publication()?;
-                Some((
-                    live.series.clone(),
-                    live.generation,
-                    live.price_scale,
-                    live.quantity_scale,
-                    update,
-                ))
-            })
-            .collect::<Vec<_>>();
-        for (series, generation, price_scale, quantity_scale, update) in ready {
-            let published = match update {
-                LiveSeriesPublication::Tails(bars) => {
-                    self.install_live_tails(&series, generation, price_scale, quantity_scale, bars)
-                }
-                LiveSeriesPublication::CompletedCorrection(bar) => self
-                    .install_completed_live_correction(
-                        &series,
-                        generation,
-                        price_scale,
-                        quantity_scale,
-                        bar,
-                    ),
-            };
-            if let Err(error) = published {
-                diagnostic!("Aeris engine live publication failed: {error}");
-                self.candle_series_recovering(
-                    &series,
-                    generation,
-                    FailureStage::Publication,
-                    "Live publication requires covering history",
-                );
-            }
-        }
-    }
-
     pub(super) fn remove_waiter(&mut self, consumer_id: ConsumerId) {
         for waiters in self.pending.values_mut() {
             waiters.retain(|waiter| waiter.consumer_id != consumer_id);
@@ -3943,19 +3789,19 @@ impl Coordinator<'_> {
 
     pub(super) fn prune_unused_live_series(&mut self) {
         let retired_trade_providers = self
-            .series_live
+            .series
             .trade_keys()
             .filter(|series| !self.engine.has_subscription(series))
             .map(|series| series.provider_id.clone())
             .collect::<BTreeSet<_>>();
         for series in self
-            .series_live
+            .series
             .trade_keys()
             .filter(|series| !self.engine.has_subscription(series))
         {
             self.history.cancel_series(series);
         }
-        self.series_live
+        self.series
             .retain_trades(|series, _| self.engine.has_subscription(series));
         for provider in retired_trade_providers {
             if self
@@ -3969,19 +3815,19 @@ impl Coordinator<'_> {
             }
         }
         let retired_candle_providers = self
-            .series_live
+            .series
             .candle_keys()
             .filter(|series| !self.engine.has_subscription(series))
             .map(|series| series.provider_id.clone())
             .collect::<BTreeSet<_>>();
         for series in self
-            .series_live
+            .series
             .candle_keys()
             .filter(|series| !self.engine.has_subscription(series))
         {
             self.history.cancel_series(series);
         }
-        self.series_live
+        self.series
             .retain_candles(|series, _| self.engine.has_subscription(series));
         for provider in retired_candle_providers {
             self.session_mut(&provider).demand_dirty = true;
@@ -4054,11 +3900,11 @@ impl Coordinator<'_> {
             let provider = descriptor.id;
             let demanded = match descriptor.live_model {
                 super::LiveModel::TradeBuilt => self
-                    .series_live
+                    .series
                     .trade_keys()
                     .any(|series| series.provider_id == provider),
                 super::LiveModel::ProviderCandles => self
-                    .series_live
+                    .series
                     .candle_keys()
                     .any(|series| series.provider_id == provider),
             } || self.price_alerts.has_active_provider(provider);
@@ -5435,7 +5281,7 @@ mod tests {
             period: BarPeriod::time(60).expect("time period"),
             definition_version: 1,
         };
-        let mut live = CandleLiveHandoff::new(
+        let mut live = SeriesLifecycle::new(
             series,
             generation(),
             "BTC".to_string(),
@@ -5488,7 +5334,7 @@ mod tests {
             (CandleGapPolicy::Contiguous, false),
             (CandleGapPolicy::SessionGapsAllowed, true),
         ] {
-            let mut live = CandleLiveHandoff::new(
+            let mut live = SeriesLifecycle::new(
                 series.clone(),
                 generation(),
                 "TEST".to_string(),
@@ -5509,7 +5355,7 @@ mod tests {
             period: BarPeriod::time(60).expect("time period"),
             definition_version: 1,
         };
-        let mut live = CandleLiveHandoff::new(
+        let mut live = SeriesLifecycle::new(
             series,
             generation(),
             "BTC".to_string(),
@@ -5536,7 +5382,7 @@ mod tests {
         live.accept_bar(candle(180_000_000_000, 10_250, 10_500, 10_200, 10_300, 1))
             .expect("new candle buffers");
         assert_eq!(live.buffered.len(), 2);
-        assert_eq!(live.forming.map(|bar| bar.close), Some(10_100));
+        assert_eq!(live.forming.map(|forming| forming.bar.close), Some(10_100));
 
         live.seed(
             2,
@@ -5549,9 +5395,9 @@ mod tests {
         )
         .expect("current history reseed replays buffered candles");
         assert!(live.buffered.is_empty());
-        assert_eq!(live.history_state, LiveHistoryState::Ready);
+        assert!(live.history_ready());
         assert_eq!(live.bars.last().map(|bar| bar.close), Some(10_250));
-        assert_eq!(live.forming.map(|bar| bar.close), Some(10_300));
+        assert_eq!(live.forming.map(|forming| forming.bar.close), Some(10_300));
     }
 
     #[test]

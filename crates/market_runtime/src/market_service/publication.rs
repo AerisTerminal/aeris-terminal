@@ -231,6 +231,15 @@ pub(super) fn series_state_payload(
         series: Some(series),
         state,
         detail,
+        presentation: Some(match state {
+            SeriesLoadState::Resolving => crate::SeriesPresentationStatus::Loading,
+            SeriesLoadState::Ready => crate::SeriesPresentationStatus::ConnectingLive,
+            SeriesLoadState::Live => crate::SeriesPresentationStatus::Live,
+            SeriesLoadState::Partial => crate::SeriesPresentationStatus::Recovering,
+            SeriesLoadState::Empty | SeriesLoadState::Failed | SeriesLoadState::Superseded => {
+                crate::SeriesPresentationStatus::AwaitingData
+            }
+        }),
     })
 }
 
@@ -434,11 +443,13 @@ impl Coordinator<'_> {
         consumer_id: ConsumerId,
         series: &BarSeriesKey,
     ) -> SeriesLoadState {
-        if self.series_live.trade(series).is_some_and(|live| {
+        if self.series.trade(series).is_some_and(|live| {
             live.connected && live.history_state == super::LiveHistoryState::Ready
-        }) || self.series_live.candle(series).is_some_and(|live| {
-            live.connected && live.history_state == super::LiveHistoryState::Ready
-        }) {
+        }) || self
+            .series
+            .candle(series)
+            .is_some_and(|live| live.connected && live.history_ready())
+        {
             SeriesLoadState::Live
         } else if self.engine.has_publication(consumer_id) {
             SeriesLoadState::Ready

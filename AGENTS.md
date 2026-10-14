@@ -134,6 +134,8 @@ the check.
 - `HistoryTracker` alone owns per-series current/backfill lanes, retry deadlines, empty coverage,
   detached windows and cancellation. History requests and completions carry the same exact
   provider/demand/sequence ticket; retirement prunes the tracker, never parallel coordinator maps.
+- Candle series control and the single forming bar belong to `market_service::lifecycle::SeriesLifecycles`.
+  Retired candle handlers must not return, and lifecycle transitions use the injected clock rather than system time.
 - Stall recovery considers every live candle and trade series while its calendar is open;
   closed sessions never recover for silence, and unknown sessions use a longer threshold.
   Practice session checks use the same calendar for every provider.

@@ -168,6 +168,16 @@ pub struct MarketProviderInstrumentSelection {
 }
 
 /// Direct generation-fenced readiness state for one canonical series.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SeriesPresentationStatus {
+    Loading,
+    ConnectingLive,
+    Live,
+    Recovering,
+    AwaitingData,
+}
+
+/// Direct generation-fenced readiness state for one canonical series.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketSeriesState {
     pub consumer_id: aeris_market_engine::ConsumerId,
@@ -175,6 +185,8 @@ pub struct MarketSeriesState {
     pub series: Option<aeris_market_data::BarSeriesKey>,
     pub state: aeris_contracts::SeriesLoadState,
     pub detail: Option<String>,
+    /// Runtime-owned presentation phase; clients never derive this from provider text.
+    pub presentation: Option<SeriesPresentationStatus>,
 }
 
 /// Part of a canonical series demand that a [`MarketDemandError`] invalidates.

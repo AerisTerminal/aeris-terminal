@@ -1,14 +1,14 @@
+use super::lifecycle::CandleHandoffSeed;
 use super::{
-    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, CandleHandoffSeed, Command,
-    ConsumerId, Coordinator, DemandWaiter, EMPTY_CURRENT_HISTORY_DETAIL,
-    EMPTY_CURRENT_HISTORY_RETAINED_DETAIL, EmptyCurrentHistory, FailureStage, FormingBar,
-    GenerationId, HISTORY_CAPACITY_EXHAUSTED, HISTORY_SERIES_HIGH_WATERMARK,
-    HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest, HistorySnapshot, HistorySource,
-    INITIAL_HISTORY_BARS, InstallProviderInstrument, MAXIMUM_HISTORY_BARS_PER_REQUEST,
-    MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering, ProviderGeneration, ProviderRequest,
-    Receiver, SeriesLoadState, SeriesSnapshot, SyncSender, TradeHandoffSeed,
-    VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage, fail_waiters,
-    publish_state, series_state, thread, try_enqueue_history,
+    ActiveWorkerGuard, Arc, AtomicBool, BTreeSet, BarSeriesKey, Command, ConsumerId, Coordinator,
+    DemandWaiter, EMPTY_CURRENT_HISTORY_DETAIL, EMPTY_CURRENT_HISTORY_RETAINED_DETAIL,
+    EmptyCurrentHistory, FailureStage, FormingBar, GenerationId, HISTORY_CAPACITY_EXHAUSTED,
+    HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange, HistoryRequest,
+    HistorySnapshot, HistorySource, INITIAL_HISTORY_BARS, InstallProviderInstrument,
+    MAXIMUM_HISTORY_BARS_PER_REQUEST, MAXIMUM_HISTORY_RETRIES, MarketBar, Mutex, Ordering,
+    ProviderGeneration, ProviderRequest, Receiver, SeriesLoadState, SeriesSnapshot, SyncSender,
+    TradeHandoffSeed, VIEWPORT_LIVE_TAIL_RESERVE, Viewport, engine_install_failure_stage,
+    fail_waiters, publish_state, series_state, thread, try_enqueue_history,
 };
 use aeris_observability::diagnostic;
 
@@ -548,7 +548,7 @@ impl Coordinator<'_> {
                 );
             }
         } else if self.provider_uses_candles(&series.provider_id) {
-            self.start_candle_realtime_from_snapshot(series, snapshot)?;
+            self.restore_candle_from_snapshot(series, snapshot)?;
         } else {
             self.start_rithmic_realtime_from_snapshot(series, snapshot)?;
         }
@@ -809,28 +809,28 @@ impl Coordinator<'_> {
 
     fn live_history_coverage(&self, series: &BarSeriesKey) -> Option<(i64, i64)> {
         if self.provider_uses_candles(&series.provider_id) {
-            self.series_live.candle(series)?.coverage()
+            self.series.candle(series)?.coverage()
         } else {
-            self.series_live.trade(series)?.coverage()
+            self.series.trade(series)?.coverage()
         }
     }
 
     fn begin_live_history_reseed(&mut self, series: &BarSeriesKey) {
         if self.provider_uses_candles(&series.provider_id) {
-            if let Some(live) = self.series_live.candle_mut(series) {
+            if let Some(live) = self.series.candle_mut(series) {
                 live.begin_history_reseed();
             }
-        } else if let Some(live) = self.series_live.trade_mut(series) {
+        } else if let Some(live) = self.series.trade_mut(series) {
             live.begin_history_reseed();
         }
     }
 
     fn cancel_live_history_reseed(&mut self, series: &BarSeriesKey) -> Result<(), String> {
         if self.provider_uses_candles(&series.provider_id) {
-            if let Some(live) = self.series_live.candle_mut(series) {
+            if let Some(live) = self.series.candle_mut(series) {
                 live.cancel_history_reseed()?;
             }
-        } else if let Some(live) = self.series_live.trade_mut(series) {
+        } else if let Some(live) = self.series.trade_mut(series) {
             live.cancel_history_reseed()?;
         }
         Ok(())
@@ -889,16 +889,8 @@ impl Coordinator<'_> {
             return Ok(());
         }
         let (range, remainder) = self.page_history_range(series, range);
-        if let Some((retry_at, failed_range, attempts)) = self.history.pending(series, epoch, kind)
-        {
-            if failed_range == range && self.clock.monotonic() < retry_at {
-                return Ok(());
-            }
-            if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {
-                // The failed cooldown expired, or the user moved to a genuinely
-                // different range. Start that request with a fresh retry budget.
-                self.history.clear_retry(series, epoch, kind);
-            }
+        if !self.history_retry_ready(series, epoch, kind, range) {
+            return Ok(());
         }
         let instrument = self.history_request_instrument(series);
         let ticket = self
@@ -924,6 +916,12 @@ impl Coordinator<'_> {
         };
         match try_enqueue_history(history, request) {
             Ok(()) => {
+                if range.is_none() && self.provider_uses_candles(&series.provider_id) {
+                    self.transition_candle_series(
+                        series,
+                        super::lifecycle::SeriesInput::HistoryRequested(&ticket),
+                    );
+                }
                 if range.is_none() {
                     diagnostic!(
                         "Aeris market covering history requested for {} generation={}",
@@ -950,6 +948,27 @@ impl Coordinator<'_> {
                 Err(error)
             }
         }
+    }
+
+    fn history_retry_ready(
+        &mut self,
+        series: &BarSeriesKey,
+        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+        kind: LaneKind,
+        range: Option<HistoryRange>,
+    ) -> bool {
+        if let Some((retry_at, failed_range, attempts)) = self.history.pending(series, epoch, kind)
+        {
+            if failed_range == range && self.clock.monotonic() < retry_at {
+                return false;
+            }
+            if attempts > MAXIMUM_HISTORY_RETRIES || failed_range != range {
+                // The failed cooldown expired, or the user moved to a genuinely
+                // different range. Start that request with a fresh retry budget.
+                self.history.clear_retry(series, epoch, kind);
+            }
+        }
+        true
     }
 
     fn history_request_instrument(
@@ -1087,9 +1106,21 @@ impl Coordinator<'_> {
             }
             Err(error) => {
                 let retry = self.schedule_history_retry(series, generation, range, &error);
+                if retry && range.is_none() && self.provider_uses_candles(&series.provider_id) {
+                    self.transition_candle_series(
+                        series,
+                        super::lifecycle::SeriesInput::HistoryFailed,
+                    );
+                }
                 self.dispatch_deferred_history(ticket, generation);
                 if !retry {
                     if range.is_none() {
+                        if self.provider_uses_candles(&series.provider_id) {
+                            self.transition_candle_series(
+                                series,
+                                super::lifecycle::SeriesInput::HistoryRetryExhausted,
+                            );
+                        }
                         let _ = self.cancel_live_history_reseed(series);
                         self.history_failed(series, generation);
                     } else {
@@ -1157,7 +1188,7 @@ impl Coordinator<'_> {
             CompletedHistoryInstall::Initial
         };
         if self
-            .install_completed_history(series, generation, prepared.snapshot, install)
+            .install_completed_history(ticket, generation, prepared.snapshot, install)
             .is_none()
         {
             if range.is_none() {
@@ -1178,7 +1209,7 @@ impl Coordinator<'_> {
                 return;
             };
             let realigned = if self.provider_uses_candles(&series.provider_id) {
-                self.start_candle_realtime_from_snapshot(series, &canonical)
+                self.restore_candle_from_snapshot(series, &canonical)
             } else {
                 self.start_rithmic_realtime_from_snapshot(series, &canonical)
             };
@@ -1269,6 +1300,12 @@ impl Coordinator<'_> {
             coverage.current_empty = Some(recorded);
         }
         self.pending.remove(series);
+        if self.provider_uses_candles(&series.provider_id) {
+            self.transition_candle_series(
+                series,
+                super::lifecycle::SeriesInput::HistoryEmpty(Some(ticket)),
+            );
+        }
         let detail = if self.engine.series_snapshot(series).is_some() {
             EMPTY_CURRENT_HISTORY_RETAINED_DETAIL
         } else {
@@ -1344,13 +1381,13 @@ impl Coordinator<'_> {
     }
 
     fn live_history_ready(&self, series: &BarSeriesKey) -> bool {
-        self.series_live
+        self.series
             .trade(series)
             .is_some_and(|live| live.history_state == super::LiveHistoryState::Ready)
             || self
-                .series_live
+                .series
                 .candle(series)
-                .is_some_and(|live| live.history_state == super::LiveHistoryState::Ready)
+                .is_some_and(super::lifecycle::SeriesLifecycle::history_ready)
     }
 
     fn execute_studies_after_history_install(
@@ -1419,11 +1456,12 @@ impl Coordinator<'_> {
     }
     fn install_completed_history(
         &mut self,
-        series: &BarSeriesKey,
+        ticket: &HistoryTicket,
         generation: ProviderGeneration,
         snapshot: HistorySnapshot,
         install: CompletedHistoryInstall,
     ) -> Option<(Vec<MarketBar>, Option<FormingBar>)> {
+        let series = &ticket.series;
         let price_scale = snapshot.price_scale;
         let quantity_scale = snapshot.quantity_scale;
         let handoff_boundary_unix_nanos = snapshot.handoff_boundary_unix_nanos;
@@ -1478,7 +1516,7 @@ impl Coordinator<'_> {
             return Some((bars, forming));
         }
         if self.provider_uses_candles(&series.provider_id) {
-            if let Err(error) = self.finish_candle_history_handoff(
+            if let Err(error) = self.install_candle_seed(
                 series,
                 generation,
                 CandleHandoffSeed {
@@ -1487,6 +1525,7 @@ impl Coordinator<'_> {
                     bars: &bars,
                     forming: provider_forming,
                 },
+                Some(ticket),
             ) {
                 self.fail_history_handoff(series, &error);
                 return None;
@@ -1703,18 +1742,6 @@ impl Coordinator<'_> {
         }
     }
 
-    pub(super) fn finish_candle_history_handoff(
-        &mut self,
-        series: &BarSeriesKey,
-        generation: ProviderGeneration,
-        seed: CandleHandoffSeed<'_>,
-    ) -> Result<(), String> {
-        self.ensure_realtime(series)?;
-        self.seed_candle_history(series, generation, seed)
-            .then_some(())
-            .ok_or_else(|| "Provider history/live handoff failed".to_string())
-    }
-
     pub(super) fn finish_rithmic_history_handoff(
         &mut self,
         series: &BarSeriesKey,
@@ -1730,75 +1757,13 @@ impl Coordinator<'_> {
             .ok_or_else(|| "Rithmic history/live handoff failed".to_string())
     }
 
-    pub(super) fn start_candle_realtime_from_snapshot(
-        &mut self,
-        series: &BarSeriesKey,
-        snapshot: &aeris_market_engine::SeriesSnapshot,
-    ) -> Result<(), String> {
-        self.ensure_realtime(series)?;
-        // A retained series whose newest bar is still forming hands that bar
-        // over as the open period rather than as closed history, so the first
-        // live replacement revises it instead of opening a duplicate period.
-        let (bars, forming) = match snapshot.bars.split_last() {
-            Some((last, head)) if snapshot.forming => (
-                head,
-                Some(FormingBar {
-                    bar: *last,
-                    trades: None,
-                }),
-            ),
-            _ => (snapshot.bars.as_ref(), None),
-        };
-        if self.seed_candle_history(
-            series,
-            snapshot.provider_generation,
-            CandleHandoffSeed {
-                price_scale: snapshot.price_scale,
-                quantity_scale: snapshot.quantity_scale,
-                bars,
-                forming,
-            },
-        ) {
-            Ok(())
-        } else {
-            Err("Provider cached history/live handoff failed".to_string())
-        }
-    }
-
-    pub(super) fn seed_candle_history(
-        &mut self,
-        series: &BarSeriesKey,
-        _generation: ProviderGeneration,
-        seed: CandleHandoffSeed<'_>,
-    ) -> bool {
-        let Some(live) = self.series_live.candle_mut(series) else {
-            return true;
-        };
-        let CandleHandoffSeed {
-            price_scale,
-            quantity_scale,
-            bars,
-            forming,
-        } = seed;
-        if live
-            .seed(price_scale, quantity_scale, bars, forming)
-            .is_ok()
-        {
-            return true;
-        }
-        live.history_state = super::LiveHistoryState::AwaitingHistory;
-        live.dirty = false;
-        self.broadcast_series_recovery_for(series, "Provider history/live handoff failed");
-        false
-    }
-
     pub(super) fn seed_rithmic_history(
         &mut self,
         series: &BarSeriesKey,
         _generation: ProviderGeneration,
         seed: TradeHandoffSeed<'_>,
     ) -> bool {
-        let Some(live) = self.series_live.trade_mut(series) else {
+        let Some(live) = self.series.trade_mut(series) else {
             return true;
         };
         let TradeHandoffSeed {

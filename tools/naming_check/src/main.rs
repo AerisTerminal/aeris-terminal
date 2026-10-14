@@ -119,6 +119,24 @@ fn main() -> ExitCode {
             }
         }
     }
+    for path in [
+        "crates/market_runtime/src/market_service/coordinator.rs",
+        "crates/market_runtime/src/market_service/realtime.rs",
+        "crates/market_runtime/src/market_service/lifecycle/mod.rs",
+        "crates/market_runtime/src/market_service/lifecycle/handlers.rs",
+    ] {
+        let file = root.join(path);
+        match fs::read_to_string(&file) {
+            Ok(source) if violates_series_lifecycle_boundary(path, &source) => {
+                violations.push(relative_to(&root, &file));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("failed to read series lifecycle boundary at {path}: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let event_path = "crates/market_runtime/src/market_service/provider_event.rs";
     let event_file = root.join(event_path);
     match fs::read_to_string(&event_file) {
@@ -171,6 +189,31 @@ fn violates_calendar_boundary(path: &str, source: &str) -> bool {
         return true;
     }
     production.contains("RithmicExchangeCalendar")
+}
+
+fn violates_series_lifecycle_boundary(path: &str, source: &str) -> bool {
+    let production = production_source_prefix(source);
+    if path.ends_with("/coordinator.rs")
+        && !production.contains("series: lifecycle::SeriesLifecycles")
+    {
+        return true;
+    }
+    if path.contains("/lifecycle/") && production.contains("Instant::now()") {
+        return true;
+    }
+    if path.ends_with("/realtime.rs")
+        && [
+            "candle_provider_",
+            "candle_series_recovering",
+            "publish_candle_live",
+            "CandleLiveHandoff",
+        ]
+        .iter()
+        .any(|old| production.contains(old))
+    {
+        return true;
+    }
+    false
 }
 
 fn public_provider_event_has_raw_generation(source: &str) -> bool {
@@ -2303,7 +2346,7 @@ mod tests {
         );
         let coordinator_source = manifest(&format!("{root}/coordinator.rs"));
         let coordinator = production_prefix(&coordinator_source);
-        assert!(coordinator.contains("series_live: super::SeriesLiveMap::default()"));
+        assert!(coordinator.contains("series: lifecycle::SeriesLifecycles::default()"));
         for superseded in ["rithmic_live:", "candle_live:"] {
             assert!(
                 !coordinator.contains(superseded),
@@ -2327,6 +2370,33 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn series_lifecycle_boundary_accepts_owner_and_injected_clock() {
+        assert!(!super::violates_series_lifecycle_boundary(
+            "crates/market_runtime/src/market_service/coordinator.rs",
+            "struct Coordinator { series: lifecycle::SeriesLifecycles }"
+        ));
+        assert!(!super::violates_series_lifecycle_boundary(
+            "crates/market_runtime/src/market_service/lifecycle/mod.rs",
+            "fn step(clock: &dyn Clock) { clock.monotonic(); }\n#[cfg(test)] mod tests { fn check() { Instant::now(); } }\nfn production_after_tests() { let _now = 1; }",
+        ));
+    }
+
+    #[test]
+    fn series_lifecycle_boundary_rejects_old_owner_handlers_and_wall_clock() {
+        assert!(super::violates_series_lifecycle_boundary(
+            "crates/market_runtime/src/market_service/coordinator.rs",
+            "struct Coordinator { series_live: SeriesLiveMap }",
+        ));
+        assert!(super::violates_series_lifecycle_boundary(
+            "crates/market_runtime/src/market_service/lifecycle/mod.rs",
+            "#[cfg(test)] mod tests { fn check() {} }\nfn production_after_tests() { Instant::now(); }",
+        ));
+        assert!(super::violates_series_lifecycle_boundary(
+            "crates/market_runtime/src/market_service/realtime.rs",
+            "fn publish_candle_live() {}",
+        ));
     }
     #[test]
     fn local_clients_versions_and_workspace_writes_remain_fenced() {

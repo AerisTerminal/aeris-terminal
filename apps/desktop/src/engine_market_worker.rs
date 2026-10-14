@@ -1342,6 +1342,7 @@ mod tests {
             series: None,
             state: load_state,
             detail: detail.map(str::to_string),
+            presentation: None,
         };
 
         apply_series_state(
@@ -1429,6 +1430,7 @@ mod tests {
             series: None,
             state: SeriesLoadState::Empty,
             detail: Some("waiting for live trades".to_string()),
+            presentation: None,
         };
 
         apply_series_state(empty.clone(), "rithmic", true, &mut live, &sender)
@@ -2229,6 +2231,7 @@ mod tests {
                 series: None,
                 state: SeriesLoadState::Live,
                 detail: None,
+                presentation: None,
             }),
             &PushedEventContext {
                 consumer_id: 1,
