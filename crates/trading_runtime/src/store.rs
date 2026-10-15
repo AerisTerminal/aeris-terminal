@@ -669,6 +669,17 @@ pub(super) struct FillPolicyPersistence<'a> {
 }
 
 impl TradingStore {
+    #[cfg(test)]
+    pub(super) fn crash_during_commit(&self, nth: usize) {
+        let mut remaining = nth;
+        self.connection
+            .commit_hook(Some(move || {
+                remaining = remaining.saturating_sub(1);
+                remaining == 0
+            }))
+            .expect("install replay-only SQLite commit hook");
+    }
+
     pub(super) fn open(path: &Path, retention: TradingRetention) -> Result<Self, StoreError> {
         let existed = path != Path::new(":memory:") && path.exists();
         if existed {

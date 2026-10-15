@@ -489,7 +489,9 @@ Status: in progress
 - [x] M4.2 trading-core-owner-shell - Thin owner thread around a synchronous `TradingCore`
   - Moved bounded `Command` to `service/mod.rs` and the single owner wait loop to `service/owner.rs`; `TradingCore` serializes `handle(command, now)`, `on_market(batch, now)` and due `on_timer(now)` without changing the current durable order path or goldens.
   - Eight concurrent submitters place 1,000 distinct orders with contiguous event sequences and revisions preserved across restart. An idle `ManualClock` owner retains zero timer calls across 1,000 status commands; its named thread is asserted. TR-12 god-object split has begun, but the broader finding remains open for M4.5/M4.6/M5.9/M8.10.
-- [ ] M4.3 trading-replay-harness - Deterministic trading replay harness
+- [x] M4.3 trading-replay-harness - Deterministic trading replay harness
+  - Moved the two frozen simulated scenarios into `src/replay/` without changing either golden; both now drive `TradingCore` directly against a temporary SQLite file and compare byte-identical transcripts across independent runs.
+  - Shared core startup with the production owner; replay restart drops/reopens its SQLite connection, and a test-only SQLite commit hook aborts the selected commit. Seeded, bounded xorshift runs check order/event consistency and restart recovery at each step, and report reproducible seed/step failures. The hook dependency is dev-only; no new production boundary or restriction.
 - [ ] M4.4 indexed-order-book - Indexed order book; remove linear scans
 - [ ] M4.5 trading-core-module-split - Split `lib.rs` and the Coordinator into focused modules
 - [ ] M4.6 trading-store-module-split - Split `store.rs` by table family
@@ -695,6 +697,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4.1 fix(trading): stamp cancels at monotonic command time - injected clock, regression and single-line stop golden update; GUI cancel flow blocked by pre-M4.7 instrument registration.
 - 2026-10-15 M4 triage fix(trading): restore verified default contract terms and dynamic bracket increments - pre-M3/HEAD isolated GUI comparison found two regressions; verified live practice ladder order after owner-side fixes, full gate green.
 - 2026-10-15 M4.2 refactor(trading): isolate the single trading owner shell - moved command and timed wait boundaries, retained golden behavior, and verified concurrent revision/restart plus idle ManualClock coverage.
+- 2026-10-15 M4.3 test(trading): replay core against SQLite with deterministic transcripts - ported both unchanged goldens, tested restart/commit abort and seeded reproduction.
 
 ## 7. Known gaps / deferred
 

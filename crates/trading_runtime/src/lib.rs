@@ -543,43 +543,13 @@ impl TradingService {
         let worker = thread::Builder::new()
             .name(service::owner::OWNER_THREAD_NAME.to_string())
             .spawn(move || {
-                let coordinator =
-                    TradingStore::open(&database_path, retention).and_then(|mut store| {
-                        let state = store.load_state().map_err(StoreError::Other)?;
-                        let restored_orders = state
-                            .orders
-                            .values()
-                            .filter(|order| order.status.is_open())
-                            .map(|order| order.id.clone())
-                            .collect();
-                        let mut coordinator = TradingCore {
-                            store,
-                            state,
-                            retention,
-                            command_now: clock.wall_unix_nanos(),
-                            clock,
-                            copy_dispatches: std::collections::VecDeque::new(),
-                            market_observation_error: None,
-                            venue_error: None,
-                            observations: coordinator_observations,
-                            observation_cursors: BTreeMap::new(),
-                            restored_orders,
-                            practice_market_session: None,
-                            venue_outbound: None,
-                            venue_inbox: coordinator_venue_inbox,
-                            venue_ingestion: 0,
-                            connected_broker_accounts: BTreeSet::new(),
-                            #[cfg(test)]
-                            timer_calls: 0,
-                        };
-                        coordinator
-                            .repair_loaded_position_projections()
-                            .map_err(StoreError::Other)?;
-                        coordinator
-                            .align_loaded_protection()
-                            .map_err(StoreError::Other)?;
-                        Ok(coordinator)
-                    });
+                let coordinator = TradingCore::open(
+                    &database_path,
+                    retention,
+                    clock,
+                    coordinator_observations,
+                    coordinator_venue_inbox,
+                );
                 match coordinator {
                     Ok(mut coordinator) => {
                         if started_tx.send(Ok(())).is_ok() {
@@ -1084,6 +1054,47 @@ fn observation_revision(observation: &SimulatedMarketObservation) -> (u64, u64) 
 }
 
 impl TradingCore {
+    fn open(
+        database_path: &std::path::Path,
+        retention: TradingRetention,
+        clock: Arc<dyn clock::Clock>,
+        observations: Arc<Mutex<PendingObservations>>,
+        venue_inbox: Weak<VenueInbox>,
+    ) -> Result<Self, StoreError> {
+        let mut store = TradingStore::open(database_path, retention)?;
+        let state = store.load_state().map_err(StoreError::Other)?;
+        let restored_orders = state
+            .orders
+            .values()
+            .filter(|order| order.status.is_open())
+            .map(|order| order.id.clone())
+            .collect();
+        let mut core = Self {
+            store,
+            state,
+            retention,
+            command_now: clock.wall_unix_nanos(),
+            clock,
+            copy_dispatches: std::collections::VecDeque::new(),
+            market_observation_error: None,
+            venue_error: None,
+            observations,
+            observation_cursors: BTreeMap::new(),
+            restored_orders,
+            practice_market_session: None,
+            venue_outbound: None,
+            venue_inbox,
+            venue_ingestion: 0,
+            connected_broker_accounts: BTreeSet::new(),
+            #[cfg(test)]
+            timer_calls: 0,
+        };
+        core.repair_loaded_position_projections()
+            .map_err(StoreError::Other)?;
+        core.align_loaded_protection().map_err(StoreError::Other)?;
+        Ok(core)
+    }
+
     fn repair_loaded_position_projections(&mut self) -> Result<(), String> {
         let keys = self.state.positions.keys().cloned().collect::<Vec<_>>();
         let mut repaired = Vec::new();

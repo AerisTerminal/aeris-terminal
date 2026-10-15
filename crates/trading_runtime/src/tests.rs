@@ -4,7 +4,8 @@ use aeris_instruments::{
 };
 use std::{fs, path::PathBuf};
 
-mod characterization;
+#[path = "replay/mod.rs"]
+mod replay;
 
 pub(crate) struct TestDirectory(PathBuf);
 
