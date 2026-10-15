@@ -92,13 +92,12 @@ fn git(root: &Path, arguments: &[&str]) -> ProbeResult<String> {
         .map_err(|_| ProbeError::Invariant("git output was not UTF-8"))
 }
 
-fn run(options: &cli::Options, evidence: &mut Evidence) -> ProbeResult<()> {
-    use aeris_platform_runtime::data_root::{DataRootMode, InstanceLock, initialize_data_root};
-    let root = initialize_data_root(DataRootMode::Validation {
-        root: options.root.clone(),
-        borrow_stored_ctrader: false,
-    })
-    .map_err(|error| ProbeError::Runtime(error.to_string()))?;
+fn run(
+    root: &aeris_platform_runtime::data_root::DataRoot,
+    options: &cli::Options,
+    evidence: &mut Evidence,
+) -> ProbeResult<()> {
+    use aeris_platform_runtime::data_root::InstanceLock;
     let _lock =
         InstanceLock::acquire(root).map_err(|error| ProbeError::Runtime(error.to_string()))?;
     let service = market(aeris_market_runtime::MarketService::start())?;
@@ -117,7 +116,15 @@ fn run(options: &cli::Options, evidence: &mut Evidence) -> ProbeResult<()> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    use aeris_platform_runtime::data_root::{DataRootMode, initialize_data_root};
+
     let options = cli::Options::parse(std::env::args().skip(1)).map_err(ProbeError::Argument)?;
+    // Reject unsafe roots before collecting evidence or attempting to write output.
+    let root = initialize_data_root(DataRootMode::Validation {
+        root: options.root.clone(),
+        borrow_stored_ctrader: false,
+    })
+    .map_err(|error| ProbeError::Runtime(error.to_string()))?;
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -126,7 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let clean = git(repo, &["status", "--porcelain", "--untracked-files=normal"])?.is_empty();
     let started_at = utc_now().to_rfc3339();
     let mut evidence = Evidence::new();
-    let result = run(&options, &mut evidence);
+    let result = run(root, &options, &mut evidence);
     let _ = evidence.check("source_clean", clean, json!({"clean": clean}));
     if let Err(error) = &result {
         evidence
