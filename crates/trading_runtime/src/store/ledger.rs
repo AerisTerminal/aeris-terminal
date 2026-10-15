@@ -119,6 +119,32 @@ impl TradingStore {
             .map_err(database_error)?;
         Ok(())
     }
+
+    pub(crate) fn put_verified_instrument(
+        &mut self,
+        instrument: &TradingInstrument,
+        route: &super::MarketRoute,
+    ) -> Result<(), String> {
+        let contract = encode_contract(&instrument.contract)?;
+        let route_json = super::encode_market_route(route)?;
+        let tx = self.connection.transaction().map_err(database_error)?;
+        tx.execute(
+            "INSERT INTO instruments(id, price_scale, quantity_scale, contract_json, market_route_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET price_scale=excluded.price_scale,
+                quantity_scale=excluded.quantity_scale, contract_json=excluded.contract_json,
+                market_route_json=excluded.market_route_json",
+            params![
+                instrument.instrument_id.as_str(),
+                instrument.price_scale,
+                instrument.quantity_scale,
+                contract,
+                route_json,
+            ],
+        )
+        .map_err(database_error)?;
+        tx.commit().map_err(database_error)
+    }
 }
 
 impl TradingStore {

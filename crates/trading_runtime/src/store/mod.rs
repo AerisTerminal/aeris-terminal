@@ -37,6 +37,7 @@ use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentClass, InstrumentDecimal, InstrumentId,
     InstrumentMetadataProvenance, PriceGrid, SessionHours,
 };
+use aeris_trading::market::MarketRoute;
 use aeris_trading::{
     AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
     OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
@@ -129,11 +130,62 @@ fn corrupt_error(path: &Path, detail: impl Into<String>) -> StoreError {
     }
 }
 
+fn encode_market_route(route: &MarketRoute) -> Result<String, String> {
+    route.validate().map_err(|error| error.to_string())?;
+    Ok(json!({
+        "provider_id": route.provider_id,
+        "instrument_id": route.instrument_id.as_str(),
+        "provider_symbol": route.provider_symbol,
+        "display_symbol": route.display_symbol,
+        "venue_id": route.venue_id,
+        "entitlement_id": route.entitlement_id,
+        "price_scale": route.price_scale,
+        "quantity_scale": route.quantity_scale,
+    })
+    .to_string())
+}
+
+fn decode_market_route(encoded: &str) -> Result<MarketRoute, String> {
+    let value: Value = serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+    let string = |field: &'static str| -> Result<String, String> {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("stored market route missing {field}"))
+    };
+    let scale = |field: &'static str| -> Result<u8, String> {
+        value
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| format!("stored market route missing {field}"))
+    };
+    let route = MarketRoute {
+        provider_id: string("provider_id")?,
+        instrument_id: InstrumentId::try_new(string("instrument_id")?)
+            .map_err(|error| error.to_string())?,
+        provider_symbol: string("provider_symbol")?,
+        display_symbol: string("display_symbol")?,
+        venue_id: string("venue_id")?,
+        entitlement_id: match value.get("entitlement_id") {
+            Some(Value::Null) => None,
+            Some(Value::String(id)) => Some(id.clone()),
+            _ => return Err("stored market route has invalid entitlement_id".into()),
+        },
+        price_scale: scale("price_scale")?,
+        quantity_scale: scale("quantity_scale")?,
+    };
+    route.validate().map_err(|error| error.to_string())?;
+    Ok(route)
+}
+
 pub(super) struct StoredState {
     pub revision: u64,
     pub next_sequence: u64,
     pub accounts: BTreeMap<TradingAccountId, TradingAccount>,
     pub instruments: BTreeMap<InstrumentId, TradingInstrument>,
+    pub market_routes: BTreeMap<InstrumentId, MarketRoute>,
     pub orders: crate::book::OrderBook,
     pub order_events: VecDeque<OrderEvent>,
     pub fills: VecDeque<Fill>,
@@ -295,6 +347,7 @@ impl TradingStore {
         let next_sequence = self.metadata("next_sequence")?;
         let accounts = self.load_accounts()?;
         let instruments = self.load_instruments()?;
+        let market_routes = self.load_market_routes()?;
         let orders = self.load_orders()?;
         let order_events = self.load_events()?;
         let fills = self.load_fills()?;
@@ -322,6 +375,7 @@ impl TradingStore {
             next_sequence,
             accounts,
             instruments,
+            market_routes,
             orders: crate::book::OrderBook::from_stored(orders, broker_order_ids),
             order_events,
             fills,
@@ -533,6 +587,35 @@ mod tests {
                 .expect("version");
             assert_eq!(actual, SCHEMA_VERSION, "starting at v{version}");
         }
+    }
+    #[test]
+    fn v19_instrument_fixture_keeps_terms_without_inventing_a_market_route() {
+        let connection = Connection::open_in_memory().expect("fixture");
+        create_schema_at(&connection, 19);
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        let instrument = crate::tests::instrument();
+        store.put_instrument(&instrument).expect("v19 instrument");
+        store.migrate(false).expect("V20 migration");
+        assert_eq!(
+            store
+                .load_instruments()
+                .expect("instruments")
+                .get(&instrument.instrument_id),
+            Some(&instrument)
+        );
+        assert!(store.load_market_routes().expect("routes").is_empty());
+        let route: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT market_route_json FROM instruments WHERE id = ?1",
+                [instrument.instrument_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("legacy route column");
+        assert_eq!(route, None);
     }
 
     #[test]

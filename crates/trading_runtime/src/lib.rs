@@ -20,6 +20,7 @@ pub(crate) use aeris_trading::{
 pub(crate) use aeris_trading::{
     ClientOrderId, Fill, FixedPoint, Order, TradingAccount, TradingAccountId, TradingProvenance,
 };
+pub use core::market::feed::MarketFeedInbox;
 pub use core::*;
 pub(crate) use core::{
     DEMO_VENUE_UNAVAILABLE, MAXIMUM_OPEN_ORDERS, Reply, TradingCore, UNREALIZED_PNL_INTERVAL,

@@ -15,13 +15,14 @@ mod groups;
 #[path = "../ledger/mod.rs"]
 mod ledger;
 #[path = "../market/mod.rs"]
-mod market;
+pub(crate) mod market;
 #[path = "../risk/owner.rs"]
 mod risk_owner;
 use groups::{planned_leg, protection};
 #[path = "../venue/broker.rs"]
 mod broker;
 
+use self::market::feed::{MarketFeedInbox, QuoteBook};
 use crate::book::OrderBook;
 pub use crate::copier::{
     MAXIMUM_COPIER_TARGETS, TradeCopierConfig, TradeCopierTarget, TradeCopyDispatch,
@@ -51,6 +52,7 @@ pub use crate::strategy::{
 };
 use crate::venue::{VenueInbox, VenueRequest};
 use aeris_instruments::{ContractMetadata, InstrumentId};
+use aeris_trading::market::{MarketRoute, QuoteInterestSink};
 use aeris_trading::{
     AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order,
     OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
@@ -463,6 +465,7 @@ pub(crate) struct TradingRuntime {
     stopping: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     observations: Arc<Mutex<PendingObservations>>,
+    market_feed: Arc<MarketFeedInbox>,
     pub(crate) venue_inbox: Arc<VenueInbox>,
 }
 
@@ -487,6 +490,12 @@ pub(crate) struct TradingCore {
     market_observation_error: Option<String>,
     venue_error: Option<String>,
     observations: Arc<Mutex<PendingObservations>>,
+    market_feed: Arc<MarketFeedInbox>,
+    quote_book: QuoteBook,
+    interest_sink: Option<Arc<dyn QuoteInterestSink>>,
+    ticket_interest: BTreeMap<InstrumentId, MarketRoute>,
+    published_interest: Vec<MarketRoute>,
+    interest_revision: u64,
     observation_cursors: BTreeMap<InstrumentId, ObservationCursor>,
     /// Orders working when the store was opened that this owner has not since modified. Their
     /// provenance revision was stamped by an earlier process's market feed, whose session
@@ -548,6 +557,11 @@ impl TradingService {
         let observations = Arc::new(Mutex::new(PendingObservations::default()));
         let coordinator_observations = Arc::clone(&observations);
         let stopping = Arc::new(AtomicBool::new(false));
+        let market_feed = Arc::new(MarketFeedInbox::new(
+            commands.clone(),
+            Arc::clone(&stopping),
+        ));
+        let coordinator_market_feed = Arc::clone(&market_feed);
         let venue_inbox = VenueInbox::new(commands.clone(), Arc::clone(&stopping));
         let coordinator_venue_inbox = Arc::downgrade(&venue_inbox);
         let worker = thread::Builder::new()
@@ -559,6 +573,7 @@ impl TradingService {
                     clock,
                     coordinator_observations,
                     coordinator_venue_inbox,
+                    coordinator_market_feed,
                 );
                 match coordinator {
                     Ok(mut coordinator) => {
@@ -581,6 +596,7 @@ impl TradingService {
                 stopping,
                 worker: Mutex::new(Some(worker)),
                 observations,
+                market_feed,
                 venue_inbox,
             }),
         })
@@ -636,6 +652,26 @@ impl TradingService {
     /// Returns an error for invalid metadata, overload, or a storage failure.
     pub fn register_instrument(&self, instrument: TradingInstrument) -> Result<(), String> {
         self.request(|reply| Command::RegisterInstrument(instrument, reply))
+    }
+
+    /// Attaches the single market interest owner, then republishes recovered routes.
+    ///
+    /// # Errors
+    /// Returns an error when the owner or interest sink cannot accept the attachment.
+    pub fn attach_market_feed(
+        &self,
+        sink: Arc<dyn QuoteInterestSink>,
+    ) -> Result<Arc<MarketFeedInbox>, String> {
+        self.request(|reply| Command::AttachMarketFeed(sink, reply))?;
+        Ok(Arc::clone(&self.runtime.market_feed))
+    }
+
+    /// Replaces bounded ticket demand; tickets never become execution quote authorities.
+    ///
+    /// # Errors
+    /// Returns an error for invalid, duplicate or excessive routes, or owner overload.
+    pub fn set_ticket_interest(&self, routes: Vec<MarketRoute>) -> Result<(), String> {
+        self.request(|reply| Command::SetTicketInterest(routes, reply))
     }
 
     /// Installs the market owner's read-only calendar check before accepting
@@ -1073,6 +1109,7 @@ impl TradingCore {
         clock: Arc<dyn clock::Clock>,
         observations: Arc<Mutex<PendingObservations>>,
         venue_inbox: Weak<VenueInbox>,
+        market_feed: Arc<MarketFeedInbox>,
     ) -> Result<Self, StoreError> {
         let mut store = TradingStore::open(database_path, retention)?;
         let state = store.load_state().map_err(StoreError::Other)?;
@@ -1091,6 +1128,12 @@ impl TradingCore {
             market_observation_error: None,
             venue_error: None,
             observations,
+            market_feed,
+            quote_book: QuoteBook::default(),
+            interest_sink: None,
+            ticket_interest: BTreeMap::new(),
+            published_interest: Vec::new(),
+            interest_revision: 0,
             observation_cursors: BTreeMap::new(),
             restored_orders,
             practice_market_session: None,
@@ -1205,6 +1248,11 @@ impl TradingCore {
             Command::RegisterInstrument(instrument, reply) => {
                 respond(&reply, self.register_instrument(instrument));
             }
+            Command::AttachMarketFeed(..)
+            | Command::SetTicketInterest(..)
+            | Command::DrainMarketFeed
+            | Command::Observe(..)
+            | Command::DrainObservations => self.dispatch_market_command(command, now),
             Command::InstallPracticeMarketSession(session, reply) => {
                 respond(&reply, self.install_practice_market_session(session));
             }
@@ -1240,23 +1288,6 @@ impl TradingCore {
             | Command::Reverse(..)
             | Command::FlattenAll(..)
             | Command::ApplyEconomicEventRisk(..) => self.dispatch_account_command(command),
-            Command::Observe(observation, reply) => {
-                self.advance_observation_cursor(&observation);
-                let result = self.observe_market(&observation);
-                self.market_observation_error = result.as_ref().err().cloned();
-                let _ = reply.send(result);
-            }
-            Command::DrainObservations => {
-                let pending = {
-                    let mut pending = self
-                        .observations
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    pending.drain_queued = false;
-                    std::mem::take(&mut pending.latest)
-                };
-                self.on_market(pending.into_values().collect(), now);
-            }
             Command::PutUserRecord(record, reply) => {
                 respond(&reply, self.put_user_record(&record));
             }
@@ -1289,6 +1320,10 @@ impl TradingCore {
                 return false;
             }
         }
+        if let Err(error) = self.recompute_quote_interest() {
+            self.market_observation_error = Some(error.to_string());
+        }
+        self.market_feed.wake_if_pending();
         true
     }
 
@@ -1300,6 +1335,9 @@ impl TradingCore {
                 self.market_observation_error = self.observe_market(&observation).err();
             }
         }
+        if let Err(error) = self.recompute_quote_interest() {
+            self.market_observation_error = Some(error.to_string());
+        }
     }
 
     /// Refreshes broker P&L only at a due deadline, never on an idle command wake.
@@ -1310,6 +1348,9 @@ impl TradingCore {
             self.timer_calls += 1;
         }
         self.request_unrealized_pnl();
+        if let Err(error) = self.recompute_quote_interest() {
+            self.market_observation_error = Some(error.to_string());
+        }
     }
 
     fn dispatch_account_command(&mut self, command: Command) {

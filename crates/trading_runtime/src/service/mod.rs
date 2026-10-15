@@ -11,6 +11,7 @@ use super::{
     TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus, TradingSnapshot,
     UserRecord, VenueRequest,
 };
+use aeris_trading::market::{MarketRoute, QuoteInterestSink};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::mpsc::SyncSender;
@@ -64,6 +65,9 @@ pub(crate) enum Command {
     ),
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
     DrainObservations,
+    AttachMarketFeed(Arc<dyn QuoteInterestSink>, Reply<()>),
+    SetTicketInterest(Vec<MarketRoute>, Reply<()>),
+    DrainMarketFeed,
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),

@@ -1721,6 +1721,14 @@ impl Coordinator<'_> {
         if !self.trading_feed.attached() {
             return;
         }
+        let Some(provider_generation) = self
+            .engine
+            .provider_status(&key.provider)
+            .and_then(|status| status.generation)
+            .map(|generation| generation.0.get())
+        else {
+            return;
+        };
         let Some(at) = self.clock.wall_nanos() else {
             return;
         };
@@ -1739,6 +1747,7 @@ impl Coordinator<'_> {
         };
         let session = InstrumentSession {
             instrument_id: key.instrument.clone(),
+            provider_generation,
             phase: self
                 .calendar
                 .phase(key.instrument.as_str(), at.div_euclid(1_000_000)),

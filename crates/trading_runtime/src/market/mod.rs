@@ -1,3 +1,340 @@
+pub(crate) mod feed;
+
+use super::{Command, ManagedBracketStatus, respond};
+use aeris_instruments::{ContractMetadata, InstrumentId, InstrumentMetadataProvenance, PriceGrid};
+use aeris_trading::AccountEnvironment;
+use aeris_trading::market::{
+    InstrumentTerms, MAXIMUM_QUOTE_INTEREST, MarketFeedError, MarketFeedEvent, MarketRoute,
+    QuoteInterest,
+};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+const MAXIMUM_TICKET_INTEREST: usize = 64;
+
+#[derive(Debug)]
+pub(crate) enum MarketConsumerError {
+    Feed(MarketFeedError),
+    InvalidContract(String),
+    ProviderChanged,
+    TicketLimit,
+    DuplicateTicket,
+    InterestLimit,
+    RevisionExhausted,
+    Persistence(String),
+}
+
+impl fmt::Display for MarketConsumerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Feed(error) => write!(f, "{error}"),
+            Self::InvalidContract(error) | Self::Persistence(error) => f.write_str(error),
+            Self::ProviderChanged => {
+                f.write_str("verified terms cannot change an instrument's provider identity")
+            }
+            Self::TicketLimit => f.write_str("ticket quote interest limit reached"),
+            Self::DuplicateTicket => f.write_str("duplicate ticket route"),
+            Self::InterestLimit => f.write_str("trading quote interest limit reached"),
+            Self::RevisionExhausted => f.write_str("quote interest revision exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for MarketConsumerError {}
+
+impl From<MarketFeedError> for MarketConsumerError {
+    fn from(error: MarketFeedError) -> Self {
+        Self::Feed(error)
+    }
+}
+
+impl TradingCore {
+    pub(crate) fn dispatch_market_command(&mut self, command: Command, now: i64) {
+        match command {
+            Command::AttachMarketFeed(sink, reply) => {
+                self.interest_sink = Some(sink);
+                self.published_interest.clear();
+                respond(
+                    &reply,
+                    self.recompute_quote_interest()
+                        .map_err(|error| error.to_string()),
+                );
+            }
+            Command::SetTicketInterest(routes, reply) => {
+                respond(
+                    &reply,
+                    self.replace_ticket_interest(routes)
+                        .map_err(|error| error.to_string()),
+                );
+            }
+            Command::DrainMarketFeed => self.drain_market_feed(),
+            Command::Observe(observation, reply) => {
+                self.advance_observation_cursor(&observation);
+                let result = self.observe_market(&observation);
+                self.market_observation_error = result.as_ref().err().cloned();
+                let _ = reply.send(result);
+            }
+            Command::DrainObservations => {
+                let pending = {
+                    let mut pending = self
+                        .observations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    pending.drain_queued = false;
+                    std::mem::take(&mut pending.latest)
+                };
+                self.on_market(pending.into_values().collect(), now);
+            }
+            _ => unreachable!("only market commands are dispatched here"),
+        }
+    }
+
+    pub(crate) fn register_verified_terms(
+        &mut self,
+        terms: InstrumentTerms,
+    ) -> Result<(), MarketConsumerError> {
+        terms.validate()?;
+        let id = terms.route.instrument_id.clone();
+        if self
+            .state
+            .market_routes
+            .get(&id)
+            .is_some_and(|route| route.provider_id != terms.route.provider_id)
+        {
+            return Err(MarketConsumerError::ProviderChanged);
+        }
+        if self.state.instruments.get(&id).is_some_and(|old| {
+            old.contract.provenance.provider_id == terms.route.provider_id
+                && old.contract.provenance.session_generation > terms.session_generation
+        }) {
+            return Ok(());
+        }
+        let contract = ContractMetadata {
+            tick_size: match terms.price_grid {
+                PriceGrid::Fixed(tick) => Some(tick),
+                _ => None,
+            },
+            price_grid: terms.price_grid,
+            instrument_class: terms.instrument_class,
+            point_value: terms.point_value,
+            order_quantity_increment: terms.quantity_increment,
+            currency: terms.currency,
+            expiry: terms.expiry,
+            first_notice: terms.first_notice,
+            last_trade: terms.last_trade,
+            session_hours: terms.session_hours,
+            provenance: InstrumentMetadataProvenance {
+                provider_id: terms.route.provider_id.clone(),
+                provider_symbol: terms.route.provider_symbol.clone(),
+                display_symbol: terms.route.display_symbol.clone(),
+                session_generation: terms.session_generation,
+            },
+        };
+        let instrument = TradingInstrument {
+            instrument_id: id.clone(),
+            price_scale: terms.route.price_scale,
+            quantity_scale: terms.route.quantity_scale,
+            contract,
+        };
+        instrument
+            .contract
+            .validate()
+            .map_err(|error| MarketConsumerError::InvalidContract(error.to_string()))?;
+        if self.interested_in(&id)
+            && !self.state.market_routes.contains_key(&id)
+            && self.collect_quote_interest(&self.ticket_interest)?.len() == MAXIMUM_QUOTE_INTEREST
+        {
+            return Err(MarketConsumerError::InterestLimit);
+        }
+        let needs_quote = self.interested_in(&id);
+        let route_changed = self
+            .state
+            .market_routes
+            .get(&id)
+            .is_some_and(|route| route != &terms.route);
+        self.store
+            .put_verified_instrument(&instrument, &terms.route)
+            .map_err(MarketConsumerError::Persistence)?;
+        self.state.instruments.insert(id.clone(), instrument);
+        self.state.market_routes.insert(id.clone(), terms.route);
+        if route_changed {
+            self.quote_book.retire_route(&id);
+        }
+        if needs_quote {
+            self.quote_book
+                .set_generation_floor(&id, terms.session_generation);
+        }
+        self.bump_revision()
+            .map_err(MarketConsumerError::Persistence)
+    }
+
+    pub(crate) fn replace_ticket_interest(
+        &mut self,
+        routes: Vec<MarketRoute>,
+    ) -> Result<(), MarketConsumerError> {
+        if routes.len() > MAXIMUM_TICKET_INTEREST {
+            return Err(MarketConsumerError::TicketLimit);
+        }
+        let mut tickets = BTreeMap::new();
+        for route in routes {
+            route.validate()?;
+            if tickets.insert(route.instrument_id.clone(), route).is_some() {
+                return Err(MarketConsumerError::DuplicateTicket);
+            }
+        }
+        // Check the union before changing the published demand.
+        self.collect_quote_interest(&tickets)?;
+        self.ticket_interest = tickets;
+        Ok(())
+    }
+
+    pub(crate) fn interested_in(&self, id: &InstrumentId) -> bool {
+        self.quote_interest_ids().contains(id) || self.ticket_interest.contains_key(id)
+    }
+
+    pub(crate) fn check_new_order_interest(
+        &self,
+        id: &InstrumentId,
+    ) -> Result<(), MarketConsumerError> {
+        if !self.interested_in(id)
+            && self.state.market_routes.contains_key(id)
+            && self.collect_quote_interest(&self.ticket_interest)?.len() == MAXIMUM_QUOTE_INTEREST
+        {
+            return Err(MarketConsumerError::InterestLimit);
+        }
+        Ok(())
+    }
+
+    fn quote_interest_ids(&self) -> BTreeSet<InstrumentId> {
+        let mut ids = BTreeSet::new();
+        for order in self.state.orders.open_orders() {
+            if self
+                .state
+                .accounts
+                .get(&order.account_id)
+                .is_some_and(|account| account.environment == AccountEnvironment::Simulated)
+            {
+                ids.insert(order.instrument_id.clone());
+            }
+        }
+        for position in self.state.positions.values() {
+            if position.net_quantity.units() != 0
+                && self
+                    .state
+                    .accounts
+                    .get(&position.account_id)
+                    .is_some_and(|account| account.environment == AccountEnvironment::Simulated)
+            {
+                ids.insert(position.instrument_id.clone());
+            }
+        }
+        for group in self.state.managed_brackets.values() {
+            if !matches!(
+                group.status,
+                ManagedBracketStatus::AwaitingEntry | ManagedBracketStatus::Active
+            ) {
+                continue;
+            }
+            let Some(entry) = self.state.orders.by_client(&group.entry_client_order_id) else {
+                continue;
+            };
+            if self
+                .state
+                .accounts
+                .get(&entry.account_id)
+                .is_some_and(|account| account.environment == AccountEnvironment::Simulated)
+            {
+                ids.insert(entry.instrument_id.clone());
+            }
+        }
+        ids
+    }
+
+    fn collect_quote_interest(
+        &self,
+        tickets: &BTreeMap<InstrumentId, MarketRoute>,
+    ) -> Result<Vec<MarketRoute>, MarketConsumerError> {
+        let mut routes = self
+            .quote_interest_ids()
+            .into_iter()
+            .filter_map(|id| {
+                self.state
+                    .market_routes
+                    .get(&id)
+                    .cloned()
+                    .map(|route| (id, route))
+            })
+            .collect::<BTreeMap<_, _>>();
+        routes.extend(
+            tickets
+                .iter()
+                .map(|(id, route)| (id.clone(), route.clone())),
+        );
+        if routes.len() > MAXIMUM_QUOTE_INTEREST {
+            return Err(MarketConsumerError::InterestLimit);
+        }
+        Ok(routes.into_values().collect())
+    }
+
+    pub(crate) fn recompute_quote_interest(&mut self) -> Result<(), MarketConsumerError> {
+        let Some(sink) = self.interest_sink.as_ref() else {
+            return Ok(());
+        };
+        let routes = self.collect_quote_interest(&self.ticket_interest)?;
+        if routes == self.published_interest {
+            return Ok(());
+        }
+        let revision = self
+            .interest_revision
+            .checked_add(1)
+            .ok_or(MarketConsumerError::RevisionExhausted)?;
+        sink.set_interest(QuoteInterest {
+            revision,
+            routes: routes.clone(),
+        })
+        .map_err(MarketConsumerError::Feed)?;
+        self.interest_revision = revision;
+        self.published_interest = routes;
+        self.quote_book.retain(
+            &self
+                .published_interest
+                .iter()
+                .map(|route| route.instrument_id.clone())
+                .collect(),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn drain_market_feed(&mut self) {
+        let batch = self.market_feed.drain();
+        for event in batch.controls {
+            match event {
+                MarketFeedEvent::Terms(terms) => {
+                    if let Err(error) = self.register_verified_terms(terms) {
+                        self.market_observation_error = Some(error.to_string());
+                    }
+                }
+                event => {
+                    if let Err(error) = self.quote_book.accept(event, &self.state.market_routes) {
+                        self.market_observation_error = Some(error.to_string());
+                    }
+                }
+            }
+        }
+        for quote in batch.quotes {
+            if let Err(error) = self
+                .quote_book
+                .accept(MarketFeedEvent::Quote(quote), &self.state.market_routes)
+            {
+                self.market_observation_error = Some(error.to_string());
+            }
+        }
+        if batch.resync {
+            // A changed revision requests a full snapshot, including lost Terms/Feed/Session.
+            self.published_interest.clear();
+        }
+    }
+}
 use super::{
     ClientOrderId, Fill, FixedPoint, ObservationCursor, Order, Position,
     SimulatedMarketObservation, TradingCore, TradingInstrument, market_fill_candidates,

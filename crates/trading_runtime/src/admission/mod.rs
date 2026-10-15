@@ -286,6 +286,8 @@ impl TradingCore {
         if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
             return Ok(existing.clone());
         }
+        self.check_new_order_interest(&command.instrument_id)
+            .map_err(|error| error.to_string())?;
         let copier = self
             .state
             .trade_copiers

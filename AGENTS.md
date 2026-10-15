@@ -111,7 +111,8 @@ violations and missing verification explicitly, and never describe them as satis
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V19 migration sequence. Store-open preflight scratch cleanup may
+  `schema.rs` retains the V1–V20 migration sequence. V20 adds nullable verified market routes;
+  migrated legacy instruments remain route-less until verified Terms arrive. Store-open preflight scratch cleanup may
   remove only exact preflight directories containing solely the expected database copy and
   SQLite sidecars; preserve unknown contents and report cleanup failures through observability.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance

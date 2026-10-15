@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 20;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -194,6 +194,8 @@ pub(super) const MIGRATION_V18: &str =
 /// retired session's events can never be mistaken for current ones.
 pub(super) const MIGRATION_V19: &str =
     "INSERT INTO metadata(key, value) VALUES ('venue_generation', 0);";
+/// Legacy instruments have no verified route and cannot be subscribed until Terms arrive.
+pub(super) const MIGRATION_V20: &str = "ALTER TABLE instruments ADD COLUMN market_route_json TEXT;";
 
 pub(super) struct Migration {
     pub(super) from: u32,
@@ -296,6 +298,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 18,
         to: 19,
         sql: MIGRATION_V19,
+    },
+    Migration {
+        from: 19,
+        to: 20,
+        sql: MIGRATION_V20,
     },
 ];
 

@@ -132,6 +132,7 @@ pub enum FeedState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstrumentSession {
     pub instrument_id: InstrumentId,
+    pub provider_generation: u64,
     pub phase: SessionPhase,
     pub source: aeris_instruments::CalendarSourceKind,
     pub session_end_unix_nanos: Option<i64>,
@@ -144,7 +145,8 @@ impl InstrumentSession {
     /// # Errors
     /// Returns an error when a provider supplies malformed UTC timestamps.
     pub fn validate(&self) -> Result<(), MarketFeedError> {
-        if self.session_end_unix_nanos.is_some_and(|time| time < 0)
+        if self.provider_generation == 0
+            || self.session_end_unix_nanos.is_some_and(|time| time < 0)
             || self.next_open_unix_nanos.is_some_and(|time| time < 0)
         {
             return Err(MarketFeedError::InvalidSessionTime);

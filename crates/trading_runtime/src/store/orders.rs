@@ -221,6 +221,33 @@ impl TradingStore {
 }
 
 impl TradingStore {
+    pub(super) fn load_market_routes(
+        &self,
+    ) -> Result<BTreeMap<InstrumentId, super::MarketRoute>, String> {
+        let mut routes = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, market_route_json FROM instruments WHERE market_route_json IS NOT NULL",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (id, json) = row.map_err(database_error)?;
+            let id = InstrumentId::try_new(id).map_err(|error| error.to_string())?;
+            let route = super::decode_market_route(&json)?;
+            if route.instrument_id != id {
+                return Err("stored market route has a different instrument identity".into());
+            }
+            routes.insert(id, route);
+        }
+        Ok(routes)
+    }
+
     pub(super) fn load_instruments(
         &self,
     ) -> Result<BTreeMap<InstrumentId, TradingInstrument>, String> {

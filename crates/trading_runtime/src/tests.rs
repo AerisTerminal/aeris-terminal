@@ -68,6 +68,7 @@ pub(crate) fn start_service(directory: &TestDirectory) -> TradingService {
 }
 
 mod foundation;
+mod market_feed;
 
 #[test]
 fn owner_serializes_eight_submitters_and_recovers_exact_order_revisions() {

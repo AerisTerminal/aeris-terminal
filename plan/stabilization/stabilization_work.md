@@ -506,6 +506,7 @@ Status: in progress
 - [ ] M4.7 runtime-owned-quotes - Trading runtime owns its quotes; the desktop relay is removed
   - M4.7 part 1/3: The market owner projects only provider-verified expiry, first-notice, last-trade, weekly hours and session generation into `InstrumentTerms`. On restored quote leases without catalog entries it searches and selects the exact saved route through a bounded, generation-fenced provider catalog request; no terms are synthesized. Feed attachment snapshots include only quotes from the current provider generation.
   - Market/domain crate checks and the full fmt, workspace strict Clippy, workspace tests and naming gate passed. Focused tests cover invalid dates, restored route resolution with no chart, rejected early/retired callbacks and current-generation snapshot quotes. Execution still uses desktop observations alone until the atomic part 3 cutover; M4.7 remains unchecked.
+  - M4.7 part 2/3: Trading owner registers verified Terms and persists their routes in V20; migration leaves old instruments without invented routes. Owner-fenced QuoteBook, bounded latest-wins feed inbox, 64-ticket and 256-total interest follow working orders, positions and managed groups, with restart republishing. Session events now carry provider generation. The feed is deliberately **not** an execution input; existing desktop observations alone still drive fills until part 3 wires composition and removes the relay. V20 is occupied by route persistence, so the planned M4.9 fill-accounting migration must use V21 or later; no M4.7 GUI/no-chart stop claim is made yet.
 - [ ] M4.8 provider-neutral-gating - Session and freshness gating for every provider
 - [ ] M4.9 fill-accounting-consolidation - One fill-accounting implementation (V20)
 - [ ] M4.10 facts-only-persistence - Commit-then-apply steps; no durable writes per quote
@@ -630,6 +631,7 @@ the repo root `AGENTS.md`.
 - One named trading owner thread runs the loop in `service/owner.rs` and drives `TradingCore` command, market and deadline entry points; the bounded command enum resides in `service/mod.rs` (M4.2, this commit).
 - `book::OrderBook` alone mutates canonical orders and maintains client, broker, open-scope and executable indexes (M4.4, this commit).
 - Store preflight scratch sweeping removes only exact-name directories containing expected database and sidecar copies; unknown contents remain and cleanup failures are logged (M4.6, this commit).
+- V20 persists only verified trading market routes; migrated legacy instruments remain route-less until the market owner publishes verified Terms. The owner bounds ticket interest at 64 and combined quote interest at 256 (M4.7 part 2/3, this commit).
 
 ## 6. Progress log
 
@@ -714,6 +716,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4.5 refactor(trading): split core behavior into focused modules - moved owner methods and broker/group implementations mechanically with unchanged goldens and scripted scenarios; full gates passed.
 - 2026-10-15 M4.6 refactor(trading): split SQLite store by table family - preserved V1–V19 and restart assertions, added StepTx and bounded safe preflight scratch cleanup with failure diagnostics.
 - 2026-10-15 M4.7 part 1/3 feat(market): restore trading lease routes with verified terms - preserved provider contract fields, resolved chart-free routes through the catalog and fenced the current quote snapshot; full gate passed.
+- 2026-10-15 M4.7 part 2/3 feat(trading): prepare bounded owner market feed and persistent routes - tested validation/fencing, overflow, interest lifecycle/bounds, V19 migration and restart without changing simulated execution; desktop cutover remains part 3.
 
 ## 7. Known gaps / deferred
 
