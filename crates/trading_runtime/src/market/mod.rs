@@ -49,7 +49,7 @@ impl From<MarketFeedError> for MarketConsumerError {
 }
 
 impl TradingCore {
-    pub(crate) fn dispatch_market_command(&mut self, command: Command, now: i64) {
+    pub(crate) fn dispatch_market_command(&mut self, command: Command) {
         match command {
             Command::AttachMarketFeed(sink, reply) => {
                 self.interest_sink = Some(sink);
@@ -68,22 +68,12 @@ impl TradingCore {
                 );
             }
             Command::DrainMarketFeed => self.drain_market_feed(),
+            #[cfg(test)]
             Command::Observe(observation, reply) => {
                 self.advance_observation_cursor(&observation);
                 let result = self.observe_market(&observation);
                 self.market_observation_error = result.as_ref().err().cloned();
                 let _ = reply.send(result);
-            }
-            Command::DrainObservations => {
-                let pending = {
-                    let mut pending = self
-                        .observations
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    pending.drain_queued = false;
-                    std::mem::take(&mut pending.latest)
-                };
-                self.on_market(pending.into_values().collect(), now);
             }
             _ => unreachable!("only market commands are dispatched here"),
         }
@@ -307,6 +297,7 @@ impl TradingCore {
 
     pub(crate) fn drain_market_feed(&mut self) {
         let batch = self.market_feed.drain();
+        let mut changed = BTreeSet::new();
         for event in batch.controls {
             match event {
                 MarketFeedEvent::Terms(terms) => {
@@ -315,20 +306,40 @@ impl TradingCore {
                     }
                 }
                 event => {
-                    if let Err(error) = self.quote_book.accept(event, &self.state.market_routes) {
-                        self.market_observation_error = Some(error.to_string());
+                    let id = match &event {
+                        MarketFeedEvent::Feed { instrument_id, .. } => instrument_id.clone(),
+                        MarketFeedEvent::Session(session) => session.instrument_id.clone(),
+                        MarketFeedEvent::Quote(quote) => quote.instrument_id.clone(),
+                        MarketFeedEvent::Terms(_) => unreachable!(),
+                    };
+                    match self.quote_book.accept(event, &self.state.market_routes) {
+                        Ok(true) => {
+                            changed.insert(id);
+                        }
+                        Err(error) => self.market_observation_error = Some(error.to_string()),
+                        Ok(false) => {}
                     }
                 }
             }
         }
         for quote in batch.quotes {
-            if let Err(error) = self
+            let id = quote.instrument_id.clone();
+            match self
                 .quote_book
                 .accept(MarketFeedEvent::Quote(quote), &self.state.market_routes)
             {
-                self.market_observation_error = Some(error.to_string());
+                Ok(true) => {
+                    changed.insert(id);
+                }
+                Err(error) => self.market_observation_error = Some(error.to_string()),
+                Ok(false) => {}
             }
         }
+        let observations = changed
+            .iter()
+            .filter_map(|id| self.quote_book.observation(id))
+            .collect();
+        self.on_market(observations, self.command_now);
         if batch.resync {
             // A changed revision requests a full snapshot, including lost Terms/Feed/Session.
             self.published_interest.clear();

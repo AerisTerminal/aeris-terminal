@@ -123,7 +123,6 @@ fn apply_order_book_snapshot(
         // canonical snapshot.
         return Ok(());
     };
-    aeris_desktop::trading::publish_simulated_market_observation(&frame);
     messages
         .send(MarketWorkerMessage::OrderBook(frame))
         .map_err(|error| error.to_string())?;

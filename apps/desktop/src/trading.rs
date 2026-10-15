@@ -1,13 +1,8 @@
 //! Desktop command access to the single in-process trading owner.
 
-use aeris_contracts::InstallProviderInstrument;
-use aeris_instruments::{
-    ContractDate, ContractMetadata, InstrumentId, InstrumentMetadataProvenance, SessionHours,
-};
-use aeris_market_runtime::market_service::instrument_terms_from_install;
+use aeris_instruments::InstrumentId;
 use aeris_trading_runtime::{
-    CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, SimulatedMarketObservation,
-    TradeCopierConfig, TradingInstrument, TradingService,
+    CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, TradeCopierConfig, TradingService,
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -214,7 +209,7 @@ fn parse_usd_equity(value: &str) -> Result<aeris_trading::FixedPoint, String> {
     aeris_trading::FixedPoint::try_new(units, 2).map_err(|error| error.to_string())
 }
 
-/// Dispatches a market order and its immediate simulated-market observation off the UI thread.
+/// Dispatches a market order through the owner quote book off the UI thread.
 pub fn dispatch_simulated_market_order(
     frame: &aeris_market_data::OrderBookFrame,
     side: aeris_trading::OrderSide,
@@ -249,7 +244,7 @@ pub fn dispatch_simulated_order(
         record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
-    let Some((command, observation)) = prepare_simulated_order(
+    let Some(command) = prepare_simulated_order(
         frame,
         side,
         account_key,
@@ -265,8 +260,8 @@ pub fn dispatch_simulated_order(
     cx.background_executor()
         .spawn(async move {
             let result = service
-                .place_order(command)
-                .and_then(|order| placement_outcome(&service, &order.client_order_id, observation));
+                .place_order_from_market(command, true)
+                .map(|order| placement_outcome(&order));
             record_feedback(result);
         })
         .detach();
@@ -296,7 +291,7 @@ pub fn dispatch_simulated_selected_order(
         record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
-    let Some((entry, observation)) = prepare_simulated_order(
+    let Some(entry) = prepare_simulated_order(
         frame,
         side,
         selection.account_key,
@@ -313,15 +308,15 @@ pub fn dispatch_simulated_selected_order(
         .spawn(async move {
             let accepted = if let Some(template_id) = selection.template_id {
                 service
-                    .place_bracket(PlaceBracket { entry, template_id })
+                    .place_bracket_from_market(PlaceBracket { entry, template_id })
                     .map(|placement| placement.entry_client_order_id().clone())
             } else {
                 service
-                    .place_order(entry)
+                    .place_order_from_market(entry, true)
                     .map(|order| order.client_order_id)
             };
-            let result = accepted.and_then(|client_order_id| {
-                placement_outcome(&service, &client_order_id, observation)
+            let result = accepted.map(|client_order_id| {
+                format!("Practice order {} accepted", client_order_id.as_str())
             });
             record_feedback(result);
         })
@@ -337,21 +332,8 @@ fn order_type_requires_price(order_type: aeris_trading::OrderType) -> bool {
     )
 }
 
-/// Returns the working-order outcome after applying the submission-time BBO.
-fn placement_outcome(
-    service: &TradingService,
-    client_order_id: &aeris_trading::ClientOrderId,
-    observation: Option<SimulatedMarketObservation>,
-) -> Result<String, String> {
-    let fills = observation
-        .map(|observation| service.observe_market(observation))
-        .transpose()?
-        .unwrap_or_default();
-    Ok(if fills.is_empty() {
-        format!("Practice order {} is working", client_order_id.as_str())
-    } else {
-        format!("Practice order filled · {} fill(s)", fills.len())
-    })
+fn placement_outcome(order: &aeris_trading::Order) -> String {
+    format!("Practice order {} accepted", order.client_order_id.as_str())
 }
 
 /// Applies an exact price to the price field(s) that the order type uses.
@@ -390,7 +372,7 @@ pub fn dispatch_simulated_order_at_price(
         record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
-    let Some((mut command, observation)) = prepare_simulated_order(
+    let Some(mut command) = prepare_simulated_order(
         frame,
         order.side,
         order.account_key,
@@ -411,8 +393,8 @@ pub fn dispatch_simulated_order_at_price(
     cx.background_executor()
         .spawn(async move {
             let result = service
-                .place_order(command)
-                .and_then(|order| placement_outcome(&service, &order.client_order_id, observation));
+                .place_order_from_market(command, false)
+                .map(|order| placement_outcome(&order));
             record_feedback(result);
         })
         .detach();
@@ -533,10 +515,7 @@ pub fn modify_simulated_order_at_price(
         venue_id: "aeris-sim".to_string(),
         provider_id: frame.provider_id.clone(),
         session_generation: frame.session_generation,
-        source_sequence: frame
-            .source_watermark
-            .max(frame.bbo_source_watermark)
-            .max(1),
+        source_sequence: 1, // Placeholder; the trading owner stamps the current quote.
         observed_unix_nanos: modified_unix_nanos,
     };
     let (limit_price, stop_price) = price_fields(order_type, price);
@@ -550,7 +529,10 @@ pub fn modify_simulated_order_at_price(
     };
     cx.background_executor()
         .spawn(async move {
-            record_outcome(service.modify_order(command), "Practice order modified");
+            record_outcome(
+                service.modify_order_from_market(command),
+                "Practice order modified",
+            );
         })
         .detach();
 }
@@ -650,7 +632,7 @@ pub fn register_trade_copier(config: TradeCopierConfig, cx: &mut gpui::App) {
 pub fn prepare_simulated_market_order(
     frame: &aeris_market_data::OrderBookFrame,
     side: aeris_trading::OrderSide,
-) -> Option<(PlaceOrder, Option<SimulatedMarketObservation>)> {
+) -> Option<PlaceOrder> {
     prepare_simulated_order(
         frame,
         side,
@@ -661,7 +643,7 @@ pub fn prepare_simulated_market_order(
     )
 }
 
-/// Prepares a validated simulated order-entry instruction and its BBO observation.
+/// Prepares an identity-bearing order instruction; the owner prices it from its quote book.
 #[must_use]
 pub fn prepare_simulated_order(
     frame: &aeris_market_data::OrderBookFrame,
@@ -670,7 +652,7 @@ pub fn prepare_simulated_order(
     quantity_units: u64,
     order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
-) -> Option<(PlaceOrder, Option<SimulatedMarketObservation>)> {
+) -> Option<PlaceOrder> {
     if frame.state != aeris_market_data::OrderBookState::Ready {
         return None;
     }
@@ -695,29 +677,14 @@ pub fn prepare_simulated_order(
         venue_id: "aeris-sim".to_string(),
         provider_id: frame.provider_id.clone(),
         session_generation: frame.session_generation,
-        source_sequence: frame
-            .source_watermark
-            .max(frame.bbo_source_watermark)
-            .max(1),
+        source_sequence: 1, // Placeholder; the trading owner stamps the current quote.
         observed_unix_nanos: submitted_unix_nanos,
     };
-    let (bid, ask) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref())?;
-    let bid = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?;
-    let ask = aeris_trading::FixedPoint::try_new(ask.price, frame.price_scale).ok()?;
-    let entry_price = match side {
-        aeris_trading::OrderSide::Buy => ask,
-        aeris_trading::OrderSide::Sell => bid,
-    };
-    let (limit_price, stop_price) = match order_type {
-        aeris_trading::OrderType::Market => (None, None),
-        aeris_trading::OrderType::Limit => (Some(entry_price), None),
-        aeris_trading::OrderType::Stop => (None, Some(entry_price)),
-        aeris_trading::OrderType::StopLimit => (Some(entry_price), Some(entry_price)),
-    };
+    let (limit_price, stop_price) = (None, None);
     let command = PlaceOrder {
         client_order_id,
         account_id,
-        instrument_id: instrument_id.clone(),
+        instrument_id,
         side,
         order_type,
         time_in_force,
@@ -725,15 +692,9 @@ pub fn prepare_simulated_order(
         limit_price,
         stop_price,
         submitted_unix_nanos,
-        provenance: provenance.clone(),
-    };
-    let observation = Some(SimulatedMarketObservation {
-        instrument_id,
-        bid,
-        ask,
         provenance,
-    });
-    Some((command, observation))
+    };
+    Some(command)
 }
 
 fn display_quantity_units(quantity: u64, scale: u8) -> Option<i64> {
@@ -741,23 +702,6 @@ fn display_quantity_units(quantity: u64, scale: u8) -> Option<i64> {
     quantity
         .checked_mul(multiplier)
         .and_then(|units| i64::try_from(units).ok())
-}
-
-/// Publishes one canonical book BBO to the simulated venue from a market worker thread.
-///
-/// The trading owner applies each provider revision once per instrument, so several panes
-/// publishing the same book do not multiply simulated-venue work. The bounded command queue
-/// never blocks the market worker; an overflow is reported and the next revision supersedes it.
-pub fn publish_simulated_market_observation(frame: &aeris_market_data::OrderBookFrame) {
-    let Some(service) = TRADING_SERVICE.get() else {
-        return;
-    };
-    let Some(observation) = simulated_market_observation(frame) else {
-        return;
-    };
-    if let Err(error) = service.publish_market_observation(observation) {
-        record_feedback(Err(format!("Practice market update failed: {error}")));
-    }
 }
 
 /// Flattens the simulated account using the current best bid and ask off the UI thread.
@@ -775,7 +719,7 @@ pub fn flatten_simulated_account_for(
         record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
-    let Some((account_id, observation)) = prepare_flatten_for(frame, account_key) else {
+    let Some((account_id, instrument)) = prepare_flatten_for(frame, account_key) else {
         record_feedback(Err(
             "Flatten requires a selected account and current bid and ask".to_string(),
         ));
@@ -785,7 +729,7 @@ pub fn flatten_simulated_account_for(
         .spawn(async move {
             record_feedback(flatten_feedback(
                 "Flattened",
-                service.flatten_account(account_id, observation),
+                service.flatten_account_at(account_id, instrument),
             ));
         })
         .detach();
@@ -801,7 +745,7 @@ pub fn reverse_simulated_position(
         record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
-    let Some((account_id, observation)) = prepare_flatten_for(frame, account_key) else {
+    let Some((account_id, instrument)) = prepare_flatten_for(frame, account_key) else {
         record_feedback(Err(
             "Reverse requires a selected account and current bid and ask".to_string(),
         ));
@@ -811,7 +755,7 @@ pub fn reverse_simulated_position(
         .spawn(async move {
             record_feedback(flatten_feedback(
                 "Reversed",
-                service.reverse_position(account_id, observation),
+                service.reverse_position_at(account_id, instrument),
             ));
         })
         .detach();
@@ -823,62 +767,32 @@ pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx:
         record_feedback(Err("Practice trading is unavailable".to_string()));
         return;
     };
-    let Some(observation) = simulated_market_observation(frame) else {
-        record_feedback(Err("Flatten requires a current bid and ask".to_string()));
+    let Ok(instrument) = InstrumentId::try_new(frame.instrument_id.clone()) else {
+        record_feedback(Err("Flatten requires a selected instrument".to_string()));
         return;
     };
     cx.background_executor()
         .spawn(async move {
             record_feedback(flatten_feedback(
                 "Flattened all accounts",
-                service.flatten_all(observation),
+                service.flatten_all_at(instrument),
             ));
         })
         .detach();
 }
 
-/// Prepares a selected simulated account and current BBO observation.
+/// Prepares the selected account and instrument identities.
 #[must_use]
 pub fn prepare_flatten_for(
     frame: &aeris_market_data::OrderBookFrame,
     selected_account_key: Option<String>,
-) -> Option<(aeris_trading::TradingAccountId, SimulatedMarketObservation)> {
+) -> Option<(aeris_trading::TradingAccountId, InstrumentId)> {
     let account_id = selected_account_key
         .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
-    let observation = simulated_market_observation(frame)?;
-    Some((account_id, observation))
-}
-
-/// Converts one current order-book BBO into the practice venue's canonical market observation.
-/// This path intentionally does not require a selected account so global market publication and
-/// Flatten All cannot be disabled by account-selection state.
-#[must_use]
-pub fn simulated_market_observation(
-    frame: &aeris_market_data::OrderBookFrame,
-) -> Option<SimulatedMarketObservation> {
-    if frame.state != aeris_market_data::OrderBookState::Ready {
-        return None;
-    }
-    let (bid, ask) = frame.best_bid.as_ref().zip(frame.best_ask.as_ref())?;
-    let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
-    let bid = aeris_trading::FixedPoint::try_new(bid.price, frame.price_scale).ok()?;
-    let ask = aeris_trading::FixedPoint::try_new(ask.price, frame.price_scale).ok()?;
-    let observation = SimulatedMarketObservation {
-        instrument_id,
-        bid,
-        ask,
-        provenance: aeris_trading::TradingProvenance {
-            venue_id: "aeris-sim".to_string(),
-            provider_id: frame.provider_id.clone(),
-            session_generation: frame.session_generation,
-            source_sequence: frame
-                .source_watermark
-                .max(frame.bbo_source_watermark)
-                .max(1),
-            observed_unix_nanos: now(),
-        },
-    };
-    Some(observation)
+    Some((
+        account_id,
+        InstrumentId::try_new(frame.instrument_id.clone()).ok()?,
+    ))
 }
 
 #[must_use]
@@ -890,187 +804,9 @@ pub fn now() -> i64 {
         .unwrap_or(1)
 }
 
-/// Registers complete provider contract terms on a market background worker.
-///
-/// # Errors
-/// Returns an error for incomplete or malformed provider metadata, runtime overload, or durable-store failure.
-pub fn register_provider_instrument(instrument: &InstallProviderInstrument) -> Result<(), String> {
-    let service = TRADING_SERVICE
-        .get()
-        .ok_or_else(|| "Practice trading owner is unavailable".to_string())?;
-    service.register_instrument(trading_instrument_from_install(instrument)?)?;
-    record_feedback(Ok(format!(
-        "Practice trading ready for {}",
-        instrument.display_symbol
-    )));
-    Ok(())
-}
-
-fn trading_instrument_from_install(
-    instrument: &InstallProviderInstrument,
-) -> Result<TradingInstrument, String> {
-    let terms = instrument_terms_from_install(instrument)?;
-    let metadata = instrument
-        .contract_metadata
-        .as_deref()
-        .ok_or_else(|| "provider contract metadata missing".to_string())?;
-    let session_hours = metadata
-        .session_hours
-        .iter()
-        .map(|session| {
-            Ok(SessionHours {
-                weekday: u8::try_from(session.weekday)
-                    .map_err(|_| "provider session weekday is invalid".to_string())?,
-                open_seconds: session.open_seconds,
-                close_seconds: session.close_seconds,
-                timezone: session.timezone.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let contract = ContractMetadata {
-        tick_size: match terms.price_grid {
-            aeris_instruments::PriceGrid::Fixed(increment) => Some(increment),
-            _ => None,
-        },
-        price_grid: terms.price_grid,
-        instrument_class: terms.instrument_class,
-        point_value: terms.point_value,
-        order_quantity_increment: terms.quantity_increment,
-        currency: terms.currency,
-        expiry: metadata
-            .contract_expiry
-            .as_deref()
-            .map(parse_contract_date)
-            .transpose()?,
-        first_notice: metadata
-            .first_notice_date
-            .as_deref()
-            .map(parse_contract_date)
-            .transpose()?,
-        last_trade: metadata
-            .last_trade_date
-            .as_deref()
-            .map(parse_contract_date)
-            .transpose()?,
-        session_hours,
-        provenance: InstrumentMetadataProvenance {
-            provider_id: instrument.provider.clone(),
-            provider_symbol: instrument.provider_symbol.clone(),
-            display_symbol: instrument.display_symbol.clone(),
-            session_generation: instrument.session_generation,
-        },
-    };
-    Ok(TradingInstrument {
-        instrument_id: terms.route.instrument_id,
-        price_scale: terms.route.price_scale,
-        quantity_scale: terms.route.quantity_scale,
-        contract,
-    })
-}
-
-/// Shows incomplete provider contract terms in the order-entry status while
-/// allowing the chart to continue loading.
-pub fn report_practice_registration_error(error: String) {
-    record_feedback(Err(error));
-}
-
-fn parse_contract_date(value: &str) -> Result<ContractDate, String> {
-    let mut parts = value.split('-');
-    let year = parts
-        .next()
-        .and_then(|part| part.parse::<u16>().ok())
-        .ok_or_else(|| "provider contract date is invalid".to_string())?;
-    let month = parts
-        .next()
-        .and_then(|part| part.parse::<u8>().ok())
-        .ok_or_else(|| "provider contract date is invalid".to_string())?;
-    let day = parts
-        .next()
-        .and_then(|part| part.parse::<u8>().ok())
-        .ok_or_else(|| "provider contract date is invalid".to_string())?;
-    if parts.next().is_some() {
-        return Err("provider contract date is invalid".to_string());
-    }
-    let date = ContractDate { year, month, day };
-    date.validate().map_err(|error| error.to_string())?;
-    Ok(date)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_contract_date, parse_usd_equity, prepare_simulated_order,
-        simulated_market_observation, trading_instrument_from_install,
-    };
-
-    #[test]
-    fn incomplete_contract_terms_name_the_missing_field_in_order_entry_copy() {
-        let mut instrument = aeris_contracts::InstallProviderInstrument {
-            provider: "tastytrade".into(),
-            session_generation: 1,
-            selection_generation: 1,
-            instrument_id: "tastytrade:Future:/ESZ6".into(),
-            provider_symbol: "/ESZ26:XCME".into(),
-            display_symbol: "ESZ6".into(),
-            venue_id: "CME".into(),
-            price_scale: 8,
-            quantity_scale: 8,
-            entitlement_id: "tastytrade-market".into(),
-            price_increment: Some(25_000_000),
-            contract_metadata: Some(Box::new(aeris_contracts::ProviderContractMetadata {
-                point_value: Some(5_000_000_000),
-                point_value_scale: Some(8),
-                currency: None,
-                contract_expiry: None,
-                first_notice_date: None,
-                last_trade_date: None,
-                session_hours: Vec::new(),
-                order_quantity_increment: Some(100_000_000),
-                ..Default::default()
-            })),
-        };
-        assert_eq!(
-            aeris_market_runtime::market_service::instrument_terms_from_install(&instrument)
-                .unwrap_err(),
-            "Practice trading unavailable for ESZ6: contract currency missing"
-        );
-        instrument.contract_metadata.as_mut().unwrap().currency = Some("USD".into());
-        assert_eq!(
-            aeris_market_runtime::market_service::instrument_terms_from_install(&instrument)
-                .unwrap()
-                .currency,
-            "USD"
-        );
-        let registered =
-            trading_instrument_from_install(&instrument).expect("exact provider terms");
-        assert_eq!(
-            registered.contract.point_value.unwrap().units(),
-            5_000_000_000
-        );
-        assert_eq!(registered.contract.tick_size.unwrap().units(), 25_000_000);
-        assert_eq!(registered.contract.currency, "USD");
-        assert_eq!(
-            registered
-                .contract
-                .order_quantity_increment
-                .unwrap()
-                .units(),
-            100_000_000
-        );
-
-        instrument.instrument_id = "tastytrade:Equity:AAPL".into();
-        instrument.provider_symbol = "AAPL".into();
-        instrument.display_symbol = "AAPL".into();
-        instrument.price_increment = Some(1_000_000);
-        let terms = instrument.contract_metadata.as_mut().unwrap();
-        terms.point_value = Some(1);
-        terms.point_value_scale = Some(0);
-        let registered = trading_instrument_from_install(&instrument).expect("equity terms");
-        assert_eq!(registered.contract.point_value.unwrap().units(), 1);
-        assert_eq!(registered.contract.point_value.unwrap().scale(), 0);
-        assert_eq!(registered.contract.tick_size.unwrap().units(), 1_000_000);
-        assert_eq!(registered.contract.currency, "USD");
-    }
+    use super::{parse_usd_equity, prepare_simulated_order};
 
     fn order_book_frame() -> aeris_market_data::OrderBookFrame {
         let level = |price| aeris_market_data::OrderBookColumnLevel {
@@ -1106,17 +842,10 @@ mod tests {
     }
 
     #[test]
-    fn contract_dates_require_an_exact_day() {
-        assert!(parse_contract_date("2026-12-18").is_ok());
-        assert!(parse_contract_date("202612").is_err());
-        assert!(parse_contract_date("2026-02-30").is_err());
-    }
-
-    #[test]
     fn order_entry_preserves_selected_account_and_execution_instructions() {
         let account_id =
             aeris_trading::TradingAccountId::try_new("aeris-sim-2").expect("account id");
-        let (order, observation) = prepare_simulated_order(
+        let order = prepare_simulated_order(
             &order_book_frame(),
             aeris_trading::OrderSide::Sell,
             Some(account_id.as_str().to_string()),
@@ -1132,24 +861,15 @@ mod tests {
             order.time_in_force,
             aeris_trading::TimeInForce::GoodTillCancelled
         );
-        assert_eq!(
-            order.limit_price.map(aeris_trading::FixedPoint::units),
-            Some(10_000)
-        );
-        assert_eq!(
-            order.stop_price.map(aeris_trading::FixedPoint::units),
-            Some(10_000)
-        );
-        let observation = observation.expect("BBO observation");
-        assert_eq!(observation.bid.units(), 10_000);
-        assert_eq!(observation.ask.units(), 10_001);
+        assert!(order.limit_price.is_none());
+        assert!(order.stop_price.is_none());
     }
 
     #[test]
     fn order_entry_converts_display_quantity_to_provider_fixed_point_units() {
         let mut frame = order_book_frame();
         frame.quantity_scale = 3;
-        let (order, _) = prepare_simulated_order(
+        let order = prepare_simulated_order(
             &frame,
             aeris_trading::OrderSide::Buy,
             Some("aeris-practice-1".to_string()),
@@ -1160,15 +880,6 @@ mod tests {
         .expect("scaled order command");
         assert_eq!(order.quantity.units(), 5_000);
         assert_eq!(order.quantity.scale(), 3);
-    }
-
-    #[test]
-    fn global_practice_market_observation_does_not_require_selected_account() {
-        let observation =
-            simulated_market_observation(&order_book_frame()).expect("current BBO observation");
-        assert_eq!(observation.instrument_id.as_str(), "test:instrument");
-        assert_eq!(observation.bid.units(), 10_000);
-        assert_eq!(observation.ask.units(), 10_001);
     }
 
     #[test]
@@ -1204,7 +915,6 @@ mod tests {
     fn recovering_book_cannot_fill_a_practice_order() {
         let mut frame = order_book_frame();
         frame.state = aeris_market_data::OrderBookState::Stale;
-        assert!(simulated_market_observation(&frame).is_none());
         assert!(
             prepare_simulated_order(
                 &frame,

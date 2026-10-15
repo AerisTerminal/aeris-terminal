@@ -1,5 +1,5 @@
 //! Owner-only market facts and a non-blocking, bounded ingress mailbox.
-use crate::service::Command;
+use crate::{SimulatedMarketObservation, service::Command};
 use aeris_instruments::InstrumentId;
 use aeris_trading::market::{
     FeedState, InstrumentSession, MAXIMUM_QUOTE_INTEREST, MarketFeedError, MarketFeedEvent,
@@ -24,12 +24,34 @@ pub(crate) struct QuoteBook {
 #[derive(Default)]
 struct QuoteEntry {
     generation: u64,
+    /// Owner-local monotonic ingress order, never inferred from provider identifiers.
+    revision: u64,
     quote: Option<TradingQuote>,
     feed: Option<FeedState>,
     session: Option<InstrumentSession>,
 }
 
 impl QuoteBook {
+    pub(crate) fn observation(&self, id: &InstrumentId) -> Option<SimulatedMarketObservation> {
+        let entry = self.entries.get(id)?;
+        let quote = entry.quote.as_ref()?;
+        if entry.feed != Some(FeedState::Live) {
+            return None;
+        }
+        Some(SimulatedMarketObservation {
+            instrument_id: id.clone(),
+            bid: quote.bid,
+            ask: quote.ask,
+            provenance: aeris_trading::TradingProvenance {
+                venue_id: "aeris-sim".into(),
+                provider_id: quote.provider_id.clone(),
+                session_generation: quote.provider_generation,
+                source_sequence: entry.revision,
+                observed_unix_nanos: quote.received_unix_nanos,
+            },
+        })
+    }
+
     pub(crate) fn retire_route(&mut self, id: &InstrumentId) {
         self.entries.remove(id);
     }
@@ -106,9 +128,18 @@ impl QuoteBook {
                 }) {
                     return Ok(false);
                 }
+                entry.revision = entry
+                    .revision
+                    .checked_add(1)
+                    .ok_or(MarketFeedError::InvalidRevision)?;
                 entry.quote = Some(quote);
             }
-            MarketFeedEvent::Feed { state, .. } => entry.feed = Some(state),
+            MarketFeedEvent::Feed { state, .. } => {
+                if state != FeedState::Live || entry.feed != Some(FeedState::Live) {
+                    entry.quote = None;
+                }
+                entry.feed = Some(state);
+            }
             MarketFeedEvent::Session(session) => {
                 entry.session = Some(session);
             }

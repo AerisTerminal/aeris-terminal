@@ -4,13 +4,16 @@ pub(crate) mod owner;
 
 use super::{
     BracketPlacement, BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount,
-    EconomicEventRiskOutcome, EconomicEventRiskTrigger, Fill, FixedPoint, FlattenOutcome,
-    ModifyOrder, MovePlannedBracketLeg, Order, PathBuf, PlaceBracket, PlaceInlineBracket,
-    PlaceOrder, PlaceProtectiveOrder, PlannedBracketLeg, PracticeMarketSession, Receiver, Reply,
-    RiskEvaluation, RiskProfile, SessionPlan, SimulatedMarketObservation, TradeCopierConfig,
-    TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus, TradingSnapshot,
-    UserRecord, VenueRequest,
+    EconomicEventRiskOutcome, EconomicEventRiskTrigger, FixedPoint, FlattenOutcome, ModifyOrder,
+    MovePlannedBracketLeg, Order, PathBuf, PlaceBracket, PlaceInlineBracket, PlaceOrder,
+    PlaceProtectiveOrder, PlannedBracketLeg, PracticeMarketSession, Receiver, Reply,
+    RiskEvaluation, RiskProfile, SessionPlan, TradeCopierConfig, TradingAccount, TradingAccountId,
+    TradingInstrument, TradingServiceStatus, TradingSnapshot, UserRecord, VenueRequest,
 };
+#[cfg(test)]
+use crate::SimulatedMarketObservation;
+#[cfg(test)]
+use aeris_trading::Fill;
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
 use std::sync::Arc;
 #[cfg(test)]
@@ -24,11 +27,16 @@ pub(crate) enum Command {
     RegisterInstrument(TradingInstrument, Reply<()>),
     InstallPracticeMarketSession(Arc<PracticeMarketSession>, Reply<()>),
     Place(PlaceOrder, Reply<Order>),
+    PlaceFromMarket(PlaceOrder, bool, Reply<Order>),
     PlaceBracket(PlaceBracket, Reply<BracketPlacement>),
+    PlaceBracketFromMarket(PlaceBracket, Reply<BracketPlacement>),
     PlaceInlineBracket(PlaceInlineBracket, Reply<BracketPlacement>),
+    PlaceInlineBracketFromMarket(PlaceInlineBracket, Reply<BracketPlacement>),
     PlaceProtective(PlaceProtectiveOrder, Reply<Order>),
+    PlaceProtectiveFromMarket(PlaceProtectiveOrder, Reply<Order>),
     EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),
     Modify(ModifyOrder, Reply<Order>),
+    ModifyFromMarket(ModifyOrder, Reply<Order>),
     MovePlannedLeg(MovePlannedBracketLeg, Reply<PlannedBracketLeg>),
     Cancel(ClientOrderId, Reply<Order>),
     CancelAll(Option<TradingAccountId>, Reply<Vec<Order>>),
@@ -47,24 +55,44 @@ pub(crate) enum Command {
     LockAccount(TradingAccountId, String, i64, Reply<()>),
     UnlockAccount(TradingAccountId, Reply<()>),
     KillSwitch(Option<TradingAccountId>, String, i64, Reply<usize>),
+    #[cfg(test)]
     Flatten(
         TradingAccountId,
         SimulatedMarketObservation,
         Reply<FlattenOutcome>,
     ),
+    #[cfg(test)]
     Reverse(
         TradingAccountId,
         SimulatedMarketObservation,
         Reply<FlattenOutcome>,
     ),
+    #[cfg(test)]
     FlattenAll(SimulatedMarketObservation, Reply<FlattenOutcome>),
+    FlattenAt(
+        TradingAccountId,
+        aeris_instruments::InstrumentId,
+        Reply<FlattenOutcome>,
+    ),
+    ReverseAt(
+        TradingAccountId,
+        aeris_instruments::InstrumentId,
+        Reply<FlattenOutcome>,
+    ),
+    FlattenAllAt(aeris_instruments::InstrumentId, Reply<FlattenOutcome>),
+    #[cfg(test)]
     ApplyEconomicEventRisk(
         EconomicEventRiskTrigger,
         Option<SimulatedMarketObservation>,
         Reply<EconomicEventRiskOutcome>,
     ),
+    ApplyEconomicEventRiskAt(
+        EconomicEventRiskTrigger,
+        Option<aeris_instruments::InstrumentId>,
+        Reply<EconomicEventRiskOutcome>,
+    ),
+    #[cfg(test)]
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
-    DrainObservations,
     AttachMarketFeed(Arc<dyn QuoteInterestSink>, Reply<()>),
     SetTicketInterest(Vec<MarketRoute>, Reply<()>),
     DrainMarketFeed,

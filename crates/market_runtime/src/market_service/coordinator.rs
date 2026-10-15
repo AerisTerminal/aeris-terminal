@@ -1523,6 +1523,12 @@ impl Coordinator<'_> {
             .retain(|key, _| self.trading_routes.contains_key(key));
         self.resolve_trading_routes();
         self.reconcile_order_books();
+        // A new trading lease can be installed after initial feed attachment while
+        // the provider is already online. Snapshot its current feed state and quote
+        // now, rather than waiting for another provider-state transition.
+        if self.trading_feed.attached() {
+            self.publish_trading_feed_snapshot();
+        }
         for route in &interest.routes {
             self.publish_trading_session(&super::InstrumentStreamKey {
                 provider: route.provider_id.clone(),
@@ -3031,6 +3037,60 @@ mod tests {
             Some(MarketFeedEvent::Session(session))
                 if session.phase == aeris_instruments::SessionPhase::Open
         ));
+    }
+
+    #[test]
+    fn late_trading_lease_snapshots_live_feed_without_a_chart() {
+        let mut coordinator = coordinator();
+        let instrument = hyperliquid_instrument();
+        let generation = ProviderGeneration(nonzero(2));
+        coordinator
+            .engine
+            .begin_provider_session(&instrument.provider, generation)
+            .unwrap();
+        coordinator
+            .engine
+            .set_provider_health(&instrument.provider, generation, ProviderHealth::Online)
+            .unwrap();
+        coordinator.trading_feed.attach();
+        let route = aeris_trading::market::MarketRoute {
+            provider_id: instrument.provider.clone(),
+            instrument_id: aeris_instruments::InstrumentId::try_new(
+                instrument.instrument_id.clone(),
+            )
+            .unwrap(),
+            provider_symbol: instrument.provider_symbol.clone(),
+            display_symbol: instrument.display_symbol.clone(),
+            venue_id: instrument.venue_id.clone(),
+            entitlement_id: Some(instrument.entitlement_id.clone()),
+            price_scale: u8::try_from(instrument.price_scale).unwrap(),
+            quantity_scale: u8::try_from(instrument.quantity_scale).unwrap(),
+        };
+        coordinator
+            .install_trading_interest(&aeris_trading::market::QuoteInterest {
+                revision: 1,
+                routes: vec![route.clone()],
+            })
+            .unwrap();
+        assert_eq!(coordinator.engine.subscriptions().len(), 0);
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 1);
+        let mut live = false;
+        while let Some(event) = coordinator.trading_feed.receive(Duration::ZERO) {
+            if matches!(
+                event,
+                aeris_trading::market::MarketFeedEvent::Feed {
+                    instrument_id,
+                    state: aeris_trading::market::FeedState::Live,
+                    provider_generation: 2,
+                } if instrument_id == route.instrument_id
+            ) {
+                live = true;
+            }
+        }
+        assert!(
+            live,
+            "a post-attachment quote lease needs its live feed state"
+        );
     }
 
     #[test]

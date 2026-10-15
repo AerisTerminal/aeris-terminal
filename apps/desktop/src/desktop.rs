@@ -2383,13 +2383,7 @@ fn chart_order_from_intent(
     app: &WorkspaceSurface,
     frame: &aeris_market_data::OrderBookFrame,
     order_type: aeris_trading::OrderType,
-) -> Result<
-    (
-        aeris_trading_runtime::PlaceOrder,
-        aeris_trading_runtime::SimulatedMarketObservation,
-    ),
-    ChartIntentRejection,
-> {
+) -> Result<aeris_trading_runtime::PlaceOrder, ChartIntentRejection> {
     let product = app
         .product
         .as_ref()
@@ -2417,10 +2411,7 @@ fn chart_order_from_intent(
         venue_id: "aeris-sim".to_string(),
         provider_id: frame.provider_id.clone(),
         session_generation: frame.session_generation,
-        source_sequence: frame
-            .source_watermark
-            .max(frame.bbo_source_watermark)
-            .max(1),
+        source_sequence: 1, // Placeholder; the trading owner stamps the current quote.
         observed_unix_nanos: submitted_unix_nanos,
     };
     let client_order_id = aeris_trading::ClientOrderId::try_new(format!(
@@ -2439,7 +2430,7 @@ fn chart_order_from_intent(
     let order = aeris_trading_runtime::PlaceOrder {
         client_order_id,
         account_id,
-        instrument_id: instrument_id.clone(),
+        instrument_id,
         side,
         order_type,
         time_in_force: aeris_trading::TimeInForce::Day,
@@ -2447,24 +2438,9 @@ fn chart_order_from_intent(
         limit_price,
         stop_price,
         submitted_unix_nanos,
-        provenance: provenance.clone(),
+        provenance,
     };
-    let quote = |level: Option<&aeris_market_data::OrderBookColumnLevel>| {
-        level
-            .and_then(|level| {
-                aeris_trading::FixedPoint::try_new(level.price, frame.price_scale).ok()
-            })
-            .ok_or(ChartIntentRejection::NoQuote)
-    };
-    Ok((
-        order,
-        aeris_trading_runtime::SimulatedMarketObservation {
-            instrument_id,
-            bid: quote(frame.best_bid.as_ref())?,
-            ask: quote(frame.best_ask.as_ref())?,
-            provenance,
-        },
-    ))
+    Ok(order)
 }
 
 /// Rolls back a chart trading intent the desktop could not dispatch, and says why in the
@@ -2518,34 +2494,6 @@ fn chart_tick_offset(
         .flatten()
 }
 
-/// The entry order that rests at `entry` until the market reaches it: a limit on the passive
-/// side of the touch, a stop beyond it. A limit beyond the touch is marketable and would fill
-/// at once instead of waiting for the drawing's entry. `None` when the prices cannot be
-/// compared exactly.
-fn resting_entry_order_type(
-    side: aeris_trading::OrderSide,
-    entry: aeris_trading::FixedPoint,
-    bid: aeris_trading::FixedPoint,
-    ask: aeris_trading::FixedPoint,
-) -> Option<aeris_trading::OrderType> {
-    let touch = match side {
-        aeris_trading::OrderSide::Buy => ask,
-        aeris_trading::OrderSide::Sell => bid,
-    }
-    .exact_rescale(entry.scale())
-    .ok()?
-    .units();
-    let beyond_touch = match side {
-        aeris_trading::OrderSide::Buy => entry.units() > touch,
-        aeris_trading::OrderSide::Sell => entry.units() < touch,
-    };
-    Some(if beyond_touch {
-        aeris_trading::OrderType::Stop
-    } else {
-        aeris_trading::OrderType::Limit
-    })
-}
-
 fn dispatch_chart_place_bracket(
     chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
@@ -2554,7 +2502,7 @@ fn dispatch_chart_place_bracket(
 ) {
     let sequence = intent.sequence;
     match chart_bracket_from_intent(intent, app, cx) {
-        Ok((command, observation)) => {
+        Ok(command) => {
             let Some(service) = aeris_desktop::trading::handle() else {
                 reject_chart_intent(
                     &chart,
@@ -2565,9 +2513,7 @@ fn dispatch_chart_place_bracket(
                 return;
             };
             let task = cx.background_executor().spawn(async move {
-                let result = service
-                    .place_inline_bracket(command)
-                    .and_then(|_| service.observe_market(observation));
+                let result = service.place_inline_bracket_from_market(command);
                 aeris_desktop::trading::record_outcome(result, "Bracket placed")
             });
             cx.spawn(async move |_, cx| {
@@ -2586,20 +2532,13 @@ fn chart_bracket_from_intent(
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
     cx: &App,
-) -> Result<
-    (
-        aeris_trading_runtime::PlaceInlineBracket,
-        aeris_trading_runtime::SimulatedMarketObservation,
-    ),
-    ChartIntentRejection,
-> {
+) -> Result<aeris_trading_runtime::PlaceInlineBracket, ChartIntentRejection> {
     let product = app
         .product
         .as_ref()
         .ok_or(ChartIntentRejection::NoInstrument)?;
     let frame = chart_quote_frame(app, product, cx)?;
-    let (entry, observation) =
-        chart_order_from_intent(intent, app, &frame, aeris_trading::OrderType::Limit)?;
+    let entry = chart_order_from_intent(intent, app, &frame, aeris_trading::OrderType::Limit)?;
     let price = |price: Option<f64>| {
         price
             .and_then(|price| chart_price_fixed_point(price, product.price_scale))
@@ -2610,15 +2549,6 @@ fn chart_bracket_from_intent(
     let entry_price = entry
         .limit_price
         .ok_or(ChartIntentRejection::InvalidPrice)?;
-    let order_type =
-        resting_entry_order_type(entry.side, entry_price, observation.bid, observation.ask)
-            .ok_or(ChartIntentRejection::InvalidPrice)?;
-    let entry = aeris_trading_runtime::PlaceOrder {
-        order_type,
-        limit_price: (order_type == aeris_trading::OrderType::Limit).then_some(entry_price),
-        stop_price: (order_type == aeris_trading::OrderType::Stop).then_some(entry_price),
-        ..entry
-    };
     let tick = product.price_increment.filter(|tick| *tick > 0);
     let valid_relation = match entry.side {
         aeris_trading::OrderSide::Buy => {
@@ -2651,23 +2581,14 @@ fn chart_bracket_from_intent(
         break_even: None,
         enabled: true,
     };
-    Ok((
-        aeris_trading_runtime::PlaceInlineBracket { entry, template },
-        observation,
-    ))
+    Ok(aeris_trading_runtime::PlaceInlineBracket { entry, template })
 }
 
 fn chart_protection_from_intent(
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
     cx: &App,
-) -> Result<
-    (
-        aeris_trading_runtime::PlaceOrder,
-        aeris_trading_runtime::SimulatedMarketObservation,
-    ),
-    ChartIntentRejection,
-> {
+) -> Result<aeris_trading_runtime::PlaceOrder, ChartIntentRejection> {
     let account_id = app
         .trading_pnl
         .order_entry
@@ -2711,7 +2632,7 @@ fn dispatch_chart_create_protection(
             .map(|service| (prepared, service))
             .ok_or(ChartIntentRejection::TradingUnavailable)
     });
-    let ((order, observation), service) = match prepared {
+    let (order, service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
             reject_chart_intent(&chart, sequence, reason, cx);
@@ -2724,9 +2645,9 @@ fn dispatch_chart_create_protection(
         aeris_trading_runtime::ProtectiveOrderRole::TakeProfit
     };
     let task = cx.background_executor().spawn(async move {
-        let result = service
-            .place_protective_order(aeris_trading_runtime::PlaceProtectiveOrder { order, role })
-            .and_then(|_| service.observe_market(observation));
+        let result = service.place_protective_order_from_market(
+            aeris_trading_runtime::PlaceProtectiveOrder { order, role },
+        );
         aeris_desktop::trading::record_outcome(result, "Practice protective order placed")
     });
     cx.spawn(async move |_, cx| {
@@ -2760,7 +2681,7 @@ fn dispatch_chart_modify(
     };
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_outcome(
-            service.modify_order(command),
+            service.modify_order_from_market(command),
             "Practice order modified",
         )
     });
@@ -2811,10 +2732,7 @@ fn chart_modify_from_intent(
             venue_id: "aeris-sim".to_string(),
             provider_id: frame.provider_id.clone(),
             session_generation: frame.session_generation,
-            source_sequence: frame
-                .source_watermark
-                .max(frame.bbo_source_watermark)
-                .max(1),
+            source_sequence: 1, // Placeholder; the trading owner stamps the current quote.
             observed_unix_nanos: modified_unix_nanos,
         },
     })
@@ -2827,7 +2745,7 @@ fn chart_close_position_from_intent(
 ) -> Result<
     (
         aeris_trading::TradingAccountId,
-        aeris_trading_runtime::SimulatedMarketObservation,
+        aeris_instruments::InstrumentId,
     ),
     ChartIntentRejection,
 > {
@@ -2873,7 +2791,7 @@ fn dispatch_chart_close_position(
             .map(|service| (prepared, service))
             .ok_or(ChartIntentRejection::TradingUnavailable)
     });
-    let ((account_id, observation), service) = match prepared {
+    let ((account_id, instrument), service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
             reject_chart_intent(&chart, sequence, reason, cx);
@@ -2883,7 +2801,7 @@ fn dispatch_chart_close_position(
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_result(aeris_desktop::trading::flatten_feedback(
             "Position closed",
-            service.flatten_account(account_id, observation),
+            service.flatten_account_at(account_id, instrument),
         ))
     });
     cx.spawn(async move |_, cx| {
@@ -5751,23 +5669,9 @@ pub(super) fn run(
     if let Err(error) = attach_ctrader_venue(&trading, &market) {
         diagnostic!("Aeris cTrader trading venue could not be attached: {error}");
     }
-    if let Err(error) = trading.install_practice_market_session(Arc::new(
-        move |provider_id: &str,
-              instrument_id: &str,
-              provider_symbol: &str,
-              now_unix_nanos: i64| {
-            market.require_practice_market_session(
-                provider_id,
-                instrument_id,
-                provider_symbol,
-                now_unix_nanos,
-            )
-        },
-    )) {
-        diagnostic!("Aeris practice market calendar could not be installed: {error}");
-        let _ = context.shutdown(Duration::from_secs(2));
-        let _ = trading.shutdown(Duration::from_secs(2));
-        fatal_startup("The practice market calendar could not be installed.");
+    if let Err(error) = attach_trading_market_feed(&trading, &market) {
+        diagnostic!("Aeris trading market feed could not attach: {error}");
+        fatal_startup("The trading market feed could not start.");
     }
     let lifecycle = DesktopLifecycle::new(trading, context, instance_lock);
     #[cfg(debug_assertions)]
@@ -5775,6 +5679,34 @@ pub(super) fn run(
         panic_after_stores_open();
     }
     run_desktop(configured, lifecycle);
+}
+
+fn attach_trading_market_feed(
+    trading: &aeris_trading_runtime::TradingService,
+    market: &aeris_market_runtime::MarketService,
+) -> Result<(), String> {
+    let market_calendar = market.clone();
+    trading.install_practice_market_session(Arc::new(
+        move |provider_id: &str,
+              instrument_id: &str,
+              provider_symbol: &str,
+              now_unix_nanos: i64| {
+            market_calendar.require_practice_market_session(
+                provider_id,
+                instrument_id,
+                provider_symbol,
+                now_unix_nanos,
+            )
+        },
+    ))?;
+    let quote_inbox = trading.attach_market_feed(market.trading_quote_interest_sink())?;
+    market.attach_trading_feed(aeris_market_runtime::market_service::TradingFeedLink {
+        events: Box::new(move |event| {
+            if let Err(error) = quote_inbox.push(event) {
+                diagnostic!("Aeris trading market feed rejected an event: {error}");
+            }
+        }),
+    })
 }
 
 fn fatal_startup(message: &str) -> ! {

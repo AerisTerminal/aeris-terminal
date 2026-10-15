@@ -9,6 +9,8 @@ use super::{
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_observability::diagnostic;
+use aeris_trading::market::MarketRoute;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 pub(super) fn run_workers(
@@ -28,7 +30,14 @@ pub(super) fn run_workers(
     }
     let market = shared_market_runtime()?;
     market.attach(client_id)?;
+    let owns_ticket_interest = additions.is_some();
     let result = run_attached_workers(&market, client_id, endpoints, additions);
+    if owns_ticket_interest
+        && let Some(trading) = aeris_desktop::trading::handle()
+        && let Err(error) = trading.set_ticket_interest(Vec::new())
+    {
+        diagnostic!("Aeris ticket quote interest could not be released: {error}");
+    }
     for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
         let _ = market.remove_consumer(client_id, record.endpoint.consumer_id);
         record.endpoint.active = false;
@@ -48,14 +57,22 @@ fn run_attached_workers(
         initialize_record(market, client_id, record)?;
     }
 
+    // The workspace group owns tickets; standalone catalog clients must not
+    // replace its interest set with an empty one.
+    let owns_ticket_interest = additions.is_some();
     let mut additions = additions;
     let mut next_session_status_at = Instant::now();
+    let mut ticket_routes = Vec::<MarketRoute>::new();
+    let mut ticket_interest_dirty = true;
     while additions.is_some() || endpoints.iter().any(|record| record.endpoint.active) {
         if let Some(receiver) = additions.as_ref() {
             loop {
                 match receiver.try_recv() {
                     Ok(mut record) => match initialize_record(market, client_id, &mut record) {
-                        Ok(()) => endpoints.push(record),
+                        Ok(()) => {
+                            endpoints.push(record);
+                            ticket_interest_dirty = true;
+                        }
                         Err(error) => {
                             let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
                                 state: ChartState::Error,
@@ -84,52 +101,108 @@ fn run_attached_workers(
             }
             if disconnected {
                 retire_endpoint(market, client_id, &mut record.endpoint);
+                ticket_interest_dirty = true;
             }
         }
         endpoints.retain(|record| record.endpoint.active);
+        if owns_ticket_interest && ticket_interest_dirty {
+            update_ticket_interest(endpoints, &mut ticket_routes);
+            ticket_interest_dirty = false;
+        }
         let session_tick_due = Instant::now() >= next_session_status_at;
         publish_session_statuses(market, endpoints, session_tick_due);
         if session_tick_due {
             next_session_status_at = Instant::now() + Duration::from_secs(60);
         }
-        let consumer_budgets = endpoints
-            .iter()
-            .filter(|record| record.endpoint.active)
-            .filter_map(|record| {
-                let (queued, capacity) = record.endpoint.messages.occupancy();
-                let available = capacity.saturating_sub(queued);
-                (available > 0).then_some((record.endpoint.consumer_id, available))
-            })
-            .collect::<Vec<_>>();
-        if consumer_budgets.is_empty() {
-            let _ready = market.wait_for_events(
-                client_id,
-                next_session_status_at.saturating_duration_since(Instant::now()),
-            );
-            continue;
+        ticket_interest_dirty |=
+            drain_market_events(market, client_id, endpoints, next_session_status_at)?;
+        if owns_ticket_interest && ticket_interest_dirty {
+            update_ticket_interest(endpoints, &mut ticket_routes);
+            ticket_interest_dirty = false;
         }
-        let events = match market.drain_events(client_id, &consumer_budgets) {
-            Ok(events) => events,
+    }
+    Ok(())
+}
+
+fn drain_market_events(
+    market: &MarketService,
+    client_id: u64,
+    endpoints: &mut [EndpointRecord],
+    next_session_status_at: Instant,
+) -> Result<bool, String> {
+    let consumer_budgets = endpoints
+        .iter()
+        .filter(|record| record.endpoint.active)
+        .filter_map(|record| {
+            let (queued, capacity) = record.endpoint.messages.occupancy();
+            let available = capacity.saturating_sub(queued);
+            (available > 0).then_some((record.endpoint.consumer_id, available))
+        })
+        .collect::<Vec<_>>();
+    if consumer_budgets.is_empty() {
+        let _ready = market.wait_for_events(
+            client_id,
+            next_session_status_at.saturating_duration_since(Instant::now()),
+        );
+        return Ok(false);
+    }
+    let events = market
+        .drain_events(client_id, &consumer_budgets)
+        .inspect_err(|error| {
+            report_runtime_failure(endpoints, error);
+        })?;
+    let empty = events.is_empty();
+    let mut changed = false;
+    for event in events {
+        match apply_received_event(market, client_id, event, endpoints) {
+            Ok(selection_changed) => changed |= selection_changed,
             Err(error) => {
                 report_runtime_failure(endpoints, &error);
                 return Err(error);
             }
-        };
-        let empty = events.is_empty();
-        for event in events {
-            if let Err(error) = apply_received_event(market, client_id, event, endpoints) {
-                report_runtime_failure(endpoints, &error);
-                return Err(error);
-            }
-        }
-        if empty {
-            let _ready = market.wait_for_events(
-                client_id,
-                next_session_status_at.saturating_duration_since(Instant::now()),
-            );
         }
     }
-    Ok(())
+    if empty {
+        let _ready = market.wait_for_events(
+            client_id,
+            next_session_status_at.saturating_duration_since(Instant::now()),
+        );
+    }
+    Ok(changed)
+}
+
+fn update_ticket_interest(endpoints: &[EndpointRecord], published: &mut Vec<MarketRoute>) {
+    let mut routes = BTreeMap::new();
+    for record in endpoints
+        .iter()
+        .filter(|record| record.endpoint.active && record.role == EndpointRole::Market)
+    {
+        if let Ok(terms) =
+            aeris_market_runtime::market_service::instrument_terms_from_install(&record.product)
+        {
+            routes.insert(terms.route.instrument_id.clone(), terms.route);
+        }
+    }
+    // Only 64 tickets can hold quote leases; orders and positions retain their
+    // independent owner demand even when more panes are open.
+    if routes.len() > 64 {
+        diagnostic!(
+            "Aeris ticket quote interest omitted {} instruments above the 64-route limit",
+            routes.len() - 64
+        );
+    }
+    let desired = routes.into_values().take(64).collect::<Vec<_>>();
+    if *published == desired {
+        return;
+    }
+    let Some(trading) = aeris_desktop::trading::handle() else {
+        return;
+    };
+    if let Err(error) = trading.set_ticket_interest(desired.clone()) {
+        diagnostic!("Aeris ticket quote interest could not be updated: {error}");
+    } else {
+        *published = desired;
+    }
 }
 
 /// Sends each chart its market session status when its product or the runtime calendar
@@ -255,7 +328,7 @@ fn apply_received_event(
     _client_id: u64,
     (consumer_id, event): (u64, aeris_market_runtime::MarketConsumerEvent),
     endpoints: &mut [EndpointRecord],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let event = event.value;
     if consumer_id == 0 {
         let MarketRuntimeEvent::Fault(fault) = event else {
@@ -271,26 +344,34 @@ fn apply_received_event(
                 message: fault.redacted_detail.clone(),
             });
         }
-        return Ok(());
+        return Ok(false);
     }
     let Some(record) = endpoints
         .iter_mut()
         .find(|record| record.endpoint.active && record.endpoint.consumer_id == consumer_id)
     else {
-        return Ok(());
+        return Ok(false);
     };
     if let MarketRuntimeEvent::SelectionOutcome(outcome) = event {
         apply_selection_outcome(record, outcome)?;
-        return Ok(());
+        return Ok(true);
     }
     let endpoint = &mut record.endpoint;
     let (catalog, event) = classify_provider_catalog_event(event);
     let event = match catalog {
         Some(event) => {
+            let mut changed = false;
             if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
-                && let Err(error) = aeris_desktop::trading::register_provider_instrument(instrument)
+                && record.role == EndpointRole::Market
+                && record.product.provider == instrument.provider
+                && record.product.instrument_id == instrument.instrument_id
+                && instrument.selection_generation >= record.product.selection_generation
+                && instrument.session_generation >= record.product.session_generation
             {
-                aeris_desktop::trading::report_practice_registration_error(error);
+                // Verified Terms supersede the provisional selected descriptor, not
+                // a different pane selection. Ticket demand uses the same identity.
+                record.product = instrument.clone();
+                changed = true;
             }
             if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
                 && record.role != EndpointRole::MarketScreen
@@ -304,14 +385,14 @@ fn apply_received_event(
             let _ = endpoint
                 .messages
                 .send(MarketWorkerMessage::ProviderCatalog(event));
-            return Ok(());
+            return Ok(changed);
         }
         None => event,
     };
-    let Some(event) = event else { return Ok(()) };
+    let Some(event) = event else { return Ok(false) };
     // A screen consumer owns no series, so any other event is not addressed to its presentation.
     if record.role == EndpointRole::MarketScreen {
-        return Ok(());
+        return Ok(false);
     }
     if let MarketRuntimeEvent::ProviderState(state) = &event
         && state.provider != record.product.provider
@@ -319,7 +400,7 @@ fn apply_received_event(
         return Err("engine provider state identity mismatched".to_string());
     }
     if complete_pending_recovery(&event, &record.product, endpoint)? {
-        return Ok(());
+        return Ok(false);
     }
     let result = apply_pushed_event(
         event,
@@ -338,7 +419,7 @@ fn apply_received_event(
             message: error,
         });
     }
-    Ok(())
+    Ok(false)
 }
 
 fn apply_selection_outcome(
@@ -352,9 +433,6 @@ fn apply_selection_outcome(
             ..
         } => {
             let selected = descriptor.instrument;
-            if let Err(error) = aeris_desktop::trading::register_provider_instrument(&selected) {
-                aeris_desktop::trading::report_practice_registration_error(error);
-            }
             if record
                 .pending_selection
                 .as_ref()

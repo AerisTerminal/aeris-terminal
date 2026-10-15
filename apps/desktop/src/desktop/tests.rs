@@ -24,13 +24,12 @@ use super::{
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
     ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
-    resting_entry_order_type, series_selector_label, should_finish_chrome_overlay_close,
-    stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
-    switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
-    timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
-    timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
-    timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
-    watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
+    series_selector_label, should_finish_chrome_overlay_close, stabilized_connection_state,
+    stable_connection_message, stopped_worker_chart_detail, switch_requires_chart_cover,
+    symbol_input_action, symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+    timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
+    timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
+    timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
     workspace_label, workspace_maximize_transition, workspace_split_ratio, workspace_switch,
     wrapped_workspace_index,
@@ -89,33 +88,6 @@ fn chart_prices_convert_at_eight_places_despite_float_representation() {
     assert_eq!(chart_price_fixed_point(1224.375, 2), None);
     assert_eq!(chart_price_fixed_point(f64::NAN, 8), None);
     assert_eq!(chart_quantity_fixed_point(0.0, 8), None);
-}
-
-#[test]
-fn position_drawing_entries_rest_until_the_market_reaches_them() {
-    use aeris_trading::{FixedPoint, OrderSide, OrderType};
-    let price = |units| FixedPoint::try_new(units, 2).expect("price");
-    let (bid, ask) = (price(3_088_400), price(3_088_425));
-    for (side, entry, expected) in [
-        (OrderSide::Buy, 3_108_950, OrderType::Stop),
-        (OrderSide::Buy, 3_088_425, OrderType::Limit),
-        (OrderSide::Buy, 3_080_000, OrderType::Limit),
-        (OrderSide::Sell, 3_080_000, OrderType::Stop),
-        (OrderSide::Sell, 3_088_400, OrderType::Limit),
-        (OrderSide::Sell, 3_108_950, OrderType::Limit),
-    ] {
-        assert_eq!(
-            resting_entry_order_type(side, price(entry), bid, ask),
-            Some(expected),
-            "{side:?} at {entry}"
-        );
-    }
-    let coarse = FixedPoint::try_new(30_884, 0).expect("coarse");
-    assert_eq!(
-        resting_entry_order_type(OrderSide::Buy, coarse, bid, price(3_088_425)),
-        None,
-        "a quote finer than the entry cannot be compared exactly"
-    );
 }
 
 #[test]

@@ -494,7 +494,7 @@ impl TerminalApp {
         }
         self.next_event_risk_check = now_instant + CHECK_INTERVAL;
         let surface = self.active_surface();
-        let (snapshot, maximum_lead_seconds, observation) = {
+        let (snapshot, maximum_lead_seconds, instrument) = {
             let surface = surface.read(cx);
             let maximum_lead_seconds = surface
                 .trading_pnl
@@ -505,15 +505,13 @@ impl TerminalApp {
                 .map(|rule| rule.lead_seconds)
                 .max()
                 .unwrap_or(0);
-            let observation = surface
-                .order_book
-                .read(cx)
-                .frame()
-                .and_then(aeris_desktop::trading::simulated_market_observation);
+            let instrument = surface.order_book.read(cx).frame().and_then(|frame| {
+                aeris_instruments::InstrumentId::try_new(frame.instrument_id.clone()).ok()
+            });
             (
                 Arc::clone(&surface.context_snapshot),
                 maximum_lead_seconds,
-                observation,
+                instrument,
             )
         };
         if maximum_lead_seconds == 0 {
@@ -546,7 +544,7 @@ impl TerminalApp {
         }
         let dispatch = cx.background_executor().spawn(async move {
             for (_, event) in due {
-                service.apply_economic_event_risk(event, observation.clone())?;
+                service.apply_economic_event_risk_at(event, instrument.clone())?;
             }
             Ok::<_, String>(())
         });

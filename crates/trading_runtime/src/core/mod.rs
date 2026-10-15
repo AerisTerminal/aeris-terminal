@@ -72,8 +72,6 @@ use std::{
 };
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
-/// Distinct instruments whose latest BBO can wait for the trading owner at once.
-pub(crate) const MAXIMUM_PENDING_OBSERVATIONS: usize = 256;
 pub(crate) const REPLY_CAPACITY: usize = 1;
 pub(crate) const MAXIMUM_OPEN_ORDERS: usize = 4_096;
 pub(crate) const MAXIMUM_SNAPSHOT_ITEMS: usize = 10_000;
@@ -464,20 +462,8 @@ pub struct TradingService {
 pub(crate) struct TradingRuntime {
     stopping: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
-    observations: Arc<Mutex<PendingObservations>>,
     market_feed: Arc<MarketFeedInbox>,
     pub(crate) venue_inbox: Arc<VenueInbox>,
-}
-
-/// Latest-value mailbox for published market observations.
-///
-/// Market publication can outpace simulated-venue work. Keeping only the newest BBO per
-/// instrument bounds memory, and a single queued drain command keeps market traffic from
-/// occupying the command queue that user order commands share.
-#[derive(Default)]
-pub(crate) struct PendingObservations {
-    latest: BTreeMap<InstrumentId, SimulatedMarketObservation>,
-    drain_queued: bool,
 }
 
 pub(crate) struct TradingCore {
@@ -489,7 +475,6 @@ pub(crate) struct TradingCore {
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
     market_observation_error: Option<String>,
     venue_error: Option<String>,
-    observations: Arc<Mutex<PendingObservations>>,
     market_feed: Arc<MarketFeedInbox>,
     quote_book: QuoteBook,
     interest_sink: Option<Arc<dyn QuoteInterestSink>>,
@@ -554,8 +539,6 @@ impl TradingService {
         let (started_tx, started_rx) = mpsc::sync_channel(REPLY_CAPACITY);
         let database_path = config.database_path;
         let clock = config.clock;
-        let observations = Arc::new(Mutex::new(PendingObservations::default()));
-        let coordinator_observations = Arc::clone(&observations);
         let stopping = Arc::new(AtomicBool::new(false));
         let market_feed = Arc::new(MarketFeedInbox::new(
             commands.clone(),
@@ -571,7 +554,6 @@ impl TradingService {
                     &database_path,
                     retention,
                     clock,
-                    coordinator_observations,
                     coordinator_venue_inbox,
                     coordinator_market_feed,
                 );
@@ -595,7 +577,6 @@ impl TradingService {
             runtime: Arc::new(TradingRuntime {
                 stopping,
                 worker: Mutex::new(Some(worker)),
-                observations,
                 market_feed,
                 venue_inbox,
             }),
@@ -691,6 +672,60 @@ impl TradingService {
     /// Returns an error when validation, routing, capacity, or persistence fails.
     pub fn place_order(&self, order: PlaceOrder) -> Result<Order, String> {
         self.request(|reply| Command::Place(order, reply))
+    }
+
+    /// Submits a desktop instruction using only the owner's current validated market quote.
+    /// `at_touch` prices a limit or stop instruction at the current touch.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or rejected order.
+    pub fn place_order_from_market(
+        &self,
+        order: PlaceOrder,
+        at_touch: bool,
+    ) -> Result<Order, String> {
+        self.request(|reply| Command::PlaceFromMarket(order, at_touch, reply))
+    }
+
+    /// Submits a template entry using the owner's quote.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or rejected bracket.
+    pub fn place_bracket_from_market(
+        &self,
+        bracket: PlaceBracket,
+    ) -> Result<BracketPlacement, String> {
+        self.request(|reply| Command::PlaceBracketFromMarket(bracket, reply))
+    }
+
+    /// Submits an inline bracket using the owner's quote.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or rejected bracket.
+    pub fn place_inline_bracket_from_market(
+        &self,
+        bracket: PlaceInlineBracket,
+    ) -> Result<BracketPlacement, String> {
+        self.request(|reply| Command::PlaceInlineBracketFromMarket(bracket, reply))
+    }
+
+    /// Submits a protective order using the owner's quote.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or invalid protection.
+    pub fn place_protective_order_from_market(
+        &self,
+        order: PlaceProtectiveOrder,
+    ) -> Result<Order, String> {
+        self.request(|reply| Command::PlaceProtectiveFromMarket(order, reply))
+    }
+
+    /// Modifies an order using the owner's quote provenance.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or invalid modification.
+    pub fn modify_order_from_market(&self, order: ModifyOrder) -> Result<Order, String> {
+        self.request(|reply| Command::ModifyFromMarket(order, reply))
     }
 
     /// Attaches a bounded demo-venue writer under the next session generation, which the
@@ -890,6 +925,7 @@ impl TradingService {
     /// # Errors
     /// Returns an error when the observation is invalid, the account is unknown, or persistence
     /// fails. Flattening is an administrative action and remains available while risk-locked.
+    #[cfg(test)]
     pub fn flatten_account(
         &self,
         account_id: TradingAccountId,
@@ -903,6 +939,7 @@ impl TradingService {
     /// # Errors
     /// Returns an error when the position is flat, the observation is invalid,
     /// persistence fails, or the replacement side violates account risk.
+    #[cfg(test)]
     pub fn reverse_position(
         &self,
         account_id: TradingAccountId,
@@ -916,11 +953,44 @@ impl TradingService {
     /// # Errors
     /// Returns an error when the observation is invalid, no accounts are registered, or
     /// persistence fails. This administrative action remains available while risk-locked.
+    #[cfg(test)]
     pub fn flatten_all(
         &self,
         observation: SimulatedMarketObservation,
     ) -> Result<FlattenOutcome, String> {
         self.request(|reply| Command::FlattenAll(observation, reply))
+    }
+
+    /// Flattens the selected instrument using only the owner's validated quote.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or failed close.
+    pub fn flatten_account_at(
+        &self,
+        account: TradingAccountId,
+        instrument: InstrumentId,
+    ) -> Result<FlattenOutcome, String> {
+        self.request(|reply| Command::FlattenAt(account, instrument, reply))
+    }
+
+    /// Reverses the selected instrument using only the owner's validated quote.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or failed reversal.
+    pub fn reverse_position_at(
+        &self,
+        account: TradingAccountId,
+        instrument: InstrumentId,
+    ) -> Result<FlattenOutcome, String> {
+        self.request(|reply| Command::ReverseAt(account, instrument, reply))
+    }
+
+    /// Flattens all accounts for the selected instrument using only the owner's validated quote.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable quote or failed close.
+    pub fn flatten_all_at(&self, instrument: InstrumentId) -> Result<FlattenOutcome, String> {
+        self.request(|reply| Command::FlattenAllAt(instrument, reply))
     }
 
     /// Applies every enabled account event rule once, durably fenced by event/profile identity.
@@ -929,6 +999,7 @@ impl TradingService {
     /// # Errors
     /// Returns an error when the trigger or observation is invalid, a complete flatten cannot be
     /// priced, the runtime is overloaded, or durable rule state cannot be written.
+    #[cfg(test)]
     pub fn apply_economic_event_risk(
         &self,
         event: EconomicEventRiskTrigger,
@@ -937,65 +1008,28 @@ impl TradingService {
         self.request(|reply| Command::ApplyEconomicEventRisk(event, observation, reply))
     }
 
+    /// Applies an event rule using the owner's quote for the selected instrument.
+    ///
+    /// # Errors
+    /// Returns an error for a rejected rule or unavailable owner.
+    pub fn apply_economic_event_risk_at(
+        &self,
+        event: EconomicEventRiskTrigger,
+        instrument: Option<InstrumentId>,
+    ) -> Result<EconomicEventRiskOutcome, String> {
+        self.request(|reply| Command::ApplyEconomicEventRiskAt(event, instrument, reply))
+    }
+
     /// Applies one market observation and returns fills produced by the simulated venue.
     ///
     /// # Errors
     /// Returns an error when the observation is invalid or a fill cannot be persisted exactly.
+    #[cfg(test)]
     pub fn observe_market(
         &self,
         observation: SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {
         self.request(|reply| Command::Observe(observation, reply))
-    }
-
-    /// Offers one canonical market observation without blocking its market-publication owner.
-    ///
-    /// Only the newest observation per instrument is retained until the owner drains it, and
-    /// an older provider revision never replaces a newer pending one. A full command queue
-    /// leaves the observation pending; the next publication retries the drain request.
-    ///
-    /// # Errors
-    /// Returns an error when the owner is stopping or unavailable, or when too many distinct
-    /// instruments are already pending.
-    pub fn publish_market_observation(
-        &self,
-        observation: SimulatedMarketObservation,
-    ) -> Result<(), String> {
-        if self.runtime.stopping.load(Ordering::Acquire) {
-            return Err("trading owner is stopping".to_string());
-        }
-        let mut pending = self
-            .runtime
-            .observations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let pending_count = pending.latest.len();
-        match pending.latest.entry(observation.instrument_id.clone()) {
-            std::collections::btree_map::Entry::Occupied(mut current) => {
-                if observation_revision(&observation) >= observation_revision(current.get()) {
-                    current.insert(observation);
-                }
-            }
-            std::collections::btree_map::Entry::Vacant(_)
-                if pending_count >= MAXIMUM_PENDING_OBSERVATIONS =>
-            {
-                return Err("pending market observation limit reached".to_string());
-            }
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(observation);
-            }
-        }
-        if pending.drain_queued {
-            return Ok(());
-        }
-        match self.commands.try_send(Command::DrainObservations) {
-            Ok(()) => {
-                pending.drain_queued = true;
-                Ok(())
-            }
-            Err(TrySendError::Full(_)) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => Err("trading owner is unavailable".to_string()),
-        }
     }
 
     /// Stores one user-owned JSON record on the background owner.
@@ -1102,12 +1136,35 @@ pub(crate) fn observation_revision(observation: &SimulatedMarketObservation) -> 
     )
 }
 
+pub(crate) fn resting_bracket_order_type(
+    side: OrderSide,
+    entry: FixedPoint,
+    bid: FixedPoint,
+    ask: FixedPoint,
+) -> Result<OrderType, String> {
+    let touch = match side {
+        OrderSide::Buy => ask,
+        OrderSide::Sell => bid,
+    }
+    .exact_rescale(entry.scale())
+    .map_err(|error| error.to_string())?
+    .units();
+    let beyond_touch = match side {
+        OrderSide::Buy => entry.units() > touch,
+        OrderSide::Sell => entry.units() < touch,
+    };
+    Ok(if beyond_touch {
+        OrderType::Stop
+    } else {
+        OrderType::Limit
+    })
+}
+
 impl TradingCore {
     pub(crate) fn open(
         database_path: &std::path::Path,
         retention: TradingRetention,
         clock: Arc<dyn clock::Clock>,
-        observations: Arc<Mutex<PendingObservations>>,
         venue_inbox: Weak<VenueInbox>,
         market_feed: Arc<MarketFeedInbox>,
     ) -> Result<Self, StoreError> {
@@ -1127,7 +1184,6 @@ impl TradingCore {
             copy_dispatches: std::collections::VecDeque::new(),
             market_observation_error: None,
             venue_error: None,
-            observations,
             market_feed,
             quote_book: QuoteBook::default(),
             interest_sink: None,
@@ -1250,18 +1306,23 @@ impl TradingCore {
             }
             Command::AttachMarketFeed(..)
             | Command::SetTicketInterest(..)
-            | Command::DrainMarketFeed
-            | Command::Observe(..)
-            | Command::DrainObservations => self.dispatch_market_command(command, now),
+            | Command::DrainMarketFeed => self.dispatch_market_command(command),
+            #[cfg(test)]
+            Command::Observe(..) => self.dispatch_market_command(command),
             Command::InstallPracticeMarketSession(session, reply) => {
                 respond(&reply, self.install_practice_market_session(session));
             }
             Command::Place(..)
+            | Command::PlaceFromMarket(..)
             | Command::PlaceBracket(..)
+            | Command::PlaceBracketFromMarket(..)
             | Command::PlaceInlineBracket(..)
+            | Command::PlaceInlineBracketFromMarket(..)
             | Command::PlaceProtective(..)
+            | Command::PlaceProtectiveFromMarket(..)
             | Command::EvaluateRisk(..)
             | Command::Modify(..)
+            | Command::ModifyFromMarket(..)
             | Command::MovePlannedLeg(..)
             | Command::Cancel(..)
             | Command::CancelAll(..)
@@ -1284,7 +1345,12 @@ impl TradingCore {
             Command::LockAccount(..)
             | Command::UnlockAccount(..)
             | Command::KillSwitch(..)
-            | Command::Flatten(..)
+            | Command::FlattenAt(..)
+            | Command::ReverseAt(..)
+            | Command::FlattenAllAt(..)
+            | Command::ApplyEconomicEventRiskAt(..) => self.dispatch_account_command(command),
+            #[cfg(test)]
+            Command::Flatten(..)
             | Command::Reverse(..)
             | Command::FlattenAll(..)
             | Command::ApplyEconomicEventRisk(..) => self.dispatch_account_command(command),
@@ -1305,15 +1371,7 @@ impl TradingCore {
                 barrier.wait();
             }
             #[cfg(test)]
-            Command::OwnerDiagnostics(reply) => {
-                respond(
-                    &reply,
-                    Ok((
-                        thread::current().name().unwrap_or_default().to_string(),
-                        self.timer_calls,
-                    )),
-                );
-            }
+            Command::OwnerDiagnostics(reply) => respond(&reply, Ok(self.owner_diagnostics())),
             Command::Shutdown(reply) => {
                 let result = self.store.checkpoint_for_shutdown();
                 let _ = reply.send(result);
@@ -1325,6 +1383,14 @@ impl TradingCore {
         }
         self.market_feed.wake_if_pending();
         true
+    }
+
+    #[cfg(test)]
+    fn owner_diagnostics(&self) -> (String, usize) {
+        (
+            thread::current().name().unwrap_or_default().to_string(),
+            self.timer_calls,
+        )
     }
 
     /// Applies the bounded latest-value market batch under the owner clock.
@@ -1367,19 +1433,53 @@ impl TradingCore {
                     self.kill_switch(account_id.as_ref(), &reason, locked_at),
                 );
             }
+            #[cfg(test)]
             Command::Flatten(account_id, observation, reply) => {
                 respond(&reply, self.flatten_account(&account_id, &observation));
             }
+            #[cfg(test)]
             Command::Reverse(account_id, observation, reply) => {
                 respond(&reply, self.reverse_position(&account_id, &observation));
             }
+            #[cfg(test)]
             Command::FlattenAll(observation, reply) => {
                 respond(&reply, self.flatten_all(&observation));
             }
+            Command::FlattenAt(account, instrument, reply) => {
+                respond(
+                    &reply,
+                    self.market_observation(&instrument)
+                        .and_then(|quote| self.flatten_account(&account, &quote)),
+                );
+            }
+            Command::ReverseAt(account, instrument, reply) => {
+                respond(
+                    &reply,
+                    self.market_observation(&instrument)
+                        .and_then(|quote| self.reverse_position(&account, &quote)),
+                );
+            }
+            Command::FlattenAllAt(instrument, reply) => {
+                respond(
+                    &reply,
+                    self.market_observation(&instrument)
+                        .and_then(|quote| self.flatten_all(&quote)),
+                );
+            }
+            #[cfg(test)]
             Command::ApplyEconomicEventRisk(event, observation, reply) => {
                 respond(
                     &reply,
                     self.apply_economic_event_risk(&event, observation.as_ref()),
+                );
+            }
+            Command::ApplyEconomicEventRiskAt(event, instrument, reply) => {
+                let quote = instrument
+                    .as_ref()
+                    .and_then(|id| self.quote_book.observation(id));
+                respond(
+                    &reply,
+                    self.apply_economic_event_risk(&event, quote.as_ref()),
                 );
             }
             _ => unreachable!("only account commands are dispatched here"),
@@ -1407,18 +1507,70 @@ impl TradingCore {
     fn dispatch_order_command(&mut self, command: Command) {
         match command {
             Command::Place(order, reply) => respond(&reply, self.place_order(&order)),
+            Command::PlaceFromMarket(order, at_touch, reply) => {
+                respond(
+                    &reply,
+                    self.market_order(order, at_touch)
+                        .and_then(|order| self.place_order(&order)),
+                );
+            }
             Command::PlaceBracket(bracket, reply) => respond(&reply, self.place_bracket(&bracket)),
+            Command::PlaceBracketFromMarket(bracket, reply) => {
+                respond(
+                    &reply,
+                    self.market_order(bracket.entry, true).and_then(|entry| {
+                        self.place_bracket(&PlaceBracket {
+                            entry,
+                            template_id: bracket.template_id,
+                        })
+                    }),
+                );
+            }
             Command::PlaceInlineBracket(bracket, reply) => respond(
                 &reply,
                 self.place_bracket_with_template(&bracket.entry, bracket.template),
             ),
+            Command::PlaceInlineBracketFromMarket(bracket, reply) => {
+                respond(
+                    &reply,
+                    self.market_resting_bracket_entry(bracket.entry)
+                        .and_then(|entry| {
+                            self.place_bracket_with_template(&entry, bracket.template)
+                        }),
+                );
+            }
             Command::PlaceProtective(order, reply) => {
                 respond(&reply, self.place_protective_order(order));
+            }
+            Command::PlaceProtectiveFromMarket(order, reply) => {
+                respond(
+                    &reply,
+                    self.market_order(order.order, false)
+                        .and_then(|order_command| {
+                            self.place_protective_order(PlaceProtectiveOrder {
+                                order: order_command,
+                                role: order.role,
+                            })
+                        }),
+                );
             }
             Command::EvaluateRisk(order, reply) => {
                 respond(&reply, self.evaluate_order_risk(&order));
             }
             Command::Modify(order, reply) => respond(&reply, self.modify_order(order)),
+            Command::ModifyFromMarket(mut order, reply) => {
+                let result = self
+                    .state
+                    .orders
+                    .by_client(&order.client_order_id)
+                    .ok_or_else(|| "practice order is not registered".to_string())
+                    .and_then(|current| self.market_observation(&current.instrument_id))
+                    .and_then(|quote| {
+                        order.provenance = quote.provenance;
+                        self.modify_order(order)
+                    });
+                respond(&reply, result);
+            }
             Command::MovePlannedLeg(command, reply) => {
                 respond(&reply, self.move_planned_bracket_leg(&command));
             }
@@ -1452,6 +1604,48 @@ impl TradingCore {
             ),
             _ => {}
         }
+    }
+
+    fn market_observation(
+        &self,
+        instrument: &InstrumentId,
+    ) -> Result<SimulatedMarketObservation, String> {
+        self.quote_book
+            .observation(instrument)
+            .ok_or_else(|| "a current live market quote is unavailable".to_string())
+    }
+
+    fn market_order(&self, mut order: PlaceOrder, at_touch: bool) -> Result<PlaceOrder, String> {
+        let quote = self.market_observation(&order.instrument_id)?;
+        if at_touch {
+            let price = match order.side {
+                OrderSide::Buy => quote.ask,
+                OrderSide::Sell => quote.bid,
+            };
+            match order.order_type {
+                OrderType::Market => {}
+                OrderType::Limit => order.limit_price = Some(price),
+                OrderType::Stop => order.stop_price = Some(price),
+                OrderType::StopLimit => {
+                    order.limit_price = Some(price);
+                    order.stop_price = Some(price);
+                }
+            }
+        }
+        order.provenance = quote.provenance;
+        Ok(order)
+    }
+
+    fn market_resting_bracket_entry(&self, mut entry: PlaceOrder) -> Result<PlaceOrder, String> {
+        let quote = self.market_observation(&entry.instrument_id)?;
+        let price = entry
+            .limit_price
+            .ok_or_else(|| "bracket entry price is unavailable".to_string())?;
+        entry.order_type = resting_bracket_order_type(entry.side, price, quote.bid, quote.ask)?;
+        entry.limit_price = (entry.order_type == OrderType::Limit).then_some(price);
+        entry.stop_price = (entry.order_type == OrderType::Stop).then_some(price);
+        entry.provenance = quote.provenance;
+        Ok(entry)
     }
 
     fn status(&self) -> TradingServiceStatus {

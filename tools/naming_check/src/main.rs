@@ -134,6 +134,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    if let Err(error) =
+        inspect_desktop_quote_boundary(&root, &root.join("apps/desktop/src"), &mut violations)
+    {
+        eprintln!("failed to inspect desktop quote boundary: {error}");
+        return ExitCode::FAILURE;
+    }
     for path in [
         "crates/market_runtime/src/market_service/coordinator.rs",
         "crates/market_runtime/src/market_service/realtime.rs",
@@ -216,6 +222,33 @@ fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
         }
     }
     Ok(violations)
+}
+
+fn violates_desktop_quote_boundary(path: &str, source: &str) -> bool {
+    path.starts_with("apps/desktop/src/")
+        && production_source_prefix(source).contains("SimulatedMarketObservation")
+}
+
+fn inspect_desktop_quote_boundary(
+    root: &Path,
+    directory: &Path,
+    violations: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            inspect_desktop_quote_boundary(root, &path, violations)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let relative = relative_to(root, &path);
+            if violates_desktop_quote_boundary(
+                &relative.to_string_lossy().replace('\\', "/"),
+                &fs::read_to_string(&path)?,
+            ) {
+                violations.push(relative);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn inspect_market_test_names(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -1584,6 +1617,36 @@ mod tests {
             assert!(
                 !constructs_series_cadence(&contents),
                 "{} constructs SeriesCadence; cadence mapping belongs to market_runtime",
+                relative_string(&path)
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_quote_authority_rule_scans_after_test_modules() {
+        let path = "apps/desktop/src/trading.rs";
+        assert!(!super::violates_desktop_quote_boundary(
+            path,
+            "#[cfg(test)] mod tests { fn observation() { SimulatedMarketObservation; } }\nfn command() {}"
+        ));
+        assert!(super::violates_desktop_quote_boundary(
+            path,
+            "#[cfg(test)] mod tests { fn observation() { SimulatedMarketObservation; } }\nfn command() { SimulatedMarketObservation; }"
+        ));
+        assert!(!super::violates_desktop_quote_boundary(
+            "crates/trading_runtime/src/core/mod.rs",
+            "fn owner() { SimulatedMarketObservation; }"
+        ));
+    }
+
+    #[test]
+    fn desktop_never_constructs_simulated_market_observations() {
+        for path in production_sources_under("apps/desktop/src") {
+            let contents = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            assert!(
+                !super::violates_desktop_quote_boundary(&relative_string(&path), &contents),
+                "{} bypasses the trading owner's QuoteBook",
                 relative_string(&path)
             );
         }

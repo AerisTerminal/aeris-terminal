@@ -72,6 +72,9 @@ violations and missing verification explicitly, and never describe them as satis
 - `trading_runtime` is the single in-process owner of broker accounts, orders, order events, fills,
   positions, PnL, simulated execution and the embedded user-record store. The desktop holds command/view
   handles only; `account_runtime`, charts and UI surfaces never own or duplicate broker trading state.
+- The desktop never constructs `SimulatedMarketObservation` or relays order-book prices for execution.
+  `trading_runtime` consumes the market feed through its bounded inbox and its owner `QuoteBook`;
+  desktop trading actions identify instruments and explicit order instructions, never authoritative quotes.
 - The trading service has one named owner thread whose loop is in `service/owner.rs`; it waits for bounded commands
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
