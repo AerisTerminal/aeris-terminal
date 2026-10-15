@@ -95,6 +95,7 @@ pub enum InstrumentRequest {
         symbol: String,
         exchange: String,
         entitlement_id: String,
+        search_generation: u64,
     },
     Default,
 }

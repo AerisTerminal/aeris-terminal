@@ -773,6 +773,7 @@ pub struct EngineSelectionRequest {
 pub struct CatalogSelectionRequest {
     pub sequence: u64,
     pub browser_generation: u64,
+    pub search_generation: u64,
     pub provider: String,
     pub symbol: String,
     pub exchange: String,

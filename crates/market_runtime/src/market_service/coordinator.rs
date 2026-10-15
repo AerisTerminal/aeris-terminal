@@ -7961,7 +7961,13 @@ mod tests {
             Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(ref result))
                 if result.search_generation == 8
         ));
-        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+        assert_eq!(coordinator.command_fences.count_for(consumer), 1);
+        assert!(coordinator.command_fences.accepts(
+            consumer,
+            "rithmic",
+            super::super::CommandKind::Search,
+            8
+        ));
     }
 
     fn market_screen(consumer: ConsumerId, screen_generation: u64) -> ProviderMarketScreen {
@@ -8098,7 +8104,7 @@ mod tests {
             Some(MarketRuntimeEvent::ProviderInstrumentSearchPreview(_))
         ));
         coordinator.handle_catalog_search(result);
-        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+        assert_eq!(coordinator.command_fences.count_for(consumer), 1);
     }
 
     #[test]
@@ -8149,7 +8155,7 @@ mod tests {
             search_generation: 1,
             instruments: Vec::new(),
         });
-        assert_eq!(coordinator.command_fences.count_for(consumer), 0);
+        assert_eq!(coordinator.command_fences.count_for(consumer), 1);
 
         let events = coordinator
             .events
@@ -8168,6 +8174,91 @@ mod tests {
             [17, 1],
             "a picker result must not replace the pending startup re-resolution"
         );
+    }
+
+    #[test]
+    fn catalog_search_result_selection_preserves_search_identity_for_broker_providers() {
+        use super::super::descriptors::{InstrumentRequest, SelectionRequest};
+        for descriptor in [
+            super::super::ctrader::DESCRIPTOR,
+            super::super::tastytrade::DESCRIPTOR,
+        ] {
+            let mut coordinator = coordinator();
+            let owner = consumer(1);
+            register(&mut coordinator, owner);
+            coordinator.consumer_clients.insert(owner, client(1));
+            coordinator.events.insert(owner, ConsumerEvents::default());
+            let (commands, dispatched) = std::sync::mpsc::sync_channel(4);
+            let (_events, incoming) =
+                std::sync::mpsc::sync_channel::<super::super::ProviderCatalogEvent>(4);
+            let catalog = super::super::ProviderCatalogChannelImpl::new(
+                commands,
+                incoming,
+                |sender, _, command| sender.try_send(command).map_err(|error| error.to_string()),
+            );
+            let (history, _requests) = std::sync::mpsc::sync_channel(4);
+            coordinator.providers.records.insert(
+                descriptor.id,
+                super::super::ProviderDispatchRecord {
+                    descriptor,
+                    history: &history,
+                    lifecycle: None,
+                    ctrader: None,
+                    hyperliquid: None,
+                    tastytrade: None,
+                    rithmic: None,
+                    catalog: Some(&catalog),
+                },
+            );
+            let search = aeris_contracts::SearchProviderInstruments {
+                consumer_id: owner.0.get(),
+                search_generation: 7,
+                startup_resolve: false,
+                provider: descriptor.id.into(),
+                query: "EURUSD".into(),
+                maximum_results: 16,
+                categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            };
+            let (reply, accepted) = std::sync::mpsc::sync_channel(1);
+            coordinator.handle_provider_search(client(1), search, &reply);
+            accepted.recv().unwrap().unwrap();
+            assert!(matches!(dispatched.try_recv().unwrap(),
+                super::super::ProviderCatalogCommand::Search(search)
+                    if search.search_generation == 7));
+            coordinator.handle_catalog_search(aeris_contracts::ProviderInstrumentSearchResult {
+                consumer_id: owner.0.get(),
+                provider: descriptor.id.into(),
+                provider_generation: 1,
+                search_generation: 7,
+                instruments: Vec::new(),
+            });
+            assert!(matches!(
+                coordinator.events.get_mut(&owner).unwrap().pop(),
+                Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(_))
+            ));
+            let request = SelectionRequest {
+                consumer_id: owner.0.get(),
+                generation: 9,
+                instrument: InstrumentRequest::CatalogSymbol {
+                    provider_id: descriptor.id.into(),
+                    symbol: "EURUSD".into(),
+                    exchange: "demo".into(),
+                    entitlement_id: descriptor.presentation.selection_entitlement_id.into(),
+                    search_generation: 7,
+                },
+                interval: aeris_market_data::ChartInterval::Minute1,
+                streams: StreamRequirements::BARS,
+                viewport: None,
+            };
+            coordinator.begin_selection(client(1), request).unwrap();
+            assert!(
+                matches!(dispatched.try_recv().unwrap(),
+                super::super::ProviderCatalogCommand::Select(selection)
+                    if selection.search_generation == 7 && selection.selection_generation == 9),
+                "{} must select against the search that produced the result",
+                descriptor.id
+            );
+        }
     }
 
     #[test]

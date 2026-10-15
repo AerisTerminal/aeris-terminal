@@ -238,12 +238,23 @@ impl Coordinator<'_> {
             symbol,
             exchange,
             entitlement_id,
+            search_generation,
         } = &request.instrument
         {
+            if !self.current_catalog_search(consumer, &provider, *search_generation) {
+                self.publish_selection_outcome(
+                    consumer,
+                    SelectionOutcome::Failed {
+                        generation,
+                        error: SelectionError::Superseded,
+                    },
+                );
+                return;
+            }
             let selection = SelectProviderInstrument {
                 consumer_id: request.consumer_id,
                 selection_generation: request.generation,
-                search_generation: request.generation,
+                search_generation: *search_generation,
                 startup_resolve: false,
                 provider: provider_id.clone(),
                 symbol: symbol.clone(),
@@ -326,6 +337,21 @@ impl Coordinator<'_> {
                 provider: provider.to_owned(),
             });
         }
+    }
+
+    fn current_catalog_search(
+        &self,
+        consumer: ConsumerId,
+        provider: &str,
+        search_generation: u64,
+    ) -> bool {
+        search_generation == 0
+            || self.command_fences.accepts(
+                consumer,
+                provider,
+                super::CommandKind::Search,
+                search_generation,
+            )
     }
 
     fn publish_selection_outcome(&mut self, consumer: ConsumerId, outcome: SelectionOutcome) {
@@ -957,7 +983,7 @@ impl Coordinator<'_> {
         ) else {
             return;
         };
-        self.command_fences.take(
+        self.complete_catalog_search_fence(
             consumer_id,
             &result.provider,
             kind,
@@ -966,6 +992,24 @@ impl Coordinator<'_> {
         if let Some(events) = self.events.get_mut(&consumer_id) {
             *events.catalog_search_slot(kind) =
                 Some(MarketRuntimeEvent::ProviderInstrumentSearchResult(result));
+        }
+    }
+
+    fn complete_catalog_search_fence(
+        &mut self,
+        consumer: ConsumerId,
+        provider: &str,
+        kind: super::CommandKind,
+        generation: u64,
+    ) {
+        if kind == super::CommandKind::Search {
+            // Keep the identity until replacement or retirement for a chart
+            // selection, but never publish a duplicate search response.
+            self.command_fences
+                .complete_search(consumer, provider, generation);
+        } else {
+            self.command_fences
+                .take(consumer, provider, kind, generation);
         }
     }
 

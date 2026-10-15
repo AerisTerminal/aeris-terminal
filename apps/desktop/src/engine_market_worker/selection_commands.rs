@@ -254,6 +254,7 @@ fn process_catalog_select(
                 symbol: request.symbol.clone(),
                 exchange: request.exchange.clone(),
                 entitlement_id: request.entitlement_id.clone(),
+                search_generation: request.search_generation,
             },
             interval: request.interval,
             streams: chart_demand_streams(market, &request.provider, endpoint.depth_visible)?,

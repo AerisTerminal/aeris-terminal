@@ -337,6 +337,7 @@ fn catalog_symbol_selection_commits_only_after_its_fenced_resolution() {
             symbol: selected.provider_symbol.clone(),
             exchange: selected.venue_id.clone(),
             entitlement_id: selected.entitlement_id.clone(),
+            search_generation: 1,
         },
         interval: aeris_market_data::ChartInterval::Minute1,
         streams: StreamRequirements::BARS,

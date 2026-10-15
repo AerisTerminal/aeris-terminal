@@ -237,6 +237,7 @@ fn select(
             symbol: symbol.into(),
             exchange: "Hyperliquid".into(),
             entitlement_id: "hyperliquid-public".into(),
+            search_generation: 0,
         }
     };
     let started = Instant::now();

@@ -2426,6 +2426,7 @@ impl WorkspaceSurface {
                 let request = aeris_desktop::market_worker::CatalogSelectionRequest {
                     sequence: 0,
                     browser_generation: selection.generation.get() as u64,
+                    search_generation: selection.search_generation.get() as u64,
                     provider: provider.to_string(),
                     symbol: selection.instrument.symbol.clone(),
                     exchange: selection.instrument.exchange.clone(),

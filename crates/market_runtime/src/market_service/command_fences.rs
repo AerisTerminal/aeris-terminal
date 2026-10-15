@@ -18,6 +18,7 @@ struct Pending {
     wire_generation: u64,
     epoch: Epoch<CommandTag>,
     selection: bool,
+    completed: bool,
 }
 
 #[derive(Default)]
@@ -52,6 +53,7 @@ impl CommandFences {
                 wire_generation,
                 epoch,
                 selection,
+                completed: false,
             },
         );
         epoch
@@ -93,7 +95,9 @@ impl CommandFences {
             self.pending
                 .get(&(consumer, provider.to_owned(), *kind))
                 .is_some_and(|pending| {
-                    pending.wire_generation == generation && pending.selection == selection
+                    pending.wire_generation == generation
+                        && pending.selection == selection
+                        && !pending.completed
                 })
         })
     }
@@ -125,6 +129,21 @@ impl CommandFences {
         self.pending
             .remove(&(consumer, provider.to_owned(), kind))
             .map(|pending| pending.epoch)
+    }
+
+    pub(super) fn complete_search(
+        &mut self,
+        consumer: ConsumerId,
+        provider: &str,
+        wire_generation: u64,
+    ) {
+        if let Some(pending) =
+            self.pending
+                .get_mut(&(consumer, provider.to_owned(), CommandKind::Search))
+            && pending.wire_generation == wire_generation
+        {
+            pending.completed = true;
+        }
     }
 
     pub(super) fn remove_consumer(&mut self, consumer: ConsumerId) {
