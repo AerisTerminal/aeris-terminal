@@ -31,6 +31,7 @@ pub(super) struct OwnedCoordinatorChannels {
     pub(super) commands: Receiver<Command>,
     pub(super) providers: ProviderRuntimeRegistry,
     pub(super) quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
+    pub(super) quotes: Arc<Mutex<super::quotes::QuoteBook>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -71,6 +72,7 @@ pub(super) fn spawn_coordinator(
                 commands,
                 mut providers,
                 quote_releases,
+                quotes,
             } = channels;
             {
                 let dispatch = providers.dispatch();
@@ -81,6 +83,7 @@ pub(super) fn spawn_coordinator(
                     &shutdown,
                     clock,
                     quote_releases,
+                    quotes,
                 );
             }
             // A history worker may be blocked on a full bounded completion
@@ -103,9 +106,11 @@ fn run_coordinator(
     shutdown: &AtomicBool,
     clock: Arc<dyn super::clock::Clock>,
     quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
+    quotes: Arc<Mutex<super::quotes::QuoteBook>>,
 ) {
     let mut coordinator = Coordinator::with_clock(engine, providers, clock);
     coordinator.quote_releases = Some(quote_releases);
+    coordinator.quotes = quotes;
     let demand_flushers = coordinator
         .providers
         .records
@@ -146,6 +151,8 @@ fn coordinator_turn(
         );
         for id in released {
             if coordinator.engine.release_data_lease(id) {
+                coordinator.reconcile_order_books();
+                coordinator.mark_alert_demand_changed();
                 coordinator.pending_activity = true;
             }
         }
@@ -304,6 +311,7 @@ impl<'a> Coordinator<'a> {
             deadlines: BTreeMap::new(),
             pending_activity: true,
             quote_releases: None,
+            quotes: Arc::new(Mutex::new(super::quotes::QuoteBook::default())),
             control_retry: false,
             series_effects: super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),
@@ -786,6 +794,8 @@ fn study_live_market_data<'a>(
         .find_map(|book| book.study_live_market_data(input, generation))
 }
 
+type OrderBookIdentity = (String, String, String);
+
 pub(super) struct Coordinator<'a> {
     pub(super) engine: MarketEngine,
     pub(super) studies: StudyRuntime,
@@ -804,6 +814,7 @@ pub(super) struct Coordinator<'a> {
     deadlines: BTreeMap<Instant, TimerKey>,
     pending_activity: bool,
     quote_releases: Option<Arc<Mutex<Vec<MarketDataLeaseId>>>>,
+    pub(super) quotes: Arc<Mutex<super::quotes::QuoteBook>>,
     pub(super) control_retry: bool,
     pub(super) series_effects: super::lifecycle::EffectBuf,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
@@ -845,6 +856,10 @@ impl Coordinator<'_> {
         id: &str,
         epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
     ) {
+        self.quotes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_provider(id);
         self.provider_epochs.bind(id, epoch);
         if let Some(descriptor) = self.providers.descriptor(id) {
             // The worker's Connecting event is asynchronous. History tickets
@@ -1256,8 +1271,12 @@ impl Coordinator<'_> {
             .acquire_instrument_lease(key, StreamRequirements::NONE.with(MarketStream::Quotes))
         {
             Ok(id) => {
+                self.reconcile_order_books();
+                self.mark_alert_demand_changed();
+                self.pending_activity = true;
                 if reply.send(Ok(id)).is_err() {
                     let _ = self.engine.release_data_lease(id);
+                    self.reconcile_order_books();
                 }
             }
             Err(error) => {
@@ -1676,24 +1695,16 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn reconcile_order_books(&mut self) {
-        let mut required_identities = BTreeSet::new();
-        let mut depth_identities = BTreeSet::new();
-        for (series, subscription) in self.engine.subscriptions() {
-            let identity = (
-                series.provider_id.clone(),
-                series.instrument_id.clone(),
-                series.entitlement_id.clone(),
-            );
-            if subscription.streams.contains(MarketStream::Depth) {
-                depth_identities.insert(identity.clone());
-            }
-            if subscription.streams.contains(MarketStream::Depth)
-                || subscription.streams.contains(MarketStream::Trades)
-                || subscription.streams.contains(MarketStream::Quotes)
-            {
-                required_identities.insert(identity);
-            }
-        }
+        let (required_identities, depth_identities) = self.required_order_book_identities();
+        let retained_keys = self
+            .engine
+            .instrument_subscriptions()
+            .map(|(key, _)| key)
+            .collect::<BTreeSet<_>>();
+        self.quotes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(&retained_keys);
         let required = self
             .catalog
             .values()
@@ -1762,6 +1773,46 @@ impl Coordinator<'_> {
                     .get(identity)
                     .is_some_and(|book| !book.publishes_top_of_book_only())
         });
+    }
+
+    fn required_order_book_identities(
+        &self,
+    ) -> (BTreeSet<OrderBookIdentity>, BTreeSet<OrderBookIdentity>) {
+        let mut required_identities = BTreeSet::new();
+        let mut depth_identities = BTreeSet::new();
+        for (series, subscription) in self.engine.subscriptions() {
+            let identity = (
+                series.provider_id.clone(),
+                series.instrument_id.clone(),
+                series.entitlement_id.clone(),
+            );
+            if subscription.streams.contains(MarketStream::Depth) {
+                depth_identities.insert(identity.clone());
+            }
+            if subscription.streams.contains(MarketStream::Depth)
+                || subscription.streams.contains(MarketStream::Trades)
+                || subscription.streams.contains(MarketStream::Quotes)
+            {
+                required_identities.insert(identity);
+            }
+        }
+        for (key, streams) in self.engine.instrument_subscriptions() {
+            let identity = (
+                key.provider,
+                key.instrument.as_str().to_string(),
+                key.entitlement.unwrap_or_default(),
+            );
+            if streams.contains(MarketStream::Depth) {
+                depth_identities.insert(identity.clone());
+            }
+            if streams.contains(MarketStream::Quotes)
+                || streams.contains(MarketStream::Depth)
+                || streams.contains(MarketStream::Trades)
+            {
+                required_identities.insert(identity);
+            }
+        }
+        (required_identities, depth_identities)
     }
 
     pub(super) fn status(&self) -> MarketServiceStatus {
@@ -2054,6 +2105,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn trading_feed_quote_lease_without_chart_drives_provider_and_book_demand() {
+        let mut coordinator = coordinator();
+        let instrument = hyperliquid_instrument();
+        coordinator.catalog.insert(
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
+            instrument.clone(),
+        );
+        let key = super::super::InstrumentStreamKey {
+            provider: instrument.provider.clone(),
+            instrument: aeris_instruments::InstrumentId::try_new(instrument.instrument_id.clone())
+                .expect("valid instrument id"),
+            entitlement: Some(instrument.entitlement_id.clone()),
+        };
+        let lease = coordinator
+            .engine
+            .acquire_instrument_lease(&key, StreamRequirements::NONE.with(MarketStream::Quotes))
+            .expect("quotes-only lease");
+        assert_eq!(coordinator.engine.subscriptions().len(), 0);
+        let demand = coordinator.provider_demand(&instrument.provider);
+        assert_eq!(demand.instruments.len(), 1);
+        assert!(demand.instruments[0].streams.contains(MarketStream::Quotes));
+        let wire = demand.hyperliquid_wire();
+        assert_eq!(wire.quotes.len(), 1);
+        assert_eq!(wire.candles.len(), 0);
+        coordinator.reconcile_order_books();
+        assert!(coordinator.order_books.contains_key(&(
+            instrument.provider.clone(),
+            instrument.instrument_id.clone()
+        )));
+        let generation = ProviderGeneration(nonzero(2));
+        coordinator
+            .engine
+            .begin_provider_session(&instrument.provider, generation)
+            .expect("provider session");
+        coordinator.provider_quote(
+            &instrument.provider,
+            generation.0.get(),
+            &aeris_market_data::TopOfBookQuote {
+                metadata: aeris_market_data::EventMetadata {
+                    provider_id: instrument.provider.clone(),
+                    instrument_id: instrument.instrument_id.clone(),
+                    entitlement_id: instrument.entitlement_id.clone(),
+                    source_sequence: 1,
+                    session_generation: generation.0.get(),
+                    timestamps: aeris_market_data::QualifiedTimestamp {
+                        exchange_unix_nanos: Some(10),
+                        provider_unix_nanos: None,
+                        received_unix_nanos: 11,
+                    },
+                },
+                bid: Some(aeris_market_data::QuoteLevel {
+                    price: 100,
+                    quantity: Some(1),
+                    order_count: None,
+                }),
+                ask: Some(aeris_market_data::QuoteLevel {
+                    price: 101,
+                    quantity: Some(2),
+                    order_count: None,
+                }),
+            },
+        );
+        let state = coordinator
+            .quotes
+            .lock()
+            .unwrap()
+            .latest(&key)
+            .expect("leased quote reaches the read projection");
+        assert_eq!(state.quote.bid.units(), 100);
+        assert_eq!(state.quote.ask.units(), 101);
+        assert_eq!(state.quote.provider_generation, generation.0.get());
+
+        assert!(coordinator.engine.release_data_lease(lease));
+        coordinator.reconcile_order_books();
+        assert!(coordinator.order_books.is_empty());
+        assert!(coordinator.quotes.lock().unwrap().latest(&key).is_none());
+        assert_eq!(
+            coordinator
+                .provider_demand(&instrument.provider)
+                .instruments
+                .len(),
+            0
+        );
+    }
+
     fn study_definition_with_streams(
         series: BarSeriesKey,
         streams: StreamRequirements,
@@ -2178,6 +2318,7 @@ mod tests {
             deadlines: BTreeMap::new(),
             pending_activity: true,
             quote_releases: None,
+            quotes: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
             control_retry: false,
             series_effects: super::super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),

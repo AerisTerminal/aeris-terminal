@@ -24,6 +24,11 @@ use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_contracts::ProviderPresentationDescriptor;
 
+struct QuoteChannels {
+    releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
+    latest: Arc<Mutex<super::quotes::QuoteBook>>,
+}
+
 fn dispatch_rithmic_catalog(
     controls: &SyncSender<RithmicCatalogControl>,
     provider: &str,
@@ -1113,6 +1118,7 @@ impl MarketService {
         let engine = super::configured_engine_from_descriptors(&descriptors)?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let quote_releases = Arc::new(Mutex::new(Vec::new()));
+        let quotes = Arc::new(Mutex::new(super::quotes::QuoteBook::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let broker_api = Arc::new(super::tastytrade::BrokerApi::default());
@@ -1134,6 +1140,7 @@ impl MarketService {
                 commands: command_rx,
                 providers: provider_registry,
                 quote_releases: Arc::clone(&quote_releases),
+                quotes: Arc::clone(&quotes),
             },
             Arc::clone(&shutdown),
             Arc::new(super::clock::SystemClock),
@@ -1148,7 +1155,10 @@ impl MarketService {
                 presentations: provider_presentations,
                 search_preparers: provider_search_preparers,
             },
-            quote_releases,
+            QuoteChannels {
+                releases: quote_releases,
+                latest: quotes,
+            },
         )
     }
 
@@ -1159,8 +1169,12 @@ impl MarketService {
         mut workers: Vec<thread::JoinHandle<()>>,
         context: super::ProviderStartContext,
         providers: MarketServiceProviders,
-        quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
+        channels: QuoteChannels,
     ) -> Result<Self, String> {
+        let QuoteChannels {
+            releases: quote_releases,
+            latest: quotes,
+        } = channels;
         let super::ProviderStartContext {
             tastytrade: broker_api,
             ctrader,
@@ -1200,6 +1214,7 @@ impl MarketService {
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
                 quote_releases,
+                quotes,
             }),
         })
     }
@@ -1644,10 +1659,11 @@ impl MarketService {
         owner: LeaseOwner,
         key: InstrumentStreamKey,
     ) -> Result<QuoteSubscription, String> {
-        let lease_id = self.request(|reply| Ok(Command::AcquireQuote(key, reply)))?;
+        let lease_id = self.request(|reply| Ok(Command::AcquireQuote(key.clone(), reply)))?;
         Ok(QuoteSubscription {
             lease_id,
             owner,
+            key,
             runtime: Arc::clone(&self.runtime),
         })
     }
@@ -1972,7 +1988,10 @@ mod tests {
                 search_preparers: BTreeMap::new(),
                 presentations: vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
             },
-            Arc::new(Mutex::new(Vec::new())),
+            QuoteChannels {
+                releases: Arc::new(Mutex::new(Vec::new())),
+                latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
+            },
         )
         .expect("test runtime starts");
         assert_eq!(service.provider_presentations()[0].id, "rithmic");
@@ -2006,7 +2025,10 @@ mod tests {
                 search_preparers: BTreeMap::new(),
                 presentations: vec![],
             },
-            Arc::clone(&releases),
+            QuoteChannels {
+                releases: Arc::clone(&releases),
+                latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
+            },
         )
         .unwrap();
         let service_for_thread = service.clone();

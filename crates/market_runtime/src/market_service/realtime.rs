@@ -941,6 +941,7 @@ impl Coordinator<'_> {
                     display_depth: false,
                 });
         }
+        self.merge_instrument_subscriptions(provider_id, &mut instruments, &mut missing_catalog);
         let alert_overrides_instrument = self
             .providers
             .descriptor(provider_id)
@@ -978,6 +979,41 @@ impl Coordinator<'_> {
                 .map(|(series, _)| series.instrument_id)
                 .collect(),
             missing_catalog,
+        }
+    }
+
+    fn merge_instrument_subscriptions(
+        &self,
+        provider_id: &str,
+        instruments: &mut BTreeMap<String, ProviderInstrumentDemand>,
+        missing_catalog: &mut bool,
+    ) {
+        for (key, streams) in self
+            .engine
+            .instrument_subscriptions()
+            .filter(|(key, _)| key.provider == provider_id)
+        {
+            let Some(instrument) = self
+                .catalog
+                .get(&(key.provider.clone(), key.instrument.as_str().to_string()))
+                .filter(|instrument| {
+                    key.entitlement.as_deref() == Some(instrument.entitlement_id.as_str())
+                })
+                .cloned()
+            else {
+                *missing_catalog = true;
+                continue;
+            };
+            instruments
+                .entry(instrument.instrument_id.clone())
+                .and_modify(|entry| entry.streams = entry.streams.union(streams))
+                .or_insert(ProviderInstrumentDemand {
+                    instrument,
+                    streams,
+                    alert_trades: false,
+                    alert_instrument: None,
+                    display_depth: false,
+                });
         }
     }
 
@@ -2306,6 +2342,7 @@ impl Coordinator<'_> {
             self.broadcast_order_book(provider, &instrument_id);
         }
         if quote_changed {
+            self.update_trading_quote(provider, &instrument_id, &entitlement_id, quote);
             self.publish_non_bar_study_change(
                 provider,
                 &instrument_id,
@@ -2322,6 +2359,57 @@ impl Coordinator<'_> {
                 MarketStream::Trades,
                 observed_unix_nanos,
             );
+        }
+    }
+
+    fn update_trading_quote(
+        &mut self,
+        provider: &str,
+        instrument_id: &str,
+        entitlement_id: &str,
+        quote: &TopOfBookQuote,
+    ) {
+        if let Some(instrument) = self
+            .catalog
+            .get(&(provider.to_string(), instrument_id.to_string()))
+            && let (Ok(instrument_id), Ok(price_scale), Ok(quantity_scale)) = (
+                aeris_instruments::InstrumentId::try_new(instrument_id),
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+            )
+        {
+            let key = super::InstrumentStreamKey {
+                provider: provider.to_string(),
+                instrument: instrument_id.clone(),
+                entitlement: Some(entitlement_id.to_string()),
+            };
+            if self
+                .engine
+                .instrument_subscriptions()
+                .any(|(leased, _)| leased == key)
+            {
+                let route = aeris_trading::market::MarketRoute {
+                    provider_id: provider.to_string(),
+                    instrument_id,
+                    provider_symbol: instrument.provider_symbol.clone(),
+                    display_symbol: instrument.display_symbol.clone(),
+                    venue_id: instrument.venue_id.clone(),
+                    entitlement_id: Some(instrument.entitlement_id.clone()),
+                    price_scale,
+                    quantity_scale,
+                };
+                let received = self
+                    .clock
+                    .wall_nanos()
+                    .unwrap_or(quote.metadata.timestamps.received_unix_nanos);
+                let phase = self
+                    .calendar
+                    .phase(&instrument.instrument_id, received.div_euclid(1_000_000));
+                self.quotes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .update(key, &route, quote, received, phase);
+            }
         }
     }
 

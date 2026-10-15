@@ -57,6 +57,8 @@ use crate::rithmic_realtime::{
 };
 
 mod alerts;
+mod quotes;
+pub use quotes::{QuoteSourceKind, QuoteState};
 pub(crate) mod clock;
 pub(crate) mod reconnect;
 use alerts::PriceAlertRegistry;
@@ -126,6 +128,7 @@ pub struct MarketService {
 pub struct QuoteSubscription {
     lease_id: MarketDataLeaseId,
     owner: LeaseOwner,
+    key: InstrumentStreamKey,
     runtime: Arc<MarketRuntime>,
 }
 
@@ -133,6 +136,15 @@ impl QuoteSubscription {
     #[must_use]
     pub const fn owner(&self) -> LeaseOwner {
         self.owner
+    }
+
+    #[must_use]
+    pub fn latest(&self) -> Option<QuoteState> {
+        self.runtime
+            .quotes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest(&self.key)
     }
 }
 
@@ -178,6 +190,7 @@ struct MarketRuntime {
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
     quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
+    quotes: Arc<Mutex<quotes::QuoteBook>>,
 }
 
 struct MarketServiceProviders {
@@ -605,6 +618,30 @@ impl ProviderDemand {
                 quotes.insert(mapping.clone());
             }
             if streams.contains(MarketStream::Depth) {
+                books.insert(mapping);
+            }
+        }
+        for requested in &self.instruments {
+            let instrument = &requested.instrument;
+            let (Ok(price_scale), Ok(quantity_scale)) = (
+                u8::try_from(instrument.price_scale),
+                u8::try_from(instrument.quantity_scale),
+            ) else {
+                continue;
+            };
+            let mapping = HyperliquidInstrumentDemand {
+                wire_coin: instrument.provider_symbol.clone(),
+                instrument_id: instrument.instrument_id.clone(),
+                entitlement_id: instrument.entitlement_id.clone(),
+                price_scale,
+                quantity_scale,
+            };
+            if requested.streams.contains(MarketStream::Quotes)
+                || requested.streams.contains(MarketStream::Depth)
+            {
+                quotes.insert(mapping.clone());
+            }
+            if requested.streams.contains(MarketStream::Depth) {
                 books.insert(mapping);
             }
         }
