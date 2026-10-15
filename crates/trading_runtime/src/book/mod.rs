@@ -7,7 +7,7 @@ use std::{
     ops::Deref,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct OrderBook {
     orders: BTreeMap<OrderId, Order>,
     by_client: BTreeMap<ClientOrderId, OrderId>,

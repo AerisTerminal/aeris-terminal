@@ -397,6 +397,102 @@ fn start_golden_service(
     service
 }
 
+#[test]
+fn replay_multi_effect_quote_failed_commit_keeps_memory_and_disk_unchanged() {
+    let directory = TestDirectory::new("multi-effect-quote-failure");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    harness
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: market_order("atomic-bracket", OrderSide::Buy, 1, 1_000),
+            template: BracketStrategyTemplate {
+                template_id: "atomic-template".into(),
+                revision: 1,
+                name: "Atomic stop and target".into(),
+                stop_offset_ticks: 8,
+                targets: vec![BracketTarget {
+                    offset_ticks: 8,
+                    quantity_percent: 100,
+                }],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("entry accepted");
+    harness
+        .place_order(market_order("atomic-second", OrderSide::Buy, 2, 1_000))
+        .expect("second entry accepted");
+    let before = harness.snapshot().expect("before");
+    let touch = observation(10_000, 10_025, 3, 2_000);
+    harness.crash_during_commit(1);
+    assert!(harness.observe_market(touch.clone()).is_err());
+    assert_eq!(harness.snapshot().expect("failed memory"), before);
+    harness.restart().expect("reopen after failed quote");
+    assert_eq!(harness.snapshot().expect("failed disk"), before);
+    harness.crash_during_commit(2);
+    assert_eq!(harness.observe_market(touch).expect("replay").len(), 2);
+    let committed = harness.snapshot().expect("committed");
+    assert_eq!(committed.fills.len(), 2);
+    assert_eq!(
+        committed.managed_brackets[0].status,
+        ManagedBracketStatus::Active
+    );
+    harness.restart().expect("restart after committed quote");
+    assert_eq!(harness.snapshot().expect("recovered"), committed);
+}
+
+#[test]
+fn replay_failed_stop_fill_keeps_target_and_bracket_working_until_replay() {
+    let directory = TestDirectory::new("quote-oco-failure");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    harness
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: market_order("oco-entry", OrderSide::Buy, 1, 1_000),
+            template: BracketStrategyTemplate {
+                template_id: "oco-template".into(),
+                revision: 1,
+                name: "Atomic OCO".into(),
+                stop_offset_ticks: 8,
+                targets: vec![BracketTarget {
+                    offset_ticks: 8,
+                    quantity_percent: 100,
+                }],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("bracket placed");
+    harness
+        .observe_market(observation(10_000, 10_025, 2, 2_000))
+        .expect("entry fills and arms");
+    let before = harness.snapshot().expect("before stop fill");
+    let touch = observation(9_800, 9_825, 3, 6_000);
+    harness.crash_during_commit(1);
+    assert!(harness.observe_market(touch.clone()).is_err());
+    assert_eq!(harness.snapshot().expect("failed memory"), before);
+    harness.restart().expect("restart after rollback");
+    assert_eq!(harness.snapshot().expect("failed disk"), before);
+    harness.crash_during_commit(2);
+    assert_eq!(harness.observe_market(touch).expect("stop replay").len(), 1);
+    let committed = harness.snapshot().expect("after stop");
+    assert_eq!(
+        committed.managed_brackets[0].status,
+        ManagedBracketStatus::Completed
+    );
+    assert_eq!(committed.positions[0].net_quantity.units(), 0);
+    assert!(
+        committed
+            .orders
+            .iter()
+            .any(|order| order.status == OrderStatus::Cancelled)
+    );
+    harness.restart().expect("restart after stop");
+    assert_eq!(harness.snapshot().expect("durable OCO"), committed);
+}
+
 fn script_place_touch_modify_cancel_flatten(
     service: &mut ReplayHarness,
     account: &TradingAccountId,

@@ -2,7 +2,7 @@ use super::{
     ClientOrderId, Fill, FillId, FillMemoryUpdate, FixedPoint, ManagedBracketStatus, ModifyOrder,
     Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep,
     SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, TradingInstrument,
-    VenueRoute, fill_policy_persistence, is_simulated, planned_leg,
+    VenueRoute, is_simulated, planned_leg,
 };
 
 impl TradingCore {
@@ -288,14 +288,6 @@ impl TradingCore {
                     .get(&order.account_id)
                     .ok_or_else(|| "fill account disappeared".to_string())?,
                 instrument,
-            )?;
-            self.store.insert_fill(
-                &order,
-                &event,
-                &fill,
-                &position,
-                fill_policy_persistence(&policy_update),
-                sequence + 1,
             )?;
             self.apply_fill_to_memory(
                 order,

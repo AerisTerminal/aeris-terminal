@@ -6,7 +6,7 @@ use super::{
     upsert_discipline_state, upsert_position, upsert_risk_rule_state,
 };
 
-fn insert_fill_accounting(
+pub(super) fn insert_fill_accounting(
     transaction: &rusqlite::Transaction<'_>,
     fill: &Fill,
     accounting: FillAccounting,
@@ -33,7 +33,7 @@ fn insert_fill_accounting(
     Ok(())
 }
 
-fn upsert_trade_cycle(
+pub(super) fn upsert_trade_cycle(
     transaction: &rusqlite::Transaction<'_>,
     cycle: &TradeCycle,
 ) -> Result<(), String> {

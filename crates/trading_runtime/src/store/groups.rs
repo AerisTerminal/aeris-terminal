@@ -1,8 +1,7 @@
 use super::{
     BTreeMap, BracketStrategyTemplate, BracketTarget, BreakEvenRule, ClientOrderId, Connection,
-    FixedPoint, ManagedBracket, ManagedBracketStatus, Order, OrderEvent, ProtectiveOrder,
-    ProtectiveOrderRole, StepTx, TradingStore, TrailingStopRule, database_error, fixed,
-    insert_event_row, insert_order_row, params, update_next_sequence,
+    FixedPoint, ManagedBracket, ManagedBracketStatus, ProtectiveOrder, ProtectiveOrderRole, StepTx,
+    TradingStore, TrailingStopRule, database_error, fixed, params,
 };
 
 impl TradingStore {
@@ -300,37 +299,6 @@ impl TradingStore {
             );
         }
         Ok(result)
-    }
-}
-
-impl TradingStore {
-    pub(crate) fn insert_managed_child_orders(
-        &mut self,
-        orders: &[(Order, OrderEvent)],
-        bracket: &ManagedBracket,
-        next_sequence: u64,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        for (order, event) in orders {
-            insert_order_row(&transaction, order)?;
-            insert_event_row(&transaction, event)?;
-        }
-        upsert_managed_bracket(&transaction, bracket)?;
-        update_next_sequence(&transaction, next_sequence)?;
-        StepTx::commit_revision(transaction).map_err(database_error)
-    }
-
-    pub(crate) fn reject_managed_bracket(
-        &mut self,
-        bracket: &ManagedBracket,
-        event: &OrderEvent,
-        next_sequence: u64,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        insert_event_row(&transaction, event)?;
-        upsert_managed_bracket(&transaction, bracket)?;
-        update_next_sequence(&transaction, next_sequence)?;
-        StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
 

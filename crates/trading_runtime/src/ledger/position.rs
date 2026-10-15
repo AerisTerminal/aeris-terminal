@@ -5,7 +5,7 @@ use crate::risk::RiskRuleState;
 
 /// The single durable per-instrument cycle. `pnl_known` distinguishes a legacy
 /// open trade with no reliable baseline from a trade opened after V21.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct TradeCycle {
     pub account_id: crate::TradingAccountId,
     pub instrument_id: aeris_instruments::InstrumentId,
@@ -17,7 +17,7 @@ pub(crate) struct TradeCycle {
     pub pnl_known: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct FillAccounting {
     pub cycle_id: i64,
     pub realized_gross: Option<FixedPoint>,

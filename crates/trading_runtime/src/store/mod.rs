@@ -3,6 +3,7 @@ mod fills;
 mod groups;
 mod ledger;
 mod orders;
+mod quotes;
 mod retention;
 mod risk;
 mod schema;
@@ -181,6 +182,7 @@ fn decode_market_route(encoded: &str) -> Result<MarketRoute, String> {
     Ok(route)
 }
 
+#[derive(Clone)]
 pub(super) struct StoredState {
     pub revision: u64,
     pub next_sequence: u64,

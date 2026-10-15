@@ -251,7 +251,9 @@ impl TradingCore {
             provenance: order.provenance.clone(),
         };
         event.validate().map_err(|error| error.to_string())?;
-        self.store.modify_order(&resized, &event, sequence + 1)?;
+        if !self.quote_planning {
+            self.store.modify_order(&resized, &event, sequence + 1)?;
+        }
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
         self.state.orders.insert(resized.id.clone(), resized);
@@ -288,7 +290,9 @@ impl TradingCore {
         for bracket_id in finished {
             if let Some(mut bracket) = self.state.managed_brackets.get(&bracket_id).cloned() {
                 bracket.status = ManagedBracketStatus::Completed;
-                self.store.put_managed_bracket_projection(&bracket)?;
+                if !self.quote_planning {
+                    self.store.put_managed_bracket_projection(&bracket)?;
+                }
                 self.state.managed_brackets.insert(bracket_id, bracket);
             }
         }

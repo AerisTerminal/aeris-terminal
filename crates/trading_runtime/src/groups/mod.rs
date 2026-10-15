@@ -503,11 +503,6 @@ impl TradingCore {
     }
 
     pub(super) fn commit_armed_bracket(&mut self, armed: ArmedBracket) -> Result<(), String> {
-        self.store.insert_managed_child_orders(
-            &armed.children,
-            &armed.bracket,
-            armed.next_sequence,
-        )?;
         self.state.next_sequence = armed.next_sequence;
         for (order, event) in armed.children {
             self.state.order_events.push_back(event);
@@ -546,8 +541,6 @@ impl TradingCore {
             provenance: observation.provenance.clone(),
         };
         event.validate().map_err(|error| error.to_string())?;
-        self.store
-            .reject_managed_bracket(&bracket, &event, sequence + 1)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
         self.state
@@ -637,7 +630,6 @@ impl TradingCore {
             }
             bracket.status = ManagedBracketStatus::Completed;
         }
-        self.store.put_managed_bracket(&bracket)?;
         self.state
             .managed_brackets
             .insert(bracket_id.to_string(), bracket);

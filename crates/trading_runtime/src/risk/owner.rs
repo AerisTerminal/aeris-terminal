@@ -109,7 +109,9 @@ impl TradingCore {
             profile_id: profile.map(|profile| profile.profile_id.clone()),
             profile_version: profile.map(|profile| profile.version),
         };
-        self.store.put_risk_lock(&lock)?;
+        if !self.quote_planning {
+            self.store.put_risk_lock(&lock)?;
+        }
         self.state.risk_locks.insert(account_id, lock);
         self.bump_revision()
     }
@@ -632,7 +634,9 @@ impl TradingCore {
                 && current.units() > state.peak_session_pnl.units()
             {
                 state.peak_session_pnl = current;
-                self.store.put_risk_rule_state(&state)?;
+                if !self.quote_planning {
+                    self.store.put_risk_rule_state(&state)?;
+                }
                 self.state
                     .risk_rule_states
                     .insert(profile.account_id.clone(), state.clone());

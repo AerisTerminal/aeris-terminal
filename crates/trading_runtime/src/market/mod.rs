@@ -109,9 +109,23 @@ impl TradingCore {
             Command::DrainMarketFeed => self.drain_market_feed(),
             #[cfg(test)]
             Command::Observe(observation, reply) => {
+                let previous_cursor = self
+                    .observation_cursors
+                    .get(&observation.instrument_id)
+                    .copied();
                 self.advance_observation_cursor(&observation);
                 let result = self.observe_market(&observation);
-                self.market_observation_error = result.as_ref().err().cloned();
+                if self.quote_commit_failed {
+                    if let Some(previous) = previous_cursor {
+                        self.observation_cursors
+                            .insert(observation.instrument_id.clone(), previous);
+                    } else {
+                        self.observation_cursors.remove(&observation.instrument_id);
+                    }
+                }
+                if !self.quote_commit_failed {
+                    self.market_observation_error = result.as_ref().err().cloned();
+                }
                 let _ = reply.send(result);
             }
             _ => unreachable!("only market commands are dispatched here"),
@@ -433,6 +447,31 @@ impl TradingCore {
         &mut self,
         observation: &SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {
+        self.quote_commit_failed = false;
+        let working_state = self.state.clone();
+        let working_eligibility = self.eligible_after.clone();
+        let original = std::mem::replace(&mut self.state, working_state);
+        let original_eligibility = std::mem::replace(&mut self.eligible_after, working_eligibility);
+        self.quote_planning = true;
+        let result = self.plan_market_quote(observation);
+        self.quote_planning = false;
+        let planned = std::mem::replace(&mut self.state, original);
+        let planned_eligibility = std::mem::replace(&mut self.eligible_after, original_eligibility);
+        let fills = result?;
+        if let Err(error) = self.store.commit_quote_step(&self.state, &planned) {
+            self.quote_commit_failed = true;
+            return Err(error);
+        }
+        self.state = planned;
+        self.eligible_after = planned_eligibility;
+        self.enforce_memory_retention();
+        Ok(fills)
+    }
+
+    fn plan_market_quote(
+        &mut self,
+        observation: &SimulatedMarketObservation,
+    ) -> Result<Vec<Fill>, String> {
         observation
             .provenance
             .validate()
@@ -497,8 +536,6 @@ impl TradingCore {
         self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
         positions_changed |= self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
         if positions_changed {
-            self.store.enforce_retention(true)?;
-            self.enforce_memory_retention();
             self.bump_revision()?;
         }
         Ok(fills)
@@ -598,7 +635,9 @@ impl TradingCore {
                     unrealized_pnl: unrealized,
                     ..current
                 };
-                self.store.update_position(&updated)?;
+                if !self.quote_planning {
+                    self.store.update_position(&updated)?;
+                }
                 self.state.positions.insert(key, updated);
                 positions_changed = true;
             }

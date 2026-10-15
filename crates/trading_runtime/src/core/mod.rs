@@ -472,6 +472,9 @@ pub(crate) struct TradingCore {
     command_now: i64,
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
     market_observation_error: Option<String>,
+    /// Quote computation runs on a private projection; only its completed facts are persisted.
+    quote_planning: bool,
+    quote_commit_failed: bool,
     venue_error: Option<String>,
     market_feed: Arc<MarketFeedInbox>,
     quote_book: QuoteBook,
@@ -1176,6 +1179,8 @@ impl TradingCore {
             clock,
             copy_dispatches: std::collections::VecDeque::new(),
             market_observation_error: None,
+            quote_planning: false,
+            quote_commit_failed: false,
             venue_error: None,
             market_feed,
             quote_book: QuoteBook::default(),
@@ -1387,8 +1392,24 @@ impl TradingCore {
     pub(crate) fn on_market(&mut self, batch: Vec<SimulatedMarketObservation>, now: i64) {
         self.command_now = self.command_now.max(now);
         for observation in batch {
+            let previous_cursor = self
+                .observation_cursors
+                .get(&observation.instrument_id)
+                .copied();
             if self.advance_observation_cursor(&observation) {
-                self.market_observation_error = self.observe_market(&observation).err();
+                match self.observe_market(&observation) {
+                    Ok(_) => self.market_observation_error = None,
+                    Err(error) if self.quote_commit_failed => {
+                        if let Some(previous) = previous_cursor {
+                            self.observation_cursors
+                                .insert(observation.instrument_id.clone(), previous);
+                        } else {
+                            self.observation_cursors.remove(&observation.instrument_id);
+                        }
+                        aeris_observability::diagnostic!("trading quote commit failed: {error}");
+                    }
+                    Err(error) => self.market_observation_error = Some(error),
+                }
             }
         }
         if let Err(error) = self.recompute_quote_interest() {
@@ -1695,7 +1716,11 @@ impl TradingCore {
     }
 
     fn bump_revision(&mut self) -> Result<(), String> {
-        self.state.revision = self.store.revision()?;
+        if self.quote_planning {
+            self.state.revision = self.state.revision.saturating_add(1).min(i64::MAX as u64);
+        } else {
+            self.state.revision = self.store.revision()?;
+        }
         Ok(())
     }
 
@@ -1718,7 +1743,9 @@ impl TradingCore {
             .revision
             .saturating_add(revision_increment)
             .min(i64::MAX as u64);
-        self.store.commit_order_step(&step)?;
+        if !self.quote_planning {
+            self.store.commit_order_step(&step)?;
+        }
         self.state.next_sequence = step.next_sequence;
         for id in step.deleted_brackets {
             self.state.managed_brackets.remove(&id);
