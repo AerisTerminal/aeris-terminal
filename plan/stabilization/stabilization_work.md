@@ -429,6 +429,7 @@ Status: in progress
   - Generic lifecycle/history/calendar/coordinator/realtime/runtime/publication files reject provider-id literals in production, including after test modules; fixture tests cover each path (quotes and outbox when introduced). Provider-specific invalidation wording moved to provider-event translation. The remaining provider dispatch enums are deliberately M3.6.
   - Workspace fmt, Clippy `-D warnings`, tests and naming_check passed. Characterization (4), lifecycle (12), aggregation and descriptor matrix suites passed; no Rithmic live session or GUI run (internal-only item; M3.4 GUI validation completed).
 - [x] M3.6 provider-session-registry - `ProviderSession` trait and `ProviderRegistry`
+  - Round-2 SOL interval investigation (VAL-MKT-043): a fresh isolated BTC-USDC 1m pane selected SOL-USDC once and remained at 1m. The picker passes `WorkspaceSurface::interval` unchanged into its catalog selection, so a 1W SOL after an earlier timeframe action is the pane's carried interval, not a SOL-specific or fresh-root default. The round-2 GUI report lacks a complete ordered input trace to identify the earlier 1W action; this explanation and the fresh-root check are recorded in the mission library.
   - User-testing coverage (VAL-MKT-042): scripted two-provider demand verifies selective idle stop while another provider retains book demand; concrete interval, viewport-visibility, tab and layout changes diff without extra connects.
   - Part 1/3: tastytrade HTTP transport is borrowed outside the catalog-cache mutex and returned on all paths; authorization revocation retires an in-flight transport. Two regression tests and the full workspace gate passed. Registry and per-provider idle work remain before this item can be checked.
   - Part 2/3: idle release and stop-overlap check only the stopping provider's own series, book and alert demand; a scripted two-provider book test guards the overlap. Full workspace gate passed with the CI debug profile and one Cargo job.
@@ -680,6 +681,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M3.12 fix(market): refuse overridden production root before probe IO - child process rejected the fresh overridden root without writing and retained the policy error.
 - 2026-10-15 M3.12 fix(market): select probe symbols by stable instrument identity - removed the zero search-generation probe request and added focused coverage; clean-source live qualification follows.
 - 2026-10-15 M3.1 fix(desktop): retain bounded per-gap live snapshot evidence - seven EURUSD 1m omissions matched raw decoded provider minutes and the pre-M3 chart; 32-entry truncation test and full workspace gate passed.
+- 2026-10-15 M3.6 fix(market): document carried pane interval on symbol switch - fresh-root SOL stayed 1m; catalog selection carries the pane interval rather than a symbol-specific weekly default.
 
 ## 7. Known gaps / deferred
 
