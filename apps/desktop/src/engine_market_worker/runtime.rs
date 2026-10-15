@@ -5,8 +5,7 @@ use super::{
     MarketService, MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
     apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
     handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
-    initialize_market_screen_endpoint, mpsc, process_command, set_resource_class,
-    shared_market_runtime,
+    initialize_market_screen_endpoint, mpsc, process_command, shared_market_runtime,
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_observability::diagnostic;
@@ -74,23 +73,17 @@ fn run_attached_workers(
             }
         }
         for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
-            process_pending_foreground_selection(market, client_id, record);
-            process_pending_resource_class(market, client_id, &mut record.endpoint);
-            process_pending_depth_visibility(market, client_id, record);
-            process_pending_price_alerts(market, client_id, record);
-            match record.endpoint.commands.try_recv() {
-                Ok(command) => {
-                    if let Err(error) = process_command(market, client_id, record, command) {
-                        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-                            state: ChartState::Error,
-                            message: error,
-                        });
-                    }
+            let (commands, disconnected) = drain_command_batch(&record.endpoint.commands);
+            for command in commands {
+                if let Err(error) = process_command(market, client_id, record, command) {
+                    let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
+                        state: ChartState::Error,
+                        message: error,
+                    });
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    retire_endpoint(market, client_id, &mut record.endpoint);
-                }
+            }
+            if disconnected {
+                retire_endpoint(market, client_id, &mut record.endpoint);
             }
         }
         endpoints.retain(|record| record.endpoint.active);
@@ -180,49 +173,46 @@ fn session_status_stale(sent: Option<&(String, u64)>, instrument_id: &str, revis
     })
 }
 
-fn process_pending_foreground_selection(
-    market: &MarketService,
-    client_id: u64,
-    record: &mut EndpointRecord,
-) {
-    let provider_selection = record
-        .endpoint
-        .pending_provider_selection
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    if let Some(selection) = provider_selection
-        && let Err(error) = process_command(
-            market,
-            client_id,
-            record,
-            MarketWorkerCommand::ProviderSelect(selection),
-        )
-    {
-        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Error,
-            message: error,
-        });
+/// Coalesces only adjacent latest-value commands. A click is a barrier, so a
+/// viewport or alert update queued after it never overtakes that click.
+fn drain_command_batch(
+    commands: &mpsc::Receiver<MarketWorkerCommand>,
+) -> (Vec<MarketWorkerCommand>, bool) {
+    let mut batch = Vec::with_capacity(super::COMMAND_CAPACITY);
+    let mut disconnected = false;
+    for _ in 0..super::COMMAND_CAPACITY {
+        match commands.try_recv() {
+            Ok(command) => {
+                if let Some(previous) = batch.last_mut()
+                    && coalesces(previous, &command)
+                {
+                    *previous = command;
+                    continue;
+                }
+                batch.push(command);
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
     }
+    (batch, disconnected)
+}
 
-    let engine_selection = record
-        .endpoint
-        .pending_engine_selection
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    if let Some(selection) = engine_selection
-        && let Err(error) = process_command(
-            market,
-            client_id,
-            record,
-            MarketWorkerCommand::EngineSelect(selection),
-        )
-    {
-        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Error,
-            message: error,
-        });
+fn coalesces(previous: &MarketWorkerCommand, next: &MarketWorkerCommand) -> bool {
+    match (previous, next) {
+        (MarketWorkerCommand::ChartViewport(first), MarketWorkerCommand::ChartViewport(second)) => {
+            first.selection_generation == second.selection_generation
+        }
+        (MarketWorkerCommand::DepthVisible(_), MarketWorkerCommand::DepthVisible(_))
+        | (MarketWorkerCommand::ResourceClass(_), MarketWorkerCommand::ResourceClass(_))
+        | (
+            MarketWorkerCommand::ReplacePriceAlerts(_),
+            MarketWorkerCommand::ReplacePriceAlerts(_),
+        ) => true,
+        _ => false,
     }
 }
 
@@ -357,74 +347,6 @@ fn apply_received_event(
     Ok(())
 }
 
-fn process_pending_resource_class(
-    market: &MarketService,
-    client_id: u64,
-    endpoint: &mut WorkerEndpoint,
-) {
-    let pending = endpoint
-        .pending_resource_class
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    if let Some(resource_class) = pending
-        && let Err(error) = set_resource_class(market, client_id, endpoint, resource_class)
-    {
-        let _ = endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Error,
-            message: error,
-        });
-    }
-}
-
-fn process_pending_depth_visibility(
-    market: &MarketService,
-    client_id: u64,
-    record: &mut EndpointRecord,
-) {
-    let pending = record
-        .endpoint
-        .pending_depth_visible
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    let Some(visible) = pending else { return };
-    if let Err(error) = super::selection_commands::set_depth_visible(
-        market,
-        client_id,
-        &mut record.endpoint,
-        &record.product.provider,
-        record.startup_resolution.is_some(),
-        visible,
-    ) {
-        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Error,
-            message: error,
-        });
-    }
-}
-
-fn process_pending_price_alerts(
-    market: &MarketService,
-    client_id: u64,
-    record: &mut EndpointRecord,
-) {
-    let pending = record
-        .endpoint
-        .pending_price_alerts
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    if let Some(alerts) = pending {
-        let _ = process_command(
-            market,
-            client_id,
-            record,
-            MarketWorkerCommand::ReplacePriceAlerts(alerts),
-        );
-    }
-}
-
 pub(super) fn retire_endpoint(
     market: &MarketService,
     client_id: u64,
@@ -438,6 +360,38 @@ pub(super) fn retire_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordered_command_batch_coalesces_only_adjoining_latest_values() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        sender
+            .send(MarketWorkerCommand::DepthVisible(true))
+            .expect("queued");
+        sender
+            .send(MarketWorkerCommand::DepthVisible(false))
+            .expect("queued");
+        sender
+            .send(MarketWorkerCommand::ProviderSelect(
+                aeris_contracts::SelectProviderInstrument {
+                    symbol: "ETH".into(),
+                    ..Default::default()
+                },
+            ))
+            .expect("click queued");
+        sender
+            .send(MarketWorkerCommand::DepthVisible(true))
+            .expect("queued after click");
+        let (batch, disconnected) = drain_command_batch(&receiver);
+        assert!(!disconnected);
+        assert!(matches!(
+            batch.as_slice(),
+            [
+                MarketWorkerCommand::DepthVisible(false),
+                MarketWorkerCommand::ProviderSelect(_),
+                MarketWorkerCommand::DepthVisible(true)
+            ]
+        ));
+    }
 
     #[test]
     fn session_status_is_resent_when_the_calendar_or_product_changes() {

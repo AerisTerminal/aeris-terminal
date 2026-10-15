@@ -959,11 +959,6 @@ impl std::ops::Deref for WorkerCommandSender {
 
 pub struct MarketDataWorker {
     commands: Option<WorkerCommandSender>,
-    resource_class: Option<Arc<Mutex<Option<ConsumerResourceClass>>>>,
-    depth_visible: Option<Arc<Mutex<Option<bool>>>>,
-    provider_selection: Option<Arc<Mutex<Option<SelectProviderInstrument>>>>,
-    engine_selection: Option<Arc<Mutex<Option<Box<EngineSelectionRequest>>>>>,
-    price_alerts: Option<Arc<Mutex<Option<Vec<MarketPriceAlert>>>>>,
     messages: Option<MarketWorkerReceiver>,
     shutdown_complete: Option<Receiver<()>>,
     connected: bool,
@@ -986,11 +981,6 @@ impl MarketDataWorker {
                 sender: commands,
                 wake: None,
             }),
-            resource_class: None,
-            depth_visible: None,
-            provider_selection: None,
-            engine_selection: None,
-            price_alerts: None,
             messages: Some(messages),
             shutdown_complete: Some(shutdown_complete),
             connected: true,
@@ -1014,48 +1004,6 @@ impl MarketDataWorker {
         }
     }
 
-    #[must_use]
-    pub fn with_resource_class_slot(
-        mut self,
-        resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
-    ) -> Self {
-        self.resource_class = Some(resource_class);
-        self
-    }
-
-    #[must_use]
-    pub fn with_depth_visibility_slot(mut self, depth_visible: Arc<Mutex<Option<bool>>>) -> Self {
-        self.depth_visible = Some(depth_visible);
-        self
-    }
-
-    /// Installs bounded single-item slots for foreground instrument switching.
-    ///
-    /// Symbol selection must not lose to a burst of lower-priority viewport or
-    /// recovery commands. Each slot retains only the newest pending request, so
-    /// foreground intent survives command-mailbox pressure without introducing
-    /// an unbounded queue.
-    #[must_use]
-    pub fn with_foreground_selection_slots(
-        mut self,
-        provider_selection: Arc<Mutex<Option<SelectProviderInstrument>>>,
-        engine_selection: Arc<Mutex<Option<Box<EngineSelectionRequest>>>>,
-    ) -> Self {
-        self.provider_selection = Some(provider_selection);
-        self.engine_selection = Some(engine_selection);
-        self
-    }
-
-    /// Installs a coalescing slot for complete price-alert snapshots.
-    #[must_use]
-    pub fn with_price_alert_slot(
-        mut self,
-        price_alerts: Arc<Mutex<Option<Vec<MarketPriceAlert>>>>,
-    ) -> Self {
-        self.price_alerts = Some(price_alerts);
-        self
-    }
-
     /// Replaces the runtime-owned alert definitions without blocking GPUI.
     ///
     /// The latest complete snapshot wins, so rapid edits stay bounded and can
@@ -1070,13 +1018,6 @@ impl MarketDataWorker {
         let Some(commands) = self.commands.as_ref() else {
             return Err(TrySendError::Disconnected(alerts));
         };
-        if let Some(slot) = &self.price_alerts {
-            *slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(alerts);
-            self.notify_command();
-            return Ok(());
-        }
         commands
             .try_send(MarketWorkerCommand::ReplacePriceAlerts(alerts))
             .inspect(|()| commands.notify())
@@ -1238,14 +1179,6 @@ impl MarketDataWorker {
             product,
             interval,
         });
-        if let Some(pending) = &self.engine_selection {
-            *pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
-            sequence.store(next, Ordering::Release);
-            self.notify_command();
-            return Ok(next);
-        }
         commands
             .try_send(MarketWorkerCommand::EngineSelect(request))
             .inspect(|()| commands.notify())
@@ -1317,16 +1250,6 @@ impl MarketDataWorker {
     /// Returns the requested visibility when the bounded worker command lane is
     /// full or disconnected.
     pub fn try_set_order_book_visible(&self, visible: bool) -> Result<(), TrySendError<bool>> {
-        if let Some(slot) = &self.depth_visible {
-            if self.commands.is_none() {
-                return Err(TrySendError::Disconnected(visible));
-            }
-            *slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(visible);
-            self.notify_command();
-            return Ok(());
-        }
         let Some(commands) = self.commands.as_ref() else {
             return Err(TrySendError::Disconnected(visible));
         };
@@ -1365,33 +1288,25 @@ impl MarketDataWorker {
     /// Updates the exact engine resource class for this consumer.
     ///
     /// # Errors
-    /// Returns the requested class when the worker boundary is disconnected. Engine-backed
-    /// workers conflate rapid transitions into one bounded latest-value slot.
+    /// Returns the requested class when the ordered mailbox is full or disconnected.
+    /// Only adjacent queued class changes coalesce on the bridge thread.
     pub fn try_set_market_resource_class(
         &self,
         resource_class: ConsumerResourceClass,
     ) -> Result<(), TrySendError<ConsumerResourceClass>> {
-        if let Some(slot) = &self.resource_class {
-            if self.commands.is_none() {
-                return Err(TrySendError::Disconnected(resource_class));
-            }
-            if let Some(messages) = &self.messages {
-                messages.set_market_publications_enabled(
-                    resource_class == ConsumerResourceClass::Foreground,
-                );
-            }
-            *slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource_class);
-            self.notify_command();
-            return Ok(());
-        }
         let Some(commands) = self.commands.as_ref() else {
             return Err(TrySendError::Disconnected(resource_class));
         };
         commands
             .try_send(MarketWorkerCommand::ResourceClass(resource_class))
-            .inspect(|()| commands.notify())
+            .inspect(|()| {
+                if let Some(messages) = &self.messages {
+                    messages.set_market_publications_enabled(
+                        resource_class == ConsumerResourceClass::Foreground,
+                    );
+                }
+                commands.notify();
+            })
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::ResourceClass(resource_class)) => {
                     TrySendError::Full(resource_class)
@@ -1522,13 +1437,6 @@ impl MarketDataWorker {
         let Some(commands) = self.commands.as_ref() else {
             return Err(ProviderCommandUnavailable);
         };
-        if let Some(pending) = &self.provider_selection {
-            *pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
-            self.notify_command();
-            return Ok(());
-        }
         commands
             .try_send(MarketWorkerCommand::ProviderSelect(selection))
             .inspect(|()| commands.notify())
@@ -1751,9 +1659,9 @@ mod tests {
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::{
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicU64, Ordering},
-            mpsc,
+            mpsc::{self, TrySendError},
         },
         thread,
         time::Duration,
@@ -1915,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_resource_class_transitions_conflate_when_command_mailbox_is_full() {
+    fn engine_resource_class_reports_ordered_mailbox_overflow() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         command_tx
             .try_send(MarketWorkerCommand::ChartViewport(ChartViewportUpdate {
@@ -1926,28 +1834,24 @@ mod tests {
             .expect("command mailbox is filled");
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let resource_class = Arc::new(Mutex::new(None));
         let mut worker =
-            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None)
-                .with_resource_class_slot(Arc::clone(&resource_class));
-
-        worker
-            .try_set_market_resource_class(ConsumerResourceClass::Background)
-            .expect("background transition is conflated");
-        worker
-            .try_set_market_resource_class(ConsumerResourceClass::Foreground)
-            .expect("foreground transition replaces background");
-
-        assert_eq!(
-            resource_class
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take(),
-            Some(ConsumerResourceClass::Foreground)
-        );
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
+        assert!(matches!(
+            worker.try_set_market_resource_class(ConsumerResourceClass::Background),
+            Err(TrySendError::Full(ConsumerResourceClass::Background))
+        ));
         assert!(matches!(
             command_rx.recv(),
             Ok(MarketWorkerCommand::ChartViewport(_))
+        ));
+        worker
+            .try_set_market_resource_class(ConsumerResourceClass::Foreground)
+            .expect("resource class queues once there is capacity");
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::ResourceClass(
+                ConsumerResourceClass::Foreground
+            ))
         ));
         drop(command_rx);
         let _ = worker.begin_retirement();
@@ -1958,10 +1862,8 @@ mod tests {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let resource_class = Arc::new(Mutex::new(None));
         let mut worker =
-            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None)
-                .with_resource_class_slot(Arc::clone(&resource_class));
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None);
         let mut fixture = FixtureMarketWorker::try_new().expect("fixture validates");
         let make_publication = |bootstrap: super::MarketWorkerBootstrap| MarketWorkerPublication {
             generation: MarketPublicationGeneration::from_generation(&bootstrap.generation),
@@ -1979,6 +1881,12 @@ mod tests {
         worker
             .try_set_market_resource_class(ConsumerResourceClass::Background)
             .expect("background transition is accepted");
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(MarketWorkerCommand::ResourceClass(
+                ConsumerResourceClass::Background
+            ))
+        ));
         let (messages, _) = worker.drain_messages();
         assert!(messages.is_empty());
 
@@ -3295,12 +3203,10 @@ mod tests {
     }
 
     #[test]
-    fn foreground_symbol_switch_survives_a_full_command_mailbox() {
+    fn foreground_symbol_switch_reports_bounded_overflow_without_advancing_generation() {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
         let (_shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
-        let provider_selection = Arc::new(Mutex::new(None));
-        let engine_selection = Arc::new(Mutex::new(None));
         let sequence = Arc::new(AtomicU64::new(7));
         let worker = MarketDataWorker::from_channels(
             command_tx,
@@ -3308,10 +3214,6 @@ mod tests {
             shutdown_rx,
             None,
             Some(Arc::clone(&sequence)),
-        )
-        .with_foreground_selection_slots(
-            Arc::clone(&provider_selection),
-            Arc::clone(&engine_selection),
         );
 
         worker
@@ -3327,48 +3229,39 @@ mod tests {
             exchange: "Hyperliquid".to_string(),
             entitlement_id: "hyperliquid-public".to_string(),
         };
-        worker
-            .try_select_provider(selection.clone())
-            .expect("provider selection uses the foreground slot");
-        let replacement = SelectProviderInstrument {
-            selection_generation: 4,
-            symbol: "SOL".to_string(),
-            ..selection.clone()
+        assert!(worker.try_select_provider(selection.clone()).is_err());
+        let selected = InstallProviderInstrument {
+            provider: "hyperliquid".to_string(),
+            provider_symbol: "ETH".to_string(),
+            display_symbol: "ETH".to_string(),
+            ..InstallProviderInstrument::default()
         };
-        worker
-            .try_select_provider(replacement.clone())
-            .expect("newer provider selection replaces the pending foreground selection");
-        let next = worker
-            .try_select_engine(
-                InstallProviderInstrument {
-                    provider: "hyperliquid".to_string(),
-                    provider_symbol: "ETH".to_string(),
-                    display_symbol: "ETH".to_string(),
-                    ..InstallProviderInstrument::default()
-                },
-                ChartInterval::Minute1,
-            )
-            .expect("engine selection uses the foreground slot");
-
-        assert_eq!(next, 8);
-        assert_eq!(sequence.load(Ordering::Acquire), 8);
-        assert_eq!(
-            provider_selection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref(),
-            Some(&replacement)
-        );
-        let pending_engine = engine_selection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .expect("engine selection retained");
-        assert_eq!(pending_engine.sequence, 8);
-        assert_eq!(pending_engine.product.provider_symbol, "ETH");
+        assert!(matches!(
+            worker.try_select_engine(selected.clone(), ChartInterval::Minute1),
+            Err(TrySendError::Full(_))
+        ));
+        assert_eq!(sequence.load(Ordering::Acquire), 7);
         assert!(matches!(
             command_rx.recv(),
             Ok(MarketWorkerCommand::ChartViewport(_))
         ));
+        worker
+            .try_select_provider(selection.clone())
+            .expect("selection enters the freed ordered queue");
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(MarketWorkerCommand::ProviderSelect(queued)) if queued == selection
+        ));
+        let next = worker
+            .try_select_engine(selected, ChartInterval::Minute1)
+            .expect("engine selection follows the click");
+
+        assert_eq!(next, 8);
+        assert_eq!(sequence.load(Ordering::Acquire), 8);
+        let Ok(MarketWorkerCommand::EngineSelect(pending_engine)) = command_rx.recv() else {
+            panic!("ordered engine selection");
+        };
+        assert_eq!(pending_engine.sequence, 8);
+        assert_eq!(pending_engine.product.provider_symbol, "ETH");
     }
 }

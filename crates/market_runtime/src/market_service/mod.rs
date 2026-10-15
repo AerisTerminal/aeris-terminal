@@ -210,6 +210,7 @@ impl Drop for MarketRuntime {
         let _ = self.shutdown_wake.try_send(Command::ProviderWake);
         self.broker_api.cancel_searches();
         self.trading_feed.wake();
+        self.outbox.notify_attached();
     }
 }
 

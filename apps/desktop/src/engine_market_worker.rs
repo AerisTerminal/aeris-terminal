@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -501,12 +501,6 @@ struct WorkerEndpoint {
     consumer_id: u64,
     messages: MarketWorkerSender,
     commands: mpsc::Receiver<MarketWorkerCommand>,
-    pending_resource_class: Arc<Mutex<Option<ConsumerResourceClass>>>,
-    pending_depth_visible: Arc<Mutex<Option<bool>>>,
-    pending_provider_selection: Arc<Mutex<Option<aeris_contracts::SelectProviderInstrument>>>,
-    pending_engine_selection:
-        Arc<Mutex<Option<Box<aeris_desktop::market_worker::EngineSelectionRequest>>>>,
-    pending_price_alerts: Arc<Mutex<Option<Vec<MarketPriceAlert>>>>,
     shutdown: mpsc::SyncSender<()>,
     pending_recovery: Option<ReplayRecoveryCommand>,
     /// Set once the engine has reported this demand generation live. After that
@@ -588,11 +582,6 @@ fn worker_endpoint(
     let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
     let selection_sequence = Arc::new(AtomicU64::new(initial_generation));
-    let pending_resource_class = Arc::new(Mutex::new(None));
-    let pending_depth_visible = Arc::new(Mutex::new(None));
-    let pending_provider_selection = Arc::new(Mutex::new(None));
-    let pending_engine_selection = Arc::new(Mutex::new(None));
-    let pending_price_alerts = Arc::new(Mutex::new(None));
     let worker = WorkspaceMarketPane {
         workspace_id,
         pane_id,
@@ -605,14 +594,7 @@ fn worker_endpoint(
             None,
             Some(Arc::clone(&selection_sequence)),
         )
-        .with_command_wake(Arc::new(wake_market_bridges))
-        .with_resource_class_slot(Arc::clone(&pending_resource_class))
-        .with_depth_visibility_slot(Arc::clone(&pending_depth_visible))
-        .with_foreground_selection_slots(
-            Arc::clone(&pending_provider_selection),
-            Arc::clone(&pending_engine_selection),
-        )
-        .with_price_alert_slot(Arc::clone(&pending_price_alerts)),
+        .with_command_wake(Arc::new(wake_market_bridges)),
     };
     let endpoint = EndpointRecord {
         workspace_id,
@@ -626,11 +608,6 @@ fn worker_endpoint(
             consumer_id,
             messages: message_tx,
             commands: command_rx,
-            pending_resource_class,
-            pending_depth_visible,
-            pending_provider_selection,
-            pending_engine_selection,
-            pending_price_alerts,
             shutdown: shutdown_tx,
             pending_recovery: None,
             live: false,
@@ -811,7 +788,7 @@ mod selection_commands;
 use selection_commands::retain_depth_visibility;
 use selection_commands::{
     handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
-    initialize_market_screen_endpoint, process_command, set_resource_class,
+    initialize_market_screen_endpoint, process_command,
 };
 
 #[path = "engine_market_worker/publications.rs"]
@@ -962,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_endpoint_wires_foreground_selection_slots() {
+    fn workspace_endpoint_keeps_click_before_queued_viewport_and_engine_selection() {
         let product = default_hyperliquid_product();
         let (pane, record) =
             worker_endpoint(2, 9, product.clone(), 41, ChartInterval::Minute1, None, 7);
@@ -978,30 +955,34 @@ mod tests {
         };
         pane.worker
             .try_select_provider(provider_selection.clone())
-            .expect("provider selection enters foreground slot");
-        assert_eq!(
-            record
-                .endpoint
-                .pending_provider_selection
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref(),
-            Some(&provider_selection)
-        );
+            .expect("provider selection queued");
+        pane.worker
+            .try_set_chart_viewport(100, 200)
+            .expect("viewport queued after click");
+        assert!(matches!(
+            record.endpoint.commands.try_recv(),
+            Ok(MarketWorkerCommand::ProviderSelect(selection)) if selection == provider_selection
+        ));
+        assert!(matches!(
+            record.endpoint.commands.try_recv(),
+            Ok(MarketWorkerCommand::ChartViewport(viewport))
+                if viewport.start_unix_nanos == 100 && viewport.end_unix_nanos == 200
+        ));
 
         assert_eq!(
             pane.worker
                 .try_select_engine(product, ChartInterval::Minute5)
-                .expect("engine selection enters foreground slot"),
+                .expect("engine selection queued"),
             8
         );
-        let pending_engine = record
+        let MarketWorkerCommand::EngineSelect(pending_engine) = record
             .endpoint
-            .pending_engine_selection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .expect("engine selection is retained");
+            .commands
+            .try_recv()
+            .expect("engine selection")
+        else {
+            panic!("expected ordered engine selection");
+        };
         assert_eq!(pending_engine.sequence, 8);
         assert_eq!(pending_engine.interval, ChartInterval::Minute5);
     }
@@ -1032,13 +1013,14 @@ mod tests {
                 .expect("first catalog selection is dispatchable"),
             1
         );
-        let pending = record
+        let MarketWorkerCommand::EngineSelect(pending) = record
             .endpoint
-            .pending_engine_selection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .expect("selection waits in the foreground slot");
+            .commands
+            .try_recv()
+            .expect("selection queued")
+        else {
+            panic!("expected ordered catalog selection");
+        };
         assert_eq!(pending.sequence, 1);
         assert_eq!(pending.product, selected);
         assert_eq!(pending.interval, ChartInterval::Minute5);
@@ -1653,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_recovery_from_previous_generation_is_rejected_after_selection_advances() {
+    fn queued_recovery_from_previous_generation_is_rejected_if_selection_advances_first() {
         let product = default_hyperliquid_product();
         let (mut pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 7);
@@ -1666,22 +1648,23 @@ mod tests {
         assert_eq!(
             pane.worker
                 .try_select_engine(product, ChartInterval::Minute5)
-                .expect("new selection enters the foreground slot"),
+                .expect("new selection queues after recovery"),
             8
         );
-        let pending = record
-            .endpoint
-            .pending_engine_selection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-            .expect("newer selection is processed before the ordinary command lane");
-        record.endpoint.active_generation = pending.sequence;
         let queued_recovery = record
             .endpoint
             .commands
             .try_recv()
-            .expect("older recovery remains queued in the ordinary lane");
+            .expect("older recovery remains first in the ordered lane");
+        let MarketWorkerCommand::EngineSelect(pending) = record
+            .endpoint
+            .commands
+            .try_recv()
+            .expect("selection follows recovery in the ordered lane")
+        else {
+            panic!("expected queued selection");
+        };
+        record.endpoint.active_generation = pending.sequence;
         let MarketWorkerCommand::Recovery {
             selection_generation,
             command,

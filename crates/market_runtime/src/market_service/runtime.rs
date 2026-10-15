@@ -1251,6 +1251,7 @@ impl MarketService {
     pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
         self.runtime.shutdown.store(true, Ordering::Release);
         self.runtime.trading_feed.wake();
+        self.runtime.outbox.notify_attached();
         // A full queue already makes the coordinator runnable.
         let _ = self.commands.try_send(Command::ProviderWake);
         self.runtime.broker_api.cancel_searches();
