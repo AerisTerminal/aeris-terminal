@@ -3,6 +3,43 @@
 use super::*;
 use aeris_observability::diagnostic;
 
+#[cfg(feature = "diagnostics")]
+#[derive(serde::Serialize)]
+struct SnapshotGap {
+    start_utc_ns: i64,
+    missing_intervals: i64,
+}
+
+#[cfg(feature = "diagnostics")]
+fn snapshot_gaps(
+    timestamps: impl IntoIterator<Item = i64>,
+    interval_nanos: i64,
+) -> (usize, Vec<SnapshotGap>, bool) {
+    const MAXIMUM_RECORDED_GAPS: usize = 32;
+    let mut previous: Option<i64> = None;
+    let mut count = 0;
+    let mut gaps = Vec::with_capacity(MAXIMUM_RECORDED_GAPS);
+    for timestamp in timestamps {
+        if let Some(start) = previous {
+            let distance = timestamp.saturating_sub(start);
+            if distance != interval_nanos {
+                count += 1;
+                if gaps.len() < MAXIMUM_RECORDED_GAPS {
+                    gaps.push(SnapshotGap {
+                        start_utc_ns: start.saturating_add(interval_nanos),
+                        missing_intervals: distance
+                            .div_euclid(interval_nanos)
+                            .saturating_sub(1)
+                            .max(0),
+                    });
+                }
+            }
+        }
+        previous = Some(timestamp);
+    }
+    (count, gaps, count > MAXIMUM_RECORDED_GAPS)
+}
+
 /// The persisted chart time zone, or the chart default for legacy workspaces without one.
 fn restored_chart_time_zone(restored: Option<&WorkspaceChartState>) -> String {
     restored
@@ -2943,18 +2980,14 @@ impl WorkspaceSurface {
                     i64::from(snapshot.bar_definition().interval_seconds)
                         .saturating_mul(1_000_000_000)
                 });
-                let interior_gaps = interval_nanos.map(|interval_nanos| {
-                    snapshot
-                        .bars()
-                        .windows(2)
-                        .filter(|pair| {
-                            pair[1]
-                                .provenance()
-                                .exchange_timestamp_unix_nanos
-                                .saturating_sub(pair[0].provenance().exchange_timestamp_unix_nanos)
-                                != interval_nanos
-                        })
-                        .count()
+                let gap_evidence = interval_nanos.map(|interval_nanos| {
+                    snapshot_gaps(
+                        snapshot
+                            .bars()
+                            .iter()
+                            .map(|bar| bar.provenance().exchange_timestamp_unix_nanos),
+                        interval_nanos,
+                    )
                 });
                 let first_timestamp = snapshot
                     .bars()
@@ -2964,12 +2997,20 @@ impl WorkspaceSurface {
                     .bars()
                     .last()
                     .map_or(0, |bar| bar.provenance().exchange_timestamp_unix_nanos);
-                let interior_gaps =
-                    interior_gaps.map_or_else(|| "null".to_string(), |value| value.to_string());
+                let interior_gaps = gap_evidence
+                    .as_ref()
+                    .map_or_else(|| "null".to_string(), |(count, _, _)| count.to_string());
+                let gaps = gap_evidence.as_ref().map_or_else(
+                    || "[]".to_string(),
+                    |(_, gaps, _)| serde_json::json!(gaps).to_string(),
+                );
+                let gaps_truncated = gap_evidence
+                    .as_ref()
+                    .is_some_and(|(_, _, truncated)| *truncated);
                 let interval_nanos =
                     interval_nanos.map_or_else(|| "null".to_string(), |value| value.to_string());
                 diagnostic!(
-                    "AERIS_LIVE_SNAPSHOT {{\"bar_count\":{},\"first_timestamp\":{first_timestamp},\"last_timestamp\":{last_timestamp},\"interior_gaps\":{interior_gaps},\"interval_nanos\":{interval_nanos}}}",
+                    "AERIS_LIVE_SNAPSHOT {{\"bar_count\":{},\"first_timestamp\":{first_timestamp},\"last_timestamp\":{last_timestamp},\"interior_gaps\":{interior_gaps},\"interval_nanos\":{interval_nanos},\"gaps\":{gaps},\"gaps_truncated\":{gaps_truncated}}}",
                     snapshot.bars().len()
                 );
             }

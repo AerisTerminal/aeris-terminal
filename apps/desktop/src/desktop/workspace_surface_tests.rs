@@ -2,6 +2,23 @@
 
 use super::*;
 
+#[cfg(feature = "diagnostics")]
+#[test]
+fn live_snapshot_gaps_keep_the_metric_and_bound_the_evidence() {
+    let (count, gaps, truncated) = snapshot_gaps([0, 60, 240, 300], 60);
+    assert_eq!(count, 1);
+    assert_eq!(gaps[0].start_utc_ns, 120);
+    assert_eq!(gaps[0].missing_intervals, 2);
+    assert!(!truncated);
+
+    let timestamps = (0..=33).map(|index| index * 120);
+    let (count, gaps, truncated) = snapshot_gaps(timestamps, 60);
+    assert_eq!(count, 33);
+    assert_eq!(gaps.len(), 32);
+    assert_eq!(gaps[31].start_utc_ns, 31 * 120 + 60);
+    assert!(truncated);
+}
+
 #[test]
 fn chart_countdown_stops_only_for_the_products_closed_session() {
     use aeris_contracts::{MarketSessionPhase, MarketSessionSource, MarketSessionStatus};
