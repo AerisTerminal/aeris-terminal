@@ -8,10 +8,9 @@ use super::{
     MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine, MarketServiceStatus, MarketStream, NonZeroUsize,
     Ordering, PriceAlertRegistry, ProviderConnectionState, ProviderDispatch, ProviderEpochRegistry,
     ProviderGeneration, ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent,
-    ProviderRuntimeRegistry, ProviderSessionSlot, ProviderState, REALTIME_CAPACITY,
-    REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply, StreamRequirements,
-    StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig, authorize_consumer,
-    publish_state, thread,
+    ProviderRuntimeRegistry, ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver,
+    RecvTimeoutError, Reply, StreamRequirements, StudyMarketLeaseChangeKind, StudyRuntime,
+    StudyRuntimeConfig, authorize_consumer, publish_state, thread,
 };
 #[cfg(test)]
 use super::{
@@ -197,14 +196,9 @@ impl<'a> Coordinator<'a> {
         providers: ProviderDispatch<'a>,
         clock: Arc<dyn super::clock::Clock>,
     ) -> Self {
-        let sessions = providers
-            .records
-            .keys()
-            .copied()
-            .map(|provider| (provider, ProviderSessionSlot::default()))
-            .collect();
         let mut provider_registry = super::provider_session::ProviderRegistry::new();
         for (&id, record) in &providers.records {
+            provider_registry.register_control(id);
             if let Some(channels) = record.hyperliquid {
                 provider_registry.register(
                     id,
@@ -217,12 +211,11 @@ impl<'a> Coordinator<'a> {
                     clock.as_ref(),
                 );
             }
-            if let super::ProviderRealtimeDispatch::CtraderBound { controls, .. } = &record.realtime
-            {
+            if let Some(channels) = record.ctrader {
                 provider_registry.register(
                     id,
                     Box::new(super::provider_session::CtraderSession {
-                        controls: (*controls).clone(),
+                        controls: channels.controls.clone(),
                         history: record.history.clone(),
                     }),
                     record.descriptor.capabilities.reconnect,
@@ -235,6 +228,18 @@ impl<'a> Coordinator<'a> {
                     Box::new(super::provider_session::TastytradeSession {
                         controls: channels.controls.clone(),
                         history: record.history.clone(),
+                    }),
+                    record.descriptor.capabilities.reconnect,
+                    clock.as_ref(),
+                );
+            }
+            if let Some(channels) = record.rithmic {
+                provider_registry.register(
+                    id,
+                    Box::new(super::provider_session::RithmicSession {
+                        controls: channels.controls.clone(),
+                        history: record.history.clone(),
+                        binding: Arc::clone(&channels.binding),
                     }),
                     record.descriptor.capabilities.reconnect,
                     clock.as_ref(),
@@ -283,7 +288,6 @@ impl<'a> Coordinator<'a> {
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             command_fences: super::CommandFences::default(),
-            sessions,
         };
         for provider in coordinator.provider_registry.catalog_connect_ids() {
             let _ = coordinator.ensure_provider_connection(provider);
@@ -331,6 +335,7 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
             }
             drained += 1;
             match event {
+                #[cfg(test)]
                 ProviderRuntimeEvent::Realtime(event) => coordinator.handle_provider_event(event),
                 ProviderRuntimeEvent::BoundRealtime(event) => {
                     coordinator.handle_bound_provider_event(event);
@@ -790,8 +795,6 @@ pub(super) struct Coordinator<'a> {
     /// Provider callbacks are fenced here before entering the canonical consumer
     /// outbox, so desktop presentation code never needs a second pending-command map.
     pub(super) command_fences: super::CommandFences,
-    /// One bounded lifecycle and control slot per registered provider.
-    pub(super) sessions: BTreeMap<&'static str, ProviderSessionSlot>,
 }
 
 impl Coordinator<'_> {
@@ -939,7 +942,7 @@ impl Coordinator<'_> {
             }
         }
         if self.control_retry
-            || self.sessions.values().any(|session| {
+            || self.provider_registry.controls().any(|session| {
                 session.pending.is_some() || session.demand_dirty || session.authorization.is_some()
             })
         {
@@ -951,16 +954,12 @@ impl Coordinator<'_> {
         self.deadlines = deadlines;
     }
 
-    pub(super) fn session(&self, provider: &str) -> &ProviderSessionSlot {
-        self.sessions
-            .get(provider)
-            .expect("registered provider has a session slot")
+    pub(super) fn session(&self, provider: &str) -> &super::ProviderControlState {
+        self.provider_registry.control(provider)
     }
 
-    pub(super) fn session_mut(&mut self, provider: &str) -> &mut ProviderSessionSlot {
-        self.sessions
-            .get_mut(provider)
-            .expect("registered provider has a session slot")
+    pub(super) fn session_mut(&mut self, provider: &str) -> &mut super::ProviderControlState {
+        self.provider_registry.control_mut(provider)
     }
 
     pub(super) fn detach_client(&mut self, client_id: ClientId) {
@@ -984,13 +983,7 @@ impl Coordinator<'_> {
         self.publish_lifecycle_live();
         self.history.cancel_all();
         for provider in self.providers.records.keys().copied().collect::<Vec<_>>() {
-            if self.provider_registry.contains(provider) {
-                let _ = self.provider_registry.release_idle(provider);
-            } else {
-                let _ = self
-                    .providers
-                    .send_control(provider, super::ProviderControl::Stop);
-            }
+            let _ = self.provider_registry.release_idle(provider);
         }
     }
 
@@ -1371,7 +1364,7 @@ impl Coordinator<'_> {
         }
         self.mark_alert_demand_changed();
         self.reconcile_order_books();
-        for session in self.sessions.values_mut() {
+        for session in self.provider_registry.controls_mut() {
             session.demand_dirty = true;
         }
         self.release_unused_live_market_data();
@@ -1896,8 +1889,7 @@ mod tests {
     use crate::market_service::{
         FormingBar, HISTORY_SERIES_HIGH_WATERMARK, HISTORY_SERIES_TARGET_BARS, HistoryRange,
         HistorySnapshot, INITIAL_HISTORY_BARS, MAXIMUM_HISTORY_RETRIES, MAXIMUM_STORED_BARS,
-        ProviderDispatchRecord, ProviderDisplayDepthEvent, ProviderRealtimeDispatch,
-        SeriesLoadState,
+        ProviderDispatchRecord, ProviderDisplayDepthEvent, SeriesLoadState,
     };
     use crate::study::{
         NativeStudyProgram, NativeStudyRegistration, StudyDefinition, StudyDependency,
@@ -2101,7 +2093,13 @@ mod tests {
             clock: Arc::new(super::super::clock::SystemClock),
             calendar: super::super::calendar::MarketCalendarService::default(),
             provider_epochs: ProviderEpochRegistry::default(),
-            provider_registry: super::super::provider_session::ProviderRegistry::new(),
+            provider_registry: {
+                let mut registry = super::super::provider_session::ProviderRegistry::new();
+                for descriptor in super::super::BUILT_IN_PROVIDER_DESCRIPTORS {
+                    registry.register_control(descriptor.id);
+                }
+                registry
+            },
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -2120,10 +2118,6 @@ mod tests {
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             command_fences: super::super::CommandFences::default(),
-            sessions: super::super::BUILT_IN_PROVIDER_DESCRIPTORS
-                .iter()
-                .map(|descriptor| (descriptor.id, ProviderSessionSlot::default()))
-                .collect(),
         }
     }
 
@@ -3008,9 +3002,10 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_tx,
                 lifecycle: None,
-                realtime: ProviderRealtimeDispatch::Disabled,
+                ctrader: None,
                 hyperliquid: None,
                 tastytrade: None,
+                rithmic: None,
                 catalog: None,
             },
         );
@@ -4336,9 +4331,10 @@ mod tests {
                     descriptor: super::super::ctrader::DESCRIPTOR,
                     history: Box::leak(Box::new(history_tx)),
                     lifecycle: None,
-                    realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                    ctrader: None,
                     hyperliquid: None,
                     tastytrade: None,
+                    rithmic: None,
                     catalog: None,
                 },
             );
@@ -4633,9 +4629,10 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_tx,
                 lifecycle: None,
-                realtime: ProviderRealtimeDispatch::Disabled,
+                ctrader: None,
                 hyperliquid: None,
                 tastytrade: None,
+                rithmic: None,
                 catalog: None,
             },
         );
@@ -4815,9 +4812,10 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
-                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                ctrader: None,
                 hyperliquid: None,
                 tastytrade: None,
+                rithmic: None,
                 catalog: None,
             },
         );
@@ -4850,12 +4848,16 @@ mod tests {
                     descriptor: super::super::RITHMIC_DESCRIPTOR,
                     history: Box::leak(Box::new(history_sender)),
                     lifecycle: None,
-                    realtime: ProviderRealtimeDispatch::Rithmic {
-                        controls: Box::leak(Box::new(controls)),
-                        events: Box::leak(Box::new(event_receiver)),
-                    },
+                    ctrader: None,
                     hyperliquid: None,
                     tastytrade: None,
+                    rithmic: Some(Box::leak(Box::new(super::super::RithmicChannels {
+                        controls,
+                        events: event_receiver,
+                        binding: Arc::new(std::sync::Mutex::new(
+                            super::super::provider_session::RithmicBinding::default(),
+                        )),
+                    }))),
                     catalog: None,
                 },
             )]),
@@ -4871,6 +4873,57 @@ mod tests {
             events,
             controls_receiver,
         )
+    }
+
+    #[test]
+    fn rithmic_transport_replacement_rebinds_before_forwarding_new_wire_events() {
+        let (mut coordinator, _, events, controls) =
+            scripted_rithmic_coordinator(Arc::new(super::super::clock::SystemClock));
+        assert!(coordinator.ensure_provider_connection("rithmic"));
+        let first = coordinator
+            .provider_registry
+            .epoch("rithmic")
+            .expect("reserved");
+        assert!(
+            controls.try_recv().is_err(),
+            "binding does not open transport"
+        );
+        events.send(RithmicRealtimeEvent::Connected(1)).unwrap();
+        let Some(ProviderRuntimeEvent::BoundRealtime(connected)) =
+            coordinator.providers.take_event(0)
+        else {
+            panic!("initial event must be bound");
+        };
+        assert_eq!(connected.generation, first);
+        coordinator.handle_bound_provider_event(connected);
+        events.send(RithmicRealtimeEvent::Connecting(2)).unwrap();
+        let Some(ProviderRuntimeEvent::BoundRealtime(replaced)) =
+            coordinator.providers.take_event(0)
+        else {
+            panic!("replacement must precede new-wire events");
+        };
+        assert!(matches!(
+            replaced.kind,
+            super::super::ProviderEventKind::TransportReplaced
+        ));
+        assert_eq!(replaced.generation, first);
+        coordinator.handle_bound_provider_event(replaced);
+        let second = coordinator
+            .provider_registry
+            .epoch("rithmic")
+            .expect("rebound");
+        assert_ne!(first, second);
+        assert_eq!(
+            coordinator.provider_epochs.current("rithmic", 2),
+            Some(second)
+        );
+        let Some(ProviderRuntimeEvent::BoundRealtime(connecting)) =
+            coordinator.providers.take_event(0)
+        else {
+            panic!("queued new-wire event must resume after rebind");
+        };
+        assert_eq!(connecting.generation, second);
+        assert!(controls.try_recv().is_err(), "rebind never opens a socket");
     }
 
     #[test]
@@ -5042,9 +5095,10 @@ mod tests {
                 descriptor: super::super::tastytrade::DESCRIPTOR,
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
-                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                ctrader: None,
                 hyperliquid: None,
                 tastytrade: None,
+                rithmic: None,
                 catalog: None,
             },
         );
@@ -5209,9 +5263,10 @@ mod tests {
                 descriptor: *descriptor,
                 history: Box::leak(Box::new(history_tx)),
                 lifecycle: None,
-                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                ctrader: None,
                 hyperliquid: None,
                 tastytrade: None,
+                rithmic: None,
                 catalog: None,
             },
         );
@@ -6449,9 +6504,10 @@ mod tests {
                 descriptor: super::super::RITHMIC_DESCRIPTOR,
                 history: history_sender,
                 lifecycle: None,
-                realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                ctrader: None,
                 hyperliquid: None,
                 tastytrade: None,
+                rithmic: None,
                 catalog: None,
             },
         );

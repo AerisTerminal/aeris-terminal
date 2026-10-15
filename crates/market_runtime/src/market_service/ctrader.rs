@@ -16,10 +16,9 @@ use super::{
     HistoryRequest, HistorySnapshot, InstallProviderInstrument, Instant, MAXIMUM_CONSUMERS,
     MarketBar, Mutex, Ordering, ProviderCatalogChannelImpl, ProviderCatalogChannels,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderCoordinatorWake,
-    ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRuntimeLifecycle,
-    ProviderRuntimeRecord, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver,
-    SearchProviderInstruments, SelectProviderInstrument, SyncSender, TopOfBookQuote, TrySendError,
-    VecDeque, mpsc, thread,
+    ProviderRuntimeLifecycle, ProviderRuntimeRecord, REALTIME_CAPACITY,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver, SearchProviderInstruments,
+    SelectProviderInstrument, SyncSender, TopOfBookQuote, TrySendError, VecDeque, mpsc, thread,
 };
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
@@ -2280,16 +2279,13 @@ fn spawn_record(
         .map_err(|error| error.to_string())?;
     Ok(ProviderRuntimeRecord {
         tastytrade: None,
+        rithmic: None,
         hyperliquid: None,
         ctrader: Some(super::CtraderChannels { controls, events }),
         descriptor,
         history: history_tx,
         cancellation,
         lifecycle,
-        realtime: ProviderRealtimeChannels {
-            enabled: true,
-            channels: ProviderRealtimeChannelSet::Disabled,
-        },
         catalog: ProviderCatalogChannels {
             enabled: true,
             channels: Box::new(ProviderCatalogChannelImpl::new(

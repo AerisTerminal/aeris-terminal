@@ -850,19 +850,22 @@ impl Coordinator<'_> {
         if !self.ensure_provider_connection(&series.provider_id) {
             return Err("provider connection is not ready");
         }
-        if self.provider_registry.contains(&series.provider_id) {
-            self.provider_registry
-                .epoch(&series.provider_id)
-                .ok_or("provider connection is not yet reserved")
-        } else {
-            self.provider_epochs
+        #[cfg(not(test))]
+        let _ = generation;
+        #[cfg(test)]
+        if !self.provider_registry.contains(&series.provider_id) {
+            return self
+                .provider_epochs
                 .stamp(
                     &series.provider_id,
                     generation.0.get(),
                     &mut self.provider_registry,
                 )
-                .ok_or("history request belongs to a retired provider session")
+                .ok_or("history request belongs to a retired provider session");
         }
+        self.provider_registry
+            .epoch(&series.provider_id)
+            .ok_or("provider connection is not yet reserved")
     }
 
     pub(super) fn enqueue_history_request(
@@ -1186,8 +1189,9 @@ impl Coordinator<'_> {
     ) {
         let series = &ticket.series;
         if self
-            .sessions
-            .get(series.provider_id.as_str())
+            .provider_registry
+            .has_control(series.provider_id.as_str())
+            .then(|| self.session(series.provider_id.as_str()))
             .is_some_and(|session| session.suspended)
         {
             return;

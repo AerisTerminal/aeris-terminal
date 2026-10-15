@@ -301,8 +301,9 @@ impl Coordinator<'_> {
 
     pub(super) fn handle_provider_catalog(&mut self, provider: &str, event: ProviderCatalogEvent) {
         if self
-            .sessions
-            .get(provider)
+            .provider_registry
+            .has_control(provider)
+            .then(|| self.session(provider))
             .is_some_and(|session| session.suspended)
         {
             return;
@@ -314,19 +315,26 @@ impl Coordinator<'_> {
                 status,
                 valid_from_utc_ms,
                 valid_until_utc_ms,
-            } => self.handle_provider_event(super::WireProviderEvent {
-                provider: match self.providers.descriptor(provider) {
-                    Some(descriptor) => descriptor.id,
-                    None => return,
-                },
-                generation,
-                kind: super::ProviderEventKind::Calendar {
-                    instrument_id,
-                    status,
-                    valid_from_utc_ms,
-                    valid_until_utc_ms,
-                },
-            }),
+            } => {
+                let Some(epoch) = self.provider_epochs.current(provider, generation) else {
+                    self.provider_epochs.drop_event();
+                    return;
+                };
+                let Some(descriptor) = self.providers.descriptor(provider) else {
+                    return;
+                };
+                self.handle_bound_provider_event(super::ProviderEvent {
+                    provider: descriptor.id,
+                    generation: epoch,
+                    wire_generation: generation,
+                    kind: super::ProviderEventKind::Calendar {
+                        instrument_id,
+                        status,
+                        valid_from_utc_ms,
+                        valid_until_utc_ms,
+                    },
+                });
+            }
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.restore_provider_catalog_health(&result.provider);
                 self.handle_catalog_search(result);
@@ -418,8 +426,9 @@ impl Coordinator<'_> {
             .is_some_and(|status| status.health == ProviderHealth::Online);
         if !healthy
             || self
-                .sessions
-                .get(provider)
+                .provider_registry
+                .has_control(provider)
+                .then(|| self.session(provider))
                 .is_none_or(|session| session.catalog_degraded.is_some())
         {
             return;
@@ -433,8 +442,9 @@ impl Coordinator<'_> {
     /// realtime worker owns transport Online/Recovering transitions.
     pub(super) fn restore_provider_catalog_health(&mut self, provider: &str) {
         let Some(degraded) = self
-            .sessions
-            .get(provider)
+            .provider_registry
+            .has_control(provider)
+            .then(|| self.session(provider))
             .and_then(|session| session.catalog_degraded)
         else {
             return;

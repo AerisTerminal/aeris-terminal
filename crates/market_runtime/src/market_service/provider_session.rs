@@ -6,7 +6,10 @@
 
 use std::{
     collections::BTreeMap,
-    sync::mpsc::{SyncSender, TrySendError},
+    sync::{
+        Mutex,
+        mpsc::{Receiver, SyncSender, TrySendError},
+    },
     time::Instant,
 };
 
@@ -24,6 +27,9 @@ pub(super) enum ProviderSessionError {
 }
 
 pub(super) trait ProviderSession: Send {
+    fn adapter_retries_transport(&self) -> bool {
+        false
+    }
     fn catalog_uses_session(&self) -> bool {
         false
     }
@@ -32,6 +38,14 @@ pub(super) trait ProviderSession: Send {
         epoch: Epoch<ProviderTag>,
         sink: ProviderEventSink,
     ) -> Result<bool, ProviderSessionError>;
+    /// Adopt an adapter-owned replacement without opening another transport.
+    fn rebind(
+        &self,
+        _epoch: Epoch<ProviderTag>,
+        _sink: ProviderEventSink,
+    ) -> Result<bool, ProviderSessionError> {
+        Err(ProviderSessionError::Unavailable)
+    }
     fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError>;
     fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError>;
     fn release_idle(&self) -> Result<bool, ProviderSessionError>;
@@ -62,6 +76,7 @@ pub(super) struct ProviderConnection {
 pub(super) struct ProviderRegistry {
     sequence: EpochSequence<ProviderTag>,
     connections: BTreeMap<&'static str, ProviderConnection>,
+    controls: BTreeMap<&'static str, super::ProviderControlState>,
 }
 
 #[derive(Clone, Copy)]
@@ -177,6 +192,113 @@ pub(super) struct TastytradeSession {
     pub(super) history: SyncSender<HistoryRequest>,
 }
 
+pub(super) struct RithmicSession {
+    pub(super) controls: SyncSender<super::RithmicRealtimeControl>,
+    pub(super) history: SyncSender<HistoryRequest>,
+    pub(super) binding: std::sync::Arc<Mutex<RithmicBinding>>,
+}
+
+#[derive(Default)]
+pub(super) struct RithmicBinding {
+    pub(super) sink: Option<ProviderEventSink>,
+    pub(super) wire_generation: Option<u64>,
+    pub(super) pending: Option<crate::rithmic_realtime::RithmicRealtimeEvent>,
+}
+
+impl ProviderSession for RithmicSession {
+    fn adapter_retries_transport(&self) -> bool {
+        true
+    }
+    fn connect(
+        &self,
+        epoch: Epoch<ProviderTag>,
+        sink: ProviderEventSink,
+    ) -> Result<bool, ProviderSessionError> {
+        debug_assert_eq!(epoch, sink.epoch);
+        self.binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sink = Some(sink);
+        Ok(true)
+    }
+
+    fn rebind(
+        &self,
+        epoch: Epoch<ProviderTag>,
+        sink: ProviderEventSink,
+    ) -> Result<bool, ProviderSessionError> {
+        debug_assert_eq!(epoch, sink.epoch);
+        let mut binding = self
+            .binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        binding.sink = Some(sink);
+        binding.wire_generation = binding
+            .pending
+            .as_ref()
+            .map(crate::rithmic_realtime::RithmicRealtimeEvent::generation);
+        Ok(true)
+    }
+
+    fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
+        let wire = demand
+            .rithmic_wire()
+            .map_err(|_| ProviderSessionError::Unavailable)?;
+        try_control(
+            &self.controls,
+            super::RithmicRealtimeControl::Subscribe(wire),
+        )
+    }
+
+    fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError> {
+        try_control(&self.history, request)
+    }
+
+    fn release_idle(&self) -> Result<bool, ProviderSessionError> {
+        try_control(&self.controls, super::RithmicRealtimeControl::Stop)
+    }
+
+    fn shutdown(&self) {
+        let _ = self.release_idle();
+    }
+}
+
+impl RithmicBinding {
+    pub(super) fn take(
+        &mut self,
+        events: &Receiver<crate::rithmic_realtime::RithmicRealtimeEvent>,
+    ) -> Option<super::ProviderEvent> {
+        let sink = self.sink?;
+        let event = match self.pending.take() {
+            Some(event) => event,
+            None => events.try_recv().ok()?,
+        };
+        let wire_generation = event.generation();
+        match self.wire_generation {
+            Some(current) if wire_generation < current => None,
+            Some(current) if wire_generation > current => {
+                self.pending = Some(event);
+                Some(super::ProviderEvent {
+                    provider: super::RITHMIC_DESCRIPTOR.id,
+                    generation: sink.epoch,
+                    wire_generation,
+                    kind: super::ProviderEventKind::TransportReplaced,
+                })
+            }
+            _ => {
+                self.wire_generation = Some(wire_generation);
+                let wire = super::ProviderEvent::rithmic(event);
+                Some(super::ProviderEvent {
+                    provider: wire.provider,
+                    generation: sink.epoch,
+                    wire_generation,
+                    kind: wire.kind,
+                })
+            }
+        }
+    }
+}
+
 impl ProviderSession for TastytradeSession {
     fn connect(
         &self,
@@ -244,7 +366,38 @@ impl ProviderRegistry {
         Self {
             sequence: EpochSequence::default(),
             connections: BTreeMap::new(),
+            controls: BTreeMap::new(),
         }
+    }
+
+    pub(super) fn register_control(&mut self, id: &'static str) {
+        self.controls.entry(id).or_default();
+    }
+
+    pub(super) fn control(&self, id: &str) -> &super::ProviderControlState {
+        self.controls
+            .get(id)
+            .expect("registered provider has control state")
+    }
+
+    pub(super) fn control_mut(&mut self, id: &str) -> &mut super::ProviderControlState {
+        self.controls
+            .get_mut(id)
+            .expect("registered provider has control state")
+    }
+
+    pub(super) fn has_control(&self, id: &str) -> bool {
+        self.controls.contains_key(id)
+    }
+
+    pub(super) fn controls(&self) -> impl Iterator<Item = &super::ProviderControlState> {
+        self.controls.values()
+    }
+
+    pub(super) fn controls_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut super::ProviderControlState> {
+        self.controls.values_mut()
     }
 
     pub(super) fn register(
@@ -310,6 +463,31 @@ impl ProviderRegistry {
         {
             connection.state = ConnectionState::Online;
             connection.online_since = Some(now);
+        }
+    }
+
+    pub(super) fn rebind(
+        &mut self,
+        id: &str,
+    ) -> Result<Option<Epoch<ProviderTag>>, ProviderSessionError> {
+        if !self.connections.contains_key(id) {
+            return Err(ProviderSessionError::Unavailable);
+        }
+        let epoch = self.reserve();
+        let connection = self
+            .connections
+            .get_mut(id)
+            .ok_or(ProviderSessionError::Unavailable)?;
+        if connection
+            .session
+            .rebind(epoch, ProviderEventSink { epoch })?
+        {
+            connection.epoch = Some(epoch);
+            connection.state = ConnectionState::Connecting;
+            connection.last_demand = None;
+            Ok(Some(epoch))
+        } else {
+            Ok(None)
         }
     }
 
@@ -440,6 +618,12 @@ impl ProviderRegistry {
 
     pub(super) fn contains(&self, id: &str) -> bool {
         self.connections.contains_key(id)
+    }
+
+    pub(super) fn adapter_retries_transport(&self, id: &str) -> bool {
+        self.connections
+            .get(id)
+            .is_some_and(|connection| connection.session.adapter_retries_transport())
     }
 }
 
@@ -762,5 +946,77 @@ mod tests {
         registry.disconnected("tastytrade", first, now);
         assert_eq!(registry.epoch("tastytrade"), Some(second));
         assert_eq!(registry.next_retry(), None);
+    }
+
+    #[test]
+    fn rithmic_rebind_retires_wire_epoch_without_connecting_again() {
+        use crate::rithmic_realtime::RithmicRealtimeEvent as Wire;
+        let clock = ScriptedClock::new(47);
+        let (controls, queued) = std::sync::mpsc::sync_channel(8);
+        let (history, _) = std::sync::mpsc::sync_channel(1);
+        let (events_tx, events) = std::sync::mpsc::sync_channel(4);
+        let binding = Arc::new(Mutex::new(RithmicBinding::default()));
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "rithmic",
+            Box::new(RithmicSession {
+                controls,
+                history,
+                binding: Arc::clone(&binding),
+            }),
+            ReconnectPolicy::rithmic_recovery(),
+            &clock,
+        );
+        let first = registry
+            .connect("rithmic", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        assert!(queued.try_recv().is_err(), "binding never opens a socket");
+        events_tx.send(Wire::Connected(7)).unwrap();
+        let initial = binding.lock().unwrap().take(&events).unwrap();
+        assert_eq!(initial.generation, first);
+        assert!(matches!(
+            initial.kind,
+            super::super::ProviderEventKind::Connected
+        ));
+        for revision in 0..5 {
+            let mut demand = ProviderDemand::default();
+            demand
+                .explicit_trade_ids
+                .insert(format!("selection-{revision}"));
+            assert!(registry.apply_demand("rithmic", &demand).unwrap());
+            assert!(matches!(
+                queued.try_recv().unwrap(),
+                super::super::RithmicRealtimeControl::Subscribe(_)
+            ));
+            assert!(
+                registry
+                    .connect("rithmic", clock.monotonic())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        events_tx.send(Wire::Connecting(8)).unwrap();
+        let replaced = binding.lock().unwrap().take(&events).unwrap();
+        assert_eq!(replaced.generation, first);
+        assert!(matches!(
+            replaced.kind,
+            super::super::ProviderEventKind::TransportReplaced
+        ));
+        let second = registry.rebind("rithmic").unwrap().unwrap();
+        assert_ne!(first, second);
+        assert!(queued.try_recv().is_err(), "rebind never opens a socket");
+        let connecting = binding.lock().unwrap().take(&events).unwrap();
+        assert_eq!(connecting.generation, second);
+        assert_eq!(connecting.wire_generation, 8);
+        assert!(matches!(
+            connecting.kind,
+            super::super::ProviderEventKind::Connecting
+        ));
+        events_tx.send(Wire::Heartbeat(7, None)).unwrap();
+        assert!(
+            binding.lock().unwrap().take(&events).is_none(),
+            "old wire event is retired"
+        );
     }
 }

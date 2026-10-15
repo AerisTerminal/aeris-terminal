@@ -68,7 +68,7 @@ pub(super) struct ProviderEvent {
     pub(super) kind: ProviderEventKind,
 }
 
-/// Untrusted adapter identity. The coordinator registry stamps it before dispatch.
+/// Untrusted adapter identity, retained only at adapter conversion boundaries.
 pub(super) struct WireProviderEvent {
     pub(super) provider: &'static str,
     pub(super) generation: u64,
@@ -84,6 +84,7 @@ pub(super) struct ProviderEpochRegistry {
 }
 
 impl ProviderEpochRegistry {
+    #[cfg(test)]
     pub(super) fn stamp(
         &mut self,
         provider: &str,
@@ -109,8 +110,11 @@ impl ProviderEpochRegistry {
     }
 
     pub(super) fn bind(&mut self, provider: &str, epoch: Epoch<ProviderTag>) {
-        self.active
-            .insert(provider.to_owned(), (epoch.get().get(), epoch));
+        self.bind_wire(provider, epoch, epoch.get().get());
+    }
+
+    pub(super) fn bind_wire(&mut self, provider: &str, epoch: Epoch<ProviderTag>, wire: u64) {
+        self.active.insert(provider.to_owned(), (wire, epoch));
     }
 
     pub(super) fn accepts(&self, provider: &str, epoch: Epoch<ProviderTag>) -> bool {
@@ -170,6 +174,8 @@ pub(super) enum ProviderDisconnect {
 }
 
 pub(super) enum ProviderEventKind {
+    /// The adapter replaced its transport; the registry must reserve a new epoch and rebind.
+    TransportReplaced,
     Connecting,
     Connected,
     Heartbeat(Option<u64>),

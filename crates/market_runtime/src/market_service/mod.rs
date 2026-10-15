@@ -462,12 +462,6 @@ struct ProviderDemand {
     missing_catalog: bool,
 }
 
-enum ProviderControl {
-    Demand(ProviderDemand),
-    Stop,
-    AuthorizationChanged(bool),
-}
-
 impl ProviderDemand {
     fn rithmic_wire(&self) -> Result<RithmicRealtimeDemand, String> {
         if self.missing_catalog {
@@ -601,7 +595,7 @@ impl ProviderDemand {
 }
 
 #[derive(Default)]
-struct ProviderSessionSlot {
+struct ProviderControlState {
     accepted: Option<ProviderDemand>,
     pending: Option<ProviderDemand>,
     stop_pending: Option<ProviderGeneration>,
@@ -716,9 +710,11 @@ mod provider_event;
 pub(crate) mod provider_session;
 mod realtime;
 mod watchdog;
+#[cfg(test)]
+use provider_event::WireProviderEvent;
 use provider_event::{
     ProviderCandle, ProviderDisconnect, ProviderEpochRegistry, ProviderEvent, ProviderEventKind,
-    ProviderTradeBatch, WireProviderEvent,
+    ProviderTradeBatch,
 };
 
 /// One live publication for a series. Live handoffs publish only incremental
@@ -1180,19 +1176,6 @@ impl ProviderRuntimeLifecycle {
     }
 }
 
-struct ProviderRealtimeChannels {
-    enabled: bool,
-    channels: ProviderRealtimeChannelSet,
-}
-
-enum ProviderRealtimeChannelSet {
-    Disabled,
-    Rithmic {
-        controls: SyncSender<RithmicRealtimeControl>,
-        events: Receiver<RithmicRealtimeEvent>,
-    },
-}
-
 struct HyperliquidChannels {
     controls: SyncSender<HyperliquidRealtimeControl>,
     events: Receiver<
@@ -1252,10 +1235,10 @@ struct ProviderRuntimeRecord {
     history: SyncSender<HistoryRequest>,
     cancellation: Arc<AtomicBool>,
     lifecycle: Arc<ProviderRuntimeLifecycle>,
-    realtime: ProviderRealtimeChannels,
     hyperliquid: Option<HyperliquidChannels>,
     ctrader: Option<CtraderChannels>,
     tastytrade: Option<TastytradeChannels>,
+    rithmic: Option<RithmicChannels>,
     catalog: ProviderCatalogChannels,
     workers: Vec<thread::JoinHandle<()>>,
 }
@@ -1276,6 +1259,11 @@ struct TastytradeChannels {
             tastytrade::RealtimeEvent,
         >,
     >,
+}
+struct RithmicChannels {
+    controls: SyncSender<RithmicRealtimeControl>,
+    events: Receiver<RithmicRealtimeEvent>,
+    binding: Arc<Mutex<provider_session::RithmicBinding>>,
 }
 
 struct StartedProviderRuntime {
@@ -1344,36 +1332,11 @@ struct ProviderDispatchRecord<'a> {
     descriptor: ProviderDescriptor,
     history: &'a SyncSender<HistoryRequest>,
     lifecycle: Option<&'a ProviderRuntimeLifecycle>,
-    realtime: ProviderRealtimeDispatch<'a>,
+    ctrader: Option<&'a CtraderChannels>,
     hyperliquid: Option<&'a HyperliquidChannels>,
     tastytrade: Option<&'a TastytradeChannels>,
+    rithmic: Option<&'a RithmicChannels>,
     catalog: Option<&'a dyn ProviderCatalogChannel>,
-}
-
-enum ProviderRealtimeDispatch<'a> {
-    CtraderBound {
-        controls: &'a SyncSender<ctrader::RealtimeControl>,
-        events: &'a Receiver<
-            aeris_market_engine::fence::Fenced<
-                aeris_market_engine::fence::ProviderTag,
-                ctrader::RealtimeEvent,
-            >,
-        >,
-    },
-    Rithmic {
-        controls: &'a SyncSender<RithmicRealtimeControl>,
-        events: &'a Receiver<RithmicRealtimeEvent>,
-    },
-    Disabled,
-}
-
-impl<'a> ProviderRealtimeDispatch<'a> {
-    fn rithmic_controls(&self) -> Option<&'a SyncSender<RithmicRealtimeControl>> {
-        match self {
-            Self::Rithmic { controls, .. } => Some(controls),
-            _ => None,
-        }
-    }
 }
 
 enum ProviderCatalogCommand {
@@ -1383,6 +1346,7 @@ enum ProviderCatalogCommand {
 }
 
 enum ProviderRuntimeEvent {
+    #[cfg(test)]
     Realtime(WireProviderEvent),
     BoundRealtime(ProviderEvent),
     DisplayDepth(&'static str, ProviderDisplayDepthEvent),
@@ -1564,6 +1528,7 @@ struct ProviderEventMetadata {
 impl ProviderRuntimeEvent {
     fn metadata(&self) -> Option<ProviderEventMetadata> {
         let (provider, generation, reconnecting, transport_rtt_nanos) = match self {
+            #[cfg(test)]
             Self::Realtime(event) => (
                 event.provider,
                 event.generation,

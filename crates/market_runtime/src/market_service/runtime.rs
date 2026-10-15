@@ -6,22 +6,20 @@ use super::{
     LiveRithmicHistory, MarketEngine, MarketRuntime, MarketService, MarketServiceStatus, Mutex,
     NativeStudyRegistration, Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelImpl,
     ProviderCatalogChannels, ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch,
-    ProviderDispatchRecord, ProviderEventLane, ProviderRealtimeChannelSet,
-    ProviderRealtimeChannels, ProviderRealtimeDispatch, ProviderRuntimeEvent,
-    ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec,
-    REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl,
-    RithmicRealtimeControl, ScreenProviderMarkets, SearchProviderInstruments,
-    SelectProviderInstrument, StartedProviderRuntime, StreamRequirements, StudyInstanceId,
-    SyncSender, TrySendError, Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc,
-    spawn_coordinator, spawn_history_worker, thread, try_send_hyperliquid_catalog,
-    try_send_rithmic_catalog, validate_provider_instrument, validate_provider_screen,
-    validate_provider_search, validate_provider_selection,
+    ProviderDispatchRecord, ProviderEventLane, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
+    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, ScreenProviderMarkets,
+    SearchProviderInstruments, SelectProviderInstrument, StartedProviderRuntime,
+    StreamRequirements, StudyInstanceId, SyncSender, TrySendError, Viewport, WorkspaceId,
+    configured_reconnect_delay, id, mpsc, spawn_coordinator, spawn_history_worker, thread,
+    try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
+    validate_provider_screen, validate_provider_search, validate_provider_selection,
 };
 use crate::MarketRuntimeEvent;
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
 };
-use crate::hyperliquid_realtime::{HyperliquidCatalogControl, HyperliquidRealtimeControl};
+use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_contracts::ProviderPresentationDescriptor;
 
@@ -342,6 +340,9 @@ impl ProviderRuntimeRegistry {
             super::CatalogPublisher::new(catalog_events_tx, descriptor.id, wake.clone());
         let (catalog_controls, catalog_controls_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (realtime_events_tx, realtime_events) = mpsc::sync_channel(REALTIME_CAPACITY);
+        let binding = Arc::new(Mutex::new(
+            super::provider_session::RithmicBinding::default(),
+        ));
         let (realtime_controls, realtime_controls_rx) =
             mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
         if enabled {
@@ -387,16 +388,14 @@ impl ProviderRuntimeRegistry {
             history: started.history,
             cancellation: started.cancellation,
             lifecycle: started.lifecycle,
-            realtime: ProviderRealtimeChannels {
-                enabled,
-                channels: ProviderRealtimeChannelSet::Rithmic {
-                    controls: realtime_controls,
-                    events: realtime_events,
-                },
-            },
             hyperliquid: None,
             ctrader: None,
             tastytrade: None,
+            rithmic: Some(super::RithmicChannels {
+                controls: realtime_controls,
+                events: realtime_events,
+                binding,
+            }),
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -485,10 +484,6 @@ impl ProviderRuntimeRegistry {
             history: started.history,
             cancellation: started.cancellation,
             lifecycle: started.lifecycle,
-            realtime: ProviderRealtimeChannels {
-                enabled,
-                channels: ProviderRealtimeChannelSet::Disabled,
-            },
             hyperliquid: enabled.then_some(HyperliquidChannels {
                 controls: realtime_controls,
                 events: realtime_events,
@@ -497,6 +492,7 @@ impl ProviderRuntimeRegistry {
             }),
             ctrader: None,
             tastytrade: None,
+            rithmic: None,
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -617,20 +613,6 @@ impl ProviderRuntimeRegistry {
             .records
             .iter()
             .map(|(provider_id, record)| {
-                let realtime = match &record.realtime.channels {
-                    ProviderRealtimeChannelSet::Rithmic { controls, events }
-                        if record.realtime.enabled =>
-                    {
-                        ProviderRealtimeDispatch::Rithmic { controls, events }
-                    }
-                    _ => ProviderRealtimeDispatch::Disabled,
-                };
-                let realtime = record.ctrader.as_ref().map_or(realtime, |channels| {
-                    ProviderRealtimeDispatch::CtraderBound {
-                        controls: &channels.controls,
-                        events: &channels.events,
-                    }
-                });
                 let catalog = record
                     .catalog
                     .enabled
@@ -641,9 +623,10 @@ impl ProviderRuntimeRegistry {
                         descriptor: record.descriptor,
                         history: &record.history,
                         lifecycle: Some(&record.lifecycle),
-                        realtime,
+                        ctrader: record.ctrader.as_ref(),
                         hyperliquid: record.hyperliquid.as_ref(),
                         tastytrade: record.tastytrade.as_ref(),
+                        rithmic: record.rithmic.as_ref(),
                         catalog,
                     },
                 )
@@ -654,9 +637,10 @@ impl ProviderRuntimeRegistry {
             let Some(record) = records.get(provider_id) else {
                 continue;
             };
-            if !matches!(record.realtime, ProviderRealtimeDispatch::Disabled)
+            if record.ctrader.is_some()
                 || record.hyperliquid.is_some()
                 || record.tastytrade.is_some()
+                || record.rithmic.is_some()
             {
                 lanes.push(ProviderEventLane::Realtime(provider_id));
             }
@@ -683,16 +667,15 @@ impl ProviderRuntimeRegistry {
         for (_, record) in records {
             let ProviderRuntimeRecord {
                 history,
-                realtime,
                 hyperliquid: _,
                 ctrader: _,
                 tastytrade: _,
+                rithmic: _,
                 catalog,
                 workers,
                 ..
             } = record;
             drop(history);
-            drop(realtime);
             drop(catalog);
             for worker in workers {
                 let name = worker.thread().name().unwrap_or("unnamed").to_string();
@@ -774,7 +757,7 @@ impl ProviderDispatch<'_> {
     pub(super) fn rithmic_realtime_enabled(&self) -> bool {
         self.records
             .get(super::RITHMIC_DESCRIPTOR.id)
-            .is_some_and(|record| record.realtime.rithmic_controls().is_some())
+            .is_some_and(|record| record.rithmic.is_some())
     }
 
     pub(super) fn observe_generation(
@@ -811,10 +794,26 @@ impl ProviderDispatch<'_> {
 
     pub(super) fn take_event(&self, lane: usize) -> Option<ProviderRuntimeEvent> {
         let event = match *self.lanes.get(lane)? {
-            ProviderEventLane::Realtime(provider_id) => {
-                match &self.records.get(provider_id)?.realtime {
-                    ProviderRealtimeDispatch::CtraderBound { events, .. } => {
-                        events.try_recv().ok().and_then(|bound| {
+            ProviderEventLane::Realtime(provider_id) => self
+                .records
+                .get(provider_id)?
+                .rithmic
+                .and_then(|channels| {
+                    channels
+                        .binding
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take(&channels.events)
+                })
+                .map(ProviderRuntimeEvent::BoundRealtime)
+                .or_else(|| {
+                    self.records
+                        .get(provider_id)?
+                        .ctrader?
+                        .events
+                        .try_recv()
+                        .ok()
+                        .and_then(|bound| {
                             let wire = super::ProviderEvent::ctrader(bound.value);
                             (wire.generation == bound.epoch.get().get()).then_some(
                                 ProviderRuntimeEvent::BoundRealtime(super::ProviderEvent {
@@ -825,14 +824,7 @@ impl ProviderDispatch<'_> {
                                 }),
                             )
                         })
-                    }
-                    ProviderRealtimeDispatch::Rithmic { events, .. } => {
-                        events.try_recv().ok().map(|event| {
-                            ProviderRuntimeEvent::Realtime(super::ProviderEvent::rithmic(event))
-                        })
-                    }
-                    ProviderRealtimeDispatch::Disabled => None,
-                }
+                })
                 .or_else(|| {
                     let bound = self
                         .records
@@ -869,8 +861,7 @@ impl ProviderDispatch<'_> {
                             kind: wire.kind,
                         }),
                     )
-                })
-            }
+                }),
             ProviderEventLane::Catalog(provider_id) => self
                 .records
                 .get(provider_id)?
@@ -926,67 +917,6 @@ impl ProviderDispatch<'_> {
             .send(provider_id, command)
     }
 
-    pub(super) fn send_control(
-        &self,
-        provider_id: &str,
-        control: super::ProviderControl,
-    ) -> Result<bool, String> {
-        match control {
-            super::ProviderControl::Stop => self.stop(provider_id),
-            super::ProviderControl::Demand(demand) => {
-                let Some(record) = self.records.get(provider_id) else {
-                    return Err(format!("{provider_id} live worker is unavailable"));
-                };
-                match &record.realtime {
-                    ProviderRealtimeDispatch::Rithmic { .. } => self.send_rithmic_realtime(
-                        RithmicRealtimeControl::Subscribe(demand.rithmic_wire()?),
-                    ),
-                    ProviderRealtimeDispatch::CtraderBound { .. } => {
-                        Err("Provider demand is registry-owned".to_string())
-                    }
-                    ProviderRealtimeDispatch::Disabled => Ok(false),
-                }
-            }
-            super::ProviderControl::AuthorizationChanged(_ready) => {
-                let Some(record) = self.records.get(provider_id) else {
-                    return Err(format!("{provider_id} live worker is unavailable"));
-                };
-                if record.descriptor.capabilities.connection_kind
-                    != super::ProviderConnectionKind::BrokerCapability
-                {
-                    return Err(format!(
-                        "{provider_id} does not accept authorization control"
-                    ));
-                }
-                Err(format!(
-                    "{provider_id} does not accept authorization control"
-                ))
-            }
-        }
-    }
-
-    pub(super) fn send_rithmic_realtime(
-        &self,
-        control: RithmicRealtimeControl,
-    ) -> Result<bool, String> {
-        let Some(controls) = self
-            .records
-            .get(super::RITHMIC_DESCRIPTOR.id)
-            .ok_or_else(|| "Provider live worker is unavailable".to_string())?
-            .realtime
-            .rithmic_controls()
-        else {
-            return Ok(false);
-        };
-        match controls.try_send(control) {
-            Ok(()) => Ok(true),
-            Err(TrySendError::Full(_)) => Ok(false),
-            Err(TrySendError::Disconnected(_)) => {
-                Err("Provider live worker is unavailable".to_string())
-            }
-        }
-    }
-
     pub(super) fn send_hyperliquid_display_depth(
         &self,
         control: HyperliquidDisplayDepthControl,
@@ -1006,42 +936,6 @@ impl ProviderDispatch<'_> {
             Err(TrySendError::Disconnected(_)) => {
                 Err("Provider display-depth worker is unavailable".to_string())
             }
-        }
-    }
-
-    pub(super) fn stop(&self, provider_id: &str) -> Result<bool, String> {
-        let Some(record) = self.records.get(provider_id) else {
-            return Ok(true);
-        };
-        match &record.realtime {
-            ProviderRealtimeDispatch::CtraderBound { .. } => {
-                Err("Provider idle release is registry-owned".to_string())
-            }
-            ProviderRealtimeDispatch::Rithmic { controls, .. } => {
-                match controls.try_send(RithmicRealtimeControl::Stop) {
-                    Ok(()) => Ok(true),
-                    Err(TrySendError::Full(_)) => Ok(false),
-                    Err(TrySendError::Disconnected(_)) => {
-                        Err("Provider live worker is unavailable".to_string())
-                    }
-                }
-            }
-            ProviderRealtimeDispatch::Disabled if record.hyperliquid.is_some() => {
-                let channels = record.hyperliquid.expect("checked");
-                let controls = &channels.controls;
-                let display_controls = &channels.display_controls;
-                let raw_stopped = match controls.try_send(HyperliquidRealtimeControl::Stop) {
-                    Err(TrySendError::Full(_)) => false,
-                    Ok(()) | Err(TrySendError::Disconnected(_)) => true,
-                };
-                let display_stopped =
-                    match display_controls.try_send(HyperliquidDisplayDepthControl::Stop) {
-                        Err(TrySendError::Full(_)) => false,
-                        Ok(()) | Err(TrySendError::Disconnected(_)) => true,
-                    };
-                Ok(raw_stopped && display_stopped)
-            }
-            ProviderRealtimeDispatch::Disabled => Ok(true),
         }
     }
 }

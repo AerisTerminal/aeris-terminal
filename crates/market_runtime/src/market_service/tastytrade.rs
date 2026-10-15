@@ -6,10 +6,10 @@ use super::{
     InstallProviderInstrument, Instant, LIVE_BUFFER_CAPACITY, MAXIMUM_CONSUMERS, MarketBar,
     MarketTrade, Mutex, Ordering, ProviderCatalogChannelImpl, ProviderCatalogChannels,
     ProviderCatalogRejected, ProviderCatalogRejectionReason, ProviderCoordinatorWake,
-    ProviderRealtimeChannelSet, ProviderRealtimeChannels, ProviderRuntimeLifecycle,
-    ProviderRuntimeRecord, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver,
-    RecvTimeoutError, SearchProviderInstruments, SelectProviderInstrument, SyncSender,
-    TopOfBookQuote, TrySendError, VecDeque, broker_authorization, mpsc, thread,
+    ProviderRuntimeLifecycle, ProviderRuntimeRecord, REALTIME_CAPACITY,
+    RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver, RecvTimeoutError, SearchProviderInstruments,
+    SelectProviderInstrument, SyncSender, TopOfBookQuote, TrySendError, VecDeque,
+    broker_authorization, mpsc, thread,
 };
 #[cfg(test)]
 use super::{ProviderGeneration, id};
@@ -2940,14 +2940,11 @@ pub(super) fn start_record(
         ctrader: None,
         hyperliquid: None,
         tastytrade: Some(super::TastytradeChannels { controls, events }),
+        rithmic: None,
         descriptor,
         history: history_tx,
         cancellation,
         lifecycle,
-        realtime: ProviderRealtimeChannels {
-            enabled: true,
-            channels: ProviderRealtimeChannelSet::Disabled,
-        },
         catalog: ProviderCatalogChannels {
             enabled: true,
             channels: Box::new(ProviderCatalogChannelImpl::new(

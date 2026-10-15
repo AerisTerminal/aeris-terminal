@@ -1020,8 +1020,7 @@ impl Coordinator<'_> {
             return Ok(());
         }
         let neutral = self.provider_demand(super::RITHMIC_DESCRIPTOR.id);
-        let demand = neutral.rithmic_wire()?;
-        if demand.instruments.is_empty() {
+        if neutral.rithmic_wire()?.instruments.is_empty() {
             return Ok(());
         }
         if self.session(super::RITHMIC_DESCRIPTOR.id).accepted.as_ref() == Some(&neutral)
@@ -1029,10 +1028,14 @@ impl Coordinator<'_> {
         {
             return Ok(());
         }
-        if self.providers.send_control(
-            super::RITHMIC_DESCRIPTOR.id,
-            super::ProviderControl::Demand(neutral.clone()),
-        )? {
+        if !self.ensure_provider_connection(super::RITHMIC_DESCRIPTOR.id) {
+            return Ok(());
+        }
+        if self
+            .provider_registry
+            .apply_demand(super::RITHMIC_DESCRIPTOR.id, &neutral)
+            .is_ok_and(|sent| sent)
+        {
             let session = self.session_mut(super::RITHMIC_DESCRIPTOR.id);
             session.pending = None;
             session.accepted = Some(neutral);
@@ -1146,6 +1149,7 @@ impl Coordinator<'_> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn handle_provider_event(&mut self, wire: super::WireProviderEvent) {
         let engine_generation = self
             .engine
@@ -1180,6 +1184,48 @@ impl Coordinator<'_> {
             .accepts(event.provider, event.generation)
         {
             self.provider_epochs.drop_event();
+            return;
+        }
+        if matches!(event.kind, ProviderEventKind::TransportReplaced) {
+            match self.provider_registry.rebind(event.provider) {
+                Ok(Some(epoch)) => {
+                    self.provider_epochs
+                        .bind_wire(event.provider, epoch, event.wire_generation);
+                    self.session_mut(event.provider).accepted = None;
+                    self.session_mut(event.provider).pending = None;
+                    let demand = self.provider_demand(event.provider);
+                    if !demand.instruments.is_empty() || !demand.candle_series.is_empty() {
+                        match self.provider_registry.apply_demand(event.provider, &demand) {
+                            Ok(true) => self.session_mut(event.provider).accepted = Some(demand),
+                            Ok(false) => self.session_mut(event.provider).pending = Some(demand),
+                            Err(_) => self.control_retry = true,
+                        }
+                    }
+                }
+                _ => self.control_retry = true,
+            }
+            return;
+        }
+        if self
+            .provider_epochs
+            .current(event.provider, event.wire_generation)
+            .is_none()
+        {
+            self.provider_epochs
+                .bind_wire(event.provider, event.generation, event.wire_generation);
+        }
+        if self
+            .provider_registry
+            .adapter_retries_transport(event.provider)
+        {
+            if matches!(event.kind, ProviderEventKind::Connected) {
+                self.provider_registry.connected(
+                    event.provider,
+                    event.generation,
+                    self.clock.monotonic(),
+                );
+            }
+            self.dispatch_provider_event(event);
             return;
         }
         match &event.kind {
@@ -1217,7 +1263,7 @@ impl Coordinator<'_> {
         if matches!(
             event.kind,
             ProviderEventKind::Disconnected(_) | ProviderEventKind::Failed(_)
-        ) && self.sessions.contains_key(event.provider)
+        ) && self.provider_registry.has_control(event.provider)
         {
             self.session_mut(event.provider).accepted = None;
         }
@@ -1256,6 +1302,7 @@ impl Coordinator<'_> {
             return;
         }
         match kind {
+            ProviderEventKind::TransportReplaced => unreachable!("handled before dispatch"),
             ProviderEventKind::Connecting => {
                 self.begin_lifecycle_session(
                     provider,
@@ -1314,17 +1361,26 @@ impl Coordinator<'_> {
                 self.recover_provider_candle(provider, generation, &symbol);
             }
             ProviderEventKind::TradeRecovery(instrument) => {
-                self.request_indexed_trade_recovery(
-                    provider,
-                    generation,
-                    &instrument.instrument_id,
-                    "the provider requested trade recovery",
-                );
+                self.request_provider_trade_recovery(provider, generation, &instrument);
             }
             ProviderEventKind::Calendar { .. } => {
                 unreachable!("calendar update handled before dispatch")
             }
         }
+    }
+
+    fn request_provider_trade_recovery(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        instrument: &InstallProviderInstrument,
+    ) {
+        self.request_indexed_trade_recovery(
+            provider,
+            generation,
+            &instrument.instrument_id,
+            "the provider requested trade recovery",
+        );
     }
 
     fn handle_provider_recovering_event(
@@ -1348,7 +1404,8 @@ impl Coordinator<'_> {
     }
 
     fn accepts_provider_event(&self, event: &ProviderEvent) -> bool {
-        self.sessions.get(event.provider).is_some_and(|session| {
+        self.provider_registry.has_control(event.provider) && {
+            let session = self.session(event.provider);
             !session.suspended
                 && self
                     .provider_epochs
@@ -1357,7 +1414,7 @@ impl Coordinator<'_> {
                     .stop_pending
                     .is_none_or(|pending| pending.0.get() != event.wire_generation)
                     || matches!(event.kind, ProviderEventKind::Disconnected(_)))
-        })
+        }
     }
 
     fn accept_provider_calendar(
@@ -1402,22 +1459,14 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn flush_session_managed_demand(&mut self, provider: &'static str) {
-        if !self.sessions.contains_key(provider) {
+        if !self.provider_registry.has_control(provider) {
             return;
         }
         if let Some(ready) = self.session(provider).authorization {
-            let sent = if self.provider_registry.contains(provider) {
-                self.provider_registry
-                    .authorization_changed(provider, ready)
-                    .is_ok_and(|sent| sent)
-            } else {
-                self.providers
-                    .send_control(
-                        provider,
-                        super::ProviderControl::AuthorizationChanged(ready),
-                    )
-                    .is_ok_and(|sent| sent)
-            };
+            let sent = self
+                .provider_registry
+                .authorization_changed(provider, ready)
+                .is_ok_and(|sent| sent);
             if sent {
                 if self.provider_registry.contains(provider)
                     && !self
@@ -1453,15 +1502,10 @@ impl Coordinator<'_> {
         }
         if demand.candle_series.is_empty() && demand.instruments.is_empty() {
             if self.session(provider).accepted.is_some() {
-                let sent = if self.provider_registry.contains(provider) {
-                    self.provider_registry
-                        .release_idle(provider)
-                        .is_ok_and(|sent| sent)
-                } else {
-                    self.providers
-                        .send_control(provider, super::ProviderControl::Stop)
-                        .is_ok_and(|sent| sent)
-                };
+                let sent = self
+                    .provider_registry
+                    .release_idle(provider)
+                    .is_ok_and(|sent| sent);
                 if sent {
                     self.session_mut(provider).accepted = Some(demand);
                 } else {
@@ -1470,17 +1514,11 @@ impl Coordinator<'_> {
             }
             return;
         }
-        let sent = if self.provider_registry.contains(provider) {
-            self.ensure_provider_connection(provider)
-                && self
-                    .provider_registry
-                    .apply_demand(provider, &demand)
-                    .is_ok_and(|sent| sent)
-        } else {
-            self.providers
-                .send_control(provider, super::ProviderControl::Demand(demand.clone()))
-                .is_ok_and(|sent| sent)
-        };
+        let sent = self.ensure_provider_connection(provider)
+            && self
+                .provider_registry
+                .apply_demand(provider, &demand)
+                .is_ok_and(|sent| sent);
         if sent {
             self.session_mut(provider).accepted = Some(demand);
         } else {
@@ -2514,7 +2552,10 @@ impl Coordinator<'_> {
     /// Hands the worker the rebuilt subscription set. The worker diffs it
     /// against live subscriptions, so presentation changes never reconnect.
     pub(super) fn flush_hyperliquid_demand(&mut self) {
-        if !self.sessions.contains_key(super::HYPERLIQUID_DESCRIPTOR.id) {
+        if !self
+            .provider_registry
+            .has_control(super::HYPERLIQUID_DESCRIPTOR.id)
+        {
             return;
         }
         if !self.session(super::HYPERLIQUID_DESCRIPTOR.id).demand_dirty {
@@ -2630,7 +2671,10 @@ impl Coordinator<'_> {
     }
     /// Hands the worker a replacement subscription set the control channel refused.
     pub(super) fn flush_rithmic_demand(&mut self) {
-        if !self.sessions.contains_key(super::RITHMIC_DESCRIPTOR.id) {
+        if !self
+            .provider_registry
+            .has_control(super::RITHMIC_DESCRIPTOR.id)
+        {
             return;
         }
         let Some(neutral) = self
@@ -2640,10 +2684,10 @@ impl Coordinator<'_> {
         else {
             return;
         };
-        match self.providers.send_control(
-            super::RITHMIC_DESCRIPTOR.id,
-            super::ProviderControl::Demand(neutral.clone()),
-        ) {
+        match self
+            .provider_registry
+            .apply_demand(super::RITHMIC_DESCRIPTOR.id, &neutral)
+        {
             Ok(true) => {
                 self.session_mut(super::RITHMIC_DESCRIPTOR.id).accepted = Some(neutral);
             }
@@ -2717,14 +2761,10 @@ impl Coordinator<'_> {
             else {
                 continue;
             };
-            let stopped = if self.provider_registry.contains(provider) {
-                self.provider_registry
-                    .release_idle(provider)
-                    .map_err(|_| "Provider live worker is unavailable".to_string())
-            } else {
-                self.providers
-                    .send_control(provider, super::ProviderControl::Stop)
-            };
+            let stopped = self
+                .provider_registry
+                .release_idle(provider)
+                .map_err(|_| "Provider live worker is unavailable".to_string());
             match stopped {
                 Ok(true) => self.session_mut(provider).stop_pending = Some(generation),
                 Ok(false) => self.control_retry = true,
