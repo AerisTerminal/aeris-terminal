@@ -702,6 +702,47 @@ mod tests {
     }
 
     #[test]
+    fn scripted_registry_keeps_each_provider_connected_across_five_demand_changes() {
+        let clock = ScriptedClock::new(48);
+        let mut registry = ProviderRegistry::new();
+        let providers = [
+            ("hyperliquid", ReconnectPolicy::hyperliquid()),
+            ("ctrader", ReconnectPolicy::ctrader()),
+            ("tastytrade", ReconnectPolicy::tastytrade()),
+            ("rithmic", ReconnectPolicy::rithmic_recovery()),
+        ];
+        let records = providers
+            .into_iter()
+            .map(|(id, policy)| {
+                let calls = Arc::new(Mutex::new((0, Vec::new())));
+                registry.register(
+                    id,
+                    Box::new(ScriptedSession(Arc::clone(&calls))),
+                    policy,
+                    &clock,
+                );
+                let epoch = registry.connect(id, clock.monotonic()).unwrap().unwrap();
+                registry.connected(id, epoch, clock.monotonic());
+                (id, epoch, calls)
+            })
+            .collect::<Vec<_>>();
+        for change in ["symbol", "interval", "viewport", "tab", "layout"] {
+            for (id, epoch, _) in &records {
+                let mut demand = ProviderDemand::default();
+                demand.explicit_trade_ids.insert(change.to_string());
+                assert!(registry.apply_demand(id, &demand).unwrap());
+                assert_eq!(registry.connect(id, clock.monotonic()).unwrap(), None);
+                assert_eq!(registry.epoch(id), Some(*epoch));
+            }
+        }
+        for (id, _, calls) in records {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.0, 1, "{id} connected more than once");
+            assert_eq!(calls.1.len(), 5, "{id} missed a demand change");
+        }
+    }
+
+    #[test]
     fn scripted_registry_reserves_next_epoch_only_when_retry_is_due() {
         let clock = ScriptedClock::new(34);
         let calls = Arc::new(Mutex::new((0, Vec::new())));

@@ -565,6 +565,7 @@ pub(crate) fn run(
         }
         match MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
             Ok((mut socket, _shutdown)) => {
+                diagnostic!("Aeris Hyperliquid market session opened epoch={generation}");
                 match run_session(
                     &mut socket,
                     generation,
@@ -580,6 +581,9 @@ pub(crate) fn run(
                         diagnostic!("Aeris Hyperliquid realtime parked by demand owner");
                     }
                     SessionExit::Reconnect(reason) => {
+                        if stop.load(Ordering::Acquire) {
+                            return;
+                        }
                         diagnostic!("Aeris Hyperliquid realtime reconnecting: {reason}");
                     }
                 }
