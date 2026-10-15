@@ -4,8 +4,8 @@
 //! so protection never opens a position of its own.
 
 use crate::{
-    Coordinator, ManagedBracket, ManagedBracketStatus, ProtectiveOrderRole,
-    SimulatedMarketObservation, VenueRoute,
+    ManagedBracket, ManagedBracketStatus, ProtectiveOrderRole, SimulatedMarketObservation,
+    TradingCore, VenueRoute,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
@@ -49,7 +49,7 @@ pub(crate) fn managed_bracket_role(
     }
 }
 
-impl Coordinator {
+impl TradingCore {
     /// The protective role of an order: a managed bracket's stop or target, or a standalone
     /// stop loss or take profit.
     pub(crate) fn protection_role(

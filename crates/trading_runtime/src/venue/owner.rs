@@ -3,8 +3,8 @@
 use super::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::BracketStrategyTemplate;
 use crate::{
-    Coordinator, DEMO_VENUE_UNAVAILABLE, FlattenOutcome, MAXIMUM_OPEN_ORDERS, ModifyOrder,
-    PlaceOrder, TradingProvenance, check_quantity_increment, store::BrokerFillRecord,
+    DEMO_VENUE_UNAVAILABLE, FlattenOutcome, MAXIMUM_OPEN_ORDERS, ModifyOrder, PlaceOrder,
+    TradingCore, TradingProvenance, check_quantity_increment, store::BrokerFillRecord,
 };
 use aeris_trading::{
     AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
@@ -19,7 +19,7 @@ use std::{collections::BTreeSet, sync::mpsc::TrySendError};
 
 const NOT_ACKNOWLEDGED: &str = "cTrader has not acknowledged this order yet; try again shortly";
 
-impl Coordinator {
+impl TradingCore {
     /// The broker account behind a registered broker-routed trading account.
     fn broker_account(&self, account_id: &TradingAccountId) -> Result<String, String> {
         self.state

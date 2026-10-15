@@ -486,7 +486,9 @@ Status: in progress
   - `cancellation_uses_command_time_even_when_wall_clock_moves_backwards` and both golden tests pass. The sole golden change is `simulated_stop_golden.txt` cancel event `2000 -> 3000`; the other golden is unchanged. The workspace fmt, Clippy and test gates passed; naming_check passed after adding the clock trait to the documented boundary list.
   - GUI cancel-time verification is blocked at this stage: an isolated practice-account order-book bid click returned "trading instrument is not registered" before any order could be placed. M4.7's runtime Terms registration must land before repeating VAL-TRD-003. The current Order model has no terminal-time field; the last Cancelled event supplies that time until M5's lifecycle schema adds an updated time.
   - Pre-M4.2 regression triage: the detached pre-M3 `f00d4a99` build accepted a live Hyperliquid practice ladder order on a fresh isolated root; `6b248b2f` rejected the same flow as "trading instrument is not registered". M3 default selection installed provisional metadata without requesting verified catalog terms. The coordinator now requests those terms asynchronously behind the startup command fence while retaining immediate chart selection. A second M3 regression removed the fixed tick for Hyperliquid's significant-figure grid; bracket offsets now use the exact local increment at the entry price, and quote handling with no active bracket never demands a tick. A fresh isolated desktop after both fixes showed a working Buy Limit line and "Practice order ... is working"; no golden files changed. VAL-TRD-003's 60-second cancel-timing GUI assertion remains to be run.
-- [ ] M4.2 trading-core-owner-shell - Thin owner thread around a synchronous `TradingCore`
+- [x] M4.2 trading-core-owner-shell - Thin owner thread around a synchronous `TradingCore`
+  - Moved bounded `Command` to `service/mod.rs` and the single owner wait loop to `service/owner.rs`; `TradingCore` serializes `handle(command, now)`, `on_market(batch, now)` and due `on_timer(now)` without changing the current durable order path or goldens.
+  - Eight concurrent submitters place 1,000 distinct orders with contiguous event sequences and revisions preserved across restart. An idle `ManualClock` owner retains zero timer calls across 1,000 status commands; its named thread is asserted. TR-12 god-object split has begun, but the broader finding remains open for M4.5/M4.6/M5.9/M8.10.
 - [ ] M4.3 trading-replay-harness - Deterministic trading replay harness
 - [ ] M4.4 indexed-order-book - Indexed order book; remove linear scans
 - [ ] M4.5 trading-core-module-split - Split `lib.rs` and the Coordinator into focused modules
@@ -613,6 +615,7 @@ the repo root `AGENTS.md`.
 - The market replay scenario names remain in `market_service/replay/mod.rs` and are checked by `aeris_naming_check` (M3.11, this commit).
 - Market probe fault injection is compiled only under the `probe` feature and interrupts the Hyperliquid WebSocket without affecting catalog HTTP; the probe CLI requires an isolated locked validation root before invoking it (M3.12, this commit).
 - Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, this commit).
+- One named trading owner thread runs the loop in `service/owner.rs` and drives `TradingCore` command, market and deadline entry points; the bounded command enum resides in `service/mod.rs` (M4.2, this commit).
 
 ## 6. Progress log
 
@@ -691,6 +694,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M3.12 docs(plan): record final-HEAD lifecycle probe qualification - clean `088899c4` probe passed 28/28 and the overridden-root refusal wrote nothing.
 - 2026-10-15 M4.1 fix(trading): stamp cancels at monotonic command time - injected clock, regression and single-line stop golden update; GUI cancel flow blocked by pre-M4.7 instrument registration.
 - 2026-10-15 M4 triage fix(trading): restore verified default contract terms and dynamic bracket increments - pre-M3/HEAD isolated GUI comparison found two regressions; verified live practice ladder order after owner-side fixes, full gate green.
+- 2026-10-15 M4.2 refactor(trading): isolate the single trading owner shell - moved command and timed wait boundaries, retained golden behavior, and verified concurrent revision/restart plus idle ManualClock coverage.
 
 ## 7. Known gaps / deferred
 

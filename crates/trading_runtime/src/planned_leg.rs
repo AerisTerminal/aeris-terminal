@@ -3,7 +3,7 @@
 //! child order exists; the bracket template stays the only stored form of that protection.
 
 use crate::{
-    Coordinator, ManagedBracket, ManagedBracketStatus, ProtectiveOrderRole, TradingInstrument,
+    ManagedBracket, ManagedBracketStatus, ProtectiveOrderRole, TradingCore, TradingInstrument,
     allocated_target_quantities, instrument_tick_units, managed_child_client_order_id,
     opposite_side, order_increment_units, shifted_price,
 };
@@ -142,7 +142,7 @@ fn leg_slot(
     Ok(None)
 }
 
-impl Coordinator {
+impl TradingCore {
     /// The awaiting bracket whose entry is `client_order_id`.
     pub(crate) fn awaiting_bracket(
         &self,

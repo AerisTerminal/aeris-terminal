@@ -69,6 +69,98 @@ pub(crate) fn start_service(directory: &TestDirectory) -> TradingService {
 mod foundation;
 
 #[test]
+fn owner_serializes_eight_submitters_and_recovers_exact_order_revisions() {
+    let directory = TestDirectory::new("owner-concurrency");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let baseline = service.status().expect("baseline").revision;
+    let workers = (0..8)
+        .map(|worker| {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                for index in 0..125 {
+                    let mut order = market_order(
+                        &format!("owner-{worker}-{index}"),
+                        OrderSide::Buy,
+                        1,
+                        1_000_000_000_000,
+                    );
+                    order.order_type = OrderType::Limit;
+                    order.time_in_force = TimeInForce::GoodTillCancelled;
+                    order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+                    loop {
+                        match service.place_order(order.clone()) {
+                            Ok(accepted) => {
+                                assert_eq!(accepted.client_order_id, order.client_order_id);
+                                break;
+                            }
+                            Err(error) if error == "trading command queue is full" => {
+                                std::thread::yield_now();
+                            }
+                            Err(error) => panic!("submit failed: {error}"),
+                        }
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().expect("submitter");
+    }
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_eq!(snapshot.revision, baseline + 1_000);
+    assert_eq!(snapshot.orders.len(), 1_000);
+    let mut sequences = snapshot
+        .order_events
+        .iter()
+        .map(|event| event.sequence)
+        .collect::<Vec<_>>();
+    sequences.sort_unstable();
+    assert_eq!(sequences.len(), 1_000);
+    assert!(sequences.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .map(|order| order.client_order_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1_000
+    );
+    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    let recovered = restarted.snapshot().expect("recovered");
+    assert_eq!(recovered.revision, snapshot.revision);
+    assert_eq!(recovered.orders, snapshot.orders);
+    restarted
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown");
+}
+
+#[test]
+fn idle_manual_clock_owner_does_not_run_timer_before_deadline() {
+    let directory = TestDirectory::new("owner-idle");
+    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let service = TradingService::start(configuration).expect("service");
+    let diagnostics = || {
+        service
+            .request(Command::OwnerDiagnostics)
+            .expect("owner diagnostics")
+    };
+    let (name, timer_calls) = diagnostics();
+    assert_eq!(name, "aeris-trading-owner");
+    for _ in 0..1_000 {
+        service.status().expect("status");
+    }
+    assert_eq!(diagnostics().1, timer_calls);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     let directory = TestDirectory::new("cancel-command-time");
     let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));

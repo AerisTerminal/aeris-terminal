@@ -3902,7 +3902,6 @@ jobs:
         for contract in [
             "pub struct TradingService",
             "mpsc::sync_channel(COMMAND_CAPACITY)",
-            "aeris-trading-owner",
             "MAXIMUM_OPEN_ORDERS",
             "MAXIMUM_SNAPSHOT_ITEMS",
             "AccountEnvironment::Simulated",
@@ -3957,6 +3956,32 @@ jobs:
             manifest("AGENTS.md")
                 .contains("`trading_runtime` is the single in-process owner of broker accounts")
         );
+    }
+    #[test]
+    fn trading_core_owner_shell_has_one_command_and_deadline_boundary() {
+        let runtime = manifest("crates/trading_runtime/src/lib.rs");
+        for contract in [
+            "struct TradingCore",
+            "fn handle(&mut self, command: Command, now: i64)",
+            "fn on_market(&mut self, batch: Vec<SimulatedMarketObservation>, now: i64)",
+            "fn on_timer(&mut self, now: i64)",
+        ] {
+            assert!(runtime.contains(contract), "trading core lost {contract}");
+        }
+        let service = manifest("crates/trading_runtime/src/service/mod.rs");
+        assert!(service.contains("pub(crate) enum Command"));
+        let owner = manifest("crates/trading_runtime/src/service/owner.rs");
+        for contract in [
+            "aeris-trading-owner",
+            "recv_timeout",
+            "core.handle(",
+            "core.on_timer(",
+        ] {
+            assert!(
+                owner.contains(contract),
+                "trading owner shell lost {contract}"
+            );
+        }
     }
     #[test]
     fn context_data_remains_one_bounded_runtime_owned_boundary() {

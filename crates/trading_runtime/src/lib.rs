@@ -11,6 +11,7 @@ mod planned_leg;
 mod protection;
 mod risk;
 mod round_trip;
+mod service;
 mod store;
 mod strategy;
 pub mod venue;
@@ -38,6 +39,7 @@ pub use risk::{
     RiskProfile, RiskRuleState, TrailingDrawdownMode,
 };
 pub use round_trip::{TradeLeg, TradeRoundTrip};
+use service::Command;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -465,66 +467,7 @@ struct PendingObservations {
     drain_queued: bool,
 }
 
-enum Command {
-    Status(Reply<TradingServiceStatus>),
-    RegisterAccount(TradingAccount, Reply<()>),
-    CreatePracticeAccount(CreatePracticeAccount, Reply<TradingAccount>),
-    DeletePracticeAccount(TradingAccountId, Reply<TradingAccount>),
-    RegisterInstrument(TradingInstrument, Reply<()>),
-    InstallPracticeMarketSession(Arc<PracticeMarketSession>, Reply<()>),
-    Place(PlaceOrder, Reply<Order>),
-    PlaceBracket(PlaceBracket, Reply<BracketPlacement>),
-    PlaceInlineBracket(PlaceInlineBracket, Reply<BracketPlacement>),
-    PlaceProtective(PlaceProtectiveOrder, Reply<Order>),
-    EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),
-    Modify(ModifyOrder, Reply<Order>),
-    MovePlannedLeg(MovePlannedBracketLeg, Reply<PlannedBracketLeg>),
-    Cancel(ClientOrderId, Reply<Order>),
-    CancelAll(Option<TradingAccountId>, Reply<Vec<Order>>),
-    CloseBrokerPosition(TradingAccountId, String, Reply<()>),
-    AmendBrokerPositionSltp(
-        TradingAccountId,
-        String,
-        Option<FixedPoint>,
-        Option<FixedPoint>,
-        Reply<()>,
-    ),
-    RegisterRiskProfile(RiskProfile, Reply<()>),
-    RegisterSessionPlan(SessionPlan, Reply<()>),
-    RegisterTradeCopier(TradeCopierConfig, Reply<()>),
-    RegisterStrategyTemplate(BracketStrategyTemplate, Reply<()>),
-    LockAccount(TradingAccountId, String, i64, Reply<()>),
-    UnlockAccount(TradingAccountId, Reply<()>),
-    KillSwitch(Option<TradingAccountId>, String, i64, Reply<usize>),
-    Flatten(
-        TradingAccountId,
-        SimulatedMarketObservation,
-        Reply<FlattenOutcome>,
-    ),
-    Reverse(
-        TradingAccountId,
-        SimulatedMarketObservation,
-        Reply<FlattenOutcome>,
-    ),
-    FlattenAll(SimulatedMarketObservation, Reply<FlattenOutcome>),
-    ApplyEconomicEventRisk(
-        EconomicEventRiskTrigger,
-        Option<SimulatedMarketObservation>,
-        Reply<EconomicEventRiskOutcome>,
-    ),
-    Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
-    DrainObservations,
-    PutUserRecord(UserRecord, Reply<()>),
-    Snapshot(Reply<TradingSnapshot>),
-    Export(PathBuf, Reply<()>),
-    AttachVenue(Reply<(u64, Receiver<VenueRequest>)>),
-    DrainVenueEvents,
-    #[cfg(test)]
-    BlockOwnerForTest(SyncSender<()>, Arc<std::sync::Barrier>),
-    Shutdown(Reply<()>),
-}
-
-struct Coordinator {
+struct TradingCore {
     store: TradingStore,
     state: StoredState,
     retention: TradingRetention,
@@ -548,6 +491,8 @@ struct Coordinator {
     /// Broker accounts the current venue generation has announced; the rest are not
     /// reachable now.
     connected_broker_accounts: BTreeSet<TradingAccountId>,
+    #[cfg(test)]
+    timer_calls: usize,
 }
 
 /// Latest canonical BBO applied per registered instrument. Market panes can
@@ -596,7 +541,7 @@ impl TradingService {
         let venue_inbox = VenueInbox::new(commands.clone(), Arc::clone(&stopping));
         let coordinator_venue_inbox = Arc::downgrade(&venue_inbox);
         let worker = thread::Builder::new()
-            .name("aeris-trading-owner".to_string())
+            .name(service::owner::OWNER_THREAD_NAME.to_string())
             .spawn(move || {
                 let coordinator =
                     TradingStore::open(&database_path, retention).and_then(|mut store| {
@@ -607,7 +552,7 @@ impl TradingService {
                             .filter(|order| order.status.is_open())
                             .map(|order| order.id.clone())
                             .collect();
-                        let mut coordinator = Coordinator {
+                        let mut coordinator = TradingCore {
                             store,
                             state,
                             retention,
@@ -624,6 +569,8 @@ impl TradingService {
                             venue_inbox: coordinator_venue_inbox,
                             venue_ingestion: 0,
                             connected_broker_accounts: BTreeSet::new(),
+                            #[cfg(test)]
+                            timer_calls: 0,
                         };
                         coordinator
                             .repair_loaded_position_projections()
@@ -636,7 +583,7 @@ impl TradingService {
                 match coordinator {
                     Ok(mut coordinator) => {
                         if started_tx.send(Ok(())).is_ok() {
-                            coordinator.run(&receiver);
+                            service::owner::run(&mut coordinator, &receiver);
                         }
                     }
                     Err(error) => {
@@ -1136,7 +1083,7 @@ fn observation_revision(observation: &SimulatedMarketObservation) -> (u64, u64) 
     )
 }
 
-impl Coordinator {
+impl TradingCore {
     fn repair_loaded_position_projections(&mut self) -> Result<(), String> {
         let keys = self.state.positions.keys().cloned().collect::<Vec<_>>();
         let mut repaired = Vec::new();
@@ -1218,127 +1165,160 @@ impl Coordinator {
         saw_fill.then_some(rebuilt).flatten()
     }
 
-    /// The next command. While connected broker accounts hold positions, the broker's
-    /// unrealized P&L is requested every [`UNREALIZED_PNL_INTERVAL`] between commands.
-    fn next_command(
-        &self,
-        commands: &Receiver<Command>,
-        next_refresh: &mut Duration,
-    ) -> Option<Command> {
-        loop {
-            if !self.wants_unrealized_pnl() {
-                return commands.recv().ok();
+    /// Applies one command on the single owner. Returns false after a shutdown checkpoint.
+    fn handle(&mut self, command: Command, now: i64) -> bool {
+        self.command_now = self.command_now.max(now);
+        match command {
+            Command::Status(reply) => respond(&reply, Ok(self.status())),
+            Command::RegisterAccount(account, reply) => {
+                respond(&reply, self.register_account(account));
             }
-            let now = self.clock.monotonic();
-            if now >= *next_refresh {
-                self.request_unrealized_pnl();
-                *next_refresh = now + UNREALIZED_PNL_INTERVAL;
+            Command::CreatePracticeAccount(account, reply) => {
+                respond(&reply, self.create_practice_account(&account));
             }
-            match commands.recv_timeout(next_refresh.saturating_sub(now)) {
-                Ok(command) => return Some(command),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            Command::DeletePracticeAccount(account_id, reply) => {
+                respond(&reply, self.delete_practice_account(&account_id));
+            }
+            Command::RegisterInstrument(instrument, reply) => {
+                respond(&reply, self.register_instrument(instrument));
+            }
+            Command::InstallPracticeMarketSession(session, reply) => {
+                respond(&reply, self.install_practice_market_session(session));
+            }
+            Command::Place(..)
+            | Command::PlaceBracket(..)
+            | Command::PlaceInlineBracket(..)
+            | Command::PlaceProtective(..)
+            | Command::EvaluateRisk(..)
+            | Command::Modify(..)
+            | Command::MovePlannedLeg(..)
+            | Command::Cancel(..)
+            | Command::CancelAll(..)
+            | Command::CloseBrokerPosition(..)
+            | Command::AmendBrokerPositionSltp(..) => {
+                self.dispatch_order_command(command);
+            }
+            Command::RegisterRiskProfile(profile, reply) => {
+                respond(&reply, self.register_risk_profile(profile));
+            }
+            Command::RegisterSessionPlan(plan, reply) => {
+                respond(&reply, self.register_session_plan(plan));
+            }
+            Command::RegisterTradeCopier(config, reply) => {
+                respond(&reply, self.register_trade_copier(config));
+            }
+            Command::RegisterStrategyTemplate(template, reply) => {
+                respond(&reply, self.register_strategy_template(template));
+            }
+            Command::LockAccount(..)
+            | Command::UnlockAccount(..)
+            | Command::KillSwitch(..)
+            | Command::Flatten(..)
+            | Command::Reverse(..)
+            | Command::FlattenAll(..)
+            | Command::ApplyEconomicEventRisk(..) => self.dispatch_account_command(command),
+            Command::Observe(observation, reply) => {
+                self.advance_observation_cursor(&observation);
+                let result = self.observe_market(&observation);
+                self.market_observation_error = result.as_ref().err().cloned();
+                let _ = reply.send(result);
+            }
+            Command::DrainObservations => {
+                let pending = {
+                    let mut pending = self
+                        .observations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    pending.drain_queued = false;
+                    std::mem::take(&mut pending.latest)
+                };
+                self.on_market(pending.into_values().collect(), now);
+            }
+            Command::PutUserRecord(record, reply) => {
+                respond(&reply, self.put_user_record(&record));
+            }
+            Command::Snapshot(reply) => {
+                let _ = reply.send(self.snapshot());
+            }
+            Command::Export(directory, reply) => {
+                let _ = reply.send(self.store.export(&directory));
+            }
+            Command::AttachVenue(reply) => respond(&reply, self.attach_venue()),
+            Command::DrainVenueEvents => self.drain_venue_events(),
+            #[cfg(test)]
+            Command::BlockOwnerForTest(ready, barrier) => {
+                let _ = ready.send(());
+                barrier.wait();
+            }
+            #[cfg(test)]
+            Command::OwnerDiagnostics(reply) => {
+                respond(
+                    &reply,
+                    Ok((
+                        thread::current().name().unwrap_or_default().to_string(),
+                        self.timer_calls,
+                    )),
+                );
+            }
+            Command::Shutdown(reply) => {
+                let result = self.store.checkpoint_for_shutdown();
+                let _ = reply.send(result);
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Applies the bounded latest-value market batch under the owner clock.
+    fn on_market(&mut self, batch: Vec<SimulatedMarketObservation>, now: i64) {
+        self.command_now = self.command_now.max(now);
+        for observation in batch {
+            if self.advance_observation_cursor(&observation) {
+                self.market_observation_error = self.observe_market(&observation).err();
             }
         }
     }
 
-    fn run(&mut self, commands: &Receiver<Command>) {
-        let mut next_refresh = self.clock.monotonic();
-        while let Some(command) = self.next_command(commands, &mut next_refresh) {
-            self.command_now = self.command_now.max(self.clock.wall_unix_nanos());
-            match command {
-                Command::Status(reply) => respond(&reply, Ok(self.status())),
-                Command::RegisterAccount(account, reply) => {
-                    respond(&reply, self.register_account(account));
-                }
-                Command::CreatePracticeAccount(account, reply) => {
-                    respond(&reply, self.create_practice_account(&account));
-                }
-                Command::DeletePracticeAccount(account_id, reply) => {
-                    respond(&reply, self.delete_practice_account(&account_id));
-                }
-                Command::RegisterInstrument(instrument, reply) => {
-                    respond(&reply, self.register_instrument(instrument));
-                }
-                Command::InstallPracticeMarketSession(session, reply) => {
-                    respond(&reply, self.install_practice_market_session(session));
-                }
-                Command::Place(..)
-                | Command::PlaceBracket(..)
-                | Command::PlaceInlineBracket(..)
-                | Command::PlaceProtective(..)
-                | Command::EvaluateRisk(..)
-                | Command::Modify(..)
-                | Command::MovePlannedLeg(..)
-                | Command::Cancel(..)
-                | Command::CancelAll(..)
-                | Command::CloseBrokerPosition(..)
-                | Command::AmendBrokerPositionSltp(..) => {
-                    self.dispatch_order_command(command);
-                }
-                Command::RegisterRiskProfile(profile, reply) => {
-                    respond(&reply, self.register_risk_profile(profile));
-                }
-                Command::RegisterSessionPlan(plan, reply) => {
-                    respond(&reply, self.register_session_plan(plan));
-                }
-                Command::RegisterTradeCopier(config, reply) => {
-                    respond(&reply, self.register_trade_copier(config));
-                }
-                Command::RegisterStrategyTemplate(template, reply) => {
-                    respond(&reply, self.register_strategy_template(template));
-                }
-                Command::LockAccount(account_id, reason, locked_at, reply) => {
-                    let _ = reply.send(self.lock_account(account_id, reason, locked_at));
-                }
-                Command::UnlockAccount(account_id, reply) => {
-                    let _ = reply.send(self.unlock_account(&account_id));
-                }
-                Command::KillSwitch(account_id, reason, locked_at, reply) => {
-                    let _ = reply.send(self.kill_switch(account_id.as_ref(), &reason, locked_at));
-                }
-                Command::Flatten(account_id, observation, reply) => {
-                    let _ = reply.send(self.flatten_account(&account_id, &observation));
-                }
-                Command::Reverse(account_id, observation, reply) => {
-                    let _ = reply.send(self.reverse_position(&account_id, &observation));
-                }
-                Command::FlattenAll(observation, reply) => {
-                    let _ = reply.send(self.flatten_all(&observation));
-                }
-                Command::ApplyEconomicEventRisk(event, observation, reply) => {
-                    let _ =
-                        reply.send(self.apply_economic_event_risk(&event, observation.as_ref()));
-                }
-                Command::Observe(observation, reply) => {
-                    self.advance_observation_cursor(&observation);
-                    let result = self.observe_market(&observation);
-                    self.market_observation_error = result.as_ref().err().cloned();
-                    let _ = reply.send(result);
-                }
-                Command::DrainObservations => self.drain_observations(),
-                Command::PutUserRecord(record, reply) => {
-                    respond(&reply, self.put_user_record(&record));
-                }
-                Command::Snapshot(reply) => {
-                    let _ = reply.send(self.snapshot());
-                }
-                Command::Export(directory, reply) => {
-                    let _ = reply.send(self.store.export(&directory));
-                }
-                Command::AttachVenue(reply) => respond(&reply, self.attach_venue()),
-                Command::DrainVenueEvents => self.drain_venue_events(),
-                #[cfg(test)]
-                Command::BlockOwnerForTest(ready, barrier) => {
-                    let _ = ready.send(());
-                    barrier.wait();
-                }
-                Command::Shutdown(reply) => {
-                    let result = self.store.checkpoint_for_shutdown();
-                    let _ = reply.send(result);
-                    break;
-                }
+    /// Refreshes broker P&L only at a due deadline, never on an idle command wake.
+    fn on_timer(&mut self, now: i64) {
+        self.command_now = self.command_now.max(now);
+        #[cfg(test)]
+        {
+            self.timer_calls += 1;
+        }
+        self.request_unrealized_pnl();
+    }
+
+    fn dispatch_account_command(&mut self, command: Command) {
+        match command {
+            Command::LockAccount(account_id, reason, locked_at, reply) => {
+                respond(&reply, self.lock_account(account_id, reason, locked_at));
             }
+            Command::UnlockAccount(account_id, reply) => {
+                respond(&reply, self.unlock_account(&account_id));
+            }
+            Command::KillSwitch(account_id, reason, locked_at, reply) => {
+                respond(
+                    &reply,
+                    self.kill_switch(account_id.as_ref(), &reason, locked_at),
+                );
+            }
+            Command::Flatten(account_id, observation, reply) => {
+                respond(&reply, self.flatten_account(&account_id, &observation));
+            }
+            Command::Reverse(account_id, observation, reply) => {
+                respond(&reply, self.reverse_position(&account_id, &observation));
+            }
+            Command::FlattenAll(observation, reply) => {
+                respond(&reply, self.flatten_all(&observation));
+            }
+            Command::ApplyEconomicEventRisk(event, observation, reply) => {
+                respond(
+                    &reply,
+                    self.apply_economic_event_risk(&event, observation.as_ref()),
+                );
+            }
+            _ => unreachable!("only account commands are dispatched here"),
         }
     }
 
@@ -3042,22 +3022,6 @@ impl Coordinator {
             })
             .map(Some)
             .map_err(|error| error.to_string())
-    }
-
-    fn drain_observations(&mut self) {
-        let pending = {
-            let mut pending = self
-                .observations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pending.drain_queued = false;
-            std::mem::take(&mut pending.latest)
-        };
-        for observation in pending.into_values() {
-            if self.advance_observation_cursor(&observation) {
-                self.market_observation_error = self.observe_market(&observation).err();
-            }
-        }
     }
 
     /// Records a published observation and reports whether it is newer than the
