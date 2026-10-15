@@ -876,11 +876,14 @@ impl Drop for ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::market_service::clock::ScriptedClock;
+    use crate::market_service::{
+        BarPeriod, BarSeriesKey, InstallProviderInstrument, MarketStream, ProviderInstrumentDemand,
+        StreamRequirements, clock::ScriptedClock,
+    };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    struct ScriptedSession(Arc<Mutex<(usize, Vec<ProviderDemand>)>>);
+    struct ScriptedSession(Arc<Mutex<(usize, Vec<ProviderDemand>, usize)>>);
 
     impl ProviderSession for ScriptedSession {
         fn connect(
@@ -902,16 +905,84 @@ mod tests {
         }
 
         fn release_idle(&self) -> Result<bool, ProviderSessionError> {
+            self.0.lock().unwrap().2 += 1;
             Ok(true)
         }
 
         fn shutdown(&self) {}
     }
 
+    fn scripted_instrument(provider: &str, symbol: &str) -> InstallProviderInstrument {
+        InstallProviderInstrument {
+            provider: provider.into(),
+            instrument_id: symbol.into(),
+            provider_symbol: symbol.into(),
+            ..Default::default()
+        }
+    }
+
+    fn scripted_provider_b_series(symbol: &str, seconds: u32) -> BarSeriesKey {
+        BarSeriesKey {
+            provider_id: "provider_b".into(),
+            instrument_id: symbol.into(),
+            entitlement_id: String::new(),
+            period: BarPeriod::time(seconds).unwrap(),
+            definition_version: 1,
+        }
+    }
+
+    fn provider_b_demand_changes() -> (
+        ProviderInstrumentDemand,
+        ProviderDemand,
+        Vec<(&'static str, ProviderDemand)>,
+    ) {
+        let book = ProviderInstrumentDemand {
+            instrument: scripted_instrument("provider_b", "book"),
+            streams: StreamRequirements::NONE.with(MarketStream::Depth),
+            display_depth: true,
+        };
+        let mut demand = ProviderDemand {
+            instruments: vec![book.clone()],
+            candle_series: vec![(
+                scripted_provider_b_series("chart", 60),
+                StreamRequirements::BARS,
+                scripted_instrument("provider_b", "chart"),
+            )],
+            ..Default::default()
+        };
+        let initial = demand.clone();
+        let mut changes = Vec::new();
+        // Interval changes the live candle subscription's cadence.
+        demand.candle_series[0].0 = scripted_provider_b_series("chart", 300);
+        changes.push(("interval", demand.clone()));
+        // A viewport-driven visible quote interest adds another instrument.
+        demand.instruments.push(ProviderInstrumentDemand {
+            instrument: scripted_instrument("provider_b", "visible-quote"),
+            streams: StreamRequirements::NONE.with(MarketStream::Quotes),
+            display_depth: false,
+        });
+        changes.push(("viewport", demand.clone()));
+        // Switching tabs changes the selected live chart.
+        demand.candle_series[0] = (
+            scripted_provider_b_series("other-chart", 300),
+            StreamRequirements::BARS,
+            scripted_instrument("provider_b", "other-chart"),
+        );
+        changes.push(("tab", demand.clone()));
+        // Adding a layout pane adds a second live series.
+        demand.candle_series.push((
+            scripted_provider_b_series("second-pane", 60),
+            StreamRequirements::BARS,
+            scripted_instrument("provider_b", "second-pane"),
+        ));
+        changes.push(("layout", demand));
+        (book, initial, changes)
+    }
+
     #[test]
     fn scripted_registry_changes_demand_without_connecting_again() {
         let clock = ScriptedClock::new(12);
-        let calls = Arc::new(Mutex::new((0, Vec::new())));
+        let calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
         let mut registry = ProviderRegistry::new();
         registry.register(
             "hyperliquid",
@@ -953,7 +1024,7 @@ mod tests {
         let records = providers
             .into_iter()
             .map(|(id, policy)| {
-                let calls = Arc::new(Mutex::new((0, Vec::new())));
+                let calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
                 registry.register(
                     id,
                     Box::new(ScriptedSession(Arc::clone(&calls))),
@@ -982,9 +1053,80 @@ mod tests {
     }
 
     #[test]
+    fn scripted_registry_releases_only_idle_provider_and_diffs_concrete_demands() {
+        let clock = ScriptedClock::new(54);
+        let a_calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
+        let b_calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
+        let mut registry = ProviderRegistry::new();
+        for (id, calls) in [("provider_a", &a_calls), ("provider_b", &b_calls)] {
+            registry.register(
+                id,
+                Box::new(ScriptedSession(Arc::clone(calls))),
+                ReconnectPolicy::hyperliquid(),
+                &clock,
+            );
+            let epoch = registry.connect(id, clock.monotonic()).unwrap().unwrap();
+            registry.connected(id, epoch, clock.monotonic());
+        }
+        let b_epoch = registry.epoch("provider_b").unwrap();
+        let a_demand = ProviderDemand {
+            instruments: vec![ProviderInstrumentDemand {
+                instrument: scripted_instrument("provider_a", "quote"),
+                streams: StreamRequirements::NONE.with(MarketStream::Quotes),
+                display_depth: false,
+            }],
+            ..Default::default()
+        };
+        let (book, b_demand, changes) = provider_b_demand_changes();
+        assert!(registry.apply_demand("provider_a", &a_demand).unwrap());
+        assert!(registry.apply_demand("provider_b", &b_demand).unwrap());
+        assert!(
+            registry
+                .apply_demand("provider_a", &ProviderDemand::default())
+                .unwrap()
+        );
+        assert!(registry.release_idle("provider_a").unwrap());
+        assert_eq!(registry.epoch("provider_a"), None);
+        assert_eq!(
+            registry.connections["provider_a"].state,
+            ConnectionState::Idle
+        );
+        assert_eq!(registry.epoch("provider_b"), Some(b_epoch));
+        assert_eq!(
+            registry.connections["provider_b"].state,
+            ConnectionState::Online
+        );
+        assert_eq!(a_calls.lock().unwrap().2, 1);
+        assert_eq!(b_calls.lock().unwrap().2, 0);
+
+        for (index, (change, demand)) in changes.into_iter().enumerate() {
+            assert!(
+                demand.instruments.contains(&book),
+                "{change} lost order book"
+            );
+            assert!(registry.apply_demand("provider_b", &demand).unwrap());
+            assert!(registry.apply_demand("provider_b", &demand).unwrap());
+            assert_eq!(
+                registry.connect("provider_b", clock.monotonic()).unwrap(),
+                None
+            );
+            assert_eq!(registry.epoch("provider_b"), Some(b_epoch));
+            let calls = b_calls.lock().unwrap();
+            assert_eq!(calls.0, 1, "{change} reconnected provider B");
+            assert_eq!(calls.1.len(), index + 2, "{change} missed a demand diff");
+            assert_eq!(calls.1.last(), Some(&demand), "{change} payload was lost");
+            assert_eq!(calls.2, 0, "{change} released active provider B");
+        }
+        let calls = a_calls.lock().unwrap();
+        assert_eq!(calls.0, 1);
+        assert_eq!(calls.1, vec![a_demand, ProviderDemand::default()]);
+        assert_eq!(calls.2, 1);
+    }
+
+    #[test]
     fn scripted_registry_reserves_next_epoch_only_when_retry_is_due() {
         let clock = ScriptedClock::new(34);
-        let calls = Arc::new(Mutex::new((0, Vec::new())));
+        let calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
         let mut registry = ProviderRegistry::new();
         registry.register(
             "hyperliquid",
@@ -1171,7 +1313,7 @@ mod tests {
     #[test]
     fn scripted_ctrader_registry_applies_five_diffs_without_a_second_connection() {
         let clock = ScriptedClock::new(42);
-        let calls = Arc::new(Mutex::new((0, Vec::new())));
+        let calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
         let mut registry = ProviderRegistry::new();
         registry.register(
             "ctrader",
@@ -1204,7 +1346,7 @@ mod tests {
     #[test]
     fn scripted_ctrader_registry_honors_server_wait_and_retry_budget() {
         let clock = ScriptedClock::new(43);
-        let calls = Arc::new(Mutex::new((0, Vec::new())));
+        let calls = Arc::new(Mutex::new((0, Vec::new(), 0)));
         let mut registry = ProviderRegistry::new();
         registry.register(
             "ctrader",

@@ -2408,6 +2408,9 @@ mod tests {
     mod characterization {
         include!("tests/characterization.rs");
     }
+    mod recovery {
+        include!("tests/recovery.rs");
+    }
 
     use super::super::lifecycle::RecoveryReason;
     use super::*;

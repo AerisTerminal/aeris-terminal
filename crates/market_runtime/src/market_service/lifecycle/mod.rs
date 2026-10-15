@@ -385,6 +385,11 @@ impl SeriesLifecycle {
     }
 
     pub(super) fn recover_trade(&mut self, reason: RecoveryReason) {
+        let reason = if self.dormant_session_rolled(self.clock.as_ref()) {
+            RecoveryReason::SessionRolled
+        } else {
+            reason
+        };
         let Some(trade) = self.trade_model_mut() else {
             return;
         };
@@ -427,6 +432,9 @@ impl SeriesLifecycle {
     }
 
     pub(super) fn accept_trade(&mut self, trade: &MarketTrade) -> Result<(), String> {
+        if self.dormant_session_rolled(self.clock.as_ref()) {
+            return Err("Trade arrived after dormant session boundary".into());
+        }
         let ready = self.history_ready();
         let Some(model) = self.trade_model_mut() else {
             return Err("Trade-built lifecycle is unavailable".into());
@@ -444,6 +452,9 @@ impl SeriesLifecycle {
         &mut self,
         change: &IndexedTradeMutation,
     ) -> Result<(), String> {
+        if self.dormant_session_rolled(self.clock.as_ref()) {
+            return Err("Indexed trade arrived after dormant session boundary".into());
+        }
         let ready = self.history_ready();
         let Some(model) = self.trade_model_mut() else {
             return Err("Trade-built lifecycle is unavailable".into());
@@ -462,6 +473,9 @@ impl SeriesLifecycle {
         symbol: &str,
         candle: super::ProviderCandle,
     ) -> Result<(), String> {
+        if self.dormant_session_rolled(self.clock.as_ref()) {
+            return Err("Trade candle arrived after dormant session boundary".into());
+        }
         let ready = self.history_ready();
         let Some(model) = self.trade_model_mut() else {
             return Err("Trade-built lifecycle is unavailable".into());
@@ -535,6 +549,14 @@ impl SeriesLifecycle {
         matches!(
             self.state,
             SeriesState::Live { .. } | SeriesState::Dormant { .. }
+        )
+    }
+
+    fn dormant_session_rolled(&self, clock: &dyn Clock) -> bool {
+        matches!(
+            self.state,
+            SeriesState::Dormant { until: Some(until), .. }
+                if clock.wall_nanos().is_some_and(|now| now.div_euclid(1_000_000) >= until)
         )
     }
 
@@ -691,6 +713,15 @@ impl SeriesLifecycle {
         out.push(SeriesEffect::ReportStatus(PresentationStatus::AwaitingData));
     }
 
+    fn request_recovery(&mut self, reason: RecoveryReason, out: &mut EffectBuf) {
+        self.state = SeriesState::Recovering {
+            reason,
+            ticket: None,
+        };
+        out.push(SeriesEffect::RequestHistory);
+        out.push(SeriesEffect::ReportStatus(PresentationStatus::Recovering));
+    }
+
     fn step_live(&mut self, input: SeriesInput<'_>, ctx: &StepContext<'_>, out: &mut EffectBuf) {
         match input {
             SeriesInput::Online(_)
@@ -699,6 +730,9 @@ impl SeriesLifecycle {
             | SeriesInput::HistoryEmpty(_) => unreachable!("dispatched before live transitions"),
             SeriesInput::HistoryFailed => {
                 out.push(SeriesEffect::ReportStatus(PresentationStatus::Recovering));
+            }
+            SeriesInput::Candle if self.dormant_session_rolled(ctx.clock) => {
+                self.request_recovery(RecoveryReason::SessionRolled, out);
             }
             SeriesInput::Candle if self.history_ready() => {
                 self.state = SeriesState::Live {
@@ -711,12 +745,7 @@ impl SeriesLifecycle {
             SeriesInput::Candle => {
                 if self.buffered.len() == LIVE_BUFFER_CAPACITY {
                     self.buffered.clear();
-                    self.state = SeriesState::Recovering {
-                        reason: RecoveryReason::QueueOverflow,
-                        ticket: None,
-                    };
-                    out.push(SeriesEffect::RequestHistory);
-                    out.push(SeriesEffect::ReportStatus(PresentationStatus::Recovering));
+                    self.request_recovery(RecoveryReason::QueueOverflow, out);
                 }
             }
             SeriesInput::HistoryRetryExhausted => {
@@ -736,14 +765,8 @@ impl SeriesLifecycle {
                 };
                 out.push(SeriesEffect::ReportStatus(PresentationStatus::AwaitingData));
             }
-            SeriesInput::PhaseChanged(_) if matches!(self.state, SeriesState::Dormant { until: Some(until), .. } if ctx.clock.wall_nanos().is_some_and(|now| now.div_euclid(1_000_000) >= until)) =>
-            {
-                self.state = SeriesState::Recovering {
-                    reason: RecoveryReason::SessionRolled,
-                    ticket: None,
-                };
-                out.push(SeriesEffect::RequestHistory);
-                out.push(SeriesEffect::ReportStatus(PresentationStatus::Recovering));
+            SeriesInput::PhaseChanged(_) if self.dormant_session_rolled(ctx.clock) => {
+                self.request_recovery(RecoveryReason::SessionRolled, out);
             }
             SeriesInput::PhaseChanged(_) => {
                 self.state = SeriesState::Live {
@@ -770,12 +793,12 @@ impl SeriesLifecycle {
                     SessionPhase::Open | SessionPhase::Extended | SessionPhase::AlwaysOpen
                 ) => {}
             SeriesInput::Recover(reason) => {
-                self.state = SeriesState::Recovering {
-                    reason,
-                    ticket: None,
+                let reason = if self.dormant_session_rolled(ctx.clock) {
+                    RecoveryReason::SessionRolled
+                } else {
+                    reason
                 };
-                out.push(SeriesEffect::RequestHistory);
-                out.push(SeriesEffect::ReportStatus(PresentationStatus::Recovering));
+                self.request_recovery(reason, out);
             }
             SeriesInput::Failed(error) => {
                 self.state = SeriesState::Failed { error };
@@ -964,6 +987,34 @@ mod tests {
         effects
     }
 
+    fn seeded_live() -> (
+        SeriesLifecycle,
+        Arc<ScriptedClock>,
+        Epoch<ProviderTag>,
+        HistoryTicket,
+    ) {
+        let (mut lifecycle, clock, epoch, ticket) = fixture();
+        step(
+            &mut lifecycle,
+            clock.as_ref(),
+            SessionPhase::Open,
+            SeriesInput::Online(epoch),
+        );
+        step(
+            &mut lifecycle,
+            clock.as_ref(),
+            SessionPhase::Open,
+            SeriesInput::HistoryRequested(&ticket),
+        );
+        step(
+            &mut lifecycle,
+            clock.as_ref(),
+            SessionPhase::Open,
+            SeriesInput::Seeded(Some(&ticket)),
+        );
+        (lifecycle, clock, epoch, ticket)
+    }
+
     #[test]
     fn cached_candle_demand_identity_matches_wire_fields_without_event_formatting() {
         use super::super::provider_event::ProviderCandleSymbol;
@@ -1054,15 +1105,11 @@ mod tests {
         }
     }
 
-    fn ingest_case(case: LifecycleCase, live: &mut SeriesLifecycle) {
+    fn next_trade(live: &SeriesLifecycle) -> MarketTrade {
         use aeris_market_data::{AggressorSide, EventMetadata, QualifiedTimestamp};
 
-        if matches!(case, LifecycleCase::CandleOverlay) {
-            live.accept_bar(bar_at(3, 4)).expect("next candle");
-            return;
-        }
         let timestamp = bar_at(3, 4).exchange_timestamp_unix_nanos + 1;
-        let trade = MarketTrade {
+        MarketTrade {
             metadata: EventMetadata {
                 provider_id: live.series.provider_id.clone(),
                 instrument_id: live.series.instrument_id.clone(),
@@ -1079,7 +1126,15 @@ mod tests {
             price: 101,
             quantity: 1,
             aggressor: AggressorSide::Unknown,
-        };
+        }
+    }
+
+    fn ingest_case(case: LifecycleCase, live: &mut SeriesLifecycle) {
+        if matches!(case, LifecycleCase::CandleOverlay) {
+            live.accept_bar(bar_at(3, 4)).expect("next candle");
+            return;
+        }
+        let trade = next_trade(live);
         match case {
             LifecycleCase::Indexed => live
                 .accept_indexed_trade(&IndexedTradeMutation {
@@ -1125,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_contract_is_shared_by_candle_indexed_and_sequence_models() {
+    fn contract_is_shared_by_candle_indexed_and_sequence_models() {
         for case in [
             LifecycleCase::CandleOverlay,
             LifecycleCase::Indexed,
@@ -1250,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_online_then_seed_reports_live() {
+    fn lifecycle_matching_seed_merges_and_publishes_live_or_dormant() {
         let (mut lifecycle, clock, epoch, ticket) = fixture();
         let ctx = StepContext {
             clock: clock.as_ref(),
@@ -1262,17 +1317,81 @@ mod tests {
         lifecycle.step(SeriesInput::HistoryRequested(&ticket), &ctx, &mut effects);
         assert!(matches!(lifecycle.state(), SeriesState::Seeding { .. }));
         assert_eq!(effects.status(), Some(PresentationStatus::ConnectingLive));
+        lifecycle
+            .accept_bar(bar_at(2, 3))
+            .expect("buffer live candle");
+        let seeding = lifecycle.state.clone();
+        lifecycle
+            .seed(
+                2,
+                0,
+                &[bar_at(0, 1)],
+                Some(FormingBar {
+                    bar: bar_at(1, 2),
+                    trades: None,
+                }),
+            )
+            .expect("merge buffered live candle into history seam");
+        lifecycle.state = seeding;
+        assert_eq!(
+            lifecycle
+                .bars
+                .iter()
+                .map(|bar| bar.source_sequence)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            lifecycle.forming.map(|forming| forming.bar.source_sequence),
+            Some(3)
+        );
+        assert!(lifecycle.buffered.is_empty());
         effects.clear();
         lifecycle.step(SeriesInput::Seeded(Some(&ticket)), &ctx, &mut effects);
         assert!(matches!(lifecycle.state(), SeriesState::Live { .. }));
         assert_eq!(effects.status(), Some(PresentationStatus::ConnectingLive));
-        effects.clear();
-        lifecycle.step(SeriesInput::Candle, &ctx, &mut effects);
-        assert_eq!(effects.status(), Some(PresentationStatus::Live));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect == SeriesEffect::PublishCoveringSnapshot)
+        );
+
+        let (mut closed, clock, epoch, ticket) = fixture();
+        step(
+            &mut closed,
+            clock.as_ref(),
+            SessionPhase::Closed,
+            SeriesInput::Online(epoch),
+        );
+        step(
+            &mut closed,
+            clock.as_ref(),
+            SessionPhase::Closed,
+            SeriesInput::HistoryRequested(&ticket),
+        );
+        let effects = step(
+            &mut closed,
+            clock.as_ref(),
+            SessionPhase::Closed,
+            SeriesInput::Seeded(Some(&ticket)),
+        );
+        assert!(matches!(
+            closed.state(),
+            SeriesState::Dormant {
+                phase: SessionPhase::Closed,
+                ..
+            }
+        ));
+        assert_eq!(effects.status(), Some(PresentationStatus::AwaitingData));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect == SeriesEffect::PublishCoveringSnapshot)
+        );
     }
 
     #[test]
-    fn lifecycle_full_seed_buffer_discards_and_requests_reseed() {
+    fn lifecycle_seeding_buffers_bounded_candles_then_recovers_on_overflow() {
         let (mut lifecycle, clock, epoch, _) = fixture();
         step(
             &mut lifecycle,
@@ -1280,18 +1399,35 @@ mod tests {
             SessionPhase::AlwaysOpen,
             SeriesInput::Online(epoch),
         );
+        for sequence in 0..LIVE_BUFFER_CAPACITY - 1 {
+            lifecycle
+                .accept_bar(bar_at(
+                    i64::try_from(sequence).expect("buffer index fits i64"),
+                    sequence as u64 + 1,
+                ))
+                .expect("bounded buffer append");
+        }
+        assert_eq!(lifecycle.buffered.len(), LIVE_BUFFER_CAPACITY - 1);
+        assert!(matches!(lifecycle.state(), SeriesState::Seeding { .. }));
+        let before = step(
+            &mut lifecycle,
+            clock.as_ref(),
+            SessionPhase::AlwaysOpen,
+            SeriesInput::Candle,
+        );
+        assert_eq!(lifecycle.buffered.len(), LIVE_BUFFER_CAPACITY - 1);
+        assert!(before.iter().next().is_none());
+        let overflow_minute =
+            i64::try_from(LIVE_BUFFER_CAPACITY).expect("buffer capacity fits i64");
         lifecycle
-            .buffered
-            .extend((0..LIVE_BUFFER_CAPACITY).map(|_| MarketBar {
-                source_sequence: 1,
-                exchange_timestamp_seconds: 1,
-                exchange_timestamp_unix_nanos: 1_000_000_000,
-                open: 100,
-                high: 100,
-                low: 100,
-                close: 100,
-                volume: 1,
-            }));
+            .accept_bar(bar_at(overflow_minute, LIVE_BUFFER_CAPACITY as u64 + 1))
+            .expect("last bounded append");
+        assert_eq!(lifecycle.buffered.len(), LIVE_BUFFER_CAPACITY);
+        assert!(
+            lifecycle
+                .accept_bar(bar_at(overflow_minute, LIVE_BUFFER_CAPACITY as u64 + 1))
+                .is_err()
+        );
         let effects = step(
             &mut lifecycle,
             clock.as_ref(),
@@ -1339,7 +1475,7 @@ mod tests {
             SeriesInput::Seeded(Some(&stale)),
         );
         assert_eq!(lifecycle.stale_inputs, 1);
-        assert_eq!(effects.status(), None);
+        assert!(effects.iter().next().is_none());
         assert!(matches!(lifecycle.state(), SeriesState::Seeding { .. }));
         let mut epochs = EpochSequence::<ProviderTag>::default();
         let _current = epochs.next();
@@ -1357,43 +1493,21 @@ mod tests {
             SeriesInput::ProviderOffline(epoch),
         );
         assert_eq!(lifecycle.stale_inputs, 2);
-        assert_eq!(effects.status(), None);
+        assert!(effects.iter().next().is_none());
+        let effects = step(
+            &mut lifecycle,
+            clock.as_ref(),
+            SessionPhase::AlwaysOpen,
+            SeriesInput::Online(epoch),
+        );
+        assert_eq!(lifecycle.stale_inputs, 3);
+        assert!(effects.iter().next().is_none());
+        assert_eq!(lifecycle.epoch, Some(newer));
         assert!(matches!(lifecycle.state(), SeriesState::Seeding { .. }));
     }
 
     #[test]
-    fn lifecycle_seed_dormant_when_calendar_closed() {
-        let (mut lifecycle, clock, epoch, ticket) = fixture();
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::Closed,
-            SeriesInput::Online(epoch),
-        );
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::Closed,
-            SeriesInput::HistoryRequested(&ticket),
-        );
-        let effects = step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::Closed,
-            SeriesInput::Seeded(Some(&ticket)),
-        );
-        assert!(matches!(
-            lifecycle.state(),
-            SeriesState::Dormant {
-                phase: SessionPhase::Closed,
-                ..
-            }
-        ));
-        assert_eq!(effects.status(), Some(PresentationStatus::AwaitingData));
-    }
-
-    #[test]
-    fn lifecycle_empty_history_reports_awaiting_data() {
+    fn empty_history_reports_awaiting_data() {
         let (mut lifecycle, clock, epoch, ticket) = fixture();
         step(
             &mut lifecycle,
@@ -1418,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_retry_preserves_seed_then_exhaustion_fails() {
+    fn lifecycle_history_error_preserves_seeding_until_retry_exhaustion() {
         let (mut lifecycle, clock, epoch, ticket) = fixture();
         step(
             &mut lifecycle,
@@ -1450,26 +1564,76 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_gap_and_open_stall_recover_but_closed_stall_does_not() {
-        let (mut lifecycle, clock, epoch, ticket) = fixture();
-        step(
+    fn lifecycle_live_candle_closes_bar_and_publishes_delta() {
+        let (mut lifecycle, clock, _, _) = seeded_live();
+        lifecycle
+            .seed(
+                2,
+                0,
+                &[bar_at(0, 1)],
+                Some(FormingBar {
+                    bar: bar_at(1, 2),
+                    trades: None,
+                }),
+            )
+            .expect("initial live seam");
+        lifecycle
+            .accept_bar(bar_at(2, 3))
+            .expect("contiguous candle");
+        let effects = step(
             &mut lifecycle,
             clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::Online(epoch),
+            SessionPhase::Open,
+            SeriesInput::Candle,
         );
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::HistoryRequested(&ticket),
+        assert_eq!(
+            lifecycle.bars.last().map(|bar| bar.source_sequence),
+            Some(2)
         );
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::Seeded(Some(&ticket)),
+        assert_eq!(
+            lifecycle.forming.map(|forming| forming.bar.source_sequence),
+            Some(3)
         );
+        assert!(matches!(
+            lifecycle.state(),
+            SeriesState::Live {
+                observed_live: true,
+                ..
+            }
+        ));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect == SeriesEffect::PublishDelta)
+        );
+        assert_eq!(effects.status(), Some(PresentationStatus::Live));
+    }
+
+    #[test]
+    fn lifecycle_live_gap_and_queue_overflow_request_recovery() {
+        for reason in [RecoveryReason::SequenceGap, RecoveryReason::QueueOverflow] {
+            let (mut lifecycle, clock, _, _) = seeded_live();
+            let effects = step(
+                &mut lifecycle,
+                clock.as_ref(),
+                SessionPhase::Open,
+                SeriesInput::Recover(reason),
+            );
+            assert!(
+                matches!(lifecycle.state(), SeriesState::Recovering { reason: actual, .. } if *actual == reason)
+            );
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| effect == SeriesEffect::RequestHistory)
+            );
+            assert_eq!(effects.status(), Some(PresentationStatus::Recovering));
+        }
+    }
+
+    #[test]
+    fn lifecycle_open_stall_recovers_but_closed_stall_does_not() {
+        let (mut lifecycle, clock, _, _) = seeded_live();
         let closed = step(
             &mut lifecycle,
             clock.as_ref(),
@@ -1492,55 +1656,60 @@ mod tests {
             }
         ));
         assert_eq!(open.status(), Some(PresentationStatus::Recovering));
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::Open,
-            SeriesInput::Seeded(None),
+        assert!(
+            open.iter()
+                .any(|effect| effect == SeriesEffect::RequestHistory)
         );
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::Open,
-            SeriesInput::Recover(RecoveryReason::SequenceGap),
-        );
-        assert!(matches!(
-            lifecycle.state(),
-            SeriesState::Recovering {
-                reason: RecoveryReason::SequenceGap,
-                ..
-            }
-        ));
     }
 
     #[test]
-    fn lifecycle_phase_close_then_session_roll_requests_history() {
-        let (mut lifecycle, clock, epoch, ticket) = fixture();
-        step(
+    fn lifecycle_closed_phase_enters_dormant() {
+        let (mut lifecycle, clock, _, _) = seeded_live();
+        let effects = step(
             &mut lifecycle,
             clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::Online(epoch),
+            SessionPhase::Closed,
+            SeriesInput::PhaseChanged(SessionPhase::Closed),
         );
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::HistoryRequested(&ticket),
-        );
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::Seeded(Some(&ticket)),
-        );
+        assert!(matches!(
+            lifecycle.state(),
+            SeriesState::Dormant {
+                phase: SessionPhase::Closed,
+                until: Some(2_000)
+            }
+        ));
+        assert_eq!(effects.status(), Some(PresentationStatus::AwaitingData));
+    }
+
+    #[test]
+    fn lifecycle_dormant_reopens_or_reseeds_after_session_roll() {
+        let (mut lifecycle, clock, _, _) = seeded_live();
         step(
             &mut lifecycle,
             clock.as_ref(),
             SessionPhase::Closed,
             SeriesInput::PhaseChanged(SessionPhase::Closed),
         );
-        assert!(matches!(lifecycle.state(), SeriesState::Dormant { .. }));
+        let reopened = step(
+            &mut lifecycle,
+            clock.as_ref(),
+            SessionPhase::Open,
+            SeriesInput::PhaseChanged(SessionPhase::Open),
+        );
+        assert!(matches!(lifecycle.state(), SeriesState::Live { .. }));
+        assert_eq!(reopened.status(), Some(PresentationStatus::ConnectingLive));
+        assert!(
+            !reopened
+                .iter()
+                .any(|effect| effect == SeriesEffect::RequestHistory)
+        );
+
+        step(
+            &mut lifecycle,
+            clock.as_ref(),
+            SessionPhase::Break,
+            SeriesInput::PhaseChanged(SessionPhase::Break),
+        );
         clock.advance(std::time::Duration::from_secs(3));
         let effects = step(
             &mut lifecycle,
@@ -1560,29 +1729,112 @@ mod tests {
                 .iter()
                 .any(|effect| effect == SeriesEffect::RequestHistory)
         );
+
+        let (mut trade, _, _, _) = case_fixture(LifecycleCase::Sequence);
+        seed_case(
+            LifecycleCase::Sequence,
+            &mut trade,
+            &[bar_at(0, 1), bar_at(1, 2)],
+            bar_at(2, 3),
+        );
+        trade.state = SeriesState::Dormant {
+            phase: SessionPhase::Break,
+            until: None,
+        };
+        ingest_case(LifecycleCase::Sequence, &mut trade);
+        assert!(
+            matches!(
+                trade.state(),
+                SeriesState::Live {
+                    observed_live: true,
+                    ..
+                }
+            ),
+            "trade during Dormant resumes live series"
+        );
     }
 
     #[test]
-    fn lifecycle_offline_then_new_epoch_reseeds_and_provider_failure_is_terminal() {
-        let (mut lifecycle, clock, epoch, ticket) = fixture();
+    fn lifecycle_rolled_dormant_candle_requests_session_reseed() {
+        let (mut lifecycle, clock, _, _) = seeded_live();
         step(
             &mut lifecycle,
             clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::Online(epoch),
+            SessionPhase::Closed,
+            SeriesInput::PhaseChanged(SessionPhase::Closed),
         );
-        step(
+        clock.advance(std::time::Duration::from_secs(3));
+        let effects = step(
             &mut lifecycle,
             clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::HistoryRequested(&ticket),
+            SessionPhase::Open,
+            SeriesInput::Candle,
         );
-        step(
-            &mut lifecycle,
-            clock.as_ref(),
-            SessionPhase::AlwaysOpen,
-            SeriesInput::Seeded(Some(&ticket)),
+        assert!(matches!(
+            lifecycle.state(),
+            SeriesState::Recovering {
+                reason: RecoveryReason::SessionRolled,
+                ..
+            }
+        ));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect == SeriesEffect::RequestHistory)
         );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| effect == SeriesEffect::PublishDelta)
+        );
+    }
+
+    #[test]
+    fn lifecycle_rolled_dormant_trade_rejects_mutation_and_recovers_session() {
+        for case in [LifecycleCase::Indexed, LifecycleCase::Sequence] {
+            let (mut lifecycle, clock, _, _) = case_fixture(case);
+            seed_case(
+                case,
+                &mut lifecycle,
+                &[bar_at(0, 1), bar_at(1, 2)],
+                bar_at(2, 3),
+            );
+            lifecycle.state = SeriesState::Dormant {
+                phase: SessionPhase::Closed,
+                until: Some(2_000),
+            };
+            clock.advance(std::time::Duration::from_secs(3));
+            let trade = next_trade(&lifecycle);
+            let before = lifecycle.trade_model().expect("trade model").bars.clone();
+            let result = match case {
+                LifecycleCase::Indexed => lifecycle.accept_indexed_trade(&IndexedTradeMutation {
+                    index: "next".into(),
+                    kind: super::super::IndexedTradeKind::New,
+                    source_sequence: 7,
+                    trade: Some(trade),
+                }),
+                LifecycleCase::Sequence => lifecycle.accept_trade(&trade),
+                LifecycleCase::CandleOverlay => unreachable!(),
+            };
+            assert!(result.is_err(), "{case:?}: rolled trade requires recovery");
+            assert_eq!(lifecycle.trade_model().expect("trade model").bars, before);
+            lifecycle.recover_trade(RecoveryReason::SequenceGap);
+            assert!(
+                matches!(
+                    lifecycle.state(),
+                    SeriesState::Recovering {
+                        reason: RecoveryReason::SessionRolled,
+                        ..
+                    }
+                ),
+                "{case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_current_provider_offline_cancels_history() {
+        let (mut lifecycle, clock, epoch, _) = seeded_live();
         let offline = step(
             &mut lifecycle,
             clock.as_ref(),
@@ -1598,22 +1850,48 @@ mod tests {
                 .iter()
                 .any(|effect| effect == SeriesEffect::CancelHistory)
         );
+        assert_eq!(offline.status(), Some(PresentationStatus::Recovering));
+    }
+
+    #[test]
+    fn lifecycle_new_provider_epoch_reseeds() {
+        let (mut lifecycle, clock, epoch, _) = seeded_live();
         let mut epochs = EpochSequence::<ProviderTag>::default();
         epochs.next();
         let newer = epochs.next();
-        step(
+        assert!(newer > epoch);
+        let effects = step(
             &mut lifecycle,
             clock.as_ref(),
             SessionPhase::AlwaysOpen,
             SeriesInput::Online(newer),
         );
         assert!(matches!(lifecycle.state(), SeriesState::Seeding { .. }));
-        step(
+        assert_eq!(lifecycle.epoch, Some(newer));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect == SeriesEffect::SubscribeLive)
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect == SeriesEffect::RequestHistory)
+        );
+    }
+
+    #[test]
+    fn lifecycle_provider_failure_reports_failed() {
+        let (mut lifecycle, clock, _, _) = seeded_live();
+        let effects = step(
             &mut lifecycle,
             clock.as_ref(),
             SessionPhase::AlwaysOpen,
             SeriesInput::Failed(SeriesFailure::Provider("unavailable".into())),
         );
-        assert!(matches!(lifecycle.state(), SeriesState::Failed { .. }));
+        assert!(
+            matches!(lifecycle.state(), SeriesState::Failed { error: SeriesFailure::Provider(reason) } if reason == "unavailable")
+        );
+        assert_eq!(effects.status(), Some(PresentationStatus::AwaitingData));
     }
 }

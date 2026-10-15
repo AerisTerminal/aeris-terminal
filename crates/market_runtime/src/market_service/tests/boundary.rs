@@ -87,12 +87,46 @@ impl Boundary {
     pub(super) fn series(&self) -> BarSeriesKey { self.series.clone() }
 
     pub(super) fn demand(&mut self, series: BarSeriesKey, generation_number: u64) {
+        self.demand_with_streams(series, generation_number, StreamRequirements::BARS);
+    }
+
+    pub(super) fn demand_with_streams(
+        &mut self,
+        series: BarSeriesKey,
+        generation_number: u64,
+        streams: StreamRequirements,
+    ) {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
         self.command(Command::Demand(
             client(1), self.consumer, generation(generation_number),
-            series, StreamRequirements::BARS, reply,
+            series, streams, reply,
         ));
         received.recv().expect("demand reply").expect("demand succeeds");
+    }
+
+    pub(super) fn replace_alerts(&mut self, alerts: Vec<crate::MarketPriceAlert>) {
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        self.command(Command::ReplacePriceAlerts(client(1), consumer(2), alerts, reply));
+        received.recv().expect("alert reply").expect("alerts accepted");
+    }
+
+    pub(super) fn register_alert_consumer(&mut self) {
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        self.command(Command::Register(
+            ConsumerIdentity {
+                client_id: client(1),
+                workspace_id: WorkspaceId(nonzero(1)),
+                consumer_id: consumer(2),
+            },
+            reply,
+        ));
+        received.recv().expect("register reply").expect("alert consumer registers");
+    }
+
+    pub(super) fn remove_consumer(&mut self) {
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        self.command(Command::Remove(client(1), self.consumer, reply));
+        received.recv().expect("remove reply").expect("consumer removed");
     }
 
     pub(super) fn viewport(&mut self, generation_number: u64, start: i64, end: i64) {
@@ -194,7 +228,11 @@ impl Boundary {
     }
 
     pub(super) fn trade(&mut self, sequence: u64, minute: i64) {
-        let mut trade = rithmic_trade_for_series(&self.series, sequence, minute * 60_000_000_000);
+        self.trade_for(&self.series.clone(), sequence, minute);
+    }
+
+    pub(super) fn trade_for(&mut self, series: &BarSeriesKey, sequence: u64, minute: i64) {
+        let mut trade = rithmic_trade_for_series(series, sequence, minute * 60_000_000_000);
         trade.metadata.session_generation = self.provider_generation;
         self.provider_event(RithmicRealtimeEvent::Trade(
             self.provider_generation, trade,
