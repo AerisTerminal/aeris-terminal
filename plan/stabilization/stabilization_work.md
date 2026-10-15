@@ -442,6 +442,7 @@ Status: in progress
   - The complete workspace fmt, strict Clippy, tests and naming check pass, including the four characterization tests, quote precision/crossed-touch, owner sharing/capacity, guard drop/release, durable field round trip and legacy metadata fallback. No GUI behavior changed in M3.7; the probe pass follows the final visible M3 item.
 - [ ] M3.8 trading-quote-feed - Market-side trading quote feed driven by instrument demand
   - Part 1/3: quote-only instrument leases now reach the shared provider demand and canonical book without creating chart series; Hyperliquid subscribes BBO without candles, cTrader/tastytrade/Rithmic retain their session-owned quote mapping. `QuoteSubscription::latest` reads the bounded coordinator-updated quote projection, validated against the route; release removes the book and quote and changes provider demand. Scripted no-chart quote/release and invalid-spread tests, 381 market-runtime tests (4 ignored), and full workspace gate passed. Trading interest sink, feed events, alert lease migration, terms/grid conversion and live BBO example remain in parts 2-3; item stays unchecked.
+  - Part 2/3: revisioned trading quote interest installs and replaces leases in the engine owner. Active price alerts now hold the same owner-scoped instrument leases, including after one-shot triggers and consumer removal; the retired alert-only provider demand merge and its superseded flags are removed. Scripted tests cover transactional interest changes and no-chart alert trade subscriptions. Feed events, runtime terms conversion and live BBO example remain; item stays unchecked.
 - [ ] M3.9 fenced-events-waitable-outbox - Every consumer event is fenced; the bridge blocks on a waitable outbox
 - [ ] M3.10 select-and-demand-descriptors - `select_and_demand` command and runtime-published instrument and provider descriptors
 - [ ] M3.11 market-replay-harness - Deterministic market replay harness with permanent scenarios
@@ -631,6 +632,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M3 startup fix(market): reserve provider generation before startup history - pre-M3 and pre-registry detached builds rendered the default; fixed the generation race at the coordinator and verified fresh-default rendering without input.
 - 2026-10-15 M3.7 feat(market): add bounded instrument leases and trading feed contracts - validated quote/route/terms contracts and durable grid/class, re-keyed the single shared lease owner, and added a nonblocking quote guard release; provider subscriptions and feed follow in M3.8.
 - 2026-10-15 M3.8 feat(market): connect quote-only leases to provider demand (M3.8 part 1/3) - no-chart demand drives upstream BBO, quote validation and guard latest state; complete feed and probe follow.
+- 2026-10-15 M3.8 refactor(market): lease trading and alert quote demand in engine (M3.8 part 2/3) - replaces the alert-only upstream merge and validates revisioned trading interest; feed events and live probe follow.
 
 ## 7. Known gaps / deferred
 

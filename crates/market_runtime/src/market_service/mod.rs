@@ -278,6 +278,7 @@ enum Command {
         Reply<()>,
     ),
     AcquireQuote(InstrumentStreamKey, Reply<MarketDataLeaseId>),
+    SetTradingInterest(aeris_trading::market::QuoteInterest, Reply<()>),
     Poll(ClientId, ConsumerId, Reply<Option<MarketRuntimeEvent>>),
     PollClient(
         ClientId,
@@ -503,8 +504,6 @@ struct HistorySnapshot {
 struct ProviderInstrumentDemand {
     instrument: InstallProviderInstrument,
     streams: StreamRequirements,
-    alert_trades: bool,
-    alert_instrument: Option<InstallProviderInstrument>,
     display_depth: bool,
 }
 
@@ -526,8 +525,7 @@ impl ProviderDemand {
                 .instruments
                 .iter()
                 .filter_map(|requested| {
-                    let trades = requested.alert_trades
-                        || requested.streams.contains(MarketStream::Bars)
+                    let trades = requested.streams.contains(MarketStream::Bars)
                         || requested.streams.contains(MarketStream::Trades)
                         || requested.streams.contains(MarketStream::Depth);
                     let quotes = requested.streams.contains(MarketStream::Quotes);
@@ -556,6 +554,7 @@ impl ProviderDemand {
             if self
                 .explicit_trade_ids
                 .contains(&requested.instrument.instrument_id)
+                || requested.streams.contains(MarketStream::Trades)
             {
                 wire.tape_instruments.push(requested.instrument.clone());
             }
@@ -645,23 +644,22 @@ impl ProviderDemand {
                 books.insert(mapping);
             }
         }
-        for requested in self.instruments.iter().filter(|item| item.alert_trades) {
-            let Some(instrument) = requested.alert_instrument.as_ref() else {
-                continue;
-            };
-            let (Ok(price_scale), Ok(quantity_scale)) = (
-                u8::try_from(instrument.price_scale),
-                u8::try_from(instrument.quantity_scale),
-            ) else {
-                continue;
-            };
-            trades.insert(HyperliquidInstrumentDemand {
-                wire_coin: instrument.provider_symbol.clone(),
-                instrument_id: instrument.instrument_id.clone(),
-                entitlement_id: instrument.entitlement_id.clone(),
-                price_scale,
-                quantity_scale,
-            });
+        for requested in &self.instruments {
+            if requested.streams.contains(MarketStream::Trades) {
+                let instrument = &requested.instrument;
+                if let (Ok(price_scale), Ok(quantity_scale)) = (
+                    u8::try_from(instrument.price_scale),
+                    u8::try_from(instrument.quantity_scale),
+                ) {
+                    trades.insert(HyperliquidInstrumentDemand {
+                        wire_coin: instrument.provider_symbol.clone(),
+                        instrument_id: instrument.instrument_id.clone(),
+                        entitlement_id: instrument.entitlement_id.clone(),
+                        price_scale,
+                        quantity_scale,
+                    });
+                }
+            }
         }
         HyperliquidDemand {
             candles: candles.into_iter().collect(),
@@ -847,7 +845,6 @@ struct ProviderCapabilities {
     /// Coordinator-facing detail published when broker authorization is revoked.
     authorization_revoked_detail: &'static str,
     live_model: LiveModel,
-    alert_overrides_instrument: bool,
     overflow_recovery_detail: &'static str,
     trade_continuity: TradeContinuity,
     candle_requires_connected: bool,
@@ -1027,7 +1024,6 @@ const RITHMIC_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         alert_demand_update: AlertDemandUpdate::Immediate,
         authorization_revoked_detail: "Rithmic disconnected",
         live_model: LiveModel::TradeBuilt,
-        alert_overrides_instrument: false,
         overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
         trade_continuity: TradeContinuity::Sequence,
         candle_requires_connected: false,
@@ -1095,7 +1091,6 @@ const HYPERLIQUID_CAPABILITIES: ProviderCapabilities = ProviderCapabilities {
     alert_demand_update: AlertDemandUpdate::MarkDirty,
     authorization_revoked_detail: "Hyperliquid disconnected",
     live_model: LiveModel::ProviderCandles,
-    alert_overrides_instrument: false,
     overflow_recovery_detail: "Local market event queue overflow; repairing continuity",
     trade_continuity: TradeContinuity::Sequence,
     candle_requires_connected: true,

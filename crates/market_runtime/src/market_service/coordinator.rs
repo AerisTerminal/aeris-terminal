@@ -312,6 +312,7 @@ impl<'a> Coordinator<'a> {
             pending_activity: true,
             quote_releases: None,
             quotes: Arc::new(Mutex::new(super::quotes::QuoteBook::default())),
+            trading_interest_revision: 0,
             control_retry: false,
             series_effects: super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),
@@ -815,6 +816,7 @@ pub(super) struct Coordinator<'a> {
     pending_activity: bool,
     quote_releases: Option<Arc<Mutex<Vec<MarketDataLeaseId>>>>,
     pub(super) quotes: Arc<Mutex<super::quotes::QuoteBook>>,
+    trading_interest_revision: u64,
     pub(super) control_retry: bool,
     pub(super) series_effects: super::lifecycle::EffectBuf,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
@@ -1229,11 +1231,8 @@ impl Coordinator<'_> {
                 let _ = reply.send(self.install_provider_instrument(&instrument));
             }
             Command::ReplacePriceAlerts(client_id, consumer_id, alerts, reply) => {
-                let result =
-                    authorize_consumer(&self.engine, client_id, consumer_id).and_then(|()| {
-                        self.price_alerts
-                            .replace_consumer_alerts(consumer_id, alerts)
-                    });
+                let result = authorize_consumer(&self.engine, client_id, consumer_id)
+                    .and_then(|()| self.replace_price_alerts(consumer_id, alerts));
                 if result.is_ok() {
                     self.mark_alert_demand_changed();
                     self.release_idle();
@@ -1242,6 +1241,9 @@ impl Coordinator<'_> {
             }
             Command::AcquireQuote(key, reply) => {
                 self.acquire_quote(&key, &reply);
+            }
+            Command::SetTradingInterest(interest, reply) => {
+                let _ = reply.send(self.install_trading_interest(&interest));
             }
             Command::Poll(client_id, consumer_id, reply) => {
                 self.handle_poll(client_id, consumer_id, &reply);
@@ -1283,6 +1285,76 @@ impl Coordinator<'_> {
                 let _ = reply.send(Err(error.to_string()));
             }
         }
+    }
+
+    fn install_trading_interest(
+        &mut self,
+        interest: &aeris_trading::market::QuoteInterest,
+    ) -> Result<(), String> {
+        interest.validate().map_err(|error| error.to_string())?;
+        if interest.revision <= self.trading_interest_revision {
+            return Err("trading quote interest revision is stale".into());
+        }
+        let keys = interest
+            .routes
+            .iter()
+            .map(|route| super::InstrumentStreamKey {
+                provider: route.provider_id.clone(),
+                instrument: route.instrument_id.clone(),
+                entitlement: route.entitlement_id.clone(),
+            })
+            .collect::<BTreeSet<_>>();
+        self.engine
+            .set_instrument_leases(
+                aeris_market_engine::LeaseOwner::Trading,
+                keys,
+                StreamRequirements::NONE.with(MarketStream::Quotes),
+            )
+            .map_err(|error| error.to_string())?;
+        self.trading_interest_revision = interest.revision;
+        self.reconcile_order_books();
+        self.mark_alert_demand_changed();
+        self.pending_activity = true;
+        Ok(())
+    }
+
+    fn replace_price_alerts(
+        &mut self,
+        consumer_id: ConsumerId,
+        alerts: Vec<crate::MarketPriceAlert>,
+    ) -> Result<(), String> {
+        let mut replacement = self.price_alerts.clone();
+        replacement.replace_consumer_alerts(consumer_id, alerts)?;
+        let keys = replacement.active_keys()?;
+        self.engine
+            .set_instrument_leases(
+                aeris_market_engine::LeaseOwner::PriceAlerts,
+                keys,
+                StreamRequirements::NONE
+                    .with(MarketStream::Trades)
+                    .with(MarketStream::Quotes),
+            )
+            .map_err(|error| error.to_string())?;
+        self.price_alerts = replacement;
+        self.reconcile_order_books();
+        self.pending_activity = true;
+        Ok(())
+    }
+
+    pub(super) fn reconcile_price_alert_leases(&mut self) -> Result<(), String> {
+        self.engine
+            .set_instrument_leases(
+                aeris_market_engine::LeaseOwner::PriceAlerts,
+                self.price_alerts.active_keys()?,
+                StreamRequirements::NONE
+                    .with(MarketStream::Trades)
+                    .with(MarketStream::Quotes),
+            )
+            .map_err(|error| error.to_string())?;
+        self.reconcile_order_books();
+        self.mark_alert_demand_changed();
+        self.pending_activity = true;
+        Ok(())
     }
 
     fn handle_resource_class(
@@ -2194,6 +2266,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trading_feed_interest_revisions_replace_shared_quote_leases_atomically() {
+        let mut coordinator = coordinator();
+        let instrument = hyperliquid_instrument();
+        coordinator.catalog.insert(
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
+            instrument.clone(),
+        );
+        let route = aeris_trading::market::MarketRoute {
+            provider_id: instrument.provider.clone(),
+            instrument_id: aeris_instruments::InstrumentId::try_new(
+                instrument.instrument_id.clone(),
+            )
+            .unwrap(),
+            provider_symbol: instrument.provider_symbol.clone(),
+            display_symbol: instrument.display_symbol.clone(),
+            venue_id: instrument.venue_id.clone(),
+            entitlement_id: Some(instrument.entitlement_id.clone()),
+            price_scale: u8::try_from(instrument.price_scale).unwrap(),
+            quantity_scale: u8::try_from(instrument.quantity_scale).unwrap(),
+        };
+        let interest = aeris_trading::market::QuoteInterest {
+            revision: 1,
+            routes: vec![route],
+        };
+        coordinator.install_trading_interest(&interest).unwrap();
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 1);
+        assert_eq!(
+            coordinator
+                .provider_demand(&instrument.provider)
+                .instruments
+                .len(),
+            1
+        );
+        assert!(coordinator.install_trading_interest(&interest).is_err());
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 1);
+        coordinator
+            .install_trading_interest(&aeris_trading::market::QuoteInterest {
+                revision: 2,
+                routes: vec![],
+            })
+            .unwrap();
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 0);
+        assert_eq!(
+            coordinator
+                .provider_demand(&instrument.provider)
+                .instruments
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn trading_feed_price_alerts_use_engine_leases_instead_of_outside_demand() {
+        let mut coordinator = coordinator();
+        let instrument = hyperliquid_instrument();
+        coordinator.catalog.insert(
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
+            instrument.clone(),
+        );
+        let alert = crate::MarketPriceAlert {
+            id: "test-alert".into(),
+            instrument: instrument.clone(),
+            price: 100,
+            condition: aeris_contracts::PriceAlertCondition::CrossingUp,
+            frequency: aeris_contracts::PriceAlertFrequency::OnlyOnce,
+            active: true,
+        };
+        coordinator
+            .replace_price_alerts(consumer(1), vec![alert])
+            .expect("active alert installs the shared engine lease");
+        let demand = coordinator.provider_demand(&instrument.provider);
+        assert_eq!(demand.instruments.len(), 1);
+        assert!(demand.instruments[0].streams.contains(MarketStream::Trades));
+        assert_eq!(demand.hyperliquid_wire().trades.len(), 1);
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 1);
+        coordinator
+            .replace_price_alerts(consumer(1), vec![])
+            .expect("removing the last alert releases the shared lease");
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 0);
+        assert_eq!(
+            coordinator
+                .provider_demand(&instrument.provider)
+                .instruments
+                .len(),
+            0
+        );
+    }
+
     fn study_definition_with_streams(
         series: BarSeriesKey,
         streams: StreamRequirements,
@@ -2319,6 +2486,7 @@ mod tests {
             pending_activity: true,
             quote_releases: None,
             quotes: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
+            trading_interest_revision: 0,
             control_retry: false,
             series_effects: super::super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),

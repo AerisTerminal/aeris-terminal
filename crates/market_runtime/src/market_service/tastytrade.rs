@@ -86,7 +86,6 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
         alert_demand_update: super::AlertDemandUpdate::WorkerManaged,
         authorization_revoked_detail: "Tastytrade disconnected",
         live_model: super::LiveModel::TradeBuilt,
-        alert_overrides_instrument: true,
         overflow_recovery_detail: "Tastytrade queue overflow requires recovery",
         trade_continuity: super::TradeContinuity::Indexed,
         candle_requires_connected: false,

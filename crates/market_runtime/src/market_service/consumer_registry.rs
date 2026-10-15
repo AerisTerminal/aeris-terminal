@@ -23,6 +23,9 @@ impl<'a, 'b> ConsumerRegistry<'a, 'b> {
         owner.consumer_clients.remove(&consumer);
         owner.command_fences.remove_consumer(consumer);
         owner.price_alerts.remove_consumer(consumer);
+        if let Err(error) = owner.reconcile_price_alert_leases() {
+            aeris_observability::diagnostic!("Aeris price alert lease release failed: {error}");
+        }
         owner.remove_waiter(consumer);
         if remove_engine_lease {
             owner.engine.remove_consumer(consumer);

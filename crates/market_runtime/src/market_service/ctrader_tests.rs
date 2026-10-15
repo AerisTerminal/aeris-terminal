@@ -1176,8 +1176,6 @@ fn provider_demand_wire_maps_series_quotes_and_depth() {
     let depth_only = super::super::ProviderInstrumentDemand {
         instrument: demo.clone(),
         streams: super::super::StreamRequirements::BARS.with(MarketStream::Depth),
-        alert_trades: false,
-        alert_instrument: None,
         display_depth: false,
     };
     let quotes_only = super::super::ProviderInstrumentDemand {

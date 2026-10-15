@@ -105,7 +105,6 @@ pub(super) const DESCRIPTOR: super::ProviderDescriptor = super::ProviderDescript
         idle_stop_policy: super::IdleStopPolicy::WorkerManaged,
         alert_demand_update: super::AlertDemandUpdate::WorkerManaged,
         live_model: super::LiveModel::ProviderCandles,
-        alert_overrides_instrument: false,
         overflow_recovery_detail: "cTrader queue overflow requires recovery",
         trade_continuity: super::TradeContinuity::Sequence,
         candle_requires_connected: true,

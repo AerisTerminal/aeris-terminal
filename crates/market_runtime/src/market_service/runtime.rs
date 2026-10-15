@@ -23,10 +23,22 @@ use crate::hyperliquid_display_depth::{
 use crate::hyperliquid_realtime::HyperliquidCatalogControl;
 use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_contracts::ProviderPresentationDescriptor;
+use aeris_trading::market::{MarketFeedError, QuoteInterest, QuoteInterestSink};
 
 struct QuoteChannels {
     releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     latest: Arc<Mutex<super::quotes::QuoteBook>>,
+}
+
+struct MarketQuoteInterestSink(MarketService);
+
+impl QuoteInterestSink for MarketQuoteInterestSink {
+    fn set_interest(&self, interest: QuoteInterest) -> Result<(), MarketFeedError> {
+        interest.validate()?;
+        self.0
+            .request(|reply| Ok(Command::SetTradingInterest(interest, reply)))
+            .map_err(|_| MarketFeedError::Unavailable)
+    }
 }
 
 fn dispatch_rithmic_catalog(
@@ -1666,6 +1678,13 @@ impl MarketService {
             key,
             runtime: Arc::clone(&self.runtime),
         })
+    }
+
+    /// Publishes trading-owned quote interest into the single engine lease
+    /// registry. Revisions are checked on the coordinator before mutation.
+    #[must_use]
+    pub fn trading_quote_interest_sink(&self) -> Arc<dyn QuoteInterestSink> {
+        Arc::new(MarketQuoteInterestSink(self.clone()))
     }
 
     /// Drains at most one bounded market publication for an owned consumer.

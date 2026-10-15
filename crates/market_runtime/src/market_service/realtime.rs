@@ -8,8 +8,8 @@ use super::{
     MarketStream, MarketTrade, NonZeroUsize, OrderBook, OrderBookApplyOutcome, Ordering,
     ProviderDemand, ProviderDisconnect, ProviderDisplayDepthEvent, ProviderEvent,
     ProviderEventKind, ProviderGeneration, ProviderHealth, ProviderInstrumentDemand,
-    ProviderOrderBook, ProviderTradeBatch, SeriesLoadState, StreamRequirements, TopOfBookQuote,
-    TradeModel, VecDeque, id, merge_live_candle, series_state_payload, series_update_message,
+    ProviderOrderBook, ProviderTradeBatch, SeriesLoadState, TopOfBookQuote, TradeModel, VecDeque,
+    id, merge_live_candle, series_state_payload, series_update_message,
 };
 #[cfg(test)]
 use super::{
@@ -936,34 +936,10 @@ impl Coordinator<'_> {
                 .or_insert(ProviderInstrumentDemand {
                     instrument,
                     streams,
-                    alert_trades: false,
-                    alert_instrument: None,
                     display_depth: false,
                 });
         }
         self.merge_instrument_subscriptions(provider_id, &mut instruments, &mut missing_catalog);
-        let alert_overrides_instrument = self
-            .providers
-            .descriptor(provider_id)
-            .is_some_and(|descriptor| descriptor.capabilities.alert_overrides_instrument);
-        for instrument in self.price_alerts.active_instruments(provider_id) {
-            instruments
-                .entry(instrument.instrument_id.clone())
-                .and_modify(|entry| {
-                    entry.alert_trades = true;
-                    entry.alert_instrument = Some(instrument.clone());
-                    if alert_overrides_instrument {
-                        entry.instrument = instrument.clone();
-                    }
-                })
-                .or_insert(ProviderInstrumentDemand {
-                    alert_instrument: Some(instrument.clone()),
-                    instrument,
-                    streams: StreamRequirements::NONE,
-                    alert_trades: true,
-                    display_depth: false,
-                });
-        }
         self.mark_display_depth_demand(provider_id, &mut instruments);
         ProviderDemand {
             instruments: instruments.into_values().collect(),
@@ -1010,8 +986,6 @@ impl Coordinator<'_> {
                 .or_insert(ProviderInstrumentDemand {
                     instrument,
                     streams,
-                    alert_trades: false,
-                    alert_instrument: None,
                     display_depth: false,
                 });
         }
@@ -2231,7 +2205,9 @@ impl Coordinator<'_> {
             }
         }
         if demand_changed {
-            self.mark_provider_alert_demand_changed(&trade.metadata.provider_id);
+            if let Err(error) = self.reconcile_price_alert_leases() {
+                diagnostic!("Aeris price alert lease release failed: {error}");
+            }
             self.release_idle();
         }
     }

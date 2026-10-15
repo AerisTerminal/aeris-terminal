@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aeris_contracts::{InstallProviderInstrument, PriceAlertCondition, PriceAlertFrequency};
-use aeris_market_engine::ConsumerId;
+use aeris_market_engine::{ConsumerId, InstrumentStreamKey};
 
 use crate::{MAXIMUM_PRICE_ALERTS_PER_CONSUMER, MarketPriceAlert, MarketPriceAlertTrigger};
 
@@ -46,13 +46,27 @@ struct PriceObservation {
     price: i64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct PriceAlertRegistry {
     alerts: BTreeMap<AlertInstrumentKey, Vec<RegisteredAlert>>,
     observations: BTreeMap<AlertInstrumentKey, PriceObservation>,
 }
 
 impl PriceAlertRegistry {
+    pub(super) fn active_keys(&self) -> Result<BTreeSet<InstrumentStreamKey>, String> {
+        self.alerts
+            .iter()
+            .filter(|(_, items)| items.iter().any(|item| item.alert.active))
+            .map(|(key, _)| {
+                Ok(InstrumentStreamKey {
+                    provider: key.provider.clone(),
+                    instrument: aeris_instruments::InstrumentId::try_new(key.instrument_id.clone())
+                        .map_err(|error| error.to_string())?,
+                    entitlement: Some(key.entitlement_id.clone()),
+                })
+            })
+            .collect()
+    }
     pub(super) fn replace_consumer_alerts(
         &mut self,
         consumer_id: ConsumerId,
