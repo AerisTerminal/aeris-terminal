@@ -6,9 +6,9 @@ use super::{
     BracketPlacement, BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount,
     EconomicEventRiskOutcome, EconomicEventRiskTrigger, FixedPoint, FlattenOutcome, ModifyOrder,
     MovePlannedBracketLeg, Order, PathBuf, PlaceBracket, PlaceInlineBracket, PlaceOrder,
-    PlaceProtectiveOrder, PlannedBracketLeg, PracticeMarketSession, Receiver, Reply,
-    RiskEvaluation, RiskProfile, SessionPlan, TradeCopierConfig, TradingAccount, TradingAccountId,
-    TradingInstrument, TradingServiceStatus, TradingSnapshot, UserRecord, VenueRequest,
+    PlaceProtectiveOrder, PlannedBracketLeg, Receiver, Reply, RiskEvaluation, RiskProfile,
+    SessionPlan, TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument,
+    TradingServiceStatus, TradingSnapshot, UserRecord, VenueRequest,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -25,7 +25,6 @@ pub(crate) enum Command {
     CreatePracticeAccount(CreatePracticeAccount, Reply<TradingAccount>),
     DeletePracticeAccount(TradingAccountId, Reply<TradingAccount>),
     RegisterInstrument(TradingInstrument, Reply<()>),
-    InstallPracticeMarketSession(Arc<PracticeMarketSession>, Reply<()>),
     Place(PlaceOrder, Reply<Order>),
     PlaceFromMarket(PlaceOrder, bool, Reply<Order>),
     PlaceBracket(PlaceBracket, Reply<BracketPlacement>),

@@ -100,7 +100,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | Finding | Severity | Title | Closed by | Status |
 |---|---|---|---|---|
 | MD-01 | High | A persisted 3-day chart pane cannot be restored because the workspace writer and reader disagree | M1.3 | closed in ab5ff341 |
-| MD-02 | High | The stalled-live recovery watchdog only works for tastytrade | M2.6 (market), M4.8 (trading) | market part closed in this commit; trading gate M4.8 open |
+| MD-02 | High | The stalled-live recovery watchdog only works for tastytrade | M2.6 (market), M4.8 (trading) | market watchdog and trading practice gate closed; M4.8 GUI resting-order check outstanding |
 | MD-03 | High (likely; needs fixture confirmation) | Session-day live bars are bucketed from the last bar, not from the exchange trading day | M2.7 | closed in this commit |
 | MD-04 | Medium | Weekly and monthly live updates are silently missing for non-CME venues | M2.5 (demand), M2.7 (live) | closed in this commit |
 | MD-05 | High (performance; unmeasured) | Hot paths copy the full canonical series on every live tick | M2.2 (measurement), M3.3 (copies), M3.4 (idle CPU) | closed in this commit |
@@ -117,7 +117,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments, M3.2 trade retention/demand-dirty/provider wording, and M3.5 Rithmic presentation and capability documentation closed; other items open |
 | MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | closed in this commit |
 | TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
-| TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | open |
+| TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | provider-neutral session, feed-generation and per-class age gates in trading owner; GUI resting-order check outstanding |
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | open |
 | TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | open |
 | TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | open; runtime lookup scans removed in M4.4 |
@@ -509,7 +509,10 @@ Status: in progress
   - M4.7 part 2/3: Trading owner registers verified Terms and persists their routes in V20; migration leaves old instruments without invented routes. Owner-fenced QuoteBook, bounded latest-wins feed inbox, 64-ticket and 256-total interest follow working orders, positions and managed groups, with restart republishing. Session events now carry provider generation. The feed is deliberately **not** an execution input; existing desktop observations alone still drive fills until part 3 wires composition and removes the relay. V20 is occupied by route persistence, so the planned M4.9 fill-accounting migration must use V21 or later; no M4.7 GUI/no-chart stop claim is made yet.
   - M4.7 part 3/3: The desktop composition root attaches both market/feed directions before accepting trading commands. The trading owner executes feed quotes from its QuoteBook, stamps desktop entry/modify instructions with owner quote provenance and prices chart bracket entry type from its current touch; removed the desktop book relay, direct instrument registration, every desktop observation construction and the old pending-observation mailbox. A production naming rule rejects any desktop `SimulatedMarketObservation` reference, including code after a test module. A no-chart fixture covers fill, marks, stop and restart with recovered route demand. TR-01, UI-01 and the trading part of MD-11 are addressed in code; GUI pane-free stop/bracket remains outstanding, so M4.7 stays unchecked.
   - Part 3 verification: crate-scoped checks and tests, full workspace fmt, strict Clippy, all-feature tests and naming-check tests/scanner passed. On an isolated Hyperliquid desktop, a practice buy filled; a resting bid placed at 20:15:52 UTC was canceled at 20:17:12 UTC (SQLite event times). Switching the only BTC chart to ETH removed BTC series demand while the BTC position mark changed from USD 18 to USD 13 in 30 seconds; after restart on ETH, BTC marks resumed (USD 84 to USD 70). A GUI stop or bracket fill after closing BTC demand was not established; the deterministic no-chart test covers it. M4.9's fill-accounting migration must start at V21 or later because route persistence already occupies V20.
-- [ ] M4.8 provider-neutral-gating - Session and freshness gating for every provider
+- [x] M4.8 provider-neutral-gating - Session and freshness gating for every provider
+  - Simulated-order admission now requires a tradable verified session, Live feed, current provider generation and a fresh quote (crypto 10 s; other classes 60 s; per-class policy overrides). Typed `RejectReason` names closed/unknown/unavailable/stale states. Resting orders may mark but cannot fill on an ineligible quote; owner-local `eligible_after` replaces the restored-order fence. Removed the tastytrade-only practice-session callbacks on both sides.
+  - Manual-clock tests cover inclusive quote-age thresholds, 11 s/61 s rejection, Open/Extended/AlwaysOpen versus Closed/PreOpen/Break/Unknown for market/limit/stop/stop-limit/bracket entry, unchanged rejected revisions/rows, four provider identities, non-Live feeds, superseded generation, closed marks and post-restart first eligible quote. Trading goldens remain unchanged.
+  - Fresh isolated GUI: BTC-USDC practice Buy produced a 1 BTC position and Join Bid was accepted and filled another BTC while quotes were live; no reject appeared. In a two-pane BTC/ETH workspace, closing the BTC pane kept its 2 BTC position visible and P/L changed USD 37 to USD 19 while ETH remained the only chart. The same root restarted on ETH; SQLite retained the 2 BTC position. **Not yet proven:** the contract's limit 5% below bid as a *working* order (the Join Bid filled immediately and the current compact ticket has no arbitrary-price control); neither a pane-free stop nor bracket fill was placed. These GUI clauses remain pending despite the checked implementation item.
 - [ ] M4.9 fill-accounting-consolidation - One fill-accounting implementation (V20)
 - [ ] M4.10 facts-only-persistence - Commit-then-apply steps; no durable writes per quote
 
@@ -635,6 +638,7 @@ the repo root `AGENTS.md`.
 - Store preflight scratch sweeping removes only exact-name directories containing expected database and sidecar copies; unknown contents remain and cleanup failures are logged (M4.6, this commit).
 - V20 persists only verified trading market routes; migrated legacy instruments remain route-less until the market owner publishes verified Terms. The owner bounds ticket interest at 64 and combined quote interest at 256 (M4.7 part 2/3, this commit).
 - Desktop source may not reference `SimulatedMarketObservation`; quote execution and current quote provenance are owned by the trading QuoteBook fed from the market runtime (M4.7 part 3/3, this commit).
+- Simulated order admission and fills require the trading owner's verified session, Live current-generation quote and class-specific freshness; a restart-time owner-local `eligible_after` fences restored orders without comparing provider generations across processes (M4.8).
 
 ## 6. Progress log
 
@@ -721,6 +725,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4.7 part 1/3 feat(market): restore trading lease routes with verified terms - preserved provider contract fields, resolved chart-free routes through the catalog and fenced the current quote snapshot; full gate passed.
 - 2026-10-15 M4.7 part 2/3 feat(trading): prepare bounded owner market feed and persistent routes - tested validation/fencing, overflow, interest lifecycle/bounds, V19 migration and restart without changing simulated execution; desktop cutover remains part 3.
 - 2026-10-16 M4.7 part 3/3 fix(trading): execute simulated orders from the owner quote book - removed the desktop quote relay and registration, wired feed and ticket demand, and tested pane-free stop/mark/restart; GUI assertions remain to be qualified.
+- 2026-10-16 M4.8 feat(trading): gate simulated orders on provider-neutral session and fresh Live quote - four provider fixture families, all entry shapes, clock boundaries and restart fence tested; isolated BTC market/Join Bid accepted, but GUI far-resting limit and pane-free stop/bracket remain unverified.
 
 ## 7. Known gaps / deferred
 

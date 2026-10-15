@@ -4140,6 +4140,7 @@ fn start_trading_service()
         database_path,
         retention: aeris_trading_runtime::TradingRetention::default(),
         clock: std::sync::Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
+        execution: aeris_trading_runtime::ExecutionPolicy::default(),
     })
 }
 
@@ -5685,20 +5686,6 @@ fn attach_trading_market_feed(
     trading: &aeris_trading_runtime::TradingService,
     market: &aeris_market_runtime::MarketService,
 ) -> Result<(), String> {
-    let market_calendar = market.clone();
-    trading.install_practice_market_session(Arc::new(
-        move |provider_id: &str,
-              instrument_id: &str,
-              provider_symbol: &str,
-              now_unix_nanos: i64| {
-            market_calendar.require_practice_market_session(
-                provider_id,
-                instrument_id,
-                provider_symbol,
-                now_unix_nanos,
-            )
-        },
-    ))?;
     let quote_inbox = trading.attach_market_feed(market.trading_quote_interest_sink())?;
     market.attach_trading_feed(aeris_market_runtime::market_service::TradingFeedLink {
         events: Box::new(move |event| {

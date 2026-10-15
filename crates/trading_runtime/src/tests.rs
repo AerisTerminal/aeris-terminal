@@ -40,11 +40,16 @@ pub(crate) fn config(directory: &TestDirectory) -> TradingServiceConfig {
             maximum_user_records_per_kind: 4,
         },
         clock: Arc::new(crate::clock::SystemClock::default()),
+        execution: ExecutionPolicy::default(),
     }
 }
 
 pub(crate) fn start_service(directory: &TestDirectory) -> TradingService {
-    let service = TradingService::start(config(directory)).expect("service starts");
+    start_service_with_config(config(directory))
+}
+
+pub(crate) fn start_service_with_config(configuration: TradingServiceConfig) -> TradingService {
+    let service = TradingService::start(configuration).expect("service starts");
     if service
         .snapshot()
         .expect("initial snapshot")
@@ -428,57 +433,6 @@ fn whole_unit_contract_rejects_fractional_orders_at_market_data_scale() {
     assert_eq!(
         reopened.place_order(fractional).unwrap_err(),
         "order quantity must use whole provider units"
-    );
-}
-
-#[test]
-fn practice_calendar_rejects_closed_market_and_requires_a_new_quote_to_fill() {
-    let directory = TestDirectory::new("practice-calendar");
-    let service = start_service(&directory);
-    let open = Arc::new(AtomicBool::new(true));
-    let calendar_open = Arc::clone(&open);
-    service
-        .install_practice_market_session(Arc::new(
-            move |_provider: &str, _instrument: &str, _symbol: &str, _now: i64| {
-                if calendar_open.load(Ordering::Acquire) {
-                    Ok(true)
-                } else {
-                    Err("Practice market is closed".into())
-                }
-            },
-        ))
-        .expect("calendar installs");
-    service
-        .register_instrument(instrument())
-        .expect("instrument");
-    service
-        .place_order(market_order("open-session-buy", OrderSide::Buy, 5, 1_500))
-        .expect("open market accepts order");
-    assert_eq!(
-        service
-            .observe_market(observation(9_975, 10_000, 5, 1_600))
-            .expect("submission quote is valid"),
-        [] as [aeris_trading::Fill; 0]
-    );
-    assert_eq!(
-        service
-            .observe_market(observation(9_975, 10_000, 6, 2_000))
-            .expect("new live quote fills")
-            .len(),
-        1
-    );
-    open.store(false, Ordering::Release);
-    assert_eq!(
-        service
-            .place_order(market_order("closed-session-buy", OrderSide::Buy, 7, 3_000))
-            .unwrap_err(),
-        "Practice market is closed"
-    );
-    assert_eq!(
-        service
-            .observe_market(observation(9_975, 10_000, 7, 3_000))
-            .unwrap_err(),
-        "Practice market is closed"
     );
 }
 
@@ -1468,88 +1422,6 @@ fn bracket_targets_split_in_whole_order_increments() {
         Ok(vec![(0, 100_000_000), (1, 200_000_000)])
     );
     assert!(split(150_000_000, 8, &[100], 100_000_000).is_err());
-}
-
-fn install_open_practice_calendar(service: &TradingService) {
-    service
-        .install_practice_market_session(Arc::new(
-            |_provider: &str, _instrument: &str, _symbol: &str, _now: i64| Ok(true),
-        ))
-        .expect("calendar installs");
-}
-
-#[test]
-fn orders_restored_from_an_earlier_process_fill_on_the_first_new_quote() {
-    let directory = TestDirectory::new("restored-order-fence");
-    let service = start_service(&directory);
-    install_open_practice_calendar(&service);
-    service
-        .register_instrument(instrument())
-        .expect("instrument registers");
-    let mut long = market_order("existing-long", OrderSide::Buy, 1, 1_000);
-    long.quantity = quantity(2);
-    service.place_order(long).expect("long accepted");
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("long fills");
-    for client_id in ["restored-stop", "modified-stop"] {
-        let mut stop = market_order(client_id, OrderSide::Sell, 500, 3_000);
-        stop.order_type = OrderType::Stop;
-        stop.time_in_force = TimeInForce::GoodTillCancelled;
-        stop.stop_price = Some(FixedPoint::try_new(9_900, 2).expect("stop"));
-        service.place_order(stop).expect("stop accepted");
-    }
-    service
-        .observe_market(observation(9_975, 10_000, 501, 3_500))
-        .expect("quote above the stops");
-    service
-        .shutdown(Duration::from_secs(2))
-        .expect("service stops");
-
-    // The restarted feed numbers its quotes from the beginning again.
-    let restarted = start_service(&directory);
-    install_open_practice_calendar(&restarted);
-    restarted
-        .modify_order(ModifyOrder {
-            client_order_id: ClientOrderId::try_new("modified-stop").expect("client id"),
-            time_in_force: TimeInForce::GoodTillCancelled,
-            limit_price: None,
-            stop_price: Some(FixedPoint::try_new(9_890, 2).expect("stop")),
-            modified_unix_nanos: 4_000,
-            provenance: provenance(3, 4_000),
-        })
-        .expect("stop modifies");
-    let filled_ids = |fills: Vec<aeris_trading::Fill>, service: &TradingService| {
-        let snapshot = service.snapshot().expect("snapshot");
-        fills
-            .iter()
-            .map(|fill| {
-                snapshot
-                    .orders
-                    .iter()
-                    .find(|order| order.id == fill.order_id)
-                    .expect("filled order")
-                    .client_order_id
-                    .as_str()
-                    .to_string()
-            })
-            .collect::<Vec<_>>()
-    };
-    let first = restarted
-        .observe_market(observation(9_850, 9_875, 3, 4_000))
-        .expect("first quote after restart");
-    assert_eq!(filled_ids(first, &restarted), ["restored-stop"]);
-    let second = restarted
-        .observe_market(observation(9_850, 9_875, 4, 5_000))
-        .expect("next quote");
-    assert_eq!(
-        filled_ids(second, &restarted),
-        ["modified-stop"],
-        "a stop modified in this process waits for a quote newer than its modification"
-    );
-    let flat = restarted.snapshot().expect("flat snapshot");
-    assert_eq!(flat.market_observation_error, None);
-    assert_eq!(flat.positions[0].net_quantity.units(), 0);
 }
 
 #[test]
@@ -3245,6 +3117,7 @@ fn measured_store_workload_is_bounded_and_restartable() {
             maximum_user_records_per_kind: usize::try_from(USER_RECORDS).expect("record count"),
         },
         clock: Arc::new(crate::clock::SystemClock::default()),
+        execution: ExecutionPolicy::default(),
     };
     let service = TradingService::start(measured_config.clone()).expect("service starts");
     service

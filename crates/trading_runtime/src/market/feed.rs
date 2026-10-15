@@ -1,6 +1,7 @@
 //! Owner-only market facts and a non-blocking, bounded ingress mailbox.
 use crate::{SimulatedMarketObservation, service::Command};
 use aeris_instruments::InstrumentId;
+use aeris_trading::RejectReason;
 use aeris_trading::market::{
     FeedState, InstrumentSession, MAXIMUM_QUOTE_INTEREST, MarketFeedError, MarketFeedEvent,
     MarketRoute, TradingQuote,
@@ -32,6 +33,45 @@ struct QuoteEntry {
 }
 
 impl QuoteBook {
+    pub(crate) fn check_session(&self, id: &InstrumentId, now: i64) -> Result<(), RejectReason> {
+        let session = self
+            .entries
+            .get(id)
+            .and_then(|entry| entry.session.as_ref())
+            .ok_or(RejectReason::SessionUnknown)?;
+        super::gating::tradable_phase(session.phase, session.next_open_unix_nanos)?;
+        if session.session_end_unix_nanos.is_some_and(|end| now >= end) {
+            return Err(RejectReason::MarketClosed {
+                phase: aeris_instruments::SessionPhase::Closed,
+                next_open: session.next_open_unix_nanos,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_quote(
+        &self,
+        id: &InstrumentId,
+        now: i64,
+        class: aeris_instruments::InstrumentClass,
+        policy: super::gating::ExecutionPolicy,
+    ) -> Result<(), RejectReason> {
+        let entry = self.entries.get(id).ok_or(RejectReason::QuoteUnavailable)?;
+        if entry.feed != Some(FeedState::Live) {
+            return Err(RejectReason::QuoteUnavailable);
+        }
+        let quote = entry.quote.as_ref().ok_or(RejectReason::QuoteUnavailable)?;
+        if quote.provider_generation != entry.generation
+            || entry
+                .session
+                .as_ref()
+                .is_none_or(|session| session.provider_generation != entry.generation)
+        {
+            return Err(RejectReason::QuoteUnavailable);
+        }
+        super::gating::fresh_quote(now, quote.received_unix_nanos, class, policy)
+    }
+
     pub(crate) fn observation(&self, id: &InstrumentId) -> Option<SimulatedMarketObservation> {
         let entry = self.entries.get(id)?;
         let quote = entry.quote.as_ref()?;

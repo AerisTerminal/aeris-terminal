@@ -47,6 +47,7 @@ pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
         database_path: std::path::PathBuf::from(":memory:"),
         retention: aeris_trading_runtime::TradingRetention::default(),
         clock: std::sync::Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
+        execution: aeris_trading_runtime::ExecutionPolicy::default(),
     })
     .expect("test trading service starts")
 }
@@ -3747,6 +3748,94 @@ struct ChartOrderFixture {
     directory: std::path::PathBuf,
 }
 
+struct ChartFeedSink;
+
+impl aeris_trading::market::QuoteInterestSink for ChartFeedSink {
+    fn set_interest(
+        &self,
+        _interest: aeris_trading::market::QuoteInterest,
+    ) -> Result<(), aeris_trading::market::MarketFeedError> {
+        Ok(())
+    }
+}
+
+fn attach_chart_test_feed(
+    service: &aeris_trading_runtime::TradingService,
+    instrument_id: &aeris_instruments::InstrumentId,
+) {
+    use aeris_trading::market::{
+        FeedState, InstrumentSession, InstrumentTerms, MarketFeedEvent, MarketRoute, TradingQuote,
+    };
+    let route = MarketRoute {
+        provider_id: "fixture".into(),
+        instrument_id: instrument_id.clone(),
+        provider_symbol: "BTC".into(),
+        display_symbol: "BTC".into(),
+        venue_id: "fixture".into(),
+        entitlement_id: None,
+        price_scale: 2,
+        quantity_scale: 0,
+    };
+    let feed = service
+        .attach_market_feed(std::sync::Arc::new(ChartFeedSink))
+        .expect("fixture market feed");
+    feed.push(MarketFeedEvent::Terms(InstrumentTerms {
+        route,
+        instrument_class: aeris_instruments::InstrumentClass::CryptoSpot,
+        price_grid: aeris_instruments::PriceGrid::Fixed(
+            aeris_instruments::InstrumentDecimal::try_new(1, 2).expect("tick"),
+        ),
+        point_value: Some(
+            aeris_instruments::InstrumentDecimal::try_new(1, 0).expect("point value"),
+        ),
+        quantity_increment: None,
+        currency: "USD".into(),
+        expiry: None,
+        first_notice: None,
+        last_trade: None,
+        session_hours: Vec::new(),
+        session_generation: 1,
+    }))
+    .expect("terms");
+    feed.push(MarketFeedEvent::Session(InstrumentSession {
+        instrument_id: instrument_id.clone(),
+        provider_generation: 1,
+        phase: aeris_instruments::SessionPhase::AlwaysOpen,
+        source: aeris_instruments::CalendarSourceKind::AlwaysOpen,
+        session_end_unix_nanos: None,
+        next_open_unix_nanos: None,
+    }))
+    .expect("session");
+    feed.push(MarketFeedEvent::Feed {
+        instrument_id: instrument_id.clone(),
+        state: FeedState::Live,
+        provider_generation: 1,
+    })
+    .expect("feed");
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos(),
+    )
+    .expect("timestamp");
+    feed.push(MarketFeedEvent::Quote(TradingQuote {
+        instrument_id: instrument_id.clone(),
+        bid: aeris_trading::FixedPoint::try_new(10_000, 2).expect("bid"),
+        ask: aeris_trading::FixedPoint::try_new(10_025, 2).expect("ask"),
+        bid_size: None,
+        ask_size: None,
+        last: None,
+        provider_id: "fixture".into(),
+        provider_generation: 1,
+        source_sequence: Some(1),
+        exchange_unix_nanos: None,
+        received_unix_nanos: now,
+    }))
+    .expect("quote");
+    service.status().expect("fixture facts applied");
+}
+
 impl ChartOrderFixture {
     fn start(name: &str) -> Self {
         use aeris_instruments::{
@@ -3767,6 +3856,7 @@ impl ChartOrderFixture {
             database_path: directory.join("trading.sqlite3"),
             retention: TradingRetention::default(),
             clock: std::sync::Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
+            execution: aeris_trading_runtime::ExecutionPolicy::default(),
         })
         .expect("trading service");
         let instrument_id = InstrumentId::try_new("instrument:fixture:BTC").expect("instrument");
@@ -3797,6 +3887,7 @@ impl ChartOrderFixture {
                 },
             })
             .expect("register instrument");
+        attach_chart_test_feed(&service, &instrument_id);
         let account = aeris_trading::TradingAccountId::try_new("aeris-sim-1").expect("account");
         service
             .register_account(simulated_chart_fixture(account.clone()))

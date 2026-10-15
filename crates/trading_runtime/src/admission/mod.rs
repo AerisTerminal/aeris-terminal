@@ -1,11 +1,11 @@
 use super::{
-    AccountEnvironment, Arc, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE, FixedPoint,
+    AccountEnvironment, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE, FixedPoint,
     MAXIMUM_COPY_DISPATCHES, MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order,
     OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderType, PlaceOrder,
-    PlaceProtectiveOrder, PracticeMarketSession, ProtectiveOrder, ProtectiveOrderRole, Receiver,
-    TradeCopyDispatch, TradingAccount, TradingAccountId, TradingCore, TradingInstrument,
-    VenueRequest, VenueRoute, check_quantity_increment, mirrored_client_order_id, mpsc,
-    multiply_quantity, order_acceptance_detail, venue,
+    PlaceProtectiveOrder, ProtectiveOrder, ProtectiveOrderRole, Receiver, TradeCopyDispatch,
+    TradingAccount, TradingAccountId, TradingCore, TradingInstrument, VenueRequest, VenueRoute,
+    check_quantity_increment, mirrored_client_order_id, mpsc, multiply_quantity,
+    order_acceptance_detail, venue,
 };
 
 impl TradingCore {
@@ -190,6 +190,8 @@ impl TradingCore {
     ) {
         self.state.accounts.remove(account_id);
         self.state.orders.remove_account(account_id);
+        self.eligible_after
+            .retain(|order_id, _| !account_order_ids.contains(order_id.as_str()));
         self.state
             .order_events
             .retain(|event| !account_order_ids.contains(event.order_id.as_str()));
@@ -350,6 +352,8 @@ impl TradingCore {
         self.store.insert_order(&order, &event, sequence + 1)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
+        self.eligible_after
+            .insert(order.id.clone(), self.command_now);
         self.state.orders.insert(order.id.clone(), order.clone());
         self.bump_revision()?;
         Ok(order)
@@ -396,40 +400,14 @@ impl TradingCore {
             .insert_protective_order(&order, &event, &protective, sequence + 1)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
+        self.eligible_after
+            .insert(order.id.clone(), self.command_now);
         self.state.orders.insert(order.id.clone(), order.clone());
         self.state
             .protective_orders
             .insert(protective.client_order_id.clone(), protective);
         self.bump_revision()?;
         Ok(order)
-    }
-
-    pub(super) fn require_practice_market_session(
-        &self,
-        instrument: &TradingInstrument,
-        now_unix_nanos: i64,
-    ) -> Result<bool, String> {
-        self.practice_market_session
-            .as_ref()
-            .map_or(Ok(false), |session| {
-                session(
-                    &instrument.contract.provenance.provider_id,
-                    instrument.instrument_id.as_str(),
-                    &instrument.contract.provenance.provider_symbol,
-                    now_unix_nanos,
-                )
-            })
-    }
-
-    pub(super) fn install_practice_market_session(
-        &mut self,
-        session: Arc<PracticeMarketSession>,
-    ) -> Result<(), String> {
-        if self.practice_market_session.is_some() {
-            return Err("Practice market session checker is already installed".into());
-        }
-        self.practice_market_session = Some(session);
-        Ok(())
     }
 
     pub(super) fn prepare_single_order(
@@ -450,18 +428,20 @@ impl TradingCore {
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
         let account_currency = account.currency.clone();
+        let instrument = self
+            .state
+            .instruments
+            .get(&command.instrument_id)
+            .ok_or_else(|| "trading instrument is not registered".to_string())?
+            .clone();
+        self.check_practice_market(&instrument)
+            .map_err(|reason| reason.to_string())?;
         let risk_warnings = if enforce_risk {
             self.evaluate_order_risk(&command)?.warnings
         } else {
             self.validate_managed_exit(&command)?;
             Vec::new()
         };
-        let instrument = self
-            .state
-            .instruments
-            .get(&command.instrument_id)
-            .ok_or_else(|| "trading instrument is not registered".to_string())?;
-        self.require_practice_market_session(instrument, self.command_now)?;
         if instrument.contract.currency != account_currency {
             return Err("Practice contract currency differs from the account currency".to_string());
         }
@@ -474,7 +454,7 @@ impl TradingCore {
         {
             return Err("order scales do not match the instrument".to_string());
         }
-        check_quantity_increment(instrument, command.quantity)?;
+        check_quantity_increment(&instrument, command.quantity)?;
         if self
             .state
             .orders

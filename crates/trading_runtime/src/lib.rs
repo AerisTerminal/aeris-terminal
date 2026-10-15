@@ -34,11 +34,7 @@ pub(crate) use service::Command;
 #[cfg(test)]
 pub(crate) use std::{
     collections::BTreeMap,
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Mutex, Weak, atomic::AtomicBool, mpsc},
     time::Duration,
 };
 pub(crate) use std::{path::PathBuf, sync::mpsc::Receiver};

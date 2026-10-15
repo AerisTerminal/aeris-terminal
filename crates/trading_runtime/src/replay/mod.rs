@@ -16,6 +16,7 @@ impl ReplayHarness {
             &configuration.database_path,
             configuration.retention.validate()?,
             configuration.clock.clone(),
+            configuration.execution,
             Weak::new(),
             Arc::new(crate::core::market::feed::MarketFeedInbox::new(
                 mpsc::sync_channel(1).0,

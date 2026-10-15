@@ -265,7 +265,6 @@ enum Command {
     Status(Reply<MarketServiceStatus>),
     #[cfg(feature = "probe")]
     ProbeFailWebSocket(u8, Reply<()>),
-    InstalledInstrument(String, String, Reply<Option<InstallProviderInstrument>>),
     BrokerAuthorizationChanged(&'static str, bool, Reply<()>),
     AvailableStreams(String, StreamRequirements, Reply<StreamRequirements>),
     Attach(ClientId, Reply<()>),

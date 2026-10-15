@@ -8,7 +8,9 @@ use core::fmt;
 use std::error::Error;
 
 pub mod market;
+pub mod reject;
 pub mod venue;
+pub use reject::RejectReason;
 
 /// Maximum decimal scale accepted by canonical trading values.
 pub const MAXIMUM_DECIMAL_SCALE: u8 = 18;

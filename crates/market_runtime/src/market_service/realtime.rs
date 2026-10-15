@@ -2423,13 +2423,26 @@ impl Coordinator<'_> {
                 let phase = self
                     .calendar
                     .phase(&instrument.instrument_id, received.div_euclid(1_000_000));
-                if let Some(state) = self
-                    .quotes
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .update(key, &route, quote, received, phase)
+                let (changed_key, current) = {
+                    let mut quotes = self
+                        .quotes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let changed_key = quotes
+                        .latest(&key)
+                        .is_none_or(|old| old.phase != phase)
+                        .then(|| key.clone());
+                    (
+                        changed_key,
+                        quotes.update(key, &route, quote, received, phase),
+                    )
+                };
+                if let Some(state) = current
                     && self.trading_feed.attached()
                 {
+                    if let Some(key) = changed_key {
+                        self.publish_trading_session(&key);
+                    }
                     self.trading_feed
                         .publish(aeris_trading::market::MarketFeedEvent::Quote(state.quote));
                 }

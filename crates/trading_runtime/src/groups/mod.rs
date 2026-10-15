@@ -133,6 +133,8 @@ impl TradingCore {
             .insert_order_and_managed_bracket(&entry, &event, &bracket, sequence + 1)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
+        self.eligible_after
+            .insert(entry.id.clone(), self.command_now);
         self.state.orders.insert(entry.id.clone(), entry);
         self.state
             .managed_brackets
@@ -517,6 +519,8 @@ impl TradingCore {
         self.state.next_sequence = armed.next_sequence;
         for (order, event) in armed.children {
             self.state.order_events.push_back(event);
+            self.eligible_after
+                .insert(order.id.clone(), order.submitted_unix_nanos);
             self.state.orders.insert(order.id.clone(), order);
         }
         self.state

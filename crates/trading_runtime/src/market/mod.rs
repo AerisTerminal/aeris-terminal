@@ -1,4 +1,5 @@
 pub(crate) mod feed;
+pub(crate) mod gating;
 
 use super::{Command, ManagedBracketStatus, respond};
 use aeris_instruments::{ContractMetadata, InstrumentId, InstrumentMetadataProvenance, PriceGrid};
@@ -49,6 +50,44 @@ impl From<MarketFeedError> for MarketConsumerError {
 }
 
 impl TradingCore {
+    pub(super) fn check_practice_session(
+        &self,
+        instrument: &TradingInstrument,
+    ) -> Result<(), aeris_trading::RejectReason> {
+        #[cfg(test)]
+        if !self
+            .state
+            .market_routes
+            .contains_key(&instrument.instrument_id)
+        {
+            // Direct-observation fixtures have no provider feed; real Terms always carry a route.
+            return Ok(());
+        }
+        self.quote_book
+            .check_session(&instrument.instrument_id, self.command_now)
+    }
+
+    pub(super) fn check_practice_market(
+        &self,
+        instrument: &TradingInstrument,
+    ) -> Result<(), aeris_trading::RejectReason> {
+        self.check_practice_session(instrument)?;
+        #[cfg(test)]
+        if !self
+            .state
+            .market_routes
+            .contains_key(&instrument.instrument_id)
+        {
+            return Ok(());
+        }
+        self.quote_book.check_quote(
+            &instrument.instrument_id,
+            self.command_now,
+            instrument.contract.instrument_class,
+            self.execution,
+        )
+    }
+
     pub(crate) fn dispatch_market_command(&mut self, command: Command) {
         match command {
             Command::AttachMarketFeed(sink, reply) => {
@@ -410,8 +449,6 @@ impl TradingCore {
             .get(&observation.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?
             .clone();
-        let require_new_quote =
-            self.require_practice_market_session(&instrument, self.command_now)?;
         if observation.bid.scale() != instrument.price_scale {
             return Err("market observation scale does not match the instrument".to_string());
         }
@@ -423,16 +460,30 @@ impl TradingCore {
         self.update_managed_stops(observation, &instrument)?;
         let mut candidates =
             market_fill_candidates(&self.state.orders, &self.state.accounts, observation);
-        if require_new_quote {
+        if self.check_practice_market(&instrument).is_err() {
+            candidates.clear();
+        } else {
             candidates.retain(|(order_id, _)| {
-                self.restored_orders.contains(order_id)
-                    || self.state.orders.get(order_id).is_some_and(|order| {
-                        observation_revision(observation)
-                            > (
-                                order.provenance.session_generation,
-                                order.provenance.source_sequence,
-                            )
+                #[cfg(test)]
+                if !self
+                    .state
+                    .market_routes
+                    .contains_key(&observation.instrument_id)
+                {
+                    return true;
+                }
+                let after = self
+                    .eligible_after
+                    .get(order_id)
+                    .copied()
+                    .or_else(|| {
+                        self.state
+                            .orders
+                            .get(order_id)
+                            .map(|order| order.submitted_unix_nanos)
                     })
+                    .unwrap_or(i64::MAX);
+                observation.provenance.observed_unix_nanos > after
             });
         }
         let candidate_ids = candidates

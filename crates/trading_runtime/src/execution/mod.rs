@@ -54,6 +54,7 @@ impl TradingCore {
         self.state
             .orders
             .insert(cancelled.id.clone(), cancelled.clone());
+        self.eligible_after.remove(&cancelled.id);
         if reconcile_bracket {
             self.reconcile_managed_cancellation(client_order_id)?;
         }
@@ -169,8 +170,8 @@ impl TradingCore {
         self.store.modify_order(&modified, &event, sequence + 1)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
-        // The new provenance comes from this process's feed, so the order waits for a newer quote.
-        self.restored_orders.remove(&modified.id);
+        self.eligible_after
+            .insert(modified.id.clone(), self.command_now);
         self.state
             .orders
             .insert(modified.id.clone(), modified.clone());

@@ -23,6 +23,7 @@ use groups::{planned_leg, protection};
 mod broker;
 
 use self::market::feed::{MarketFeedInbox, QuoteBook};
+pub use self::market::gating::ExecutionPolicy;
 use crate::book::OrderBook;
 pub use crate::copier::{
     MAXIMUM_COPIER_TARGETS, TradeCopierConfig, TradeCopierTarget, TradeCopyDispatch,
@@ -187,6 +188,7 @@ pub struct TradingServiceConfig {
     pub database_path: PathBuf,
     pub retention: TradingRetention,
     pub clock: Arc<dyn clock::Clock>,
+    pub execution: ExecutionPolicy,
 }
 
 /// Fixed-point contract terms retained by the trading owner.
@@ -254,11 +256,6 @@ pub struct SimulatedMarketObservation {
     pub ask: FixedPoint,
     pub provenance: TradingProvenance,
 }
-
-/// Read-only provider calendar check supplied by the market owner. A `true`
-/// result also requires a quote newer than the order's source revision.
-pub type PracticeMarketSession =
-    dyn Fn(&str, &str, &str, i64) -> Result<bool, String> + Send + Sync;
 
 /// User-owned record classes stored by PF7.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -482,13 +479,10 @@ pub(crate) struct TradingCore {
     published_interest: Vec<MarketRoute>,
     interest_revision: u64,
     observation_cursors: BTreeMap<InstrumentId, ObservationCursor>,
-    /// Orders working when the store was opened that this owner has not since modified. Their
-    /// provenance revision was stamped by an earlier process's market feed, whose session
-    /// generations and sequences restart with every process, so it cannot be ordered against
-    /// the current feed: every quote this owner observes is newer than the one they were
-    /// priced from. Bounded by the open orders the store held at startup.
-    restored_orders: BTreeSet<OrderId>,
-    practice_market_session: Option<Arc<PracticeMarketSession>>,
+    /// Owner-local acceptance floor, bounded by `MAXIMUM_OPEN_ORDERS`. On recovery, the
+    /// current wall time fences quotes received before this process started.
+    eligible_after: BTreeMap<OrderId, i64>,
+    execution: ExecutionPolicy,
     venue_outbound: Option<SyncSender<VenueRequest>>,
     venue_inbox: Weak<VenueInbox>,
     venue_ingestion: u64,
@@ -535,6 +529,10 @@ impl TradingService {
     /// Returns an error when configuration, storage, migration, or worker startup fails.
     pub fn start(config: TradingServiceConfig) -> Result<Self, StoreError> {
         let retention = config.retention.validate()?;
+        let execution = config
+            .execution
+            .validate()
+            .map_err(|error| StoreError::Other(error.to_string()))?;
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (started_tx, started_rx) = mpsc::sync_channel(REPLY_CAPACITY);
         let database_path = config.database_path;
@@ -554,6 +552,7 @@ impl TradingService {
                     &database_path,
                     retention,
                     clock,
+                    execution,
                     coordinator_venue_inbox,
                     coordinator_market_feed,
                 );
@@ -653,17 +652,6 @@ impl TradingService {
     /// Returns an error for invalid, duplicate or excessive routes, or owner overload.
     pub fn set_ticket_interest(&self, routes: Vec<MarketRoute>) -> Result<(), String> {
         self.request(|reply| Command::SetTicketInterest(routes, reply))
-    }
-
-    /// Installs the market owner's read-only calendar check before accepting
-    /// provider instruments. The owner rejects duplicate installation.
-    /// # Errors
-    /// Returns an error on duplicate installation or owner overload.
-    pub fn install_practice_market_session(
-        &self,
-        session: Arc<PracticeMarketSession>,
-    ) -> Result<(), String> {
-        self.request(|reply| Command::InstallPracticeMarketSession(session, reply))
     }
 
     /// Submits one order through the authoritative trading command path.
@@ -1165,15 +1153,21 @@ impl TradingCore {
         database_path: &std::path::Path,
         retention: TradingRetention,
         clock: Arc<dyn clock::Clock>,
+        execution: ExecutionPolicy,
         venue_inbox: Weak<VenueInbox>,
         market_feed: Arc<MarketFeedInbox>,
     ) -> Result<Self, StoreError> {
         let mut store = TradingStore::open(database_path, retention)?;
         let state = store.load_state().map_err(StoreError::Other)?;
-        let restored_orders = state
+        let eligible_after = state
             .orders
             .open_orders()
-            .map(|order| order.id.clone())
+            .map(|order| {
+                (
+                    order.id.clone(),
+                    clock.wall_unix_nanos().max(order.submitted_unix_nanos),
+                )
+            })
             .collect();
         let mut core = Self {
             store,
@@ -1191,8 +1185,8 @@ impl TradingCore {
             published_interest: Vec::new(),
             interest_revision: 0,
             observation_cursors: BTreeMap::new(),
-            restored_orders,
-            practice_market_session: None,
+            eligible_after,
+            execution,
             venue_outbound: None,
             venue_inbox,
             venue_ingestion: 0,
@@ -1309,9 +1303,6 @@ impl TradingCore {
             | Command::DrainMarketFeed => self.dispatch_market_command(command),
             #[cfg(test)]
             Command::Observe(..) => self.dispatch_market_command(command),
-            Command::InstallPracticeMarketSession(session, reply) => {
-                respond(&reply, self.install_practice_market_session(session));
-            }
             Command::Place(..)
             | Command::PlaceFromMarket(..)
             | Command::PlaceBracket(..)
@@ -1610,6 +1601,10 @@ impl TradingCore {
         &self,
         instrument: &InstrumentId,
     ) -> Result<SimulatedMarketObservation, String> {
+        if let Some(terms) = self.state.instruments.get(instrument) {
+            self.check_practice_session(terms)
+                .map_err(|reason| reason.to_string())?;
+        }
         self.quote_book
             .observation(instrument)
             .ok_or_else(|| "a current live market quote is unavailable".to_string())

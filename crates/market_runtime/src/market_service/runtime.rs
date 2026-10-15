@@ -1045,38 +1045,6 @@ impl MarketService {
         calendar
     }
 
-    /// Checks the installed instrument's calendar before simulated execution.
-    /// Quote freshness remains the trading owner's separate responsibility.
-    /// # Errors
-    /// Rejects a closed or unavailable calendar.
-    pub fn require_practice_market_session(
-        &self,
-        provider_id: &str,
-        instrument_id: &str,
-        provider_symbol: &str,
-        now_unix_nanos: i64,
-    ) -> Result<bool, String> {
-        let installed = self
-            .request(|reply| {
-                Ok(Command::InstalledInstrument(
-                    provider_id.into(),
-                    instrument_id.into(),
-                    reply,
-                ))
-            })?
-            .ok_or_else(|| "Practice market instrument is not installed".to_string())?;
-        if installed.provider_symbol != provider_symbol {
-            return Err("Practice market instrument identity changed".into());
-        }
-        self.calendar_for(&installed, now_unix_nanos)
-            .require_practice_session(
-                &installed.instrument_id,
-                now_unix_nanos.div_euclid(1_000_000),
-            )
-            .map(|()| true)
-            .map_err(|error| error.to_string())
-    }
-
     /// Returns the requested streams supported by the authoritative provider configuration.
     /// # Errors
     /// Returns coordinator failure.

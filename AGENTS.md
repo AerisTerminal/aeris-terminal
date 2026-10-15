@@ -75,6 +75,9 @@ violations and missing verification explicitly, and never describe them as satis
 - The desktop never constructs `SimulatedMarketObservation` or relays order-book prices for execution.
   `trading_runtime` consumes the market feed through its bounded inbox and its owner `QuoteBook`;
   desktop trading actions identify instruments and explicit order instructions, never authoritative quotes.
+- Simulated order admission and fills use the trading owner's verified session and current-generation Live quote.
+  Crypto quotes may be at most 10 seconds old and other classes at most 60 seconds old by default;
+  owner-local `eligible_after` fences resting orders after acceptance and across process restarts.
 - The trading service has one named owner thread whose loop is in `service/owner.rs`; it waits for bounded commands
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by

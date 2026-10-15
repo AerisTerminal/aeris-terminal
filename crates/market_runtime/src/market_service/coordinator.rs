@@ -1252,7 +1252,6 @@ impl Coordinator<'_> {
             command @ Command::ProbeFailWebSocket(..) => self.handle_service_command(command),
             command @ (Command::BrokerAuthorizationChanged(..)
             | Command::AvailableStreams(..)
-            | Command::InstalledInstrument(..)
             | Command::Status(..)
             | Command::Attach(..)
             | Command::Detach(..)
@@ -1335,10 +1334,6 @@ impl Coordinator<'_> {
                     _ => Err("WebSocket probe control unavailable".to_string()),
                 };
                 let _ = reply.send(result);
-            }
-            Command::InstalledInstrument(provider, instrument, reply) => {
-                let installed = self.catalog.get(&(provider, instrument)).cloned();
-                let _ = reply.send(Ok(installed));
             }
             Command::Attach(client_id, reply) => {
                 self.handle_attach(client_id, &reply);
@@ -1449,7 +1444,6 @@ impl Coordinator<'_> {
             | Command::Detach(..)
             | Command::DrainClient(..)
             | Command::AvailableStreams(..)
-            | Command::InstalledInstrument(..)
             | Command::BrokerAuthorizationChanged(..) => {
                 unreachable!("command was routed to the wrong dispatcher")
             }
