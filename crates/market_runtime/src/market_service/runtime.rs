@@ -1336,6 +1336,33 @@ impl MarketService {
         self.request(|reply| Ok(Command::Status(reply)))
     }
 
+    /// Injects a WebSocket-only failure into the active public feed. HTTP catalog
+    /// and history remain untouched. Available only to explicitly built probes.
+    ///
+    /// # Errors
+    /// Returns an error outside validation mode or when the bounded provider
+    /// control channel is unavailable.
+    #[cfg(feature = "probe")]
+    pub fn probe_fail_hyperliquid_websocket(
+        &self,
+        subsequent_connect_failures: u8,
+    ) -> Result<(), String> {
+        if !aeris_platform_runtime::data_root::active_data_root()
+            .is_ok_and(aeris_platform_runtime::data_root::DataRoot::is_validation)
+        {
+            return Err("probe WebSocket injection requires an isolated validation root".into());
+        }
+        if subsequent_connect_failures > 4 {
+            return Err("probe reconnect attempt limit exceeded".into());
+        }
+        self.request(|reply| {
+            Ok(Command::ProbeFailWebSocket(
+                subsequent_connect_failures,
+                reply,
+            ))
+        })
+    }
+
     /// Registers one market consumer owned by an attached client.
     ///
     /// # Errors

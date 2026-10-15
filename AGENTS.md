@@ -121,6 +121,9 @@ the check.
   lifecycle refactors cannot silently drop the baseline.
 - Keep the deterministic market replay scenarios under `market_service/replay/mod.rs`;
   `tools/naming_check` requires their names so lifecycle changes retain replay coverage.
+- Live market probes run only from `tools/aeris_probes` on an isolated validation root with an
+  exclusive instance lock. The optional `probe` feature's bounded Hyperliquid fault control
+  interrupts only its WebSocket; never use a process-wide proxy that blocks catalog HTTP.
 - Coordinator-owned watchdog, history retry and trade-handoff timestamps use the injected
   `market_service::clock::Clock`; direct system time belongs only in `SystemClock`.
 - Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;

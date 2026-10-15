@@ -8,6 +8,7 @@ publish.workspace = true
 
 [features]
 replay = []
+probe = []
 
 [dependencies]
 aeris_contracts = { path = "../contracts" }

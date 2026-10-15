@@ -1,0 +1,23 @@
+[package]
+name = "aeris_probes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "market_lifecycle_probe"
+path = "src/main.rs"
+
+[dependencies]
+aeris_market_runtime = { path = "../../crates/market_runtime", features = ["probe"] }
+aeris_market_engine = { path = "../../crates/market_engine" }
+aeris_market_data = { path = "../../crates/domain/market_data" }
+aeris_instruments = { path = "../../crates/domain/instruments" }
+aeris_platform_runtime = { path = "../../crates/platform_runtime" }
+chrono.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

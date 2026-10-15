@@ -319,6 +319,10 @@ impl ConsumerEvents {
         self.series.clear();
         self.series_overflowed = false;
         self.series.push_back(snapshot);
+        #[cfg(feature = "probe")]
+        {
+            self.maximum_series_depth = self.maximum_series_depth.max(self.series.len());
+        }
     }
 
     pub(super) fn clear_series(&mut self) {
@@ -463,6 +467,10 @@ impl ConsumerEvents {
         }
         self.series
             .push_back(MarketRuntimeEvent::SeriesUpdate(next));
+        #[cfg(feature = "probe")]
+        {
+            self.maximum_series_depth = self.maximum_series_depth.max(self.series.len());
+        }
     }
 }
 

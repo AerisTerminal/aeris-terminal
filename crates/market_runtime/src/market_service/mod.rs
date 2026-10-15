@@ -183,6 +183,28 @@ pub struct MarketServiceStatus {
     pub retained_series: usize,
     pub retained_bars: usize,
     pub approximate_series_bytes: usize,
+    #[cfg(feature = "probe")]
+    pub probe: ProbeStatus,
+}
+
+/// Read-only, bounded coordinator diagnostics compiled only for headless probes.
+#[cfg(feature = "probe")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeStatus {
+    pub hyperliquid_sessions: u64,
+    pub stale_events: u64,
+    pub stale_history: u64,
+    pub maximum_queued_series_updates: usize,
+    pub retry_attempts: Vec<ProbeRetry>,
+}
+
+#[cfg(feature = "probe")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeRetry {
+    pub attempt: u32,
+    pub delay_ms: u64,
+    pub failed_age_ms: u64,
+    pub resumed_age_ms: Option<u64>,
 }
 
 struct MarketRuntime {
@@ -241,6 +263,8 @@ enum Command {
     /// the top of the next coordinator iteration.
     ProviderWake,
     Status(Reply<MarketServiceStatus>),
+    #[cfg(feature = "probe")]
+    ProbeFailWebSocket(u8, Reply<()>),
     InstalledInstrument(String, String, Reply<Option<InstallProviderInstrument>>),
     BrokerAuthorizationChanged(&'static str, bool, Reply<()>),
     AvailableStreams(String, StreamRequirements, Reply<StreamRequirements>),
@@ -734,6 +758,8 @@ struct ConsumerEvents {
     catalog_ready: Option<MarketRuntimeEvent>,
     provider: Option<MarketRuntimeEvent>,
     series: VecDeque<MarketRuntimeEvent>,
+    #[cfg(feature = "probe")]
+    maximum_series_depth: usize,
     /// Set when the series queue could not hold one more distinct bar. The
     /// coordinator resolves it by replacing the whole queue with a covering
     /// snapshot, because dropping the oldest update opens a sequence gap the

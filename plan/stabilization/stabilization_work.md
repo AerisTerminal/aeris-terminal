@@ -458,6 +458,8 @@ Status: in progress
   - `ReplayHarness` drives coordinator commands and scripted registry history/demand through the existing bounded event boundary. Fifteen named scenarios cover 50 alternating selections with late completions, epoch rebind, typed sequence gap, one forming bar, exhausted backfill, overflow, stalls, calendars, backoff, leases and Day3; the private-map sequence-gap test moved to the harness.
   - The sanitized Hyperliquid public candle-shape fixture contains no private fields. Two consecutive replay runs, the four characterization tests and the full workspace gate passed. Existing private-map tests for unrelated behavior remain as complementary coverage, not a second replay implementation.
 - [ ] M3.12 hyperliquid-lifecycle-probe - Live Hyperliquid market lifecycle probe with JSON evidence
+  - Part 1/2: added the workspace `aeris_probes` headless binary, strict isolated-root and locked-run CLI, `aeris.probe.v1` evidence envelope, bounded consumer observation, continuity/quote/paging/session/shutdown checks, and a feature-gated WebSocket-only failure control. The registry records at most 16 exact retry schedules and attempted times; HTTP catalog/history remain available during injected failures. Probe-only socket faults must not use process-wide proxies (also recorded in `AGENTS.md`).
+  - Four tool tests and the WebSocket isolation unit test pass, as do fmt, strict workspace Clippy, workspace tests and naming. A dirty-source live preflight reached every market check with 0 gaps for 1m/1h/1d, one session through switches, one-epoch forced recovery, a live quote, older contiguous pages and a closed 1m bar; as designed its `source_clean` check failed. The clean-source live run and fresh-default GUI pass belong to part 2; item stays unchecked.
 
 ### M4 trading core
 
@@ -589,6 +591,7 @@ the repo root `AGENTS.md`.
 - Generic market-service lifecycle/history/calendar/quote/outbox/coordinator/realtime/runtime/publication source contains no provider-id literals, including after test modules; provider replay aggregation does not live on `ChartInterval` (M3.5, this commit).
 - Provider catalog command/event traffic crosses one bounded `ProviderCatalogChannel`; provider-specific wire commands are translated within its registered channel (M3.6, this commit).
 - The market replay scenario names remain in `market_service/replay/mod.rs` and are checked by `aeris_naming_check` (M3.11, this commit).
+- Market probe fault injection is compiled only under the `probe` feature and interrupts the Hyperliquid WebSocket without affecting catalog HTTP; the probe CLI requires an isolated locked validation root before invoking it (M3.12, this commit).
 
 ## 6. Progress log
 
@@ -653,6 +656,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M3.10 feat(market): add transactional runtime chart selection (M3.10 part 2/3) - direct typed selection and rollback keep old live demand on failure; desktop migration follows.
 - 2026-10-15 M3.10 feat(market): resolve chart selections inside the coordinator (M3.10 part 3/3) - fenced catalog callbacks, typed outbox outcomes and one-invoke desktop picks; full gate and isolated fresh-default/ten-switch checks passed.
 - 2026-10-15 M3.11 test(market): replay market lifecycle through scripted registry - 50-switch late-completion replay, recovery, exhaustion and calendar scenarios passed twice; naming and full workspace gate green.
+- 2026-10-15 M3.12 feat(market): add isolated lifecycle probe and WebSocket fault control (M3.12 part 1/2) - complete headless probe and bounded retry diagnostics passed focused and full gates; clean-source live evidence and GUI check follow.
 
 ## 7. Known gaps / deferred
 

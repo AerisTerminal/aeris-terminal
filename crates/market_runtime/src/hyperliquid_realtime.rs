@@ -103,6 +103,10 @@ pub(crate) enum HyperliquidRealtimeControl {
     Connect(ProviderEventSink),
     Subscribe(HyperliquidDemand),
     Stop,
+    #[cfg(feature = "probe")]
+    FailWebSocket {
+        subsequent_connect_failures: u8,
+    },
 }
 
 pub(crate) enum HyperliquidCatalogControl {
@@ -548,6 +552,8 @@ pub(crate) fn run(
 ) {
     let mut demand = HyperliquidDemand::default();
     let mut pending_epoch = None;
+    #[cfg(feature = "probe")]
+    let mut forced_failures = 0;
     loop {
         if stop.load(Ordering::Acquire) {
             return;
@@ -558,6 +564,8 @@ pub(crate) fn run(
                 Ok(HyperliquidRealtimeControl::Subscribe(next)) => demand = next,
                 Ok(HyperliquidRealtimeControl::Stop)
                 | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                #[cfg(feature = "probe")]
+                Ok(HyperliquidRealtimeControl::FailWebSocket { .. }) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
             continue;
@@ -580,7 +588,12 @@ pub(crate) fn run(
         if wake.overflowed("hyperliquid", generation) {
             continue;
         }
-        match MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
+        let connection = connect_market_socket(
+            stop,
+            #[cfg(feature = "probe")]
+            &mut forced_failures,
+        );
+        match connection {
             Ok((mut socket, _shutdown)) => {
                 diagnostic!("Aeris Hyperliquid market session opened epoch={generation}");
                 match run_session(
@@ -603,6 +616,10 @@ pub(crate) fn run(
                         }
                         diagnostic!("Aeris Hyperliquid realtime reconnecting: {reason}");
                     }
+                    #[cfg(feature = "probe")]
+                    SessionExit::ProbeFailure(count) => {
+                        forced_failures = count;
+                    }
                 }
             }
             Err(error) => {
@@ -621,9 +638,6 @@ pub(crate) fn run(
                 }
             }
         }
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
         if emit(
             events,
             HyperliquidRealtimeEvent::Disconnected(generation),
@@ -634,6 +648,19 @@ pub(crate) fn run(
             return;
         }
     }
+}
+
+fn connect_market_socket(
+    stop: &Arc<AtomicBool>,
+    #[cfg(feature = "probe")] forced_failures: &mut u8,
+) -> Result<(MarketSocket, aeris_platform_runtime::MarketSocketShutdown), String> {
+    #[cfg(feature = "probe")]
+    if *forced_failures > 0 {
+        *forced_failures -= 1;
+        return Err("probe WebSocket-only connection failure".into());
+    }
+    MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop)
+        .map_err(|error| error.to_string())
 }
 
 fn drain_controls(
@@ -649,6 +676,8 @@ fn drain_controls(
             }
             HyperliquidRealtimeControl::Connect(sink) => *pending_epoch = Some(sink),
             HyperliquidRealtimeControl::Stop => *pending_epoch = None,
+            #[cfg(feature = "probe")]
+            HyperliquidRealtimeControl::FailWebSocket { .. } => {}
         }
     }
 }
@@ -658,6 +687,8 @@ enum SessionExit {
     Reconnect(String),
     Parked,
     Closed,
+    #[cfg(feature = "probe")]
+    ProbeFailure(u8),
 }
 
 /// Publishes without blocking; overflow rejects the pending catalog requests.
@@ -848,7 +879,19 @@ fn run_session(
             return SessionExit::Closed;
         }
         // Newest demand wins; Stop parks the socket until demand returns.
-        let (changed, parked) = drain_session_controls(controls, demand);
+        #[cfg(feature = "probe")]
+        let mut probe_failure = None;
+        let (changed, parked) = drain_session_controls(
+            controls,
+            demand,
+            #[cfg(feature = "probe")]
+            &mut probe_failure,
+        );
+        #[cfg(feature = "probe")]
+        if let Some(count) = probe_failure {
+            socket.close();
+            return SessionExit::ProbeFailure(count);
+        }
         if parked {
             socket.close();
             return SessionExit::Parked;
@@ -914,6 +957,7 @@ fn run_session(
 fn drain_session_controls(
     controls: &Receiver<HyperliquidRealtimeControl>,
     demand: &mut HyperliquidDemand,
+    #[cfg(feature = "probe")] probe_failure: &mut Option<u8>,
 ) -> (bool, bool) {
     let mut changed = false;
     let mut parked = false;
@@ -926,6 +970,10 @@ fn drain_session_controls(
             }
             HyperliquidRealtimeControl::Connect(_) => {}
             HyperliquidRealtimeControl::Stop => parked = true,
+            #[cfg(feature = "probe")]
+            HyperliquidRealtimeControl::FailWebSocket {
+                subsequent_connect_failures,
+            } => *probe_failure = Some(subsequent_connect_failures),
         }
     }
     (changed, parked)
@@ -1953,15 +2001,27 @@ mod tests {
     fn subscriptions_only_change_on_new_demand_and_last_control_wins() {
         let (sender, receiver) = std::sync::mpsc::sync_channel(4);
         let mut demand = HyperliquidDemand::default();
+        #[cfg(feature = "probe")]
+        let mut probe_failure = None;
         assert_eq!(
-            drain_session_controls(&receiver, &mut demand),
+            drain_session_controls(
+                &receiver,
+                &mut demand,
+                #[cfg(feature = "probe")]
+                &mut probe_failure
+            ),
             (false, false)
         );
         sender
             .send(HyperliquidRealtimeControl::Subscribe(demand.clone()))
             .unwrap();
         assert_eq!(
-            drain_session_controls(&receiver, &mut demand),
+            drain_session_controls(
+                &receiver,
+                &mut demand,
+                #[cfg(feature = "probe")]
+                &mut probe_failure
+            ),
             (false, false)
         );
         let next = HyperliquidDemand {
@@ -1973,15 +2033,51 @@ mod tests {
             .send(HyperliquidRealtimeControl::Subscribe(next.clone()))
             .unwrap();
         assert_eq!(
-            drain_session_controls(&receiver, &mut demand),
+            drain_session_controls(
+                &receiver,
+                &mut demand,
+                #[cfg(feature = "probe")]
+                &mut probe_failure
+            ),
             (true, false)
         );
         assert_eq!(demand, next);
         sender.send(HyperliquidRealtimeControl::Stop).unwrap();
         assert_eq!(
-            drain_session_controls(&receiver, &mut demand),
+            drain_session_controls(
+                &receiver,
+                &mut demand,
+                #[cfg(feature = "probe")]
+                &mut probe_failure
+            ),
             (false, true)
         );
+    }
+
+    #[cfg(feature = "probe")]
+    #[test]
+    fn probe_failure_is_websocket_only_and_does_not_clear_demand() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let mut demand = HyperliquidDemand {
+            quotes: vec![HyperliquidInstrumentDemand::default()],
+            ..Default::default()
+        };
+        sender
+            .send(HyperliquidRealtimeControl::FailWebSocket {
+                subsequent_connect_failures: 2,
+            })
+            .expect("probe control");
+        let mut failures = None;
+        assert_eq!(
+            drain_session_controls(&receiver, &mut demand, &mut failures),
+            (false, false)
+        );
+        assert_eq!(failures, Some(2));
+        assert_eq!(demand.quotes.len(), 1);
+        let mut remaining = 1;
+        let stop = Arc::new(AtomicBool::new(false));
+        assert!(connect_market_socket(&stop, &mut remaining).is_err());
+        assert_eq!(remaining, 0);
     }
 
     #[test]

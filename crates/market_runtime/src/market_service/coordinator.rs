@@ -1223,6 +1223,8 @@ impl Coordinator<'_> {
             Command::SelectAndDemand(client_id, request, reply) => {
                 let _ = reply.send(self.begin_selection(client_id, request));
             }
+            #[cfg(feature = "probe")]
+            command @ Command::ProbeFailWebSocket(..) => self.handle_service_command(command),
             command @ (Command::BrokerAuthorizationChanged(..)
             | Command::AvailableStreams(..)
             | Command::InstalledInstrument(..)
@@ -1297,6 +1299,17 @@ impl Coordinator<'_> {
             }
             Command::Status(reply) => {
                 let _ = reply.send(Ok(self.status()));
+            }
+            #[cfg(feature = "probe")]
+            Command::ProbeFailWebSocket(count, reply) => {
+                let result = match self
+                    .provider_registry
+                    .probe_fail_websocket(super::HYPERLIQUID_DESCRIPTOR.id, count)
+                {
+                    Ok(true) => Ok(()),
+                    _ => Err("WebSocket probe control unavailable".to_string()),
+                };
+                let _ = reply.send(result);
             }
             Command::InstalledInstrument(provider, instrument, reply) => {
                 let installed = self.catalog.get(&(provider, instrument)).cloned();
@@ -1400,6 +1413,8 @@ impl Coordinator<'_> {
             Command::Drain(client_id, consumer_id, reply) => {
                 self.handle_drain(client_id, consumer_id, &reply);
             }
+            #[cfg(feature = "probe")]
+            Command::ProbeFailWebSocket(..) => unreachable!("probe control is a service command"),
             Command::Request(..)
             | Command::SelectAndDemand(..)
             | Command::HistoryCompleted(..)
@@ -2186,6 +2201,24 @@ impl Coordinator<'_> {
             retained_series: metrics.stored_series,
             retained_bars: metrics.stored_bars,
             approximate_series_bytes: metrics.approximate_series_bytes,
+            #[cfg(feature = "probe")]
+            probe: {
+                let (stale_events, stale_history) = self.provider_epochs.stale_counts();
+                super::ProbeStatus {
+                    hyperliquid_sessions: self
+                        .provider_registry
+                        .successful_connections(super::HYPERLIQUID_DESCRIPTOR.id),
+                    stale_events,
+                    stale_history,
+                    maximum_queued_series_updates: self
+                        .events
+                        .values()
+                        .map(|events| events.maximum_series_depth)
+                        .max()
+                        .unwrap_or(0),
+                    retry_attempts: self.provider_registry.probe_retries(self.clock.monotonic()),
+                }
+            },
         }
     }
 

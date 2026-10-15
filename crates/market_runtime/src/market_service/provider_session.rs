@@ -27,6 +27,13 @@ pub(super) enum ProviderSessionError {
 }
 
 pub(super) trait ProviderSession: Send {
+    #[cfg(feature = "probe")]
+    fn probe_fail_websocket(
+        &self,
+        _subsequent_connect_failures: u8,
+    ) -> Result<bool, ProviderSessionError> {
+        Err(ProviderSessionError::Unavailable)
+    }
     fn adapter_retries_transport(&self) -> bool {
         false
     }
@@ -71,12 +78,25 @@ pub(super) struct ProviderConnection {
     pub(super) session: Box<dyn ProviderSession>,
     last_demand: Option<ProviderDemand>,
     online_since: Option<Instant>,
+    #[cfg(feature = "probe")]
+    successful_connections: u64,
 }
 
 pub(super) struct ProviderRegistry {
     sequence: EpochSequence<ProviderTag>,
     connections: BTreeMap<&'static str, ProviderConnection>,
     controls: BTreeMap<&'static str, super::ProviderControlState>,
+    #[cfg(feature = "probe")]
+    retry_records: std::collections::VecDeque<RetryRecord>,
+}
+
+#[cfg(feature = "probe")]
+struct RetryRecord {
+    provider: String,
+    failed_at: Instant,
+    attempt: u32,
+    delay: std::time::Duration,
+    resumed_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +128,18 @@ fn try_control<T>(sender: &SyncSender<T>, control: T) -> Result<bool, ProviderSe
 }
 
 impl ProviderSession for HyperliquidSession {
+    #[cfg(feature = "probe")]
+    fn probe_fail_websocket(
+        &self,
+        subsequent_connect_failures: u8,
+    ) -> Result<bool, ProviderSessionError> {
+        try_control(
+            &self.controls,
+            HyperliquidRealtimeControl::FailWebSocket {
+                subsequent_connect_failures,
+            },
+        )
+    }
     fn connect(
         &self,
         epoch: Epoch<ProviderTag>,
@@ -340,6 +372,18 @@ impl ProviderSession for TastytradeSession {
 }
 
 impl ProviderRegistry {
+    #[cfg(feature = "probe")]
+    pub(super) fn probe_fail_websocket(
+        &self,
+        id: &str,
+        count: u8,
+    ) -> Result<bool, ProviderSessionError> {
+        self.connections
+            .get(id)
+            .ok_or(ProviderSessionError::Unavailable)?
+            .session
+            .probe_fail_websocket(count)
+    }
     pub(super) fn catalog_connect_ids(&self) -> Vec<&'static str> {
         self.connections
             .iter()
@@ -367,6 +411,8 @@ impl ProviderRegistry {
             sequence: EpochSequence::default(),
             connections: BTreeMap::new(),
             controls: BTreeMap::new(),
+            #[cfg(feature = "probe")]
+            retry_records: std::collections::VecDeque::new(),
         }
     }
 
@@ -416,6 +462,8 @@ impl ProviderRegistry {
                 session,
                 last_demand: None,
                 online_since: None,
+                #[cfg(feature = "probe")]
+                successful_connections: 0,
             },
         );
     }
@@ -451,6 +499,15 @@ impl ProviderRegistry {
             connection.state = ConnectionState::Connecting;
             connection.last_demand = None;
             connection.online_since = None;
+            #[cfg(feature = "probe")]
+            if let Some(record) = self
+                .retry_records
+                .iter_mut()
+                .rev()
+                .find(|record| record.provider == id && record.resumed_at.is_none())
+            {
+                record.resumed_at = Some(now);
+            }
             Ok(Some(epoch))
         } else {
             Ok(None)
@@ -461,9 +518,21 @@ impl ProviderRegistry {
         if let Some(connection) = self.connections.get_mut(id)
             && connection.epoch == Some(epoch)
         {
+            #[cfg(feature = "probe")]
+            if !matches!(connection.state, ConnectionState::Online) {
+                connection.successful_connections =
+                    connection.successful_connections.saturating_add(1);
+            }
             connection.state = ConnectionState::Online;
             connection.online_since = Some(now);
         }
+    }
+
+    #[cfg(feature = "probe")]
+    pub(super) fn successful_connections(&self, id: &str) -> u64 {
+        self.connections
+            .get(id)
+            .map_or(0, |connection| connection.successful_connections)
     }
 
     pub(super) fn rebind(
@@ -515,7 +584,43 @@ impl ProviderRegistry {
                 RetryDecision::Wait(delay) => ConnectionState::RetryAt(now + delay),
                 RetryDecision::Failed { .. } | RetryDecision::Fatal => ConnectionState::Failed,
             };
+            #[cfg(feature = "probe")]
+            if let ConnectionState::RetryAt(at) = connection.state {
+                if self.retry_records.len() == 16 {
+                    self.retry_records.pop_front();
+                }
+                self.retry_records.push_back(RetryRecord {
+                    provider: id.to_owned(),
+                    failed_at: now,
+                    attempt: connection.backoff.attempts(),
+                    delay: at.saturating_duration_since(now),
+                    resumed_at: None,
+                });
+            }
         }
+    }
+
+    #[cfg(feature = "probe")]
+    pub(super) fn probe_retries(&self, now: Instant) -> Vec<super::ProbeRetry> {
+        self.retry_records
+            .iter()
+            .filter(|record| record.provider == "hyperliquid")
+            .map(|record| super::ProbeRetry {
+                attempt: record.attempt,
+                delay_ms: record.delay.as_millis().try_into().unwrap_or(u64::MAX),
+                failed_age_ms: now
+                    .saturating_duration_since(record.failed_at)
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                resumed_age_ms: record.resumed_at.map(|at| {
+                    now.saturating_duration_since(at)
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX)
+                }),
+            })
+            .collect()
     }
 
     pub(super) fn next_retry(&self) -> Option<Instant> {

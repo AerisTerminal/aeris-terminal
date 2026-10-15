@@ -136,7 +136,7 @@ impl ProviderEpochRegistry {
         self.stale_history = self.stale_history.saturating_add(1);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "probe"))]
     pub(super) fn stale_counts(&self) -> (u64, u64) {
         (self.stale_events, self.stale_history)
     }
