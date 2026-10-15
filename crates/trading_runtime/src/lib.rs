@@ -3,6 +3,7 @@
 //! The service owns its bounded command queue, canonical orders/fills/positions, and the one
 //! embedded user-record store. Callers must invoke blocking request methods from background work.
 
+mod book;
 pub mod clock;
 mod copier;
 mod discipline;
@@ -22,6 +23,7 @@ use aeris_trading::{
     OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
     TimeInForce, TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
 };
+use book::OrderBook;
 pub use copier::{MAXIMUM_COPIER_TARGETS, TradeCopierConfig, TradeCopierTarget, TradeCopyDispatch};
 pub use discipline::{
     DisciplineState, FAST_STOP_REENTRY_NANOS, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD,
@@ -1065,8 +1067,7 @@ impl TradingCore {
         let state = store.load_state().map_err(StoreError::Other)?;
         let restored_orders = state
             .orders
-            .values()
-            .filter(|order| order.status.is_open())
+            .open_orders()
             .map(|order| order.id.clone())
             .collect();
         let mut core = Self {
@@ -1406,12 +1407,7 @@ impl TradingCore {
             schema_version: SCHEMA_VERSION,
             revision: self.state.revision,
             account_count: self.state.accounts.len(),
-            working_order_count: self
-                .state
-                .orders
-                .values()
-                .filter(|order| order.status.is_open())
-                .count(),
+            working_order_count: self.state.orders.open_count(),
             position_count: self.state.positions.len(),
             retention: self.retention,
             venue_error: self.venue_error.clone(),
@@ -1598,9 +1594,7 @@ impl TradingCore {
         managed_bracket_ids: &[String],
     ) {
         self.state.accounts.remove(account_id);
-        self.state
-            .orders
-            .retain(|_, order| &order.account_id != account_id);
+        self.state.orders.remove_account(account_id);
         self.state
             .order_events
             .retain(|event| !account_order_ids.contains(event.order_id.as_str()));
@@ -1905,8 +1899,7 @@ impl TradingCore {
         let order = self
             .state
             .orders
-            .values()
-            .find(|order| order.client_order_id == *client_order_id)
+            .by_client(client_order_id)
             .cloned()
             .ok_or_else(|| "order client identifier is not registered".to_string())?;
         match self.route(&order.account_id)? {
@@ -1988,8 +1981,7 @@ impl TradingCore {
         let order = self
             .state
             .orders
-            .values()
-            .find(|order| order.client_order_id == command.client_order_id)
+            .by_client(&command.client_order_id)
             .cloned()
             .ok_or_else(|| "order client identifier is not registered".to_string())?;
         let account = self
@@ -2080,12 +2072,13 @@ impl TradingCore {
             self.route(account_id)?;
         }
         // Globally, accounts Aeris cannot trade (data-only live accounts) are skipped.
-        let candidates = self
-            .state
-            .orders
-            .values()
-            .filter(|order| order.status.is_open())
-            .filter(|order| account_id.is_none_or(|account_id| &order.account_id == account_id))
+        let open_orders = if let Some(account_id) = account_id {
+            self.state.orders.open_for_account(account_id)
+        } else {
+            self.state.orders.open_orders().collect()
+        };
+        let candidates = open_orders
+            .into_iter()
             .filter_map(|order| {
                 self.route(&order.account_id)
                     .ok()
@@ -2117,23 +2110,13 @@ impl TradingCore {
                 if command.client_order_id.as_str().len() > 50 {
                     return Err("cTrader ClientOrderId must be at most 50 characters".into());
                 }
-                if let Some(existing) = self
-                    .state
-                    .orders
-                    .values()
-                    .find(|order| order.client_order_id == command.client_order_id)
-                {
+                if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
                     return Ok(existing.clone());
                 }
                 return self.place_broker_order(command);
             }
         }
-        if let Some(existing) = self
-            .state
-            .orders
-            .values()
-            .find(|order| order.client_order_id == command.client_order_id)
-        {
+        if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
             return Ok(existing.clone());
         }
         let copier = self
@@ -2345,8 +2328,7 @@ impl TradingCore {
             .min_by_key(|(_, bracket)| {
                 self.state
                     .orders
-                    .values()
-                    .find(|order| order.client_order_id == bracket.entry_client_order_id)
+                    .by_client(&bracket.entry_client_order_id)
                     .map_or(i64::MIN, |order| order.submitted_unix_nanos)
             })
             .map(|(id, _)| id.clone())
@@ -2365,12 +2347,7 @@ impl TradingCore {
         command: PlaceOrder,
         enforce_risk: bool,
     ) -> Result<Order, String> {
-        if let Some(existing) = self
-            .state
-            .orders
-            .values()
-            .find(|order| order.client_order_id == command.client_order_id)
-        {
+        if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
             return Ok(existing.clone());
         }
         let sequence = self.state.next_sequence;
@@ -2387,12 +2364,7 @@ impl TradingCore {
         if self.route(&command.order.account_id)? != VenueRoute::Simulated {
             return Err("managed protective orders are unavailable for broker accounts".into());
         }
-        if let Some(existing) = self
-            .state
-            .orders
-            .values()
-            .find(|order| order.client_order_id == command.order.client_order_id)
-        {
+        if let Some(existing) = self.state.orders.by_client(&command.order.client_order_id) {
             let role_matches = self
                 .state
                 .protective_orders
@@ -2508,9 +2480,7 @@ impl TradingCore {
         if self
             .state
             .orders
-            .values()
-            .filter(|order| order.status.is_open())
-            .count()
+            .open_count()
             .saturating_add(additional_open_orders)
             >= MAXIMUM_OPEN_ORDERS
         {
@@ -2840,7 +2810,7 @@ impl TradingCore {
                 .or_default()
                 .0 += i128::from(position.side.sign()) * i128::from(quantity.units());
         }
-        for order in self.state.orders.values().filter(|order| {
+        for order in self.state.orders.open_orders().filter(|order| {
             &order.account_id == account_id
                 && order.status.is_open()
                 && self.protection_role(&order.client_order_id).is_none()
@@ -4096,8 +4066,7 @@ impl TradingCore {
     fn order_by_client_id(&self, client_order_id: &ClientOrderId) -> Result<&Order, String> {
         self.state
             .orders
-            .values()
-            .find(|order| order.client_order_id == *client_order_id)
+            .by_client(client_order_id)
             .ok_or_else(|| "managed bracket order disappeared".to_string())
     }
 
@@ -4163,11 +4132,9 @@ impl TradingCore {
         let immediate_or_cancel = self
             .state
             .orders
-            .values()
+            .executable_for(&observation.instrument_id)
             .filter(|order| {
-                order.status.is_executable()
-                    && order.instrument_id == observation.instrument_id
-                    && is_simulated(&self.state.accounts, &order.account_id)
+                is_simulated(&self.state.accounts, &order.account_id)
                     && matches!(
                         order.time_in_force,
                         TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
@@ -5086,17 +5053,13 @@ fn check_quantity_increment(
 /// Orders the touch simulator may fill: executable simulated-account orders on the
 /// observed instrument. Broker orders are filled only by their broker.
 fn market_fill_candidates(
-    orders: &BTreeMap<OrderId, Order>,
+    orders: &OrderBook,
     accounts: &BTreeMap<TradingAccountId, TradingAccount>,
     observation: &SimulatedMarketObservation,
 ) -> Vec<(OrderId, FixedPoint)> {
     orders
-        .values()
-        .filter(|order| {
-            order.status.is_executable()
-                && order.instrument_id == observation.instrument_id
-                && is_simulated(accounts, &order.account_id)
-        })
+        .executable_for(&observation.instrument_id)
+        .filter(|order| is_simulated(accounts, &order.account_id))
         .filter_map(|order| touch_price(order, observation).map(|price| (order.id.clone(), price)))
         .collect()
 }

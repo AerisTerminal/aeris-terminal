@@ -49,8 +49,8 @@ impl TradingCore {
         let oldest_open = self
             .state
             .orders
-            .values()
-            .filter(|order| order.account_id == account.id && order.status.is_open())
+            .open_orders()
+            .filter(|order| order.account_id == account.id)
             .map(|order| order.submitted_unix_nanos)
             .min();
         let latest_deal = self
@@ -126,10 +126,9 @@ impl TradingCore {
 
     fn broker_order_id(&self, order_id: &OrderId) -> Option<String> {
         self.state
-            .broker_order_ids
-            .iter()
-            .find(|(_, owner)| *owner == order_id)
-            .map(|(broker, _)| broker.clone())
+            .orders
+            .broker_for_order(order_id)
+            .map(str::to_owned)
     }
 
     pub(crate) fn place_broker_order(&mut self, command: &PlaceOrder) -> Result<Order, String> {
@@ -210,14 +209,7 @@ impl TradingCore {
             return Err("order scales do not match the instrument".into());
         }
         check_quantity_increment(instrument, command.quantity)?;
-        if self
-            .state
-            .orders
-            .values()
-            .filter(|order| order.status.is_open())
-            .count()
-            >= MAXIMUM_OPEN_ORDERS
-        {
+        if self.state.orders.open_count() >= MAXIMUM_OPEN_ORDERS {
             return Err("trading open-order limit reached".into());
         }
         // Every M3.2 check applies to broker orders. The practice rule that the contract
@@ -695,8 +687,8 @@ impl TradingCore {
         let sequence = self.state.next_sequence;
         let bound = self
             .state
-            .broker_order_ids
-            .get(&report.broker_order_id)
+            .orders
+            .broker_owner(&report.broker_order_id)
             .and_then(|order_id| self.state.orders.get(order_id))
             .filter(|order| order.account_id == *account_id)
             .cloned();
@@ -756,11 +748,6 @@ impl TradingCore {
             },
             sequence + 1,
         )?;
-        if mirror.is_some() {
-            self.state
-                .broker_order_ids
-                .insert(report.broker_order_id.clone(), current.id.clone());
-        }
         if let Some(pnl) = realized_pnl {
             self.state.fill_realized_pnl.insert(fill.id.clone(), pnl);
         }
@@ -769,6 +756,11 @@ impl TradingCore {
             .insert(fill.id.clone(), report.broker_position_id.clone());
         self.state.next_sequence = sequence + 1;
         self.state.orders.insert(updated.id.clone(), updated);
+        if mirror.is_some() {
+            self.state
+                .orders
+                .bind_broker(report.broker_order_id.clone(), current.id.clone());
+        }
         self.state.order_events.push_back(event);
         self.state.fills.push_back(fill);
         self.bump_revision()
@@ -984,7 +976,7 @@ impl TradingCore {
     /// The owner order a broker report describes: by its bound broker id, or, before the
     /// first report binds it, by client order id within the same account only.
     fn reported_order(&self, account_id: &TradingAccountId, report: &BrokerOrder) -> Option<Order> {
-        if let Some(order_id) = self.state.broker_order_ids.get(&report.broker_order_id) {
+        if let Some(order_id) = self.state.orders.broker_owner(&report.broker_order_id) {
             return self
                 .state
                 .orders
@@ -995,11 +987,9 @@ impl TradingCore {
         let client = report.client_order_id.as_deref()?;
         self.state
             .orders
-            .values()
-            .find(|order| {
-                order.account_id == *account_id
-                    && order.client_order_id.as_str() == client
-                    && self.broker_order_id(&order.id).is_none()
+            .by_client_str(client)
+            .filter(|order| {
+                order.account_id == *account_id && self.broker_order_id(&order.id).is_none()
             })
             .cloned()
     }
@@ -1017,10 +1007,11 @@ impl TradingCore {
         let Some(current) = self.reported_order(account_id, report) else {
             return Ok(());
         };
-        let binding = !self
+        let binding = self
             .state
-            .broker_order_ids
-            .contains_key(&report.broker_order_id);
+            .orders
+            .broker_owner(&report.broker_order_id)
+            .is_none();
         if !current.status.is_open() {
             return Ok(());
         }
@@ -1078,10 +1069,8 @@ impl TradingCore {
         let Some(current) = self
             .state
             .orders
-            .values()
-            .find(|order| {
-                order.account_id == *account_id && order.client_order_id == *client_order_id
-            })
+            .by_client(client_order_id)
+            .filter(|order| order.account_id == *account_id)
             .cloned()
         else {
             return Ok(());
@@ -1190,8 +1179,8 @@ impl TradingCore {
             .transition_broker_order(&updated, &event, sequence + 1, binding)?;
         if let Some(broker_order_id) = binding {
             self.state
-                .broker_order_ids
-                .insert(broker_order_id.to_string(), updated.id.clone());
+                .orders
+                .bind_broker(broker_order_id.to_string(), updated.id.clone());
         }
         self.state.next_sequence = sequence + 1;
         self.state.orders.insert(updated.id.clone(), updated);

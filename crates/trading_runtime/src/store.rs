@@ -536,7 +536,7 @@ pub(super) struct StoredState {
     pub next_sequence: u64,
     pub accounts: BTreeMap<TradingAccountId, TradingAccount>,
     pub instruments: BTreeMap<InstrumentId, TradingInstrument>,
-    pub orders: BTreeMap<OrderId, Order>,
+    pub orders: crate::book::OrderBook,
     pub order_events: VecDeque<OrderEvent>,
     pub fills: VecDeque<Fill>,
     pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
@@ -544,8 +544,6 @@ pub(super) struct StoredState {
     pub trade_pnl_cycles: BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
     pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
-    /// Broker order id to owner order, for every broker order the venue has accepted.
-    pub broker_order_ids: BTreeMap<String, OrderId>,
     /// The broker position each retained broker fill belongs to.
     pub broker_fill_positions: BTreeMap<FillId, String>,
     /// The latest relay session generation ever attached.
@@ -900,7 +898,7 @@ impl TradingStore {
             next_sequence,
             accounts,
             instruments,
-            orders,
+            orders: crate::book::OrderBook::from_stored(orders, broker_order_ids),
             order_events,
             fills,
             completed_trade_pnl,
@@ -908,7 +906,6 @@ impl TradingStore {
             trade_pnl_cycles,
             positions,
             broker_positions,
-            broker_order_ids,
             broker_fill_positions,
             venue_generation,
             broker_balances,

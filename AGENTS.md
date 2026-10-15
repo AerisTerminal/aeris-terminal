@@ -74,6 +74,8 @@ violations and missing verification explicitly, and never describe them as satis
   handles only; `account_runtime`, charts and UI surfaces never own or duplicate broker trading state.
 - The trading service has one named owner thread whose loop is in `service/owner.rs`; it waits for bounded commands
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
+- Trading orders and their client, broker, open-scope and executable indexes are owned together by
+  `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Trading owner timestamps come from the injected `trading_runtime::clock::Clock`, with wall time clamped
   monotonically per process. Direct system time in trading production code belongs only in `SystemClock`.
 - cTrader trading travels over the `market_runtime`-owned cTrader session for that host through the

@@ -120,7 +120,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | open |
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | open |
 | TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | open |
-| TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | open |
+| TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | open; runtime lookup scans removed in M4.4 |
 | TR-06 | High | Per-quote durable writes and retention that deletes the ledger | M4.10 (per-quote writes), M5.8 (retention and repair) | open |
 | TR-07 | High | Position protection is built from overlapping patch layers | M5.2 (validator), M5.5 (model), M5.6 (cleanup) | open |
 | TR-08 | Medium | Fill model gaps | M5.1 (part), M5.2 (tick checks), M5.3, M5.4 | open |
@@ -492,7 +492,10 @@ Status: in progress
 - [x] M4.3 trading-replay-harness - Deterministic trading replay harness
   - Moved the two frozen simulated scenarios into `src/replay/` without changing either golden; both now drive `TradingCore` directly against a temporary SQLite file and compare byte-identical transcripts across independent runs.
   - Shared core startup with the production owner; replay restart drops/reopens its SQLite connection, and a test-only SQLite commit hook aborts the selected commit. Seeded, bounded xorshift runs check order/event consistency and restart recovery at each step, and report reproducible seed/step failures. The hook dependency is dev-only; no new production boundary or restriction.
-- [ ] M4.4 indexed-order-book - Indexed order book; remove linear scans
+- [x] M4.4 indexed-order-book - Indexed order book; remove linear scans
+  - `book::OrderBook` owns canonical orders and client/broker, open `(account, instrument)` and executable instrument indexes; insert, replacement, account purge and retention removal maintain all views. Replaced client, broker reverse, scoped cancellation and market candidate scans without changing order or golden behavior.
+  - Seeded 4,000-step insert/transition/broker-bind/remove property test recomputes every index after each operation; trading crate tests and scripted broker/golden scenarios pass. On this Windows machine, release-mode 50,000-order/1,000-client-lookup comparison: former full scan 409.646 ms; indexed lookup 0.281 ms. Command: `cargo test -p aeris_trading_runtime --release --locked -- book::tests::benchmark_50k_order_lookup --ignored --nocapture` (same book and machine, timed lookup loops only).
+  - TR-05 remains open for M5.11 publication and M6.10 desktop snapshot work; no persistence schema or golden changes.
 - [ ] M4.5 trading-core-module-split - Split `lib.rs` and the Coordinator into focused modules
 - [ ] M4.6 trading-store-module-split - Split `store.rs` by table family
 - [ ] M4.7 runtime-owned-quotes - Trading runtime owns its quotes; the desktop relay is removed
@@ -618,6 +621,7 @@ the repo root `AGENTS.md`.
 - Market probe fault injection is compiled only under the `probe` feature and interrupts the Hyperliquid WebSocket without affecting catalog HTTP; the probe CLI requires an isolated locked validation root before invoking it (M3.12, this commit).
 - Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, this commit).
 - One named trading owner thread runs the loop in `service/owner.rs` and drives `TradingCore` command, market and deadline entry points; the bounded command enum resides in `service/mod.rs` (M4.2, this commit).
+- `book::OrderBook` alone mutates canonical orders and maintains client, broker, open-scope and executable indexes (M4.4, this commit).
 
 ## 6. Progress log
 
@@ -698,6 +702,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4 triage fix(trading): restore verified default contract terms and dynamic bracket increments - pre-M3/HEAD isolated GUI comparison found two regressions; verified live practice ladder order after owner-side fixes, full gate green.
 - 2026-10-15 M4.2 refactor(trading): isolate the single trading owner shell - moved command and timed wait boundaries, retained golden behavior, and verified concurrent revision/restart plus idle ManualClock coverage.
 - 2026-10-15 M4.3 test(trading): replay core against SQLite with deterministic transcripts - ported both unchanged goldens, tested restart/commit abort and seeded reproduction.
+- 2026-10-15 M4.4 perf(trading): index owner order lookups and executable demand - removed order and reverse-broker scans with index-consistency coverage; measured 409.646 ms scan vs 0.281 ms indexed for 1,000 lookups at 50,000 orders.
 
 ## 7. Known gaps / deferred
 
