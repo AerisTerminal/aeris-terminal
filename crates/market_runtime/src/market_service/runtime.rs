@@ -410,7 +410,9 @@ impl ProviderRuntimeRegistry {
             hyperliquid: None,
             ctrader: None,
             tastytrade: None,
-            rithmic: Some(super::RithmicChannels {
+            // A history-only runtime has no realtime receiver. Do not
+            // register its intentionally closed control channel as a session.
+            rithmic: enabled.then_some(super::RithmicChannels {
                 controls: realtime_controls,
                 events: realtime_events,
                 binding,

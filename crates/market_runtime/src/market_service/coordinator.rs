@@ -221,6 +221,7 @@ fn coordinator_turn(
     if due.contains(TimerKey::HISTORY_RETRY) {
         coordinator.retry_history();
     }
+    coordinator.publish_failed_provider_controls();
     if active || !coordinator.dirty_series.is_empty() || due.0 != 0 {
         coordinator.refresh_deadlines();
     }
@@ -973,6 +974,9 @@ impl Coordinator<'_> {
         if !self.provider_registry.contains(id) {
             return true;
         }
+        if self.provider_registry.is_failed(id) {
+            return false;
+        }
         if self.provider_registry.epoch(id).is_some() {
             return true;
         }
@@ -1019,6 +1023,16 @@ impl Coordinator<'_> {
             self.begin_reserved_provider_epoch(id, epoch);
             self.session_mut(id).demand_dirty = true;
             self.session_mut(id).accepted = None;
+        }
+    }
+
+    fn publish_failed_provider_controls(&mut self) {
+        for (id, epoch, reason) in self.provider_registry.take_failures() {
+            self.session_mut(id).demand_dirty = false;
+            self.session_mut(id).pending = None;
+            self.session_mut(id).authorization = None;
+            self.provider_epochs.bind(id, epoch);
+            self.mark_lifecycle_failed(id, epoch.get().get(), reason);
         }
     }
 
@@ -3230,6 +3244,103 @@ mod tests {
             .expect("failed provider status");
         assert_eq!(status.generation, Some(ProviderGeneration(nonzero(1))));
         assert_eq!(status.health, ProviderHealth::Failed);
+    }
+
+    #[test]
+    fn dead_provider_worker_publishes_failure_and_removes_retry_timer() {
+        use super::super::clock::Clock;
+        let clock = Arc::new(super::super::clock::ScriptedClock::new(51));
+        let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
+        let (controls, receiver) = std::sync::mpsc::sync_channel(1);
+        let (history, _history_receiver) = std::sync::mpsc::sync_channel(1);
+        coordinator.provider_registry.register(
+            "ctrader",
+            Box::new(super::super::provider_session::CtraderSession { controls, history }),
+            super::super::reconnect::ReconnectPolicy::ctrader(),
+            clock.as_ref(),
+        );
+        let first = coordinator
+            .provider_registry
+            .connect("ctrader", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        coordinator.begin_reserved_provider_epoch("ctrader", first);
+        coordinator
+            .provider_registry
+            .disconnected("ctrader", first, clock.monotonic());
+        drop(receiver);
+        let due = coordinator.provider_registry.next_retry().unwrap();
+        clock.advance(due.duration_since(clock.monotonic()));
+        coordinator.connect_due_providers();
+        coordinator.publish_failed_provider_controls();
+        coordinator.refresh_deadlines();
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("ctrader")
+                .map(|status| status.health),
+            Some(ProviderHealth::Failed)
+        );
+        assert_eq!(coordinator.provider_registry.next_retry(), None);
+        assert!(
+            coordinator
+                .deadlines
+                .keys()
+                .all(|at| *at > clock.monotonic())
+        );
+    }
+
+    #[test]
+    fn full_provider_worker_bounds_coordinator_retry_turns() {
+        use super::super::clock::Clock;
+        let clock = Arc::new(super::super::clock::ScriptedClock::new(54));
+        let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
+        let (controls, _receiver) = std::sync::mpsc::sync_channel(1);
+        let (history, _history_receiver) = std::sync::mpsc::sync_channel(1);
+        coordinator.provider_registry.register(
+            "ctrader",
+            Box::new(super::super::provider_session::CtraderSession { controls, history }),
+            super::super::reconnect::ReconnectPolicy::ctrader(),
+            clock.as_ref(),
+        );
+        let first = coordinator
+            .provider_registry
+            .connect("ctrader", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        coordinator.begin_reserved_provider_epoch("ctrader", first);
+        coordinator
+            .provider_registry
+            .disconnected("ctrader", first, clock.monotonic());
+        let end = clock.monotonic() + Duration::from_secs(60);
+        let mut turns = 0;
+        while clock.monotonic() < end {
+            coordinator.refresh_deadlines();
+            let Some(wait) = coordinator.next_wait() else {
+                break;
+            };
+            assert!(
+                wait > Duration::ZERO,
+                "coordinator may not schedule an immediate turn"
+            );
+            turns += 1;
+            assert!(turns <= 10, "retry budget must bound coordinator turns");
+            clock.advance(wait.min(end.duration_since(clock.monotonic())));
+            if clock.monotonic() < end {
+                coordinator.connect_due_providers();
+                coordinator.publish_failed_provider_controls();
+            }
+        }
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("ctrader")
+                .map(|status| status.health),
+            Some(ProviderHealth::Failed)
+        );
+        assert_eq!(coordinator.provider_registry.next_retry(), None);
     }
 
     #[test]

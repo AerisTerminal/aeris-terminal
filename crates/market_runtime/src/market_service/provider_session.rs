@@ -10,7 +10,7 @@ use std::{
         Mutex,
         mpsc::{Receiver, SyncSender, TrySendError},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use aeris_market_engine::fence::{Epoch, EpochSequence, ProviderTag};
@@ -24,6 +24,7 @@ use super::{
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ProviderSessionError {
     Unavailable,
+    InvalidDemand,
 }
 
 pub(super) trait ProviderSession: Send {
@@ -78,8 +79,35 @@ pub(super) struct ProviderConnection {
     pub(super) session: Box<dyn ProviderSession>,
     last_demand: Option<ProviderDemand>,
     online_since: Option<Instant>,
+    failure_reason: Option<&'static str>,
+    failure_published: bool,
     #[cfg(feature = "probe")]
     successful_connections: u64,
+}
+
+const WORKER_DISCONNECTED: &str = "provider control worker disconnected";
+const RETRY_BUDGET_EXHAUSTED: &str =
+    "provider control queue remained full until retry budget exhausted";
+
+impl ProviderConnection {
+    fn failed(&mut self, reason: &'static str) {
+        self.state = ConnectionState::Failed;
+        self.failure_reason = Some(reason);
+        self.failure_published = false;
+    }
+
+    fn control_full(&mut self, now: Instant) {
+        match self.backoff.failure(RetryClass::Transient) {
+            RetryDecision::Wait(delay) => {
+                // Full jitter can return zero. An elapsed deadline would make
+                // the coordinator immediately re-enter the same retry turn.
+                self.state = ConnectionState::RetryAt(now + delay.max(Duration::from_millis(1)));
+            }
+            RetryDecision::Failed { .. } | RetryDecision::Fatal => {
+                self.failed(RETRY_BUDGET_EXHAUSTED);
+            }
+        }
+    }
 }
 
 pub(super) struct ProviderRegistry {
@@ -275,7 +303,7 @@ impl ProviderSession for RithmicSession {
     fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
         let wire = demand
             .rithmic_wire()
-            .map_err(|_| ProviderSessionError::Unavailable)?;
+            .map_err(|_| ProviderSessionError::InvalidDemand)?;
         try_control(
             &self.controls,
             super::RithmicRealtimeControl::Subscribe(wire),
@@ -406,6 +434,11 @@ impl ProviderRegistry {
                 )
         })
     }
+    pub(super) fn is_failed(&self, id: &str) -> bool {
+        self.connections
+            .get(id)
+            .is_some_and(|connection| matches!(connection.state, ConnectionState::Failed))
+    }
     pub(super) fn new() -> Self {
         Self {
             sequence: EpochSequence::default(),
@@ -462,6 +495,8 @@ impl ProviderRegistry {
                 session,
                 last_demand: None,
                 online_since: None,
+                failure_reason: None,
+                failure_published: false,
                 #[cfg(feature = "probe")]
                 successful_connections: 0,
             },
@@ -491,32 +526,53 @@ impl ProviderRegistry {
             .connections
             .get_mut(id)
             .ok_or(ProviderSessionError::Unavailable)?;
-        if connection
+        match connection
             .session
-            .connect(epoch, ProviderEventSink { epoch })?
+            .connect(epoch, ProviderEventSink { epoch })
         {
-            connection.epoch = Some(epoch);
-            connection.state = ConnectionState::Connecting;
-            connection.last_demand = None;
-            connection.online_since = None;
-            #[cfg(feature = "probe")]
-            if let Some(record) = self
-                .retry_records
-                .iter_mut()
-                .rev()
-                .find(|record| record.provider == id && record.resumed_at.is_none())
-            {
-                record.resumed_at = Some(now);
+            Ok(true) => {
+                connection.epoch = Some(epoch);
+                connection.state = ConnectionState::Connecting;
+                connection.failure_reason = None;
+                connection.last_demand = None;
+                connection.online_since = None;
+                #[cfg(feature = "probe")]
+                if let Some(record) = self
+                    .retry_records
+                    .iter_mut()
+                    .rev()
+                    .find(|record| record.provider == id && record.resumed_at.is_none())
+                {
+                    record.resumed_at = Some(now);
+                }
+                Ok(Some(epoch))
             }
-            Ok(Some(epoch))
-        } else {
-            Ok(None)
+            Ok(false) => {
+                // The reserved epoch never left this registry; retain the
+                // preceding epoch for consumer failure publication.
+                connection.control_full(now);
+                if connection.epoch.is_none() && matches!(connection.state, ConnectionState::Failed)
+                {
+                    connection.epoch = Some(epoch);
+                }
+                Ok(None)
+            }
+            Err(error) => {
+                connection.failed(WORKER_DISCONNECTED);
+                if connection.epoch.is_none() {
+                    // No worker received this epoch. Use it solely to publish
+                    // the terminal failure; it cannot authorize worker events.
+                    connection.epoch = Some(epoch);
+                }
+                Err(error)
+            }
         }
     }
 
     pub(super) fn connected(&mut self, id: &str, epoch: Epoch<ProviderTag>, now: Instant) {
         if let Some(connection) = self.connections.get_mut(id)
             && connection.epoch == Some(epoch)
+            && !matches!(connection.state, ConnectionState::Failed)
         {
             #[cfg(feature = "probe")]
             if !matches!(connection.state, ConnectionState::Online) {
@@ -547,16 +603,27 @@ impl ProviderRegistry {
             .connections
             .get_mut(id)
             .ok_or(ProviderSessionError::Unavailable)?;
-        if connection
+        if matches!(connection.state, ConnectionState::Failed) {
+            return Err(ProviderSessionError::Unavailable);
+        }
+        match connection
             .session
-            .rebind(epoch, ProviderEventSink { epoch })?
+            .rebind(epoch, ProviderEventSink { epoch })
         {
-            connection.epoch = Some(epoch);
-            connection.state = ConnectionState::Connecting;
-            connection.last_demand = None;
-            Ok(Some(epoch))
-        } else {
-            Ok(None)
+            Ok(true) => {
+                connection.epoch = Some(epoch);
+                connection.state = ConnectionState::Connecting;
+                connection.last_demand = None;
+                Ok(Some(epoch))
+            }
+            Ok(false) => {
+                connection.failed("provider transport rebind was not accepted");
+                Ok(None)
+            }
+            Err(error) => {
+                connection.failed(WORKER_DISCONNECTED);
+                Err(error)
+            }
         }
     }
 
@@ -573,6 +640,7 @@ impl ProviderRegistry {
     ) {
         if let Some(connection) = self.connections.get_mut(id)
             && connection.epoch == Some(epoch)
+            && !matches!(connection.state, ConnectionState::Failed)
         {
             if connection.online_since.take().is_some_and(|since| {
                 now.saturating_duration_since(since)
@@ -581,7 +649,9 @@ impl ProviderRegistry {
                 connection.backoff.reset();
             }
             connection.state = match connection.backoff.failure(class) {
-                RetryDecision::Wait(delay) => ConnectionState::RetryAt(now + delay),
+                RetryDecision::Wait(delay) => {
+                    ConnectionState::RetryAt(now + delay.max(Duration::from_millis(1)))
+                }
                 RetryDecision::Failed { .. } | RetryDecision::Fatal => ConnectionState::Failed,
             };
             #[cfg(feature = "probe")]
@@ -645,6 +715,25 @@ impl ProviderRegistry {
             .collect()
     }
 
+    pub(super) fn take_failures(
+        &mut self,
+    ) -> Vec<(&'static str, Epoch<ProviderTag>, &'static str)> {
+        self.connections
+            .iter_mut()
+            .filter_map(|(id, connection)| {
+                if connection.failure_published {
+                    return None;
+                }
+                let (Some(epoch), Some(reason)) = (connection.epoch, connection.failure_reason)
+                else {
+                    return None;
+                };
+                connection.failure_published = true;
+                Some((*id, epoch, reason))
+            })
+            .collect()
+    }
+
     pub(super) fn due_ids(&self, now: Instant) -> Vec<&'static str> {
         self.connections
             .iter()
@@ -663,39 +752,68 @@ impl ProviderRegistry {
             .connections
             .get_mut(id)
             .ok_or(ProviderSessionError::Unavailable)?;
+        if matches!(connection.state, ConnectionState::Failed) {
+            return Err(ProviderSessionError::Unavailable);
+        }
         if connection.last_demand.as_ref() == Some(demand) {
             return Ok(true);
         }
-        if connection.session.apply_demand(demand)? {
-            connection.last_demand = Some(demand.clone());
-            Ok(true)
-        } else {
-            Ok(false)
+        match connection.session.apply_demand(demand) {
+            Ok(true) => {
+                connection.last_demand = Some(demand.clone());
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(error) => {
+                connection.failed(match error {
+                    ProviderSessionError::Unavailable => WORKER_DISCONNECTED,
+                    ProviderSessionError::InvalidDemand => "provider demand cannot be encoded",
+                });
+                Err(error)
+            }
         }
     }
 
     pub(super) fn request_history(
-        &self,
+        &mut self,
         id: &str,
         request: HistoryRequest,
     ) -> Result<bool, ProviderSessionError> {
-        self.connections
-            .get(id)
-            .ok_or(ProviderSessionError::Unavailable)?
-            .session
-            .request_history(request)
+        let connection = self
+            .connections
+            .get_mut(id)
+            .ok_or(ProviderSessionError::Unavailable)?;
+        if matches!(connection.state, ConnectionState::Failed) {
+            return Err(ProviderSessionError::Unavailable);
+        }
+        match connection.session.request_history(request) {
+            Err(error) => {
+                connection.failed(WORKER_DISCONNECTED);
+                Err(error)
+            }
+            result => result,
+        }
     }
 
     pub(super) fn authorization_changed(
-        &self,
+        &mut self,
         id: &str,
         ready: bool,
     ) -> Result<bool, ProviderSessionError> {
-        self.connections
-            .get(id)
-            .ok_or(ProviderSessionError::Unavailable)?
-            .session
-            .authorization_changed(ready)
+        let connection = self
+            .connections
+            .get_mut(id)
+            .ok_or(ProviderSessionError::Unavailable)?;
+        if matches!(connection.state, ConnectionState::Failed) {
+            return Err(ProviderSessionError::Unavailable);
+        }
+        match connection.session.authorization_changed(ready) {
+            Err(error) => {
+                connection.failed(WORKER_DISCONNECTED);
+                Err(error)
+            }
+            result => result,
+        }
     }
 
     pub(super) fn release_idle(&mut self, id: &str) -> Result<bool, ProviderSessionError> {
@@ -703,12 +821,27 @@ impl ProviderRegistry {
             .connections
             .get_mut(id)
             .ok_or(ProviderSessionError::Unavailable)?;
-        if connection.session.release_idle()? {
+        if matches!(connection.state, ConnectionState::Failed) {
+            return Err(ProviderSessionError::Unavailable);
+        }
+        if matches!(connection.state, ConnectionState::Idle) {
+            return Ok(true);
+        }
+        let released = match connection.session.release_idle() {
+            Ok(released) => released,
+            Err(error) => {
+                connection.failed(WORKER_DISCONNECTED);
+                return Err(error);
+            }
+        };
+        if released {
             connection.state = ConnectionState::Idle;
             connection.epoch = None;
             connection.backoff.reset();
             connection.last_demand = None;
             connection.online_since = None;
+            connection.failure_reason = None;
+            connection.failure_published = false;
             Ok(true)
         } else {
             Ok(false)
@@ -745,6 +878,7 @@ mod tests {
     use super::*;
     use crate::market_service::clock::ScriptedClock;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     struct ScriptedSession(Arc<Mutex<(usize, Vec<ProviderDemand>)>>);
 
@@ -870,9 +1004,168 @@ mod tests {
         assert_eq!(registry.retry_due(clock.monotonic()).len(), 0);
         let retry = registry.retry_due(at);
         assert_eq!(retry.len(), 1);
-        assert_ne!(retry[0].1, first);
-        assert_eq!(registry.epoch("hyperliquid"), Some(retry[0].1));
+        let second = retry[0].1;
+        assert_ne!(second, first);
+        assert_eq!(registry.epoch("hyperliquid"), Some(second));
         assert_eq!(calls.lock().unwrap().0, 2);
+    }
+
+    #[test]
+    fn full_retry_control_channel_schedules_future_bounded_attempt_without_spinning() {
+        let clock = ScriptedClock::new(49);
+        let (controls, queued) = std::sync::mpsc::sync_channel(1);
+        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "ctrader",
+            Box::new(CtraderSession { controls, history }),
+            ReconnectPolicy::ctrader(),
+            &clock,
+        );
+        let first = registry
+            .connect("ctrader", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        registry.disconnected("ctrader", first, clock.monotonic());
+        let due = registry.next_retry().unwrap();
+        clock.advance(due.duration_since(clock.monotonic()));
+        // The original Connect remains queued, so the bounded control channel is full.
+        assert_eq!(registry.retry_due(clock.monotonic()).len(), 0);
+        let next = registry
+            .next_retry()
+            .expect("full channel must retain a retry");
+        assert!(next > clock.monotonic(), "no elapsed deadline may remain");
+        assert!(next.duration_since(clock.monotonic()) <= Duration::from_secs(6));
+        assert_eq!(registry.epoch("ctrader"), Some(first));
+        assert_eq!(registry.connections["ctrader"].backoff.attempts(), 2);
+
+        let mut turns = 0;
+        let interval_end = clock.monotonic() + Duration::from_secs(30);
+        while clock.monotonic() < interval_end {
+            turns += 1;
+            assert!(turns <= 20, "coordinator must not spin on an elapsed retry");
+            if let Some(at) = registry.next_retry() {
+                assert!(at > clock.monotonic());
+                clock.advance(at.min(interval_end).duration_since(clock.monotonic()));
+                if at <= clock.monotonic() {
+                    registry.retry_due(clock.monotonic());
+                }
+            } else {
+                break;
+            }
+        }
+        assert_eq!(
+            registry.connections["ctrader"].state,
+            ConnectionState::Failed
+        );
+        assert_eq!(registry.next_retry(), None);
+        drop(queued);
+    }
+
+    #[test]
+    fn disconnected_retry_worker_fails_with_cause_and_no_deadline() {
+        let clock = ScriptedClock::new(50);
+        let (controls, queued) = std::sync::mpsc::sync_channel(1);
+        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "ctrader",
+            Box::new(CtraderSession { controls, history }),
+            ReconnectPolicy::ctrader(),
+            &clock,
+        );
+        let first = registry
+            .connect("ctrader", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        registry.disconnected("ctrader", first, clock.monotonic());
+        drop(queued);
+        let due = registry.next_retry().unwrap();
+        clock.advance(due.duration_since(clock.monotonic()));
+        assert_eq!(registry.retry_due(clock.monotonic()).len(), 0);
+        assert_eq!(
+            registry.connections["ctrader"].state,
+            ConnectionState::Failed
+        );
+        assert_eq!(
+            registry.connections["ctrader"].failure_reason,
+            Some(WORKER_DISCONNECTED)
+        );
+        assert_eq!(
+            registry.take_failures(),
+            vec![("ctrader", first, WORKER_DISCONNECTED)]
+        );
+        assert!(
+            registry.take_failures().is_empty(),
+            "failure publishes once"
+        );
+        assert_eq!(registry.next_retry(), None);
+        assert_eq!(registry.epoch("ctrader"), Some(first));
+        assert_eq!(registry.retry_due(clock.monotonic()).len(), 0);
+    }
+
+    #[test]
+    fn full_demand_and_idle_controls_retain_work_until_channel_drains() {
+        let clock = ScriptedClock::new(52);
+        let (controls, queued) = std::sync::mpsc::sync_channel(1);
+        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "ctrader",
+            Box::new(CtraderSession { controls, history }),
+            ReconnectPolicy::ctrader(),
+            &clock,
+        );
+        let epoch = registry
+            .connect("ctrader", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        let mut demand = ProviderDemand::default();
+        demand.explicit_trade_ids.insert("EURUSD".into());
+        assert!(!registry.apply_demand("ctrader", &demand).unwrap());
+        assert!(!registry.release_idle("ctrader").unwrap());
+        assert_eq!(registry.epoch("ctrader"), Some(epoch));
+        queued.try_recv().unwrap();
+        assert!(registry.apply_demand("ctrader", &demand).unwrap());
+        assert_eq!(
+            registry.connections["ctrader"].last_demand.as_ref(),
+            Some(&demand)
+        );
+        queued.try_recv().unwrap();
+        assert!(registry.release_idle("ctrader").unwrap());
+        assert_eq!(registry.epoch("ctrader"), None);
+    }
+
+    #[test]
+    fn disconnected_demand_control_is_terminal_not_silently_retried() {
+        let clock = ScriptedClock::new(53);
+        let (controls, queued) = std::sync::mpsc::sync_channel(1);
+        let (history, _history_rx) = std::sync::mpsc::sync_channel(1);
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "ctrader",
+            Box::new(CtraderSession { controls, history }),
+            ReconnectPolicy::ctrader(),
+            &clock,
+        );
+        let epoch = registry
+            .connect("ctrader", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        drop(queued);
+        assert_eq!(
+            registry.apply_demand("ctrader", &ProviderDemand::default()),
+            Err(ProviderSessionError::Unavailable)
+        );
+        assert_eq!(
+            registry.connections["ctrader"].state,
+            ConnectionState::Failed
+        );
+        assert_eq!(
+            registry.take_failures(),
+            vec![("ctrader", epoch, WORKER_DISCONNECTED)]
+        );
+        assert_eq!(registry.next_retry(), None);
     }
 
     #[test]
