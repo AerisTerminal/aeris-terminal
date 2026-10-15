@@ -2323,6 +2323,7 @@ fn spawn_record(
         })
         .map_err(|error| error.to_string())?;
     Ok(ProviderRuntimeRecord {
+        hyperliquid: None,
         descriptor,
         history: history_tx,
         cancellation,

@@ -1159,7 +1159,10 @@ impl Coordinator<'_> {
             self.provider_epochs.drop_event();
             return;
         }
-        let Some(epoch) = self.provider_epochs.stamp(wire.provider, wire.generation) else {
+        let Some(epoch) =
+            self.provider_epochs
+                .stamp(wire.provider, wire.generation, &mut self.provider_registry)
+        else {
             self.provider_epochs.drop_event();
             return;
         };
@@ -1169,6 +1172,30 @@ impl Coordinator<'_> {
             wire_generation: wire.generation,
             kind: wire.kind,
         });
+    }
+
+    pub(super) fn handle_bound_provider_event(&mut self, event: ProviderEvent) {
+        if !self
+            .provider_epochs
+            .accepts(event.provider, event.generation)
+        {
+            self.provider_epochs.drop_event();
+            return;
+        }
+        match &event.kind {
+            ProviderEventKind::Connected => self
+                .provider_registry
+                .connected(event.provider, event.generation),
+            ProviderEventKind::Disconnected(_) | ProviderEventKind::Failed(_) => {
+                self.provider_registry.disconnected(
+                    event.provider,
+                    event.generation,
+                    self.clock.monotonic(),
+                );
+            }
+            _ => {}
+        }
+        self.dispatch_provider_event(event);
     }
 
     fn dispatch_provider_event(&mut self, event: ProviderEvent) {
@@ -2435,10 +2462,13 @@ impl Coordinator<'_> {
                 .demand_dirty = false;
             return;
         }
-        let raw = self.providers.send_control(
-            super::HYPERLIQUID_DESCRIPTOR.id,
-            super::ProviderControl::Demand(neutral),
-        );
+        if !self.ensure_provider_connection(super::HYPERLIQUID_DESCRIPTOR.id) {
+            return;
+        }
+        let raw = self
+            .provider_registry
+            .apply_demand(super::HYPERLIQUID_DESCRIPTOR.id, &neutral)
+            .map_err(|_| "Provider live worker is unavailable".to_string());
         let display = self.providers.send_hyperliquid_display_depth(
             HyperliquidDisplayDepthControl::Subscribe(display_demand),
         );
@@ -2617,10 +2647,15 @@ impl Coordinator<'_> {
             else {
                 continue;
             };
-            match self
-                .providers
-                .send_control(provider, super::ProviderControl::Stop)
-            {
+            let stopped = if self.provider_registry.contains(provider) {
+                self.provider_registry
+                    .release_idle(provider)
+                    .map_err(|_| "Provider live worker is unavailable".to_string())
+            } else {
+                self.providers
+                    .send_control(provider, super::ProviderControl::Stop)
+            };
+            match stopped {
                 Ok(true) => self.session_mut(provider).stop_pending = Some(generation),
                 Ok(false) => self.control_retry = true,
                 Err(_) => {

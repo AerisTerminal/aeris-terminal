@@ -839,6 +839,32 @@ impl Coordinator<'_> {
 
     /// Schedules a covering or page-bounded older-history request. A second
     /// request for the same series is deferred until the active page completes.
+    fn history_epoch_for_request(
+        &mut self,
+        series: &BarSeriesKey,
+        generation: ProviderGeneration,
+    ) -> Result<
+        aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+        &'static str,
+    > {
+        if !self.ensure_provider_connection(&series.provider_id) {
+            return Err("provider connection is not ready");
+        }
+        if self.provider_registry.contains(&series.provider_id) {
+            self.provider_registry
+                .epoch(&series.provider_id)
+                .ok_or("provider connection is not yet reserved")
+        } else {
+            self.provider_epochs
+                .stamp(
+                    &series.provider_id,
+                    generation.0.get(),
+                    &mut self.provider_registry,
+                )
+                .ok_or("history request belongs to a retired provider session")
+        }
+    }
+
     pub(super) fn enqueue_history_request(
         &mut self,
         series: &BarSeriesKey,
@@ -848,10 +874,7 @@ impl Coordinator<'_> {
         self.engine
             .verify_provider_request(&series.provider_id, ProviderRequest::HistoricalBars)
             .map_err(|_| "provider does not support historical bars")?;
-        let epoch = self
-            .provider_epochs
-            .stamp(&series.provider_id, generation.0.get())
-            .ok_or("history request belongs to a retired provider session")?;
+        let epoch = self.history_epoch_for_request(series, generation)?;
         let kind = if range.is_some() {
             LaneKind::Backfill
         } else {
@@ -908,14 +931,8 @@ impl Coordinator<'_> {
             range,
             stop: Arc::clone(&stop),
         };
-        let history = match self.providers.history(&series.provider_id) {
-            Ok(history) => history,
-            Err(error) => {
-                self.history.defer(&ticket, range);
-                return Err(error);
-            }
-        };
-        match try_enqueue_history(history, request) {
+        let dispatched = self.dispatch_history_request(request, &ticket, range)?;
+        match dispatched {
             Ok(()) => {
                 if range.is_none() && self.provider_uses_candles(&series.provider_id) {
                     self.transition_candle_series(
@@ -949,6 +966,31 @@ impl Coordinator<'_> {
                 Err(error)
             }
         }
+    }
+
+    fn dispatch_history_request(
+        &mut self,
+        request: HistoryRequest,
+        ticket: &super::history::tracker::HistoryTicket,
+        range: Option<HistoryRange>,
+    ) -> Result<Result<(), &'static str>, &'static str> {
+        let provider = request.series.provider_id.clone();
+        Ok(if self.provider_registry.contains(&provider) {
+            match self.provider_registry.request_history(&provider, request) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("provider history queue is full"),
+                Err(_) => Err("provider history worker is unavailable"),
+            }
+        } else {
+            let history = match self.providers.history(&provider) {
+                Ok(history) => history,
+                Err(error) => {
+                    self.history.defer(ticket, range);
+                    return Err(error);
+                }
+            };
+            try_enqueue_history(history, request)
+        })
     }
 
     fn history_retry_ready(

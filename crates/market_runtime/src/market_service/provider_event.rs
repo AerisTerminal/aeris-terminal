@@ -5,7 +5,7 @@ use super::{
 use crate::hyperliquid_realtime::HyperliquidRealtimeEvent;
 use crate::rithmic_realtime::RithmicRealtimeEvent;
 use aeris_contracts::MarketSessionStatus;
-use aeris_market_engine::fence::{Epoch, EpochSequence, ProviderTag};
+use aeris_market_engine::fence::{Epoch, ProviderTag};
 use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
 use std::collections::BTreeMap;
 
@@ -75,17 +75,21 @@ pub(super) struct WireProviderEvent {
     pub(super) kind: ProviderEventKind,
 }
 
-/// Owns the only mint for adapter generations. Never retains retired sessions.
+/// Tracks accepted adapter generations; epoch minting belongs to `ProviderRegistry`.
 #[derive(Default)]
 pub(super) struct ProviderEpochRegistry {
-    sequence: EpochSequence<ProviderTag>,
     active: BTreeMap<String, (u64, Epoch<ProviderTag>)>,
     stale_events: u64,
     stale_history: u64,
 }
 
 impl ProviderEpochRegistry {
-    pub(super) fn stamp(&mut self, provider: &str, wire: u64) -> Option<Epoch<ProviderTag>> {
+    pub(super) fn stamp(
+        &mut self,
+        provider: &str,
+        wire: u64,
+        registry: &mut super::provider_session::ProviderRegistry,
+    ) -> Option<Epoch<ProviderTag>> {
         if wire == 0
             || self
                 .active
@@ -99,9 +103,14 @@ impl ProviderEpochRegistry {
         {
             return Some(*epoch);
         }
-        let epoch = self.sequence.next();
+        let epoch = registry.reserve();
         self.active.insert(provider.to_owned(), (wire, epoch));
         Some(epoch)
+    }
+
+    pub(super) fn bind(&mut self, provider: &str, epoch: Epoch<ProviderTag>) {
+        self.active
+            .insert(provider.to_owned(), (epoch.get().get(), epoch));
     }
 
     pub(super) fn accepts(&self, provider: &str, epoch: Epoch<ProviderTag>) -> bool {

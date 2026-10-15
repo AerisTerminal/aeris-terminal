@@ -148,6 +148,7 @@ fn coordinator_turn(
     }
     if due.contains(TimerKey::CONTROL_RETRY) && !active {
         coordinator.control_retry = false;
+        coordinator.connect_due_providers();
         for flush in demand_flushers {
             flush(coordinator);
         }
@@ -202,6 +203,21 @@ impl<'a> Coordinator<'a> {
             .copied()
             .map(|provider| (provider, ProviderSessionSlot::default()))
             .collect();
+        let mut provider_registry = super::provider_session::ProviderRegistry::new();
+        for (&id, record) in &providers.records {
+            if let Some(channels) = record.hyperliquid {
+                provider_registry.register(
+                    id,
+                    Box::new(super::provider_session::HyperliquidSession {
+                        controls: channels.controls.clone(),
+                        display_controls: channels.display_controls.clone(),
+                        history: record.history.clone(),
+                    }),
+                    record.descriptor.capabilities.reconnect,
+                    clock.as_ref(),
+                );
+            }
+        }
         Self {
             engine,
             studies: StudyRuntime::new(StudyRuntimeConfig {
@@ -225,6 +241,7 @@ impl<'a> Coordinator<'a> {
             clock,
             calendar: super::calendar::MarketCalendarService::default(),
             provider_epochs: ProviderEpochRegistry::default(),
+            provider_registry,
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -288,6 +305,9 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
             drained += 1;
             match event {
                 ProviderRuntimeEvent::Realtime(event) => coordinator.handle_provider_event(event),
+                ProviderRuntimeEvent::BoundRealtime(event) => {
+                    coordinator.handle_bound_provider_event(event);
+                }
                 ProviderRuntimeEvent::DisplayDepth(provider, event) => {
                     coordinator.handle_provider_display_depth(provider, event);
                 }
@@ -706,6 +726,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) clock: Arc<dyn super::clock::Clock>,
     pub(super) calendar: super::calendar::MarketCalendarService,
     pub(super) provider_epochs: ProviderEpochRegistry,
+    pub(super) provider_registry: super::provider_session::ProviderRegistry,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
@@ -737,6 +758,40 @@ pub(super) struct Coordinator<'a> {
 }
 
 impl Coordinator<'_> {
+    pub(super) fn ensure_provider_connection(&mut self, id: &str) -> bool {
+        if !self.provider_registry.contains(id) {
+            return true;
+        }
+        if self.provider_registry.epoch(id).is_some() {
+            return true;
+        }
+        if let Ok(Some(epoch)) = self.provider_registry.connect(id, self.clock.monotonic()) {
+            self.provider_epochs.bind(id, epoch);
+            true
+        } else {
+            self.control_retry = true;
+            false
+        }
+    }
+
+    fn connect_due_providers(&mut self) {
+        let due = self.provider_registry.due_ids(self.clock.monotonic());
+        for id in due {
+            if !self.has_provider_live_demand(id)
+                && !self
+                    .provider_registry
+                    .release_idle(id)
+                    .is_ok_and(|stopped| stopped)
+            {
+                self.control_retry = true;
+            }
+        }
+        for (id, epoch) in self.provider_registry.retry_due(self.clock.monotonic()) {
+            self.provider_epochs.bind(id, epoch);
+            self.session_mut(id).demand_dirty = true;
+        }
+    }
+
     pub(super) fn collect_dirty_series(&mut self) {
         self.dirty_series.clear();
         self.dirty_series
@@ -785,6 +840,9 @@ impl Coordinator<'_> {
         let mut deadlines = BTreeMap::<Instant, TimerKey>::new();
         if let Some(at) = self.history.next_retry_deadline() {
             deadlines.entry(at).or_default().0 |= TimerKey::HISTORY_RETRY;
+        }
+        if let Some(at) = self.provider_registry.next_retry() {
+            deadlines.entry(at).or_default().0 |= TimerKey::CONTROL_RETRY;
         }
         for (series, live) in self.series.iter() {
             if !live.connected || !live.history_ready() {
@@ -2000,6 +2058,7 @@ mod tests {
             clock: Arc::new(super::super::clock::SystemClock),
             calendar: super::super::calendar::MarketCalendarService::default(),
             provider_epochs: ProviderEpochRegistry::default(),
+            provider_registry: super::super::provider_session::ProviderRegistry::new(),
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -2046,7 +2105,11 @@ mod tests {
     ) -> aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag> {
         coordinator
             .provider_epochs
-            .stamp(provider, generation.0.get())
+            .stamp(
+                provider,
+                generation.0.get(),
+                &mut coordinator.provider_registry,
+            )
             .expect("provider epoch")
     }
 
@@ -2903,6 +2966,7 @@ mod tests {
                 history: history_tx,
                 lifecycle: None,
                 realtime: ProviderRealtimeDispatch::Disabled,
+                hyperliquid: None,
                 catalog: None,
             },
         );
@@ -4229,6 +4293,7 @@ mod tests {
                     history: Box::leak(Box::new(history_tx)),
                     lifecycle: None,
                     realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                    hyperliquid: None,
                     catalog: None,
                 },
             );
@@ -4524,6 +4589,7 @@ mod tests {
                 history: history_tx,
                 lifecycle: None,
                 realtime: ProviderRealtimeDispatch::Disabled,
+                hyperliquid: None,
                 catalog: None,
             },
         );
@@ -4704,6 +4770,7 @@ mod tests {
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                hyperliquid: None,
                 catalog: None,
             },
         );
@@ -4740,6 +4807,7 @@ mod tests {
                         controls: Box::leak(Box::new(controls)),
                         events: Box::leak(Box::new(event_receiver)),
                     },
+                    hyperliquid: None,
                     catalog: None,
                 },
             )]),
@@ -4763,7 +4831,7 @@ mod tests {
         let (mut coordinator, _) = connected_rithmic_coordinator();
         let previous = coordinator
             .provider_epochs
-            .stamp("rithmic", 1)
+            .stamp("rithmic", 1, &mut coordinator.provider_registry)
             .expect("first session minted by registry");
         let series = series();
         let before = coordinator.engine.series_snapshot(&series);
@@ -4773,7 +4841,7 @@ mod tests {
             .expect("new provider session");
         coordinator
             .provider_epochs
-            .stamp("rithmic", 2)
+            .stamp("rithmic", 2, &mut coordinator.provider_registry)
             .expect("new session minted by registry");
         let phase = coordinator
             .calendar
@@ -4927,6 +4995,7 @@ mod tests {
                 history: Box::leak(Box::new(history_sender)),
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                hyperliquid: None,
                 catalog: None,
             },
         );
@@ -5092,6 +5161,7 @@ mod tests {
                 history: Box::leak(Box::new(history_tx)),
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                hyperliquid: None,
                 catalog: None,
             },
         );
@@ -6330,6 +6400,7 @@ mod tests {
                 history: history_sender,
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
+                hyperliquid: None,
                 catalog: None,
             },
         );

@@ -712,6 +712,7 @@ struct IndexedTradeMutation {
 mod lifecycle;
 use lifecycle::TradeModel;
 mod provider_event;
+pub(crate) mod provider_session;
 mod realtime;
 mod watchdog;
 use provider_event::{
@@ -1184,6 +1185,7 @@ struct ProviderRealtimeChannels {
 }
 
 enum ProviderRealtimeChannelSet {
+    Disabled,
     Tastytrade {
         controls: SyncSender<tastytrade::RealtimeControl>,
         events: Receiver<tastytrade::RealtimeEvent>,
@@ -1196,12 +1198,18 @@ enum ProviderRealtimeChannelSet {
         controls: SyncSender<RithmicRealtimeControl>,
         events: Receiver<RithmicRealtimeEvent>,
     },
-    Hyperliquid {
-        controls: SyncSender<HyperliquidRealtimeControl>,
-        events: Receiver<HyperliquidRealtimeEvent>,
-        display_controls: SyncSender<HyperliquidDisplayDepthControl>,
-        display_events: Receiver<HyperliquidDisplayDepthEvent>,
-    },
+}
+
+struct HyperliquidChannels {
+    controls: SyncSender<HyperliquidRealtimeControl>,
+    events: Receiver<
+        aeris_market_engine::fence::Fenced<
+            aeris_market_engine::fence::ProviderTag,
+            HyperliquidRealtimeEvent,
+        >,
+    >,
+    display_controls: SyncSender<HyperliquidDisplayDepthControl>,
+    display_events: Receiver<HyperliquidDisplayDepthEvent>,
 }
 
 struct ProviderCatalogChannels {
@@ -1252,6 +1260,7 @@ struct ProviderRuntimeRecord {
     cancellation: Arc<AtomicBool>,
     lifecycle: Arc<ProviderRuntimeLifecycle>,
     realtime: ProviderRealtimeChannels,
+    hyperliquid: Option<HyperliquidChannels>,
     catalog: ProviderCatalogChannels,
     workers: Vec<thread::JoinHandle<()>>,
 }
@@ -1323,6 +1332,7 @@ struct ProviderDispatchRecord<'a> {
     history: &'a SyncSender<HistoryRequest>,
     lifecycle: Option<&'a ProviderRuntimeLifecycle>,
     realtime: ProviderRealtimeDispatch<'a>,
+    hyperliquid: Option<&'a HyperliquidChannels>,
     catalog: Option<&'a dyn ProviderCatalogChannel>,
 }
 
@@ -1339,12 +1349,6 @@ enum ProviderRealtimeDispatch<'a> {
         controls: &'a SyncSender<RithmicRealtimeControl>,
         events: &'a Receiver<RithmicRealtimeEvent>,
     },
-    Hyperliquid {
-        controls: &'a SyncSender<HyperliquidRealtimeControl>,
-        events: &'a Receiver<HyperliquidRealtimeEvent>,
-        display_controls: &'a SyncSender<HyperliquidDisplayDepthControl>,
-        display_events: &'a Receiver<HyperliquidDisplayDepthEvent>,
-    },
     Disabled,
 }
 
@@ -1352,24 +1356,6 @@ impl<'a> ProviderRealtimeDispatch<'a> {
     fn rithmic_controls(&self) -> Option<&'a SyncSender<RithmicRealtimeControl>> {
         match self {
             Self::Rithmic { controls, .. } => Some(controls),
-            _ => None,
-        }
-    }
-
-    fn hyperliquid_controls(&self) -> Option<&'a SyncSender<HyperliquidRealtimeControl>> {
-        match self {
-            Self::Hyperliquid { controls, .. } => Some(controls),
-            _ => None,
-        }
-    }
-
-    fn hyperliquid_display_controls(
-        &self,
-    ) -> Option<&'a SyncSender<HyperliquidDisplayDepthControl>> {
-        match self {
-            Self::Hyperliquid {
-                display_controls, ..
-            } => Some(display_controls),
             _ => None,
         }
     }
@@ -1383,6 +1369,7 @@ enum ProviderCatalogCommand {
 
 enum ProviderRuntimeEvent {
     Realtime(WireProviderEvent),
+    BoundRealtime(ProviderEvent),
     DisplayDepth(&'static str, ProviderDisplayDepthEvent),
     Catalog(&'static str, ProviderCatalogEvent),
 }
@@ -1565,6 +1552,21 @@ impl ProviderRuntimeEvent {
             Self::Realtime(event) => (
                 event.provider,
                 event.generation,
+                matches!(
+                    event.kind,
+                    ProviderEventKind::Connecting
+                        | ProviderEventKind::Recovering { .. }
+                        | ProviderEventKind::Failed(..)
+                        | ProviderEventKind::Disconnected(..)
+                ),
+                match event.kind {
+                    ProviderEventKind::Heartbeat(rtt) => rtt,
+                    _ => None,
+                },
+            ),
+            Self::BoundRealtime(event) => (
+                event.provider,
+                event.wire_generation,
                 matches!(
                     event.kind,
                     ProviderEventKind::Connecting

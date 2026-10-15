@@ -33,14 +33,12 @@ use aeris_hyperliquid_market_adapter::{
     decode_trades_batch, fetch_meta_bundle, parse_ws_frame,
 };
 use aeris_market_data::{DepthSnapshot, MarketTrade, TopOfBookQuote};
+use aeris_market_engine::fence::{Fenced, ProviderTag};
 use aeris_platform_runtime::{MarketSocket, MarketSocketEvent};
 
 use crate::hyperliquid_market_screen::{RetainedMarketStatistics, instrument_summary};
+use crate::market_service::provider_session::ProviderEventSink;
 use crate::market_service::{CatalogPublisher, ProviderCoordinatorWake};
-use crate::market_service::{
-    clock::{Clock, SystemClock},
-    reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
-};
 
 pub(crate) const CATALOG_WORKER_NAME: &str = "aeris-hyperliquid-catalog";
 pub(crate) const PROVIDER_WORKER_NAME: &str = "aeris-hyperliquid-provider";
@@ -102,6 +100,7 @@ pub(crate) struct HyperliquidDemand {
 }
 
 pub(crate) enum HyperliquidRealtimeControl {
+    Connect(ProviderEventSink),
     Subscribe(HyperliquidDemand),
     Stop,
 }
@@ -525,58 +524,53 @@ fn instrument_matches_entitlement(
 /// Runs the realtime worker: one multiplexed socket for every demand.
 pub(crate) fn run(
     controls: &Receiver<HyperliquidRealtimeControl>,
-    events: &SyncSender<HyperliquidRealtimeEvent>,
+    events: &SyncSender<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
     stop: &Arc<AtomicBool>,
     ws_generation: &Arc<AtomicU64>,
     wake: &ProviderCoordinatorWake,
-    _reconnect_delay: Duration,
 ) {
-    let clock = SystemClock;
-    let mut backoff = Backoff::new(ReconnectPolicy::hyperliquid(), &clock, 0x4859_5045);
-    let mut healthy_since = None;
-    let mut generation = ws_generation.load(Ordering::Acquire).max(1);
     let mut demand = HyperliquidDemand::default();
-    let mut stopped = true;
+    let mut pending_epoch = None;
     loop {
         if stop.load(Ordering::Acquire) {
             return;
         }
-        drain_controls(controls, &mut demand, &mut stopped);
-        if stopped {
+        if pending_epoch.is_none() {
             match controls.recv_timeout(CATALOG_POLL_INTERVAL) {
-                Ok(HyperliquidRealtimeControl::Subscribe(next)) => {
-                    demand = next;
-                    stopped = false;
-                }
+                Ok(HyperliquidRealtimeControl::Connect(sink)) => pending_epoch = Some(sink),
+                Ok(HyperliquidRealtimeControl::Subscribe(next)) => demand = next,
                 Ok(HyperliquidRealtimeControl::Stop)
                 | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
             continue;
         }
+        drain_controls(controls, &mut demand, &mut pending_epoch);
+        let Some(sink) = pending_epoch.take() else {
+            continue;
+        };
+        let generation = sink.epoch.get().get();
         ws_generation.store(generation, Ordering::Release);
         if emit(
             events,
             HyperliquidRealtimeEvent::Connecting(generation),
             stop,
             wake,
+            sink,
         ) {
             return;
         }
         if wake.overflowed("hyperliquid", generation) {
-            generation = generation.saturating_add(1);
-            reconnect_sleep(&mut backoff, stop);
             continue;
         }
         match MarketSocket::connect(HYPERLIQUID_WS_URL, CONNECT_TIMEOUT, stop) {
             Ok((mut socket, _shutdown)) => {
-                healthy_since = Some(clock.monotonic());
                 match run_session(
                     &mut socket,
                     generation,
                     &mut demand,
                     controls,
-                    events,
+                    (events, sink),
                     stop,
                     wake,
                 ) {
@@ -584,9 +578,6 @@ pub(crate) fn run(
                     SessionExit::Closed => {}
                     SessionExit::Parked => {
                         diagnostic!("Aeris Hyperliquid realtime parked by demand owner");
-                        stopped = true;
-                        backoff.reset();
-                        healthy_since = None;
                     }
                     SessionExit::Reconnect(reason) => {
                         diagnostic!("Aeris Hyperliquid realtime reconnecting: {reason}");
@@ -603,6 +594,7 @@ pub(crate) fn run(
                     HyperliquidRealtimeEvent::Recovering(generation),
                     stop,
                     wake,
+                    sink,
                 ) {
                     return;
                 }
@@ -616,15 +608,9 @@ pub(crate) fn run(
             HyperliquidRealtimeEvent::Disconnected(generation),
             stop,
             wake,
+            sink,
         ) {
             return;
-        }
-        generation = generation.saturating_add(1).max(1);
-        if !stopped {
-            if let Some(since) = healthy_since.take() {
-                backoff.healthy_for(since, &clock);
-            }
-            reconnect_sleep(&mut backoff, stop);
         }
     }
 }
@@ -632,25 +618,18 @@ pub(crate) fn run(
 fn drain_controls(
     controls: &Receiver<HyperliquidRealtimeControl>,
     demand: &mut HyperliquidDemand,
-    stopped: &mut bool,
+    pending_epoch: &mut Option<ProviderEventSink>,
 ) {
     // Newest demand wins; stopping parks rather than closing the worker.
     while let Ok(control) = controls.try_recv() {
         match control {
             HyperliquidRealtimeControl::Subscribe(next) => {
                 *demand = next;
-                *stopped = false;
             }
-            HyperliquidRealtimeControl::Stop => *stopped = true,
+            HyperliquidRealtimeControl::Connect(sink) => *pending_epoch = Some(sink),
+            HyperliquidRealtimeControl::Stop => *pending_epoch = None,
         }
     }
-}
-
-fn reconnect_sleep(backoff: &mut Backoff, stop: &Arc<AtomicBool>) {
-    let RetryDecision::Wait(delay) = backoff.failure(RetryClass::Transient) else {
-        unreachable!("Hyperliquid has no retry budget");
-    };
-    thread_sleep(delay, stop);
 }
 
 #[derive(PartialEq, Eq)]
@@ -658,18 +637,6 @@ enum SessionExit {
     Reconnect(String),
     Parked,
     Closed,
-}
-
-fn thread_sleep(delay: Duration, stop: &Arc<AtomicBool>) {
-    let deadline = Instant::now() + delay;
-    while Instant::now() < deadline {
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
-        std::thread::sleep(
-            Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())),
-        );
-    }
 }
 
 /// Publishes without blocking; overflow rejects the pending catalog requests.
@@ -685,16 +652,17 @@ fn publish_catalog<T>(events: &CatalogPublisher<T>, event: T, stop: &AtomicBool)
 
 /// Sends one realtime event; returns true when cancelled or the coordinator is gone.
 fn emit(
-    events: &SyncSender<HyperliquidRealtimeEvent>,
+    events: &SyncSender<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
     event: HyperliquidRealtimeEvent,
     stop: &AtomicBool,
     wake: &ProviderCoordinatorWake,
+    sink: ProviderEventSink,
 ) -> bool {
     if stop.load(Ordering::Acquire) {
         return true;
     }
     let generation = event.generation();
-    match events.try_send(event) {
+    match events.try_send(sink.stamp(event)) {
         Ok(()) => {
             wake.notify();
             false
@@ -724,9 +692,18 @@ impl HyperliquidRealtimeEvent {
 }
 
 struct RealtimeEventSink<'a> {
-    events: &'a SyncSender<HyperliquidRealtimeEvent>,
+    events: RealtimeEventChannel<'a>,
     stop: &'a AtomicBool,
     wake: &'a ProviderCoordinatorWake,
+}
+
+enum RealtimeEventChannel<'a> {
+    Bound {
+        events: &'a SyncSender<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
+        sink: ProviderEventSink,
+    },
+    #[cfg(test)]
+    Raw(&'a SyncSender<HyperliquidRealtimeEvent>),
 }
 
 impl RealtimeEventSink<'_> {
@@ -738,16 +715,19 @@ impl RealtimeEventSink<'_> {
         if self.wake.overflowed("hyperliquid", generation) {
             return true;
         }
-        match self.events.try_send(event) {
-            Ok(()) => {
-                self.wake.notify();
-                false
+        let result = match &self.events {
+            RealtimeEventChannel::Bound { events, sink } => {
+                events.try_send(sink.stamp(event)).map_err(|_| ())
             }
-            Err(TrySendError::Full(_)) => {
-                self.wake.report_overflow("hyperliquid", generation);
-                true
-            }
-            Err(TrySendError::Disconnected(_)) => true,
+            #[cfg(test)]
+            RealtimeEventChannel::Raw(events) => events.try_send(event).map_err(|_| ()),
+        };
+        if result.is_ok() {
+            self.wake.notify();
+            false
+        } else {
+            self.wake.report_overflow("hyperliquid", generation);
+            true
         }
     }
 }
@@ -811,11 +791,21 @@ fn run_session(
     generation: u64,
     demand: &mut HyperliquidDemand,
     controls: &Receiver<HyperliquidRealtimeControl>,
-    events: &SyncSender<HyperliquidRealtimeEvent>,
+    bound_events: (
+        &SyncSender<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
+        ProviderEventSink,
+    ),
     stop: &Arc<AtomicBool>,
     wake: &ProviderCoordinatorWake,
 ) -> SessionExit {
-    let sink = RealtimeEventSink { events, stop, wake };
+    let sink = RealtimeEventSink {
+        events: RealtimeEventChannel::Bound {
+            events: bound_events.0,
+            sink: bound_events.1,
+        },
+        stop,
+        wake,
+    };
     let started = Instant::now();
     let mut state = SessionState {
         pending_subscriptions: BTreeMap::new(),
@@ -913,6 +903,7 @@ fn drain_session_controls(
                 *demand = next;
                 parked = false;
             }
+            HyperliquidRealtimeControl::Connect(_) => {}
             HyperliquidRealtimeControl::Stop => parked = true,
         }
     }
@@ -1502,7 +1493,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let wake = ProviderCoordinatorWake::for_tests();
         let sink = RealtimeEventSink {
-            events,
+            events: RealtimeEventChannel::Raw(events),
             stop: &stop,
             wake: &wake,
         };
@@ -1534,7 +1525,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let wake = ProviderCoordinatorWake::for_tests();
         let sink = RealtimeEventSink {
-            events: &events,
+            events: RealtimeEventChannel::Raw(&events),
             stop: &stop,
             wake: &wake,
         };
@@ -2001,7 +1992,6 @@ mod tests {
                 &worker_stop,
                 &worker_generation,
                 &wake,
-                Duration::from_millis(10),
             );
         });
         let instrument = HyperliquidInstrumentDemand {
@@ -2020,13 +2010,24 @@ mod tests {
                 ..Default::default()
             }))
             .expect("demand");
+        controls
+            .send(HyperliquidRealtimeControl::Connect(ProviderEventSink {
+                epoch: aeris_market_engine::fence::EpochSequence::<ProviderTag>::default().next(),
+            }))
+            .expect("connect");
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut connected = false;
         let mut candle = false;
         while Instant::now() < deadline && !(connected && candle) {
             match event_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(HyperliquidRealtimeEvent::Connected(_)) => connected = true,
-                Ok(HyperliquidRealtimeEvent::Candle(_, _, _, _)) => candle = true,
+                Ok(Fenced {
+                    value: HyperliquidRealtimeEvent::Connected(_),
+                    ..
+                }) => connected = true,
+                Ok(Fenced {
+                    value: HyperliquidRealtimeEvent::Candle(_, _, _, _),
+                    ..
+                }) => candle = true,
                 Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }

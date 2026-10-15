@@ -2,20 +2,20 @@ use super::{
     ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarSeriesKey,
     COMMAND_CAPACITY, ClientId, Command, ConsumerId, ConsumerIdentity, ConsumerResourceClass,
     Duration, GenerationId, HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource,
-    InstallProviderInstrument, Instant, LiveHyperliquidHistory, LiveRithmicHistory, MarketEngine,
-    MarketRuntime, MarketService, MarketServiceStatus, Mutex, NativeStudyRegistration, Ordering,
-    OwnedCoordinatorChannels, ProviderCatalogChannelImpl, ProviderCatalogChannels,
-    ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
-    ProviderEventLane, ProviderRealtimeChannelSet, ProviderRealtimeChannels,
-    ProviderRealtimeDispatch, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
-    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
-    RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, RithmicRealtimeControl,
-    ScreenProviderMarkets, SearchProviderInstruments, SelectProviderInstrument,
-    StartedProviderRuntime, StreamRequirements, StudyInstanceId, SyncSender, TrySendError,
-    Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc, spawn_coordinator,
-    spawn_history_worker, thread, try_send_hyperliquid_catalog, try_send_rithmic_catalog,
-    validate_provider_instrument, validate_provider_screen, validate_provider_search,
-    validate_provider_selection,
+    HyperliquidChannels, InstallProviderInstrument, Instant, LiveHyperliquidHistory,
+    LiveRithmicHistory, MarketEngine, MarketRuntime, MarketService, MarketServiceStatus, Mutex,
+    NativeStudyRegistration, Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelImpl,
+    ProviderCatalogChannels, ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch,
+    ProviderDispatchRecord, ProviderEventLane, ProviderRealtimeChannelSet,
+    ProviderRealtimeChannels, ProviderRealtimeDispatch, ProviderRuntimeEvent,
+    ProviderRuntimeLifecycle, ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec,
+    REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl,
+    RithmicRealtimeControl, ScreenProviderMarkets, SearchProviderInstruments,
+    SelectProviderInstrument, StartedProviderRuntime, StreamRequirements, StudyInstanceId,
+    SyncSender, TrySendError, Viewport, WorkspaceId, configured_reconnect_delay, id, mpsc,
+    spawn_coordinator, spawn_history_worker, thread, try_send_hyperliquid_catalog,
+    try_send_rithmic_catalog, validate_provider_instrument, validate_provider_screen,
+    validate_provider_search, validate_provider_selection,
 };
 use crate::MarketRuntimeEvent;
 use crate::hyperliquid_display_depth::{
@@ -394,6 +394,7 @@ impl ProviderRuntimeRegistry {
                     events: realtime_events,
                 },
             },
+            hyperliquid: None,
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -461,7 +462,6 @@ impl ProviderRuntimeRegistry {
                 realtime_events_tx,
                 ws_generation,
                 wake.clone(),
-                reconnect_delay,
             ) {
                 started.cancel_and_join();
                 return Err(error);
@@ -485,13 +485,14 @@ impl ProviderRuntimeRegistry {
             lifecycle: started.lifecycle,
             realtime: ProviderRealtimeChannels {
                 enabled,
-                channels: ProviderRealtimeChannelSet::Hyperliquid {
-                    controls: realtime_controls,
-                    events: realtime_events,
-                    display_controls,
-                    display_events,
-                },
+                channels: ProviderRealtimeChannelSet::Disabled,
             },
+            hyperliquid: enabled.then_some(HyperliquidChannels {
+                controls: realtime_controls,
+                events: realtime_events,
+                display_controls,
+                display_events,
+            }),
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -542,10 +543,14 @@ impl ProviderRuntimeRegistry {
         started: &mut StartedProviderRuntime,
         active_workers: &Arc<Mutex<BTreeSet<String>>>,
         controls: mpsc::Receiver<crate::hyperliquid_realtime::HyperliquidRealtimeControl>,
-        events: mpsc::SyncSender<crate::hyperliquid_realtime::HyperliquidRealtimeEvent>,
+        events: mpsc::SyncSender<
+            aeris_market_engine::fence::Fenced<
+                aeris_market_engine::fence::ProviderTag,
+                crate::hyperliquid_realtime::HyperliquidRealtimeEvent,
+            >,
+        >,
         ws_generation: Arc<AtomicU64>,
         wake: ProviderCoordinatorWake,
-        reconnect_delay: Duration,
     ) -> Result<(), String> {
         let cancellation = Arc::clone(&started.cancellation);
         let lifecycle = Arc::clone(&started.lifecycle);
@@ -563,7 +568,6 @@ impl ProviderRuntimeRegistry {
                     &cancellation,
                     &ws_generation,
                     &wake,
-                    reconnect_delay,
                 );
                 if !cancellation.load(Ordering::Acquire) {
                     lifecycle.mark_terminal_failure("Provider runtime stopped unexpectedly");
@@ -625,17 +629,6 @@ impl ProviderRuntimeRegistry {
                     {
                         ProviderRealtimeDispatch::Rithmic { controls, events }
                     }
-                    ProviderRealtimeChannelSet::Hyperliquid {
-                        controls,
-                        events,
-                        display_controls,
-                        display_events,
-                    } if record.realtime.enabled => ProviderRealtimeDispatch::Hyperliquid {
-                        controls,
-                        events,
-                        display_controls,
-                        display_events,
-                    },
                     _ => ProviderRealtimeDispatch::Disabled,
                 };
                 let catalog = record
@@ -649,6 +642,7 @@ impl ProviderRuntimeRegistry {
                         history: &record.history,
                         lifecycle: Some(&record.lifecycle),
                         realtime,
+                        hyperliquid: record.hyperliquid.as_ref(),
                         catalog,
                     },
                 )
@@ -659,16 +653,15 @@ impl ProviderRuntimeRegistry {
             let Some(record) = records.get(provider_id) else {
                 continue;
             };
-            if !matches!(record.realtime, ProviderRealtimeDispatch::Disabled) {
+            if !matches!(record.realtime, ProviderRealtimeDispatch::Disabled)
+                || record.hyperliquid.is_some()
+            {
                 lanes.push(ProviderEventLane::Realtime(provider_id));
             }
             if record.catalog.is_some() {
                 lanes.push(ProviderEventLane::Catalog(provider_id));
             }
-            if matches!(
-                record.realtime,
-                ProviderRealtimeDispatch::Hyperliquid { .. }
-            ) {
+            if record.hyperliquid.is_some() {
                 lanes.push(ProviderEventLane::DisplayDepth(provider_id));
             }
         }
@@ -689,6 +682,7 @@ impl ProviderRuntimeRegistry {
             let ProviderRuntimeRecord {
                 history,
                 realtime,
+                hyperliquid: _,
                 catalog,
                 workers,
                 ..
@@ -830,13 +824,27 @@ impl ProviderDispatch<'_> {
                             ProviderRuntimeEvent::Realtime(super::ProviderEvent::rithmic(event))
                         })
                     }
-                    ProviderRealtimeDispatch::Hyperliquid { events, .. } => {
-                        events.try_recv().ok().map(|event| {
-                            ProviderRuntimeEvent::Realtime(super::ProviderEvent::hyperliquid(event))
-                        })
-                    }
                     ProviderRealtimeDispatch::Disabled => None,
                 }
+                .or_else(|| {
+                    let bound = self
+                        .records
+                        .get(provider_id)?
+                        .hyperliquid?
+                        .events
+                        .try_recv()
+                        .ok()?;
+                    let epoch = bound.epoch;
+                    let wire = super::ProviderEvent::hyperliquid(bound.value);
+                    (wire.generation == epoch.get().get()).then_some(
+                        ProviderRuntimeEvent::BoundRealtime(super::ProviderEvent {
+                            provider: wire.provider,
+                            generation: epoch,
+                            wire_generation: wire.generation,
+                            kind: wire.kind,
+                        }),
+                    )
+                })
             }
             ProviderEventLane::Catalog(provider_id) => self
                 .records
@@ -844,15 +852,14 @@ impl ProviderDispatch<'_> {
                 .catalog?
                 .try_recv()
                 .map(|event| ProviderRuntimeEvent::Catalog(provider_id, event)),
-            ProviderEventLane::DisplayDepth(provider_id) => {
-                match &self.records.get(provider_id)?.realtime {
-                    ProviderRealtimeDispatch::Hyperliquid { display_events, .. } => display_events
-                        .try_recv()
-                        .ok()
-                        .map(|event| ProviderRuntimeEvent::DisplayDepth(provider_id, event.into())),
-                    _ => None,
-                }
-            }
+            ProviderEventLane::DisplayDepth(provider_id) => self
+                .records
+                .get(provider_id)?
+                .hyperliquid?
+                .display_events
+                .try_recv()
+                .ok()
+                .map(|event| ProviderRuntimeEvent::DisplayDepth(provider_id, event.into())),
         }?;
         self.observe_event(&event);
         Some(event)
@@ -908,9 +915,6 @@ impl ProviderDispatch<'_> {
                 match &record.realtime {
                     ProviderRealtimeDispatch::Rithmic { .. } => self.send_rithmic_realtime(
                         RithmicRealtimeControl::Subscribe(demand.rithmic_wire()?),
-                    ),
-                    ProviderRealtimeDispatch::Hyperliquid { .. } => self.send_hyperliquid_realtime(
-                        HyperliquidRealtimeControl::Subscribe(demand.hyperliquid_wire()),
                     ),
                     ProviderRealtimeDispatch::Tastytrade { controls, .. } => {
                         match controls.try_send(super::tastytrade::RealtimeControl::Subscribe(
@@ -1001,28 +1005,6 @@ impl ProviderDispatch<'_> {
         }
     }
 
-    pub(super) fn send_hyperliquid_realtime(
-        &self,
-        control: HyperliquidRealtimeControl,
-    ) -> Result<bool, String> {
-        let Some(controls) = self
-            .records
-            .get(super::HYPERLIQUID_DESCRIPTOR.id)
-            .ok_or_else(|| "Provider live worker is unavailable".to_string())?
-            .realtime
-            .hyperliquid_controls()
-        else {
-            return Ok(false);
-        };
-        match controls.try_send(control) {
-            Ok(()) => Ok(true),
-            Err(TrySendError::Full(_)) => Ok(false),
-            Err(TrySendError::Disconnected(_)) => {
-                Err("Provider live worker is unavailable".to_string())
-            }
-        }
-    }
-
     pub(super) fn send_hyperliquid_display_depth(
         &self,
         control: HyperliquidDisplayDepthControl,
@@ -1031,8 +1013,8 @@ impl ProviderDispatch<'_> {
             .records
             .get(super::HYPERLIQUID_DESCRIPTOR.id)
             .ok_or_else(|| "Provider display-depth worker is unavailable".to_string())?
-            .realtime
-            .hyperliquid_display_controls()
+            .hyperliquid
+            .map(|channel| &channel.display_controls)
         else {
             return Ok(false);
         };
@@ -1071,11 +1053,10 @@ impl ProviderDispatch<'_> {
                     }
                 }
             }
-            ProviderRealtimeDispatch::Hyperliquid {
-                controls,
-                display_controls,
-                ..
-            } => {
+            ProviderRealtimeDispatch::Disabled if record.hyperliquid.is_some() => {
+                let channels = record.hyperliquid.expect("checked");
+                let controls = &channels.controls;
+                let display_controls = &channels.display_controls;
                 let raw_stopped = match controls.try_send(HyperliquidRealtimeControl::Stop) {
                     Err(TrySendError::Full(_)) => false,
                     Ok(()) | Err(TrySendError::Disconnected(_)) => true,
