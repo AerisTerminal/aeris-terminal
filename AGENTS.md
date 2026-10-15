@@ -275,6 +275,21 @@ a self-hosted runner must stay `workflow_dispatch`-only in every trigger form; l
 performance lanes stay `workflow_dispatch`-only. `tools/naming_check` enforces this shape across
 every workflow.
 
+## Build output hygiene
+
+Cargo never removes superseded artifacts. Every distinct command, profile and feature set adds a full
+new copy under `target/`, and GPUI debug builds have grown it past 70 GB in a few hours. Keep it bounded:
+
+- Before building a new desktop binary (`cargo build` or `cargo run`, debug or release), run
+  `cargo clean` so the old `target/` is removed completely and only the new build remains.
+- Before each verification batch, check the size of `target/`; above 25 GB, run `cargo clean` first.
+  Clean `third_party/gpui_base/target` the same way when it exists.
+- Never run `cargo clean` while another Cargo process is building in this workspace.
+- Delete each validation root under `%LOCALAPPDATA%\Temp\aeris_validation\` once its run is finished
+  and its evidence is recorded; do not leave per-attempt roots behind.
+- The maintainer's machine also runs an hourly `Aeris Target Cleanup` scheduled task that enforces the
+  25 GB cap and removes validation roots untouched for two days. It is a backstop, not a substitute.
+
 ## Release workflow
 
 Production release publication is disabled while the Aeris domain and AWS backend are unconfigured. Do not publish, install, or point clients at the former Axiusflow endpoint. The retired publication workflow must not be restored. Design and verify a new AWS release path when the maintainer requests deployment.
