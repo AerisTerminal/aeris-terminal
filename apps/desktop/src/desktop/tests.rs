@@ -3780,6 +3780,10 @@ impl ChartOrderFixture {
                 quantity_scale: 0,
                 contract: ContractMetadata {
                     tick_size: Some(InstrumentDecimal::try_new(1, 2).expect("tick")),
+                    price_grid: aeris_instruments::PriceGrid::Fixed(
+                        InstrumentDecimal::try_new(1, 2).expect("tick"),
+                    ),
+                    instrument_class: aeris_instruments::InstrumentClass::CryptoSpot,
                     point_value: Some(InstrumentDecimal::try_new(1, 0).expect("point value")),
                     order_quantity_increment: None,
                     currency: "USD".to_string(),

@@ -329,6 +329,7 @@ version = "0.2.3"
 name = "aeris_market_engine"
 version = "0.2.3"
 dependencies = [
+ "aeris_instruments",
  "aeris_market_data",
  "serde_json",
  "sha2 0.11.0",

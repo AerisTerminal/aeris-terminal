@@ -22,6 +22,7 @@ pub use publication::{ConsumerPublication, ConsumerSeriesUpdate};
 pub use series_store::{SeriesSegments, SeriesSnapshot, SeriesTailOperation, SeriesView};
 pub use subscription_registry::SubscriptionStatus;
 
+use aeris_instruments::InstrumentId;
 use aeris_market_data::{BarSeriesKey, MarketBar, MarketDataValidationError};
 use data_lease::DataLeaseRegistry;
 use demand::DemandRegistry;
@@ -50,6 +51,47 @@ pub struct ConsumerId(pub NonZeroU64);
 /// chart consumers without becoming fake UI consumers or receiving publications.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MarketDataLeaseId(pub NonZeroU64);
+
+/// Instrument demand does not inherit a chart period or create synthetic bars.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct InstrumentStreamKey {
+    pub provider: String,
+    pub instrument: InstrumentId,
+    pub entitlement: Option<String>,
+}
+
+impl InstrumentStreamKey {
+    /// Checks a bounded route before it enters the shared demand owner.
+    ///
+    /// # Errors
+    /// Returns an error for empty or oversized provider/entitlement identity.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        if self.provider.trim().is_empty()
+            || self.provider.len() > 256
+            || self.instrument.as_str().len() > 256
+            || self
+                .entitlement
+                .as_ref()
+                .is_some_and(|entitlement| entitlement.trim().is_empty() || entitlement.len() > 256)
+        {
+            return Err(EngineError::InvalidInstrumentStreamKey);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MarketDemandKey {
+    Series(BarSeriesKey),
+    Instrument(InstrumentStreamKey),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum LeaseOwner {
+    Consumer(ConsumerId),
+    Trading,
+    PriceAlerts,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GenerationId(pub NonZeroU64);
@@ -122,6 +164,7 @@ pub enum EngineError {
     },
     DataLeaseIdentityExhausted,
     UnknownDataLease(MarketDataLeaseId),
+    InvalidInstrumentStreamKey,
     EmptyStreamRequirements,
     StaleConsumerGeneration {
         consumer_id: ConsumerId,
@@ -208,6 +251,9 @@ impl fmt::Display for EngineError {
                     lease_id.0
                 )
             }
+            Self::InvalidInstrumentStreamKey => {
+                formatter.write_str("instrument stream identity is invalid")
+            }
             Self::EmptyStreamRequirements => {
                 formatter.write_str("consumer demand must request at least one stream")
             }
@@ -268,12 +314,16 @@ pub struct MarketEngine {
 impl MarketEngine {
     #[must_use]
     pub fn new(config: MarketEngineConfig) -> Self {
+        Self::with_lease_capacity(config, config.maximum_series)
+    }
+
+    /// Reserves one shared bounded lease capacity for series and instrument
+    /// interests without changing the canonical series-store limit.
+    #[must_use]
+    pub fn with_lease_capacity(config: MarketEngineConfig, maximum_leases: NonZeroUsize) -> Self {
         Self {
             demands: DemandRegistry::new(config.maximum_consumers),
-            // A lease is a reference to one canonical series. Reusing the canonical
-            // series bound keeps internal demand finite without inventing another
-            // independently tuned capacity.
-            data_leases: DataLeaseRegistry::new(config.maximum_series),
+            data_leases: DataLeaseRegistry::new(maximum_leases),
             providers: ProviderManager::new(),
             series: SeriesStore::new(config.maximum_series, config.maximum_bars),
             subscriptions: SubscriptionRegistry::new(),
@@ -557,7 +607,9 @@ impl MarketEngine {
         }
         self.providers
             .verify_streams(&series.provider_id, streams)?;
-        let lease_id = self.data_leases.acquire(series.clone(), streams)?;
+        let lease_id = self
+            .data_leases
+            .acquire(MarketDemandKey::Series(series.clone()), streams)?;
         self.subscriptions
             .replace_lease(lease_id, None, series, streams);
         Ok((lease_id, self.series.get(series)))
@@ -585,14 +637,17 @@ impl MarketEngine {
             .current(lease_id)
             .cloned()
             .ok_or(EngineError::UnknownDataLease(lease_id))?;
-        if previous.series == *series && previous.streams == streams {
+        let MarketDemandKey::Series(previous_series) = &previous.key else {
+            return Err(EngineError::UnknownDataLease(lease_id));
+        };
+        if previous.key == MarketDemandKey::Series(series.clone()) && previous.streams == streams {
             return Ok(self.series.get(series));
         }
         self.data_leases
-            .replace(lease_id, series.clone(), streams)?;
+            .replace(lease_id, MarketDemandKey::Series(series.clone()), streams)?;
         self.subscriptions.replace_lease(
             lease_id,
-            Some((&previous.series, previous.streams)),
+            Some((previous_series, previous.streams)),
             series,
             streams,
         );
@@ -606,7 +661,9 @@ impl MarketEngine {
         let Some(removed) = self.data_leases.remove(lease_id) else {
             return false;
         };
-        self.subscriptions.remove_lease(lease_id, &removed.series);
+        if let MarketDemandKey::Series(series) = &removed.key {
+            self.subscriptions.remove_lease(lease_id, series);
+        }
         true
     }
 
@@ -618,7 +675,57 @@ impl MarketEngine {
     ) -> Option<(&BarSeriesKey, StreamRequirements)> {
         self.data_leases
             .current(lease_id)
-            .map(|lease| (&lease.series, lease.streams))
+            .and_then(|lease| match &lease.key {
+                MarketDemandKey::Series(series) => Some((series, lease.streams)),
+                MarketDemandKey::Instrument(_) => None,
+            })
+    }
+
+    /// Acquires a standalone instrument interest in the same bounded registry
+    /// as chart and study leases. The caller must release the returned ID.
+    ///
+    /// # Errors
+    /// Returns a typed validation, capability or capacity error without mutation.
+    pub fn acquire_instrument_lease(
+        &mut self,
+        key: &InstrumentStreamKey,
+        streams: StreamRequirements,
+    ) -> Result<MarketDataLeaseId, EngineError> {
+        key.validate()?;
+        if streams.is_empty() || streams.contains(MarketStream::Bars) {
+            return Err(EngineError::EmptyStreamRequirements);
+        }
+        self.providers.verify_streams(&key.provider, streams)?;
+        self.data_leases
+            .acquire(MarketDemandKey::Instrument(key.clone()), streams)
+    }
+
+    /// Replaces an owner's interest set transactionally; removes demand when
+    /// no other owner or lease references the instrument and entitlement.
+    ///
+    /// # Errors
+    /// Returns an error for malformed, unsupported or over-capacity interest.
+    pub fn set_instrument_leases(
+        &mut self,
+        owner: LeaseOwner,
+        keys: std::collections::BTreeSet<InstrumentStreamKey>,
+        streams: StreamRequirements,
+    ) -> Result<(), EngineError> {
+        if !keys.is_empty() && (streams.is_empty() || streams.contains(MarketStream::Bars)) {
+            return Err(EngineError::EmptyStreamRequirements);
+        }
+        for key in &keys {
+            key.validate()?;
+            self.providers.verify_streams(&key.provider, streams)?;
+        }
+        self.data_leases.set_instruments(owner, keys, streams)
+    }
+
+    /// Shared upstream quote demand including independently leased interests.
+    pub fn instrument_subscriptions(
+        &self,
+    ) -> impl Iterator<Item = (InstrumentStreamKey, StreamRequirements)> {
+        self.data_leases.instrument_subscriptions().into_iter()
     }
 
     /// Returns the number of live runtime-owned market-data leases.
@@ -1078,6 +1185,8 @@ impl MarketEngine {
         if let Some(series) = removed.series.as_ref() {
             self.subscriptions.remove(consumer_id, series);
         }
+        self.data_leases
+            .release_owner(LeaseOwner::Consumer(consumer_id));
         true
     }
 
@@ -1090,6 +1199,8 @@ impl MarketEngine {
                 self.subscriptions.remove(consumer_id, series);
             }
             self.publications.remove(consumer_id);
+            self.data_leases
+                .release_owner(LeaseOwner::Consumer(consumer_id));
             consumer_ids.push(consumer_id);
         }
         consumer_ids
@@ -2072,6 +2183,104 @@ mod tests {
             })
         );
         assert!(!engine.release_data_lease(study_lease));
+    }
+
+    #[test]
+    fn instrument_leases_share_across_owners_and_release_only_after_last_interest() {
+        let mut engine = engine(1, 3, 8);
+        register_quotes_provider(&mut engine);
+        let key = InstrumentStreamKey {
+            provider: "quotes".into(),
+            instrument: InstrumentId::try_new("BTC").unwrap(),
+            entitlement: Some("public".into()),
+        };
+        let quotes = StreamRequirements::NONE.with(MarketStream::Quotes);
+        let keys = std::collections::BTreeSet::from([key.clone()]);
+        engine
+            .set_instrument_leases(LeaseOwner::Trading, keys.clone(), quotes)
+            .unwrap();
+        engine
+            .set_instrument_leases(LeaseOwner::PriceAlerts, keys.clone(), quotes)
+            .unwrap();
+        let standalone = engine.acquire_instrument_lease(&key, quotes).unwrap();
+        assert_eq!(
+            engine.instrument_subscriptions().collect::<Vec<_>>(),
+            vec![(key.clone(), quotes)]
+        );
+        assert_eq!(engine.data_lease_count(), 3);
+        engine
+            .set_instrument_leases(
+                LeaseOwner::Trading,
+                std::collections::BTreeSet::default(),
+                quotes,
+            )
+            .unwrap();
+        assert_eq!(engine.instrument_subscriptions().count(), 1);
+        assert!(engine.release_data_lease(standalone));
+        assert_eq!(engine.instrument_subscriptions().count(), 1);
+        engine
+            .set_instrument_leases(
+                LeaseOwner::PriceAlerts,
+                std::collections::BTreeSet::default(),
+                quotes,
+            )
+            .unwrap();
+        assert_eq!(engine.instrument_subscriptions().count(), 0);
+        assert_eq!(engine.data_lease_count(), 0);
+    }
+
+    #[test]
+    fn instrument_lease_overflow_preserves_previous_owner_set() {
+        let mut engine = engine(1, 2, 8);
+        register_quotes_provider(&mut engine);
+        let key = |instrument| InstrumentStreamKey {
+            provider: "quotes".into(),
+            instrument: InstrumentId::try_new(instrument).unwrap(),
+            entitlement: None,
+        };
+        let quotes = StreamRequirements::NONE.with(MarketStream::Quotes);
+        let original = key("BTC");
+        engine
+            .set_instrument_leases(LeaseOwner::Trading, [original.clone()].into(), quotes)
+            .unwrap();
+        let study = series("rithmic:spot:ETH-USD");
+        let (study_lease, _) = engine
+            .acquire_data_lease(&study, StreamRequirements::BARS)
+            .unwrap();
+        assert!(matches!(
+            engine.set_instrument_leases(
+                LeaseOwner::Trading,
+                [original.clone(), key("ETH")].into(),
+                quotes
+            ),
+            Err(EngineError::DataLeaseLimitExceeded { .. })
+        ));
+        assert_eq!(
+            engine.instrument_subscriptions().collect::<Vec<_>>(),
+            vec![(original, quotes)]
+        );
+        assert!(engine.release_data_lease(study_lease));
+        engine
+            .set_instrument_leases(LeaseOwner::Trading, [key("ETH")].into(), quotes)
+            .unwrap();
+        assert_eq!(engine.data_lease_count(), 1);
+    }
+
+    fn register_quotes_provider(engine: &mut MarketEngine) {
+        engine
+            .register_provider(
+                "quotes".into(),
+                ProviderConfig {
+                    account_id: "quotes:public".into(),
+                    capabilities: ProviderCapabilities {
+                        historical_bars: false,
+                        realtime_bars: false,
+                        streams: StreamRequirements::NONE.with(MarketStream::Quotes),
+                    },
+                    reconnect_delay: std::time::Duration::from_millis(250),
+                },
+            )
+            .unwrap();
     }
 
     #[test]

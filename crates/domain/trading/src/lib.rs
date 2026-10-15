@@ -7,6 +7,7 @@ use aeris_instruments::InstrumentId;
 use core::fmt;
 use std::error::Error;
 
+pub mod market;
 pub mod venue;
 
 /// Maximum decimal scale accepted by canonical trading values.

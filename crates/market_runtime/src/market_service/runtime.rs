@@ -2,12 +2,13 @@ use super::{
     ActiveWorkerGuard, Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarSeriesKey,
     COMMAND_CAPACITY, ClientId, Command, ConsumerId, ConsumerIdentity, ConsumerResourceClass,
     Duration, GenerationId, HISTORY_CAPACITY, HistoryRequest, HistorySnapshot, HistorySource,
-    HyperliquidChannels, InstallProviderInstrument, Instant, LiveHyperliquidHistory,
-    LiveRithmicHistory, MarketEngine, MarketRuntime, MarketService, MarketServiceStatus, Mutex,
-    NativeStudyRegistration, Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelImpl,
-    ProviderCatalogChannels, ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch,
-    ProviderDispatchRecord, ProviderEventLane, ProviderRuntimeEvent, ProviderRuntimeLifecycle,
-    ProviderRuntimeRecord, ProviderRuntimeRegistry, ProviderRuntimeSpec, REALTIME_CAPACITY,
+    HyperliquidChannels, InstallProviderInstrument, Instant, InstrumentStreamKey, LeaseOwner,
+    LiveHyperliquidHistory, LiveRithmicHistory, MarketDataLeaseId, MarketEngine, MarketRuntime,
+    MarketService, MarketServiceProviders, MarketServiceStatus, Mutex, NativeStudyRegistration,
+    Ordering, OwnedCoordinatorChannels, ProviderCatalogChannelImpl, ProviderCatalogChannels,
+    ProviderCatalogCommand, ProviderCoordinatorWake, ProviderDispatch, ProviderDispatchRecord,
+    ProviderEventLane, ProviderRuntimeEvent, ProviderRuntimeLifecycle, ProviderRuntimeRecord,
+    ProviderRuntimeRegistry, ProviderRuntimeSpec, QuoteSubscription, REALTIME_CAPACITY,
     RITHMIC_REALTIME_CONTROL_CAPACITY, Reply, RithmicCatalogControl, ScreenProviderMarkets,
     SearchProviderInstruments, SelectProviderInstrument, StartedProviderRuntime,
     StreamRequirements, StudyInstanceId, SyncSender, TrySendError, Viewport, WorkspaceId,
@@ -1111,6 +1112,7 @@ impl MarketService {
             .collect();
         let engine = super::configured_engine_from_descriptors(&descriptors)?;
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let quote_releases = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let broker_api = Arc::new(super::tastytrade::BrokerApi::default());
@@ -1131,6 +1133,7 @@ impl MarketService {
             OwnedCoordinatorChannels {
                 commands: command_rx,
                 providers: provider_registry,
+                quote_releases: Arc::clone(&quote_releases),
             },
             Arc::clone(&shutdown),
             Arc::new(super::clock::SystemClock),
@@ -1141,8 +1144,11 @@ impl MarketService {
             active_provider_workers,
             workers,
             start_context,
-            provider_search_preparers,
-            provider_presentations,
+            MarketServiceProviders {
+                presentations: provider_presentations,
+                search_preparers: provider_search_preparers,
+            },
+            quote_releases,
         )
     }
 
@@ -1152,8 +1158,8 @@ impl MarketService {
         active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
         mut workers: Vec<thread::JoinHandle<()>>,
         context: super::ProviderStartContext,
-        provider_search_preparers: BTreeMap<&'static str, super::ProviderSearchPreparer>,
-        provider_presentations: Vec<ProviderPresentationDescriptor>,
+        providers: MarketServiceProviders,
+        quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     ) -> Result<Self, String> {
         let super::ProviderStartContext {
             tastytrade: broker_api,
@@ -1176,6 +1182,10 @@ impl MarketService {
             };
         workers.push(worker);
         let shutdown_wake = commands.clone();
+        let MarketServiceProviders {
+            presentations: provider_presentations,
+            search_preparers: provider_search_preparers,
+        } = providers;
         Ok(Self {
             commands,
             runtime: Arc::new(MarketRuntime {
@@ -1189,6 +1199,7 @@ impl MarketService {
                 rithmic_login: super::rithmic_login::RithmicLogin::new(rithmic_login),
                 active_provider_workers,
                 workers: Mutex::new(Some(workers)),
+                quote_releases,
             }),
         })
     }
@@ -1623,6 +1634,24 @@ impl MarketService {
         })
     }
 
+    /// Acquires a reference-counted quote interest without chart demand.
+    /// Dropping the returned guard queues a bounded nonblocking release.
+    ///
+    /// # Errors
+    /// Returns a provider, identity, capacity, or coordinator error.
+    pub fn subscribe_quotes(
+        &self,
+        owner: LeaseOwner,
+        key: InstrumentStreamKey,
+    ) -> Result<QuoteSubscription, String> {
+        let lease_id = self.request(|reply| Ok(Command::AcquireQuote(key, reply)))?;
+        Ok(QuoteSubscription {
+            lease_id,
+            owner,
+            runtime: Arc::clone(&self.runtime),
+        })
+    }
+
     /// Drains at most one bounded market publication for an owned consumer.
     ///
     /// # Errors
@@ -1939,8 +1968,11 @@ mod tests {
                 ctrader: super::super::ctrader::CtraderShared::default(),
                 rithmic_login: RithmicLoginRevision::default(),
             },
-            BTreeMap::new(),
-            vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
+            MarketServiceProviders {
+                search_preparers: BTreeMap::new(),
+                presentations: vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
+            },
+            Arc::new(Mutex::new(Vec::new())),
         )
         .expect("test runtime starts");
         assert_eq!(service.provider_presentations()[0].id, "rithmic");
@@ -1954,6 +1986,60 @@ mod tests {
         service
             .shutdown(Duration::from_secs(1))
             .expect("test runtime stops");
+    }
+
+    #[test]
+    fn quote_subscription_drop_queues_bounded_nonblocking_release() {
+        let (commands, receiver) = mpsc::sync_channel(2);
+        let releases = Arc::new(Mutex::new(Vec::new()));
+        let service = MarketService::build_market_service(
+            commands,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(BTreeSet::new())),
+            Vec::new(),
+            super::super::ProviderStartContext {
+                tastytrade: Arc::new(super::super::tastytrade::BrokerApi::default()),
+                ctrader: super::super::ctrader::CtraderShared::default(),
+                rithmic_login: RithmicLoginRevision::default(),
+            },
+            MarketServiceProviders {
+                search_preparers: BTreeMap::new(),
+                presentations: vec![],
+            },
+            Arc::clone(&releases),
+        )
+        .unwrap();
+        let service_for_thread = service.clone();
+        let subscriber = thread::spawn(move || {
+            service_for_thread.subscribe_quotes(
+                LeaseOwner::Trading,
+                InstrumentStreamKey {
+                    provider: "hyperliquid".into(),
+                    instrument: aeris_instruments::InstrumentId::try_new("BTC").unwrap(),
+                    entitlement: None,
+                },
+            )
+        });
+        let Command::Request(command, state) = receiver.recv().unwrap() else {
+            panic!("quote request must use the cancellation envelope");
+        };
+        assert!(state.start());
+        let Command::AcquireQuote(_, reply) = *command else {
+            panic!("expected quote acquisition");
+        };
+        let lease = MarketDataLeaseId(std::num::NonZeroU64::new(1).unwrap());
+        reply.send(Ok(lease)).unwrap();
+        let guard = subscriber.join().unwrap().unwrap();
+        assert_eq!(guard.owner(), LeaseOwner::Trading);
+        drop(guard);
+        assert_eq!(
+            *releases
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![lease]
+        );
+        assert!(matches!(receiver.try_recv(), Ok(Command::ProviderWake)));
+        service.shutdown(Duration::from_secs(1)).unwrap();
     }
 
     #[test]

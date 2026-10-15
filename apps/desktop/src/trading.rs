@@ -939,6 +939,10 @@ fn trading_instrument_from_install(
         .collect::<Result<Vec<_>, String>>()?;
     let contract = ContractMetadata {
         tick_size,
+        // The runtime will publish verified provider terms in M3.8. Until
+        // then, decimal precision or a display increment is not a price grid.
+        price_grid: aeris_instruments::PriceGrid::Unknown,
+        instrument_class: aeris_instruments::InstrumentClass::Other,
         point_value,
         order_quantity_increment: metadata
             .order_quantity_increment

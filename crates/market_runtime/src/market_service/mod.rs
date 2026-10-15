@@ -35,10 +35,10 @@ use aeris_market_data::{
 };
 use aeris_market_engine::{
     ClientId, ConsumerId, ConsumerIdentity, ConsumerResourceClass, EngineError, GenerationId,
-    MarketEngine, MarketEngineConfig, MarketStream,
-    ProviderCapabilities as EngineProviderCapabilities, ProviderConfig, ProviderGeneration,
-    ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation, StreamRequirements,
-    Viewport, WorkspaceId,
+    InstrumentStreamKey, LeaseOwner, MarketDataLeaseId, MarketEngine, MarketEngineConfig,
+    MarketStream, ProviderCapabilities as EngineProviderCapabilities, ProviderConfig,
+    ProviderGeneration, ProviderHealth, ProviderRequest, SeriesSnapshot, SeriesTailOperation,
+    StreamRequirements, Viewport, WorkspaceId,
 };
 use aeris_provider_history::HistoryRange;
 use aeris_rithmic_protocol_adapter::RITHMIC_TEST_MARKET_DATA_ACCOUNT_ID;
@@ -77,6 +77,7 @@ const HISTORY_CAPACITY_EXHAUSTED: &str = "provider history capacity is temporari
 const MAXIMUM_HISTORY_RETRIES: u8 = 3;
 const MAXIMUM_CONSUMERS: usize = 256;
 const MAXIMUM_SERIES: usize = 64;
+const MAXIMUM_DATA_LEASES: usize = MAXIMUM_SERIES + aeris_trading::market::MAXIMUM_QUOTE_INTEREST;
 const MAXIMUM_STUDIES: usize = MAXIMUM_CONSUMERS * 16;
 const MAXIMUM_STUDY_DEPENDENCIES: usize = MAXIMUM_STUDY_DEPENDENCIES_PER_INSTANCE;
 const MAXIMUM_STUDY_OUTPUTS: usize = MAXIMUM_STUDY_OUTPUTS_PER_INSTANCE;
@@ -120,6 +121,39 @@ pub struct MarketService {
     runtime: Arc<MarketRuntime>,
 }
 
+/// Releases instrument demand on drop without blocking the caller's thread.
+/// The coordinator drains the bounded pending-release slot on its next turn.
+pub struct QuoteSubscription {
+    lease_id: MarketDataLeaseId,
+    owner: LeaseOwner,
+    runtime: Arc<MarketRuntime>,
+}
+
+impl QuoteSubscription {
+    #[must_use]
+    pub const fn owner(&self) -> LeaseOwner {
+        self.owner
+    }
+}
+
+impl Drop for QuoteSubscription {
+    fn drop(&mut self) {
+        let mut releases = self
+            .runtime
+            .quote_releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // No more than maximum_data_leases distinct live guards can exist.
+        assert!(
+            releases.len() < MAXIMUM_DATA_LEASES,
+            "quote release capacity exceeded"
+        );
+        releases.push(self.lease_id);
+        drop(releases);
+        let _ = self.runtime.shutdown_wake.try_send(Command::ProviderWake);
+    }
+}
+
 /// Bounded coordinator-owned lifecycle and memory snapshot for authenticated diagnostics.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketServiceStatus {
@@ -143,6 +177,12 @@ struct MarketRuntime {
     rithmic_login: rithmic_login::RithmicLogin,
     active_provider_workers: Arc<Mutex<BTreeSet<String>>>,
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
+    quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
+}
+
+struct MarketServiceProviders {
+    presentations: Vec<ProviderPresentationDescriptor>,
+    search_preparers: BTreeMap<&'static str, ProviderSearchPreparer>,
 }
 
 impl Drop for MarketRuntime {
@@ -224,6 +264,7 @@ enum Command {
         Vec<crate::MarketPriceAlert>,
         Reply<()>,
     ),
+    AcquireQuote(InstrumentStreamKey, Reply<MarketDataLeaseId>),
     Poll(ClientId, ConsumerId, Reply<Option<MarketRuntimeEvent>>),
     PollClient(
         ClientId,
@@ -1648,13 +1689,16 @@ fn configured_engine() -> Result<MarketEngine, String> {
 fn configured_engine_from_descriptors(
     descriptors: &[ProviderDescriptor],
 ) -> Result<MarketEngine, String> {
-    let mut engine = MarketEngine::new(MarketEngineConfig {
-        maximum_consumers: NonZeroUsize::new(MAXIMUM_CONSUMERS).unwrap_or(NonZeroUsize::MIN),
-        maximum_series: NonZeroUsize::new(MAXIMUM_SERIES).unwrap_or(NonZeroUsize::MIN),
-        // SeriesStore performs no eager allocation for this logical capacity;
-        // runtime compaction keeps each series at/below its high watermark.
-        maximum_bars: NonZeroUsize::new(MAXIMUM_STORED_BARS).unwrap_or(NonZeroUsize::MIN),
-    });
+    let mut engine = MarketEngine::with_lease_capacity(
+        MarketEngineConfig {
+            maximum_consumers: NonZeroUsize::new(MAXIMUM_CONSUMERS).unwrap_or(NonZeroUsize::MIN),
+            maximum_series: NonZeroUsize::new(MAXIMUM_SERIES).unwrap_or(NonZeroUsize::MIN),
+            // SeriesStore performs no eager allocation for this logical capacity;
+            // runtime compaction keeps each series at/below its high watermark.
+            maximum_bars: NonZeroUsize::new(MAXIMUM_STORED_BARS).unwrap_or(NonZeroUsize::MIN),
+        },
+        NonZeroUsize::new(MAXIMUM_DATA_LEASES).unwrap_or(NonZeroUsize::MIN),
+    );
     for descriptor in descriptors {
         let capabilities = &descriptor.capabilities;
         if descriptor.presentation.id != descriptor.id

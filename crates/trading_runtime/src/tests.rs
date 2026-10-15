@@ -74,6 +74,10 @@ pub(crate) fn instrument() -> TradingInstrument {
         quantity_scale: 0,
         contract: ContractMetadata {
             tick_size: Some(InstrumentDecimal::try_new(25, 2).expect("tick")),
+            price_grid: aeris_instruments::PriceGrid::Fixed(
+                InstrumentDecimal::try_new(25, 2).expect("tick"),
+            ),
+            instrument_class: aeris_instruments::InstrumentClass::Future,
             point_value: Some(InstrumentDecimal::try_new(5_000, 2).expect("point value")),
             order_quantity_increment: Some(InstrumentDecimal::try_new(1, 0).expect("lot")),
             currency: "USD".to_string(),
@@ -111,6 +115,8 @@ fn high_precision_crypto_instrument() -> TradingInstrument {
         quantity_scale: 8,
         contract: ContractMetadata {
             tick_size: Some(InstrumentDecimal::try_new(1_000_000, 8).expect("tick")),
+            price_grid: aeris_instruments::PriceGrid::Unknown,
+            instrument_class: aeris_instruments::InstrumentClass::CryptoPerpetual,
             point_value: Some(InstrumentDecimal::try_new(100_000_000, 8).expect("point value")),
             order_quantity_increment: None,
             currency: "USD".to_string(),

@@ -1830,7 +1830,11 @@ mod tests {
             "crates/application/Cargo.toml",
             &["aeris_instruments", "aeris_market_data", "sha2"],
         );
-        assert_dependencies_are("crates/market_engine/Cargo.toml", &["aeris_market_data"]);
+        // Instrument quote leases use the leaf identity type, not trading or a provider runtime.
+        assert_dependencies_are(
+            "crates/market_engine/Cargo.toml",
+            &["aeris_instruments", "aeris_market_data"],
+        );
         assert_dependencies_are("crates/domain/instruments/Cargo.toml", &[]);
         assert_dependencies_are("crates/domain/market_data/Cargo.toml", &[]);
     }
@@ -2036,6 +2040,8 @@ mod tests {
             "apps/desktop/src/desktop.rs::AccountRefreshExitClaim".to_string(),
             "crates/context_runtime/src/lib.rs::ContextCredentialStore".to_string(),
             "crates/context_runtime/src/lib.rs::ContextFetcher".to_string(),
+            // Trading publishes bounded quote interest without depending on market_runtime.
+            "crates/domain/trading/src/market.rs::QuoteInterestSink".to_string(),
             "crates/market_runtime/src/market_service/ctrader.rs::CtraderMarketLink".to_string(),
             // The market owner and provider workers share one injectable time boundary.
             "crates/market_runtime/src/market_service/clock.rs::Clock".to_string(),

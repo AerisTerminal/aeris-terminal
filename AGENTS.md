@@ -64,6 +64,11 @@ violations and missing verification explicitly, and never describe them as satis
 
 - `MarketEngine` is the single market-demand owner inside `market_runtime`. Provider sessions are
   created and owned only by that in-process runtime; never create a session/runtime per chart or UI surface.
+- Instrument quote interests and series interests share `MarketEngine`'s one bounded
+  `DataLeaseRegistry`; do not add a second market-demand owner for trading or alerts.
+  Provider-neutral feed contracts live in `aeris_trading::market` and depend only on
+  `aeris_instruments`; `market_engine` may depend on `aeris_instruments` but never on
+  `aeris_trading` or a provider adapter.
 - `trading_runtime` is the single in-process owner of broker accounts, orders, order events, fills,
   positions, PnL, simulated execution and the embedded user-record store. The desktop holds command/view
   handles only; `account_runtime`, charts and UI surfaces never own or duplicate broker trading state.

@@ -76,6 +76,44 @@ pub enum AssetClass {
     Index,
 }
 
+/// Trading-specific classification, including contracts that share an asset class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstrumentClass {
+    Equity,
+    Option,
+    Future,
+    ForeignExchange,
+    CryptoSpot,
+    CryptoPerpetual,
+    Other,
+}
+
+/// Provider-sourced admissible price grid. Unknown is not a fixed-tick claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PriceGrid {
+    Fixed(InstrumentDecimal),
+    SignificantFigures { figures: u8, max_decimals: u8 },
+    Unknown,
+}
+
+impl PriceGrid {
+    /// Checks bounds without assuming a grid for an unverified venue.
+    ///
+    /// # Errors
+    /// Returns an error for invalid significant-figure precision.
+    pub const fn validate(self) -> Result<(), InstrumentValidationError> {
+        match self {
+            Self::SignificantFigures {
+                figures,
+                max_decimals,
+            } if figures == 0 || figures > 18 || max_decimals > MAX_DECIMAL_SCALE => {
+                Err(InstrumentValidationError::InvalidPriceGrid)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// The lifecycle state of an instrument revision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstrumentLifecycle {
@@ -201,6 +239,8 @@ pub struct InstrumentMetadataProvenance {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractMetadata {
     pub tick_size: Option<InstrumentDecimal>,
+    pub price_grid: PriceGrid,
+    pub instrument_class: InstrumentClass,
     pub point_value: Option<InstrumentDecimal>,
     /// Minimum accepted order quantity. Absent means no provider quantity rule is known.
     pub order_quantity_increment: Option<InstrumentDecimal>,
@@ -218,6 +258,7 @@ impl ContractMetadata {
     /// # Errors
     /// Returns an error for malformed currency, date, hours, or source evidence.
     pub fn validate(&self) -> Result<(), InstrumentValidationError> {
+        self.price_grid.validate()?;
         if self.currency.trim().is_empty() || self.currency.len() > 16 {
             return Err(InstrumentValidationError::EmptyField("contract.currency"));
         }
@@ -338,6 +379,7 @@ pub enum InstrumentValidationError {
     InvalidMetadataProvenance,
     InvalidSessionHours,
     NonPositiveContractValue,
+    InvalidPriceGrid,
     TooManySessionSegments,
     ZeroRevision,
 }
@@ -365,6 +407,7 @@ impl fmt::Display for InstrumentValidationError {
             Self::NonPositiveContractValue => {
                 formatter.write_str("contract value must be positive")
             }
+            Self::InvalidPriceGrid => formatter.write_str("price grid precision is invalid"),
             Self::TooManySessionSegments => {
                 formatter.write_str("contract has too many session segments")
             }

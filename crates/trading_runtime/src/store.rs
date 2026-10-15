@@ -7,8 +7,8 @@ use super::{
     TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
 use aeris_instruments::{
-    ContractDate, ContractMetadata, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance,
-    SessionHours,
+    ContractDate, ContractMetadata, InstrumentClass, InstrumentDecimal, InstrumentId,
+    InstrumentMetadataProvenance, PriceGrid, SessionHours,
 };
 use aeris_trading::{
     AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
@@ -3463,7 +3463,27 @@ fn encode_contract(contract: &ContractMetadata) -> Result<String, String> {
             })
         })
     };
+    let price_grid = match contract.price_grid {
+        PriceGrid::Fixed(tick) => json!({"kind": "fixed", "tick": decimal(Some(tick))}),
+        PriceGrid::SignificantFigures {
+            figures,
+            max_decimals,
+        } => {
+            json!({"kind": "significant_figures", "figures": figures, "max_decimals": max_decimals})
+        }
+        PriceGrid::Unknown => json!({"kind": "unknown"}),
+    };
+    let instrument_class = match contract.instrument_class {
+        InstrumentClass::Equity => "equity",
+        InstrumentClass::Option => "option",
+        InstrumentClass::Future => "future",
+        InstrumentClass::ForeignExchange => "foreign_exchange",
+        InstrumentClass::CryptoSpot => "crypto_spot",
+        InstrumentClass::CryptoPerpetual => "crypto_perpetual",
+        InstrumentClass::Other => "other",
+    };
     Ok(json!({"tick_size": decimal(contract.tick_size), "point_value": decimal(contract.point_value),
+        "price_grid": price_grid, "instrument_class": instrument_class,
         "order_quantity_increment": decimal(contract.order_quantity_increment),
         "currency": contract.currency, "expiry": date(contract.expiry),
         "first_notice": date(contract.first_notice), "last_trade": date(contract.last_trade),
@@ -3504,6 +3524,41 @@ fn decode_contract(raw: &str, instrument_id: &InstrumentId) -> Result<ContractMe
         .collect::<Result<Vec<_>, String>>()?;
     let contract = ContractMetadata {
         tick_size: decode_decimal(value.get("tick_size"))?,
+        price_grid: match value
+            .get("price_grid")
+            .and_then(|grid| grid.get("kind"))
+            .and_then(Value::as_str)
+        {
+            None | Some("unknown") => PriceGrid::Unknown,
+            Some("fixed") => PriceGrid::Fixed(
+                decode_decimal(value.get("price_grid").and_then(|grid| grid.get("tick")))?
+                    .ok_or_else(|| "stored fixed price grid has no tick".to_string())?,
+            ),
+            Some("significant_figures") => {
+                let grid = value
+                    .get("price_grid")
+                    .ok_or_else(|| "stored price grid is missing".to_string())?;
+                PriceGrid::SignificantFigures {
+                    figures: json_u64(grid, "figures")?
+                        .try_into()
+                        .map_err(|_| "invalid significant figures".to_string())?,
+                    max_decimals: json_u64(grid, "max_decimals")?
+                        .try_into()
+                        .map_err(|_| "invalid maximum decimals".to_string())?,
+                }
+            }
+            Some(_) => return Err("stored price grid is unknown".into()),
+        },
+        instrument_class: match value.get("instrument_class").and_then(Value::as_str) {
+            None | Some("other") => InstrumentClass::Other,
+            Some("equity") => InstrumentClass::Equity,
+            Some("option") => InstrumentClass::Option,
+            Some("future") => InstrumentClass::Future,
+            Some("foreign_exchange") => InstrumentClass::ForeignExchange,
+            Some("crypto_spot") => InstrumentClass::CryptoSpot,
+            Some("crypto_perpetual") => InstrumentClass::CryptoPerpetual,
+            Some(_) => return Err("stored instrument class is unknown".into()),
+        },
         point_value: decode_decimal(value.get("point_value"))?,
         order_quantity_increment: decode_decimal(value.get("order_quantity_increment"))?,
         currency: json_string(&value, "currency")?,
@@ -4143,6 +4198,8 @@ mod tests {
         assert_eq!(contract.provenance.display_symbol, "ESZ6");
         assert_eq!(contract.provenance.provider_symbol, "/ESZ26:XCME");
         assert_eq!(contract.order_quantity_increment, None);
+        assert_eq!(contract.price_grid, PriceGrid::Unknown);
+        assert_eq!(contract.instrument_class, InstrumentClass::Other);
 
         let equity = InstrumentId::try_new("tastytrade:Equity:AAPL").expect("equity id");
         assert_eq!(
@@ -4152,6 +4209,15 @@ mod tests {
                 .display_symbol,
             "/ESZ26:XCME"
         );
+    }
+
+    #[test]
+    fn contract_grid_and_class_survive_durable_round_trip() {
+        let instrument = crate::tests::instrument();
+        let encoded = encode_contract(&instrument.contract).expect("encode terms");
+        let restored = decode_contract(&encoded, &instrument.instrument_id).expect("decode terms");
+        assert_eq!(restored.price_grid, instrument.contract.price_grid);
+        assert_eq!(restored.instrument_class, InstrumentClass::Future);
     }
 
     #[test]

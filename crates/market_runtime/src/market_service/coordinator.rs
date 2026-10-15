@@ -5,12 +5,13 @@ use super::{
     EngineError, GenerationId, InstallProviderInstrument, Instant, MAXIMUM_STUDIES,
     MAXIMUM_STUDY_DEPENDENCIES, MAXIMUM_STUDY_OUTPUTS, MAXIMUM_STUDY_POINTS_PER_OUTPUT,
     MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE, MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS,
-    MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketEngine, MarketServiceStatus, MarketStream, NonZeroUsize,
-    Ordering, PriceAlertRegistry, ProviderConnectionState, ProviderDispatch, ProviderEpochRegistry,
-    ProviderGeneration, ProviderHealth, ProviderOrderBook, ProviderRuntimeEvent,
-    ProviderRuntimeRegistry, ProviderState, REALTIME_CAPACITY, REALTIME_DRAIN_BUDGET, Receiver,
-    RecvTimeoutError, Reply, StreamRequirements, StudyMarketLeaseChangeKind, StudyRuntime,
-    StudyRuntimeConfig, authorize_consumer, publish_state, thread,
+    MAXIMUM_STUDY_TOTAL_STATE_BYTES, MarketDataLeaseId, MarketEngine, MarketServiceStatus,
+    MarketStream, Mutex, NonZeroUsize, Ordering, PriceAlertRegistry, ProviderConnectionState,
+    ProviderDispatch, ProviderEpochRegistry, ProviderGeneration, ProviderHealth, ProviderOrderBook,
+    ProviderRuntimeEvent, ProviderRuntimeRegistry, ProviderState, REALTIME_CAPACITY,
+    REALTIME_DRAIN_BUDGET, Receiver, RecvTimeoutError, Reply, StreamRequirements,
+    StudyMarketLeaseChangeKind, StudyRuntime, StudyRuntimeConfig, authorize_consumer,
+    publish_state, thread,
 };
 #[cfg(test)]
 use super::{
@@ -29,6 +30,7 @@ use aeris_observability::diagnostic;
 pub(super) struct OwnedCoordinatorChannels {
     pub(super) commands: Receiver<Command>,
     pub(super) providers: ProviderRuntimeRegistry,
+    pub(super) quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -68,10 +70,18 @@ pub(super) fn spawn_coordinator(
             let OwnedCoordinatorChannels {
                 commands,
                 mut providers,
+                quote_releases,
             } = channels;
             {
                 let dispatch = providers.dispatch();
-                run_coordinator(engine, &commands, dispatch, &shutdown, clock);
+                run_coordinator(
+                    engine,
+                    &commands,
+                    dispatch,
+                    &shutdown,
+                    clock,
+                    quote_releases,
+                );
             }
             // A history worker may be blocked on a full bounded completion
             // channel. Close that receiver before joining provider workers.
@@ -92,8 +102,10 @@ fn run_coordinator(
     providers: ProviderDispatch<'_>,
     shutdown: &AtomicBool,
     clock: Arc<dyn super::clock::Clock>,
+    quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
 ) {
     let mut coordinator = Coordinator::with_clock(engine, providers, clock);
+    coordinator.quote_releases = Some(quote_releases);
     let demand_flushers = coordinator
         .providers
         .records
@@ -126,6 +138,18 @@ fn coordinator_turn(
     test_wait: Option<Duration>,
 ) -> bool {
     coordinator.studies.begin_turn();
+    if let Some(releases) = &coordinator.quote_releases {
+        let released = std::mem::take(
+            &mut *releases
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for id in released {
+            if coordinator.engine.release_data_lease(id) {
+                coordinator.pending_activity = true;
+            }
+        }
+    }
     let drained = drain_coordinator_events(coordinator);
     let now = coordinator.clock.monotonic();
     let due = coordinator.take_due_timers(now);
@@ -279,6 +303,7 @@ impl<'a> Coordinator<'a> {
             dirty_series: BTreeSet::new(),
             deadlines: BTreeMap::new(),
             pending_activity: true,
+            quote_releases: None,
             control_retry: false,
             series_effects: super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),
@@ -778,6 +803,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) dirty_series: BTreeSet<BarSeriesKey>,
     deadlines: BTreeMap<Instant, TimerKey>,
     pending_activity: bool,
+    quote_releases: Option<Arc<Mutex<Vec<MarketDataLeaseId>>>>,
     pub(super) control_retry: bool,
     pub(super) series_effects: super::lifecycle::EffectBuf,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
@@ -1199,6 +1225,9 @@ impl Coordinator<'_> {
                 }
                 let _ = reply.send(result);
             }
+            Command::AcquireQuote(key, reply) => {
+                self.acquire_quote(&key, &reply);
+            }
             Command::Poll(client_id, consumer_id, reply) => {
                 self.handle_poll(client_id, consumer_id, &reply);
             }
@@ -1213,6 +1242,26 @@ impl Coordinator<'_> {
             | Command::InstalledInstrument(..)
             | Command::BrokerAuthorizationChanged(..) => {
                 unreachable!("command was routed to the wrong dispatcher")
+            }
+        }
+    }
+
+    fn acquire_quote(
+        &mut self,
+        key: &super::InstrumentStreamKey,
+        reply: &Reply<MarketDataLeaseId>,
+    ) {
+        match self
+            .engine
+            .acquire_instrument_lease(key, StreamRequirements::NONE.with(MarketStream::Quotes))
+        {
+            Ok(id) => {
+                if reply.send(Ok(id)).is_err() {
+                    let _ = self.engine.release_data_lease(id);
+                }
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error.to_string()));
             }
         }
     }
@@ -2128,6 +2177,7 @@ mod tests {
             dirty_series: BTreeSet::new(),
             deadlines: BTreeMap::new(),
             pending_activity: true,
+            quote_releases: None,
             control_retry: false,
             series_effects: super::super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),
@@ -4958,6 +5008,48 @@ mod tests {
             ProviderGeneration(nonzero(2)),
             "a history completion must not be dropped for the preceding catalog generation"
         );
+    }
+
+    #[test]
+    fn coordinator_drains_quote_guard_releases_before_waiting() {
+        let mut coordinator = coordinator();
+        coordinator
+            .engine
+            .register_provider(
+                "quotes".into(),
+                aeris_market_engine::ProviderConfig {
+                    account_id: "quotes:public".into(),
+                    capabilities: aeris_market_engine::ProviderCapabilities {
+                        historical_bars: false,
+                        realtime_bars: false,
+                        streams: StreamRequirements::NONE.with(MarketStream::Quotes),
+                    },
+                    reconnect_delay: Duration::from_millis(250),
+                },
+            )
+            .unwrap();
+        let key = aeris_market_engine::InstrumentStreamKey {
+            provider: "quotes".into(),
+            instrument: aeris_instruments::InstrumentId::try_new("BTC").unwrap(),
+            entitlement: None,
+        };
+        let lease_id = coordinator
+            .engine
+            .acquire_instrument_lease(&key, StreamRequirements::NONE.with(MarketStream::Quotes))
+            .unwrap();
+        let releases = Arc::new(Mutex::new(vec![lease_id]));
+        coordinator.quote_releases = Some(Arc::clone(&releases));
+        let (_commands, receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(coordinator_turn(
+            &mut coordinator,
+            &receiver,
+            &[],
+            &AtomicBool::new(false),
+            Some(Duration::ZERO)
+        ));
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 0);
+        assert_eq!(coordinator.engine.data_lease_count(), 0);
+        assert!(releases.lock().unwrap().is_empty());
     }
 
     #[test]

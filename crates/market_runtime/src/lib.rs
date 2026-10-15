@@ -286,11 +286,12 @@ pub enum MarketRuntimeEvent {
 pub use aeris_market_engine::{
     ConsumerId as MarketConsumerId, ConsumerPublication as MarketSeriesSnapshot,
     ConsumerResourceClass as MarketConsumerResourceClass,
-    ConsumerSeriesUpdate as MarketSeriesUpdate, GenerationId as MarketGenerationId, MarketStream,
-    ProviderGeneration as MarketProviderGeneration,
+    ConsumerSeriesUpdate as MarketSeriesUpdate, GenerationId as MarketGenerationId,
+    InstrumentStreamKey, LeaseOwner, MarketStream, ProviderGeneration as MarketProviderGeneration,
     SeriesSnapshot as CanonicalMarketSeriesSnapshot, SeriesTailOperation, StreamRequirements,
 };
 pub use market_service::{
     CtraderStreamStatistics, CtraderVenueEventSink, CtraderVenueLink, MarketService,
-    MarketServiceStatus, RithmicLoginSummary, RithmicServer, built_in_provider_presentations,
+    MarketServiceStatus, QuoteSubscription, RithmicLoginSummary, RithmicServer,
+    built_in_provider_presentations,
 };
