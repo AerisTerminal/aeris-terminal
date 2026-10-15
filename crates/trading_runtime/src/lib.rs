@@ -29,7 +29,6 @@ pub(crate) use core::{
     allocated_target_quantities, check_quantity_increment, instrument_tick_units,
     managed_child_client_order_id, opposite_side, order_increment_units, shifted_price,
 };
-pub(crate) use risk::RiskTradeCycleState;
 pub(crate) use service::Command;
 #[cfg(test)]
 pub(crate) use std::{

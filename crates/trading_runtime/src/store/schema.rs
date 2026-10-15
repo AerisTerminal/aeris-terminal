@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -196,6 +196,55 @@ pub(super) const MIGRATION_V19: &str =
     "INSERT INTO metadata(key, value) VALUES ('venue_generation', 0);";
 /// Legacy instruments have no verified route and cannot be subscribed until Terms arrive.
 pub(super) const MIGRATION_V20: &str = "ALTER TABLE instruments ADD COLUMN market_route_json TEXT;";
+/// Preserve legacy P&L and cycle baselines without inventing missing per-fill values.
+/// Superseded columns and tables remain on disk for a later released migration, but readers
+/// after V21 use the new accounting rows exclusively.
+pub(super) const MIGRATION_V21: &str = "
+ CREATE TABLE fill_accounting (
+     fill_id TEXT PRIMARY KEY REFERENCES fills(id) ON DELETE CASCADE,
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     realized_gross_units INTEGER, realized_gross_scale INTEGER,
+     commission_units INTEGER NOT NULL DEFAULT 0, commission_scale INTEGER NOT NULL DEFAULT 2,
+     fees_units INTEGER NOT NULL DEFAULT 0, fees_scale INTEGER NOT NULL DEFAULT 2,
+     cycle_id INTEGER NOT NULL DEFAULT 0, cycle_closed INTEGER NOT NULL DEFAULT 0,
+     cycle_realized_units INTEGER, cycle_realized_scale INTEGER
+ ) STRICT;
+ CREATE TABLE trade_cycles (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     cycle_id INTEGER NOT NULL DEFAULT 0,
+     peak_quantity_units INTEGER NOT NULL, peak_quantity_scale INTEGER NOT NULL,
+     realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
+     risk_realized_units INTEGER NOT NULL, risk_realized_scale INTEGER NOT NULL,
+     pnl_known INTEGER NOT NULL,
+     PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;
+ INSERT INTO fill_accounting(fill_id,account_id,instrument_id,realized_gross_units,
+     realized_gross_scale,cycle_realized_units,cycle_realized_scale,cycle_closed)
+ SELECT id,account_id,instrument_id,realized_pnl_units,realized_pnl_scale,
+     completed_trade_pnl_units,completed_trade_pnl_scale,
+     completed_trade_pnl_units IS NOT NULL FROM fills;
+ INSERT INTO trade_cycles(account_id,instrument_id,peak_quantity_units,peak_quantity_scale,
+     realized_units,realized_scale,risk_realized_units,risk_realized_scale,pnl_known)
+ SELECT r.account_id,r.instrument_id,r.peak_quantity_units,r.peak_quantity_scale,
+     COALESCE(t.realized_units,r.realized_units),
+     COALESCE(t.realized_scale,r.realized_scale),
+     r.realized_units,r.realized_scale,
+     t.account_id IS NOT NULL
+ FROM risk_trade_cycles r LEFT JOIN trade_pnl_cycles t
+     ON t.account_id=r.account_id AND t.instrument_id=r.instrument_id;
+ INSERT INTO trade_cycles(account_id,instrument_id,peak_quantity_units,peak_quantity_scale,
+     realized_units,realized_scale,risk_realized_units,risk_realized_scale,pnl_known)
+ SELECT t.account_id,t.instrument_id,0,0,t.realized_units,t.realized_scale,
+     t.realized_units,t.realized_scale,1
+ FROM trade_pnl_cycles t LEFT JOIN risk_trade_cycles r
+     ON t.account_id=r.account_id AND t.instrument_id=r.instrument_id
+ WHERE r.account_id IS NULL;
+ CREATE INDEX orders_open_scope ON orders(account_id,instrument_id,status)
+     WHERE status IN ('working','partially_filled','pending');
+ CREATE INDEX fills_account_execution ON fills(account_id,instrument_id,execution_unix_nanos);
+ CREATE INDEX order_events_order_sequence ON order_events(order_id,sequence);";
 
 pub(super) struct Migration {
     pub(super) from: u32,
@@ -303,6 +352,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 19,
         to: 20,
         sql: MIGRATION_V20,
+    },
+    Migration {
+        from: 20,
+        to: 21,
+        sql: MIGRATION_V21,
     },
 ];
 

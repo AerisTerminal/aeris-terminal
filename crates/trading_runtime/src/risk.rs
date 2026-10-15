@@ -1,4 +1,3 @@
-use aeris_instruments::InstrumentId;
 use aeris_trading::{FixedPoint, TradingAccountId, TradingValidationError};
 
 /// Whether a trailing drawdown is evaluated continuously or only at the session close.
@@ -263,14 +262,6 @@ pub struct RiskRuleState {
     pub peak_session_pnl: FixedPoint,
     pub total_winning_pnl: FixedPoint,
     pub largest_winning_trade_pnl: FixedPoint,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RiskTradeCycleState {
-    pub account_id: TradingAccountId,
-    pub instrument_id: InstrumentId,
-    pub realized_pnl: FixedPoint,
-    pub peak_quantity: FixedPoint,
 }
 
 fn validate_positive(value: FixedPoint, label: &str) -> Result<(), String> {

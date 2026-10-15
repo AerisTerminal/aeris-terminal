@@ -141,7 +141,8 @@ impl TradingStore {
         upsert_risk_rule_state(&transaction, state)?;
         transaction
             .execute(
-                "DELETE FROM risk_trade_cycles WHERE account_id = ?1",
+                "UPDATE trade_cycles SET risk_realized_units=0,peak_quantity_units=0
+             WHERE account_id=?1",
                 [profile.account_id.as_str()],
             )
             .map_err(database_error)?;
@@ -409,48 +410,6 @@ impl TradingStore {
         Ok(result)
     }
 
-    pub(super) fn load_risk_trade_cycles(
-        &self,
-    ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), RiskTradeCycleState>, String> {
-        let mut result = BTreeMap::new();
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT account_id, instrument_id, realized_units, realized_scale,
-                    peak_quantity_units, peak_quantity_scale
-                 FROM risk_trade_cycles ORDER BY account_id, instrument_id",
-            )
-            .map_err(database_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, u8>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, u8>(5)?,
-                ))
-            })
-            .map_err(database_error)?;
-        for row in rows {
-            let (account_id, instrument_id, units, scale, peak_units, peak_scale) =
-                row.map_err(database_error)?;
-            let account_id =
-                TradingAccountId::try_new(account_id).map_err(|error| error.to_string())?;
-            let instrument_id =
-                InstrumentId::try_new(instrument_id).map_err(|error| error.to_string())?;
-            let state = RiskTradeCycleState {
-                account_id: account_id.clone(),
-                instrument_id: instrument_id.clone(),
-                realized_pnl: fixed(units, scale)?,
-                peak_quantity: fixed(peak_units, peak_scale)?,
-            };
-            result.insert((account_id, instrument_id), state);
-        }
-        Ok(result)
-    }
-
     pub(super) fn load_session_plans(
         &self,
     ) -> Result<BTreeMap<TradingAccountId, SessionPlan>, String> {
@@ -564,33 +523,6 @@ pub(super) fn upsert_risk_rule_state(
                 state.total_winning_pnl.scale(),
                 state.largest_winning_trade_pnl.units(),
                 state.largest_winning_trade_pnl.scale(),
-            ],
-        )
-        .map_err(database_error)?;
-    Ok(())
-}
-
-pub(super) fn upsert_risk_trade_cycle(
-    connection: &Connection,
-    state: &RiskTradeCycleState,
-) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT INTO risk_trade_cycles(account_id, instrument_id, realized_units,
-                realized_scale, peak_quantity_units, peak_quantity_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(account_id, instrument_id) DO UPDATE SET
-                realized_units=excluded.realized_units,
-                realized_scale=excluded.realized_scale,
-                peak_quantity_units=excluded.peak_quantity_units,
-                peak_quantity_scale=excluded.peak_quantity_scale",
-            params![
-                state.account_id.as_str(),
-                state.instrument_id.as_str(),
-                state.realized_pnl.units(),
-                state.realized_pnl.scale(),
-                state.peak_quantity.units(),
-                state.peak_quantity.scale(),
             ],
         )
         .map_err(database_error)?;

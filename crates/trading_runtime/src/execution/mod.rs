@@ -2,7 +2,7 @@ use super::{
     ClientOrderId, Fill, FillId, FillMemoryUpdate, FixedPoint, ManagedBracketStatus, ModifyOrder,
     Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus,
     SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, TradingInstrument,
-    VenueRoute, fill_policy_persistence, is_simulated, next_position, planned_leg,
+    VenueRoute, fill_policy_persistence, is_simulated, planned_leg,
 };
 
 impl TradingCore {
@@ -269,17 +269,15 @@ impl TradingCore {
             };
             let position_key = (order.account_id.clone(), order.instrument_id.clone());
             let previous_position = self.state.positions.get(&position_key).cloned();
-            let position = next_position(
-                previous_position.as_ref(),
+            let (position, policy_update) = self.apply_fill(
                 &fill,
+                previous_position.as_ref(),
                 self.state
                     .accounts
                     .get(&order.account_id)
                     .ok_or_else(|| "fill account disappeared".to_string())?,
                 instrument,
             )?;
-            let policy_update =
-                self.next_fill_policy_state(&fill, previous_position.as_ref(), &position)?;
             self.store.insert_fill(
                 &order,
                 &event,

@@ -1,10 +1,71 @@
 use super::{
-    BTreeMap, BrokerFillRecord, Fill, FillId, FillPolicyPersistence, FixedPoint, InstrumentId,
-    Order, OrderEvent, OrderId, Position, TradingAccountId, TradingStore, VecDeque, database_error,
-    decode_provenance, encode_provenance, fixed, insert_event_row, insert_order_row, params,
-    parse_side, sqlite_i64, update_next_sequence, upsert_discipline_state, upsert_position,
-    upsert_risk_rule_state, upsert_risk_trade_cycle,
+    BTreeMap, BrokerFillRecord, Fill, FillAccounting, FillId, FillPolicyPersistence, FixedPoint,
+    InstrumentId, Order, OrderEvent, OrderId, Position, TradeCycle, TradingAccountId, TradingStore,
+    VecDeque, database_error, decode_provenance, encode_provenance, fixed, insert_event_row,
+    insert_order_row, params, parse_side, sqlite_i64, update_next_sequence,
+    upsert_discipline_state, upsert_position, upsert_risk_rule_state,
 };
+
+fn insert_fill_accounting(
+    transaction: &rusqlite::Transaction<'_>,
+    fill: &Fill,
+    accounting: FillAccounting,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO fill_accounting(fill_id,account_id,instrument_id,
+            realized_gross_units,realized_gross_scale,cycle_id,cycle_closed,
+            cycle_realized_units,cycle_realized_scale)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                fill.id.as_str(),
+                fill.account_id.as_str(),
+                fill.instrument_id.as_str(),
+                accounting.realized_gross.map(FixedPoint::units),
+                accounting.realized_gross.map(FixedPoint::scale),
+                accounting.cycle_id,
+                accounting.cycle_closed,
+                accounting.cycle_realized.map(FixedPoint::units),
+                accounting.cycle_realized.map(FixedPoint::scale),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+fn upsert_trade_cycle(
+    transaction: &rusqlite::Transaction<'_>,
+    cycle: &TradeCycle,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO trade_cycles(account_id,instrument_id,cycle_id,peak_quantity_units,
+            peak_quantity_scale,realized_units,realized_scale,
+            risk_realized_units,risk_realized_scale,pnl_known)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(account_id,instrument_id) DO UPDATE SET
+            cycle_id=excluded.cycle_id,peak_quantity_units=excluded.peak_quantity_units,
+            peak_quantity_scale=excluded.peak_quantity_scale,
+            realized_units=excluded.realized_units,realized_scale=excluded.realized_scale,
+            risk_realized_units=excluded.risk_realized_units,
+            risk_realized_scale=excluded.risk_realized_scale,
+            pnl_known=excluded.pnl_known",
+            params![
+                cycle.account_id.as_str(),
+                cycle.instrument_id.as_str(),
+                cycle.cycle_id,
+                cycle.peak_quantity.units(),
+                cycle.peak_quantity.scale(),
+                cycle.realized_pnl.units(),
+                cycle.realized_pnl.scale(),
+                cycle.risk_realized_pnl.units(),
+                cycle.risk_realized_pnl.scale(),
+                cycle.pnl_known,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
 
 impl TradingStore {
     pub(crate) fn broker_deal_recorded(&self, broker_deal_id: &str) -> Result<bool, String> {
@@ -64,8 +125,8 @@ impl TradingStore {
             .execute(
                 "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
                     price_scale, quantity_units, quantity_scale, execution_unix_nanos,
-                    provenance_json, realized_pnl_units, realized_pnl_scale)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    provenance_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     fill.id.as_str(),
                     fill.order_id.as_str(),
@@ -78,11 +139,19 @@ impl TradingStore {
                     fill.quantity.scale(),
                     fill.execution_unix_nanos,
                     encode_provenance(&fill.provenance),
-                    record.realized_pnl.map(FixedPoint::units),
-                    record.realized_pnl.map(FixedPoint::scale),
                 ],
             )
             .map_err(database_error)?;
+        insert_fill_accounting(
+            &transaction,
+            fill,
+            FillAccounting {
+                cycle_id: 0,
+                realized_gross: record.realized_pnl,
+                cycle_realized: None,
+                cycle_closed: false,
+            },
+        )?;
         transaction
             .execute(
                 "INSERT INTO broker_deals(broker_deal_id, fill_id, account_id,
@@ -125,9 +194,8 @@ impl TradingStore {
             .execute(
                 "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
                     price_scale, quantity_units, quantity_scale, execution_unix_nanos,
-                    provenance_json, completed_trade_pnl_units, completed_trade_pnl_scale,
-                    realized_pnl_units, realized_pnl_scale)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    provenance_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     fill.id.as_str(),
                     fill.order_id.as_str(),
@@ -140,41 +208,15 @@ impl TradingStore {
                     fill.quantity.scale(),
                     fill.execution_unix_nanos,
                     encode_provenance(&fill.provenance),
-                    policy.completed_trade_pnl.map(FixedPoint::units),
-                    policy.completed_trade_pnl.map(FixedPoint::scale),
-                    policy.fill_realized_pnl.map(FixedPoint::units),
-                    policy.fill_realized_pnl.map(FixedPoint::scale),
                 ],
             )
             .map_err(database_error)?;
+        insert_fill_accounting(&transaction, fill, policy.accounting)?;
         upsert_position(&transaction, position)?;
-        if let Some(cycle) = policy.trade_pnl_cycle {
-            transaction
-                .execute(
-                    "INSERT INTO trade_pnl_cycles(account_id, instrument_id, realized_units, realized_scale)
-                     VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(account_id, instrument_id) DO UPDATE SET
-                       realized_units=excluded.realized_units, realized_scale=excluded.realized_scale",
-                    params![
-                        fill.account_id.as_str(),
-                        fill.instrument_id.as_str(),
-                        cycle.units(),
-                        cycle.scale(),
-                    ],
-                )
-                .map_err(database_error)?;
-        } else {
-            transaction
-                .execute(
-                    "DELETE FROM trade_pnl_cycles WHERE account_id = ?1 AND instrument_id = ?2",
-                    params![fill.account_id.as_str(), fill.instrument_id.as_str()],
-                )
-                .map_err(database_error)?;
-        }
+        upsert_trade_cycle(&transaction, policy.trade_cycle)?;
         if let Some(rule_state) = policy.rule_state {
             upsert_risk_rule_state(&transaction, rule_state)?;
         }
-        upsert_risk_trade_cycle(&transaction, policy.trade_cycle)?;
         upsert_discipline_state(&transaction, policy.discipline_state)?;
         update_next_sequence(&transaction, next_sequence)?;
         transaction.commit().map_err(database_error)
@@ -242,57 +284,63 @@ impl TradingStore {
         Ok(output)
     }
 
-    pub(super) fn load_completed_trade_pnl(&self) -> Result<BTreeMap<FillId, FixedPoint>, String> {
-        self.load_fill_amounts(
-            "SELECT id, completed_trade_pnl_units, completed_trade_pnl_scale
-             FROM fills WHERE completed_trade_pnl_units IS NOT NULL
-             ORDER BY execution_unix_nanos",
-        )
-    }
-
-    pub(super) fn load_fill_realized_pnl(&self) -> Result<BTreeMap<FillId, FixedPoint>, String> {
-        self.load_fill_amounts(
-            "SELECT id, realized_pnl_units, realized_pnl_scale
-             FROM fills WHERE realized_pnl_units IS NOT NULL
-             ORDER BY execution_unix_nanos",
-        )
-    }
-
-    /// Loads one optional fixed-point amount per fill from a `(id, units, scale)` query.
-    pub(super) fn load_fill_amounts(
-        &self,
-        query: &str,
-    ) -> Result<BTreeMap<FillId, FixedPoint>, String> {
+    pub(super) fn load_fill_accounting(&self) -> Result<BTreeMap<FillId, FillAccounting>, String> {
         let mut output = BTreeMap::new();
-        let mut statement = self.connection.prepare(query).map_err(database_error)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT fill_id, cycle_id, realized_gross_units, realized_gross_scale,
+                cycle_realized_units, cycle_realized_scale, cycle_closed
+             FROM fill_accounting",
+            )
+            .map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, u8>(2)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<u8>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<u8>>(5)?,
+                    row.get::<_, bool>(6)?,
                 ))
             })
             .map_err(database_error)?;
         for row in rows {
-            let (id, units, scale) = row.map_err(database_error)?;
+            let (
+                id,
+                cycle_id,
+                realized_units,
+                realized_scale,
+                cycle_units,
+                cycle_scale,
+                cycle_closed,
+            ) = row.map_err(database_error)?;
             output.insert(
                 FillId::try_new(id).map_err(|error| error.to_string())?,
-                fixed(units, scale)?,
+                FillAccounting {
+                    cycle_id,
+                    realized_gross: super::optional_fixed(realized_units, realized_scale)?,
+                    cycle_realized: super::optional_fixed(cycle_units, cycle_scale)?,
+                    cycle_closed,
+                },
             );
         }
         Ok(output)
     }
 
-    pub(super) fn load_trade_pnl_cycles(
+    pub(super) fn load_trade_cycles(
         &self,
-    ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>, String> {
+    ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), TradeCycle>, String> {
         let mut output = BTreeMap::new();
         let mut statement = self
             .connection
             .prepare(
-                "SELECT account_id, instrument_id, realized_units, realized_scale
-                 FROM trade_pnl_cycles ORDER BY account_id, instrument_id",
+                "SELECT account_id, instrument_id, cycle_id, peak_quantity_units,
+                    peak_quantity_scale, realized_units, realized_scale,
+                    risk_realized_units, risk_realized_scale, pnl_known
+                 FROM trade_cycles ORDER BY account_id, instrument_id",
             )
             .map_err(database_error)?;
         let rows = statement
@@ -301,18 +349,42 @@ impl TradingStore {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, u8>(3)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u8>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, u8>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, u8>(8)?,
+                    row.get::<_, bool>(9)?,
                 ))
             })
             .map_err(database_error)?;
         for row in rows {
-            let (account, instrument, units, scale) = row.map_err(database_error)?;
+            let (
+                account,
+                instrument,
+                cycle_id,
+                peak_units,
+                peak_scale,
+                units,
+                scale,
+                risk_units,
+                risk_scale,
+                pnl_known,
+            ) = row.map_err(database_error)?;
+            let account_id = TradingAccountId::try_new(account).map_err(|e| e.to_string())?;
+            let instrument_id = InstrumentId::try_new(instrument).map_err(|e| e.to_string())?;
             output.insert(
-                (
-                    TradingAccountId::try_new(account).map_err(|error| error.to_string())?,
-                    InstrumentId::try_new(instrument).map_err(|error| error.to_string())?,
-                ),
-                fixed(units, scale)?,
+                (account_id.clone(), instrument_id.clone()),
+                TradeCycle {
+                    account_id,
+                    instrument_id,
+                    cycle_id,
+                    peak_quantity: fixed(peak_units, peak_scale)?,
+                    realized_pnl: fixed(units, scale)?,
+                    risk_realized_pnl: fixed(risk_units, risk_scale)?,
+                    pnl_known,
+                },
             );
         }
         Ok(output)

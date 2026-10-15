@@ -2559,6 +2559,121 @@ fn scale_ins_partial_exits_and_reversals_group_by_position_cycle() {
 }
 
 #[test]
+fn v21_reversal_and_scale_out_accounting_agrees_across_views_and_restart() {
+    let directory = TestDirectory::new("v21-fill-accounting");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            profile_id: "accounting-agreement".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: price(0),
+            daily_loss_limit: price(100_000),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::EndOfDay,
+            max_contracts: contracts(10),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            economic_event_rule: None,
+            enabled: true,
+        })
+        .expect("risk profile");
+    let steps = [
+        (1, OrderSide::Buy, 2, (9_975, 10_000), 0),
+        (2, OrderSide::Sell, 3, (10_100, 10_125), 10_000),
+        (3, OrderSide::Buy, 1, (9_875, 9_900), 20_000),
+        (4, OrderSide::Buy, 3, (9_975, 10_000), 20_000),
+        (5, OrderSide::Sell, 1, (10_100, 10_125), 25_000),
+        (6, OrderSide::Sell, 2, (10_200, 10_225), 45_000),
+    ];
+    for (step, side, quantity, quote, expected) in steps {
+        execute_market_order(&service, step, side, quantity, quote);
+        let snapshot = service.snapshot().expect("snapshot");
+        let expected = price(expected);
+        let journal = snapshot
+            .fill_realized_pnl
+            .values()
+            .try_fold(price(0), |sum, pnl| sum.checked_add(*pnl))
+            .expect("journal total");
+        let trips = snapshot
+            .round_trips
+            .iter()
+            .filter_map(|trip| trip.final_pnl)
+            .try_fold(price(0), FixedPoint::checked_add)
+            .expect("round-trip total");
+        assert_eq!(journal, expected, "journal after step {step}");
+        assert_eq!(trips, expected, "round trips after step {step}");
+        assert_eq!(
+            snapshot.account_pnl[0].realized, expected,
+            "account after step {step}"
+        );
+        assert_eq!(
+            snapshot.risk_meters[0].current_realized_pnl, expected,
+            "risk after step {step}"
+        );
+    }
+    let before = service.snapshot().expect("before restart");
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    assert_v21_accounting_rows(&directory);
+    let restarted = start_service(&directory);
+    let after = restarted.snapshot().expect("after restart");
+    assert_eq!(after.fill_realized_pnl, before.fill_realized_pnl);
+    assert_eq!(after.completed_trade_pnl, before.completed_trade_pnl);
+    assert_eq!(after.round_trips, before.round_trips);
+    assert_eq!(after.account_pnl, before.account_pnl);
+    assert_eq!(after.risk_meters, before.risk_meters);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+fn assert_v21_accounting_rows(directory: &TestDirectory) {
+    let database = rusqlite::Connection::open(directory.0.join("trading.sqlite3"))
+        .expect("inspect committed accounting");
+    let row_count: i64 = database
+        .query_row("SELECT COUNT(*) FROM fill_accounting", [], |row| row.get(0))
+        .expect("accounting rows");
+    assert_eq!(row_count, 6);
+    let cycle_ids: String = database
+        .query_row(
+            "SELECT group_concat(cycle_id, ',') FROM (
+             SELECT accounting.cycle_id FROM fill_accounting accounting
+             JOIN fills ON fills.id=accounting.fill_id
+             ORDER BY fills.execution_unix_nanos
+         )",
+            [],
+            |row| row.get(0),
+        )
+        .expect("cycle identities");
+    assert_eq!(
+        cycle_ids, "0,0,1,2,2,2",
+        "the reversal closes its original cycle and opens the next"
+    );
+    let legacy_writes: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM fills WHERE completed_trade_pnl_units IS NOT NULL
+            OR realized_pnl_units IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy fill columns");
+    assert_eq!(legacy_writes, 0, "V21 never writes superseded P&L columns");
+    let old_cycles: i64 = database
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM trade_pnl_cycles)
+            + (SELECT COUNT(*) FROM risk_trade_cycles)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy cycles");
+    assert_eq!(old_cycles, 0, "V21 never writes superseded cycles");
+}
+
+#[test]
 fn a_trade_opened_before_retained_history_keeps_its_exit_pnl_without_a_guessed_entry() {
     let directory = TestDirectory::new("round-trip-retention");
     let service = start_service(&directory);

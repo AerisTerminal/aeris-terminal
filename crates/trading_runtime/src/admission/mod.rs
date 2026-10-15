@@ -201,8 +201,7 @@ impl TradingCore {
             .iter()
             .filter(|fill| &fill.account_id == account_id)
         {
-            self.state.completed_trade_pnl.remove(&fill.id);
-            self.state.fill_realized_pnl.remove(&fill.id);
+            self.state.fill_accounting.remove(&fill.id);
             self.state.broker_fill_positions.remove(&fill.id);
         }
         self.state
@@ -215,10 +214,7 @@ impl TradingCore {
         self.state.risk_locks.remove(account_id);
         self.state.risk_rule_states.remove(account_id);
         self.state
-            .risk_trade_cycles
-            .retain(|(stored_account, _), _| stored_account != account_id);
-        self.state
-            .trade_pnl_cycles
+            .trade_cycles
             .retain(|(stored_account, _), _| stored_account != account_id);
         self.state.session_plans.remove(account_id);
         self.state.discipline_states.remove(account_id);

@@ -13,7 +13,7 @@ mod execution;
 #[path = "../groups/mod.rs"]
 mod groups;
 #[path = "../ledger/mod.rs"]
-mod ledger;
+pub(crate) mod ledger;
 #[path = "../market/mod.rs"]
 pub(crate) mod market;
 #[path = "../risk/owner.rs"]
@@ -22,6 +22,7 @@ use groups::{planned_leg, protection};
 #[path = "../venue/broker.rs"]
 mod broker;
 
+use self::ledger::{FillAccounting, TradeCycle};
 use self::market::feed::{MarketFeedInbox, QuoteBook};
 pub use self::market::gating::ExecutionPolicy;
 use crate::book::OrderBook;
@@ -36,7 +37,6 @@ pub use crate::plan::{
     MAXIMUM_ALLOWED_SETUPS, MAXIMUM_CHECKLIST_ITEMS, MAXIMUM_PLAN_LEVELS, SessionAdherenceReview,
     SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,
 };
-use crate::risk::RiskTradeCycleState;
 pub use crate::risk::{
     EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskOutcome,
     EconomicEventRiskRule, EconomicEventRiskTrigger, RiskEvaluation, RiskLock, RiskMeter,
@@ -513,11 +513,9 @@ pub(crate) struct FillMemoryUpdate {
 
 pub(crate) struct FillPolicyUpdate {
     rule_state: Option<RiskRuleState>,
-    trade_cycle: RiskTradeCycleState,
+    trade_cycle: TradeCycle,
     discipline_state: DisciplineState,
-    completed_trade_pnl: Option<FixedPoint>,
-    fill_realized_pnl: Option<FixedPoint>,
-    trade_pnl_cycle: Option<FixedPoint>,
+    accounting: FillAccounting,
 }
 
 impl TradingService {
@@ -1706,8 +1704,7 @@ impl TradingCore {
         }
         while self.state.fills.len() > self.retention.maximum_fills {
             if let Some(fill) = self.state.fills.pop_front() {
-                self.state.completed_trade_pnl.remove(&fill.id);
-                self.state.fill_realized_pnl.remove(&fill.id);
+                self.state.fill_accounting.remove(&fill.id);
                 self.state.broker_fill_positions.remove(&fill.id);
             }
         }
@@ -1734,9 +1731,7 @@ pub(crate) fn fill_policy_persistence(update: &FillPolicyUpdate) -> FillPolicyPe
         rule_state: update.rule_state.as_ref(),
         trade_cycle: &update.trade_cycle,
         discipline_state: &update.discipline_state,
-        completed_trade_pnl: update.completed_trade_pnl,
-        fill_realized_pnl: update.fill_realized_pnl,
-        trade_pnl_cycle: update.trade_pnl_cycle,
+        accounting: update.accounting,
     }
 }
 

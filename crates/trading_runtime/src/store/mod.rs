@@ -21,7 +21,7 @@ use {
         decode_provenance, encode_contract, encode_provenance, insert_event_row, insert_order_row,
         parse_side, update_next_sequence,
     },
-    risk::{upsert_discipline_state, upsert_risk_rule_state, upsert_risk_trade_cycle},
+    risk::{upsert_discipline_state, upsert_risk_rule_state},
     schema::sweep_stale_preflight_directories,
 };
 
@@ -29,10 +29,11 @@ use super::{
     BracketStrategyTemplate, BracketTarget, BreakEvenRule, DisciplineState,
     EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskRule, ManagedBracket,
     ManagedBracketStatus, ProtectiveOrder, ProtectiveOrderRole, RiskLock, RiskProfile,
-    RiskRuleState, RiskTradeCycleState, SessionBias, SessionChecklistItem, SessionPlan,
-    SessionPlanLevel, TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
+    RiskRuleState, SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,
+    TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
     TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
+use crate::core::ledger::{FillAccounting, TradeCycle};
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentClass, InstrumentDecimal, InstrumentId,
     InstrumentMetadataProvenance, PriceGrid, SessionHours,
@@ -189,9 +190,8 @@ pub(super) struct StoredState {
     pub orders: crate::book::OrderBook,
     pub order_events: VecDeque<OrderEvent>,
     pub fills: VecDeque<Fill>,
-    pub completed_trade_pnl: BTreeMap<FillId, FixedPoint>,
-    pub fill_realized_pnl: BTreeMap<FillId, FixedPoint>,
-    pub trade_pnl_cycles: BTreeMap<(TradingAccountId, InstrumentId), FixedPoint>,
+    pub fill_accounting: BTreeMap<FillId, FillAccounting>,
+    pub trade_cycles: BTreeMap<(TradingAccountId, InstrumentId), TradeCycle>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
     pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
     /// The broker position each retained broker fill belongs to.
@@ -203,7 +203,6 @@ pub(super) struct StoredState {
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
     pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
     pub risk_rule_states: BTreeMap<TradingAccountId, RiskRuleState>,
-    pub risk_trade_cycles: BTreeMap<(TradingAccountId, InstrumentId), RiskTradeCycleState>,
     pub session_plans: BTreeMap<TradingAccountId, SessionPlan>,
     pub discipline_states: BTreeMap<TradingAccountId, DisciplineState>,
     pub trade_copiers: BTreeMap<TradingAccountId, TradeCopierConfig>,
@@ -256,11 +255,9 @@ pub(super) struct BrokerFillRecord<'a> {
 #[derive(Clone, Copy)]
 pub(super) struct FillPolicyPersistence<'a> {
     pub rule_state: Option<&'a RiskRuleState>,
-    pub trade_cycle: &'a RiskTradeCycleState,
+    pub trade_cycle: &'a TradeCycle,
     pub discipline_state: &'a DisciplineState,
-    pub completed_trade_pnl: Option<FixedPoint>,
-    pub fill_realized_pnl: Option<FixedPoint>,
-    pub trade_pnl_cycle: Option<FixedPoint>,
+    pub accounting: FillAccounting,
 }
 
 impl TradingStore {
@@ -351,9 +348,8 @@ impl TradingStore {
         let orders = self.load_orders()?;
         let order_events = self.load_events()?;
         let fills = self.load_fills()?;
-        let completed_trade_pnl = self.load_completed_trade_pnl()?;
-        let fill_realized_pnl = self.load_fill_realized_pnl()?;
-        let trade_pnl_cycles = self.load_trade_pnl_cycles()?;
+        let fill_accounting = self.load_fill_accounting()?;
+        let trade_cycles = self.load_trade_cycles()?;
         let positions = self.load_positions()?;
         let broker_positions = self.load_broker_positions()?;
         let broker_order_ids = self.load_broker_order_ids()?;
@@ -363,7 +359,6 @@ impl TradingStore {
         let risk_profiles = self.load_risk_profiles()?;
         let risk_locks = self.load_risk_locks()?;
         let risk_rule_states = self.load_risk_rule_states()?;
-        let risk_trade_cycles = self.load_risk_trade_cycles()?;
         let session_plans = self.load_session_plans()?;
         let discipline_states = self.load_discipline_states()?;
         let trade_copiers = self.load_trade_copiers()?;
@@ -379,9 +374,8 @@ impl TradingStore {
             orders: crate::book::OrderBook::from_stored(orders, broker_order_ids),
             order_events,
             fills,
-            completed_trade_pnl,
-            fill_realized_pnl,
-            trade_pnl_cycles,
+            fill_accounting,
+            trade_cycles,
             positions,
             broker_positions,
             broker_fill_positions,
@@ -390,7 +384,6 @@ impl TradingStore {
             risk_profiles,
             risk_locks,
             risk_rule_states,
-            risk_trade_cycles,
             session_plans,
             discipline_states,
             trade_copiers,
@@ -616,6 +609,154 @@ mod tests {
             )
             .expect("legacy route column");
         assert_eq!(route, None);
+    }
+
+    #[test]
+    fn v20_route_and_fill_fixture_backfills_v21_accounting() {
+        let path = temporary_database("v20-accounting");
+        let connection = Connection::open(&path).expect("fixture");
+        create_schema_at(&connection, 20);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                 VALUES ('a','Practice','simulated','USD',2);
+                 INSERT INTO instruments(id,price_scale,quantity_scale,contract_json,market_route_json)
+                 VALUES ('i',2,0,'{}','{\"verified\":true}');
+                 INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                    time_in_force,quantity_units,quantity_scale,status,submitted_unix_nanos,provenance_json,
+                    filled_units,filled_scale)
+                 VALUES ('o','c','a','i','sell','market','gtc',1,0,'filled',1,'{}',1,0);
+                 INSERT INTO fills(id,order_id,account_id,instrument_id,side,price_units,price_scale,
+                    quantity_units,quantity_scale,execution_unix_nanos,provenance_json,
+                    completed_trade_pnl_units,completed_trade_pnl_scale,realized_pnl_units,realized_pnl_scale)
+                 VALUES ('f','o','a','i','sell',10100,2,1,0,2,'{}',400,2,200,2);
+                 INSERT INTO trade_pnl_cycles(account_id,instrument_id,realized_units,realized_scale)
+                 VALUES ('a','i',300,2);
+                 INSERT INTO risk_trade_cycles(account_id,instrument_id,realized_units,realized_scale,
+                    peak_quantity_units,peak_quantity_scale) VALUES ('a','i',300,2,2,0);",
+            )
+            .expect("v20 fixture rows");
+        drop(connection);
+        let store = TradingStore::open(&path, TradingRetention::default()).expect("migrate v20");
+        let accounting: (i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT realized_gross_units, cycle_realized_units, fees_units
+                 FROM fill_accounting WHERE fill_id='f'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("backfilled accounting");
+        assert_eq!(accounting, (200, 400, 0));
+        let cycles = store.load_trade_cycles().expect("backfilled cycle");
+        let cycle = cycles.values().next().expect("one cycle");
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycle.realized_pnl, fixed(300, 2).expect("cycle P&L"));
+        assert_eq!(cycle.risk_realized_pnl, fixed(300, 2).expect("risk P&L"));
+        assert_eq!(cycle.peak_quantity, fixed(2, 0).expect("peak"));
+        assert!(cycle.pnl_known);
+        for index in [
+            "orders_open_scope",
+            "fills_account_execution",
+            "order_events_order_sequence",
+        ] {
+            let exists: bool = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+                    [index],
+                    |row| row.get(0),
+                )
+                .expect("V21 index");
+            assert!(exists, "{index} exists");
+        }
+        let route: String = store
+            .connection
+            .query_row(
+                "SELECT market_route_json FROM instruments WHERE id='i'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("verified route retained");
+        assert_eq!(route, "{\"verified\":true}");
+        assert!(
+            path.parent()
+                .expect("parent")
+                .join("backups")
+                .read_dir()
+                .expect("backup")
+                .next()
+                .is_some()
+        );
+        drop(store);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn v19_fills_and_cycles_migrate_through_routes_to_v21_with_backup() {
+        let path = temporary_database("v19-accounting");
+        let connection = Connection::open(&path).expect("fixture");
+        create_schema_at(&connection, 19);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+             VALUES ('a','Practice','simulated','USD',2);
+             INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+             VALUES ('i',2,0,'{}');
+             INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                 time_in_force,quantity_units,quantity_scale,status,submitted_unix_nanos,
+                 provenance_json,filled_units,filled_scale)
+             VALUES ('o1','c1','a','i','buy','market','gtc',2,0,'filled',1,'{}',2,0),
+                    ('o2','c2','a','i','sell','market','gtc',3,0,'filled',2,'{}',3,0);
+             INSERT INTO fills(id,order_id,account_id,instrument_id,side,price_units,price_scale,
+                 quantity_units,quantity_scale,execution_unix_nanos,provenance_json,
+                 completed_trade_pnl_units,completed_trade_pnl_scale,
+                 realized_pnl_units,realized_pnl_scale)
+             VALUES ('f1','o1','a','i','buy',10000,2,2,0,1,'{}',NULL,NULL,NULL,NULL),
+                    ('f2','o2','a','i','sell',10100,2,3,0,2,'{}',200,2,200,2);
+             INSERT INTO trade_pnl_cycles(account_id,instrument_id,realized_units,realized_scale)
+             VALUES ('a','i',0,2);
+             INSERT INTO risk_trade_cycles(account_id,instrument_id,realized_units,realized_scale,
+                 peak_quantity_units,peak_quantity_scale) VALUES ('a','i',0,2,0,0);",
+            )
+            .expect("v19 reversal rows");
+        drop(connection);
+        let store = TradingStore::open(&path, TradingRetention::default()).expect("migrate v19");
+        assert_eq!(store.load_fill_accounting().expect("accounting").len(), 2);
+        let completed: (i64, i64, bool) = store
+            .connection
+            .query_row(
+                "SELECT realized_gross_units,cycle_realized_units,cycle_closed
+             FROM fill_accounting WHERE fill_id='f2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("reversal accounting");
+        assert_eq!(completed, (200, 200, true));
+        assert_eq!(store.load_trade_cycles().expect("cycles").len(), 1);
+        let route: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT market_route_json FROM instruments WHERE id='i'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("route field");
+        assert_eq!(route, None, "legacy terms never invent a route");
+        assert!(
+            path.parent()
+                .expect("parent")
+                .join("backups")
+                .read_dir()
+                .expect("backup")
+                .any(|entry| entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("trading-v19-"))
+        );
+        drop(store);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
     }
 
     #[test]
@@ -1079,17 +1220,11 @@ mod tests {
         assert_eq!(working, (0, 0));
         assert!(
             store
-                .load_completed_trade_pnl()
-                .expect("historical fill has no recorded outcome")
-                .is_empty(),
-            "migration must not invent final P&L for old executions"
-        );
-        assert!(
-            store
-                .load_fill_realized_pnl()
-                .expect("historical fill has no recorded realized P&L")
-                .is_empty(),
-            "migration must not invent realized P&L for old executions"
+                .load_fill_accounting()
+                .expect("historical accounting")
+                .values()
+                .all(|row| row.cycle_realized.is_none() && row.realized_gross.is_none()),
+            "migration must not invent P&L for old executions"
         );
     }
 

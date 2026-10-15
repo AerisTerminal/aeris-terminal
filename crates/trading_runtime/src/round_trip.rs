@@ -198,7 +198,7 @@ impl OpenTrade {
         &self,
         key: &PositionKey,
         positions: &BTreeMap<PositionKey, Position>,
-        trade_pnl_cycles: &BTreeMap<PositionKey, FixedPoint>,
+        trade_cycles: &BTreeMap<PositionKey, crate::core::ledger::TradeCycle>,
     ) -> Result<Option<FixedPoint>, String> {
         let Some(position) = positions
             .get(key)
@@ -206,8 +206,8 @@ impl OpenTrade {
         else {
             return Ok(None);
         };
-        let realized = match trade_pnl_cycles.get(key).copied() {
-            Some(pnl) => pnl,
+        let realized = match trade_cycles.get(key).filter(|cycle| cycle.pnl_known) {
+            Some(cycle) => cycle.realized_pnl,
             None if self.entry_known && self.exits_recorded => self.exit_realized_pnl.unwrap_or(
                 FixedPoint::try_new(0, position.unrealized_pnl.scale())
                     .map_err(|error| error.to_string())?,
@@ -241,9 +241,8 @@ fn add_to_leg(leg: &mut Option<TradeLeg>, fill: &Fill, quantity: FixedPoint) -> 
 pub(super) fn project_round_trips<'a>(
     fills_newest_first: impl DoubleEndedIterator<Item = &'a Fill> + Clone,
     positions: &BTreeMap<PositionKey, Position>,
-    completed_trade_pnl: &BTreeMap<FillId, FixedPoint>,
-    fill_realized_pnl: &BTreeMap<FillId, FixedPoint>,
-    trade_pnl_cycles: &BTreeMap<PositionKey, FixedPoint>,
+    fill_accounting: &BTreeMap<FillId, crate::core::ledger::FillAccounting>,
+    trade_cycles: &BTreeMap<PositionKey, crate::core::ledger::TradeCycle>,
 ) -> Result<Vec<TradeRoundTrip>, String> {
     let mut net_after = BTreeMap::<PositionKey, FixedPoint>::new();
     let mut quantity_before = Vec::new();
@@ -295,12 +294,18 @@ pub(super) fn project_round_trips<'a>(
         let closed_units = before.unsigned_abs().min(signed.units().unsigned_abs());
         let closed = quantity(closed_units, scale)?;
         let closes_trade = after == 0 || after.signum() != before.signum();
-        let realized_pnl = fill_realized_pnl.get(&fill.id).copied();
+        let realized_pnl = fill_accounting
+            .get(&fill.id)
+            .and_then(|row| row.realized_gross);
         // Fills recorded before per-fill P&L carry only the completed trade's P&L, which is
         // this exit's own when it is the only exit of a fully retained trade.
         let realized_pnl = realized_pnl.or_else(|| {
             (closes_trade && trade.entry_known && trade.exit.is_none())
-                .then(|| completed_trade_pnl.get(&fill.id).copied())
+                .then(|| {
+                    fill_accounting
+                        .get(&fill.id)
+                        .and_then(|row| row.cycle_realized)
+                })
                 .flatten()
         });
         round_trips.push(trade.closing(&key, fill, closed, realized_pnl));
@@ -317,7 +322,7 @@ pub(super) fn project_round_trips<'a>(
         }
     }
     for (key, trade) in open {
-        let open_pnl = trade.open_pnl(&key, positions, trade_pnl_cycles)?;
+        let open_pnl = trade.open_pnl(&key, positions, trade_cycles)?;
         round_trips.push(trade.still_open(&key, open_pnl));
     }
     round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
@@ -335,7 +340,7 @@ pub(super) fn project_round_trips<'a>(
 pub(super) fn project_closed_broker_round_trips<'a>(
     fills_newest_first: impl DoubleEndedIterator<Item = &'a Fill>,
     fill_positions: &BTreeMap<FillId, String>,
-    fill_realized_pnl: &BTreeMap<FillId, FixedPoint>,
+    fill_accounting: &BTreeMap<FillId, crate::core::ledger::FillAccounting>,
 ) -> Result<Vec<TradeRoundTrip>, String> {
     let mut trades = BTreeMap::<(TradingAccountId, String), OpenTrade>::new();
     let mut round_trips = Vec::new();
@@ -343,7 +348,9 @@ pub(super) fn project_closed_broker_round_trips<'a>(
         let Some(position_id) = fill_positions.get(&fill.id) else {
             continue;
         };
-        let realized_pnl = fill_realized_pnl.get(&fill.id).copied();
+        let realized_pnl = fill_accounting
+            .get(&fill.id)
+            .and_then(|row| row.realized_gross);
         let trade = match trades.entry((fill.account_id.clone(), position_id.clone())) {
             Entry::Occupied(trade) => trade.into_mut(),
             // A closing fill opens nothing; seen first, the opening fill was not retained.

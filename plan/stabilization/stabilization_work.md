@@ -513,7 +513,9 @@ Status: in progress
   - Simulated-order admission now requires a tradable verified session, Live feed, current provider generation and a fresh quote (crypto 10 s; other classes 60 s; per-class policy overrides). Typed `RejectReason` names closed/unknown/unavailable/stale states. Resting orders may mark but cannot fill on an ineligible quote; owner-local `eligible_after` replaces the restored-order fence. Removed the tastytrade-only practice-session callbacks on both sides.
   - Manual-clock tests cover inclusive quote-age thresholds, 11 s/61 s rejection, Open/Extended/AlwaysOpen versus Closed/PreOpen/Break/Unknown for market/limit/stop/stop-limit/bracket entry, unchanged rejected revisions/rows, four provider identities, non-Live feeds, superseded generation, closed marks and post-restart first eligible quote. Trading goldens remain unchanged.
   - Fresh isolated GUI: BTC-USDC practice Buy produced a 1 BTC position and Join Bid was accepted and filled another BTC while quotes were live; no reject appeared. In a two-pane BTC/ETH workspace, closing the BTC pane kept its 2 BTC position visible and P/L changed USD 37 to USD 19 while ETH remained the only chart. The same root restarted on ETH; SQLite retained the 2 BTC position. **Not yet proven:** the contract's limit 5% below bid as a *working* order (the Join Bid filled immediately and the current compact ticket has no arbitrary-price control); neither a pane-free stop nor bracket fill was placed. These GUI clauses remain pending despite the checked implementation item.
-- [ ] M4.9 fill-accounting-consolidation - One fill-accounting implementation (V20)
+- [x] M4.9 fill-accounting-consolidation - One fill-accounting implementation (V21)
+  - V21 migrates V20 route-bearing instruments, backfills one accounting row per historical fill and cycle baselines, retains the legacy columns/tables unread for deferred removal, and adds open-order, fill and event indexes. V19→V21 fixtures prove migration backup and row preservation.
+  - A single `ledger/position.rs::apply_fill` computes the position, per-fill realized P&L, cycle state and risk updates. Reversal-through-zero and scale-out tests compare risk, journal, round trips and account view before and after restart; existing golden transcripts remain unchanged. Full workspace fmt, strict Clippy, tests and naming check passed. GUI journal parity remains for the final milestone pass.
 - [ ] M4.10 facts-only-persistence - Commit-then-apply steps; no durable writes per quote
 
 ### M5 trading engine
@@ -637,6 +639,7 @@ the repo root `AGENTS.md`.
 - `book::OrderBook` alone mutates canonical orders and maintains client, broker, open-scope and executable indexes (M4.4, this commit).
 - Store preflight scratch sweeping removes only exact-name directories containing expected database and sidecar copies; unknown contents remain and cleanup failures are logged (M4.6, this commit).
 - V20 persists only verified trading market routes; migrated legacy instruments remain route-less until the market owner publishes verified Terms. The owner bounds ticket interest at 64 and combined quote interest at 256 (M4.7 part 2/3, this commit).
+- V21 reads and writes only `fill_accounting` and `trade_cycles` for P&L; legacy cycle tables and fill columns are preserved, unread, for deferred removal (M4.9).
 - Desktop source may not reference `SimulatedMarketObservation`; quote execution and current quote provenance are owned by the trading QuoteBook fed from the market runtime (M4.7 part 3/3, this commit).
 - Simulated order admission and fills require the trading owner's verified session, Live current-generation quote and class-specific freshness; a restart-time owner-local `eligible_after` fences restored orders without comparing provider generations across processes (M4.8).
 
@@ -726,6 +729,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4.7 part 2/3 feat(trading): prepare bounded owner market feed and persistent routes - tested validation/fencing, overflow, interest lifecycle/bounds, V19 migration and restart without changing simulated execution; desktop cutover remains part 3.
 - 2026-10-16 M4.7 part 3/3 fix(trading): execute simulated orders from the owner quote book - removed the desktop quote relay and registration, wired feed and ticket demand, and tested pane-free stop/mark/restart; GUI assertions remain to be qualified.
 - 2026-10-16 M4.8 feat(trading): gate simulated orders on provider-neutral session and fresh Live quote - four provider fixture families, all entry shapes, clock boundaries and restart fence tested; isolated BTC market/Join Bid accepted, but GUI far-resting limit and pane-free stop/bracket remain unverified.
+- 2026-10-16 M4.9 feat(trading): consolidate fill accounting under V21 - migrated V20 routes and legacy fills/cycles, unified owner position and P&L path, and checked reversal/scale-out agreement with unchanged goldens.
 
 ## 7. Known gaps / deferred
 

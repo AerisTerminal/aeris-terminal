@@ -53,9 +53,17 @@ impl TradingCore {
         self.state
             .risk_rule_states
             .insert(profile.account_id.clone(), rule_state);
-        self.state
-            .risk_trade_cycles
-            .retain(|(account_id, _), _| account_id != &profile.account_id);
+        for cycle in self
+            .state
+            .trade_cycles
+            .values_mut()
+            .filter(|cycle| cycle.account_id == profile.account_id)
+        {
+            cycle.risk_realized_pnl = FixedPoint::try_new(0, cycle.risk_realized_pnl.scale())
+                .map_err(|error| error.to_string())?;
+            cycle.peak_quantity = FixedPoint::try_new(0, cycle.peak_quantity.scale())
+                .map_err(|error| error.to_string())?;
+        }
         self.state
             .risk_profiles
             .insert(profile.account_id.clone(), profile);
@@ -550,7 +558,8 @@ impl TradingCore {
             .filter(|fill| {
                 &fill.account_id == account_id && fill.execution_unix_nanos >= since_unix_nanos
             })
-            .filter_map(|fill| self.state.fill_realized_pnl.get(&fill.id))
+            .filter_map(|fill| self.state.fill_accounting.get(&fill.id))
+            .filter_map(|accounting| accounting.realized_gross)
             .try_fold(zero, |total, realized| {
                 realized
                     .exact_rescale(scale)

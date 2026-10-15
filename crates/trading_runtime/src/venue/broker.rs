@@ -749,7 +749,15 @@ impl TradingCore {
             sequence + 1,
         )?;
         if let Some(pnl) = realized_pnl {
-            self.state.fill_realized_pnl.insert(fill.id.clone(), pnl);
+            self.state.fill_accounting.insert(
+                fill.id.clone(),
+                crate::core::ledger::FillAccounting {
+                    cycle_id: 0,
+                    realized_gross: Some(pnl),
+                    cycle_realized: None,
+                    cycle_closed: false,
+                },
+            );
         }
         self.state
             .broker_fill_positions

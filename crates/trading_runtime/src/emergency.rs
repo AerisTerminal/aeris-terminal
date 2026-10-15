@@ -3,7 +3,7 @@ use super::{
     Fill, FillId, FillMemoryUpdate, FixedPoint, FlattenOutcome, InstrumentId, Order, OrderId,
     OrderSide, OrderStatus, OrderType, PlaceOrder, SimulatedMarketObservation, TimeInForce,
     TradingAccountId, TradingCore, VenueRoute, fill_policy_persistence, flatten_acceptance_event,
-    flatten_fill_event, next_position,
+    flatten_fill_event,
 };
 
 impl TradingCore {
@@ -377,8 +377,8 @@ impl TradingCore {
         };
         fill.validate().map_err(|error| error.to_string())?;
         let event = flatten_fill_event(&order, &fill, sequence + 1, provenance)?;
-        let position = next_position(Some(&current), &fill, &account, &instrument)?;
-        let policy_update = self.next_fill_policy_state(&fill, Some(&current), &position)?;
+        let (position, policy_update) =
+            self.apply_fill(&fill, Some(&current), &account, &instrument)?;
         self.store.insert_fill(
             &order,
             &event,

@@ -20,6 +20,7 @@ impl TradingStore {
             "DELETE FROM economic_event_risk_actions WHERE account_id = ?1",
             "DELETE FROM discipline_states WHERE account_id = ?1",
             "DELETE FROM session_plans WHERE account_id = ?1",
+            "DELETE FROM trade_cycles WHERE account_id = ?1",
             "DELETE FROM trade_pnl_cycles WHERE account_id = ?1",
             "DELETE FROM risk_trade_cycles WHERE account_id = ?1",
             "DELETE FROM risk_rule_states WHERE account_id = ?1",
@@ -31,6 +32,7 @@ impl TradingStore {
             "DELETE FROM order_events WHERE order_id IN (
                 SELECT id FROM orders WHERE account_id = ?1
              )",
+            "DELETE FROM fill_accounting WHERE account_id = ?1",
             "DELETE FROM fills WHERE account_id = ?1",
             "DELETE FROM positions WHERE account_id = ?1",
             "DELETE FROM orders WHERE account_id = ?1",

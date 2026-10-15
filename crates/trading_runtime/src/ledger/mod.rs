@@ -1,179 +1,16 @@
+mod position;
+pub(crate) use position::{FillAccounting, TradeCycle};
+
 use super::{
     AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate, FixedPoint,
     MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, OrderStatus, Position, PositionPnl,
     ProtectiveOrderRole, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS,
-    RiskLock, RiskMeter, RiskRuleState, RiskTradeCycleState, SessionAdherenceReview,
-    TradeRoundTrip, TradingAccount, TradingCore, TradingSnapshot, consistency_projection,
-    is_simulated, negative_loss, nonnegative_difference, pnl_ticks, remaining_limit, round_trip,
-    subtract_fixed, tick_value,
+    RiskLock, RiskMeter, SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore,
+    TradingSnapshot, consistency_projection, is_simulated, negative_loss, nonnegative_difference,
+    pnl_ticks, remaining_limit, round_trip, subtract_fixed, tick_value,
 };
 
 impl TradingCore {
-    pub(super) fn next_fill_policy_state(
-        &self,
-        fill: &Fill,
-        previous_position: Option<&Position>,
-        next_position: &Position,
-    ) -> Result<FillPolicyUpdate, String> {
-        let currency_scale = self
-            .state
-            .accounts
-            .get(&fill.account_id)
-            .ok_or_else(|| "fill account disappeared".to_string())?
-            .currency_scale;
-        let zero = FixedPoint::try_new(0, currency_scale).map_err(|error| error.to_string())?;
-        let zero_quantity =
-            FixedPoint::try_new(0, fill.quantity.scale()).map_err(|error| error.to_string())?;
-        let mut trade_cycle = self
-            .state
-            .risk_trade_cycles
-            .get(&(fill.account_id.clone(), fill.instrument_id.clone()))
-            .cloned()
-            .unwrap_or_else(|| RiskTradeCycleState {
-                account_id: fill.account_id.clone(),
-                instrument_id: fill.instrument_id.clone(),
-                realized_pnl: zero,
-                peak_quantity: zero_quantity,
-            });
-        let previous_realized = previous_position.map_or(zero, |position| position.realized_pnl);
-        let realized_change = subtract_fixed(next_position.realized_pnl, previous_realized)?;
-        let previous_quantity =
-            previous_position.map_or(0, |position| position.net_quantity.units());
-        let next_quantity = next_position.net_quantity.units();
-        trade_cycle.realized_pnl = trade_cycle
-            .realized_pnl
-            .checked_add(
-                realized_change
-                    .exact_rescale(trade_cycle.realized_pnl.scale())
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-        let peak_units = previous_quantity
-            .unsigned_abs()
-            .max(next_quantity.unsigned_abs())
-            .max(fill.quantity.units().unsigned_abs());
-        let peak_quantity = FixedPoint::try_new(
-            i64::try_from(peak_units).map_err(|_| "discipline quantity overflowed".to_string())?,
-            fill.quantity.scale(),
-        )
-        .map_err(|error| error.to_string())?;
-        if peak_quantity.units()
-            > trade_cycle
-                .peak_quantity
-                .exact_rescale(peak_quantity.scale())
-                .map_err(|error| error.to_string())?
-                .units()
-        {
-            trade_cycle.peak_quantity = peak_quantity;
-        }
-        let completed = previous_quantity != 0
-            && (next_quantity == 0 || previous_quantity.signum() != next_quantity.signum());
-        let risk_completed_pnl = completed.then_some(trade_cycle.realized_pnl);
-        let (completed_pnl, trade_pnl_cycle) = self.next_trade_pnl_state(
-            fill,
-            previous_quantity,
-            next_quantity,
-            realized_change,
-            zero,
-        )?;
-        let completed_quantity = completed.then_some(trade_cycle.peak_quantity);
-        let mut rule_state = self
-            .state
-            .risk_profiles
-            .get(&fill.account_id)
-            .map(|_| {
-                self.state
-                    .risk_rule_states
-                    .get(&fill.account_id)
-                    .cloned()
-                    .ok_or_else(|| "risk rule state is unavailable".to_string())
-            })
-            .transpose()?;
-        if completed {
-            Self::finish_risk_trade_cycle(
-                &mut trade_cycle,
-                rule_state.as_mut(),
-                zero,
-                zero_quantity,
-            )?;
-        }
-        let discipline_state =
-            self.next_discipline_state(fill, risk_completed_pnl.zip(completed_quantity))?;
-        let reduces_position =
-            previous_quantity != 0 && fill.side.sign() != previous_quantity.signum();
-        Ok(FillPolicyUpdate {
-            rule_state,
-            trade_cycle,
-            discipline_state,
-            completed_trade_pnl: completed_pnl,
-            fill_realized_pnl: reduces_position.then_some(realized_change),
-            trade_pnl_cycle,
-        })
-    }
-
-    pub(super) fn finish_risk_trade_cycle(
-        trade_cycle: &mut RiskTradeCycleState,
-        rule_state: Option<&mut RiskRuleState>,
-        zero: FixedPoint,
-        zero_quantity: FixedPoint,
-    ) -> Result<(), String> {
-        if trade_cycle.realized_pnl.units() > 0
-            && let Some(state) = rule_state
-        {
-            let winner = trade_cycle
-                .realized_pnl
-                .exact_rescale(state.total_winning_pnl.scale())
-                .map_err(|error| error.to_string())?;
-            state.total_winning_pnl = state
-                .total_winning_pnl
-                .checked_add(winner)
-                .map_err(|error| error.to_string())?;
-            let winner = winner
-                .exact_rescale(state.largest_winning_trade_pnl.scale())
-                .map_err(|error| error.to_string())?;
-            if winner.units() > state.largest_winning_trade_pnl.units() {
-                state.largest_winning_trade_pnl = winner;
-            }
-        }
-        trade_cycle.realized_pnl = zero;
-        trade_cycle.peak_quantity = zero_quantity;
-        Ok(())
-    }
-
-    pub(super) fn next_trade_pnl_state(
-        &self,
-        fill: &Fill,
-        previous_quantity: i64,
-        next_quantity: i64,
-        realized_change: FixedPoint,
-        zero: FixedPoint,
-    ) -> Result<(Option<FixedPoint>, Option<FixedPoint>), String> {
-        // A pre-migration open trade has no reliable cycle baseline. Leave its final P&L
-        // unknown rather than assigning the last closing fill's partial result to the trade.
-        let prior = if previous_quantity == 0 {
-            Some(zero)
-        } else {
-            self.state
-                .trade_pnl_cycles
-                .get(&(fill.account_id.clone(), fill.instrument_id.clone()))
-                .copied()
-        };
-        let total = prior
-            .map(|value| {
-                value
-                    .checked_add(realized_change)
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
-        let completed = previous_quantity != 0
-            && (next_quantity == 0 || previous_quantity.signum() != next_quantity.signum());
-        if completed {
-            Ok((total, (next_quantity != 0).then_some(zero)))
-        } else {
-            Ok((None, total))
-        }
-    }
-
     pub(super) fn next_discipline_state(
         &self,
         fill: &Fill,
@@ -243,18 +80,9 @@ impl TradingCore {
         );
         self.state.order_events.push_back(event);
         self.state.fills.push_back(fill.clone());
-        if let Some(pnl) = update.policy_update.completed_trade_pnl {
-            self.state.completed_trade_pnl.insert(fill.id.clone(), pnl);
-        }
-        if let Some(pnl) = update.policy_update.fill_realized_pnl {
-            self.state.fill_realized_pnl.insert(fill.id.clone(), pnl);
-        }
-        let trade_key = (fill.account_id.clone(), fill.instrument_id.clone());
-        if let Some(cycle) = update.policy_update.trade_pnl_cycle {
-            self.state.trade_pnl_cycles.insert(trade_key, cycle);
-        } else {
-            self.state.trade_pnl_cycles.remove(&trade_key);
-        }
+        self.state
+            .fill_accounting
+            .insert(fill.id.clone(), update.policy_update.accounting);
         self.state
             .positions
             .insert(update.position_key, update.position);
@@ -263,7 +91,7 @@ impl TradingCore {
                 .risk_rule_states
                 .insert(fill.account_id.clone(), rule_state);
         }
-        self.state.risk_trade_cycles.insert(
+        self.state.trade_cycles.insert(
             (fill.account_id.clone(), fill.instrument_id.clone()),
             update.policy_update.trade_cycle,
         );
@@ -298,14 +126,13 @@ impl TradingCore {
         let mut round_trips = round_trip::project_round_trips(
             self.simulated_fills_newest_first().into_iter(),
             &self.state.positions,
-            &self.state.completed_trade_pnl,
-            &self.state.fill_realized_pnl,
-            &self.state.trade_pnl_cycles,
+            &self.state.fill_accounting,
+            &self.state.trade_cycles,
         )?;
         round_trips.extend(round_trip::project_closed_broker_round_trips(
             broker_fills.into_iter(),
             &self.state.broker_fill_positions,
-            &self.state.fill_realized_pnl,
+            &self.state.fill_accounting,
         )?);
         round_trips.sort_by_key(|trip| std::cmp::Reverse(trip.last_fill_unix_nanos()));
         Ok(round_trips)
@@ -351,9 +178,9 @@ impl TradingCore {
                 .take(MAXIMUM_SNAPSHOT_ITEMS)
                 .filter_map(|fill| {
                     self.state
-                        .completed_trade_pnl
+                        .fill_accounting
                         .get(&fill.id)
-                        .map(|pnl| (fill.id.clone(), *pnl))
+                        .and_then(|row| row.cycle_realized.map(|pnl| (fill.id.clone(), pnl)))
                 })
                 .collect(),
             fill_realized_pnl: self
@@ -364,9 +191,9 @@ impl TradingCore {
                 .take(MAXIMUM_SNAPSHOT_ITEMS)
                 .filter_map(|fill| {
                     self.state
-                        .fill_realized_pnl
+                        .fill_accounting
                         .get(&fill.id)
-                        .map(|pnl| (fill.id.clone(), *pnl))
+                        .and_then(|row| row.realized_gross.map(|pnl| (fill.id.clone(), pnl)))
                 })
                 .collect(),
             round_trips: self.round_trips()?,
