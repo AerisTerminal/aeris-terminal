@@ -2489,6 +2489,12 @@ fn open_round_trip_pnl_follows_live_marks_and_partial_exits() {
         .expect("service stops");
     let restarted = start_service(&directory);
     let snapshot = restarted.snapshot().expect("restored open snapshot");
+    // The last quote mark is process-local; a new feed quote refreshes it after restart.
+    assert_eq!(snapshot.positions[0].net_quantity, contracts(1));
+    restarted
+        .observe_market(observation(10_200, 10_225, 8, 7_000))
+        .expect("fresh mark after restart");
+    let snapshot = restarted.snapshot().expect("refreshed open snapshot");
     assert_eq!(
         open_trade(&snapshot.round_trips).current_pnl(),
         Some(price(15_000))

@@ -448,6 +448,16 @@ impl TradingCore {
         observation: &SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {
         self.quote_commit_failed = false;
+        if self.mark_only_quote(observation)? {
+            let instrument = self
+                .state
+                .instruments
+                .get(&observation.instrument_id)
+                .ok_or("trading instrument is not registered")?
+                .clone();
+            self.update_mark_to_market(observation, &instrument)?;
+            return Ok(Vec::new());
+        }
         let working_state = self.state.clone();
         let working_eligibility = self.eligible_after.clone();
         let original = std::mem::replace(&mut self.state, working_state);
@@ -458,6 +468,19 @@ impl TradingCore {
         let planned = std::mem::replace(&mut self.state, original);
         let planned_eligibility = std::mem::replace(&mut self.eligible_after, original_eligibility);
         let fills = result?;
+        if fills.is_empty()
+            && planned.revision == self.state.revision
+            && planned.orders.iter().eq(self.state.orders.iter())
+            && planned.order_events == self.state.order_events
+            && planned.managed_brackets == self.state.managed_brackets
+            && planned.risk_rule_states == self.state.risk_rule_states
+            && planned.discipline_states == self.state.discipline_states
+            && planned.risk_locks == self.state.risk_locks
+        {
+            self.state = planned;
+            self.eligible_after = planned_eligibility;
+            return Ok(fills);
+        }
         if let Err(error) = self.store.commit_quote_step(&self.state, &planned) {
             self.quote_commit_failed = true;
             return Err(error);
@@ -466,6 +489,58 @@ impl TradingCore {
         self.eligible_after = planned_eligibility;
         self.enforce_memory_retention();
         Ok(fills)
+    }
+
+    /// Bypass speculative state cloning only when no quote-driven durable effect is possible.
+    /// Brackets and live risk always use the full planner, even on a non-crossing quote.
+    fn mark_only_quote(&self, observation: &SimulatedMarketObservation) -> Result<bool, String> {
+        observation
+            .provenance
+            .validate()
+            .map_err(|error| error.to_string())?;
+        if observation.bid.units() <= 0
+            || observation.ask.units() <= observation.bid.units()
+            || observation.bid.scale() != observation.ask.scale()
+        {
+            return Err("simulated market observation is invalid".to_string());
+        }
+        let instrument = self
+            .state
+            .instruments
+            .get(&observation.instrument_id)
+            .ok_or("trading instrument is not registered")?;
+        if observation.bid.scale() != instrument.price_scale {
+            return Err("market observation scale does not match the instrument".to_string());
+        }
+        self.validate_mark_to_market(observation, instrument)?;
+        Ok(!self.state.managed_brackets.values().any(|bracket| {
+            self.state
+                .orders
+                .by_client(&bracket.entry_client_order_id)
+                .is_some_and(|order| order.instrument_id == observation.instrument_id)
+                && matches!(
+                    bracket.status,
+                    super::ManagedBracketStatus::AwaitingEntry
+                        | super::ManagedBracketStatus::Active
+                )
+        }) && !self
+            .state
+            .risk_profiles
+            .values()
+            .any(|profile| profile.enabled)
+            && !self
+                .state
+                .orders
+                .executable_for(&observation.instrument_id)
+                .any(|order| {
+                    super::is_simulated(&self.state.accounts, &order.account_id)
+                        && (super::touch_price(order, observation).is_some()
+                            || matches!(
+                                order.time_in_force,
+                                super::TimeInForce::ImmediateOrCancel
+                                    | super::TimeInForce::FillOrKill
+                            ))
+                }))
     }
 
     fn plan_market_quote(
@@ -530,14 +605,14 @@ impl TradingCore {
             .map(|(order_id, _)| order_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
         let fills = self.execute_market_fills(candidates, observation, &instrument)?;
-        self.reconcile_managed_brackets(&fills, observation, &instrument)?;
-        self.align_position_protection(&fills, observation)?;
-        let mut positions_changed = self.update_mark_to_market(observation, &instrument)?;
-        self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
-        positions_changed |= self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
-        if positions_changed {
+        if !fills.is_empty() {
             self.bump_revision()?;
         }
+        self.reconcile_managed_brackets(&fills, observation, &instrument)?;
+        self.align_position_protection(&fills, observation)?;
+        self.update_mark_to_market(observation, &instrument)?;
+        self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
+        self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
         Ok(fills)
     }
 
@@ -635,9 +710,6 @@ impl TradingCore {
                     unrealized_pnl: unrealized,
                     ..current
                 };
-                if !self.quote_planning {
-                    self.store.update_position(&updated)?;
-                }
                 self.state.positions.insert(key, updated);
                 positions_changed = true;
             }

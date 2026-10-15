@@ -18,7 +18,11 @@ impl TradingStore {
         let tx = StepTx::begin(self).map_err(database_error)?;
         persist_quote_orders_and_fills(&tx, before, after)?;
         for (key, position) in &after.positions {
-            if before.positions.get(key) != Some(position) {
+            if before.positions.get(key).is_none_or(|previous| {
+                let mut prior = previous.clone();
+                prior.unrealized_pnl = position.unrealized_pnl;
+                prior != *position
+            }) {
                 upsert_position(&tx, position)?;
             }
         }

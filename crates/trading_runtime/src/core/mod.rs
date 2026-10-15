@@ -87,6 +87,7 @@ pub(crate) const BROKER_PNL_UNAVAILABLE: &str =
 /// One request per connected account with open broker positions, well inside cTrader's
 /// 50 requests per second.
 pub(crate) const UNREALIZED_PNL_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
 pub(crate) type Reply<T> = SyncSender<Result<T, String>>;
 
 /// The owner derives the venue from the registered account, never from order provenance.
@@ -470,6 +471,7 @@ pub(crate) struct TradingCore {
     retention: TradingRetention,
     pub(crate) clock: Arc<dyn clock::Clock>,
     command_now: i64,
+    next_retention_at: i64,
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
     market_observation_error: Option<String>,
     /// Quote computation runs on a private projection; only its completed facts are persisted.
@@ -1176,6 +1178,7 @@ impl TradingCore {
             state,
             retention,
             command_now: clock.wall_unix_nanos(),
+            next_retention_at: clock.wall_unix_nanos().saturating_add(3_600_000_000_000),
             clock,
             copy_dispatches: std::collections::VecDeque::new(),
             market_observation_error: None,
@@ -1425,6 +1428,15 @@ impl TradingCore {
             self.timer_calls += 1;
         }
         self.request_unrealized_pnl();
+        if self.command_now >= self.next_retention_at {
+            match self.store.enforce_retention() {
+                Ok(()) => {
+                    self.next_retention_at = self.command_now.saturating_add(3_600_000_000_000);
+                    self.enforce_memory_retention();
+                }
+                Err(error) => aeris_observability::diagnostic!("trading retention failed: {error}"),
+            }
+        }
         if let Err(error) = self.recompute_quote_interest() {
             self.market_observation_error = Some(error.to_string());
         }
@@ -1501,7 +1513,6 @@ impl TradingCore {
         record
             .validate()
             .and_then(|()| self.store.put_user_record(record))
-            .and_then(|()| self.store.enforce_retention(false))
     }
 
     fn drain_venue_events(&mut self) {

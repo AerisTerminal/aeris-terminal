@@ -65,9 +65,6 @@ impl TradingCore {
         let mut fills = self.observe_market(observation)?;
         self.cancel_all(Some(account_id))?;
         fills.extend(self.flatten_positions(account_id, observation)?);
-        self.store.enforce_retention(true)?;
-        self.enforce_memory_retention();
-        self.bump_revision()?;
         Ok(FlattenOutcome {
             fills,
             pending_close_requests: Vec::new(),
@@ -263,9 +260,6 @@ impl TradingCore {
                 }
             }
         }
-        self.store.enforce_retention(true)?;
-        self.enforce_memory_retention();
-        self.bump_revision()?;
         Ok(FlattenOutcome {
             fills,
             pending_close_requests,

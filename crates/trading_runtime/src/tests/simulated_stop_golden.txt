@@ -1,8 +1,8 @@
 bracket placed revision=4 orders=[sim-order-1:working] events=[sim-event-1] fills=[] pnl=0@2/0@2/5000000@2
 entry touched revision=6 orders=[sim-order-1:filled,sim-order-3:working,sim-order-4:working] events=[sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-2] pnl=0@2/-1250@2/4998750@2
-stop touched revision=8 orders=[sim-order-1:filled,sim-order-3:filled,sim-order-4:cancelled] events=[sim-event-6,sim-event-5,sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-5,sim-fill-2] pnl=-12500@2/0@2/4987500@2
+stop touched revision=9 orders=[sim-order-1:filled,sim-order-3:filled,sim-order-4:cancelled] events=[sim-event-6,sim-event-5,sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-5,sim-fill-2] pnl=-12500@2/0@2/4987500@2
 
-revision=8
+revision=9
 order sim-order-1 stop-entry buy market day 1@0 1@0 - - filled 1000 aeris-sim:fixture:1:1:1000
 order sim-order-3 bracket-stop-7b4343c53b7101fc sell stop gtc 1@0 1@0 - 9800@2 filled 2000 aeris-sim:fixture:1:2:2000
 order sim-order-4 bracket-target-59a79a05dfc0002d sell limit gtc 1@0 0@0 10200@2 - cancelled 2000 aeris-sim:fixture:1:2:2000

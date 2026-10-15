@@ -126,6 +126,9 @@ violations and missing verification explicitly, and never describe them as satis
   their deferred removal migration. Store-open preflight scratch cleanup may
   remove only exact preflight directories containing solely the expected database copy and
   SQLite sidecars; preserve unknown contents and report cleanup failures through observability.
+- Simulated quote-only marks update unrealized P&L in owner memory without cloning all trading
+  state or writing SQLite. Retention runs only from the hourly owner timer and deletes at most
+  5,000 rows from each table per run; commands, quotes and store open never perform retention.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
   legacy state, write installed-app identity, promote launchers, or run updates. Only the explicit

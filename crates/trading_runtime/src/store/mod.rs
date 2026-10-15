@@ -311,6 +311,12 @@ impl TradingStore {
             }))
             .expect("install replay-only SQLite commit hook");
     }
+    #[cfg(test)]
+    pub(super) fn write_count(&self) -> i64 {
+        self.connection
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .expect("SQLite write count")
+    }
 
     pub(super) fn open(path: &Path, retention: TradingRetention) -> Result<Self, StoreError> {
         let existed = path != Path::new(":memory:") && path.exists();
@@ -353,7 +359,6 @@ impl TradingStore {
         store
             .ensure_default_strategy_templates()
             .map_err(StoreError::Other)?;
-        store.enforce_retention(false).map_err(StoreError::Other)?;
         Ok(store)
     }
 }

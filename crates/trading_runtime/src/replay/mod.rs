@@ -177,14 +177,25 @@ impl ReplayHarness {
                     }
                 }
                 _ => {
-                    let before = self.transcript();
+                    let before = self.snapshot().expect("before restart");
                     self.restart().unwrap_or_else(|error| {
                         panic!("replay seed={seed} step={step} restart: {error}")
                     });
+                    let recovered = self.snapshot().expect("after restart");
                     assert_eq!(
-                        self.transcript(),
-                        before,
-                        "replay seed={seed} step={step}: recovery"
+                        (
+                            recovered.revision,
+                            recovered.orders,
+                            recovered.order_events,
+                            recovered.fills
+                        ),
+                        (
+                            before.revision,
+                            before.orders,
+                            before.order_events,
+                            before.fills
+                        ),
+                        "replay seed={seed} step={step}: durable recovery (marks are memory-only)"
                     );
                 }
             }
@@ -993,6 +1004,69 @@ fn replay_cancel_and_amend_first_commit_failure_rolls_back_revision() {
         harness.restart().expect("reopen committed order");
         assert_eq!(harness.transcript(), committed);
     }
+}
+
+#[test]
+fn mark_only_quotes_never_write_sqlite_and_update_memory_pnl() {
+    let directory = TestDirectory::new("mark-only-writes");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    harness
+        .place_order(market_order("mark-entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry");
+    harness
+        .observe_market(observation(10_000, 10_025, 2, 2_000))
+        .expect("entry fills");
+    let mut resting = market_order("mark-resting", OrderSide::Buy, 3, 3_000);
+    resting.order_type = OrderType::Limit;
+    resting.time_in_force = TimeInForce::GoodTillCancelled;
+    resting.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+    harness.place_order(resting).expect("resting");
+    let before = harness.snapshot().expect("before");
+    let database = rusqlite::Connection::open(&harness.configuration.database_path)
+        .expect("second connection");
+    let version: i64 = database
+        .pragma_query_value(None, "data_version", |row| row.get(0))
+        .expect("version");
+    let changes = harness.current().store.write_count();
+    harness.crash_during_commit(1);
+    for sequence in 3..1_003_u64 {
+        harness
+            .observe_market(observation(
+                10_001 + i64::try_from(sequence % 2).expect("bounded mark"),
+                10_025,
+                sequence,
+                i64::try_from(sequence).expect("bounded sequence") * 1_000,
+            ))
+            .expect("mark-only quote must not commit");
+    }
+    let after = harness.snapshot().expect("after");
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.fills, before.fills);
+    assert_ne!(
+        after.positions[0].unrealized_pnl,
+        before.positions[0].unrealized_pnl
+    );
+    assert_eq!(harness.current().store.write_count(), changes);
+    assert_eq!(
+        database
+            .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+            .expect("version"),
+        version
+    );
+    harness.crash_during_commit(2);
+    harness
+        .observe_market(observation(8_975, 9_000, 1_003, 1_003_000))
+        .expect("crossed order commits once");
+    let filled = harness.snapshot().expect("filled snapshot");
+    assert_eq!(filled.fills.len(), before.fills.len() + 1);
+    assert_eq!(filled.revision, before.revision + 1);
+    assert!(
+        database
+            .pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))
+            .expect("committed version")
+            > version
+    );
 }
 
 #[test]
