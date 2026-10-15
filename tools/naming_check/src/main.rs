@@ -3908,7 +3908,21 @@ jobs:
         ] {
             assert!(runtime.contains(contract), "trading owner lost {contract}");
         }
-        let store = manifest("crates/trading_runtime/src/store.rs");
+        let store = [
+            "schema.rs",
+            "mod.rs",
+            "orders.rs",
+            "fills.rs",
+            "ledger.rs",
+            "groups.rs",
+            "risk.rs",
+            "user_records.rs",
+            "retention.rs",
+            "export.rs",
+        ]
+        .into_iter()
+        .map(|file| manifest(&format!("crates/trading_runtime/src/store/{file}")))
+        .collect::<String>();
         for contract in [
             "journal_mode\", \"WAL",
             "user_version",

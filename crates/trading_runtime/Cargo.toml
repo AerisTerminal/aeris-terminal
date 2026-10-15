@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 aeris_instruments = { path = "../domain/instruments" }
+aeris_observability = { path = "../observability" }
 aeris_platform_sys = { path = "../platform_sys" }
 aeris_trading = { path = "../domain/trading" }
 rusqlite.workspace = true

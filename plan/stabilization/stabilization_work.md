@@ -499,7 +499,10 @@ Status: in progress
 - [x] M4.5 trading-core-module-split - Split `lib.rs` and the Coordinator into focused modules
   - Moved the existing `TradingCore` method bodies into admission, execution, ledger, risk, groups, emergency and market modules; moved protection/planned-leg and broker implementations without changing the single owner, store schema, golden transcripts or scripted venue tests. `lib.rs` now declares modules and re-exports the public surface.
   - Pre/post trading characterization: 108 passed, 4 ignored; full workspace fmt, Clippy, tests and naming_check passed. TR-12's remaining store split and later cleanup stay assigned to M4.6/M5.9/M8.10.
-- [ ] M4.6 trading-store-module-split - Split `store.rs` by table family
+- [x] M4.6 trading-store-module-split - Split `store.rs` by table family
+  - Moved the V1–V19 migration table, schema preflight and backup into `store/schema.rs`; split the existing SQL methods into orders, fills, ledger, groups, risk, user records, retention and export modules. `StepTx` wraps a rollback-on-drop SQLite transaction and is first used for order insertion; M4.10 will apply it to whole owner steps. Schema stays V19; no golden or existing assertion changed.
+  - Store open sweeps at most 32 exact-name stale preflight directories, deleting only known copied SQLite files; unknown contents are preserved and cleanup failures are logged through observability. Deterministic tests cover stale cleanup and a refused unsafe directory.
+  - Before the split, 108 trading tests passed (4 ignored). After the split, 110 passed (4 ignored), including all historical migration, persistence/restart, scripted venue and golden tests. Existing store-test suffix is byte-identical; full workspace fmt, strict Clippy, tests and naming_check passed. TR-12 remains open for M5.9 and M8.10 cleanup.
 - [ ] M4.7 runtime-owned-quotes - Trading runtime owns its quotes; the desktop relay is removed
 - [ ] M4.8 provider-neutral-gating - Session and freshness gating for every provider
 - [ ] M4.9 fill-accounting-consolidation - One fill-accounting implementation (V20)
@@ -624,6 +627,7 @@ the repo root `AGENTS.md`.
 - Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, this commit).
 - One named trading owner thread runs the loop in `service/owner.rs` and drives `TradingCore` command, market and deadline entry points; the bounded command enum resides in `service/mod.rs` (M4.2, this commit).
 - `book::OrderBook` alone mutates canonical orders and maintains client, broker, open-scope and executable indexes (M4.4, this commit).
+- Store preflight scratch sweeping removes only exact-name directories containing expected database and sidecar copies; unknown contents remain and cleanup failures are logged (M4.6, this commit).
 
 ## 6. Progress log
 
@@ -706,6 +710,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4.3 test(trading): replay core against SQLite with deterministic transcripts - ported both unchanged goldens, tested restart/commit abort and seeded reproduction.
 - 2026-10-15 M4.4 perf(trading): index owner order lookups and executable demand - removed order and reverse-broker scans with index-consistency coverage; measured 409.646 ms scan vs 0.281 ms indexed for 1,000 lookups at 50,000 orders.
 - 2026-10-15 M4.5 refactor(trading): split core behavior into focused modules - moved owner methods and broker/group implementations mechanically with unchanged goldens and scripted scenarios; full gates passed.
+- 2026-10-15 M4.6 refactor(trading): split SQLite store by table family - preserved V1–V19 and restart assertions, added StepTx and bounded safe preflight scratch cleanup with failure diagnostics.
 
 ## 7. Known gaps / deferred
 

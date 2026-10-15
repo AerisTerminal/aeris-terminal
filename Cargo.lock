@@ -500,6 +500,7 @@ name = "aeris_trading_runtime"
 version = "0.2.3"
 dependencies = [
  "aeris_instruments",
+ "aeris_observability",
  "aeris_platform_sys",
  "aeris_trading",
  "rusqlite",

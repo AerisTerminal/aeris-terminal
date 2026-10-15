@@ -1,0 +1,613 @@
+use super::*;
+
+pub const SCHEMA_VERSION: u32 = 19;
+pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
+     key TEXT PRIMARY KEY,
+     value INTEGER NOT NULL
+ ) STRICT;
+ INSERT INTO metadata(key, value) VALUES ('revision', 1), ('next_sequence', 1);
+ CREATE TABLE accounts (
+     id TEXT PRIMARY KEY, display_name TEXT NOT NULL, environment TEXT NOT NULL,
+     currency TEXT NOT NULL, currency_scale INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE instruments (
+     id TEXT PRIMARY KEY, price_scale INTEGER NOT NULL, quantity_scale INTEGER NOT NULL,
+     contract_json TEXT NOT NULL
+ ) STRICT;
+ CREATE TABLE orders (
+     id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL UNIQUE,
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id), side TEXT NOT NULL,
+     order_type TEXT NOT NULL, time_in_force TEXT NOT NULL, quantity_units INTEGER NOT NULL,
+     quantity_scale INTEGER NOT NULL, limit_units INTEGER, limit_scale INTEGER,
+     stop_units INTEGER, stop_scale INTEGER, status TEXT NOT NULL,
+     submitted_unix_nanos INTEGER NOT NULL, provenance_json TEXT NOT NULL
+ ) STRICT;
+ CREATE TABLE order_events (
+     id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id),
+     sequence INTEGER NOT NULL UNIQUE, kind TEXT NOT NULL, event_unix_nanos INTEGER NOT NULL,
+     detail TEXT, provenance_json TEXT NOT NULL
+ ) STRICT;
+ CREATE INDEX order_events_sequence ON order_events(sequence);
+ CREATE TABLE fills (
+     id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id),
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id), side TEXT NOT NULL,
+     price_units INTEGER NOT NULL, price_scale INTEGER NOT NULL,
+     quantity_units INTEGER NOT NULL, quantity_scale INTEGER NOT NULL,
+     execution_unix_nanos INTEGER NOT NULL, provenance_json TEXT NOT NULL
+ ) STRICT;
+ CREATE INDEX fills_execution ON fills(execution_unix_nanos);
+ CREATE TABLE positions (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id), net_units INTEGER NOT NULL,
+     net_scale INTEGER NOT NULL, average_units INTEGER, average_scale INTEGER,
+     realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
+     unrealized_units INTEGER NOT NULL, unrealized_scale INTEGER NOT NULL,
+     last_fill_unix_nanos INTEGER NOT NULL, PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;
+ CREATE TABLE user_records (
+     kind TEXT NOT NULL, id TEXT NOT NULL, revision INTEGER NOT NULL,
+     updated_unix_nanos INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(kind, id)
+ ) STRICT;
+ CREATE INDEX user_records_retention ON user_records(kind, updated_unix_nanos);";
+pub(super) const MIGRATION_V2: &str = "CREATE TABLE risk_profiles (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), profile_id TEXT NOT NULL,
+     version INTEGER NOT NULL, daily_loss_units INTEGER NOT NULL, daily_loss_scale INTEGER NOT NULL,
+     trailing_units INTEGER, trailing_scale INTEGER, trailing_mode TEXT NOT NULL,
+     max_contracts_units INTEGER NOT NULL, max_contracts_scale INTEGER NOT NULL,
+     consistency_percent INTEGER, restricted_until_unix_nanos INTEGER, enabled INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE risk_locks (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), reason TEXT NOT NULL,
+     locked_at_unix_nanos INTEGER NOT NULL, profile_id TEXT, profile_version INTEGER
+ ) STRICT;";
+pub(super) const MIGRATION_V3: &str =
+    "ALTER TABLE risk_profiles ADD COLUMN session_start_unix_nanos INTEGER NOT NULL DEFAULT 1;";
+pub(super) const MIGRATION_V4: &str =
+    "ALTER TABLE risk_profiles ADD COLUMN session_start_realized_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_profiles ADD COLUMN session_start_realized_scale INTEGER NOT NULL DEFAULT 2;";
+pub(super) const MIGRATION_V5: &str =
+    "ALTER TABLE orders ADD COLUMN filled_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE orders ADD COLUMN filled_scale INTEGER NOT NULL DEFAULT 0;
+ UPDATE orders SET filled_scale = quantity_scale;
+ UPDATE orders SET filled_units = quantity_units WHERE status = 'filled';";
+pub(super) const MIGRATION_V6: &str = "CREATE TABLE trade_copiers (
+     source_account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+     revision INTEGER NOT NULL, enabled INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE trade_copier_targets (
+     source_account_id TEXT NOT NULL REFERENCES trade_copiers(source_account_id) ON DELETE CASCADE,
+     target_account_id TEXT NOT NULL REFERENCES accounts(id), multiplier_units INTEGER NOT NULL,
+     multiplier_scale INTEGER NOT NULL, enabled INTEGER NOT NULL,
+     PRIMARY KEY(source_account_id, target_account_id)
+ ) STRICT;";
+pub(super) const MIGRATION_V7: &str = "CREATE TABLE strategy_templates (
+     template_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, name TEXT NOT NULL,
+     stop_offset_ticks INTEGER NOT NULL, targets_json TEXT NOT NULL,
+     trailing_activation_ticks INTEGER, trailing_distance_ticks INTEGER,
+     break_even_activation_ticks INTEGER, break_even_offset_ticks INTEGER,
+     enabled INTEGER NOT NULL
+ ) STRICT;";
+pub(super) const MIGRATION_V8: &str = "CREATE TABLE managed_brackets (
+     bracket_id TEXT PRIMARY KEY, template_json TEXT NOT NULL,
+     entry_client_order_id TEXT NOT NULL UNIQUE, stop_client_order_id TEXT,
+     target_client_order_ids_json TEXT NOT NULL, status TEXT NOT NULL,
+     entry_price_units INTEGER, entry_price_scale INTEGER
+ ) STRICT;";
+pub(super) const MIGRATION_V9: &str = "CREATE TABLE protective_orders (
+     client_order_id TEXT PRIMARY KEY REFERENCES orders(client_order_id) ON DELETE CASCADE,
+     role TEXT NOT NULL
+ ) STRICT;";
+pub(super) const MIGRATION_V10: &str = "CREATE TABLE risk_rule_states (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), profile_id TEXT NOT NULL,
+     profile_version INTEGER NOT NULL, peak_session_units INTEGER NOT NULL,
+     peak_session_scale INTEGER NOT NULL
+ ) STRICT;
+ INSERT INTO risk_rule_states(account_id, profile_id, profile_version,
+     peak_session_units, peak_session_scale)
+ SELECT account_id, profile_id, version, 0, daily_loss_scale FROM risk_profiles;";
+pub(super) const MIGRATION_V11: &str = "ALTER TABLE risk_rule_states
+     ADD COLUMN total_winning_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_rule_states ADD COLUMN total_winning_scale INTEGER NOT NULL DEFAULT 2;
+ ALTER TABLE risk_rule_states
+     ADD COLUMN largest_winner_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_rule_states ADD COLUMN largest_winner_scale INTEGER NOT NULL DEFAULT 2;
+ CREATE TABLE risk_trade_cycles (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
+     PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;";
+pub(super) const MIGRATION_V12: &str = "CREATE TABLE session_plans (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), plan_id TEXT NOT NULL,
+     revision INTEGER NOT NULL, session_start_unix_nanos INTEGER NOT NULL,
+     session_end_unix_nanos INTEGER NOT NULL, plan_json TEXT NOT NULL
+ ) STRICT;";
+pub(super) const MIGRATION_V13: &str = "ALTER TABLE risk_trade_cycles
+     ADD COLUMN peak_quantity_units INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE risk_trade_cycles ADD COLUMN peak_quantity_scale INTEGER NOT NULL DEFAULT 0;
+ CREATE TABLE discipline_states (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id), rapid_loss_count INTEGER NOT NULL,
+     loss_window_started_unix_nanos INTEGER, last_loss_unix_nanos INTEGER,
+     post_loss_quantity_units INTEGER, post_loss_quantity_scale INTEGER,
+     last_stop_fill_unix_nanos INTEGER, cooldown_until_unix_nanos INTEGER
+ ) STRICT;";
+pub(super) const MIGRATION_V14: &str = "ALTER TABLE risk_profiles ADD COLUMN event_action TEXT;
+ ALTER TABLE risk_profiles ADD COLUMN event_minimum_importance INTEGER;
+ ALTER TABLE risk_profiles ADD COLUMN event_lead_seconds INTEGER;
+ CREATE TABLE economic_event_risk_actions (
+     account_id TEXT NOT NULL REFERENCES accounts(id), event_id TEXT NOT NULL,
+     profile_version INTEGER NOT NULL, action TEXT NOT NULL,
+     applied_unix_nanos INTEGER NOT NULL,
+     PRIMARY KEY(account_id, event_id, profile_version)
+ ) STRICT;";
+pub(super) const MIGRATION_V15: &str =
+    "ALTER TABLE accounts ADD COLUMN starting_equity_units INTEGER;
+ ALTER TABLE accounts ADD COLUMN starting_equity_scale INTEGER;";
+pub(super) const MIGRATION_V16: &str =
+    "ALTER TABLE fills ADD COLUMN completed_trade_pnl_units INTEGER;
+ ALTER TABLE fills ADD COLUMN completed_trade_pnl_scale INTEGER;
+ CREATE TABLE trade_pnl_cycles (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
+     PRIMARY KEY(account_id, instrument_id)
+ ) STRICT;";
+pub(super) const MIGRATION_V17: &str = "ALTER TABLE fills ADD COLUMN realized_pnl_units INTEGER;
+ ALTER TABLE fills ADD COLUMN realized_pnl_scale INTEGER;";
+pub(super) const MIGRATION_V18: &str =
+    "ALTER TABLE accounts ADD COLUMN venue_id TEXT NOT NULL DEFAULT 'aeris-sim';
+ ALTER TABLE accounts ADD COLUMN broker_ref TEXT;
+ ALTER TABLE accounts ADD COLUMN broker_account_type TEXT;
+ ALTER TABLE accounts ADD COLUMN connection_state TEXT;
+ CREATE TABLE broker_orders (
+     order_id TEXT PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+     broker_order_id TEXT UNIQUE, client_order_id TEXT NOT NULL,
+     session_generation INTEGER NOT NULL, updated_unix_nanos INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE broker_deals (
+     broker_deal_id TEXT PRIMARY KEY, fill_id TEXT NOT NULL UNIQUE
+         REFERENCES fills(id) ON DELETE CASCADE,
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     broker_position_id TEXT, executed_unix_millis INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE broker_positions (
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     broker_position_id TEXT NOT NULL, instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     side TEXT NOT NULL, quantity_units INTEGER NOT NULL, quantity_scale INTEGER NOT NULL,
+     entry_units INTEGER NOT NULL, entry_scale INTEGER NOT NULL,
+     stop_units INTEGER, stop_scale INTEGER, take_units INTEGER, take_scale INTEGER,
+     swap_units INTEGER NOT NULL, swap_scale INTEGER NOT NULL,
+     commission_units INTEGER NOT NULL, commission_scale INTEGER NOT NULL,
+     gross_unrealized_units INTEGER NOT NULL, gross_unrealized_scale INTEGER NOT NULL,
+     net_unrealized_units INTEGER NOT NULL, net_unrealized_scale INTEGER NOT NULL,
+     opened_unix_nanos INTEGER NOT NULL,
+     PRIMARY KEY(account_id, broker_position_id)
+ ) STRICT;
+ CREATE TABLE broker_account_state (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+     balance_units INTEGER NOT NULL, balance_scale INTEGER NOT NULL,
+     last_deal_unix_millis INTEGER, session_generation INTEGER NOT NULL
+ ) STRICT;";
+/// The venue generation survives restarts so a new relay session always advances it and a
+/// retired session's events can never be mistaken for current ones.
+pub(super) const MIGRATION_V19: &str =
+    "INSERT INTO metadata(key, value) VALUES ('venue_generation', 0);";
+
+pub(super) struct Migration {
+    pub(super) from: u32,
+    pub(super) to: u32,
+    pub(super) sql: &'static str,
+}
+
+pub(super) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 0,
+        to: 1,
+        sql: INITIAL_SCHEMA,
+    },
+    Migration {
+        from: 1,
+        to: 2,
+        sql: MIGRATION_V2,
+    },
+    Migration {
+        from: 2,
+        to: 3,
+        sql: MIGRATION_V3,
+    },
+    Migration {
+        from: 3,
+        to: 4,
+        sql: MIGRATION_V4,
+    },
+    Migration {
+        from: 4,
+        to: 5,
+        sql: MIGRATION_V5,
+    },
+    Migration {
+        from: 5,
+        to: 6,
+        sql: MIGRATION_V6,
+    },
+    Migration {
+        from: 6,
+        to: 7,
+        sql: MIGRATION_V7,
+    },
+    Migration {
+        from: 7,
+        to: 8,
+        sql: MIGRATION_V8,
+    },
+    Migration {
+        from: 8,
+        to: 9,
+        sql: MIGRATION_V9,
+    },
+    Migration {
+        from: 9,
+        to: 10,
+        sql: MIGRATION_V10,
+    },
+    Migration {
+        from: 10,
+        to: 11,
+        sql: MIGRATION_V11,
+    },
+    Migration {
+        from: 11,
+        to: 12,
+        sql: MIGRATION_V12,
+    },
+    Migration {
+        from: 12,
+        to: 13,
+        sql: MIGRATION_V13,
+    },
+    Migration {
+        from: 13,
+        to: 14,
+        sql: MIGRATION_V14,
+    },
+    Migration {
+        from: 14,
+        to: 15,
+        sql: MIGRATION_V15,
+    },
+    Migration {
+        from: 15,
+        to: 16,
+        sql: MIGRATION_V16,
+    },
+    Migration {
+        from: 16,
+        to: 17,
+        sql: MIGRATION_V17,
+    },
+    Migration {
+        from: 17,
+        to: 18,
+        sql: MIGRATION_V18,
+    },
+    Migration {
+        from: 18,
+        to: 19,
+        sql: MIGRATION_V19,
+    },
+];
+
+pub(crate) fn preflight_existing_database(path: &Path) -> Result<(), StoreError> {
+    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+    let mut header = [0_u8; SQLITE_HEADER.len()];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|error| {
+            corrupt_error(path, format!("SQLite header could not be read: {error}"))
+        })?;
+    if &header != SQLITE_HEADER {
+        return Err(corrupt_error(path, "SQLite header is missing or invalid"));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| corrupt_error(path, "database path has no file name"))?;
+    let scratch = parent.join(format!(
+        ".{}.preflight-{}-{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        crate::clock::system_unix_nanos()
+    ));
+    fs::create_dir(&scratch).map_err(|error| {
+        corrupt_error(
+            path,
+            format!("quick_check scratch directory could not be created: {error}"),
+        )
+    })?;
+    let copy = scratch.join(file_name);
+    let checked = (|| {
+        fs::copy(path, &copy).map_err(|error| {
+            corrupt_error(path, format!("quick_check database copy failed: {error}"))
+        })?;
+        for suffix in ["-wal", "-shm"] {
+            let source = PathBuf::from(format!("{}{suffix}", path.display()));
+            if source.is_file() {
+                fs::copy(
+                    &source,
+                    scratch.join(format!("{}{suffix}", file_name.to_string_lossy())),
+                )
+                .map_err(|error| {
+                    corrupt_error(path, format!("quick_check sidecar copy failed: {error}"))
+                })?;
+            }
+        }
+        preflight_database_copy(path, &copy)
+    })();
+    if let Err(error) = remove_preflight_scratch(&scratch, file_name) {
+        aeris_observability::diagnostic!(
+            "trading quick_check scratch cleanup failed for {}: {error}",
+            scratch.display()
+        );
+    }
+    checked
+}
+
+/// Only directories with the exact preflight name and expected SQLite copy files
+/// are eligible. A foreign file or link is left untouched rather than recursively
+/// deleting data that does not belong to this temporary copy.
+pub(super) fn sweep_stale_preflight_directories(database: &Path) {
+    const MAX_SWEEP: usize = 32;
+    let Some(parent) = database.parent() else {
+        return;
+    };
+    let Some(file_name) = database.file_name() else {
+        return;
+    };
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            aeris_observability::diagnostic!(
+                "trading preflight scratch directory {} could not be read: {error}",
+                parent.display()
+            );
+            return;
+        }
+    };
+    let prefix = format!(".{}.preflight-", file_name.to_string_lossy());
+    let mut candidates = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                aeris_observability::diagnostic!("trading preflight scratch scan failed: {error}");
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(suffix) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
+            continue;
+        };
+        let Some((pid, nanos)) = suffix.split_once('-') else {
+            continue;
+        };
+        if ![pid, nanos].iter().all(|part| {
+            !part.is_empty() && part.len() <= 20 && part.bytes().all(|b| b.is_ascii_digit())
+        }) {
+            continue;
+        }
+        if candidates == MAX_SWEEP {
+            aeris_observability::diagnostic!(
+                "trading preflight scratch sweep deferred beyond {MAX_SWEEP} directories"
+            );
+            break;
+        }
+        candidates += 1;
+        if let Err(error) = remove_preflight_scratch(&entry.path(), file_name) {
+            aeris_observability::diagnostic!(
+                "trading preflight scratch cleanup failed for {}: {error}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
+pub(super) fn remove_preflight_scratch(
+    scratch: &Path,
+    database_name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(scratch)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "preflight scratch is not a plain directory",
+        ));
+    }
+    let expected = [
+        database_name.to_os_string(),
+        format!("{}-wal", database_name.to_string_lossy()).into(),
+        format!("{}-shm", database_name.to_string_lossy()).into(),
+    ];
+    let mut files = Vec::new();
+    for entry in fs::read_dir(scratch)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() || !expected.contains(&entry.file_name()) {
+            return Err(std::io::Error::other(
+                "preflight scratch contains an unexpected file or link",
+            ));
+        }
+        files.push(entry.path());
+    }
+    for file in files {
+        fs::remove_file(file)?;
+    }
+    fs::remove_dir(scratch)
+}
+
+pub(super) fn preflight_database_copy(
+    original_path: &Path,
+    copy_path: &Path,
+) -> Result<(), StoreError> {
+    let connection = Connection::open_with_flags(copy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| {
+            corrupt_error(
+                original_path,
+                format!("quick_check could not open the file: {error}"),
+            )
+        })?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(5_000))
+        .map_err(|error| {
+            corrupt_error(
+                original_path,
+                format!("quick_check timeout setup failed: {error}"),
+            )
+        })?;
+    let detail = connection
+        .pragma_query_value(None, "quick_check", |row| row.get::<_, String>(0))
+        .map_err(|error| corrupt_error(original_path, format!("quick_check failed: {error}")))?;
+    if detail != "ok" {
+        return Err(corrupt_error(original_path, detail));
+    }
+    let version = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| {
+            corrupt_error(
+                original_path,
+                format!("schema version could not be read: {error}"),
+            )
+        })?;
+    if version == 0 {
+        let user_tables: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                corrupt_error(
+                    original_path,
+                    format!("SQLite schema could not be inspected: {error}"),
+                )
+            })?;
+        if user_tables == 0 {
+            return Err(corrupt_error(
+                original_path,
+                "existing SQLite database has no Aeris schema",
+            ));
+        }
+    }
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::NewerSchema {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn retain_newest_backups(directory: &Path, retention: usize) -> Result<(), String> {
+    let mut backups = fs::read_dir(directory)
+        .map_err(|error| format!("trading backup directory could not be read: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("trading-v") && name.ends_with(".sqlite3"))
+        })
+        .collect::<Vec<_>>();
+    backups.sort_by_key(|path| backup_unix(path).unwrap_or(0));
+    let remove_count = backups.len().saturating_sub(retention);
+    for backup in backups.into_iter().take(remove_count) {
+        fs::remove_file(&backup).map_err(|error| {
+            format!(
+                "retired trading backup {} could not be removed: {error}",
+                backup.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+impl TradingStore {
+    pub(super) fn migrate(&mut self, back_up_existing_database: bool) -> Result<(), StoreError> {
+        let mut version = self
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .map_err(|error| {
+                StoreError::Other(format!("trading schema version could not be read: {error}"))
+            })?;
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::NewerSchema {
+                found: version,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        if back_up_existing_database && version < SCHEMA_VERSION {
+            self.back_up_before_migration(version)?;
+        }
+        while version < SCHEMA_VERSION {
+            let migration = MIGRATIONS
+                .iter()
+                .find(|migration| migration.from == version)
+                .ok_or_else(|| {
+                    StoreError::Other(format!(
+                        "trading schema migration from version {version} is missing"
+                    ))
+                })?;
+            self.apply_migration(migration.to, migration.sql)
+                .map_err(StoreError::Other)?;
+            version = migration.to;
+        }
+        Ok(())
+    }
+
+    pub(super) fn back_up_before_migration(&self, old_version: u32) -> Result<(), StoreError> {
+        let database_path = self.connection.path().map(Path::new);
+        let Some(database_path) = database_path
+            .filter(|path| !path.as_os_str().is_empty() && *path != Path::new(":memory:"))
+        else {
+            return Ok(());
+        };
+        let trading_directory = database_path.parent().ok_or_else(|| {
+            StoreError::Other("trading database has no parent directory".to_string())
+        })?;
+        let backups = trading_directory.join("backups");
+        fs::create_dir_all(&backups).map_err(|error| {
+            StoreError::Other(format!(
+                "trading backup directory could not be created: {error}"
+            ))
+        })?;
+        let unix = crate::clock::system_unix_nanos() / 1_000_000;
+        let backup = backups.join(format!("trading-v{old_version}-{unix}.sqlite3"));
+        self.connection
+            .execute("VACUUM INTO ?1", params![backup.to_string_lossy().as_ref()])
+            .map_err(|error| {
+                StoreError::Other(format!(
+                    "trading migration backup could not be created: {error}"
+                ))
+            })?;
+        retain_newest_backups(&backups, 3).map_err(StoreError::Other)
+    }
+}
+
+impl TradingStore {
+    pub(super) fn apply_migration(&mut self, version: u32, sql: &str) -> Result<(), String> {
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| format!("trading schema migration could not start: {error}"))?;
+        transaction
+            .execute_batch(sql)
+            .map_err(|error| format!("trading schema migration failed: {error}"))?;
+        transaction
+            .pragma_update(None, "user_version", version)
+            .map_err(|error| format!("trading schema version could not be committed: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("trading migration could not commit: {error}"))
+    }
+}

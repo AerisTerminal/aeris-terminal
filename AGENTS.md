@@ -110,6 +110,10 @@ violations and missing verification explicitly, and never describe them as satis
   parent directory on Unix. Production code must use this writer instead of raw `fs::write` or
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
+- Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
+  `schema.rs` retains the V1–V19 migration sequence. Store-open preflight scratch cleanup may
+  remove only exact preflight directories containing solely the expected database copy and
+  SQLite sidecars; preserve unknown contents and report cleanup failures through observability.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
   legacy state, write installed-app identity, promote launchers, or run updates. Only the explicit
