@@ -2596,6 +2596,11 @@ impl WorkspaceSurface {
                 self.symbol_selection_target,
                 self.market_state.symbol_selection_pending,
             );
+            if let Some(input) = &self.symbol_input {
+                input.update(cx, |input, input_cx| {
+                    input.set_value("", window, input_cx);
+                });
+            }
         }
         match self.chrome_overlay {
             Some(ChromeOverlay::Indicator) => {

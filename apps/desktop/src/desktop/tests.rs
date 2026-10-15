@@ -500,6 +500,10 @@ mod timeframe_input {
             let surface = self.0.read(cx);
             let input = surface.timeframe_input.clone();
             let quick = surface.chrome_overlay == Some(ChromeOverlay::QuickTimeframe);
+            let symbol = (surface.chrome_overlay == Some(ChromeOverlay::Instrument)
+                && surface.chrome_overlay_phase != ChromeOverlayPhase::Closing)
+                .then(|| surface.symbol_input.clone())
+                .flatten();
             let practice_name = surface
                 .trading_pnl
                 .account_creator
@@ -533,6 +537,7 @@ mod timeframe_input {
                     }
                 }))
                 .when(quick, |root| root.child(Input::new(&input)))
+                .when_some(symbol, |root, input| root.child(Input::new(&input)))
                 .when_some(practice_name, |root, input| root.child(Input::new(&input)))
                 .children(big_trades_dialog)
                 .children(volume_dialog)
@@ -1057,6 +1062,37 @@ mod timeframe_input {
                 assert_eq!(surface.chrome_overlay_phase, ChromeOverlayPhase::Closing);
             });
         });
+    }
+
+    #[gpui::test]
+    fn symbol_search_replaces_selected_text_and_reopens_empty(cx: &mut TestAppContext) {
+        let (surface, _requests, _publications, cx) = harness(cx);
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_chrome_overlay(ChromeOverlay::Instrument, window, cx);
+            });
+        });
+        cx.simulate_keystrokes("e t h");
+        let input = cx.read(|cx| surface.read(cx).symbol_input.clone().expect("symbol input"));
+        cx.read(|cx| assert_eq!(input.read(cx).value(), "eth"));
+
+        cx.simulate_keystrokes("ctrl-a b t c");
+        cx.read(|cx| assert_eq!(input.read(cx).value(), "btc"));
+
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.close_chrome_overlay(window, cx);
+            });
+        });
+        cx.read(|cx| assert!(input.read(cx).value().is_empty()));
+        cx.update(|window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.open_chrome_overlay(ChromeOverlay::Instrument, window, cx);
+            });
+        });
+        cx.read(|cx| assert!(input.read(cx).value().is_empty()));
+        cx.simulate_keystrokes("s o l");
+        cx.read(|cx| assert_eq!(input.read(cx).value(), "sol"));
     }
 
     #[gpui::test]

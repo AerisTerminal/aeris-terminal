@@ -4466,6 +4466,11 @@ fn subscribe_symbol_input(
             match symbol_input_action(event) {
                 SymbolInputAction::Submit => {
                     terminal.update(cx, |app, app_cx| {
+                        if app.chrome_overlay != Some(ChromeOverlay::Instrument)
+                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
+                        {
+                            return;
+                        }
                         if app.submit_symbol_input(app_cx)
                             && symbol_menu_closes_after_selection(app.symbol_selection_target)
                         {
@@ -4475,6 +4480,11 @@ fn subscribe_symbol_input(
                 }
                 SymbolInputAction::Search => {
                     terminal.update(cx, |app, cx| {
+                        if app.chrome_overlay != Some(ChromeOverlay::Instrument)
+                            || app.chrome_overlay_phase == ChromeOverlayPhase::Closing
+                        {
+                            return;
+                        }
                         let typed = app
                             .symbol_input
                             .as_ref()
