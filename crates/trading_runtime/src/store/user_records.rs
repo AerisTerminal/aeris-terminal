@@ -1,6 +1,6 @@
 use super::{
-    BTreeMap, TradeCopierConfig, TradeCopierTarget, TradingAccountId, TradingStore, UserRecord,
-    database_error, fixed, params, sqlite_i64,
+    BTreeMap, StepTx, TradeCopierConfig, TradeCopierTarget, TradingAccountId, TradingStore,
+    UserRecord, database_error, fixed, params, sqlite_i64,
 };
 
 impl TradingStore {
@@ -41,7 +41,7 @@ impl TradingStore {
                 )
                 .map_err(database_error)?;
         }
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
 

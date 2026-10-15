@@ -1479,7 +1479,7 @@ impl TradingCore {
         record
             .validate()
             .and_then(|()| self.store.put_user_record(record))
-            .and_then(|()| self.store.enforce_retention())
+            .and_then(|()| self.store.enforce_retention(false))
     }
 
     fn drain_venue_events(&mut self) {
@@ -1694,8 +1694,8 @@ impl TradingCore {
     }
 
     fn bump_revision(&mut self) -> Result<(), String> {
-        self.state.revision = self.state.revision.saturating_add(1).max(1);
-        self.store.set_revision(self.state.revision)
+        self.state.revision = self.store.revision()?;
+        Ok(())
     }
 
     fn enforce_memory_retention(&mut self) {

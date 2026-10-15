@@ -92,7 +92,7 @@ impl TradingCore {
             .cloned()
             .ok_or_else(|| "managed bracket disappeared".to_string())?;
         bracket.status = ManagedBracketStatus::Cancelled;
-        self.store.put_managed_bracket(&bracket)?;
+        self.store.put_managed_bracket_projection(&bracket)?;
         self.state.managed_brackets.insert(bracket_id, bracket);
         for target in targets.into_iter().flatten() {
             self.cancel_order(&target)?;

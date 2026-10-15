@@ -1,8 +1,8 @@
 use super::{
     BTreeMap, BracketStrategyTemplate, BracketTarget, BreakEvenRule, ClientOrderId, Connection,
     FixedPoint, ManagedBracket, ManagedBracketStatus, Order, OrderEvent, ProtectiveOrder,
-    ProtectiveOrderRole, TradingStore, TrailingStopRule, database_error, fixed, insert_event_row,
-    insert_order_row, params, update_next_sequence,
+    ProtectiveOrderRole, StepTx, TradingStore, TrailingStopRule, database_error, fixed,
+    insert_event_row, insert_order_row, params, update_next_sequence,
 };
 
 impl TradingStore {
@@ -53,7 +53,7 @@ impl TradingStore {
                 enabled: true,
             },
         ] {
-            self.put_strategy_template(&template)?;
+            Self::write_strategy_template(&self.connection, &template)?;
         }
         Ok(())
     }
@@ -64,10 +64,19 @@ impl TradingStore {
         &self,
         template: &BracketStrategyTemplate,
     ) -> Result<(), String> {
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        Self::write_strategy_template(&transaction, template)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    fn write_strategy_template(
+        connection: &Connection,
+        template: &BracketStrategyTemplate,
+    ) -> Result<(), String> {
         template.validate()?;
         let targets = serde_json::to_string(&template.targets)
             .map_err(|error| format!("strategy targets could not be encoded: {error}"))?;
-        self.connection
+        connection
             .execute(
                 "INSERT INTO strategy_templates(template_id, revision, name, stop_offset_ticks,
                     targets_json, trailing_activation_ticks, trailing_distance_ticks,
@@ -100,6 +109,15 @@ impl TradingStore {
     }
 
     pub(crate) fn put_managed_bracket(&self, bracket: &ManagedBracket) -> Result<(), String> {
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        upsert_managed_bracket(&transaction, bracket)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub(crate) fn put_managed_bracket_projection(
+        &self,
+        bracket: &ManagedBracket,
+    ) -> Result<(), String> {
         upsert_managed_bracket(&self.connection, bracket)
     }
 
@@ -308,7 +326,7 @@ impl TradingStore {
         insert_event_row(&transaction, event)?;
         upsert_managed_bracket(&transaction, bracket)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn insert_protective_order(
@@ -331,7 +349,7 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn insert_managed_child_orders(
@@ -347,7 +365,7 @@ impl TradingStore {
         }
         upsert_managed_bracket(&transaction, bracket)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn reject_managed_bracket(
@@ -360,7 +378,7 @@ impl TradingStore {
         insert_event_row(&transaction, event)?;
         upsert_managed_bracket(&transaction, bracket)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
 

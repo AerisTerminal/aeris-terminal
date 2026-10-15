@@ -31,7 +31,6 @@ impl TradingCore {
             .venue_generation
             .checked_add(1)
             .ok_or("cTrader venue generation is exhausted")?;
-        self.store.set_venue_generation(generation)?;
         let (outbound, receiver) = mpsc::sync_channel(venue::OUTBOUND_CAPACITY);
         // Every attach starts with a reconcile of each demo broker account, so state left
         // by a restart or a dropped session is settled against the broker first.
@@ -47,6 +46,7 @@ impl TradingCore {
                 .try_send(request)
                 .map_err(|_| "cTrader venue reconcile requests exceed the outbound queue")?;
         }
+        self.store.set_venue_generation(generation)?;
         self.venue_outbound = Some(outbound);
         self.state.venue_generation = generation;
         self.venue_ingestion = 0;
@@ -345,7 +345,8 @@ impl TradingCore {
         }
         let sequence = self.state.next_sequence;
         let (order, event) = self.prepare_single_order(command, enforce_risk, sequence, 0)?;
-        self.store.insert_order(&order, &event, sequence + 1)?;
+        self.store
+            .insert_order(&order, &event, sequence + 1, true)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(event);
         self.eligible_after

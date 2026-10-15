@@ -1,4 +1,4 @@
-use super::{TradingAccountId, TradingStore, database_error, params, usize_to_i64};
+use super::{StepTx, TradingAccountId, TradingStore, database_error, params, usize_to_i64};
 
 impl TradingStore {
     pub(crate) fn delete_practice_account(
@@ -58,12 +58,12 @@ impl TradingStore {
         if deleted != 1 {
             return Err("practice account disappeared before deletion".to_string());
         }
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
 
 impl TradingStore {
-    pub(crate) fn enforce_retention(&mut self) -> Result<(), String> {
+    pub(crate) fn enforce_retention(&mut self, bump_revision: bool) -> Result<(), String> {
         let transaction = self.connection.transaction().map_err(database_error)?;
         transaction
             .execute(
@@ -151,6 +151,10 @@ impl TradingStore {
                 [retained_closed_orders],
             )
             .map_err(database_error)?;
-        transaction.commit().map_err(database_error)
+        if bump_revision {
+            StepTx::commit_revision(transaction).map_err(database_error)
+        } else {
+            transaction.commit().map_err(database_error)
+        }
     }
 }

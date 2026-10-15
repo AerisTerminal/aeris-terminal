@@ -517,6 +517,8 @@ Status: in progress
   - V21 migrates V20 route-bearing instruments, backfills one accounting row per historical fill and cycle baselines, retains the legacy columns/tables unread for deferred removal, and adds open-order, fill and event indexes. V19→V21 fixtures prove migration backup and row preservation.
   - A single `ledger/position.rs::apply_fill` computes the position, per-fill realized P&L, cycle state and risk updates. Reversal-through-zero and scale-out tests compare risk, journal, round trips and account view before and after restart; existing golden transcripts remain unchanged. Full workspace fmt, strict Clippy, tests and naming check passed. GUI journal parity remains for the final milestone pass.
 - [ ] M4.10 facts-only-persistence - Commit-then-apply steps; no durable writes per quote
+  - M4.10 part 1/4: Revision persistence now joins each existing revisioned SQLite write transaction rather than making a second commit after its order/account/group/risk write. The owner reads the committed revision into memory; write-only projections and store-open housekeeping keep their previous revision behavior. Memory application still precedes some later effects, and multi-effect commands/quotes still use multiple old write paths pending parts 2 and 3.
+  - The characterized `crash_during_commit(2)` replay proves cancel and amend no longer expose a second revision commit; a first-commit failure rolls back the order and revision, survives restart and replays. Existing simulated goldens remain semantically identical; replay comparison normalizes Windows checkout CRLF. The ignored open-position release quote benchmark is restored unchanged in workload (1,000 alternating mark quotes); baseline at `20be05fd`: 1,244.4 quotes/s, command `$env:CARGO_BUILD_JOBS='2'; cargo test -p aeris_trading_runtime --release --locked benchmark_quotes_with_one_open_position -- --ignored --nocapture`. Crate checks and full fmt, strict workspace Clippy, tests and naming check passed. M4.10 remains unchecked.
 
 ### M5 trading engine
 
@@ -730,6 +732,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M4.7 part 3/3 fix(trading): execute simulated orders from the owner quote book - removed the desktop quote relay and registration, wired feed and ticket demand, and tested pane-free stop/mark/restart; GUI assertions remain to be qualified.
 - 2026-10-16 M4.8 feat(trading): gate simulated orders on provider-neutral session and fresh Live quote - four provider fixture families, all entry shapes, clock boundaries and restart fence tested; isolated BTC market/Join Bid accepted, but GUI far-resting limit and pane-free stop/bracket remain unverified.
 - 2026-10-16 M4.9 feat(trading): consolidate fill accounting under V21 - migrated V20 routes and legacy fills/cycles, unified owner position and P&L path, and checked reversal/scale-out agreement with unchanged goldens.
+- 2026-10-16 M4.10 part 1/4 feat(trading): persist revisions with existing write transactions - removed the standalone revision commit, characterized cancel/amend rollback and restored the ignored open-position quote benchmark.
 
 ## 7. Known gaps / deferred
 

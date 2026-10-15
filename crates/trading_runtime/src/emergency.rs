@@ -65,7 +65,7 @@ impl TradingCore {
         let mut fills = self.observe_market(observation)?;
         self.cancel_all(Some(account_id))?;
         fills.extend(self.flatten_positions(account_id, observation)?);
-        self.store.enforce_retention()?;
+        self.store.enforce_retention(true)?;
         self.enforce_memory_retention();
         self.bump_revision()?;
         Ok(FlattenOutcome {
@@ -263,7 +263,7 @@ impl TradingCore {
                 }
             }
         }
-        self.store.enforce_retention()?;
+        self.store.enforce_retention(true)?;
         self.enforce_memory_retention();
         self.bump_revision()?;
         Ok(FlattenOutcome {
@@ -359,7 +359,8 @@ impl TradingCore {
         };
         order.validate().map_err(|error| error.to_string())?;
         let accepted = flatten_acceptance_event(&order, sequence)?;
-        self.store.insert_order(&order, &accepted, sequence + 1)?;
+        self.store
+            .insert_order(&order, &accepted, sequence + 1, false)?;
         self.state.next_sequence = sequence + 1;
         self.state.order_events.push_back(accepted);
         self.state.orders.insert(order.id.clone(), order.clone());

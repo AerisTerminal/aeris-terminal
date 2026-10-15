@@ -1,8 +1,8 @@
 use super::{
     BTreeMap, BrokerFillRecord, Fill, FillAccounting, FillId, FillPolicyPersistence, FixedPoint,
-    InstrumentId, Order, OrderEvent, OrderId, Position, TradeCycle, TradingAccountId, TradingStore,
-    VecDeque, database_error, decode_provenance, encode_provenance, fixed, insert_event_row,
-    insert_order_row, params, parse_side, sqlite_i64, update_next_sequence,
+    InstrumentId, Order, OrderEvent, OrderId, Position, StepTx, TradeCycle, TradingAccountId,
+    TradingStore, VecDeque, database_error, decode_provenance, encode_provenance, fixed,
+    insert_event_row, insert_order_row, params, parse_side, sqlite_i64, update_next_sequence,
     upsert_discipline_state, upsert_position, upsert_risk_rule_state,
 };
 
@@ -166,7 +166,7 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
 

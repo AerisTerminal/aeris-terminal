@@ -497,7 +497,7 @@ impl TradingCore {
         self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
         positions_changed |= self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
         if positions_changed {
-            self.store.enforce_retention()?;
+            self.store.enforce_retention(true)?;
             self.enforce_memory_retention();
             self.bump_revision()?;
         }

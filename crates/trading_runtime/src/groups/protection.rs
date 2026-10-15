@@ -288,7 +288,7 @@ impl TradingCore {
         for bracket_id in finished {
             if let Some(mut bracket) = self.state.managed_brackets.get(&bracket_id).cloned() {
                 bracket.status = ManagedBracketStatus::Completed;
-                self.store.put_managed_bracket(&bracket)?;
+                self.store.put_managed_bracket_projection(&bracket)?;
                 self.state.managed_brackets.insert(bracket_id, bracket);
             }
         }

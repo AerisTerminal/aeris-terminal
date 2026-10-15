@@ -524,7 +524,9 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_golden() {
     );
     assert_eq!(
         first.trim_end(),
-        include_str!("../tests/simulated_golden.txt").trim_end()
+        include_str!("../tests/simulated_golden.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
     );
 }
 
@@ -577,7 +579,9 @@ fn simulated_bracket_stop_touch_cancels_target_golden() {
     );
     assert_eq!(
         first.trim_end(),
-        include_str!("../tests/simulated_stop_golden.txt").trim_end()
+        include_str!("../tests/simulated_stop_golden.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
     );
 }
 
@@ -611,6 +615,115 @@ fn replay_failed_commit_keeps_memory_and_disk_at_last_commit() {
     assert_eq!(harness.transcript(), before, "failed commit changed memory");
     harness.restart().expect("reopen after failed commit");
     assert_eq!(harness.transcript(), before, "failed commit changed disk");
+}
+
+#[test]
+fn replay_failed_cancel_and_amend_keep_memory_and_disk_at_last_commit() {
+    for amend in [false, true] {
+        let directory = TestDirectory::new("replay-revision-commit");
+        let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+        let mut harness = start_golden_service(&directory, clock);
+        let mut pending = market_order("revision-order", OrderSide::Buy, 1, 1_000);
+        pending.order_type = OrderType::Limit;
+        pending.time_in_force = TimeInForce::GoodTillCancelled;
+        pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+        harness.place_order(pending).expect("place");
+        let before = harness.transcript();
+        harness.crash_during_commit(2);
+        let apply = |harness: &mut ReplayHarness| {
+            if amend {
+                harness
+                    .modify_order(ModifyOrder {
+                        client_order_id: ClientOrderId::try_new("revision-order").expect("id"),
+                        time_in_force: TimeInForce::GoodTillCancelled,
+                        limit_price: Some(FixedPoint::try_new(8_900, 2).expect("price")),
+                        stop_price: None,
+                        modified_unix_nanos: 5_000,
+                        provenance: provenance(3, 5_000),
+                    })
+                    .map(|_| ())
+            } else {
+                harness
+                    .cancel_order(ClientOrderId::try_new("revision-order").expect("id"))
+                    .map(|_| ())
+            }
+        };
+        apply(&mut harness).expect("one atomic commit, not two");
+        let committed = harness.transcript();
+        assert_ne!(committed, before);
+        harness.restart().expect("reopen same database");
+        assert_eq!(harness.transcript(), committed, "memory and disk diverged");
+    }
+}
+
+#[test]
+fn replay_cancel_and_amend_first_commit_failure_rolls_back_revision() {
+    for amend in [false, true] {
+        let directory = TestDirectory::new("replay-order-rollback");
+        let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+        let mut harness = start_golden_service(&directory, clock);
+        let mut pending = market_order("rollback-order", OrderSide::Buy, 1, 1_000);
+        pending.order_type = OrderType::Limit;
+        pending.time_in_force = TimeInForce::GoodTillCancelled;
+        pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+        harness.place_order(pending).expect("place");
+        let before = harness.transcript();
+        harness.crash_during_commit(1);
+        let apply = |harness: &mut ReplayHarness| {
+            if amend {
+                harness.modify_order(ModifyOrder {
+                    client_order_id: ClientOrderId::try_new("rollback-order").expect("id"),
+                    time_in_force: TimeInForce::GoodTillCancelled,
+                    limit_price: Some(FixedPoint::try_new(8_900, 2).expect("price")),
+                    stop_price: None,
+                    modified_unix_nanos: 5_000,
+                    provenance: provenance(3, 5_000),
+                })
+            } else {
+                harness.cancel_order(ClientOrderId::try_new("rollback-order").expect("id"))
+            }
+        };
+        assert!(apply(&mut harness).is_err(), "first commit must fail");
+        assert_eq!(harness.transcript(), before, "rollback changed memory");
+        harness.restart().expect("reopen after rollback");
+        assert_eq!(harness.transcript(), before, "rollback changed disk");
+        apply(&mut harness).expect("replay succeeds after rollback");
+        let committed = harness.transcript();
+        harness.restart().expect("reopen committed order");
+        assert_eq!(harness.transcript(), committed);
+    }
+}
+
+#[test]
+#[ignore = "release throughput measurement; run explicitly with --nocapture"]
+fn benchmark_quotes_with_one_open_position() {
+    let directory = TestDirectory::new("quote-throughput");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    harness
+        .place_order(market_order("benchmark-entry", OrderSide::Buy, 1, 1_000))
+        .expect("entry accepted");
+    harness
+        .observe_market(observation(10_000, 10_025, 2, 2_000))
+        .expect("entry fills");
+    assert_eq!(harness.snapshot().expect("position").positions.len(), 1);
+    let count = 1_000_u32;
+    let start = std::time::Instant::now();
+    for sequence in 3..count + 3 {
+        harness
+            .observe_market(observation(
+                10_000 + i64::from(sequence % 2),
+                10_025 + i64::from(sequence % 2),
+                u64::from(sequence),
+                i64::from(sequence) * 1_000,
+            ))
+            .expect("mark quote");
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "quote-throughput: {count} quotes in {elapsed:?}; {:.1} quotes/s",
+        f64::from(count) / elapsed.as_secs_f64()
+    );
 }
 
 #[test]

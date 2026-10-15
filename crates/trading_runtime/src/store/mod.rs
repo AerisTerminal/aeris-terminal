@@ -225,8 +225,31 @@ impl<'a> StepTx<'a> {
         store.connection.transaction().map(Self)
     }
 
+    pub(crate) fn begin_shared(connection: &'a Connection) -> rusqlite::Result<Self> {
+        connection.unchecked_transaction().map(Self)
+    }
     pub(crate) fn commit(self) -> rusqlite::Result<()> {
+        self.0.execute(
+            "UPDATE metadata SET value = min(value + 1, 9223372036854775807) WHERE key = 'revision'",
+            [],
+        )?;
         self.0.commit()
+    }
+
+    pub(crate) fn commit_revision(transaction: Transaction<'a>) -> rusqlite::Result<()> {
+        Self(transaction).commit()
+    }
+
+    pub(crate) fn commit_without_revision(self) -> rusqlite::Result<()> {
+        self.0.commit()
+    }
+
+    pub(crate) fn commit_rejected_submission(transaction: Transaction<'a>) -> rusqlite::Result<()> {
+        transaction.execute(
+            "UPDATE metadata SET value = max(value - 1, 0) WHERE key = 'revision'",
+            [],
+        )?;
+        transaction.commit()
     }
 }
 
@@ -313,7 +336,7 @@ impl TradingStore {
         store
             .ensure_default_strategy_templates()
             .map_err(StoreError::Other)?;
-        store.enforce_retention().map_err(StoreError::Other)?;
+        store.enforce_retention(false).map_err(StoreError::Other)?;
         Ok(store)
     }
 }
@@ -404,15 +427,8 @@ impl TradingStore {
             .and_then(sqlite_u64)
     }
 
-    pub(super) fn set_revision(&self, revision: u64) -> Result<(), String> {
-        let revision = sqlite_i64(revision)?;
-        self.connection
-            .execute(
-                "UPDATE metadata SET value = ?1 WHERE key = 'revision'",
-                [revision],
-            )
-            .map_err(database_error)?;
-        Ok(())
+    pub(super) fn revision(&self) -> Result<u64, String> {
+        self.metadata("revision")
     }
 }
 

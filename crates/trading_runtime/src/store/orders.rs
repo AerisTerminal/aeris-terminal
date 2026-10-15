@@ -13,12 +13,19 @@ impl TradingStore {
         order: &Order,
         event: &OrderEvent,
         next_sequence: u64,
+        bump_revision: bool,
     ) -> Result<(), String> {
         let transaction = StepTx::begin(self).map_err(database_error)?;
         insert_order_row(&transaction, order)?;
         insert_event_row(&transaction, event)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        if bump_revision {
+            transaction.commit().map_err(database_error)
+        } else {
+            transaction
+                .commit_without_revision()
+                .map_err(database_error)
+        }
     }
 
     /// Persists a submitted broker order with its broker mapping row; the broker order id
@@ -46,17 +53,18 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn set_venue_generation(&self, generation: u64) -> Result<(), String> {
-        self.connection
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        transaction
             .execute(
                 "UPDATE metadata SET value = ?1 WHERE key = 'venue_generation'",
                 [sqlite_i64(generation)?],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 
     /// Reverts a locally prepared place if the writer has no queue capacity. No pending
@@ -77,7 +85,7 @@ impl TradingStore {
             .execute("DELETE FROM orders WHERE id = ?1", [order.id.as_str()])
             .map_err(database_error)?;
         update_next_sequence(&transaction, previous_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_rejected_submission(transaction).map_err(database_error)
     }
 
     /// Persists one broker order transition. `binding` records the broker order id the
@@ -128,7 +136,7 @@ impl TradingStore {
         }
         insert_event_row(&transaction, event)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
 
@@ -163,7 +171,7 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         update_next_sequence(&transaction, event.sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_rejected_submission(transaction).map_err(database_error)
     }
 }
 
@@ -185,7 +193,7 @@ impl TradingStore {
             .map_err(database_error)?;
         insert_event_row(&transaction, event)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn modify_order(
@@ -216,7 +224,7 @@ impl TradingStore {
             .map_err(database_error)?;
         insert_event_row(&transaction, event)?;
         update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 }
 

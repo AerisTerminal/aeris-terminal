@@ -1,5 +1,5 @@
 use super::{
-    AccountEnvironment, BTreeMap, BrokerPosition, FixedPoint, InstrumentId, Position,
+    AccountEnvironment, BTreeMap, BrokerPosition, FixedPoint, InstrumentId, Position, StepTx,
     TradingAccount, TradingAccountId, TradingInstrument, TradingStore, Transaction, database_error,
     encode_contract, params, parse_side, sqlite_i64,
 };
@@ -72,7 +72,8 @@ impl TradingStore {
 impl TradingStore {
     pub(crate) fn put_account(&self, account: &TradingAccount) -> Result<(), String> {
         account.validate().map_err(|error| error.to_string())?;
-        self.connection
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        transaction
             .execute(
                 "INSERT INTO accounts(id, display_name, environment, currency, currency_scale,
                     starting_equity_units, starting_equity_scale, venue_id, broker_ref)
@@ -96,14 +97,15 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 }
 
 impl TradingStore {
     pub(crate) fn put_instrument(&self, instrument: &TradingInstrument) -> Result<(), String> {
         let contract = encode_contract(&instrument.contract)?;
-        self.connection
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        transaction
             .execute(
                 "INSERT INTO instruments(id, price_scale, quantity_scale, contract_json)
                  VALUES (?1, ?2, ?3, ?4)
@@ -117,7 +119,7 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 
     pub(crate) fn put_verified_instrument(
@@ -143,7 +145,7 @@ impl TradingStore {
             ],
         )
         .map_err(database_error)?;
-        tx.commit().map_err(database_error)
+        StepTx::commit_revision(tx).map_err(database_error)
     }
 }
 
@@ -228,7 +230,7 @@ impl TradingStore {
                 )
                 .map_err(database_error)?;
         }
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn set_broker_balance(
@@ -237,7 +239,8 @@ impl TradingStore {
         balance: FixedPoint,
         session_generation: u64,
     ) -> Result<(), String> {
-        self.connection
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        transaction
             .execute(
                 "INSERT INTO broker_account_state(account_id, balance_units, balance_scale,
                     session_generation) VALUES (?1, ?2, ?3, ?4)
@@ -252,7 +255,7 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 }
 

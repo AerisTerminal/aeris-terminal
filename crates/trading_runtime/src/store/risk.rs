@@ -146,12 +146,13 @@ impl TradingStore {
                 [profile.account_id.as_str()],
             )
             .map_err(database_error)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn put_session_plan(&self, plan: &SessionPlan) -> Result<(), String> {
         plan.validate()?;
-        self.connection
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        transaction
             .execute(
                 "INSERT INTO session_plans(account_id, plan_id, revision,
                     session_start_unix_nanos, session_end_unix_nanos, plan_json)
@@ -171,14 +172,15 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 }
 
 impl TradingStore {
     pub(crate) fn put_risk_lock(&self, lock: &RiskLock) -> Result<(), String> {
         lock.validate()?;
-        self.connection
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        transaction
             .execute(
                 "INSERT INTO risk_locks(account_id, reason, locked_at_unix_nanos, profile_id,
                     profile_version) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -194,7 +196,7 @@ impl TradingStore {
                 ],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 
     pub(crate) fn economic_event_action_exists(
@@ -244,25 +246,30 @@ impl TradingStore {
                 [usize_to_i64(self.retention.maximum_user_records_per_kind)?],
             )
             .map_err(database_error)?;
-        transaction.commit().map_err(database_error)
+        StepTx::commit_revision(transaction).map_err(database_error)
     }
 
     pub(crate) fn delete_risk_lock(&self, account_id: &TradingAccountId) -> Result<(), String> {
-        self.connection
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        transaction
             .execute(
                 "DELETE FROM risk_locks WHERE account_id = ?1",
                 [account_id.as_str()],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)
     }
 
     pub(crate) fn put_risk_rule_state(&self, state: &RiskRuleState) -> Result<(), String> {
-        upsert_risk_rule_state(&self.connection, state)
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        upsert_risk_rule_state(&transaction, state)?;
+        transaction.commit().map_err(database_error)
     }
 
     pub(crate) fn put_discipline_state(&self, state: &DisciplineState) -> Result<(), String> {
-        upsert_discipline_state(&self.connection, state)
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        upsert_discipline_state(&transaction, state)?;
+        transaction.commit().map_err(database_error)
     }
 }
 
