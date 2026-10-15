@@ -145,8 +145,12 @@ fn ledger(snapshot: &TradingSnapshot) -> String {
     result
 }
 
-fn start_golden_service(directory: &TestDirectory) -> TradingService {
+fn start_golden_service(
+    directory: &TestDirectory,
+    clock: std::sync::Arc<crate::clock::ManualClock>,
+) -> TradingService {
     let mut configuration = config(directory);
+    configuration.clock = clock;
     configuration.retention.maximum_fills = 64;
     configuration.retention.maximum_order_events = 64;
     let service = TradingService::start(configuration).expect("service starts");
@@ -221,7 +225,8 @@ fn script_place_touch_modify_cancel_flatten(
 #[test]
 fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_golden() {
     let directory = TestDirectory::new("simulated-golden");
-    let service = start_golden_service(&directory);
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let service = start_golden_service(&directory, clock.clone());
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
     let mut trace = String::new();
     script_place_touch_modify_cancel_flatten(&service, &account, &mut trace);
@@ -249,6 +254,7 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_golden() {
         .observe_market(observation(10_000, 10_025, 8, 8_000))
         .expect("bracket entry fills");
     record("bracket active", &service, &mut trace);
+    clock.set_wall_unix_nanos(8_000);
     service
         .flatten_account(account.clone(), observation(10_100, 10_125, 9, 9_000))
         .expect("flatten bracket position");
@@ -270,6 +276,7 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_golden() {
     pending.time_in_force = TimeInForce::GoodTillCancelled;
     pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("pending price"));
     service.place_order(pending).expect("pending order");
+    clock.set_wall_unix_nanos(13_000);
     assert_eq!(
         service
             .kill_switch(Some(account), "golden kill".to_string(), 14_000)
@@ -294,7 +301,8 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_golden() {
 #[test]
 fn simulated_bracket_stop_touch_cancels_target_golden() {
     let directory = TestDirectory::new("simulated-stop-golden");
-    let service = start_golden_service(&directory);
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(2_000));
+    let service = start_golden_service(&directory, clock.clone());
     let mut trace = String::new();
     service
         .place_inline_bracket(PlaceInlineBracket {
@@ -319,6 +327,7 @@ fn simulated_bracket_stop_touch_cancels_target_golden() {
         .observe_market(observation(9_975, 10_000, 2, 2_000))
         .expect("entry touch");
     record("entry touched", &service, &mut trace);
+    clock.set_wall_unix_nanos(3_000);
     service
         .observe_market(observation(9_750, 9_775, 3, 3_000))
         .expect("stop touch");

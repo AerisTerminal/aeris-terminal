@@ -4,8 +4,7 @@ use super::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::BracketStrategyTemplate;
 use crate::{
     Coordinator, DEMO_VENUE_UNAVAILABLE, FlattenOutcome, MAXIMUM_OPEN_ORDERS, ModifyOrder,
-    PlaceOrder, TradingProvenance, check_quantity_increment, current_unix_nanos,
-    store::BrokerFillRecord,
+    PlaceOrder, TradingProvenance, check_quantity_increment, store::BrokerFillRecord,
 };
 use aeris_trading::{
     AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
@@ -243,7 +242,7 @@ impl Coordinator {
         request.validate().map_err(|error| error.to_string())?;
         // Validate and persist before making a request visible to the relay.
         let sequence = self.state.next_sequence;
-        let provenance = self.broker_provenance(current_unix_nanos()?, sequence);
+        let provenance = self.broker_provenance(self.command_now, sequence);
         let order = Order {
             id: OrderId::try_new(format!("ct-order-{sequence}"))
                 .map_err(|error| error.to_string())?,
@@ -692,7 +691,7 @@ impl Coordinator {
         if !self.state.instruments.contains_key(&report.instrument_id) {
             return Err("broker fill names an unregistered instrument".into());
         }
-        let provenance = self.venue_provenance()?;
+        let provenance = self.venue_provenance();
         let sequence = self.state.next_sequence;
         let bound = self
             .state
@@ -973,7 +972,7 @@ impl Coordinator {
             };
             let updated = Order {
                 status,
-                provenance: self.venue_provenance()?,
+                provenance: self.venue_provenance(),
                 ..order
             };
             let provenance = updated.provenance.clone();
@@ -1057,7 +1056,7 @@ impl Coordinator {
         if !changed {
             return Ok(());
         }
-        updated.provenance = self.venue_provenance()?;
+        updated.provenance = self.venue_provenance();
         let provenance = updated.provenance.clone();
         self.record_broker_transition(
             updated,
@@ -1094,21 +1093,21 @@ impl Coordinator {
         };
         let updated = Order {
             status,
-            provenance: self.venue_provenance()?,
+            provenance: self.venue_provenance(),
             ..current
         };
         let provenance = updated.provenance.clone();
         self.record_broker_transition(updated, OrderEventKind::Rejected, reason, provenance, None)
     }
 
-    fn venue_provenance(&self) -> Result<TradingProvenance, String> {
-        Ok(TradingProvenance {
+    fn venue_provenance(&self) -> TradingProvenance {
+        TradingProvenance {
             venue_id: "ctrader".into(),
             provider_id: "ctrader".into(),
             session_generation: self.state.venue_generation,
             source_sequence: self.venue_ingestion,
-            observed_unix_nanos: current_unix_nanos()?,
-        })
+            observed_unix_nanos: self.command_now,
+        }
     }
 
     fn queue_broker_transition(
@@ -1128,7 +1127,7 @@ impl Coordinator {
             .ok_or("broker order is not registered")?
             .clone();
         let sequence = self.state.next_sequence;
-        let provenance = self.broker_provenance(current_unix_nanos()?, sequence);
+        let provenance = self.broker_provenance(self.command_now, sequence);
         let event = Self::broker_event(updated, sequence, kind, detail, provenance)?;
         self.store
             .transition_broker_order(updated, &event, sequence + 1, None)?;

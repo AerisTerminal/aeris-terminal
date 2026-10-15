@@ -4221,6 +4221,7 @@ fn start_trading_service()
     aeris_trading_runtime::TradingService::start(aeris_trading_runtime::TradingServiceConfig {
         database_path,
         retention: aeris_trading_runtime::TradingRetention::default(),
+        clock: std::sync::Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
     })
 }
 

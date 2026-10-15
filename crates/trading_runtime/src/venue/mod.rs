@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{SyncSender, TrySendError},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub const INBOX_CAPACITY: usize = 1024;
@@ -66,12 +66,12 @@ impl VenueInbox {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let blocked_since = Instant::now();
+        let blocked_clock = crate::clock::SystemClock::default();
         while pending.queue.len() == INBOX_CAPACITY {
             if self.stopping.load(Ordering::Acquire) {
                 return Err("trading owner is stopping".into());
             }
-            if blocked_since.elapsed() >= self.blocked_limit {
+            if crate::clock::Clock::monotonic(&blocked_clock) >= self.blocked_limit {
                 return Err("venue inbox stalled; reconnect and reconcile required".into());
             }
             pending = self
@@ -94,7 +94,7 @@ impl VenueInbox {
                     if self.stopping.load(Ordering::Acquire) {
                         return Err("trading owner is stopping".into());
                     }
-                    if blocked_since.elapsed() >= self.blocked_limit {
+                    if crate::clock::Clock::monotonic(&blocked_clock) >= self.blocked_limit {
                         return Err("venue inbox stalled; reconnect and reconcile required".into());
                     }
                     pending = self

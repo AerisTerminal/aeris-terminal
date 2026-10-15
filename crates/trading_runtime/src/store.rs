@@ -24,7 +24,6 @@ use std::{
     fs,
     io::Read as _,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const SCHEMA_VERSION: u32 = 19;
@@ -417,9 +416,7 @@ pub(super) fn preflight_existing_database(path: &Path) -> Result<(), StoreError>
         ".{}.preflight-{}-{}",
         file_name.to_string_lossy(),
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos())
+        crate::clock::system_unix_nanos()
     ));
     fs::create_dir(&scratch).map_err(|error| {
         corrupt_error(
@@ -762,10 +759,7 @@ impl TradingStore {
                 "trading backup directory could not be created: {error}"
             ))
         })?;
-        let unix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| StoreError::Other("system clock precedes Unix epoch".to_string()))?
-            .as_millis();
+        let unix = crate::clock::system_unix_nanos() / 1_000_000;
         let backup = backups.join(format!("trading-v{old_version}-{unix}.sqlite3"));
         self.connection
             .execute("VACUUM INTO ?1", params![backup.to_string_lossy().as_ref()])
@@ -3750,6 +3744,7 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash as _, Hasher as _};
     use std::io::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temporary_database(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(

@@ -5,7 +5,7 @@
 
 use crate::{
     Coordinator, ManagedBracket, ManagedBracketStatus, ProtectiveOrderRole,
-    SimulatedMarketObservation, VenueRoute, current_unix_nanos,
+    SimulatedMarketObservation, VenueRoute,
 };
 use aeris_instruments::InstrumentId;
 use aeris_trading::{
@@ -101,7 +101,7 @@ impl Coordinator {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let now = current_unix_nanos()?;
+        let now = self.command_now;
         for (account_id, instrument_id) in positions {
             self.align_protection(&account_id, &instrument_id, now)?;
         }

@@ -2171,6 +2171,8 @@ mod tests {
             "crates/platform_runtime/src/credential_vault.rs::NativeCredentialBackend".to_string(),
             "crates/platform_runtime/src/lifecycle.rs::LifecycleHooks".to_string(),
             "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
+            // The sole trading owner receives injectable wall and monotonic time.
+            "crates/trading_runtime/src/clock.rs::Clock".to_string(),
         ]);
         assert_eq!(
             actual, expected,

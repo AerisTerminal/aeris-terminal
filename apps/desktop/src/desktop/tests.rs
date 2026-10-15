@@ -47,6 +47,7 @@ pub(super) fn test_trading_service() -> aeris_trading_runtime::TradingService {
     aeris_trading_runtime::TradingService::start(aeris_trading_runtime::TradingServiceConfig {
         database_path: std::path::PathBuf::from(":memory:"),
         retention: aeris_trading_runtime::TradingRetention::default(),
+        clock: std::sync::Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
     })
     .expect("test trading service starts")
 }
@@ -3793,6 +3794,7 @@ impl ChartOrderFixture {
         let service = TradingService::start(TradingServiceConfig {
             database_path: directory.join("trading.sqlite3"),
             retention: TradingRetention::default(),
+            clock: std::sync::Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
         })
         .expect("trading service");
         let instrument_id = InstrumentId::try_new("instrument:fixture:BTC").expect("instrument");

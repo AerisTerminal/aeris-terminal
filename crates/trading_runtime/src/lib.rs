@@ -3,6 +3,7 @@
 //! The service owns its bounded command queue, canonical orders/fills/positions, and the one
 //! embedded user-record store. Callers must invoke blocking request methods from background work.
 
+pub mod clock;
 mod copier;
 mod discipline;
 mod plan;
@@ -46,7 +47,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use store::{FillPolicyPersistence, StoredState, TradingStore};
 pub use store::{SCHEMA_VERSION, StoreError};
@@ -133,14 +134,6 @@ fn respond<T>(reply: &Reply<T>, result: Result<T, String>) {
     let _ = reply.send(result);
 }
 
-fn current_unix_nanos() -> Result<i64, String> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "Practice clock precedes the Unix epoch")?;
-    i64::try_from(elapsed.as_nanos())
-        .map_err(|_| "Practice clock exceeds the supported timestamp range".into())
-}
-
 /// One local-store retention policy. These values are user-visible runtime settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TradingRetention {
@@ -181,6 +174,7 @@ impl TradingRetention {
 pub struct TradingServiceConfig {
     pub database_path: PathBuf,
     pub retention: TradingRetention,
+    pub clock: Arc<dyn clock::Clock>,
 }
 
 /// Fixed-point contract terms retained by the trading owner.
@@ -534,6 +528,8 @@ struct Coordinator {
     store: TradingStore,
     state: StoredState,
     retention: TradingRetention,
+    clock: Arc<dyn clock::Clock>,
+    command_now: i64,
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
     market_observation_error: Option<String>,
     venue_error: Option<String>,
@@ -593,6 +589,7 @@ impl TradingService {
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (started_tx, started_rx) = mpsc::sync_channel(REPLY_CAPACITY);
         let database_path = config.database_path;
+        let clock = config.clock;
         let observations = Arc::new(Mutex::new(PendingObservations::default()));
         let coordinator_observations = Arc::clone(&observations);
         let stopping = Arc::new(AtomicBool::new(false));
@@ -614,6 +611,8 @@ impl TradingService {
                             store,
                             state,
                             retention,
+                            command_now: clock.wall_unix_nanos(),
+                            clock,
                             copy_dispatches: std::collections::VecDeque::new(),
                             market_observation_error: None,
                             venue_error: None,
@@ -1077,9 +1076,7 @@ impl TradingService {
                 return Err("trading command queue is full during shutdown".to_string());
             }
         }
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| "trading shutdown deadline overflowed".to_string())?;
+        let shutdown_clock = clock::SystemClock::default();
         loop {
             let finished = self
                 .runtime
@@ -1102,11 +1099,11 @@ impl TradingService {
                     .recv()
                     .map_err(|_| "trading owner stopped before checkpointing".to_string())?;
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let elapsed = clock::Clock::monotonic(&shutdown_clock);
+            if elapsed >= timeout {
                 return Err("trading owner shutdown deadline expired".to_string());
             }
-            thread::sleep(Duration::from_millis(5).min(deadline.duration_since(now)));
+            thread::sleep(Duration::from_millis(5).min(timeout.saturating_sub(elapsed)));
         }
     }
 
@@ -1226,18 +1223,18 @@ impl Coordinator {
     fn next_command(
         &self,
         commands: &Receiver<Command>,
-        next_refresh: &mut Instant,
+        next_refresh: &mut Duration,
     ) -> Option<Command> {
         loop {
             if !self.wants_unrealized_pnl() {
                 return commands.recv().ok();
             }
-            let now = Instant::now();
+            let now = self.clock.monotonic();
             if now >= *next_refresh {
                 self.request_unrealized_pnl();
                 *next_refresh = now + UNREALIZED_PNL_INTERVAL;
             }
-            match commands.recv_timeout(next_refresh.saturating_duration_since(now)) {
+            match commands.recv_timeout(next_refresh.saturating_sub(now)) {
                 Ok(command) => return Some(command),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return None,
@@ -1246,8 +1243,9 @@ impl Coordinator {
     }
 
     fn run(&mut self, commands: &Receiver<Command>) {
-        let mut next_refresh = Instant::now();
+        let mut next_refresh = self.clock.monotonic();
         while let Some(command) = self.next_command(commands, &mut next_refresh) {
+            self.command_now = self.command_now.max(self.clock.wall_unix_nanos());
             match command {
                 Command::Status(reply) => respond(&reply, Ok(self.status())),
                 Command::RegisterAccount(account, reply) => {
@@ -1320,11 +1318,7 @@ impl Coordinator {
                 }
                 Command::DrainObservations => self.drain_observations(),
                 Command::PutUserRecord(record, reply) => {
-                    let result = record
-                        .validate()
-                        .and_then(|()| self.store.put_user_record(&record))
-                        .and_then(|()| self.store.enforce_retention());
-                    let _ = reply.send(result);
+                    respond(&reply, self.put_user_record(&record));
                 }
                 Command::Snapshot(reply) => {
                     let _ = reply.send(self.snapshot());
@@ -1346,6 +1340,13 @@ impl Coordinator {
                 }
             }
         }
+    }
+
+    fn put_user_record(&mut self, record: &UserRecord) -> Result<(), String> {
+        record
+            .validate()
+            .and_then(|()| self.store.put_user_record(record))
+            .and_then(|()| self.store.enforce_retention())
     }
 
     fn drain_venue_events(&mut self) {
@@ -1932,7 +1933,7 @@ impl Coordinator {
             order_id: order.id.clone(),
             sequence,
             kind: OrderEventKind::Cancelled,
-            event_unix_nanos: provenance.observed_unix_nanos,
+            event_unix_nanos: self.command_now,
             detail: Some("cancelled by local command".to_string()),
             provenance,
         };
@@ -2499,7 +2500,7 @@ impl Coordinator {
             .instruments
             .get(&command.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?;
-        self.require_practice_market_session(instrument, current_unix_nanos()?)?;
+        self.require_practice_market_session(instrument, self.command_now)?;
         if instrument.contract.currency != account_currency {
             return Err("Practice contract currency differs from the account currency".to_string());
         }
@@ -3114,7 +3115,7 @@ impl Coordinator {
             .ok_or_else(|| "trading instrument is not registered".to_string())?
             .clone();
         let require_new_quote =
-            self.require_practice_market_session(&instrument, current_unix_nanos()?)?;
+            self.require_practice_market_session(&instrument, self.command_now)?;
         if observation.bid.scale() != instrument.price_scale {
             return Err("market observation scale does not match the instrument".to_string());
         }

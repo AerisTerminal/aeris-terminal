@@ -38,6 +38,7 @@ pub(crate) fn config(directory: &TestDirectory) -> TradingServiceConfig {
             maximum_order_events: 16,
             maximum_user_records_per_kind: 4,
         },
+        clock: Arc::new(crate::clock::SystemClock::default()),
     }
 }
 
@@ -66,6 +67,64 @@ pub(crate) fn start_service(directory: &TestDirectory) -> TradingService {
 }
 
 mod foundation;
+
+#[test]
+fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
+    let directory = TestDirectory::new("cancel-command-time");
+    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let service = TradingService::start(configuration).expect("service starts");
+    service
+        .register_account(TradingAccount {
+            id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            display_name: "SIM test".into(),
+            environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".into(),
+            broker_ref: None,
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: Some(FixedPoint::try_new(5_000_000, 2).expect("equity")),
+        })
+        .expect("account");
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut order = market_order("clock-limit", OrderSide::Buy, 1, 1_000_000_000_000);
+    order.order_type = OrderType::Limit;
+    order.time_in_force = TimeInForce::GoodTillCancelled;
+    order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+    service.place_order(order).expect("accepted");
+    clock.set_wall_unix_nanos(1_090_000_000_000);
+    service
+        .cancel_order(ClientOrderId::try_new("clock-limit").expect("id"))
+        .expect("cancel");
+    let first = service.snapshot().expect("snapshot");
+    let event = first
+        .order_events
+        .iter()
+        .find(|e| e.kind == OrderEventKind::Cancelled)
+        .expect("cancel event");
+    assert_eq!(event.event_unix_nanos, 1_090_000_000_000);
+    clock.set_wall_unix_nanos(1_002_000_000_000);
+    let mut second = market_order("clock-limit-2", OrderSide::Buy, 2, 1_002_000_000_000);
+    second.order_type = OrderType::Limit;
+    second.time_in_force = TimeInForce::GoodTillCancelled;
+    second.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+    service.place_order(second).expect("second accepted");
+    service
+        .cancel_order(ClientOrderId::try_new("clock-limit-2").expect("id"))
+        .expect("second cancel");
+    let last = service.snapshot().expect("snapshot");
+    let event = last
+        .order_events
+        .iter()
+        .rev()
+        .find(|e| e.kind == OrderEventKind::Cancelled)
+        .expect("second cancel event");
+    assert!(event.event_unix_nanos >= 1_090_000_000_000);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
 
 pub(crate) fn instrument() -> TradingInstrument {
     TradingInstrument {
@@ -3039,6 +3098,7 @@ fn measured_store_workload_is_bounded_and_restartable() {
             maximum_order_events: usize::try_from(EXECUTIONS * 2).expect("event count"),
             maximum_user_records_per_kind: usize::try_from(USER_RECORDS).expect("record count"),
         },
+        clock: Arc::new(crate::clock::SystemClock::default()),
     };
     let service = TradingService::start(measured_config.clone()).expect("service starts");
     service

@@ -479,9 +479,12 @@ Status: in progress
 
 ### M4 trading core
 
-Status: pending
+Status: in progress
 
-- [ ] M4.1 trading-clock-command-time - Injected trading clock; cancel events at command time
+- [x] M4.1 trading-clock-command-time - Injected trading clock; cancel events at command time
+  - Injected `Clock` via `TradingServiceConfig`; owner command stamps clamp backward wall steps. The cancel event uses the owner command time rather than the order's old observation. `current_unix_nanos` is removed; direct production time reads remain in `clock.rs` only.
+  - `cancellation_uses_command_time_even_when_wall_clock_moves_backwards` and both golden tests pass. The sole golden change is `simulated_stop_golden.txt` cancel event `2000 -> 3000`; the other golden is unchanged. The workspace fmt, Clippy and test gates passed; naming_check passed after adding the clock trait to the documented boundary list.
+  - GUI cancel-time verification is blocked at this stage: an isolated practice-account order-book bid click returned "trading instrument is not registered" before any order could be placed. M4.7's runtime Terms registration must land before repeating VAL-TRD-003. The current Order model has no terminal-time field; the last Cancelled event supplies that time until M5's lifecycle schema adds an updated time.
 - [ ] M4.2 trading-core-owner-shell - Thin owner thread around a synchronous `TradingCore`
 - [ ] M4.3 trading-replay-harness - Deterministic trading replay harness
 - [ ] M4.4 indexed-order-book - Indexed order book; remove linear scans
@@ -608,6 +611,7 @@ the repo root `AGENTS.md`.
 - Provider catalog command/event traffic crosses one bounded `ProviderCatalogChannel`; provider-specific wire commands are translated within its registered channel (M3.6, this commit).
 - The market replay scenario names remain in `market_service/replay/mod.rs` and are checked by `aeris_naming_check` (M3.11, this commit).
 - Market probe fault injection is compiled only under the `probe` feature and interrupts the Hyperliquid WebSocket without affecting catalog HTTP; the probe CLI requires an isolated locked validation root before invoking it (M3.12, this commit).
+- Trading owner-produced timestamps use the injected `trading_runtime::clock::Clock`; only its `SystemClock` reads system time. The trait is an explicit naming_check boundary (M4.1, this commit).
 
 ## 6. Progress log
 
@@ -684,6 +688,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M3.1 fix(desktop): retain bounded per-gap live snapshot evidence - seven EURUSD 1m omissions matched raw decoded provider minutes and the pre-M3 chart; 32-entry truncation test and full workspace gate passed.
 - 2026-10-15 M3.6 fix(market): document carried pane interval on symbol switch - fresh-root SOL stayed 1m; catalog selection carries the pane interval rather than a symbol-specific weekly default.
 - 2026-10-15 M3.12 docs(plan): record final-HEAD lifecycle probe qualification - clean `088899c4` probe passed 28/28 and the overridden-root refusal wrote nothing.
+- 2026-10-15 M4.1 fix(trading): stamp cancels at monotonic command time - injected clock, regression and single-line stop golden update; GUI cancel flow blocked by pre-M4.7 instrument registration.
 
 ## 7. Known gaps / deferred
 
