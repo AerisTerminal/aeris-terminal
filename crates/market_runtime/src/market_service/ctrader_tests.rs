@@ -831,10 +831,13 @@ struct Harness {
     controls: SyncSender<RealtimeControl>,
     catalog_controls: SyncSender<CatalogControl>,
     catalog_events: Receiver<CatalogEvent>,
-    events: Receiver<RealtimeEvent>,
+    events: Receiver<
+        aeris_market_engine::fence::Fenced<aeris_market_engine::fence::ProviderTag, RealtimeEvent>,
+    >,
     history: SyncSender<HistoryRequest>,
     completions: Receiver<Command>,
-    generation: Arc<AtomicU64>,
+    epochs: aeris_market_engine::fence::EpochSequence<aeris_market_engine::fence::ProviderTag>,
+    connections: u64,
     counters: Arc<StreamCounters>,
     venue: Arc<VenueSlot>,
     script: Arc<Mutex<Script>>,
@@ -847,7 +850,6 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
     let (completions, completions_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (catalog_controls, catalog_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
     let (catalog_events_tx, catalog_events) = mpsc::sync_channel(COMMAND_CAPACITY);
-    let generation = Arc::new(AtomicU64::new(1));
     let counters = Arc::new(StreamCounters::default());
     let venue = Arc::new(VenueSlot::default());
     let opener: LinkOpener = {
@@ -865,7 +867,8 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
             Ok(ScriptLink::open(&script, live))
         })
     };
-    let worker = Worker::new(
+    let mut epochs = aeris_market_engine::fence::EpochSequence::default();
+    let mut worker = Worker::new(
         WorkerPorts {
             controls: controls_rx,
             catalog: catalog_rx,
@@ -877,7 +880,6 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
             events,
             history: history_rx,
             completions,
-            generation: Arc::clone(&generation),
             stop: Arc::new(AtomicBool::new(false)),
             wake: ProviderCoordinatorWake::for_tests(),
             counters: Arc::clone(&counters),
@@ -886,10 +888,12 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
         WorkerConfig {
             opener,
             idle_stop,
-            healthy_after: Duration::from_hours(1),
             warm_catalogs_on_start: false,
         },
     );
+    worker.sink = Some(ProviderEventSink {
+        epoch: epochs.next(),
+    });
     Harness {
         worker,
         controls,
@@ -898,7 +902,8 @@ fn harness(script: Arc<Mutex<Script>>, idle_stop: Duration) -> Harness {
         events: events_rx,
         history,
         completions: completions_rx,
-        generation,
+        epochs,
+        connections: 1,
         counters,
         venue,
         script,
@@ -922,16 +927,33 @@ impl Harness {
     }
 
     fn demand(&mut self, demand: Demand) {
+        if (!demand.series.is_empty() || !demand.instruments.is_empty())
+            && self.worker.sink.is_none()
+        {
+            self.connect();
+        }
         self.controls
             .try_send(RealtimeControl::Subscribe(demand))
             .expect("control queue accepts demand");
         self.drive();
     }
 
+    fn connect(&mut self) {
+        let epoch = self.epochs.next();
+        self.connections += 1;
+        self.controls
+            .try_send(RealtimeControl::Connect(ProviderEventSink { epoch }))
+            .expect("control queue accepts connection");
+    }
+
+    fn next_epoch_value(&self) -> u64 {
+        self.connections + 1
+    }
+
     fn take_events(&self) -> Vec<RealtimeEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.events.try_recv() {
-            events.push(event);
+            events.push(event.value);
         }
         events
     }
@@ -945,6 +967,9 @@ impl Harness {
     }
 
     fn completion(&mut self) -> Command {
+        if self.worker.sink.is_none() {
+            self.connect();
+        }
         for _ in 0..64 {
             if let Ok(command) = self.completions.try_recv() {
                 return command;
@@ -1646,7 +1671,7 @@ fn idle_demand_closes_the_host_and_new_demand_opens_a_fresh_generation() {
             .any(|event| matches!(event, RealtimeEvent::Disconnected(1))),
         "the retired epoch publishes Disconnected"
     );
-    assert_eq!(harness.generation.load(Ordering::Acquire), 1);
+    assert_eq!(harness.next_epoch_value(), 2);
 
     // New demand opens a fresh session under the next generation.
     harness.demand(demand);
@@ -1662,7 +1687,7 @@ fn idle_demand_closes_the_host_and_new_demand_opens_a_fresh_generation() {
             .any(|event| matches!(event, RealtimeEvent::Connected(2)))
     );
     assert_eq!(harness.opens(), vec![false, false]);
-    assert_eq!(harness.generation.load(Ordering::Acquire), 2);
+    assert_eq!(harness.next_epoch_value(), 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1691,7 +1716,7 @@ fn host_fault_bumps_the_generation_and_fences_retired_requests_and_events() {
         harness
             .take_events()
             .iter()
-            .any(|event| matches!(event, RealtimeEvent::Recovering(1, _)))
+            .any(|event| matches!(event, RealtimeEvent::Retry(1, _, None)))
     );
 
     // Events are dropped while no epoch is open: they cannot be stamped with
@@ -1711,9 +1736,9 @@ fn host_fault_bumps_the_generation_and_fences_retired_requests_and_events() {
     assert!(harness.take_events().is_empty());
 
     // The reconnect takes a new generation; everything is re-subscribed.
-    harness.worker.retry_at = Instant::now();
+    harness.connect();
     harness.drive();
-    assert_eq!(harness.generation.load(Ordering::Acquire), 2);
+    assert_eq!(harness.next_epoch_value(), 3);
     assert_eq!(harness.opens(), vec![false, false]);
     assert!(
         harness
@@ -2305,7 +2330,7 @@ fn daily_history_keeps_provider_opens_across_a_daylight_saving_change() {
 }
 
 // ---------------------------------------------------------------------------
-// Recovery: one reconnect policy, server-directed waits, retry limit.
+// Recovery is coordinator-owned; the worker never schedules another open.
 // ---------------------------------------------------------------------------
 
 fn demo_series_demand() -> Demand {
@@ -2317,99 +2342,50 @@ fn demo_series_demand() -> Demand {
     demand
 }
 
-fn retry_after(harness: &Harness) -> Duration {
-    harness
-        .worker
-        .retry_at
-        .saturating_duration_since(Instant::now())
-}
-
 #[test]
-fn server_directed_waits_replace_the_backoff_and_do_not_count_as_failures() {
+fn host_failure_waits_for_a_new_registry_connection() {
     let mut harness = harness(scripted(), Duration::ZERO);
     harness.demand(demo_series_demand());
     harness.take_events();
 
-    harness.script.lock().unwrap().fault = Some(SessionFault::Maintenance {
-        wait: Duration::from_secs(120),
-    });
-    harness.drive();
-    assert_eq!(harness.worker.backoff.attempts(), 0);
-    let wait = retry_after(&harness);
-    assert!(
-        wait > Duration::from_secs(110) && wait <= Duration::from_secs(120),
-        "{wait:?}"
-    );
-    assert!(
-        harness
-            .take_events()
-            .iter()
-            .any(|event| matches!(event, RealtimeEvent::Recovering(1, _)))
-    );
-
-    // A connection-limit refusal while opening the host waits the same way.
-    harness.worker.retry_at = Instant::now();
-    harness.script.lock().unwrap().open_fault = Some(SessionFault::ConnectionLimit {
-        message: "cTrader connection limit reached",
-        wait: Duration::from_secs(300),
-    });
-    harness.drive();
-    assert_eq!(harness.worker.backoff.attempts(), 0);
-    assert!(harness.worker.hosts.is_empty());
-    assert!(retry_after(&harness) > Duration::from_secs(290));
-    assert!(!harness.worker.epoch_state.paused);
-}
-
-#[test]
-fn local_failures_back_off_exponentially_and_pause_at_the_retry_limit() {
-    let mut harness = harness(scripted(), Duration::ZERO);
-    harness.demand(demo_series_demand());
-    let mut waits = Vec::new();
-    for _ in 0..5 {
-        harness.worker.retry_at = Instant::now();
-        harness.drive();
-        harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
-        harness.drive();
-        if !harness.worker.epoch_state.paused {
-            waits.push(retry_after(&harness).as_secs_f64().ceil());
-        }
-    }
-    assert!(
-        waits
-            .iter()
-            .zip([3.0, 6.0, 12.0, 24.0])
-            .all(|(wait, max)| *wait >= max / 2.0 && *wait <= max)
-    );
-    assert_eq!(
-        waits.len(),
-        4,
-        "the fifth failure must not schedule a sixth attempt"
-    );
-    assert!(harness.worker.epoch_state.paused);
-    assert!(
-        harness
-            .take_events()
-            .iter()
-            .any(|event| matches!(event, RealtimeEvent::Failed(_, detail)
-                if detail.contains("cTrader: 5 reconnect attempts failed")
-                    && detail.contains("last error: cTrader session: Reconnect"))),
-        "the retry limit publishes a terminal failure"
-    );
-}
-
-#[test]
-fn a_healthy_session_clears_the_retry_count() {
-    let mut harness = harness(scripted(), Duration::ZERO);
-    harness.worker.config.healthy_after = Duration::ZERO;
-    harness.demand(demo_series_demand());
     harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
     harness.drive();
-    assert_eq!(harness.worker.backoff.attempts(), 1);
-
-    harness.worker.retry_at = Instant::now();
+    assert!(harness.worker.sink.is_none());
+    assert!(
+        harness
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, RealtimeEvent::Retry(1, _, None)))
+    );
+    for _ in 0..3 {
+        harness.drive();
+    }
+    assert_eq!(harness.opens(), vec![false]);
+    harness.connect();
     harness.drive();
     assert!(harness.worker.epoch_state.open);
-    assert_eq!(harness.worker.backoff.attempts(), 0);
+    assert_eq!(harness.opens(), vec![false, false]);
+}
+
+#[test]
+fn catalog_only_host_failure_reports_a_retry_to_the_registry() {
+    let mut harness = harness(scripted(), Duration::from_secs(30));
+    assert!(
+        harness.worker.ensure_host(false).is_ok(),
+        "catalog host opens without a chart"
+    );
+    harness.script.lock().unwrap().fault = Some(SessionFault::Reconnect);
+    harness.drive();
+    assert!(harness.worker.sink.is_none());
+    assert!(harness.take_events().iter().any(|event| {
+        matches!(event, RealtimeEvent::Retry(1, detail, None) if detail.contains("Reconnect"))
+    }));
+    harness.connect();
+    harness.drive();
+    assert_eq!(
+        harness.worker.sink.map(|sink| sink.epoch.get().get()),
+        Some(2)
+    );
 }
 
 #[test]
@@ -3013,11 +2989,6 @@ mod venue_relay {
         script.lock().unwrap().open_fault = Some(SessionFault::NeedsReconnect);
         let (mut harness, venue) = attached(script);
         assert_eq!(venue.updates(), []);
-        assert_eq!(
-            harness.worker.backoff.attempts(),
-            0,
-            "market recovery is not charged"
-        );
         venue
             .requests
             .send(VenueRequest::Place(limit_order(
@@ -3038,9 +3009,8 @@ mod venue_relay {
         assert_eq!(
             harness.opens().len(),
             1,
-            "the backoff holds the next attempt"
+            "the venue does not open another connection immediately"
         );
-        assert_eq!(harness.worker.backoff.attempts(), 0);
     }
 
     #[test]
@@ -3095,7 +3065,7 @@ mod venue_relay {
             script.trading.push_back(deal_list_frame(&[]));
             script.trading.push_back(reconcile_frame(&[], &[]));
         }
-        harness.worker.retry_at = Instant::now();
+        harness.connect();
         harness.drive();
         assert!(matches!(
             venue.updates().as_slice(),

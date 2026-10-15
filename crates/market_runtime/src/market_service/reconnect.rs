@@ -21,6 +21,9 @@ pub(crate) struct ReconnectPolicy {
 }
 
 impl ReconnectPolicy {
+    pub(crate) const fn healthy_reset_after(self) -> Duration {
+        self.healthy_reset_after
+    }
     pub(crate) const fn initial_delay(self) -> Duration {
         self.initial
     }
@@ -119,6 +122,9 @@ pub(crate) struct Backoff {
 }
 
 impl Backoff {
+    pub(crate) const fn policy(&self) -> ReconnectPolicy {
+        self.policy
+    }
     pub(crate) fn new(policy: ReconnectPolicy, clock: &dyn Clock, seed: u64) -> Self {
         // Wall clock and caller-supplied identity make separate workers independent
         // while a replayed clock and seed always reproduce the same sequence.

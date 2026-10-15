@@ -8,9 +8,10 @@
 //! The provider generation is shared by both hosts: a fault on either host
 //! closes every host session and the next live demand opens a new generation,
 //! so no event from a retired session can be published under a current one.
+use super::provider_session::ProviderEventSink;
 use super::{ActiveWorkerGuard, tastytrade::now_nanos};
 use super::{
-    Arc, AtomicBool, AtomicU64, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, COMMAND_CAPACITY,
+    Arc, AtomicBool, BTreeMap, BTreeSet, BarPeriod, BarSeriesKey, COMMAND_CAPACITY,
     CatalogPublisher, Command, Coordinator, DepthSnapshot, Duration, FormingBar, HISTORY_CAPACITY,
     HistoryRequest, HistorySnapshot, InstallProviderInstrument, Instant, MAXIMUM_CONSUMERS,
     MarketBar, Mutex, Ordering, ProviderCatalogChannelImpl, ProviderCatalogChannels,
@@ -19,10 +20,6 @@ use super::{
     ProviderRuntimeRecord, REALTIME_CAPACITY, RITHMIC_REALTIME_CONTROL_CAPACITY, Receiver,
     SearchProviderInstruments, SelectProviderInstrument, SyncSender, TopOfBookQuote, TrySendError,
     VecDeque, mpsc, thread,
-};
-use super::{
-    clock::SystemClock,
-    reconnect::{Backoff, RetryClass, RetryDecision},
 };
 use aeris_contracts::{
     ProviderContractMetadata, ProviderInstrumentSearchResult, ProviderInstrumentSummary,
@@ -134,7 +131,6 @@ const EVENT_POLL: Duration = Duration::from_millis(5);
 const EVENTS_PER_HOST_TURN: usize = 128;
 const IDLE_STOP: Duration = Duration::from_secs(30);
 const RECONCILE_RETRY: Duration = Duration::from_secs(5);
-const HEALTHY_SESSION: Duration = Duration::from_mins(1);
 const MAXIMUM_HISTORY_PAGES: usize = 8;
 const MAXIMUM_SYMBOLS_PER_REQUEST: usize = 64;
 const MAXIMUM_CATALOG_ACCOUNTS: usize = 16;
@@ -202,6 +198,7 @@ pub(super) struct Demand {
     pub instruments: Vec<(InstallProviderInstrument, bool)>,
 }
 pub(super) enum RealtimeControl {
+    Connect(ProviderEventSink),
     Subscribe(Demand),
     Stop,
     AuthorizationChanged(bool),
@@ -209,7 +206,7 @@ pub(super) enum RealtimeControl {
 pub(super) enum RealtimeEvent {
     Connecting(u64),
     Connected(u64),
-    Recovering(u64, String),
+    Retry(u64, String, Option<Duration>),
     Failed(u64, String),
     Disconnected(u64),
     Candle(u64, String, MarketBar),
@@ -221,7 +218,7 @@ impl RealtimeEvent {
         match self {
             Self::Connecting(g)
             | Self::Connected(g)
-            | Self::Recovering(g, _)
+            | Self::Retry(g, ..)
             | Self::Failed(g, _)
             | Self::Disconnected(g)
             | Self::Candle(g, ..)
@@ -1128,10 +1125,11 @@ struct WorkerPorts {
     controls: Receiver<RealtimeControl>,
     catalog: Receiver<CatalogControl>,
     catalog_events: CatalogPublisher<CatalogEvent>,
-    events: SyncSender<RealtimeEvent>,
+    events: SyncSender<
+        aeris_market_engine::fence::Fenced<aeris_market_engine::fence::ProviderTag, RealtimeEvent>,
+    >,
     history: Receiver<HistoryRequest>,
     completions: SyncSender<Command>,
-    generation: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     wake: ProviderCoordinatorWake,
     counters: Arc<StreamCounters>,
@@ -1140,8 +1138,6 @@ struct WorkerPorts {
 struct WorkerConfig {
     opener: LinkOpener,
     idle_stop: Duration,
-    /// An epoch that stays connected this long clears the retry count.
-    healthy_after: Duration,
     /// Loads the symbol catalogs as soon as the worker starts, before any search.
     warm_catalogs_on_start: bool,
 }
@@ -1160,8 +1156,6 @@ struct CatalogJob {
 /// Lifecycle of the current provider epoch.
 #[derive(Default)]
 struct EpochState {
-    /// The first epoch reuses the startup generation; later epochs increment it.
-    used: bool,
     /// Live demand currently holds an open generation.
     open: bool,
     /// Broker authorization is revoked; demand is held without sessions.
@@ -1175,9 +1169,7 @@ struct Worker {
     demand_dirty: bool,
     candle_symbols: BTreeMap<(bool, u64, u64, i32), BTreeSet<String>>,
     epoch_state: EpochState,
-    backoff: Backoff,
-    healthy_since: Option<Instant>,
-    retry_at: Instant,
+    sink: Option<ProviderEventSink>,
     reconcile_at: Instant,
     history: Option<HistoryTask>,
     completions: VecDeque<Command>,
@@ -1206,9 +1198,7 @@ impl Worker {
             demand_dirty: false,
             candle_symbols: BTreeMap::new(),
             epoch_state: EpochState::default(),
-            backoff: Backoff::new(DESCRIPTOR.capabilities.reconnect, &SystemClock, 0x4354_5241),
-            healthy_since: None,
-            retry_at: Instant::now(),
+            sink: None,
             reconcile_at: Instant::now(),
             history: None,
             completions: VecDeque::new(),
@@ -1224,11 +1214,14 @@ impl Worker {
         }
     }
     fn epoch(&self) -> u64 {
-        self.ports.generation.load(Ordering::Acquire)
+        self.sink.map_or(1, |sink| sink.epoch.get().get())
     }
     fn publish(&self, event: RealtimeEvent) -> Result<(), String> {
+        let Some(sink) = self.sink else {
+            return Ok(());
+        };
         let generation = event.generation();
-        match self.ports.events.try_send(event) {
+        match self.ports.events.try_send(sink.stamp(event)) {
             Ok(()) => {
                 self.ports.wake.notify();
                 Ok(())
@@ -1266,8 +1259,8 @@ impl Worker {
         self.flush_completions();
     }
     fn step(&mut self) -> Result<(), HostFault> {
-        if Instant::now() < self.retry_at {
-            return Ok(());
+        if self.sink.is_none() {
+            return self.poll_events();
         }
         self.open_epoch()?;
         match self.reconcile() {
@@ -1280,18 +1273,17 @@ impl Worker {
         }
         self.history_step()?;
         self.poll_events()?;
-        if self
-            .healthy_since
-            .is_some_and(|since| since.elapsed() >= self.config.healthy_after)
-        {
-            self.backoff.reset();
-            self.healthy_since = None;
-        }
         Ok(())
     }
     fn controls(&mut self) {
         while let Ok(control) = self.ports.controls.try_recv() {
             match control {
+                RealtimeControl::Connect(sink) => {
+                    self.sink = Some(sink);
+                    self.epoch_state.open = false;
+                    self.epoch_state.paused = false;
+                    self.demand_dirty = true;
+                }
                 RealtimeControl::Subscribe(next) => {
                     self.demand = next;
                     self.demand_dirty = true;
@@ -1321,8 +1313,7 @@ impl Worker {
                     self.epoch_state.open = false;
                     self.demand_dirty = true;
                     self.epoch_state.paused = !ready;
-                    self.backoff.reset();
-                    self.retry_at = Instant::now();
+                    self.sink = None;
                 }
             }
         }
@@ -1356,29 +1347,18 @@ impl Worker {
             }
         }
         self.demand_dirty = false;
-        if self.epoch_state.used {
+        if self.epoch_state.open {
             let _ = self.publish(RealtimeEvent::Disconnected(self.epoch()));
         }
         self.epoch_state.open = false;
+        self.sink = None;
     }
-    /// The first epoch uses the initial generation. Every later epoch, after a
-    /// stop, fault or authorization change, takes a new one.
+    /// Only a registry-bound connection may open a market host.
     fn open_epoch(&mut self) -> Result<(), HostFault> {
-        if self.epoch_state.open || !self.demanded() {
+        if self.epoch_state.open || !self.demanded() || self.sink.is_none() {
             return Ok(());
         }
-        let generation = if self.epoch_state.used {
-            self.ports
-                .generation
-                .fetch_add(1, Ordering::AcqRel)
-                .checked_add(1)
-                .ok_or_else(|| {
-                    HostFault::from("cTrader session generation overflowed".to_string())
-                })?
-        } else {
-            self.epoch()
-        };
-        self.epoch_state.used = true;
+        let generation = self.epoch();
         // Subscriptions belong to a generation; a reused session starts clean.
         let stale: Vec<_> = self
             .hosts
@@ -1412,7 +1392,6 @@ impl Worker {
         self.demand_dirty = true;
         self.reconcile_at = Instant::now();
         self.publish(RealtimeEvent::Connected(generation))?;
-        self.healthy_since = Some(Instant::now());
         Ok(())
     }
     fn ensure_host(&mut self, live: bool) -> Result<&mut HostSession, Failure> {
@@ -1694,6 +1673,11 @@ impl Worker {
         }
     }
     fn catalog(&mut self) {
+        // The catalog shares the market host, which must be epoch-bound before
+        // opening a transport even when no chart has demand yet.
+        if self.sink.is_none() {
+            return;
+        }
         if self.catalog_job.is_some() {
             self.advance_search();
             return;
@@ -2201,8 +2185,9 @@ impl Worker {
         self.epoch_state.open = false;
         self.candle_symbols.clear();
         let _ = self.publish(RealtimeEvent::Disconnected(self.epoch()));
+        self.sink = None;
     }
-    /// The only reconnect policy for cTrader sessions.
+    /// Report the failure; the registry alone schedules the next connection.
     fn recover(&mut self, fault: HostFault) {
         let HostFault {
             detail: error,
@@ -2214,43 +2199,17 @@ impl Worker {
         self.cancel_history(&error);
         self.candle_symbols.clear();
         self.demand_dirty = true;
-        self.healthy_since = None;
-        let decision = self.backoff.failure(match wait {
-            Some(retry_after) => RetryClass::RateLimited { retry_after },
-            None if error == DISCONNECTED_DETAIL => RetryClass::Fatal,
-            None => RetryClass::Transient,
-        });
-        self.epoch_state.paused = matches!(
-            decision,
-            RetryDecision::Failed { .. } | RetryDecision::Fatal
-        );
-        if let RetryDecision::Wait(delay) = decision {
-            self.retry_at = Instant::now() + delay;
-        }
-        if !self.epoch_state.open {
-            return;
-        }
         self.epoch_state.open = false;
         let generation = self.epoch();
-        let event = if matches!(decision, RetryDecision::Fatal) {
-            RealtimeEvent::Failed(generation, format!("cTrader: {error}"))
-        } else if self.epoch_state.paused {
-            RealtimeEvent::Failed(
-                generation,
-                format!(
-                    "cTrader: {} reconnect attempts failed; last error: {error}",
-                    self.backoff.attempts()
-                ),
-            )
+        let event = if error == DISCONNECTED_DETAIL {
+            RealtimeEvent::Failed(generation, error)
         } else {
-            RealtimeEvent::Recovering(generation, error)
+            RealtimeEvent::Retry(generation, error, wait)
         };
         if let Err(publish_error) = self.publish(event) {
             diagnostic!("Aeris cTrader provider state publication failed: {publish_error}");
-            if self.epoch_state.paused {
-                self.ports.wake.report_failure(PROVIDER, generation);
-            }
         }
+        self.sink = None;
     }
 }
 
@@ -2279,7 +2238,6 @@ pub(super) fn start_record(
         WorkerConfig {
             opener,
             idle_stop: IDLE_STOP,
-            healthy_after: HEALTHY_SESSION,
             warm_catalogs_on_start: true,
         },
     )
@@ -2295,7 +2253,6 @@ fn spawn_record(
 ) -> Result<ProviderRuntimeRecord, String> {
     let cancellation = Arc::new(AtomicBool::new(false));
     let lifecycle = Arc::new(ProviderRuntimeLifecycle::default());
-    let generation = Arc::new(AtomicU64::new(1));
     let (history_tx, history_rx) = mpsc::sync_channel(HISTORY_CAPACITY);
     let (controls, controls_rx) = mpsc::sync_channel(RITHMIC_REALTIME_CONTROL_CAPACITY);
     let (events_tx, events) = mpsc::sync_channel(REALTIME_CAPACITY);
@@ -2308,7 +2265,6 @@ fn spawn_record(
         events: events_tx,
         history: history_rx,
         completions: completions.clone(),
-        generation,
         stop: Arc::clone(&cancellation),
         wake,
         counters: Arc::clone(&shared.counters),
@@ -2324,13 +2280,14 @@ fn spawn_record(
         .map_err(|error| error.to_string())?;
     Ok(ProviderRuntimeRecord {
         hyperliquid: None,
+        ctrader: Some(super::CtraderChannels { controls, events }),
         descriptor,
         history: history_tx,
         cancellation,
         lifecycle,
         realtime: ProviderRealtimeChannels {
             enabled: true,
-            channels: ProviderRealtimeChannelSet::Ctrader { controls, events },
+            channels: ProviderRealtimeChannelSet::Disabled,
         },
         catalog: ProviderCatalogChannels {
             enabled: true,

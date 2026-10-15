@@ -395,6 +395,7 @@ impl ProviderRuntimeRegistry {
                 },
             },
             hyperliquid: None,
+            ctrader: None,
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -493,6 +494,7 @@ impl ProviderRuntimeRegistry {
                 display_controls,
                 display_events,
             }),
+            ctrader: None,
             catalog: ProviderCatalogChannels {
                 enabled,
                 channels: Box::new(ProviderCatalogChannelImpl::new(
@@ -619,11 +621,6 @@ impl ProviderRuntimeRegistry {
                     {
                         ProviderRealtimeDispatch::Tastytrade { controls, events }
                     }
-                    ProviderRealtimeChannelSet::Ctrader { controls, events }
-                        if record.realtime.enabled =>
-                    {
-                        ProviderRealtimeDispatch::Ctrader { controls, events }
-                    }
                     ProviderRealtimeChannelSet::Rithmic { controls, events }
                         if record.realtime.enabled =>
                     {
@@ -631,6 +628,12 @@ impl ProviderRuntimeRegistry {
                     }
                     _ => ProviderRealtimeDispatch::Disabled,
                 };
+                let realtime = record.ctrader.as_ref().map_or(realtime, |channels| {
+                    ProviderRealtimeDispatch::CtraderBound {
+                        controls: &channels.controls,
+                        events: &channels.events,
+                    }
+                });
                 let catalog = record
                     .catalog
                     .enabled
@@ -683,6 +686,7 @@ impl ProviderRuntimeRegistry {
                 history,
                 realtime,
                 hyperliquid: _,
+                ctrader: _,
                 catalog,
                 workers,
                 ..
@@ -814,9 +818,17 @@ impl ProviderDispatch<'_> {
                             ProviderRuntimeEvent::Realtime(super::ProviderEvent::tastytrade(event))
                         })
                     }
-                    ProviderRealtimeDispatch::Ctrader { events, .. } => {
-                        events.try_recv().ok().map(|event| {
-                            ProviderRuntimeEvent::Realtime(super::ProviderEvent::ctrader(event))
+                    ProviderRealtimeDispatch::CtraderBound { events, .. } => {
+                        events.try_recv().ok().and_then(|bound| {
+                            let wire = super::ProviderEvent::ctrader(bound.value);
+                            (wire.generation == bound.epoch.get().get()).then_some(
+                                ProviderRuntimeEvent::BoundRealtime(super::ProviderEvent {
+                                    provider: wire.provider,
+                                    generation: bound.epoch,
+                                    wire_generation: wire.generation,
+                                    kind: wire.kind,
+                                }),
+                            )
                         })
                     }
                     ProviderRealtimeDispatch::Rithmic { events, .. } => {
@@ -927,16 +939,8 @@ impl ProviderDispatch<'_> {
                             }
                         }
                     }
-                    ProviderRealtimeDispatch::Ctrader { controls, .. } => {
-                        match controls.try_send(super::ctrader::RealtimeControl::Subscribe(
-                            demand.ctrader_wire(),
-                        )) {
-                            Ok(()) => Ok(true),
-                            Err(TrySendError::Full(_)) => Ok(false),
-                            Err(TrySendError::Disconnected(_)) => {
-                                Err("Provider live worker is unavailable".to_string())
-                            }
-                        }
+                    ProviderRealtimeDispatch::CtraderBound { .. } => {
+                        Err("Provider demand is registry-owned".to_string())
                     }
                     ProviderRealtimeDispatch::Disabled => Ok(false),
                 }
@@ -957,17 +961,6 @@ impl ProviderDispatch<'_> {
                         match controls.try_send(
                             super::tastytrade::RealtimeControl::AuthorizationChanged(ready),
                         ) {
-                            Ok(()) => Ok(true),
-                            Err(TrySendError::Full(_)) => Ok(false),
-                            Err(TrySendError::Disconnected(_)) => {
-                                Err("Provider live worker is unavailable".to_string())
-                            }
-                        }
-                    }
-                    ProviderRealtimeDispatch::Ctrader { controls, .. } => {
-                        match controls
-                            .try_send(super::ctrader::RealtimeControl::AuthorizationChanged(ready))
-                        {
                             Ok(()) => Ok(true),
                             Err(TrySendError::Full(_)) => Ok(false),
                             Err(TrySendError::Disconnected(_)) => {
@@ -1038,11 +1031,8 @@ impl ProviderDispatch<'_> {
                     Err(TrySendError::Full(_)) => Ok(false),
                 }
             }
-            ProviderRealtimeDispatch::Ctrader { controls, .. } => {
-                match controls.try_send(super::ctrader::RealtimeControl::Stop) {
-                    Ok(()) | Err(TrySendError::Disconnected(_)) => Ok(true),
-                    Err(TrySendError::Full(_)) => Ok(false),
-                }
+            ProviderRealtimeDispatch::CtraderBound { .. } => {
+                Err("Provider idle release is registry-owned".to_string())
             }
             ProviderRealtimeDispatch::Rithmic { controls, .. } => {
                 match controls.try_send(RithmicRealtimeControl::Stop) {

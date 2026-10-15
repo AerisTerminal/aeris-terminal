@@ -554,7 +554,7 @@ impl Worker {
     /// not connected), trading waits with its own backoff and refuses queued requests with
     /// the reason, so market data recovery is never disturbed by it.
     pub(super) fn venue_step(&mut self) -> Result<(), HostFault> {
-        if self.venue.is_none() || Instant::now() < self.retry_at || self.epoch_state.paused {
+        if self.venue.is_none() || self.epoch_state.paused {
             return Ok(());
         }
         if let Some((until, reason)) = self

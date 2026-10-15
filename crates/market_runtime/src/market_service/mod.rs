@@ -303,6 +303,7 @@ impl ProviderCoordinatorWake {
                 .is_some_and(|slot| slot.overflow.load(Ordering::Acquire) >= generation)
     }
 
+    #[cfg(test)]
     pub(crate) fn report_failure(&self, provider: &str, generation: u64) {
         if let Some(slot) = self.slots.get(provider) {
             slot.pending_failure.fetch_max(generation, Ordering::AcqRel);
@@ -1190,10 +1191,6 @@ enum ProviderRealtimeChannelSet {
         controls: SyncSender<tastytrade::RealtimeControl>,
         events: Receiver<tastytrade::RealtimeEvent>,
     },
-    Ctrader {
-        controls: SyncSender<ctrader::RealtimeControl>,
-        events: Receiver<ctrader::RealtimeEvent>,
-    },
     Rithmic {
         controls: SyncSender<RithmicRealtimeControl>,
         events: Receiver<RithmicRealtimeEvent>,
@@ -1261,8 +1258,18 @@ struct ProviderRuntimeRecord {
     lifecycle: Arc<ProviderRuntimeLifecycle>,
     realtime: ProviderRealtimeChannels,
     hyperliquid: Option<HyperliquidChannels>,
+    ctrader: Option<CtraderChannels>,
     catalog: ProviderCatalogChannels,
     workers: Vec<thread::JoinHandle<()>>,
+}
+struct CtraderChannels {
+    controls: SyncSender<ctrader::RealtimeControl>,
+    events: Receiver<
+        aeris_market_engine::fence::Fenced<
+            aeris_market_engine::fence::ProviderTag,
+            ctrader::RealtimeEvent,
+        >,
+    >,
 }
 
 struct StartedProviderRuntime {
@@ -1337,13 +1344,18 @@ struct ProviderDispatchRecord<'a> {
 }
 
 enum ProviderRealtimeDispatch<'a> {
+    CtraderBound {
+        controls: &'a SyncSender<ctrader::RealtimeControl>,
+        events: &'a Receiver<
+            aeris_market_engine::fence::Fenced<
+                aeris_market_engine::fence::ProviderTag,
+                ctrader::RealtimeEvent,
+            >,
+        >,
+    },
     Tastytrade {
         controls: &'a SyncSender<tastytrade::RealtimeControl>,
         events: &'a Receiver<tastytrade::RealtimeEvent>,
-    },
-    Ctrader {
-        controls: &'a SyncSender<ctrader::RealtimeControl>,
-        events: &'a Receiver<ctrader::RealtimeEvent>,
     },
     Rithmic {
         controls: &'a SyncSender<RithmicRealtimeControl>,

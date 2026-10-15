@@ -122,6 +122,19 @@ pub(super) fn validate_provider_instrument(
 }
 
 impl Coordinator<'_> {
+    fn ensure_catalog_session(&mut self, provider: &str) -> Result<(), String> {
+        if !self.provider_registry.catalog_uses_session(provider) {
+            return Ok(());
+        }
+        if self.ensure_provider_connection(provider)
+            && self.provider_registry.catalog_ready(provider)
+        {
+            Ok(())
+        } else {
+            Err("Provider catalog session is recovering".into())
+        }
+    }
+
     pub(super) fn handle_provider_search(
         &mut self,
         client_id: ClientId,
@@ -139,6 +152,7 @@ impl Coordinator<'_> {
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
+                self.ensure_catalog_session(&provider)?;
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Search(search))
             });
@@ -171,6 +185,7 @@ impl Coordinator<'_> {
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
+                self.ensure_catalog_session(&provider)?;
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))
             });
@@ -198,6 +213,7 @@ impl Coordinator<'_> {
         let result = self
             .authorize_catalog_consumer(client_id, raw_consumer_id)
             .and_then(|()| {
+                self.ensure_catalog_session(&provider)?;
                 self.providers
                     .dispatch_catalog(&provider, ProviderCatalogCommand::Screen(screen))
             });

@@ -217,8 +217,20 @@ impl<'a> Coordinator<'a> {
                     clock.as_ref(),
                 );
             }
+            if let super::ProviderRealtimeDispatch::CtraderBound { controls, .. } = &record.realtime
+            {
+                provider_registry.register(
+                    id,
+                    Box::new(super::provider_session::CtraderSession {
+                        controls: (*controls).clone(),
+                        history: record.history.clone(),
+                    }),
+                    record.descriptor.capabilities.reconnect,
+                    clock.as_ref(),
+                );
+            }
         }
-        Self {
+        let mut coordinator = Self {
             engine,
             studies: StudyRuntime::new(StudyRuntimeConfig {
                 maximum_studies: NonZeroUsize::new(MAXIMUM_STUDIES).unwrap_or(NonZeroUsize::MIN),
@@ -261,7 +273,11 @@ impl<'a> Coordinator<'a> {
             catalog_sessions: BTreeMap::new(),
             command_fences: super::CommandFences::default(),
             sessions,
+        };
+        for provider in coordinator.provider_registry.catalog_connect_ids() {
+            let _ = coordinator.ensure_provider_connection(provider);
         }
+        coordinator
     }
 }
 
@@ -778,6 +794,7 @@ impl Coordinator<'_> {
         let due = self.provider_registry.due_ids(self.clock.monotonic());
         for id in due {
             if !self.has_provider_live_demand(id)
+                && !self.provider_registry.catalog_uses_session(id)
                 && !self
                     .provider_registry
                     .release_idle(id)

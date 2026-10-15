@@ -150,7 +150,7 @@ pub(super) struct ProviderCandle {
     pub(super) trade_watermark: Option<u64>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum ProviderDisconnect {
     SequenceGap {
         detail: &'static str,
@@ -159,6 +159,8 @@ pub(super) enum ProviderDisconnect {
     Recover {
         detail: &'static str,
         auto_recover: bool,
+        retry_after: Option<std::time::Duration>,
+        provider_detail: Option<String>,
     },
     Fail {
         detail: &'static str,
@@ -262,6 +264,8 @@ impl ProviderEvent {
                     ProviderDisconnect::Recover {
                         detail,
                         auto_recover,
+                        retry_after: None,
+                        provider_detail: None,
                     }
                 };
                 ProviderEventKind::Disconnected(disposition)
@@ -302,6 +306,8 @@ impl ProviderEvent {
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
                 detail: "Hyperliquid live session is recovering",
                 auto_recover: false,
+                retry_after: None,
+                provider_detail: None,
             }),
             Wire::Candle(_, coin, interval, candle) => ProviderEventKind::Candle {
                 symbol: ProviderCandleSymbol::CoinInterval { coin, interval },
@@ -337,13 +343,16 @@ impl ProviderEvent {
         let kind = match event {
             Wire::Connecting(_) => ProviderEventKind::Connecting,
             Wire::Connected(_) => ProviderEventKind::Connected,
-            Wire::Recovering(_, detail) => ProviderEventKind::Recovering {
-                detail: "cTrader feed requires recovery",
-                provider_detail: Some(detail),
-                recovery_reason: None,
-            },
             Wire::Failed(_, detail) => ProviderEventKind::Failed(detail),
             Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
+            Wire::Retry(_, detail, retry_after) => {
+                ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
+                    detail: "cTrader live session is recovering",
+                    auto_recover: false,
+                    retry_after,
+                    provider_detail: Some(detail),
+                })
+            }
             Wire::Candle(_, symbol, bar) => ProviderEventKind::Candle {
                 symbol: ProviderCandleSymbol::Wire(symbol),
                 candle: ProviderCandle {

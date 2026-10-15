@@ -1183,17 +1183,43 @@ impl Coordinator<'_> {
             return;
         }
         match &event.kind {
-            ProviderEventKind::Connected => self
-                .provider_registry
-                .connected(event.provider, event.generation),
-            ProviderEventKind::Disconnected(_) | ProviderEventKind::Failed(_) => {
-                self.provider_registry.disconnected(
+            ProviderEventKind::Connected => self.provider_registry.connected(
+                event.provider,
+                event.generation,
+                self.clock.monotonic(),
+            ),
+            ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
+                retry_after: Some(retry_after),
+                ..
+            }) => {
+                self.provider_registry.disconnected_with_class(
                     event.provider,
                     event.generation,
                     self.clock.monotonic(),
+                    super::reconnect::RetryClass::RateLimited {
+                        retry_after: *retry_after,
+                    },
                 );
             }
+            ProviderEventKind::Failed(_) => self.provider_registry.disconnected_with_class(
+                event.provider,
+                event.generation,
+                self.clock.monotonic(),
+                super::reconnect::RetryClass::Fatal,
+            ),
+            ProviderEventKind::Disconnected(_) => self.provider_registry.disconnected(
+                event.provider,
+                event.generation,
+                self.clock.monotonic(),
+            ),
             _ => {}
+        }
+        if matches!(
+            event.kind,
+            ProviderEventKind::Disconnected(_) | ProviderEventKind::Failed(_)
+        ) && self.sessions.contains_key(event.provider)
+        {
+            self.session_mut(event.provider).accepted = None;
         }
         self.dispatch_provider_event(event);
     }
@@ -1260,7 +1286,7 @@ impl Coordinator<'_> {
                 self.mark_lifecycle_failed(provider, generation, &detail);
             }
             ProviderEventKind::Disconnected(reason) => {
-                self.handle_provider_disconnected(provider, generation, descriptor, reason);
+                self.handle_provider_disconnected(provider, generation, descriptor, &reason);
             }
             ProviderEventKind::Trades(batch) => {
                 self.accept_provider_trades(
@@ -1380,15 +1406,30 @@ impl Coordinator<'_> {
             return;
         }
         if let Some(ready) = self.session(provider).authorization {
-            let sent = self
-                .providers
-                .send_control(
-                    provider,
-                    super::ProviderControl::AuthorizationChanged(ready),
-                )
-                .is_ok_and(|sent| sent);
+            let sent = if self.provider_registry.contains(provider) {
+                self.provider_registry
+                    .authorization_changed(provider, ready)
+                    .is_ok_and(|sent| sent)
+            } else {
+                self.providers
+                    .send_control(
+                        provider,
+                        super::ProviderControl::AuthorizationChanged(ready),
+                    )
+                    .is_ok_and(|sent| sent)
+            };
             if sent {
+                if self.provider_registry.contains(provider)
+                    && !self
+                        .provider_registry
+                        .release_idle(provider)
+                        .is_ok_and(|sent| sent)
+                {
+                    self.control_retry = true;
+                    return;
+                }
                 self.session_mut(provider).authorization = None;
+                self.session_mut(provider).accepted = None;
             } else {
                 self.control_retry = true;
             }
@@ -1403,10 +1444,15 @@ impl Coordinator<'_> {
         }
         if demand.candle_series.is_empty() && demand.instruments.is_empty() {
             if self.session(provider).accepted.is_some() {
-                let sent = self
-                    .providers
-                    .send_control(provider, super::ProviderControl::Stop)
-                    .is_ok_and(|sent| sent);
+                let sent = if self.provider_registry.contains(provider) {
+                    self.provider_registry
+                        .release_idle(provider)
+                        .is_ok_and(|sent| sent)
+                } else {
+                    self.providers
+                        .send_control(provider, super::ProviderControl::Stop)
+                        .is_ok_and(|sent| sent)
+                };
                 if sent {
                     self.session_mut(provider).accepted = Some(demand);
                 } else {
@@ -1415,10 +1461,17 @@ impl Coordinator<'_> {
             }
             return;
         }
-        let sent = self
-            .providers
-            .send_control(provider, super::ProviderControl::Demand(demand.clone()))
-            .is_ok_and(|sent| sent);
+        let sent = if self.provider_registry.contains(provider) {
+            self.ensure_provider_connection(provider)
+                && self
+                    .provider_registry
+                    .apply_demand(provider, &demand)
+                    .is_ok_and(|sent| sent)
+        } else {
+            self.providers
+                .send_control(provider, super::ProviderControl::Demand(demand.clone()))
+                .is_ok_and(|sent| sent)
+        };
         if sent {
             self.session_mut(provider).accepted = Some(demand);
         } else {
@@ -1862,11 +1915,18 @@ impl Coordinator<'_> {
         provider: &str,
         generation: u64,
         descriptor: super::ProviderDescriptor,
-        reason: ProviderDisconnect,
+        reason: &ProviderDisconnect,
     ) {
         if matches!(reason, ProviderDisconnect::End) {
             self.end_provider_live_session(provider, generation);
             return;
+        }
+        if let ProviderDisconnect::Recover {
+            provider_detail: Some(detail),
+            ..
+        } = reason
+        {
+            self.broadcast_provider_for(provider, Some(detail));
         }
         let stop_pending = self
             .session(provider)
@@ -1886,16 +1946,17 @@ impl Coordinator<'_> {
                         auto_recover,
                     } => {
                         self.recover_trade_sequence_gaps(provider, generation, detail);
-                        (detail, auto_recover, false)
+                        (*detail, *auto_recover, false)
                     }
                     ProviderDisconnect::Recover {
                         detail,
                         auto_recover,
-                    } => (detail, auto_recover, false),
+                        ..
+                    } => (*detail, *auto_recover, false),
                     ProviderDisconnect::Fail {
                         detail,
                         auto_recover,
-                    } => (detail, auto_recover, true),
+                    } => (*detail, *auto_recover, true),
                     ProviderDisconnect::End => return,
                 };
                 if failed {
@@ -1925,7 +1986,7 @@ impl Coordinator<'_> {
                 let detail = match reason {
                     ProviderDisconnect::Recover { detail, .. }
                     | ProviderDisconnect::Fail { detail, .. }
-                    | ProviderDisconnect::SequenceGap { detail, .. } => detail,
+                    | ProviderDisconnect::SequenceGap { detail, .. } => *detail,
                     ProviderDisconnect::End => return,
                 };
                 self.mark_lifecycle_recovering(

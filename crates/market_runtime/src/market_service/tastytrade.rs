@@ -2933,6 +2933,7 @@ pub(super) fn start_record(
         }
     };
     Ok(ProviderRuntimeRecord {
+        ctrader: None,
         hyperliquid: None,
         descriptor,
         history: history_tx,
