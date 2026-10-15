@@ -63,7 +63,7 @@ fn slotted_legs(
     let Some(base) = entry.limit_price.or(entry.stop_price) else {
         return Ok(Vec::new());
     };
-    let tick_units = instrument_tick_units(instrument)?;
+    let tick_units = instrument_tick_units(instrument, base)?;
     let leg = |slot, role, order_type, price, quantity| -> Result<_, String> {
         Ok((
             slot,
@@ -229,7 +229,7 @@ impl Coordinator {
             }
             .to_string());
         }
-        let tick_units = instrument_tick_units(&instrument)?;
+        let tick_units = instrument_tick_units(&instrument, base)?;
         if distance % tick_units != 0 {
             return Err("bracket prices must sit on whole ticks".to_string());
         }

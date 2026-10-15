@@ -193,6 +193,58 @@ fn high_precision_crypto_instrument() -> TradingInstrument {
     }
 }
 
+#[test]
+fn significant_figure_market_quotes_do_not_require_a_fixed_tick() {
+    let directory = TestDirectory::new("significant-figure-quote");
+    let service = start_service(&directory);
+    let mut crypto = high_precision_crypto_instrument();
+    crypto.contract.tick_size = None;
+    crypto.contract.price_grid = aeris_instruments::PriceGrid::SignificantFigures {
+        figures: 5,
+        max_decimals: 6,
+    };
+    service
+        .register_instrument(crypto.clone())
+        .expect("terms register");
+    assert_eq!(
+        instrument_tick_units(
+            &crypto,
+            FixedPoint::try_new(8_210_000_000_000, 8).expect("mark"),
+        ),
+        Ok(100_000_000)
+    );
+    let quote = SimulatedMarketObservation {
+        instrument_id: crypto.instrument_id.clone(),
+        bid: FixedPoint::try_new(8_209_000_000_000, 8).expect("bid"),
+        ask: FixedPoint::try_new(8_210_000_000_000, 8).expect("ask"),
+        provenance: provenance(1, 1_000),
+    };
+    assert_eq!(service.observe_market(quote).expect("quote accepted"), []);
+    service
+        .place_order(PlaceOrder {
+            client_order_id: ClientOrderId::try_new("sigfig-market-buy").expect("client"),
+            account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            instrument_id: crypto.instrument_id.clone(),
+            side: OrderSide::Buy,
+            order_type: OrderType::Market,
+            time_in_force: TimeInForce::Day,
+            quantity: FixedPoint::try_new(100_000_000, 8).expect("one unit"),
+            limit_price: None,
+            stop_price: None,
+            submitted_unix_nanos: 2_000,
+            provenance: provenance(2, 2_000),
+        })
+        .expect("market order accepted");
+    let next = SimulatedMarketObservation {
+        instrument_id: crypto.instrument_id,
+        bid: FixedPoint::try_new(8_209_000_000_000, 8).expect("bid"),
+        ask: FixedPoint::try_new(8_210_000_000_000, 8).expect("ask"),
+        provenance: provenance(3, 3_000),
+    };
+    assert_eq!(service.observe_market(next).expect("market fills").len(), 1);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
 pub(crate) fn provenance(sequence: u64, time: i64) -> TradingProvenance {
     TradingProvenance {
         venue_id: "aeris-sim".to_string(),

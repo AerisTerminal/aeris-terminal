@@ -183,10 +183,25 @@ impl Coordinator<'_> {
             }
             self.retire_pending_selection(consumer)?;
         }
+        let default = super::descriptors::default_instrument();
+        for (pending_consumer, pending_generation, _) in self
+            .command_fences
+            .pending_for(&default.provider, super::CommandKind::StartupResolve)
+        {
+            if pending_consumer == consumer {
+                self.command_fences.take(
+                    consumer,
+                    &default.provider,
+                    super::CommandKind::StartupResolve,
+                    pending_generation,
+                );
+            }
+        }
         // A known instrument and the ungated public default need no network
-        // callback. Both use the same transactional commit path.
+        // callback to show a chart. Contract terms must still be resolved
+        // asynchronously before the default instrument can be paper traded.
         let provider = match &request.instrument {
-            InstrumentRequest::Default => super::descriptors::default_instrument().provider,
+            InstrumentRequest::Default => default.provider.clone(),
             InstrumentRequest::Ref(reference) => reference.provider_id.clone(),
             InstrumentRequest::CatalogSymbol { provider_id, .. } => provider_id.clone(),
         };
@@ -195,10 +210,53 @@ impl Coordinator<'_> {
                 if self.catalog.contains_key(&(reference.provider_id.clone(), reference.instrument_id.clone())))
         {
             let outcome = self.select_and_demand(client_id, &request);
+            if matches!(outcome, SelectionOutcome::Selected { .. })
+                && matches!(request.instrument, InstrumentRequest::Default)
+                && self
+                    .catalog
+                    .get(&(default.provider.clone(), default.instrument_id.clone()))
+                    .is_none_or(|instrument| {
+                        super::instrument_terms_from_install(instrument).is_err()
+                    })
+                && let Err(error) = self.resolve_default_contract_terms(consumer, &request, default)
+            {
+                diagnostic!("Default market contract terms could not be requested: {error}");
+            }
             self.publish_selection_outcome(consumer, outcome);
             return Ok(());
         }
         self.dispatch_unresolved_selection(client_id, consumer, generation, request, provider);
+        Ok(())
+    }
+
+    fn resolve_default_contract_terms(
+        &mut self,
+        consumer: ConsumerId,
+        request: &super::SelectionRequest,
+        default: InstallProviderInstrument,
+    ) -> Result<(), String> {
+        let provider = default.provider;
+        let selection = SelectProviderInstrument {
+            consumer_id: request.consumer_id,
+            selection_generation: request.generation,
+            search_generation: request.generation,
+            startup_resolve: true,
+            provider: provider.clone(),
+            symbol: default.provider_symbol,
+            exchange: default.venue_id,
+            entitlement_id: default.entitlement_id,
+        };
+        validate_provider_selection(&selection)?;
+        self.ensure_catalog_session(&provider)?;
+        self.providers
+            .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))?;
+        self.command_fences.record_operation(
+            consumer,
+            provider,
+            super::CommandKind::StartupResolve,
+            request.generation,
+            true,
+        );
         Ok(())
     }
 

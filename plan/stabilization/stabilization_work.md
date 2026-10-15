@@ -485,6 +485,7 @@ Status: in progress
   - Injected `Clock` via `TradingServiceConfig`; owner command stamps clamp backward wall steps. The cancel event uses the owner command time rather than the order's old observation. `current_unix_nanos` is removed; direct production time reads remain in `clock.rs` only.
   - `cancellation_uses_command_time_even_when_wall_clock_moves_backwards` and both golden tests pass. The sole golden change is `simulated_stop_golden.txt` cancel event `2000 -> 3000`; the other golden is unchanged. The workspace fmt, Clippy and test gates passed; naming_check passed after adding the clock trait to the documented boundary list.
   - GUI cancel-time verification is blocked at this stage: an isolated practice-account order-book bid click returned "trading instrument is not registered" before any order could be placed. M4.7's runtime Terms registration must land before repeating VAL-TRD-003. The current Order model has no terminal-time field; the last Cancelled event supplies that time until M5's lifecycle schema adds an updated time.
+  - Pre-M4.2 regression triage: the detached pre-M3 `f00d4a99` build accepted a live Hyperliquid practice ladder order on a fresh isolated root; `6b248b2f` rejected the same flow as "trading instrument is not registered". M3 default selection installed provisional metadata without requesting verified catalog terms. The coordinator now requests those terms asynchronously behind the startup command fence while retaining immediate chart selection. A second M3 regression removed the fixed tick for Hyperliquid's significant-figure grid; bracket offsets now use the exact local increment at the entry price, and quote handling with no active bracket never demands a tick. A fresh isolated desktop after both fixes showed a working Buy Limit line and "Practice order ... is working"; no golden files changed. VAL-TRD-003's 60-second cancel-timing GUI assertion remains to be run.
 - [ ] M4.2 trading-core-owner-shell - Thin owner thread around a synchronous `TradingCore`
 - [ ] M4.3 trading-replay-harness - Deterministic trading replay harness
 - [ ] M4.4 indexed-order-book - Indexed order book; remove linear scans
@@ -689,6 +690,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M3.6 fix(market): document carried pane interval on symbol switch - fresh-root SOL stayed 1m; catalog selection carries the pane interval rather than a symbol-specific weekly default.
 - 2026-10-15 M3.12 docs(plan): record final-HEAD lifecycle probe qualification - clean `088899c4` probe passed 28/28 and the overridden-root refusal wrote nothing.
 - 2026-10-15 M4.1 fix(trading): stamp cancels at monotonic command time - injected clock, regression and single-line stop golden update; GUI cancel flow blocked by pre-M4.7 instrument registration.
+- 2026-10-15 M4 triage fix(trading): restore verified default contract terms and dynamic bracket increments - pre-M3/HEAD isolated GUI comparison found two regressions; verified live practice ladder order after owner-side fixes, full gate green.
 
 ## 7. Known gaps / deferred
 

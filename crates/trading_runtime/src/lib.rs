@@ -3822,7 +3822,7 @@ impl Coordinator {
                 next_sequence: sequence,
             });
         }
-        let tick_units = instrument_tick_units(instrument)?;
+        let tick_units = instrument_tick_units(instrument, entry_fill.price)?;
         let child_side = opposite_side(entry_order.side);
         let mut prepared = Vec::with_capacity(bracket.template.targets.len() + 1);
         let stop_price = shifted_price(
@@ -4054,7 +4054,6 @@ impl Coordinator {
             .filter(|bracket| bracket.status == ManagedBracketStatus::Active)
             .cloned()
             .collect::<Vec<_>>();
-        let tick_units = instrument_tick_units(instrument)?;
         for bracket in active {
             let entry = self
                 .order_by_client_id(&bracket.entry_client_order_id)?
@@ -4073,6 +4072,7 @@ impl Coordinator {
             let entry_price = bracket
                 .entry_price
                 .ok_or_else(|| "active managed bracket entry price is missing".to_string())?;
+            let tick_units = instrument_tick_units(instrument, entry_price)?;
             let favorable_price = match entry.side {
                 OrderSide::Buy => observation.bid,
                 OrderSide::Sell => observation.ask,
@@ -5509,10 +5509,33 @@ fn allocated_target_quantities(
     Ok(quantities)
 }
 
-fn instrument_tick_units(instrument: &TradingInstrument) -> Result<i64, String> {
+fn instrument_tick_units(instrument: &TradingInstrument, at: FixedPoint) -> Result<i64, String> {
+    if at.scale() != instrument.price_scale || at.units() <= 0 {
+        return Err("bracket price must be positive at the instrument scale".to_string());
+    }
+    if let aeris_instruments::PriceGrid::SignificantFigures {
+        figures,
+        max_decimals,
+    } = instrument.contract.price_grid
+    {
+        // The number of significant figures defines a local increment, not a
+        // constant tick. Calculate it at the entry price without floating point.
+        let digits = i32::try_from(at.units().ilog10() + 1)
+            .map_err(|_| "bracket price has too many digits")?;
+        let power = (digits - i32::from(figures))
+            .max(i32::from(at.scale()) - i32::from(max_decimals))
+            .max(0);
+        return 10_i64
+            .checked_pow(u32::try_from(power).map_err(|_| "bracket increment overflowed")?)
+            .ok_or_else(|| "bracket increment overflowed".to_string());
+    }
     let tick = instrument
         .contract
         .tick_size
+        .or(match instrument.contract.price_grid {
+            aeris_instruments::PriceGrid::Fixed(tick) => Some(tick),
+            _ => None,
+        })
         .ok_or_else(|| "tick size is required for a bracket strategy".to_string())?;
     FixedPoint::try_new(tick.units(), tick.scale())
         .map_err(|error| error.to_string())?

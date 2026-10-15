@@ -8264,6 +8264,120 @@ mod tests {
         }
     }
 
+    fn resolved_default_terms() -> InstallProviderInstrument {
+        let mut resolved = super::super::descriptors::default_instrument();
+        resolved.selection_generation = 2;
+        resolved.contract_metadata = Some(Box::new(aeris_contracts::ProviderContractMetadata {
+            point_value: Some(1),
+            point_value_scale: Some(0),
+            currency: Some("USD".into()),
+            price_significant_figures: Some(5),
+            price_max_decimals: Some(6),
+            instrument_class: Some(
+                aeris_contracts::ProviderInstrumentClass::CryptoPerpetual as i32,
+            ),
+            ..Default::default()
+        }));
+        resolved
+    }
+
+    #[test]
+    fn fresh_default_requests_verified_contract_terms_before_selection() {
+        use super::super::descriptors::{InstrumentRequest, SelectionRequest};
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.consumer_clients.insert(owner, client(1));
+        coordinator.events.insert(owner, ConsumerEvents::default());
+        let (commands, dispatched) = std::sync::mpsc::sync_channel(4);
+        let (_events, incoming) =
+            std::sync::mpsc::sync_channel::<super::super::ProviderCatalogEvent>(4);
+        let catalog = super::super::ProviderCatalogChannelImpl::new(
+            commands,
+            incoming,
+            |sender, _, command| sender.try_send(command).map_err(|error| error.to_string()),
+        );
+        let (history, _requests) = std::sync::mpsc::sync_channel(4);
+        coordinator.providers.records.insert(
+            "hyperliquid",
+            super::super::ProviderDispatchRecord {
+                descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
+                history: &history,
+                lifecycle: None,
+                ctrader: None,
+                hyperliquid: None,
+                tastytrade: None,
+                rithmic: None,
+                catalog: Some(&catalog),
+            },
+        );
+        let request = SelectionRequest {
+            consumer_id: owner.0.get(),
+            generation: 9,
+            instrument: InstrumentRequest::Default,
+            interval: aeris_market_data::ChartInterval::Minute1,
+            streams: StreamRequirements::BARS,
+            viewport: None,
+        };
+        coordinator
+            .begin_selection(client(1), request.clone())
+            .expect("default request");
+        assert!(matches!(
+            dispatched.try_recv().expect("catalog resolution dispatched"),
+            super::super::ProviderCatalogCommand::Select(selection)
+                if selection.startup_resolve
+                    && selection.selection_generation == 9
+                    && selection.symbol == "BTC"
+        ));
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .unwrap()
+                .selection_outcomes
+                .pop_front(),
+            Some(MarketRuntimeEvent::SelectionOutcome(
+                super::super::SelectionOutcome::Selected { .. }
+            ))
+        ));
+        let resolved = resolved_default_terms();
+        coordinator
+            .begin_selection(
+                client(1),
+                SelectionRequest {
+                    generation: 10,
+                    ..request
+                },
+            )
+            .expect("newer default selection");
+        assert!(matches!(
+            dispatched.try_recv().expect("new terms resolution"),
+            super::super::ProviderCatalogCommand::Select(selection)
+                if selection.selection_generation == 10
+        ));
+        coordinator.handle_catalog_selection(owner.0.get(), 9, resolved.clone());
+        assert!(
+            coordinator
+                .catalog
+                .get(&("hyperliquid".into(), "hyperliquid:perp:BTC".into()))
+                .is_some_and(|instrument| instrument.contract_metadata.is_none())
+        );
+        coordinator.handle_catalog_selection(owner.0.get(), 10, resolved);
+        let installed = coordinator
+            .catalog
+            .get(&("hyperliquid".into(), "hyperliquid:perp:BTC".into()))
+            .expect("resolved default registered");
+        assert!(super::super::instrument_terms_from_install(installed).is_ok());
+        assert!(matches!(
+            coordinator
+                .events
+                .get_mut(&owner)
+                .unwrap()
+                .startup_catalog_selection,
+            Some(MarketRuntimeEvent::ProviderInstrumentSelection(_))
+        ));
+    }
+
     #[test]
     fn retired_epoch_connected_does_not_publish_catalog_ready() {
         use aeris_market_engine::fence::{EpochSequence, ProviderTag};
