@@ -32,6 +32,13 @@ pub(super) struct OwnedCoordinatorChannels {
     pub(super) providers: ProviderRuntimeRegistry,
     pub(super) quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     pub(super) quotes: Arc<Mutex<super::quotes::QuoteBook>>,
+    pub(super) trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
+}
+
+struct FeedChannels {
+    releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
+    quotes: Arc<Mutex<super::quotes::QuoteBook>>,
+    trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -73,6 +80,7 @@ pub(super) fn spawn_coordinator(
                 mut providers,
                 quote_releases,
                 quotes,
+                trading_feed,
             } = channels;
             {
                 let dispatch = providers.dispatch();
@@ -82,8 +90,11 @@ pub(super) fn spawn_coordinator(
                     dispatch,
                     &shutdown,
                     clock,
-                    quote_releases,
-                    quotes,
+                    FeedChannels {
+                        releases: quote_releases,
+                        quotes,
+                        trading_feed,
+                    },
                 );
             }
             // A history worker may be blocked on a full bounded completion
@@ -105,12 +116,12 @@ fn run_coordinator(
     providers: ProviderDispatch<'_>,
     shutdown: &AtomicBool,
     clock: Arc<dyn super::clock::Clock>,
-    quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
-    quotes: Arc<Mutex<super::quotes::QuoteBook>>,
+    feeds: FeedChannels,
 ) {
     let mut coordinator = Coordinator::with_clock(engine, providers, clock);
-    coordinator.quote_releases = Some(quote_releases);
-    coordinator.quotes = quotes;
+    coordinator.quote_releases = Some(feeds.releases);
+    coordinator.quotes = feeds.quotes;
+    coordinator.trading_feed = feeds.trading_feed;
     let demand_flushers = coordinator
         .providers
         .records
@@ -143,6 +154,10 @@ fn coordinator_turn(
     test_wait: Option<Duration>,
 ) -> bool {
     coordinator.studies.begin_turn();
+    if coordinator.trading_feed.attached() && !coordinator.trading_feed_snapshot_sent {
+        coordinator.trading_feed_snapshot_sent = true;
+        coordinator.publish_trading_feed_snapshot();
+    }
     if let Some(releases) = &coordinator.quote_releases {
         let released = std::mem::take(
             &mut *releases
@@ -186,6 +201,16 @@ fn coordinator_turn(
     }
     if due.contains(TimerKey::WATCHDOG | TimerKey::SESSION_TRANSITION) {
         coordinator.recover_stalled_live_series();
+    }
+    if due.contains(TimerKey::SESSION_TRANSITION) {
+        let keys = coordinator
+            .engine
+            .instrument_subscriptions()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in &keys {
+            coordinator.publish_trading_session(key);
+        }
     }
     if due.contains(TimerKey::HISTORY_RETRY) {
         coordinator.retry_history();
@@ -279,23 +304,7 @@ impl<'a> Coordinator<'a> {
         }
         let mut coordinator = Self {
             engine,
-            studies: StudyRuntime::new(StudyRuntimeConfig {
-                maximum_studies: NonZeroUsize::new(MAXIMUM_STUDIES).unwrap_or(NonZeroUsize::MIN),
-                maximum_dependencies_per_study: NonZeroUsize::new(MAXIMUM_STUDY_DEPENDENCIES)
-                    .unwrap_or(NonZeroUsize::MIN),
-                maximum_outputs_per_study: NonZeroUsize::new(MAXIMUM_STUDY_OUTPUTS)
-                    .unwrap_or(NonZeroUsize::MIN),
-                maximum_points_per_output: NonZeroUsize::new(MAXIMUM_STUDY_POINTS_PER_OUTPUT)
-                    .unwrap_or(NonZeroUsize::MIN),
-                maximum_total_output_points: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS)
-                    .unwrap_or(NonZeroUsize::MIN),
-                maximum_state_bytes_per_study: NonZeroUsize::new(
-                    MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE,
-                )
-                .unwrap_or(NonZeroUsize::MIN),
-                maximum_total_state_bytes: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_STATE_BYTES)
-                    .unwrap_or(NonZeroUsize::MIN),
-            }),
+            studies: configured_studies(),
             providers,
             clock,
             calendar: super::calendar::MarketCalendarService::default(),
@@ -312,6 +321,8 @@ impl<'a> Coordinator<'a> {
             pending_activity: true,
             quote_releases: None,
             quotes: Arc::new(Mutex::new(super::quotes::QuoteBook::default())),
+            trading_feed: Arc::new(super::trading_feed::TradingFeedOutbox::default()),
+            trading_feed_snapshot_sent: false,
             trading_interest_revision: 0,
             control_retry: false,
             series_effects: super::lifecycle::EffectBuf::default(),
@@ -328,6 +339,24 @@ impl<'a> Coordinator<'a> {
         }
         coordinator
     }
+}
+
+fn configured_studies() -> StudyRuntime {
+    StudyRuntime::new(StudyRuntimeConfig {
+        maximum_studies: NonZeroUsize::new(MAXIMUM_STUDIES).unwrap_or(NonZeroUsize::MIN),
+        maximum_dependencies_per_study: NonZeroUsize::new(MAXIMUM_STUDY_DEPENDENCIES)
+            .unwrap_or(NonZeroUsize::MIN),
+        maximum_outputs_per_study: NonZeroUsize::new(MAXIMUM_STUDY_OUTPUTS)
+            .unwrap_or(NonZeroUsize::MIN),
+        maximum_points_per_output: NonZeroUsize::new(MAXIMUM_STUDY_POINTS_PER_OUTPUT)
+            .unwrap_or(NonZeroUsize::MIN),
+        maximum_total_output_points: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_OUTPUT_POINTS)
+            .unwrap_or(NonZeroUsize::MIN),
+        maximum_state_bytes_per_study: NonZeroUsize::new(MAXIMUM_STUDY_STATE_BYTES_PER_INSTANCE)
+            .unwrap_or(NonZeroUsize::MIN),
+        maximum_total_state_bytes: NonZeroUsize::new(MAXIMUM_STUDY_TOTAL_STATE_BYTES)
+            .unwrap_or(NonZeroUsize::MIN),
+    })
 }
 
 fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
@@ -816,6 +845,8 @@ pub(super) struct Coordinator<'a> {
     pending_activity: bool,
     quote_releases: Option<Arc<Mutex<Vec<MarketDataLeaseId>>>>,
     pub(super) quotes: Arc<Mutex<super::quotes::QuoteBook>>,
+    pub(super) trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
+    trading_feed_snapshot_sent: bool,
     trading_interest_revision: u64,
     pub(super) control_retry: bool,
     pub(super) series_effects: super::lifecycle::EffectBuf,
@@ -987,6 +1018,22 @@ impl Coordinator<'_> {
             );
             if let Some(last) = last {
                 deadlines.entry(last + threshold).or_default().0 |= TimerKey::WATCHDOG;
+            }
+        }
+        if self.trading_feed.attached() {
+            for (key, _) in self.engine.instrument_subscriptions() {
+                if let Some(at_ms) = wall_ms
+                    && let Some((transition, _)) = self
+                        .calendar
+                        .next_transition(key.instrument.as_str(), at_ms)
+                    && let Some(delay_ms) = transition.checked_sub(at_ms)
+                    && let Ok(delay_ms) = u64::try_from(delay_ms)
+                {
+                    deadlines
+                        .entry(now + Duration::from_millis(delay_ms))
+                        .or_default()
+                        .0 |= TimerKey::SESSION_TRANSITION;
+                }
             }
         }
         for book in self.order_books.values() {
@@ -1276,6 +1323,7 @@ impl Coordinator<'_> {
                 self.reconcile_order_books();
                 self.mark_alert_demand_changed();
                 self.pending_activity = true;
+                self.publish_trading_session(key);
                 if reply.send(Ok(id)).is_err() {
                     let _ = self.engine.release_data_lease(id);
                     self.reconcile_order_books();
@@ -1313,9 +1361,107 @@ impl Coordinator<'_> {
             .map_err(|error| error.to_string())?;
         self.trading_interest_revision = interest.revision;
         self.reconcile_order_books();
+        for route in &interest.routes {
+            self.publish_trading_session(&super::InstrumentStreamKey {
+                provider: route.provider_id.clone(),
+                instrument: route.instrument_id.clone(),
+                entitlement: route.entitlement_id.clone(),
+            });
+        }
         self.mark_alert_demand_changed();
         self.pending_activity = true;
         Ok(())
+    }
+
+    pub(super) fn publish_trading_session(&self, key: &super::InstrumentStreamKey) {
+        use aeris_instruments::CalendarSourceKind;
+        use aeris_trading::market::{InstrumentSession, MarketFeedEvent};
+
+        if !self.trading_feed.attached() {
+            return;
+        }
+        let Some(at) = self.clock.wall_nanos() else {
+            return;
+        };
+        let status = self
+            .calendar
+            .status(key.instrument.as_str(), at.div_euclid(1_000_000));
+        let source = match status.source {
+            aeris_contracts::MarketSessionSource::ProviderCalendar => {
+                CalendarSourceKind::ProviderCalendar
+            }
+            aeris_contracts::MarketSessionSource::ProviderHours => {
+                CalendarSourceKind::ContractHours
+            }
+            aeris_contracts::MarketSessionSource::Continuous => CalendarSourceKind::AlwaysOpen,
+            aeris_contracts::MarketSessionSource::Unavailable => CalendarSourceKind::Unknown,
+        };
+        let session = InstrumentSession {
+            instrument_id: key.instrument.clone(),
+            phase: self
+                .calendar
+                .phase(key.instrument.as_str(), at.div_euclid(1_000_000)),
+            source,
+            session_end_unix_nanos: status.session_end_unix_nanos,
+            next_open_unix_nanos: status.next_open_unix_nanos,
+        };
+        self.trading_feed.publish(MarketFeedEvent::Session(session));
+    }
+
+    fn publish_trading_feed_snapshot(&self) {
+        for instrument in self.catalog.values() {
+            if let Ok(terms) = super::instrument_terms_from_install(instrument) {
+                self.trading_feed
+                    .publish(aeris_trading::market::MarketFeedEvent::Terms(terms));
+            }
+        }
+        for (key, _) in self.engine.instrument_subscriptions() {
+            self.publish_trading_session(&key);
+            if let Some(generation) = self
+                .engine
+                .provider_status(&key.provider)
+                .and_then(|status| status.generation)
+            {
+                let state = if self
+                    .engine
+                    .provider_status(&key.provider)
+                    .is_some_and(|status| status.health == ProviderHealth::Online)
+                {
+                    aeris_trading::market::FeedState::Live
+                } else {
+                    aeris_trading::market::FeedState::Stale {
+                        reason: aeris_trading::market::FeedReason::Disconnected,
+                    }
+                };
+                self.trading_feed
+                    .publish(aeris_trading::market::MarketFeedEvent::Feed {
+                        instrument_id: key.instrument.clone(),
+                        state,
+                        provider_generation: generation.0.get(),
+                    });
+            }
+        }
+    }
+
+    pub(super) fn publish_provider_feed(
+        &self,
+        provider: &str,
+        generation: u64,
+        state: aeris_trading::market::FeedState,
+    ) {
+        if !self.trading_feed.attached() {
+            return;
+        }
+        for (key, _) in self.engine.instrument_subscriptions() {
+            if key.provider == provider {
+                self.trading_feed
+                    .publish(aeris_trading::market::MarketFeedEvent::Feed {
+                        instrument_id: key.instrument.clone(),
+                        state,
+                        provider_generation: generation,
+                    });
+            }
+        }
     }
 
     fn replace_price_alerts(
@@ -1768,11 +1914,25 @@ impl Coordinator<'_> {
 
     pub(super) fn reconcile_order_books(&mut self) {
         let (required_identities, depth_identities) = self.required_order_book_identities();
-        let retained_keys = self
+        let mut retained_keys = self
             .engine
             .instrument_subscriptions()
             .map(|(key, _)| key)
             .collect::<BTreeSet<_>>();
+        if self.trading_feed.attached() {
+            for (series, status) in self.engine.subscriptions() {
+                if status.streams.contains(MarketStream::Quotes)
+                    && let Ok(instrument) =
+                        aeris_instruments::InstrumentId::try_new(series.instrument_id)
+                {
+                    retained_keys.insert(super::InstrumentStreamKey {
+                        provider: series.provider_id,
+                        instrument,
+                        entitlement: Some(series.entitlement_id),
+                    });
+                }
+            }
+        }
         self.quotes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2180,6 +2340,7 @@ mod tests {
     #[test]
     fn trading_feed_quote_lease_without_chart_drives_provider_and_book_demand() {
         let mut coordinator = coordinator();
+        coordinator.trading_feed.attach();
         let instrument = hyperliquid_instrument();
         coordinator.catalog.insert(
             (
@@ -2252,7 +2413,11 @@ mod tests {
         assert_eq!(state.quote.bid.units(), 100);
         assert_eq!(state.quote.ask.units(), 101);
         assert_eq!(state.quote.provider_generation, generation.0.get());
-
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(aeris_trading::market::MarketFeedEvent::Quote(quote))
+                if quote.bid.units() == 100 && quote.ask.units() == 101
+        ));
         assert!(coordinator.engine.release_data_lease(lease));
         coordinator.reconcile_order_books();
         assert!(coordinator.order_books.is_empty());
@@ -2264,6 +2429,175 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn trading_feed_reconnect_and_release_emit_only_leased_instruments() {
+        let mut coordinator = coordinator();
+        coordinator.trading_feed.attach();
+        let instrument = hyperliquid_instrument();
+        let key = super::super::InstrumentStreamKey {
+            provider: instrument.provider.clone(),
+            instrument: aeris_instruments::InstrumentId::try_new(instrument.instrument_id).unwrap(),
+            entitlement: Some(instrument.entitlement_id),
+        };
+        let lease = coordinator
+            .engine
+            .acquire_instrument_lease(&key, StreamRequirements::NONE.with(MarketStream::Quotes))
+            .unwrap();
+        coordinator.publish_provider_feed(
+            &key.provider,
+            2,
+            aeris_trading::market::FeedState::Stale {
+                reason: aeris_trading::market::FeedReason::Disconnected,
+            },
+        );
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(aeris_trading::market::MarketFeedEvent::Feed {
+                state: aeris_trading::market::FeedState::Stale { .. },
+                ..
+            })
+        ));
+        coordinator.publish_provider_feed(&key.provider, 3, aeris_trading::market::FeedState::Live);
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(aeris_trading::market::MarketFeedEvent::Feed {
+                state: aeris_trading::market::FeedState::Live,
+                provider_generation: 3,
+                ..
+            })
+        ));
+        assert!(coordinator.engine.release_data_lease(lease));
+        coordinator.publish_provider_feed(&key.provider, 4, aeris_trading::market::FeedState::Live);
+        assert!(coordinator.trading_feed.receive(Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn trading_feed_chart_quote_stream_emits_without_a_separate_instrument_lease() {
+        let mut coordinator = coordinator();
+        coordinator.trading_feed.attach();
+        let instrument = hyperliquid_instrument();
+        coordinator.catalog.insert(
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
+            instrument.clone(),
+        );
+        let series = hyperliquid_series();
+        let (lease, _) = coordinator
+            .engine
+            .acquire_data_lease(&series, StreamRequirements::BARS.with(MarketStream::Quotes))
+            .unwrap();
+        assert_eq!(coordinator.engine.instrument_subscriptions().count(), 0);
+        coordinator.reconcile_order_books();
+        let generation = ProviderGeneration(nonzero(2));
+        coordinator
+            .engine
+            .begin_provider_session(&instrument.provider, generation)
+            .unwrap();
+        coordinator.provider_quote(
+            &instrument.provider,
+            2,
+            &TopOfBookQuote {
+                metadata: EventMetadata {
+                    provider_id: instrument.provider.clone(),
+                    instrument_id: instrument.instrument_id.clone(),
+                    entitlement_id: instrument.entitlement_id.clone(),
+                    session_generation: 2,
+                    source_sequence: 1,
+                    timestamps: QualifiedTimestamp {
+                        exchange_unix_nanos: Some(10),
+                        provider_unix_nanos: None,
+                        received_unix_nanos: 11,
+                    },
+                },
+                bid: Some(aeris_market_data::QuoteLevel {
+                    price: 100,
+                    quantity: None,
+                    order_count: None,
+                }),
+                ask: Some(aeris_market_data::QuoteLevel {
+                    price: 101,
+                    quantity: None,
+                    order_count: None,
+                }),
+            },
+        );
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(aeris_trading::market::MarketFeedEvent::Quote(quote))
+                if quote.bid.units() == 100 && quote.ask.units() == 101
+        ));
+        assert!(coordinator.engine.release_data_lease(lease));
+        coordinator.reconcile_order_books();
+        assert!(coordinator.order_books.is_empty());
+    }
+
+    #[test]
+    fn trading_feed_catalog_terms_and_lease_session_transition() {
+        use aeris_trading::market::MarketFeedEvent;
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-18T23:59:59Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let clock = Arc::new(super::super::clock::ScriptedClock::new(at));
+        let mut coordinator = coordinator();
+        coordinator.clock = clock.clone();
+        coordinator.trading_feed.attach();
+        let mut instrument = instrument();
+        instrument.contract_metadata = Some(Box::new(aeris_contracts::ProviderContractMetadata {
+            currency: Some("USD".into()),
+            point_value: Some(5),
+            point_value_scale: Some(0),
+            session_hours: vec![aeris_contracts::ProviderSessionHours {
+                weekday: 1,
+                open_seconds: 0,
+                close_seconds: 3600,
+                timezone: "UTC".into(),
+            }],
+            ..Default::default()
+        }));
+        coordinator
+            .install_provider_instrument(&instrument)
+            .unwrap();
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(MarketFeedEvent::Terms(terms))
+                if terms.price_grid == aeris_instruments::PriceGrid::Fixed(
+                    aeris_instruments::InstrumentDecimal::try_new(25, 2).unwrap()
+                )
+        ));
+        let key = super::super::InstrumentStreamKey {
+            provider: instrument.provider,
+            instrument: aeris_instruments::InstrumentId::try_new(instrument.instrument_id).unwrap(),
+            entitlement: Some(instrument.entitlement_id),
+        };
+        coordinator
+            .engine
+            .acquire_instrument_lease(&key, StreamRequirements::NONE.with(MarketStream::Quotes))
+            .unwrap();
+        coordinator.publish_trading_session(&key);
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(MarketFeedEvent::Session(session))
+                if session.phase == aeris_instruments::SessionPhase::Closed
+        ));
+        coordinator.refresh_deadlines();
+        assert!(
+            coordinator
+                .deadlines
+                .values()
+                .any(|timer| timer.contains(TimerKey::SESSION_TRANSITION))
+        );
+        clock.advance(Duration::from_secs(1));
+        coordinator.publish_trading_session(&key);
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(MarketFeedEvent::Session(session))
+                if session.phase == aeris_instruments::SessionPhase::Open
+        ));
     }
 
     #[test]
@@ -2486,6 +2820,8 @@ mod tests {
             pending_activity: true,
             quote_releases: None,
             quotes: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
+            trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
+            trading_feed_snapshot_sent: false,
             trading_interest_revision: 0,
             control_retry: false,
             series_effects: super::super::lifecycle::EffectBuf::default(),

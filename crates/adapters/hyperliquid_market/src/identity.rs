@@ -76,6 +76,14 @@ impl HyperliquidInstrument {
         if self.price_scale > 18 || self.quantity_scale > 18 {
             return Err("hyperliquid instrument precision is invalid".to_string());
         }
+        let max_decimals = if matches!(self.kind, HyperliquidMarketKind::Spot { .. }) {
+            8
+        } else {
+            6
+        };
+        if self.sz_decimals > max_decimals {
+            return Err("hyperliquid size decimals exceed the price grid limit".into());
+        }
         if let HyperliquidMarketKind::BuilderPerp { dex } = &self.kind
             && (dex.trim().is_empty() || dex.len() > 64)
         {
@@ -310,6 +318,26 @@ mod tests {
         assert_eq!(perp.wire_coin, "BTC");
         assert_eq!(spot.wire_coin, "@5");
         assert_eq!(builder.wire_coin, "xyz:BTC");
+    }
+
+    #[test]
+    fn catalog_rejects_size_precision_beyond_documented_price_grid() {
+        let perp = core_perp_with_quote("BTC", LEGACY_PERP_QUOTE_ASSET, 7).unwrap();
+        let spot = spot_pair("BTC/USDC", 5, (0, 1), 9).unwrap();
+        assert!(perp.validate().is_err());
+        assert!(spot.validate().is_err());
+        assert!(
+            core_perp_with_quote("BTC", LEGACY_PERP_QUOTE_ASSET, 6)
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            spot_pair("BTC/USDC", 5, (0, 1), 8)
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]

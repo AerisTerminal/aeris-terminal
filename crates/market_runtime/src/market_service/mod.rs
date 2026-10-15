@@ -59,6 +59,9 @@ use crate::rithmic_realtime::{
 mod alerts;
 mod quotes;
 pub use quotes::{QuoteSourceKind, QuoteState};
+mod trading_feed;
+pub use trading_feed::TradingFeedLink;
+pub use trading_feed::instrument_terms_from_install;
 pub(crate) mod clock;
 pub(crate) mod reconnect;
 use alerts::PriceAlertRegistry;
@@ -191,6 +194,7 @@ struct MarketRuntime {
     workers: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
     quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     quotes: Arc<Mutex<quotes::QuoteBook>>,
+    trading_feed: Arc<trading_feed::TradingFeedOutbox>,
 }
 
 struct MarketServiceProviders {
@@ -204,6 +208,7 @@ impl Drop for MarketRuntime {
         // A full queue already makes the coordinator runnable.
         let _ = self.shutdown_wake.try_send(Command::ProviderWake);
         self.broker_api.cancel_searches();
+        self.trading_feed.wake();
     }
 }
 

@@ -8,6 +8,35 @@ use aeris_contracts::{
 };
 use prost::Message as _;
 
+#[test]
+fn provider_variable_price_grid_round_trips_and_old_terms_remain_unknown() {
+    let instrument = InstallProviderInstrument {
+        contract_metadata: Some(Box::new(aeris_contracts::ProviderContractMetadata {
+            price_significant_figures: Some(5),
+            price_max_decimals: Some(1),
+            instrument_class: Some(
+                aeris_contracts::ProviderInstrumentClass::CryptoPerpetual as i32,
+            ),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let decoded = InstallProviderInstrument::decode(instrument.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded, instrument);
+    let legacy = aeris_contracts::ProviderContractMetadata::decode(
+        aeris_contracts::ProviderContractMetadata {
+            currency: Some("USD".into()),
+            ..Default::default()
+        }
+        .encode_to_vec()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(legacy.price_significant_figures, None);
+    assert_eq!(legacy.price_max_decimals, None);
+    assert_eq!(legacy.instrument_class, None);
+}
+
 fn workspace_tab() -> WorkspaceTabState {
     let instrument = InstallProviderInstrument {
         provider: "rithmic".into(),

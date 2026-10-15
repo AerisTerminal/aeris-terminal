@@ -87,8 +87,14 @@ impl QuoteBook {
             phase,
             source: QuoteSourceKind::TopOfBook,
         };
+        let changed = self.latest.get(&key).is_none_or(|previous| {
+            previous.quote.bid != state.quote.bid
+                || previous.quote.ask != state.quote.ask
+                || previous.quote.bid_size != state.quote.bid_size
+                || previous.quote.ask_size != state.quote.ask_size
+        });
         self.latest.insert(key, state.clone());
-        Some(state)
+        changed.then_some(state)
     }
 }
 

@@ -295,6 +295,12 @@ impl Coordinator<'_> {
             .or_insert(instrument.session_generation);
         self.catalog.insert(key, instrument.clone());
         self.calendar.resolve(instrument, None);
+        if self.trading_feed.attached()
+            && let Ok(terms) = super::instrument_terms_from_install(instrument)
+        {
+            self.trading_feed
+                .publish(aeris_trading::market::MarketFeedEvent::Terms(terms));
+        }
         self.reconcile_order_books();
         Ok(())
     }

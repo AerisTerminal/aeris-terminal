@@ -28,6 +28,7 @@ use aeris_trading::market::{MarketFeedError, QuoteInterest, QuoteInterestSink};
 struct QuoteChannels {
     releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     latest: Arc<Mutex<super::quotes::QuoteBook>>,
+    trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
 }
 
 struct MarketQuoteInterestSink(MarketService);
@@ -1131,6 +1132,7 @@ impl MarketService {
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let quote_releases = Arc::new(Mutex::new(Vec::new()));
         let quotes = Arc::new(Mutex::new(super::quotes::QuoteBook::default()));
+        let trading_feed = Arc::new(super::trading_feed::TradingFeedOutbox::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let broker_api = Arc::new(super::tastytrade::BrokerApi::default());
@@ -1153,6 +1155,7 @@ impl MarketService {
                 providers: provider_registry,
                 quote_releases: Arc::clone(&quote_releases),
                 quotes: Arc::clone(&quotes),
+                trading_feed: Arc::clone(&trading_feed),
             },
             Arc::clone(&shutdown),
             Arc::new(super::clock::SystemClock),
@@ -1170,6 +1173,7 @@ impl MarketService {
             QuoteChannels {
                 releases: quote_releases,
                 latest: quotes,
+                trading_feed,
             },
         )
     }
@@ -1186,6 +1190,7 @@ impl MarketService {
         let QuoteChannels {
             releases: quote_releases,
             latest: quotes,
+            trading_feed,
         } = channels;
         let super::ProviderStartContext {
             tastytrade: broker_api,
@@ -1227,6 +1232,7 @@ impl MarketService {
                 workers: Mutex::new(Some(workers)),
                 quote_releases,
                 quotes,
+                trading_feed,
             }),
         })
     }
@@ -1237,6 +1243,7 @@ impl MarketService {
     /// Returns an error when a worker panics or the complete shutdown exceeds `timeout`.
     pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
         self.runtime.shutdown.store(true, Ordering::Release);
+        self.runtime.trading_feed.wake();
         // A full queue already makes the coordinator runnable.
         let _ = self.commands.try_send(Command::ProviderWake);
         self.runtime.broker_api.cancel_searches();
@@ -1687,6 +1694,45 @@ impl MarketService {
         Arc::new(MarketQuoteInterestSink(self.clone()))
     }
 
+    /// Attaches the trading owner's feed on a bounded background worker.
+    /// Events are latest-wins per instrument and kind while the owner is busy.
+    ///
+    /// # Errors
+    /// Returns an error when the feed was already attached or the worker cannot start.
+    pub fn attach_trading_feed(&self, link: super::TradingFeedLink) -> Result<(), String> {
+        let mut workers = self
+            .runtime
+            .workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workers = workers
+            .as_mut()
+            .ok_or_else(|| "market engine shutdown is in progress".to_string())?;
+        if self.runtime.trading_feed.attached() {
+            return Err("trading feed is already attached".into());
+        }
+        let inbox = Arc::clone(&self.runtime.trading_feed);
+        let shutdown = Arc::clone(&self.runtime.shutdown);
+        let worker = thread::Builder::new()
+            .name("aeris-trading-feed".into())
+            .spawn(move || {
+                while !shutdown.load(Ordering::Acquire) {
+                    if let Some(event) = inbox.receive(Duration::from_secs(30))
+                        && !shutdown.load(Ordering::Acquire)
+                    {
+                        (link.events)(event);
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        workers.push(worker);
+        self.runtime.trading_feed.attach();
+        // If the coordinator is already busy, its queued work will discover
+        // the attachment at the start of the next turn.
+        let _ = self.commands.try_send(Command::ProviderWake);
+        Ok(())
+    }
+
     /// Drains at most one bounded market publication for an owned consumer.
     ///
     /// # Errors
@@ -2010,6 +2056,7 @@ mod tests {
             QuoteChannels {
                 releases: Arc::new(Mutex::new(Vec::new())),
                 latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
+                trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
             },
         )
         .expect("test runtime starts");
@@ -2047,6 +2094,7 @@ mod tests {
             QuoteChannels {
                 releases: Arc::clone(&releases),
                 latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
+                trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
             },
         )
         .unwrap();

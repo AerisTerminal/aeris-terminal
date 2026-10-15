@@ -793,6 +793,26 @@ pub struct ProviderContractMetadata {
     /// Minimum practice order quantity in fixed-point `InstallProviderInstrument.quantity_scale` units.
     #[prost(int64, optional, tag = "8")]
     pub order_quantity_increment: Option<i64>,
+    /// Provider-sourced variable tick rule; absent means fixed increment or unknown.
+    #[prost(uint32, optional, tag = "9")]
+    pub price_significant_figures: Option<u32>,
+    /// Maximum price decimals after applying the exchange's size precision.
+    #[prost(uint32, optional, tag = "10")]
+    pub price_max_decimals: Option<u32>,
+    #[prost(enumeration = "ProviderInstrumentClass", optional, tag = "11")]
+    pub instrument_class: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum ProviderInstrumentClass {
+    Other = 0,
+    Equity = 1,
+    Option = 2,
+    Future = 3,
+    ForeignExchange = 4,
+    CryptoSpot = 5,
+    CryptoPerpetual = 6,
 }
 
 /// One provider-reported weekly exchange session segment.

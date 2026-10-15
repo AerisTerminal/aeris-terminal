@@ -613,6 +613,25 @@ impl SeriesLifecycle {
     }
 }
 
+fn trading_feed_state(kind: &ProviderEventKind) -> Option<aeris_trading::market::FeedState> {
+    use aeris_trading::market::{FeedReason, FeedState};
+    match kind {
+        ProviderEventKind::Connecting | ProviderEventKind::Recovering { .. } => {
+            Some(FeedState::Stale {
+                reason: FeedReason::Recovering,
+            })
+        }
+        ProviderEventKind::Connected | ProviderEventKind::Heartbeat(_) => Some(FeedState::Live),
+        ProviderEventKind::Disconnected(_) => Some(FeedState::Stale {
+            reason: FeedReason::Disconnected,
+        }),
+        ProviderEventKind::Failed(_) => Some(FeedState::Unavailable {
+            reason: FeedReason::Disconnected,
+        }),
+        _ => None,
+    }
+}
+
 impl Coordinator<'_> {
     pub(super) fn cancel_inflight_history_for_live_recovery(
         &self,
@@ -1311,6 +1330,7 @@ impl Coordinator<'_> {
             );
             return;
         }
+        let feed_state = trading_feed_state(&kind);
         match kind {
             ProviderEventKind::TransportReplaced => unreachable!("handled before dispatch"),
             ProviderEventKind::Connecting => {
@@ -1376,6 +1396,9 @@ impl Coordinator<'_> {
             ProviderEventKind::Calendar { .. } => {
                 unreachable!("calendar update handled before dispatch")
             }
+        }
+        if let Some(state) = feed_state {
+            self.publish_provider_feed(provider, generation, state);
         }
     }
 
@@ -2363,6 +2386,17 @@ impl Coordinator<'_> {
                 .engine
                 .instrument_subscriptions()
                 .any(|(leased, _)| leased == key)
+                || (self.trading_feed.attached()
+                    && self
+                        .engine
+                        .subscriptions()
+                        .into_iter()
+                        .any(|(series, status)| {
+                            status.streams.contains(MarketStream::Quotes)
+                                && series.provider_id == provider
+                                && series.instrument_id == instrument_id.as_str()
+                                && series.entitlement_id == entitlement_id
+                        }))
             {
                 let route = aeris_trading::market::MarketRoute {
                     provider_id: provider.to_string(),
@@ -2381,10 +2415,16 @@ impl Coordinator<'_> {
                 let phase = self
                     .calendar
                     .phase(&instrument.instrument_id, received.div_euclid(1_000_000));
-                self.quotes
+                if let Some(state) = self
+                    .quotes
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .update(key, &route, quote, received, phase);
+                    .update(key, &route, quote, received, phase)
+                    && self.trading_feed.attached()
+                {
+                    self.trading_feed
+                        .publish(aeris_trading::market::MarketFeedEvent::Quote(state.quote));
+                }
             }
         }
     }

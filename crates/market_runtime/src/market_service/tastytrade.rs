@@ -1295,6 +1295,12 @@ fn install_resolved(
                     // Those windows cannot be represented by ProviderSessionHours.
                     session_hours: Vec::new(),
                     order_quantity_increment: 10_i64.checked_pow(DATA_SCALE),
+                    instrument_class: Some(if resolved.instrument_type == "Equity" {
+                        aeris_contracts::ProviderInstrumentClass::Equity
+                    } else {
+                        aeris_contracts::ProviderInstrumentClass::Future
+                    } as i32),
+                    ..Default::default()
                 })
             }),
     }

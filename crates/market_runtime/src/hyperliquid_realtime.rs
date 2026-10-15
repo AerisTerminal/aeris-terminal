@@ -474,6 +474,7 @@ fn handle_catalog_select(
         return false;
     };
     catalog.selection_generation = catalog.selection_generation.saturating_add(1).max(1);
+    let terms = hyperliquid_terms(&resolved);
     let _ = publish_catalog(
         events,
         HyperliquidCatalogEvent::SelectionResolved {
@@ -493,23 +494,39 @@ fn handle_catalog_select(
                 // Hyperliquid ticks follow significant figures, so this is the
                 // valid increment near the catalog mark price at selection.
                 price_increment,
-                contract_metadata: Some(Box::new(ProviderContractMetadata {
-                    // Hyperliquid sizes are base-asset units and its linear PnL is
-                    // (exit - entry) * size, so one size unit has a point value of one.
-                    point_value: Some(1),
-                    point_value_scale: Some(0),
-                    currency: Some("USD".to_string()),
-                    contract_expiry: None,
-                    first_notice_date: None,
-                    last_trade_date: None,
-                    session_hours: Vec::new(),
-                    order_quantity_increment: None,
-                })),
+                contract_metadata: Some(Box::new(terms)),
             },
         },
         stop,
     );
     false
+}
+
+fn hyperliquid_terms(
+    resolved: &aeris_hyperliquid_market_adapter::HyperliquidInstrument,
+) -> ProviderContractMetadata {
+    let spot = matches!(
+        resolved.kind,
+        aeris_hyperliquid_market_adapter::HyperliquidMarketKind::Spot { .. }
+    );
+    ProviderContractMetadata {
+        // Hyperliquid sizes are base-asset units and linear PnL is
+        // (exit - entry) * size, so one size unit has point value one.
+        point_value: Some(1),
+        point_value_scale: Some(0),
+        currency: Some("USD".to_string()),
+        price_significant_figures: Some(5),
+        // Exchange tick/lot docs: at most 6 - szDecimals price decimals
+        // for perps, 8 - szDecimals for spot. The normalized quantity
+        // scale is not the native szDecimals.
+        price_max_decimals: (if spot { 8_u32 } else { 6_u32 }).checked_sub(resolved.sz_decimals),
+        instrument_class: Some(if spot {
+            aeris_contracts::ProviderInstrumentClass::CryptoSpot
+        } else {
+            aeris_contracts::ProviderInstrumentClass::CryptoPerpetual
+        } as i32),
+        ..Default::default()
+    }
 }
 
 fn instrument_matches_entitlement(

@@ -32,6 +32,10 @@ impl Coordinator<'_> {
             return;
         }
         if current.is_some_and(|current| generation > current) {
+            self.quotes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear_provider(provider);
             if model == LiveModel::ProviderCandles {
                 self.clear_provider_display_depth(provider);
                 if self
