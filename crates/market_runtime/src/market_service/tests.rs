@@ -77,6 +77,27 @@ fn published_instrument_series_uses_calendar_resolved_daily_cadence() {
 }
 
 #[test]
+fn default_instrument_resolves_to_an_ungated_registered_provider() {
+    let instrument = descriptors::default_instrument();
+    let provider = published_provider_descriptors()
+        .iter()
+        .find(|provider| provider.id == instrument.provider)
+        .expect("default is a registered provider");
+    assert_eq!(provider.connect, descriptors::ConnectMethod::Public);
+    assert_eq!(
+        ResolvedSeries::resolve(
+            &instrument,
+            aeris_market_data::ChartInterval::Minute1,
+            &HYPERLIQUID_PRESENTATION,
+        )
+        .expect("default minute series")
+        .key
+        .instrument_id,
+        instrument.instrument_id
+    );
+}
+
+#[test]
 fn reconnect_status_is_plain_language_and_clears_after_streaming_resumes() {
     let lifecycle = ProviderRuntimeLifecycle::default();
     lifecycle.observe_generation(2, true);

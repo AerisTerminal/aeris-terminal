@@ -1215,6 +1215,10 @@ impl Coordinator<'_> {
                     self.history_completed(&ticket, generation, range, result);
                 }
             }
+            Command::SelectAndDemand(client_id, request, reply) => {
+                let outcome = self.select_and_demand(client_id, &request);
+                let _ = reply.send(Ok(outcome));
+            }
             command @ (Command::BrokerAuthorizationChanged(..)
             | Command::AvailableStreams(..)
             | Command::InstalledInstrument(..)
@@ -1393,6 +1397,7 @@ impl Coordinator<'_> {
                 self.handle_drain(client_id, consumer_id, &reply);
             }
             Command::Request(..)
+            | Command::SelectAndDemand(..)
             | Command::HistoryCompleted(..)
             | Command::ProviderWake
             | Command::Status(..)

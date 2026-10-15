@@ -169,6 +169,28 @@ impl DemandRegistry {
         Ok(true)
     }
 
+    /// Rolls back one uncommitted selection in the coordinator's same turn.
+    pub(crate) fn rollback_series(
+        &mut self,
+        consumer_id: ConsumerId,
+        rejected: GenerationId,
+        previous: ConsumerDemand,
+    ) -> Result<(), EngineError> {
+        let current = self
+            .consumers
+            .get_mut(&consumer_id)
+            .ok_or(EngineError::UnknownConsumer(consumer_id))?;
+        if current.generation != Some(rejected) || current.identity != previous.identity {
+            return Err(EngineError::StaleConsumerGeneration {
+                consumer_id,
+                current: current.generation.unwrap_or(rejected),
+                received: rejected,
+            });
+        }
+        *current = previous;
+        Ok(())
+    }
+
     pub(crate) fn set_viewport(
         &mut self,
         consumer_id: ConsumerId,

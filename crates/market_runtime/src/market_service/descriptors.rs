@@ -5,6 +5,7 @@ use aeris_contracts::{
 };
 use aeris_instruments::{CalendarSourceKind, InstrumentClass, PriceGrid};
 use aeris_market_data::{BarPeriod, BarSeriesKey, ChartInterval};
+use aeris_market_engine::{GenerationId, StreamRequirements, Viewport};
 
 use crate::{CadenceError, resolve_series_key};
 
@@ -70,6 +71,73 @@ pub struct InstrumentDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DescriptorError {
     InvalidInstrument,
+}
+
+/// Stable catalog identity requested by a chart consumer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstrumentRef {
+    pub provider_id: String,
+    pub instrument_id: String,
+    pub entitlement_id: String,
+}
+
+/// A fresh workspace requests the runtime's public default, not a desktop fixture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstrumentRequest {
+    Ref(InstrumentRef),
+    Default,
+}
+
+/// Public, ungated default for a fresh workspace. Catalog refresh replaces
+/// these provisional terms before the provider starts its selected stream.
+pub(super) fn default_instrument() -> InstallProviderInstrument {
+    InstallProviderInstrument {
+        provider: "hyperliquid".into(),
+        session_generation: 1,
+        selection_generation: 1,
+        instrument_id: "hyperliquid:perp:BTC".into(),
+        provider_symbol: "BTC".into(),
+        display_symbol: "BTC-USDC".into(),
+        venue_id: "Hyperliquid".into(),
+        price_scale: 8,
+        quantity_scale: 8,
+        entitlement_id: "hyperliquid-public".into(),
+        ..Default::default()
+    }
+}
+
+/// One bounded pane selection command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectionRequest {
+    pub consumer_id: u64,
+    pub generation: u64,
+    pub instrument: InstrumentRequest,
+    pub interval: ChartInterval,
+    pub streams: StreamRequirements,
+    pub viewport: Option<Viewport>,
+}
+
+/// The exact outcome of one attempted binding generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectionOutcome {
+    Selected {
+        generation: GenerationId,
+        descriptor: Box<InstrumentDescriptor>,
+        series: ResolvedSeries,
+    },
+    Failed {
+        generation: GenerationId,
+        error: SelectionError,
+    },
+}
+
+/// Selection failures do not retire the consumer's prior series.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectionError {
+    InstrumentUnavailable,
+    UnsupportedInterval,
+    InvalidViewport,
+    DemandRejected(String),
 }
 
 impl InstrumentDescriptor {

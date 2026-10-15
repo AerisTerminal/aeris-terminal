@@ -529,6 +529,38 @@ impl MarketEngine {
         })
     }
 
+    /// Restores a prior consumer selection if the attempted replacement failed
+    /// before its outcome was published. The rejected generation must still be
+    /// current, so this cannot roll back a newer accepted command.
+    ///
+    /// # Errors
+    /// Rejects a retired or foreign consumer generation without changing state.
+    pub fn rollback_series_demand(
+        &mut self,
+        consumer_id: ConsumerId,
+        rejected: GenerationId,
+        previous: &ConsumerDemand,
+    ) -> Result<(), EngineError> {
+        let current = self
+            .demands
+            .current(consumer_id)
+            .cloned()
+            .ok_or(EngineError::UnknownConsumer(consumer_id))?;
+        self.demands
+            .rollback_series(consumer_id, rejected, previous.clone())?;
+        if current.resource_class.retains_subscription() {
+            if let Some(current_series) = current.series.as_ref() {
+                self.subscriptions.remove(consumer_id, current_series);
+            }
+            if let Some((series, streams)) = previous.series.as_ref().zip(previous.streams) {
+                self.subscriptions
+                    .replace(consumer_id, None, series, streams);
+            }
+        }
+        self.publications.remove(consumer_id);
+        Ok(())
+    }
+
     /// Updates viewport demand only for the current consumer generation.
     ///
     /// # Errors
@@ -2689,5 +2721,35 @@ mod tests {
             .expect("covering recovery publishes");
         assert_eq!(recovery.publication_generation, 2);
         assert!(Arc::ptr_eq(&first.snapshot, &recovery.snapshot));
+    }
+
+    #[test]
+    fn failed_selection_rollback_keeps_previous_subscription_and_viewport() {
+        let mut engine = engine(1, 2, 4);
+        let old = series("rithmic:spot:BTC-USD");
+        let next = series("rithmic:spot:ETH-USD");
+        register(&mut engine, 1, 1);
+        engine
+            .set_series_demand(id(1), generation(1), &old)
+            .expect("old selection");
+        let viewport = Viewport::try_new(1, 2).expect("viewport");
+        engine
+            .set_viewport(id(1), generation(1), viewport)
+            .expect("old viewport");
+        let previous = engine.current_demand(id(1)).expect("previous").clone();
+        engine
+            .set_series_demand(id(1), generation(2), &next)
+            .expect("provisional selection");
+        engine
+            .rollback_series_demand(id(1), generation(2), &previous)
+            .expect("provisional selection rolls back");
+        assert_eq!(engine.current_demand(id(1)), Some(&previous));
+        assert!(engine.has_subscription(&old));
+        assert!(!engine.has_subscription(&next));
+        assert!(
+            engine
+                .rollback_series_demand(id(1), generation(2), &previous)
+                .is_err()
+        );
     }
 }

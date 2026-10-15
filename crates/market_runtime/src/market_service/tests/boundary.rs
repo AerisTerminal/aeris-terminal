@@ -69,6 +69,28 @@ impl Boundary {
         received.recv().expect("demand reply").expect("demand succeeds");
     }
 
+    pub(super) fn select(
+        &mut self,
+        generation_number: u64,
+        instrument: super::super::super::descriptors::InstrumentRequest,
+        interval: aeris_market_data::ChartInterval,
+    ) -> super::super::super::descriptors::SelectionOutcome {
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        self.command(Command::SelectAndDemand(
+            client(1),
+            super::super::super::descriptors::SelectionRequest {
+                consumer_id: self.consumer.0.get(),
+                generation: generation_number,
+                instrument,
+                interval,
+                streams: StreamRequirements::BARS,
+                viewport: None,
+            },
+            reply,
+        ));
+        received.recv().expect("exactly one selection reply").expect("transport")
+    }
+
     pub(super) fn history_request(&self) -> super::super::super::HistoryRequest {
         self.history.try_recv().expect("provider history request")
     }
@@ -144,4 +166,48 @@ impl Boundary {
         self.command(Command::InstallProviderInstrument(instrument, reply));
         received.recv().expect("install reply").expect("instrument installs");
     }
+}
+
+#[test]
+fn select_and_demand_rejects_invalid_interval_without_retiring_previous_series() {
+    use super::super::super::descriptors::{InstrumentRef, InstrumentRequest, SelectionOutcome};
+
+    let mut boundary = Boundary::new();
+    boundary.demand(boundary.series(), 1);
+    let initial = boundary.history_request();
+    boundary.complete(initial, minute_bars(0, 3), Some(minute_bars(3, 1)[0]));
+    boundary.events();
+    let reference = InstrumentRequest::Ref(InstrumentRef {
+        provider_id: "rithmic".into(),
+        instrument_id: boundary.series().instrument_id,
+        entitlement_id: boundary.series().entitlement_id,
+    });
+    let failed = boundary.select(2, reference, aeris_market_data::ChartInterval::Day3);
+    assert!(matches!(failed, SelectionOutcome::Failed { .. }));
+    boundary.trade(1, 4);
+    assert!(boundary.events().iter().any(|event| matches!(
+        event,
+        MarketRuntimeEvent::SeriesUpdate(update) if update.generation == generation(1)
+    )));
+}
+
+#[test]
+fn select_and_demand_resolves_once_and_rejects_retired_generation() {
+    use super::super::super::descriptors::{InstrumentRef, InstrumentRequest, SelectionOutcome};
+
+    let mut boundary = Boundary::new();
+    let reference = InstrumentRequest::Ref(InstrumentRef {
+        provider_id: "rithmic".into(),
+        instrument_id: boundary.series().instrument_id,
+        entitlement_id: boundary.series().entitlement_id,
+    });
+    let selected = boundary.select(2, reference.clone(), aeris_market_data::ChartInterval::Minute1);
+    assert!(matches!(selected, SelectionOutcome::Selected { generation: selected, .. } if selected == generation(2)));
+    let stale = boundary.select(1, reference, aeris_market_data::ChartInterval::Minute1);
+    assert!(matches!(stale, SelectionOutcome::Failed { generation: retired, .. } if retired == generation(1)));
+    assert_eq!(
+        boundary.coordinator.engine.current_demand(boundary.consumer)
+            .and_then(|demand| demand.generation),
+        Some(generation(2)),
+    );
 }

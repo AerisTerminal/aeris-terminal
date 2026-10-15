@@ -58,7 +58,9 @@ use crate::rithmic_realtime::{
 
 mod alerts;
 pub mod descriptors;
-pub use descriptors::{InstrumentDescriptor, ResolvedSeries};
+pub use descriptors::{
+    InstrumentDescriptor, InstrumentRequest, ResolvedSeries, SelectionOutcome, SelectionRequest,
+};
 mod quotes;
 pub use quotes::{QuoteSourceKind, QuoteState};
 mod trading_feed;
@@ -263,6 +265,7 @@ enum Command {
         StreamRequirements,
         Reply<()>,
     ),
+    SelectAndDemand(ClientId, SelectionRequest, Reply<SelectionOutcome>),
     RegisterStudy(
         ClientId,
         ConsumerId,
@@ -725,7 +728,7 @@ struct DemandWaiter {
 /// reads the resulting gap as corruption it can only repair with a full
 /// resnapshot. Every other channel stays latest-value, because a newer order
 /// book, provider state, or catalog result fully supersedes the one before it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ConsumerEvents {
     provider: Option<MarketRuntimeEvent>,
     series: VecDeque<MarketRuntimeEvent>,

@@ -1,3 +1,6 @@
+use super::descriptors::{
+    InstrumentDescriptor, InstrumentRequest, ResolvedSeries, SelectionError, SelectionOutcome,
+};
 use super::{
     ClientId, ConsumerId, Coordinator, InstallProviderInstrument, MAXIMUM_CATALOG_FIELD_BYTES,
     MAXIMUM_CATALOG_INSTRUMENTS, NonZeroU64, ProviderCatalogCommand, ProviderCatalogEvent,
@@ -122,6 +125,161 @@ pub(super) fn validate_provider_instrument(
 }
 
 impl Coordinator<'_> {
+    pub(super) fn select_and_demand(
+        &mut self,
+        client_id: ClientId,
+        request: &super::SelectionRequest,
+    ) -> SelectionOutcome {
+        let generation = super::GenerationId(
+            super::NonZeroU64::new(request.generation).expect("validated selection generation"),
+        );
+        let consumer_id = ConsumerId(
+            super::NonZeroU64::new(request.consumer_id).expect("validated selection consumer"),
+        );
+        let previous_demand = self.engine.current_demand(consumer_id).cloned();
+        let previous_events = self.events.get(&consumer_id).cloned();
+        let outcome = self
+            .resolve_selection(client_id, consumer_id, request)
+            .and_then(|(descriptor, series)| {
+                if matches!(request.instrument, InstrumentRequest::Default)
+                    && !self.catalog.contains_key(&(
+                        descriptor.instrument.provider.clone(),
+                        descriptor.instrument.instrument_id.clone(),
+                    ))
+                {
+                    self.install_provider_instrument(&descriptor.instrument)
+                        .map_err(SelectionError::DemandRejected)?;
+                }
+                let (reply, received) = std::sync::mpsc::sync_channel(1);
+                self.handle_demand(
+                    client_id,
+                    &series.key,
+                    request.streams,
+                    super::DemandWaiter {
+                        consumer_id,
+                        generation,
+                        started_at: std::time::Instant::now(),
+                    },
+                    &reply,
+                );
+                received
+                    .recv()
+                    .map_err(|_| SelectionError::DemandRejected("selection reply lost".into()))?
+                    .map_err(SelectionError::DemandRejected)?;
+                if let Some(viewport) = request.viewport {
+                    self.engine
+                        .set_viewport(consumer_id, generation, viewport)
+                        .map_err(|error| SelectionError::DemandRejected(error.to_string()))?;
+                    // Viewport history is an optional paged request. Its failure
+                    // never revokes a successfully installed live series.
+                    if let Err(error) =
+                        self.request_viewport_history(consumer_id, generation, viewport)
+                    {
+                        aeris_observability::diagnostic!(
+                            "Market viewport backfill deferred: {error}"
+                        );
+                    }
+                }
+                Ok((descriptor, series))
+            });
+        match outcome {
+            Ok((descriptor, series)) => SelectionOutcome::Selected {
+                generation,
+                descriptor: Box::new(descriptor),
+                series,
+            },
+            Err(error) => {
+                self.rollback_selection(consumer_id, generation, previous_demand, previous_events);
+                SelectionOutcome::Failed { generation, error }
+            }
+        }
+    }
+
+    fn resolve_selection(
+        &self,
+        client_id: ClientId,
+        consumer_id: ConsumerId,
+        request: &super::SelectionRequest,
+    ) -> Result<(InstrumentDescriptor, ResolvedSeries), SelectionError> {
+        authorize_consumer(&self.engine, client_id, consumer_id)
+            .map_err(SelectionError::DemandRejected)?;
+        if request
+            .viewport
+            .is_some_and(|viewport| viewport.start_unix_nanos >= viewport.end_unix_nanos)
+        {
+            return Err(SelectionError::InvalidViewport);
+        }
+        let instrument = match &request.instrument {
+            InstrumentRequest::Ref(reference) => self
+                .catalog
+                .get(&(
+                    reference.provider_id.clone(),
+                    reference.instrument_id.clone(),
+                ))
+                .filter(|instrument| instrument.entitlement_id == reference.entitlement_id)
+                .cloned(),
+            InstrumentRequest::Default => {
+                let default = super::descriptors::default_instrument();
+                Some(
+                    self.catalog
+                        .get(&(default.provider.clone(), default.instrument_id.clone()))
+                        .cloned()
+                        .unwrap_or(default),
+                )
+            }
+        }
+        .ok_or(SelectionError::InstrumentUnavailable)?;
+        let provider = self
+            .providers
+            .descriptor(&instrument.provider)
+            .ok_or(SelectionError::InstrumentUnavailable)?;
+        let series = ResolvedSeries::resolve(&instrument, request.interval, provider.presentation)
+            .map_err(|_| SelectionError::UnsupportedInterval)?;
+        let descriptor = InstrumentDescriptor::from_install(
+            &instrument,
+            provider.presentation,
+            provider.capabilities.quotes.is_some(),
+        )
+        .map_err(|_| SelectionError::InstrumentUnavailable)?;
+        Ok((descriptor, series))
+    }
+
+    fn rollback_selection(
+        &mut self,
+        consumer_id: ConsumerId,
+        generation: super::GenerationId,
+        previous_demand: Option<aeris_market_engine::ConsumerDemand>,
+        previous_events: Option<super::ConsumerEvents>,
+    ) {
+        let Some(previous) = previous_demand else {
+            return;
+        };
+        if !self
+            .engine
+            .current_demand(consumer_id)
+            .is_some_and(|current| {
+                current.generation == Some(generation) && previous.generation != Some(generation)
+            })
+        {
+            return;
+        }
+        if let Err(error) = self
+            .engine
+            .rollback_series_demand(consumer_id, generation, &previous)
+        {
+            aeris_observability::diagnostic!("Market selection rollback failed: {error}");
+            return;
+        }
+        if let (Some(previous_events), Some(events)) =
+            (previous_events, self.events.get_mut(&consumer_id))
+        {
+            *events = previous_events;
+        }
+        self.prune_unused_live_series();
+        self.prune_history_tracking();
+        self.reconcile_order_books();
+    }
+
     fn ensure_catalog_session(&mut self, provider: &str) -> Result<(), String> {
         if !self.provider_registry.catalog_uses_session(provider) {
             return Ok(());

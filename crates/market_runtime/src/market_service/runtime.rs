@@ -1485,6 +1485,27 @@ impl MarketService {
         })
     }
 
+    /// Resolves a catalog instrument and installs its series in one coordinator turn.
+    /// A rejected selection leaves the previous generation's demand installed.
+    ///
+    /// # Errors
+    /// Returns an error only when the coordinator command cannot be delivered.
+    pub fn select_and_demand(
+        &self,
+        client_id: u64,
+        request: super::SelectionRequest,
+    ) -> Result<super::SelectionOutcome, String> {
+        id(request.consumer_id)?;
+        id(request.generation)?;
+        self.request(|reply| {
+            Ok(Command::SelectAndDemand(
+                ClientId(id(client_id)?),
+                request,
+                reply,
+            ))
+        })
+    }
+
     /// Registers one native study instance anchored to an owned market consumer.
     ///
     /// Study dependencies may request several canonical series, but those data

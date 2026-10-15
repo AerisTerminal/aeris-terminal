@@ -326,7 +326,8 @@ pub use aeris_market_engine::{
     SeriesSnapshot as CanonicalMarketSeriesSnapshot, SeriesTailOperation, StreamRequirements,
 };
 pub use market_service::descriptors::{
-    ConnectMethod, InstrumentDescriptor, ProviderDescriptor, ResolvedSeries,
+    ConnectMethod, DescriptorError, InstrumentDescriptor, InstrumentRef, InstrumentRequest,
+    ProviderDescriptor, ResolvedSeries, SelectionError, SelectionOutcome, SelectionRequest,
 };
 pub use market_service::{
     CtraderStreamStatistics, CtraderVenueEventSink, CtraderVenueLink, MarketService,
