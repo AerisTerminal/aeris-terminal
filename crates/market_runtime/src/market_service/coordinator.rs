@@ -806,11 +806,24 @@ impl Coordinator<'_> {
             return true;
         }
         if let Ok(Some(epoch)) = self.provider_registry.connect(id, self.clock.monotonic()) {
-            self.provider_epochs.bind(id, epoch);
+            self.begin_reserved_provider_epoch(id, epoch);
             true
         } else {
             self.control_retry = true;
             false
+        }
+    }
+
+    fn begin_reserved_provider_epoch(
+        &mut self,
+        id: &str,
+        epoch: aeris_market_engine::fence::Epoch<aeris_market_engine::fence::ProviderTag>,
+    ) {
+        self.provider_epochs.bind(id, epoch);
+        if let Some(descriptor) = self.providers.descriptor(id) {
+            // The worker's Connecting event is asynchronous. History tickets
+            // must not capture the preceding catalog generation meanwhile.
+            self.begin_lifecycle_session(id, epoch.get().get(), descriptor.capabilities.live_model);
         }
     }
 
@@ -828,7 +841,7 @@ impl Coordinator<'_> {
             }
         }
         for (id, epoch) in self.provider_registry.retry_due(self.clock.monotonic()) {
-            self.provider_epochs.bind(id, epoch);
+            self.begin_reserved_provider_epoch(id, epoch);
             self.session_mut(id).demand_dirty = true;
             self.session_mut(id).accepted = None;
         }
@@ -1597,6 +1610,9 @@ impl Coordinator<'_> {
         series: &BarSeriesKey,
         streams: StreamRequirements,
     ) -> Result<(), String> {
+        if !self.ensure_provider_connection(&series.provider_id) {
+            return Err("provider connection is not ready".into());
+        }
         let provider_generation = self.provider_generation_for_series(series)?;
         self.ensure_realtime(series)?;
         if !streams.contains(MarketStream::Bars) {
@@ -1754,6 +1770,9 @@ impl Coordinator<'_> {
         String,
     > {
         authorize_consumer(&self.engine, client_id, waiter.consumer_id)?;
+        if !self.ensure_provider_connection(&series.provider_id) {
+            return Err("provider connection is not ready".into());
+        }
         let provider_generation = self.provider_generation_for_series(series)?;
         if matches!(
             series.period,
@@ -4873,6 +4892,72 @@ mod tests {
             events,
             controls_receiver,
         )
+    }
+
+    #[test]
+    fn startup_history_uses_reserved_epoch_before_connecting_event_arrives() {
+        let mut coordinator = coordinator();
+        let (controls, pending_controls) = std::sync::mpsc::sync_channel(4);
+        let (display_controls, _display_receiver) = std::sync::mpsc::sync_channel(4);
+        let (history, history_receiver) = std::sync::mpsc::sync_channel(4);
+        let history = Box::leak(Box::new(history));
+        coordinator.providers.records.insert(
+            "hyperliquid",
+            ProviderDispatchRecord {
+                descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
+                history,
+                lifecycle: None,
+                ctrader: None,
+                hyperliquid: None,
+                tastytrade: None,
+                rithmic: None,
+                catalog: None,
+            },
+        );
+        coordinator.provider_registry.register(
+            "hyperliquid",
+            Box::new(super::super::provider_session::HyperliquidSession {
+                controls,
+                display_controls,
+                history: history.clone(),
+            }),
+            super::super::HYPERLIQUID_DESCRIPTOR.capabilities.reconnect,
+            coordinator.clock.as_ref(),
+        );
+        coordinator.provider_registry.reserve();
+        coordinator
+            .engine
+            .begin_provider_session("hyperliquid", ProviderGeneration(nonzero(1)))
+            .expect("catalog session");
+        coordinator
+            .install_provider_instrument(&hyperliquid_instrument())
+            .expect("startup instrument installs");
+        let selected = hyperliquid_series();
+        let consumer_id = consumer(88);
+        register(&mut coordinator, consumer_id);
+        assert!(coordinator.ensure_provider_connection("hyperliquid"));
+        let reserved = coordinator
+            .provider_registry
+            .epoch("hyperliquid")
+            .expect("epoch reserved before worker handles connect");
+        assert_eq!(reserved.get().get(), 2);
+        assert!(pending_controls.try_recv().is_ok());
+        assert_eq!(
+            coordinator
+                .engine
+                .provider_status("hyperliquid")
+                .and_then(|status| status.generation),
+            Some(ProviderGeneration(nonzero(2))),
+            "first demand and history must use the reserved epoch before the asynchronous Connecting event"
+        );
+        demand_series(&mut coordinator, consumer_id, 1, &selected);
+        let request = history_receiver.try_recv().expect("first covering request");
+        assert_eq!(request.ticket.provider, reserved);
+        assert_eq!(
+            request.provider_generation,
+            ProviderGeneration(nonzero(2)),
+            "a history completion must not be dropped for the preceding catalog generation"
+        );
     }
 
     #[test]
