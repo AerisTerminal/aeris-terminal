@@ -496,7 +496,9 @@ Status: in progress
   - `book::OrderBook` owns canonical orders and client/broker, open `(account, instrument)` and executable instrument indexes; insert, replacement, account purge and retention removal maintain all views. Replaced client, broker reverse, scoped cancellation and market candidate scans without changing order or golden behavior.
   - Seeded 4,000-step insert/transition/broker-bind/remove property test recomputes every index after each operation; trading crate tests and scripted broker/golden scenarios pass. On this Windows machine, release-mode 50,000-order/1,000-client-lookup comparison: former full scan 409.646 ms; indexed lookup 0.281 ms. Command: `cargo test -p aeris_trading_runtime --release --locked -- book::tests::benchmark_50k_order_lookup --ignored --nocapture` (same book and machine, timed lookup loops only).
   - TR-05 remains open for M5.11 publication and M6.10 desktop snapshot work; no persistence schema or golden changes.
-- [ ] M4.5 trading-core-module-split - Split `lib.rs` and the Coordinator into focused modules
+- [x] M4.5 trading-core-module-split - Split `lib.rs` and the Coordinator into focused modules
+  - Moved the existing `TradingCore` method bodies into admission, execution, ledger, risk, groups, emergency and market modules; moved protection/planned-leg and broker implementations without changing the single owner, store schema, golden transcripts or scripted venue tests. `lib.rs` now declares modules and re-exports the public surface.
+  - Pre/post trading characterization: 108 passed, 4 ignored; full workspace fmt, Clippy, tests and naming_check passed. TR-12's remaining store split and later cleanup stay assigned to M4.6/M5.9/M8.10.
 - [ ] M4.6 trading-store-module-split - Split `store.rs` by table family
 - [ ] M4.7 runtime-owned-quotes - Trading runtime owns its quotes; the desktop relay is removed
 - [ ] M4.8 provider-neutral-gating - Session and freshness gating for every provider
@@ -703,6 +705,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4.2 refactor(trading): isolate the single trading owner shell - moved command and timed wait boundaries, retained golden behavior, and verified concurrent revision/restart plus idle ManualClock coverage.
 - 2026-10-15 M4.3 test(trading): replay core against SQLite with deterministic transcripts - ported both unchanged goldens, tested restart/commit abort and seeded reproduction.
 - 2026-10-15 M4.4 perf(trading): index owner order lookups and executable demand - removed order and reverse-broker scans with index-consistency coverage; measured 409.646 ms scan vs 0.281 ms indexed for 1,000 lookups at 50,000 orders.
+- 2026-10-15 M4.5 refactor(trading): split core behavior into focused modules - moved owner methods and broker/group implementations mechanically with unchanged goldens and scripted scenarios; full gates passed.
 
 ## 7. Known gaps / deferred
 

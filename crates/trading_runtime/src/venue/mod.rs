@@ -124,7 +124,5 @@ impl VenueInbox {
     }
 }
 
-mod owner;
-
 #[cfg(test)]
 mod scripted;

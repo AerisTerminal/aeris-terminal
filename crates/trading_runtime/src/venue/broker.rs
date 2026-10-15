@@ -1,7 +1,7 @@
 //! Broker order state is persisted and advanced only by the trading owner.
 
-use super::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::BracketStrategyTemplate;
+use crate::venue::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::{
     DEMO_VENUE_UNAVAILABLE, FlattenOutcome, MAXIMUM_OPEN_ORDERS, ModifyOrder, PlaceOrder,
     TradingCore, TradingProvenance, check_quantity_increment, store::BrokerFillRecord,

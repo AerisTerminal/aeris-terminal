@@ -3898,7 +3898,7 @@ jobs:
             );
         }
 
-        let runtime = manifest("crates/trading_runtime/src/lib.rs");
+        let runtime = manifest("crates/trading_runtime/src/core/mod.rs");
         for contract in [
             "pub struct TradingService",
             "mpsc::sync_channel(COMMAND_CAPACITY)",
@@ -3959,7 +3959,7 @@ jobs:
     }
     #[test]
     fn trading_core_owner_shell_has_one_command_and_deadline_boundary() {
-        let runtime = manifest("crates/trading_runtime/src/lib.rs");
+        let runtime = manifest("crates/trading_runtime/src/core/mod.rs");
         for contract in [
             "struct TradingCore",
             "fn handle(&mut self, command: Command, now: i64)",
