@@ -229,6 +229,17 @@ impl<'a> Coordinator<'a> {
                     clock.as_ref(),
                 );
             }
+            if let Some(channels) = record.tastytrade {
+                provider_registry.register(
+                    id,
+                    Box::new(super::provider_session::TastytradeSession {
+                        controls: channels.controls.clone(),
+                        history: record.history.clone(),
+                    }),
+                    record.descriptor.capabilities.reconnect,
+                    clock.as_ref(),
+                );
+            }
         }
         let mut coordinator = Self {
             engine,
@@ -348,6 +359,16 @@ fn drain_coordinator_events(coordinator: &mut Coordinator<'_>) -> usize {
                 descriptor.capabilities.live_model,
                 descriptor.capabilities.overflow_recovery_detail,
             );
+            if let Some(epoch) = coordinator.provider_epochs.current(provider, generation)
+                && coordinator.provider_registry.contains(provider)
+            {
+                coordinator.provider_registry.disconnected(
+                    provider,
+                    epoch,
+                    coordinator.clock.monotonic(),
+                );
+                coordinator.session_mut(provider).accepted = None;
+            }
             diagnostic!(
                 "Aeris market {provider} event queue overflowed at generation {generation}"
             );
@@ -806,6 +827,7 @@ impl Coordinator<'_> {
         for (id, epoch) in self.provider_registry.retry_due(self.clock.monotonic()) {
             self.provider_epochs.bind(id, epoch);
             self.session_mut(id).demand_dirty = true;
+            self.session_mut(id).accepted = None;
         }
     }
 
@@ -962,9 +984,13 @@ impl Coordinator<'_> {
         self.publish_lifecycle_live();
         self.history.cancel_all();
         for provider in self.providers.records.keys().copied().collect::<Vec<_>>() {
-            let _ = self
-                .providers
-                .send_control(provider, super::ProviderControl::Stop);
+            if self.provider_registry.contains(provider) {
+                let _ = self.provider_registry.release_idle(provider);
+            } else {
+                let _ = self
+                    .providers
+                    .send_control(provider, super::ProviderControl::Stop);
+            }
         }
     }
 
@@ -2984,6 +3010,7 @@ mod tests {
                 lifecycle: None,
                 realtime: ProviderRealtimeDispatch::Disabled,
                 hyperliquid: None,
+                tastytrade: None,
                 catalog: None,
             },
         );
@@ -4311,6 +4338,7 @@ mod tests {
                     lifecycle: None,
                     realtime: super::super::ProviderRealtimeDispatch::Disabled,
                     hyperliquid: None,
+                    tastytrade: None,
                     catalog: None,
                 },
             );
@@ -4607,6 +4635,7 @@ mod tests {
                 lifecycle: None,
                 realtime: ProviderRealtimeDispatch::Disabled,
                 hyperliquid: None,
+                tastytrade: None,
                 catalog: None,
             },
         );
@@ -4788,6 +4817,7 @@ mod tests {
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
                 hyperliquid: None,
+                tastytrade: None,
                 catalog: None,
             },
         );
@@ -4825,6 +4855,7 @@ mod tests {
                         events: Box::leak(Box::new(event_receiver)),
                     },
                     hyperliquid: None,
+                    tastytrade: None,
                     catalog: None,
                 },
             )]),
@@ -5013,6 +5044,7 @@ mod tests {
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
                 hyperliquid: None,
+                tastytrade: None,
                 catalog: None,
             },
         );
@@ -5179,6 +5211,7 @@ mod tests {
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
                 hyperliquid: None,
+                tastytrade: None,
                 catalog: None,
             },
         );
@@ -6418,6 +6451,7 @@ mod tests {
                 lifecycle: None,
                 realtime: super::super::ProviderRealtimeDispatch::Disabled,
                 hyperliquid: None,
+                tastytrade: None,
                 catalog: None,
             },
         );

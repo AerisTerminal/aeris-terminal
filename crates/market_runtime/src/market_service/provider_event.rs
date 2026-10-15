@@ -378,12 +378,14 @@ impl ProviderEvent {
             Wire::Connecting(_) => ProviderEventKind::Connecting,
             Wire::Connected(_) => ProviderEventKind::Connected,
             Wire::Heartbeat(_, rtt) => ProviderEventKind::Heartbeat(Some(rtt)),
-            Wire::Recovering(_, detail) => ProviderEventKind::Recovering {
-                detail: "Tastytrade feed requires recovery",
-                provider_detail: Some(detail),
-                recovery_reason: None,
-            },
-            Wire::Disconnected(_) => ProviderEventKind::Disconnected(ProviderDisconnect::End),
+            Wire::Retry(_, detail, retry_after) => {
+                ProviderEventKind::Disconnected(ProviderDisconnect::Recover {
+                    detail: "Tastytrade live session is recovering",
+                    auto_recover: false,
+                    retry_after,
+                    provider_detail: Some(detail),
+                })
+            }
             Wire::Candle(_, symbol, bar, count, trade_watermark) => ProviderEventKind::Candle {
                 symbol: ProviderCandleSymbol::Wire(symbol),
                 candle: ProviderCandle {

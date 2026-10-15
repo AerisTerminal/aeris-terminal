@@ -1439,6 +1439,15 @@ impl Coordinator<'_> {
             return;
         }
         let demand = self.provider_demand(provider);
+        if self.provider_registry.contains(provider)
+            && (!demand.candle_series.is_empty() || !demand.instruments.is_empty())
+            && !self.provider_registry.catalog_ready(provider)
+            && (!self.ensure_provider_connection(provider)
+                || !self.provider_registry.catalog_ready(provider))
+        {
+            // A retry deadline, not a new demand edge, reserves the next epoch.
+            return;
+        }
         if self.session(provider).accepted.as_ref() == Some(&demand) {
             return;
         }

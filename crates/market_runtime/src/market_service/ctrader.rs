@@ -2279,6 +2279,7 @@ fn spawn_record(
         })
         .map_err(|error| error.to_string())?;
     Ok(ProviderRuntimeRecord {
+        tastytrade: None,
         hyperliquid: None,
         ctrader: Some(super::CtraderChannels { controls, events }),
         descriptor,

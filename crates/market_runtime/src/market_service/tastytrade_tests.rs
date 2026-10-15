@@ -1384,6 +1384,9 @@ fn live_snapshot_end_marker_publishes_the_batch_and_retired_symbols_are_ignored(
         token_requests,
         token_replies,
     });
+    worker.sink = Some(super::super::provider_session::ProviderEventSink {
+        epoch: aeris_market_engine::fence::EpochSequence::default().next(),
+    });
     let request = request();
     let instrument = request.instrument.unwrap();
     let symbol = candle_symbol(&request.series, &instrument).unwrap();
@@ -1396,7 +1399,7 @@ fn live_snapshot_end_marker_publishes_the_batch_and_retired_symbols_are_ignored(
         .accept_candle(&symbol, SNAPSHOT_END | REMOVE_EVENT, None, 0)
         .unwrap();
     assert!(matches!(
-        output.try_recv().unwrap(),
+        output.try_recv().unwrap().value,
         RealtimeEvent::Candle(1, ..)
     ));
     worker
@@ -1427,6 +1430,9 @@ fn trade_updates_quote_prices_without_refreshing_quote_sizes() {
         token_requests,
         token_replies,
     });
+    worker.sink = Some(super::super::provider_session::ProviderEventSink {
+        epoch: aeris_market_engine::fence::EpochSequence::default().next(),
+    });
     let instrument = instrument();
     let symbol = instrument.provider_symbol.clone();
     worker.demand.instruments.push(instrument.clone());
@@ -1442,7 +1448,7 @@ fn trade_updates_quote_prices_without_refreshing_quote_sizes() {
         })
         .unwrap();
     let initial = output.try_recv().unwrap();
-    assert!(matches!(initial, RealtimeEvent::Quote(1, _)));
+    assert!(matches!(initial.value, RealtimeEvent::Quote(1, _)));
 
     worker
         .accept(FeedEvent::Trade {
@@ -1463,7 +1469,7 @@ fn trade_updates_quote_prices_without_refreshing_quote_sizes() {
         })
         .unwrap();
     let updated = output.try_recv().unwrap();
-    let RealtimeEvent::Quote(_, updated) = updated else {
+    let RealtimeEvent::Quote(_, updated) = updated.value else {
         panic!("trade should publish a quote price update");
     };
     let bid = updated.bid.unwrap();
@@ -1478,7 +1484,14 @@ fn trade_updates_quote_prices_without_refreshing_quote_sizes() {
     );
 }
 
-fn live_worker(event_capacity: usize) -> (Worker, Receiver<RealtimeEvent>) {
+fn live_worker(
+    event_capacity: usize,
+) -> (
+    Worker,
+    Receiver<
+        aeris_market_engine::fence::Fenced<aeris_market_engine::fence::ProviderTag, RealtimeEvent>,
+    >,
+) {
     let (_, controls) = mpsc::sync_channel(1);
     let (events, output) = mpsc::sync_channel(event_capacity);
     let (_, history) = mpsc::sync_channel(1);
@@ -1486,7 +1499,7 @@ fn live_worker(event_capacity: usize) -> (Worker, Receiver<RealtimeEvent>) {
     let (token_requests, _) = mpsc::sync_channel(1);
     let (_, token_replies) = mpsc::sync_channel(1);
     let wake = ProviderCoordinatorWake::new(completions.clone(), ["tastytrade"]);
-    let worker = Worker::new(WorkerPorts {
+    let mut worker = Worker::new(WorkerPorts {
         api: Arc::new(BrokerApi::default()),
         controls,
         events,
@@ -1497,6 +1510,9 @@ fn live_worker(event_capacity: usize) -> (Worker, Receiver<RealtimeEvent>) {
         wake,
         token_requests,
         token_replies,
+    });
+    worker.sink = Some(super::super::provider_session::ProviderEventSink {
+        epoch: aeris_market_engine::fence::EpochSequence::default().next(),
     });
     (worker, output)
 }
@@ -1527,7 +1543,7 @@ fn locked_or_crossed_quotes_are_withheld_without_failing_the_session() {
     worker
         .accept(quote(500_000_000_000, 500_100_000_000))
         .expect("a valid quote publishes after withheld quotes");
-    let RealtimeEvent::Quote(1, published) = output.try_recv().unwrap() else {
+    let RealtimeEvent::Quote(1, published) = output.try_recv().unwrap().value else {
         panic!("a valid quote should publish");
     };
     assert_eq!(published.bid.unwrap().price, 500_000_000_000);
@@ -1535,39 +1551,32 @@ fn locked_or_crossed_quotes_are_withheld_without_failing_the_session() {
 }
 
 #[test]
-fn repeated_transport_failures_keep_recovering_with_capped_backoff() {
+fn transport_failure_retires_the_bound_sink_until_registry_connects_again() {
     let (mut worker, output) = live_worker(16);
-    for attempt in 1..=8 {
-        let before = Instant::now();
-        worker.recover(format!("DXLink heartbeat expired ({attempt})"));
-        assert!(
-            !worker.paused,
-            "transport failure {attempt} parked the session"
-        );
-        assert!(matches!(
-            output.try_recv().unwrap(),
-            RealtimeEvent::Recovering(1, _)
-        ));
-        assert!(worker.retry_at <= before + Duration::from_secs(48) + Duration::from_secs(1));
-    }
-    assert_eq!(worker.backoff.attempts(), 8);
+    worker.recover("DXLink heartbeat expired".into());
+    assert!(!worker.paused);
+    assert!(worker.sink.is_none());
+    assert!(matches!(
+        output.try_recv().unwrap().value,
+        RealtimeEvent::Retry(1, _, None)
+    ));
+    worker.recover("no implicit retry".into());
+    assert!(output.try_recv().is_err());
 }
 
 #[test]
 fn server_rate_limit_overrides_tastytrade_reconnect_deadline() {
     let (mut worker, output) = live_worker(4);
-    let before = Instant::now();
     worker.recover_with_class(
         "Tastytrade API rate limited".into(),
         crate::market_service::reconnect::RetryClass::RateLimited {
             retry_after: Duration::from_secs(17),
         },
     );
-    assert!(worker.retry_at >= before + Duration::from_secs(17));
-    assert!(worker.retry_at <= Instant::now() + Duration::from_secs(17));
-    assert_eq!(worker.backoff.attempts(), 0);
+    assert!(worker.sink.is_none());
     assert!(matches!(
-        output.try_recv().unwrap(),
-        RealtimeEvent::Recovering(1, detail) if detail == "Tastytrade API rate limited"
+        output.try_recv().unwrap().value,
+        RealtimeEvent::Retry(1, detail, Some(delay))
+            if detail == "Tastytrade API rate limited" && delay == Duration::from_secs(17)
     ));
 }

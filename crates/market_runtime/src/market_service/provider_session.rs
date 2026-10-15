@@ -172,6 +172,51 @@ impl ProviderSession for CtraderSession {
     }
 }
 
+pub(super) struct TastytradeSession {
+    pub(super) controls: SyncSender<super::tastytrade::RealtimeControl>,
+    pub(super) history: SyncSender<HistoryRequest>,
+}
+
+impl ProviderSession for TastytradeSession {
+    fn connect(
+        &self,
+        epoch: Epoch<ProviderTag>,
+        sink: ProviderEventSink,
+    ) -> Result<bool, ProviderSessionError> {
+        debug_assert_eq!(sink.epoch, epoch);
+        try_control(
+            &self.controls,
+            super::tastytrade::RealtimeControl::Connect(sink),
+        )
+    }
+
+    fn apply_demand(&self, demand: &ProviderDemand) -> Result<bool, ProviderSessionError> {
+        try_control(
+            &self.controls,
+            super::tastytrade::RealtimeControl::Subscribe(demand.tastytrade_wire()),
+        )
+    }
+
+    fn request_history(&self, request: HistoryRequest) -> Result<bool, ProviderSessionError> {
+        try_control(&self.history, request)
+    }
+
+    fn release_idle(&self) -> Result<bool, ProviderSessionError> {
+        try_control(&self.controls, super::tastytrade::RealtimeControl::Stop)
+    }
+
+    fn authorization_changed(&self, ready: bool) -> Result<bool, ProviderSessionError> {
+        try_control(
+            &self.controls,
+            super::tastytrade::RealtimeControl::AuthorizationChanged(ready),
+        )
+    }
+
+    fn shutdown(&self) {
+        let _ = self.release_idle();
+    }
+}
+
 impl ProviderRegistry {
     pub(super) fn catalog_connect_ids(&self) -> Vec<&'static str> {
         self.connections
@@ -626,5 +671,96 @@ mod tests {
             queued.try_recv().unwrap(),
             super::super::ctrader::RealtimeControl::Stop
         ));
+    }
+
+    #[test]
+    fn tastytrade_registry_binds_connect_before_demand_and_never_reconnects_for_diffs() {
+        let clock = ScriptedClock::new(45);
+        let (controls, queued) = std::sync::mpsc::sync_channel(8);
+        let (history, _) = std::sync::mpsc::sync_channel(1);
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "tastytrade",
+            Box::new(TastytradeSession { controls, history }),
+            ReconnectPolicy::tastytrade(),
+            &clock,
+        );
+        let epoch = registry
+            .connect("tastytrade", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        let super::super::tastytrade::RealtimeControl::Connect(sink) = queued.try_recv().unwrap()
+        else {
+            panic!("first control must bind the reserved epoch");
+        };
+        assert_eq!(sink.epoch, epoch);
+        for revision in 0..5 {
+            let mut demand = ProviderDemand::default();
+            demand
+                .explicit_trade_ids
+                .insert(format!("switch-{revision}"));
+            assert!(registry.apply_demand("tastytrade", &demand).unwrap());
+            assert!(matches!(
+                queued.try_recv().unwrap(),
+                super::super::tastytrade::RealtimeControl::Subscribe(_)
+            ));
+            assert_eq!(
+                registry.connect("tastytrade", clock.monotonic()).unwrap(),
+                None
+            );
+        }
+        assert_eq!(registry.epoch("tastytrade"), Some(epoch));
+    }
+
+    #[test]
+    fn tastytrade_registry_owns_rate_limit_deadline_and_retires_old_epoch() {
+        let clock = ScriptedClock::new(46);
+        let (controls, queued) = std::sync::mpsc::sync_channel(4);
+        let (history, _) = std::sync::mpsc::sync_channel(1);
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "tastytrade",
+            Box::new(TastytradeSession { controls, history }),
+            ReconnectPolicy::tastytrade(),
+            &clock,
+        );
+        let first = registry
+            .connect("tastytrade", clock.monotonic())
+            .unwrap()
+            .unwrap();
+        let super::super::tastytrade::RealtimeControl::Connect(first_sink) =
+            queued.try_recv().unwrap()
+        else {
+            panic!("first connect");
+        };
+        let now = clock.monotonic();
+        registry.disconnected_with_class(
+            "tastytrade",
+            first,
+            now,
+            RetryClass::RateLimited {
+                retry_after: std::time::Duration::from_secs(17),
+            },
+        );
+        assert_eq!(
+            registry.next_retry(),
+            Some(now + std::time::Duration::from_secs(17))
+        );
+        assert_eq!(
+            registry
+                .retry_due(now + std::time::Duration::from_secs(16))
+                .len(),
+            0
+        );
+        let second = registry.retry_due(now + std::time::Duration::from_secs(17))[0].1;
+        assert_ne!(second, first);
+        assert_eq!(first_sink.stamp(()).epoch, first);
+        assert!(matches!(
+            queued.try_recv().unwrap(),
+            super::super::tastytrade::RealtimeControl::Connect(sink) if sink.epoch == second
+        ));
+        registry.disconnected("tastytrade", first, now);
+        assert_eq!(registry.epoch("tastytrade"), Some(second));
+        assert_eq!(registry.next_retry(), None);
     }
 }

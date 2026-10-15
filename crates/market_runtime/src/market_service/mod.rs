@@ -1187,10 +1187,6 @@ struct ProviderRealtimeChannels {
 
 enum ProviderRealtimeChannelSet {
     Disabled,
-    Tastytrade {
-        controls: SyncSender<tastytrade::RealtimeControl>,
-        events: Receiver<tastytrade::RealtimeEvent>,
-    },
     Rithmic {
         controls: SyncSender<RithmicRealtimeControl>,
         events: Receiver<RithmicRealtimeEvent>,
@@ -1259,6 +1255,7 @@ struct ProviderRuntimeRecord {
     realtime: ProviderRealtimeChannels,
     hyperliquid: Option<HyperliquidChannels>,
     ctrader: Option<CtraderChannels>,
+    tastytrade: Option<TastytradeChannels>,
     catalog: ProviderCatalogChannels,
     workers: Vec<thread::JoinHandle<()>>,
 }
@@ -1268,6 +1265,15 @@ struct CtraderChannels {
         aeris_market_engine::fence::Fenced<
             aeris_market_engine::fence::ProviderTag,
             ctrader::RealtimeEvent,
+        >,
+    >,
+}
+struct TastytradeChannels {
+    controls: SyncSender<tastytrade::RealtimeControl>,
+    events: Receiver<
+        aeris_market_engine::fence::Fenced<
+            aeris_market_engine::fence::ProviderTag,
+            tastytrade::RealtimeEvent,
         >,
     >,
 }
@@ -1340,6 +1346,7 @@ struct ProviderDispatchRecord<'a> {
     lifecycle: Option<&'a ProviderRuntimeLifecycle>,
     realtime: ProviderRealtimeDispatch<'a>,
     hyperliquid: Option<&'a HyperliquidChannels>,
+    tastytrade: Option<&'a TastytradeChannels>,
     catalog: Option<&'a dyn ProviderCatalogChannel>,
 }
 
@@ -1352,10 +1359,6 @@ enum ProviderRealtimeDispatch<'a> {
                 ctrader::RealtimeEvent,
             >,
         >,
-    },
-    Tastytrade {
-        controls: &'a SyncSender<tastytrade::RealtimeControl>,
-        events: &'a Receiver<tastytrade::RealtimeEvent>,
     },
     Rithmic {
         controls: &'a SyncSender<RithmicRealtimeControl>,

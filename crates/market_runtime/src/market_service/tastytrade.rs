@@ -174,6 +174,7 @@ pub(super) struct Demand {
     pub tape_instruments: Vec<InstallProviderInstrument>,
 }
 pub(super) enum RealtimeControl {
+    Connect(super::provider_session::ProviderEventSink),
     Subscribe(Demand),
     Stop,
     AuthorizationChanged(bool),
@@ -182,8 +183,7 @@ pub(super) enum RealtimeEvent {
     Connecting(u64),
     Connected(u64),
     Heartbeat(u64, u64),
-    Recovering(u64, String),
-    Disconnected(u64),
+    Retry(u64, String, Option<Duration>),
     Candle(u64, String, MarketBar, u64, u64),
     CandleRecovery(u64, String),
     Quote(u64, TopOfBookQuote),
@@ -197,8 +197,7 @@ impl RealtimeEvent {
             Self::Connecting(g)
             | Self::Connected(g)
             | Self::Heartbeat(g, _)
-            | Self::Recovering(g, _)
-            | Self::Disconnected(g)
+            | Self::Retry(g, ..)
             | Self::Candle(g, ..)
             | Self::CandleRecovery(g, ..)
             | Self::Quote(g, _)
@@ -1517,12 +1516,15 @@ fn market_trade(
     Ok(Some(trade))
 }
 fn publish(
-    events: &SyncSender<RealtimeEvent>,
+    events: &SyncSender<
+        aeris_market_engine::fence::Fenced<aeris_market_engine::fence::ProviderTag, RealtimeEvent>,
+    >,
     wake: &ProviderCoordinatorWake,
+    sink: super::provider_session::ProviderEventSink,
     event: RealtimeEvent,
 ) -> Result<(), String> {
-    let generation = event.generation();
-    match events.try_send(event) {
+    let generation = sink.epoch.get().get();
+    match events.try_send(sink.stamp(event)) {
         Ok(()) => {
             wake.notify();
             Ok(())
@@ -1943,7 +1945,9 @@ fn run_tokens(
 struct WorkerPorts {
     api: Arc<BrokerApi>,
     controls: Receiver<RealtimeControl>,
-    events: SyncSender<RealtimeEvent>,
+    events: SyncSender<
+        aeris_market_engine::fence::Fenced<aeris_market_engine::fence::ProviderTag, RealtimeEvent>,
+    >,
     history: Receiver<HistoryRequest>,
     completions: SyncSender<Command>,
     generation: Arc<AtomicU64>,
@@ -1954,12 +1958,12 @@ struct WorkerPorts {
 }
 struct Worker {
     ports: WorkerPorts,
+    sink: Option<super::provider_session::ProviderEventSink>,
     demand: Demand,
     socket: Option<DxlinkSession>,
     subscription_budget: Arc<Mutex<SubscriptionChangeBudget>>,
-    retry_at: Instant,
+    subscription_retry_at: Instant,
     refresh_at: Instant,
-    connected_at: Instant,
     socket_url: String,
     pending_token: Option<(u64, u64)>,
     cached_token: Option<QuoteToken>,
@@ -1972,7 +1976,6 @@ struct Worker {
     ordinal: u64,
     demand_dirty: bool,
     candle_from_ms: BTreeMap<String, i64>,
-    backoff: super::reconnect::Backoff,
     /// Set only while tastytrade authorization is withdrawn.
     paused: bool,
     trade_batches: BTreeMap<String, (bool, Vec<IndexedTradeMutation>)>,
@@ -1985,12 +1988,12 @@ impl Worker {
     fn new(ports: WorkerPorts) -> Self {
         Self {
             ports,
+            sink: None,
             demand: Demand::default(),
             socket: None,
             subscription_budget: Arc::new(Mutex::new(SubscriptionChangeBudget::default())),
-            retry_at: Instant::now(),
+            subscription_retry_at: Instant::now(),
             refresh_at: Instant::now(),
-            connected_at: Instant::now(),
             socket_url: String::new(),
             pending_token: None,
             cached_token: None,
@@ -2003,11 +2006,6 @@ impl Worker {
             ordinal: 0,
             demand_dirty: true,
             candle_from_ms: BTreeMap::new(),
-            backoff: super::reconnect::Backoff::new(
-                DESCRIPTOR.capabilities.reconnect,
-                &super::clock::SystemClock,
-                0x5441_5354,
-            ),
             paused: false,
             trade_batches: BTreeMap::new(),
             candle_batches: BTreeMap::new(),
@@ -2017,16 +2015,20 @@ impl Worker {
         }
     }
     fn epoch(&self) -> u64 {
-        self.ports.generation.load(Ordering::Acquire)
+        self.sink.map_or(0, |sink| sink.epoch.get().get())
     }
     fn publish(&self, event: RealtimeEvent) -> Result<(), String> {
-        publish(&self.ports.events, &self.ports.wake, event)
+        let Some(sink) = self.sink else {
+            return Ok(());
+        };
+        publish(&self.ports.events, &self.ports.wake, sink, event)
     }
     fn run(mut self) {
         while !self.ports.stop.load(Ordering::Acquire) {
             self.controls();
             self.flush_completions();
-            let work = !self.demand.series.is_empty() || !self.demand.instruments.is_empty();
+            let work = self.sink.is_some()
+                && (!self.demand.series.is_empty() || !self.demand.instruments.is_empty());
             if self.paused || (!work && self.socket.is_none()) {
                 self.cancel_histories("Tastytrade history demand retired");
                 thread::sleep(Duration::from_millis(25));
@@ -2034,10 +2036,6 @@ impl Worker {
             }
             let result = (|| {
                 self.connect()?;
-                if self.socket.is_some() && self.connected_at.elapsed() >= Duration::from_secs(60) {
-                    self.backoff
-                        .healthy_for(self.connected_at, &super::clock::SystemClock);
-                }
                 self.reconcile()?;
                 self.start_history()?;
                 self.finish_history()?;
@@ -2075,6 +2073,25 @@ impl Worker {
     fn controls(&mut self) {
         while let Ok(control) = self.ports.controls.try_recv() {
             match control {
+                RealtimeControl::Connect(sink) => {
+                    self.socket = None;
+                    self.pending_token = None;
+                    self.cached_token = None;
+                    self.cancel_histories("Tastytrade provider epoch retired");
+                    self.tape = None;
+                    self.loaded_tapes.clear();
+                    self.trade_batches.clear();
+                    self.candle_batches.clear();
+                    self.candle_from_ms.clear();
+                    self.quotes.clear();
+                    self.demand_dirty = true;
+                    self.sink = Some(sink);
+                    self.ports.generation.store(self.epoch(), Ordering::Release);
+                    self.subscription_retry_at = Instant::now();
+                    if let Err(error) = self.publish(RealtimeEvent::Connecting(self.epoch())) {
+                        self.recover(error);
+                    }
+                }
                 RealtimeControl::Subscribe(next) => {
                     self.demand = next;
                     self.loaded_tapes.retain(|id| {
@@ -2089,16 +2106,15 @@ impl Worker {
                     self.demand = Demand::default();
                     self.pending_token = None;
                     self.socket = None;
+                    self.sink = None;
                     self.tape = None;
                     self.loaded_tapes.clear();
-                    let _ = self.publish(RealtimeEvent::Disconnected(self.epoch()));
                 }
                 RealtimeControl::AuthorizationChanged(ready) => {
                     self.pending_token = None;
                     self.cached_token = None;
                     self.paused = !ready;
-                    self.backoff.reset();
-                    self.retry_at = Instant::now();
+                    self.subscription_retry_at = Instant::now();
                     if !ready {
                         self.socket = None;
                         self.tape = None;
@@ -2131,31 +2147,19 @@ impl Worker {
             self.install_token(&token)?;
             self.cached_token = Some(token);
         }
-        if self.pending_token.is_some() || Instant::now() < self.retry_at {
+        if self.pending_token.is_some() || Instant::now() < self.subscription_retry_at {
             return Ok(());
         }
         if self.socket.is_some() && Instant::now() < self.refresh_at {
             return Ok(());
         }
-        if self.socket.is_none() {
-            let epoch = if self.ordinal == 0 {
-                self.epoch()
-            } else {
-                self.ports
-                    .generation
-                    .fetch_add(1, Ordering::AcqRel)
-                    .checked_add(1)
-                    .ok_or("Tastytrade session generation overflowed")?
-            };
-            self.ordinal = self.ordinal.max(1);
-            self.publish(RealtimeEvent::Connecting(epoch))?;
-            if Instant::now() < self.refresh_at
-                && let Some(token) = self.cached_token.take()
-            {
-                let result = self.install_token(&token);
-                self.cached_token = Some(token);
-                return result;
-            }
+        if self.socket.is_none()
+            && Instant::now() < self.refresh_at
+            && let Some(token) = self.cached_token.take()
+        {
+            let result = self.install_token(&token);
+            self.cached_token = Some(token);
+            return result;
         }
         self.token_identity = self
             .token_identity
@@ -2169,7 +2173,7 @@ impl Worker {
         match self.ports.token_requests.try_send(request) {
             Ok(()) => self.pending_token = Some(identity),
             Err(TrySendError::Full(_)) => {
-                self.retry_at = Instant::now() + Duration::from_millis(100);
+                self.subscription_retry_at = Instant::now() + Duration::from_millis(100);
             }
             Err(TrySendError::Disconnected(_)) => {
                 return Err("Tastytrade token worker stopped".into());
@@ -2206,7 +2210,6 @@ impl Worker {
         socket.open(3, "AUTO", Vec::new())?;
         socket.open(5, "STREAM", Vec::new())?;
         self.socket_url.clone_from(&token.dxlink_url);
-        self.connected_at = Instant::now();
         self.candle_from_ms.clear();
         self.demand_dirty = true;
         self.socket = Some(socket);
@@ -2263,14 +2266,14 @@ impl Worker {
             + socket.subscription_changes_for_replace(5, &trades)?
             + socket.subscription_changes_for_replace(3, &candles)?;
         if !socket.can_change_subscriptions(changes.saturating_add(1_000))? {
-            self.retry_at = Instant::now() + Duration::from_millis(250);
+            self.subscription_retry_at = Instant::now() + Duration::from_millis(250);
             return Ok(());
         }
         for (channel, subscriptions) in [(1, quotes), (5, trades), (3, candles)] {
             match socket.replace(channel, subscriptions) {
                 Ok(()) => {}
                 Err(SubscriptionChangeError::BudgetExhausted) => {
-                    self.retry_at = Instant::now() + Duration::from_millis(250);
+                    self.subscription_retry_at = Instant::now() + Duration::from_millis(250);
                     return Ok(());
                 }
                 Err(error) => return Err(error.to_string()),
@@ -2818,17 +2821,18 @@ impl Worker {
         self.candle_batches.clear();
         self.quotes.clear();
         self.cancel_histories(&error);
-        // Transport failures never park the session: a parked worker leaves every
-        // demanded series waiting on history until the user reconnects. The capped
-        // backoff bounds provider traffic to one token request per retry interval;
-        // only an explicit authorization change pauses the worker.
-        let super::reconnect::RetryDecision::Wait(delay) = self.backoff.failure(class) else {
-            unreachable!("tastytrade transport retry has no budget");
+        // The coordinator owns transport retry. Subscription-budget pacing above
+        // remains local and cannot open a socket.
+        let retry_after = match class {
+            super::reconnect::RetryClass::RateLimited { retry_after } => Some(retry_after),
+            _ => None,
         };
-        self.retry_at = Instant::now() + delay;
-        if let Err(publish_error) = self.publish(RealtimeEvent::Recovering(self.epoch(), error)) {
+        if let Err(publish_error) =
+            self.publish(RealtimeEvent::Retry(self.epoch(), error, retry_after))
+        {
             diagnostic!("Aeris tastytrade provider state publication failed: {publish_error}");
         }
+        self.sink = None;
     }
     /// dxFeed updates each quote side independently, so a composite quote can be
     /// briefly locked or crossed. It cannot form a canonical top of book, but it
@@ -2935,13 +2939,14 @@ pub(super) fn start_record(
     Ok(ProviderRuntimeRecord {
         ctrader: None,
         hyperliquid: None,
+        tastytrade: Some(super::TastytradeChannels { controls, events }),
         descriptor,
         history: history_tx,
         cancellation,
         lifecycle,
         realtime: ProviderRealtimeChannels {
             enabled: true,
-            channels: ProviderRealtimeChannelSet::Tastytrade { controls, events },
+            channels: ProviderRealtimeChannelSet::Disabled,
         },
         catalog: ProviderCatalogChannels {
             enabled: true,
