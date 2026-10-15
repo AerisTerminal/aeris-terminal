@@ -519,6 +519,8 @@ Status: in progress
 - [ ] M4.10 facts-only-persistence - Commit-then-apply steps; no durable writes per quote
   - M4.10 part 1/4: Revision persistence now joins each existing revisioned SQLite write transaction rather than making a second commit after its order/account/group/risk write. The owner reads the committed revision into memory; write-only projections and store-open housekeeping keep their previous revision behavior. Memory application still precedes some later effects, and multi-effect commands/quotes still use multiple old write paths pending parts 2 and 3.
   - The characterized `crash_during_commit(2)` replay proves cancel and amend no longer expose a second revision commit; a first-commit failure rolls back the order and revision, survives restart and replays. Existing simulated goldens remain semantically identical; replay comparison normalizes Windows checkout CRLF. The ignored open-position release quote benchmark is restored unchanged in workload (1,000 alternating mark quotes); baseline at `20be05fd`: 1,244.4 quotes/s, command `$env:CARGO_BUILD_JOBS='2'; cargo test -p aeris_trading_runtime --release --locked benchmark_quotes_with_one_open_position -- --ignored --nocapture`. Crate checks and full fmt, strict workspace Clippy, tests and naming check passed. M4.10 remains unchecked.
+  - M4.10 part 2/4: Simulated place, copier, protective/bracket placement, modify, cancel, bracket cascade and CancelAll stage their order facts for one `StepTx`, then apply memory and dispatch diagnostics only after commit. Failed-commit replay covers acceptance/cancel/amend, copied orders and multi-order bracket cancellation; the two original simulated goldens remain unchanged.
+  - Broker place/amend/cancel reserve the bounded outbound slot across commit; full/disconnected queues reject before SQLite, and a failed commit drops the reservation without publishing a request or touching memory. The superseded broker compensating transactions are removed. Venue relay and reservation tests cover bounded capacity, disconnect and rollback. Quote-effect migration remains part 3, mark-only/retention/benchmark remains part 4.
 
 ### M5 trading engine
 
@@ -644,6 +646,7 @@ the repo root `AGENTS.md`.
 - V21 reads and writes only `fill_accounting` and `trade_cycles` for P&L; legacy cycle tables and fill columns are preserved, unread, for deferred removal (M4.9).
 - Desktop source may not reference `SimulatedMarketObservation`; quote execution and current quote provenance are owned by the trading QuoteBook fed from the market runtime (M4.7 part 3/3, this commit).
 - Simulated order admission and fills require the trading owner's verified session, Live current-generation quote and class-specific freshness; a restart-time owner-local `eligible_after` fences restored orders without comparing provider generations across processes (M4.8).
+- Broker order commands reserve bounded venue request capacity before their SQLite commit; the request becomes visible to the relay only after commit, and queue rejection causes no durable change or compensating undo (M4.10 part 2/4, this commit).
 
 ## 6. Progress log
 
@@ -733,6 +736,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M4.8 feat(trading): gate simulated orders on provider-neutral session and fresh Live quote - four provider fixture families, all entry shapes, clock boundaries and restart fence tested; isolated BTC market/Join Bid accepted, but GUI far-resting limit and pane-free stop/bracket remain unverified.
 - 2026-10-16 M4.9 feat(trading): consolidate fill accounting under V21 - migrated V20 routes and legacy fills/cycles, unified owner position and P&L path, and checked reversal/scale-out agreement with unchanged goldens.
 - 2026-10-16 M4.10 part 1/4 feat(trading): persist revisions with existing write transactions - removed the standalone revision commit, characterized cancel/amend rollback and restored the ignored open-position quote benchmark.
+- 2026-10-16 M4.10 part 2/4 feat(trading): M4.10 part 2/4 - committed staged command effects once before memory/publication, and reserved broker queue capacity through commit without compensating undo.
 
 ## 7. Known gaps / deferred
 

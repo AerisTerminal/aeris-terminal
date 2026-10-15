@@ -1,6 +1,6 @@
 use super::{
     ClientOrderId, Fill, FillId, FillMemoryUpdate, FixedPoint, ManagedBracketStatus, ModifyOrder,
-    Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus,
+    Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep,
     SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, TradingInstrument,
     VenueRoute, fill_policy_persistence, is_simulated, planned_leg,
 };
@@ -31,7 +31,19 @@ impl TradingCore {
         if !order.status.is_open() {
             return Ok(order);
         }
-        let sequence = self.state.next_sequence;
+        let mut step = OrderStep::new(self.state.next_sequence);
+        let cancelled = self.stage_cancellation(&mut step, order, reconcile_bracket)?;
+        self.commit_order_step(step, Vec::new())?;
+        Ok(cancelled)
+    }
+
+    fn stage_cancellation(
+        &self,
+        step: &mut OrderStep,
+        order: Order,
+        reconcile_bracket: bool,
+    ) -> Result<Order, String> {
+        let sequence = step.next_sequence;
         let provenance = order.provenance.clone();
         let event = OrderEvent {
             id: OrderEventId::try_new(format!("sim-event-{sequence}"))
@@ -44,60 +56,42 @@ impl TradingCore {
             provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
-        self.store.cancel_order(&order, &event, sequence + 1)?;
-        self.state.next_sequence = sequence + 1;
-        self.state.order_events.push_back(event);
+        step.next_sequence += 1;
         let cancelled = Order {
             status: OrderStatus::Cancelled,
             ..order
         };
-        self.state
-            .orders
-            .insert(cancelled.id.clone(), cancelled.clone());
-        self.eligible_after.remove(&cancelled.id);
+        step.updated.push((cancelled.clone(), event));
         if reconcile_bracket {
-            self.reconcile_managed_cancellation(client_order_id)?;
-        }
-        self.bump_revision()?;
-        Ok(cancelled)
-    }
-
-    pub(super) fn reconcile_managed_cancellation(
-        &mut self,
-        client_order_id: &ClientOrderId,
-    ) -> Result<(), String> {
-        let affected = self
-            .state
-            .managed_brackets
-            .iter()
-            .find_map(|(id, bracket)| {
+            let affected = self.state.managed_brackets.iter().find_map(|(_, bracket)| {
                 let entry_cancelled = bracket.status == ManagedBracketStatus::AwaitingEntry
-                    && bracket.entry_client_order_id == *client_order_id;
+                    && bracket.entry_client_order_id == cancelled.client_order_id;
                 let stop_cancelled = bracket.status == ManagedBracketStatus::Active
-                    && bracket.stop_client_order_id.as_ref() == Some(client_order_id);
+                    && bracket.stop_client_order_id.as_ref() == Some(&cancelled.client_order_id);
                 (entry_cancelled || stop_cancelled).then(|| {
                     (
-                        id.clone(),
+                        bracket.clone(),
                         stop_cancelled.then(|| bracket.target_client_order_ids.clone()),
                     )
                 })
             });
-        let Some((bracket_id, targets)) = affected else {
-            return Ok(());
-        };
-        let mut bracket = self
-            .state
-            .managed_brackets
-            .get(&bracket_id)
-            .cloned()
-            .ok_or_else(|| "managed bracket disappeared".to_string())?;
-        bracket.status = ManagedBracketStatus::Cancelled;
-        self.store.put_managed_bracket_projection(&bracket)?;
-        self.state.managed_brackets.insert(bracket_id, bracket);
-        for target in targets.into_iter().flatten() {
-            self.cancel_order(&target)?;
+            if let Some((mut bracket, targets)) = affected {
+                bracket.status = ManagedBracketStatus::Cancelled;
+                step.brackets.push(bracket);
+                for target in targets.into_iter().flatten() {
+                    let target_order = self
+                        .state
+                        .orders
+                        .by_client(&target)
+                        .cloned()
+                        .ok_or_else(|| "managed target disappeared".to_string())?;
+                    if target_order.status.is_open() {
+                        self.stage_cancellation(step, target_order, false)?;
+                    }
+                }
+            }
         }
-        Ok(())
+        Ok(cancelled)
     }
 
     pub(super) fn modify_order(&mut self, mut command: ModifyOrder) -> Result<Order, String> {
@@ -167,15 +161,9 @@ impl TradingCore {
             provenance: command.provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
-        self.store.modify_order(&modified, &event, sequence + 1)?;
-        self.state.next_sequence = sequence + 1;
-        self.state.order_events.push_back(event);
-        self.eligible_after
-            .insert(modified.id.clone(), self.command_now);
-        self.state
-            .orders
-            .insert(modified.id.clone(), modified.clone());
-        self.bump_revision()?;
+        let mut step = OrderStep::new(sequence + 1);
+        step.updated.push((modified.clone(), event));
+        self.commit_order_step(step, Vec::new())?;
         Ok(modified)
     }
 
@@ -212,16 +200,39 @@ impl TradingCore {
             })
             .collect::<Vec<_>>();
         let mut cancelled = Vec::new();
+        let mut step = OrderStep::new(self.state.next_sequence);
+        let mut broker_candidates = Vec::new();
         let mut failed = 0_usize;
         let mut last_error = None;
         for (client_order_id, route) in candidates {
-            match (self.cancel_order(&client_order_id), route) {
-                (Ok(order), _) => cancelled.push(order),
-                (Err(error), VenueRoute::CtraderDemo) => {
+            if route == VenueRoute::Simulated {
+                let order = self
+                    .state
+                    .orders
+                    .by_client(&client_order_id)
+                    .cloned()
+                    .ok_or("order client identifier is not registered")?;
+                if order.status.is_open()
+                    && !step
+                        .updated
+                        .iter()
+                        .any(|(updated, _)| updated.id == order.id)
+                {
+                    cancelled.push(self.stage_cancellation(&mut step, order, true)?);
+                }
+            } else {
+                broker_candidates.push(client_order_id);
+            }
+        }
+        self.commit_order_step(step, Vec::new())?;
+        // A broker's asynchronous requests cannot join the simulated SQLite step.
+        for client_order_id in broker_candidates {
+            match self.cancel_order(&client_order_id) {
+                Ok(order) => cancelled.push(order),
+                Err(error) => {
                     failed += 1;
                     last_error = Some(error);
                 }
-                (Err(error), VenueRoute::Simulated) => return Err(error),
             }
         }
         let failure = last_error

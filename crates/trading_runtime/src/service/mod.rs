@@ -6,9 +6,9 @@ use super::{
     BracketPlacement, BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount,
     EconomicEventRiskOutcome, EconomicEventRiskTrigger, FixedPoint, FlattenOutcome, ModifyOrder,
     MovePlannedBracketLeg, Order, PathBuf, PlaceBracket, PlaceInlineBracket, PlaceOrder,
-    PlaceProtectiveOrder, PlannedBracketLeg, Receiver, Reply, RiskEvaluation, RiskProfile,
-    SessionPlan, TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument,
-    TradingServiceStatus, TradingSnapshot, UserRecord, VenueRequest,
+    PlaceProtectiveOrder, PlannedBracketLeg, Reply, RiskEvaluation, RiskProfile, SessionPlan,
+    TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus,
+    TradingSnapshot, UserRecord,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -98,7 +98,7 @@ pub(crate) enum Command {
     PutUserRecord(UserRecord, Reply<()>),
     Snapshot(Reply<TradingSnapshot>),
     Export(PathBuf, Reply<()>),
-    AttachVenue(Reply<(u64, Receiver<VenueRequest>)>),
+    AttachVenue(Reply<(u64, aeris_trading::venue_outbox::VenueRequestReceiver)>),
     DrainVenueEvents,
     #[cfg(test)]
     BlockOwnerForTest(SyncSender<()>, Arc<std::sync::Barrier>),

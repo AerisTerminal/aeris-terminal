@@ -2625,7 +2625,7 @@ mod venue_relay {
     const GENERATION: u64 = 7;
 
     struct Venue {
-        requests: SyncSender<VenueRequest>,
+        requests: aeris_trading::venue_outbox::VenueRequestSender,
         events: Arc<Mutex<Vec<VenueEvent>>>,
     }
 
@@ -2657,7 +2657,7 @@ mod venue_relay {
     /// Attaches a venue and drives the turn that announces the demo account.
     fn attached(script: Arc<Mutex<Script>>) -> (Harness, Venue) {
         let mut harness = harness(script, Duration::ZERO);
-        let (requests, receiver) = mpsc::sync_channel(64);
+        let (requests, receiver) = aeris_trading::venue_outbox::bounded_venue_requests(64);
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&events);
         harness.venue.put(VenueLink {
@@ -2756,7 +2756,7 @@ mod venue_relay {
         );
         let mut harness = harness(trading_script(), Duration::ZERO);
         harness.drive();
-        let (requests, receiver) = mpsc::sync_channel(64);
+        let (requests, receiver) = aeris_trading::venue_outbox::bounded_venue_requests(64);
         harness.script.lock().unwrap().open_fault = Some(SessionFault::NeedsReconnect);
         harness.venue.put(VenueLink {
             generation: GENERATION,

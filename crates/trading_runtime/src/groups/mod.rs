@@ -5,7 +5,7 @@ use super::{
     ArmedBracket, BROKER_PNL_UNAVAILABLE, BracketPlacement, BracketStrategyTemplate, ClientOrderId,
     Fill, FixedPoint, InstrumentId, MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES,
     ManagedBracket, ManagedBracketStatus, ModifyOrder, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderSide, OrderStatus, OrderType, PlaceBracket, PlaceOrder,
+    OrderEventKind, OrderSide, OrderStatus, OrderStep, OrderType, PlaceBracket, PlaceOrder,
     SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, TradingInstrument,
     VenueRoute, allocated_target_quantities, favorable_tick_distance, instrument_tick_units,
     managed_child_client_order_id, negative_loss, nonnegative_difference, opposite_side,
@@ -84,7 +84,7 @@ impl TradingCore {
         if let Some(existing) = self.state.managed_brackets.get(&bracket_id) {
             return Ok(BracketPlacement::Managed(existing.clone()));
         }
-        self.make_room_for_managed_bracket()?;
+        let retired = self.retired_managed_bracket()?;
         let instrument = self
             .state
             .instruments
@@ -129,17 +129,11 @@ impl TradingCore {
             .get(&entry.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?;
         planned_leg::planned_legs(&bracket, &entry, instrument)?;
-        self.store
-            .insert_order_and_managed_bracket(&entry, &event, &bracket, sequence + 1)?;
-        self.state.next_sequence = sequence + 1;
-        self.state.order_events.push_back(event);
-        self.eligible_after
-            .insert(entry.id.clone(), self.command_now);
-        self.state.orders.insert(entry.id.clone(), entry);
-        self.state
-            .managed_brackets
-            .insert(bracket_id, bracket.clone());
-        self.bump_revision()?;
+        let mut step = OrderStep::new(sequence + 1);
+        step.deleted_brackets.extend(retired);
+        step.inserted.push((entry, event));
+        step.brackets.push(bracket.clone());
+        self.commit_order_step(step, Vec::new())?;
         Ok(BracketPlacement::Managed(bracket))
     }
 
@@ -194,9 +188,9 @@ impl TradingCore {
         Ok(())
     }
 
-    pub(super) fn make_room_for_managed_bracket(&mut self) -> Result<(), String> {
+    pub(super) fn retired_managed_bracket(&self) -> Result<Option<String>, String> {
         if self.state.managed_brackets.len() < MAXIMUM_MANAGED_BRACKETS {
-            return Ok(());
+            return Ok(None);
         }
         let retired = self
             .state
@@ -216,9 +210,7 @@ impl TradingCore {
             })
             .map(|(id, _)| id.clone())
             .ok_or_else(|| "active managed bracket limit reached".to_string())?;
-        self.store.delete_managed_bracket(&retired)?;
-        self.state.managed_brackets.remove(&retired);
-        Ok(())
+        Ok(Some(retired))
     }
 
     pub(super) fn recover_managed_brackets(

@@ -30,14 +30,13 @@ pub(crate) use core::{
     managed_child_client_order_id, opposite_side, order_increment_units, shifted_price,
 };
 pub(crate) use service::Command;
+pub(crate) use std::path::PathBuf;
 #[cfg(test)]
 pub(crate) use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, Weak, atomic::AtomicBool, mpsc},
     time::Duration,
 };
-pub(crate) use std::{path::PathBuf, sync::mpsc::Receiver};
-pub(crate) use venue::VenueRequest;
 
 #[cfg(test)]
 mod tests;

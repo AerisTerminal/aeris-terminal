@@ -120,16 +120,6 @@ impl TradingStore {
     ) -> Result<(), String> {
         upsert_managed_bracket(&self.connection, bracket)
     }
-
-    pub(crate) fn delete_managed_bracket(&self, bracket_id: &str) -> Result<(), String> {
-        self.connection
-            .execute(
-                "DELETE FROM managed_brackets WHERE bracket_id = ?1",
-                [bracket_id],
-            )
-            .map_err(database_error)?;
-        Ok(())
-    }
 }
 
 impl TradingStore {
@@ -314,44 +304,6 @@ impl TradingStore {
 }
 
 impl TradingStore {
-    pub(crate) fn insert_order_and_managed_bracket(
-        &mut self,
-        order: &Order,
-        event: &OrderEvent,
-        bracket: &ManagedBracket,
-        next_sequence: u64,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        insert_order_row(&transaction, order)?;
-        insert_event_row(&transaction, event)?;
-        upsert_managed_bracket(&transaction, bracket)?;
-        update_next_sequence(&transaction, next_sequence)?;
-        StepTx::commit_revision(transaction).map_err(database_error)
-    }
-
-    pub(crate) fn insert_protective_order(
-        &mut self,
-        order: &Order,
-        event: &OrderEvent,
-        protective: &ProtectiveOrder,
-        next_sequence: u64,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        insert_order_row(&transaction, order)?;
-        insert_event_row(&transaction, event)?;
-        transaction
-            .execute(
-                "INSERT INTO protective_orders(client_order_id, role) VALUES (?1, ?2)",
-                params![
-                    protective.client_order_id.as_str(),
-                    protective.role.as_str()
-                ],
-            )
-            .map_err(database_error)?;
-        update_next_sequence(&transaction, next_sequence)?;
-        StepTx::commit_revision(transaction).map_err(database_error)
-    }
-
     pub(crate) fn insert_managed_child_orders(
         &mut self,
         orders: &[(Order, OrderEvent)],

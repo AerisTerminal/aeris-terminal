@@ -10,8 +10,8 @@ use super::super::{
     reconnect::{Backoff, ReconnectPolicy, RetryClass, RetryDecision},
 };
 use super::{
-    BTreeMap, BTreeSet, DISCONNECTED_DETAIL, Failure, HostFault, Instant, Mutex, Receiver, Route,
-    Worker, classify, now_nanos, parse_instrument_id, request_error,
+    BTreeMap, BTreeSet, DISCONNECTED_DETAIL, Failure, HostFault, Instant, Mutex, Route, Worker,
+    classify, now_nanos, parse_instrument_id, request_error,
 };
 use aeris_ctrader_open_api_adapter::{
     ProtoMessage,
@@ -55,7 +55,7 @@ pub type VenueEventSink = Box<dyn Fn(VenueEvent) -> Result<(), String> + Send>;
 /// sink for events stamped with that generation.
 pub struct VenueLink {
     pub generation: u64,
-    pub requests: Receiver<VenueRequest>,
+    pub requests: aeris_trading::venue_outbox::VenueRequestReceiver,
     pub events: VenueEventSink,
 }
 

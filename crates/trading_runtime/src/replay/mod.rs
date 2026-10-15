@@ -618,6 +618,211 @@ fn replay_failed_commit_keeps_memory_and_disk_at_last_commit() {
 }
 
 #[test]
+fn replay_failed_accept_cancel_and_amend_keep_publications_and_replay_once() {
+    for operation in ["accept", "cancel", "amend"] {
+        let directory = TestDirectory::new("command-commit");
+        let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+        let mut harness = start_golden_service(&directory, clock);
+        let mut pending = market_order("command-order", OrderSide::Buy, 1, 1_000);
+        pending.order_type = OrderType::Limit;
+        pending.time_in_force = TimeInForce::GoodTillCancelled;
+        pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+        if operation != "accept" {
+            harness
+                .place_order(pending.clone())
+                .expect("initial placement");
+        }
+        let before = harness.snapshot().expect("before");
+        let apply = |harness: &mut ReplayHarness| -> Result<(), String> {
+            match operation {
+                "accept" => harness.place_order(pending.clone()).map(|_| ()),
+                "cancel" => harness
+                    .cancel_order(ClientOrderId::try_new("command-order").expect("id"))
+                    .map(|_| ()),
+                _ => harness
+                    .modify_order(ModifyOrder {
+                        client_order_id: ClientOrderId::try_new("command-order").expect("id"),
+                        time_in_force: TimeInForce::GoodTillCancelled,
+                        limit_price: Some(FixedPoint::try_new(8_900, 2).expect("price")),
+                        stop_price: None,
+                        modified_unix_nanos: 5_000,
+                        provenance: provenance(3, 5_000),
+                    })
+                    .map(|_| ()),
+            }
+        };
+        harness.crash_during_commit(1);
+        assert!(apply(&mut harness).is_err(), "{operation}: failed commit");
+        assert_eq!(
+            harness.snapshot().expect("memory"),
+            before,
+            "{operation}: memory"
+        );
+        harness.restart().expect("reopen");
+        assert_eq!(
+            harness.snapshot().expect("disk"),
+            before,
+            "{operation}: disk"
+        );
+        apply(&mut harness).expect("replay once");
+        let committed = harness.snapshot().expect("committed");
+        assert_ne!(committed, before);
+        harness.restart().expect("reopen after replay");
+        assert_eq!(harness.snapshot().expect("recovered"), committed);
+    }
+}
+
+#[test]
+fn replay_failed_copied_accept_has_no_partial_orders_or_dispatches() {
+    let directory = TestDirectory::new("copied-commit");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let target = TradingAccountId::try_new("aeris-sim-copy").expect("target");
+    harness
+        .register_account(TradingAccount {
+            id: target.clone(),
+            display_name: "SIM Copy".into(),
+            environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".into(),
+            broker_ref: None,
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("target registered");
+    harness
+        .command(|reply| {
+            Command::RegisterTradeCopier(
+                TradeCopierConfig {
+                    source_account_id: TradingAccountId::try_new("aeris-sim-1").expect("source"),
+                    revision: 1,
+                    enabled: true,
+                    targets: vec![TradeCopierTarget {
+                        account_id: target,
+                        quantity_multiplier: FixedPoint::try_new(1, 0).expect("quantity"),
+                        enabled: true,
+                    }],
+                },
+                reply,
+            )
+        })
+        .expect("copier registered");
+    let before = harness.snapshot().expect("before");
+    harness.crash_during_commit(1);
+    let order = market_order("copied-failure", OrderSide::Buy, 1, 1_000);
+    assert!(harness.place_order(order.clone()).is_err());
+    assert_eq!(harness.snapshot().expect("memory"), before);
+    harness.restart().expect("restart");
+    assert_eq!(harness.snapshot().expect("disk"), before);
+    harness.crash_during_commit(2);
+    harness.place_order(order).expect("replay");
+    assert_eq!(harness.snapshot().expect("accepted").orders.len(), 2);
+    let committed = harness.snapshot().expect("committed");
+    harness.restart().expect("restart after successful copy");
+    let mut durable = committed.clone();
+    durable.copy_dispatches.clear(); // Dispatch diagnostics are bounded process-local views.
+    assert_eq!(harness.snapshot().expect("recovered"), durable);
+}
+
+#[test]
+fn replay_failed_broker_submit_does_not_publish_reserved_request() {
+    let directory = TestDirectory::new("broker-reserved-commit");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let account_id = TradingAccountId::try_new("replay-demo").expect("id");
+    harness
+        .register_account(TradingAccount {
+            id: account_id.clone(),
+            display_name: "replay demo".into(),
+            environment: AccountEnvironment::Demo,
+            venue_id: "ctrader".into(),
+            broker_ref: Some("sanitized".into()),
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("demo account");
+    let (_, requests) = harness.command(Command::AttachVenue).expect("attach venue");
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(crate::venue::VenueRequest::Reconcile { .. })
+    ));
+    let mut order = market_order("broker-commit", OrderSide::Buy, 1, 1_000);
+    order.account_id = account_id;
+    let before = harness.snapshot().expect("before");
+    harness.crash_during_commit(1);
+    assert!(harness.place_order(order.clone()).is_err());
+    assert_eq!(harness.snapshot().expect("memory"), before);
+    assert!(matches!(
+        requests.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    harness.restart().expect("restart after failure");
+    assert_eq!(harness.snapshot().expect("disk"), before);
+    // The old receiver belongs to the retired generation. Reattach before replaying.
+    let (_, next) = harness
+        .command(Command::AttachVenue)
+        .expect("new generation");
+    assert!(matches!(
+        next.try_recv(),
+        Ok(crate::venue::VenueRequest::Reconcile { .. })
+    ));
+    harness.place_order(order).expect("replay once");
+    assert!(matches!(
+        next.try_recv(),
+        Ok(crate::venue::VenueRequest::Place(_))
+    ));
+}
+
+#[test]
+fn replay_failed_cancel_all_rolls_back_bracket_and_multiple_orders() {
+    let directory = TestDirectory::new("cancel-all-bracket");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let mut entry = market_order("pending-bracket", OrderSide::Buy, 1, 1_000);
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::GoodTillCancelled;
+    entry.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    harness
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: BracketStrategyTemplate {
+                template_id: "cancel-template".into(),
+                revision: 1,
+                name: "Cancel bracket".into(),
+                stop_offset_ticks: 8,
+                targets: vec![BracketTarget {
+                    offset_ticks: 8,
+                    quantity_percent: 100,
+                }],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("bracket");
+    let mut other = market_order("another-order", OrderSide::Buy, 2, 2_000);
+    other.order_type = OrderType::Limit;
+    other.time_in_force = TimeInForce::GoodTillCancelled;
+    other.limit_price = Some(FixedPoint::try_new(8_900, 2).expect("price"));
+    harness.place_order(other).expect("second order");
+    let before = harness.snapshot().expect("before");
+    let cancel =
+        |harness: &mut ReplayHarness| harness.command(|reply| Command::CancelAll(None, reply));
+    harness.crash_during_commit(1);
+    assert!(cancel(&mut harness).is_err());
+    assert_eq!(harness.snapshot().expect("memory"), before);
+    harness.restart().expect("restart");
+    assert_eq!(harness.snapshot().expect("disk"), before);
+    harness.crash_during_commit(2);
+    assert_eq!(cancel(&mut harness).expect("one transaction").len(), 2);
+    let after = harness.snapshot().expect("after");
+    assert!(after.orders.iter().all(|order| !order.status.is_open()));
+    harness.restart().expect("restart committed");
+    assert_eq!(harness.snapshot().expect("recovered"), after);
+}
+
+#[test]
 fn replay_failed_cancel_and_amend_keep_memory_and_disk_at_last_commit() {
     for amend in [false, true] {
         let directory = TestDirectory::new("replay-revision-commit");

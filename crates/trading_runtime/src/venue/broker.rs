@@ -261,22 +261,18 @@ impl TradingCore {
             "submitted to cTrader",
             provenance,
         )?;
+        let outbound = self.venue_outbound.clone().ok_or(DEMO_VENUE_UNAVAILABLE)?;
+        let reservation = outbound
+            .try_reserve(request)
+            .map_err(|error| outbound_error(&error))?;
         self.store
             .insert_broker_order(&order, &event, sequence + 1)?;
-        let outbound = self.venue_outbound.as_ref().ok_or(DEMO_VENUE_UNAVAILABLE)?;
-        match outbound.try_send(request) {
-            Ok(()) => {
-                self.state.next_sequence = sequence + 1;
-                self.state.orders.insert(order.id.clone(), order.clone());
-                self.state.order_events.push_back(event);
-                self.bump_revision()?;
-                Ok(order)
-            }
-            Err(error) => {
-                self.store.reject_unsent_broker_order(&order, sequence)?;
-                Err(outbound_error(&error))
-            }
-        }
+        self.state.next_sequence = sequence + 1;
+        self.state.orders.insert(order.id.clone(), order.clone());
+        self.state.order_events.push_back(event);
+        self.state.revision = self.state.revision.saturating_add(1).min(i64::MAX as u64);
+        reservation.commit();
+        Ok(order)
     }
 
     /// Requests a price change. The order keeps its current prices until the broker
@@ -1117,28 +1113,25 @@ impl TradingCore {
         updated.validate().map_err(|error| error.to_string())?;
         request.validate().map_err(|error| error.to_string())?;
         let outbound = self.venue_outbound.clone().ok_or(DEMO_VENUE_UNAVAILABLE)?;
-        let previous = self
-            .state
-            .orders
-            .get(&updated.id)
-            .ok_or("broker order is not registered")?
-            .clone();
+        if self.state.orders.get(&updated.id).is_none() {
+            return Err("broker order is not registered".into());
+        }
         let sequence = self.state.next_sequence;
         let provenance = self.broker_provenance(self.command_now, sequence);
         let event = Self::broker_event(updated, sequence, kind, detail, provenance)?;
+        let reservation = outbound
+            .try_reserve(request)
+            .map_err(|error| outbound_error(&error))?;
         self.store
             .transition_broker_order(updated, &event, sequence + 1, None)?;
-        if let Err(error) = outbound.try_send(request) {
-            self.store
-                .reject_unsent_broker_transition(&previous, &event)?;
-            return Err(outbound_error(&error));
-        }
         self.state.next_sequence = sequence + 1;
         self.state
             .orders
             .insert(updated.id.clone(), updated.clone());
         self.state.order_events.push_back(event);
-        self.bump_revision()
+        self.state.revision = self.state.revision.saturating_add(1).min(i64::MAX as u64);
+        reservation.commit();
+        Ok(())
     }
 
     fn broker_provenance(&self, observed_unix_nanos: i64, sequence: u64) -> TradingProvenance {

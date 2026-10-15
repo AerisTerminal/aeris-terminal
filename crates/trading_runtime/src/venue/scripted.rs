@@ -29,7 +29,13 @@ fn broker() -> TradingAccount {
     }
 }
 
-fn setup(label: &str) -> (TestDirectory, TradingService, mpsc::Receiver<VenueRequest>) {
+fn setup(
+    label: &str,
+) -> (
+    TestDirectory,
+    TradingService,
+    aeris_trading::venue_outbox::VenueRequestReceiver,
+) {
     let directory = TestDirectory::new(label);
     let service = start_service(&directory);
     service.register_account(broker()).expect("account");

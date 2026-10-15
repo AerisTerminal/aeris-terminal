@@ -216,6 +216,29 @@ pub(super) struct TradingStore {
     retention: TradingRetention,
 }
 
+/// Prepared facts for one order command, independent of the SQLite connection.
+pub(crate) struct OrderStep {
+    pub inserted: Vec<(Order, OrderEvent)>,
+    pub updated: Vec<(Order, OrderEvent)>,
+    pub brackets: Vec<ManagedBracket>,
+    pub deleted_brackets: Vec<String>,
+    pub protective: Vec<ProtectiveOrder>,
+    pub next_sequence: u64,
+}
+
+impl OrderStep {
+    pub(crate) fn new(next_sequence: u64) -> Self {
+        Self {
+            inserted: Vec::new(),
+            updated: Vec::new(),
+            brackets: Vec::new(),
+            deleted_brackets: Vec::new(),
+            protective: Vec::new(),
+            next_sequence,
+        }
+    }
+}
+
 /// A single owner step's SQLite transaction. Dropping without `commit` rolls back.
 /// M4.10 will collect the step's facts before opening this transaction.
 pub(crate) struct StepTx<'a>(Transaction<'a>);
@@ -242,14 +265,6 @@ impl<'a> StepTx<'a> {
 
     pub(crate) fn commit_without_revision(self) -> rusqlite::Result<()> {
         self.0.commit()
-    }
-
-    pub(crate) fn commit_rejected_submission(transaction: Transaction<'a>) -> rusqlite::Result<()> {
-        transaction.execute(
-            "UPDATE metadata SET value = max(value - 1, 0) WHERE key = 'revision'",
-            [],
-        )?;
-        transaction.commit()
     }
 }
 

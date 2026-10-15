@@ -44,16 +44,17 @@ pub use crate::risk::{
 };
 pub use crate::round_trip::{TradeLeg, TradeRoundTrip};
 use crate::service::Command;
-use crate::store::{FillPolicyPersistence, StoredState, TradingStore};
+use crate::store::{FillPolicyPersistence, OrderStep, StoredState, TradingStore};
 pub use crate::store::{SCHEMA_VERSION, StoreError};
 pub use crate::strategy::{
     BracketStrategyTemplate, BracketTarget, BreakEvenRule, MAXIMUM_BRACKET_TARGETS,
     MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES, ManagedBracket, ManagedBracketStatus,
     ProtectiveOrder, ProtectiveOrderRole, TrailingStopRule,
 };
-use crate::venue::{VenueInbox, VenueRequest};
+use crate::venue::VenueInbox;
 use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
+use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
 use aeris_trading::{
     AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order,
     OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
@@ -66,7 +67,7 @@ use std::{
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
+        mpsc::{self, SyncSender, TrySendError},
     },
     thread,
     time::Duration,
@@ -483,7 +484,7 @@ pub(crate) struct TradingCore {
     /// current wall time fences quotes received before this process started.
     eligible_after: BTreeMap<OrderId, i64>,
     execution: ExecutionPolicy,
-    venue_outbound: Option<SyncSender<VenueRequest>>,
+    venue_outbound: Option<VenueRequestSender>,
     venue_inbox: Weak<VenueInbox>,
     venue_ingestion: u64,
     /// Broker accounts the current venue generation has announced; the rest are not
@@ -720,7 +721,7 @@ impl TradingService {
     ///
     /// # Errors
     /// Returns an error when the owner is unavailable or the generation cannot be stored.
-    pub fn attach_demo_venue(&self) -> Result<(u64, Receiver<VenueRequest>), String> {
+    pub fn attach_demo_venue(&self) -> Result<(u64, VenueRequestReceiver), String> {
         self.request(Command::AttachVenue)
     }
 
@@ -1695,6 +1696,60 @@ impl TradingCore {
 
     fn bump_revision(&mut self) -> Result<(), String> {
         self.state.revision = self.store.revision()?;
+        Ok(())
+    }
+
+    fn commit_order_step(
+        &mut self,
+        step: OrderStep,
+        dispatches: Vec<TradeCopyDispatch>,
+    ) -> Result<(), String> {
+        if step.inserted.is_empty()
+            && step.updated.is_empty()
+            && step.brackets.is_empty()
+            && step.deleted_brackets.is_empty()
+        {
+            return Ok(());
+        }
+        let revision_increment =
+            u64::try_from(step.updated.len().max(1)).map_err(|error| error.to_string())?;
+        let committed_revision = self
+            .state
+            .revision
+            .saturating_add(revision_increment)
+            .min(i64::MAX as u64);
+        self.store.commit_order_step(&step)?;
+        self.state.next_sequence = step.next_sequence;
+        for id in step.deleted_brackets {
+            self.state.managed_brackets.remove(&id);
+        }
+        for bracket in step.brackets {
+            self.state
+                .managed_brackets
+                .insert(bracket.bracket_id.clone(), bracket);
+        }
+        for protective in step.protective {
+            self.state
+                .protective_orders
+                .insert(protective.client_order_id.clone(), protective);
+        }
+        for (order, event) in step.inserted.into_iter().chain(step.updated) {
+            if order.status.is_open() {
+                self.eligible_after
+                    .insert(order.id.clone(), self.command_now);
+            } else {
+                self.eligible_after.remove(&order.id);
+            }
+            self.state.orders.insert(order.id.clone(), order);
+            self.state.order_events.push_back(event);
+        }
+        for dispatch in dispatches {
+            self.copy_dispatches.push_back(dispatch);
+            while self.copy_dispatches.len() > MAXIMUM_COPY_DISPATCHES {
+                self.copy_dispatches.pop_front();
+            }
+        }
+        self.state.revision = committed_revision;
         Ok(())
     }
 

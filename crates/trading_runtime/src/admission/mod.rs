@@ -1,11 +1,10 @@
 use super::{
     AccountEnvironment, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE, FixedPoint,
-    MAXIMUM_COPY_DISPATCHES, MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order,
-    OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderType, PlaceOrder,
-    PlaceProtectiveOrder, ProtectiveOrder, ProtectiveOrderRole, Receiver, TradeCopyDispatch,
-    TradingAccount, TradingAccountId, TradingCore, TradingInstrument, VenueRequest, VenueRoute,
-    check_quantity_increment, mirrored_client_order_id, mpsc, multiply_quantity,
-    order_acceptance_detail, venue,
+    MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order, OrderEvent, OrderEventId,
+    OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType, PlaceOrder, PlaceProtectiveOrder,
+    ProtectiveOrder, ProtectiveOrderRole, TradeCopyDispatch, TradingAccount, TradingAccountId,
+    TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute, check_quantity_increment,
+    mirrored_client_order_id, multiply_quantity, order_acceptance_detail, venue,
 };
 
 impl TradingCore {
@@ -25,13 +24,14 @@ impl TradingCore {
         )
     }
 
-    pub(super) fn attach_venue(&mut self) -> Result<(u64, Receiver<VenueRequest>), String> {
+    pub(super) fn attach_venue(&mut self) -> Result<(u64, VenueRequestReceiver), String> {
         let generation = self
             .state
             .venue_generation
             .checked_add(1)
             .ok_or("cTrader venue generation is exhausted")?;
-        let (outbound, receiver) = mpsc::sync_channel(venue::OUTBOUND_CAPACITY);
+        let (outbound, receiver) =
+            aeris_trading::venue_outbox::bounded_venue_requests(venue::OUTBOUND_CAPACITY);
         // Every attach starts with a reconcile of each demo broker account, so state left
         // by a restart or a dropped session is settled against the broker first.
         let reconciles = self
@@ -299,7 +299,9 @@ impl TradingCore {
                 }
             }
         }
-        let source = self.place_single_order(command.clone())?;
+        let mut step = OrderStep::new(self.state.next_sequence);
+        let source = self.stage_single_order(&mut step, command.clone(), true)?;
+        let mut dispatches = Vec::new();
         if let Some(copier) = copier {
             for target in copier.targets.into_iter().filter(|target| target.enabled) {
                 let client_id =
@@ -309,50 +311,45 @@ impl TradingCore {
                     .map_or_else(|_| String::new(), |id| id.as_str().to_string());
                 let result = client_id.and_then(|client_order_id| {
                     let quantity = multiply_quantity(command.quantity, target.quantity_multiplier)?;
-                    self.place_single_order(PlaceOrder {
-                        client_order_id,
-                        account_id: target.account_id.clone(),
-                        quantity,
-                        ..command.clone()
-                    })
+                    self.stage_single_order(
+                        &mut step,
+                        PlaceOrder {
+                            client_order_id,
+                            account_id: target.account_id.clone(),
+                            quantity,
+                            ..command.clone()
+                        },
+                        true,
+                    )
                 });
-                self.copy_dispatches.push_back(TradeCopyDispatch {
+                let dispatch = TradeCopyDispatch {
                     source_client_order_id: command.client_order_id.as_str().to_string(),
                     target_account_id: target.account_id,
                     mirrored_client_order_id,
                     accepted: result.is_ok(),
-                    detail: result.err(),
-                });
-                while self.copy_dispatches.len() > MAXIMUM_COPY_DISPATCHES {
-                    self.copy_dispatches.pop_front();
-                }
+                    detail: result.as_ref().err().cloned(),
+                };
+                dispatches.push(dispatch);
             }
         }
+        self.commit_order_step(step, dispatches)?;
         Ok(source)
     }
 
-    pub(super) fn place_single_order(&mut self, command: PlaceOrder) -> Result<Order, String> {
-        self.place_single_order_with_risk(command, true)
-    }
-
-    pub(super) fn place_single_order_with_risk(
+    fn stage_single_order(
         &mut self,
+        step: &mut OrderStep,
         command: PlaceOrder,
         enforce_risk: bool,
     ) -> Result<Order, String> {
-        if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
-            return Ok(existing.clone());
-        }
-        let sequence = self.state.next_sequence;
-        let (order, event) = self.prepare_single_order(command, enforce_risk, sequence, 0)?;
-        self.store
-            .insert_order(&order, &event, sequence + 1, true)?;
-        self.state.next_sequence = sequence + 1;
-        self.state.order_events.push_back(event);
-        self.eligible_after
-            .insert(order.id.clone(), self.command_now);
-        self.state.orders.insert(order.id.clone(), order.clone());
-        self.bump_revision()?;
+        let (order, event) = self.prepare_single_order(
+            command,
+            enforce_risk,
+            step.next_sequence,
+            step.inserted.len(),
+        )?;
+        step.next_sequence += 1;
+        step.inserted.push((order.clone(), event));
         Ok(order)
     }
 
@@ -393,17 +390,10 @@ impl TradingCore {
             client_order_id: order.client_order_id.clone(),
             role: command.role,
         };
-        self.store
-            .insert_protective_order(&order, &event, &protective, sequence + 1)?;
-        self.state.next_sequence = sequence + 1;
-        self.state.order_events.push_back(event);
-        self.eligible_after
-            .insert(order.id.clone(), self.command_now);
-        self.state.orders.insert(order.id.clone(), order.clone());
-        self.state
-            .protective_orders
-            .insert(protective.client_order_id.clone(), protective);
-        self.bump_revision()?;
+        let mut step = OrderStep::new(sequence + 1);
+        step.inserted.push((order.clone(), event));
+        step.protective.push(protective);
+        self.commit_order_step(step, Vec::new())?;
         Ok(order)
     }
 

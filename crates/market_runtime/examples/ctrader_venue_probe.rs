@@ -56,7 +56,7 @@ fn wait_for(
 
 fn run() -> Result<(), String> {
     let market = MarketService::start()?;
-    let (requests, receiver) = mpsc::sync_channel(64);
+    let (requests, receiver) = aeris_trading::venue_outbox::bounded_venue_requests(64);
     let (events_tx, events) = mpsc::sync_channel(1024);
     market.attach_ctrader_venue(CtraderVenueLink {
         generation: 1,

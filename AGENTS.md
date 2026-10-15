@@ -82,6 +82,9 @@ violations and missing verification explicitly, and never describe them as satis
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
+- Broker order submissions and transitions reserve capacity in the bounded venue request queue before
+  committing their SQLite facts; the relay sees the request only after a successful commit. A full
+  or disconnected queue rejects without a database write or compensating undo.
 - Trading owner timestamps come from the injected `trading_runtime::clock::Clock`, with wall time clamped
   monotonically per process. Direct system time in trading production code belongs only in `SystemClock`.
 - cTrader trading travels over the `market_runtime`-owned cTrader session for that host through the

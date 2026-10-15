@@ -10,6 +10,7 @@ use std::error::Error;
 pub mod market;
 pub mod reject;
 pub mod venue;
+pub mod venue_outbox;
 pub use reject::RejectReason;
 
 /// Maximum decimal scale accepted by canonical trading values.

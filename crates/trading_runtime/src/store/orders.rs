@@ -8,6 +8,63 @@ use super::{
 };
 
 impl TradingStore {
+    /// All the facts produced by one simulated order command are committed together.
+    pub(crate) fn commit_order_step(&mut self, changes: &super::OrderStep) -> Result<(), String> {
+        let tx = StepTx::begin(self).map_err(database_error)?;
+        for id in &changes.deleted_brackets {
+            tx.execute("DELETE FROM managed_brackets WHERE bracket_id = ?1", [id])
+                .map_err(database_error)?;
+        }
+        for (order, event) in &changes.inserted {
+            insert_order_row(&tx, order)?;
+            insert_event_row(&tx, event)?;
+        }
+        for (order, event) in &changes.updated {
+            tx.execute(
+                "UPDATE orders SET status = ?1, time_in_force = ?2,
+                    limit_units = ?3, limit_scale = ?4, stop_units = ?5,
+                    stop_scale = ?6, provenance_json = ?7 WHERE id = ?8",
+                params![
+                    order.status.as_str(),
+                    order.time_in_force.as_str(),
+                    order.limit_price.map(FixedPoint::units),
+                    order.limit_price.map(FixedPoint::scale),
+                    order.stop_price.map(FixedPoint::units),
+                    order.stop_price.map(FixedPoint::scale),
+                    encode_provenance(&order.provenance),
+                    order.id.as_str(),
+                ],
+            )
+            .map_err(database_error)?;
+            insert_event_row(&tx, event)?;
+        }
+        for bracket in &changes.brackets {
+            super::groups::upsert_managed_bracket(&tx, bracket)?;
+        }
+        for protective in &changes.protective {
+            tx.execute(
+                "INSERT INTO protective_orders(client_order_id, role) VALUES (?1, ?2)",
+                params![
+                    protective.client_order_id.as_str(),
+                    protective.role.as_str()
+                ],
+            )
+            .map_err(database_error)?;
+        }
+        update_next_sequence(&tx, changes.next_sequence)?;
+        // Preserve the existing revision sequence for bulk cancellations while
+        // making their individual transitions durable in the same owner step.
+        if changes.updated.len() > 1 {
+            tx.execute(
+                "UPDATE metadata SET value = min(value + ?1, 9223372036854775807)
+                 WHERE key = 'revision'",
+                [i64::try_from(changes.updated.len() - 1).map_err(|error| error.to_string())?],
+            )
+            .map_err(database_error)?;
+        }
+        tx.commit().map_err(database_error)
+    }
+
     pub(crate) fn insert_order(
         &mut self,
         order: &Order,
@@ -67,27 +124,6 @@ impl TradingStore {
         transaction.commit().map_err(database_error)
     }
 
-    /// Reverts a locally prepared place if the writer has no queue capacity. No pending
-    /// order or event survives an explicitly rejected submission.
-    pub(crate) fn reject_unsent_broker_order(
-        &mut self,
-        order: &Order,
-        previous_sequence: u64,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        transaction
-            .execute(
-                "DELETE FROM order_events WHERE order_id = ?1",
-                [order.id.as_str()],
-            )
-            .map_err(database_error)?;
-        transaction
-            .execute("DELETE FROM orders WHERE id = ?1", [order.id.as_str()])
-            .map_err(database_error)?;
-        update_next_sequence(&transaction, previous_sequence)?;
-        StepTx::commit_rejected_submission(transaction).map_err(database_error)
-    }
-
     /// Persists one broker order transition. `binding` records the broker order id the
     /// venue reported for it, in the same transaction.
     pub(crate) fn transition_broker_order(
@@ -141,61 +177,6 @@ impl TradingStore {
 }
 
 impl TradingStore {
-    pub(crate) fn reject_unsent_broker_transition(
-        &mut self,
-        previous: &Order,
-        event: &OrderEvent,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        transaction
-            .execute(
-                "DELETE FROM order_events WHERE id = ?1",
-                [event.id.as_str()],
-            )
-            .map_err(database_error)?;
-        transaction
-            .execute(
-                "UPDATE orders SET status = ?1, time_in_force = ?2, limit_units = ?3,
-             limit_scale = ?4, stop_units = ?5, stop_scale = ?6, provenance_json = ?7
-             WHERE id = ?8",
-                params![
-                    previous.status.as_str(),
-                    previous.time_in_force.as_str(),
-                    previous.limit_price.map(FixedPoint::units),
-                    previous.limit_price.map(FixedPoint::scale),
-                    previous.stop_price.map(FixedPoint::units),
-                    previous.stop_price.map(FixedPoint::scale),
-                    encode_provenance(&previous.provenance),
-                    previous.id.as_str(),
-                ],
-            )
-            .map_err(database_error)?;
-        update_next_sequence(&transaction, event.sequence)?;
-        StepTx::commit_rejected_submission(transaction).map_err(database_error)
-    }
-}
-
-impl TradingStore {
-    pub(crate) fn cancel_order(
-        &mut self,
-        order: &Order,
-        event: &OrderEvent,
-        next_sequence: u64,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        transaction
-            .execute(
-                "UPDATE orders SET status = 'cancelled'
-                 WHERE id = ?1 AND status IN
-                    ('pending', 'working', 'pending_modify', 'partially_filled', 'pending_cancel')",
-                [order.id.as_str()],
-            )
-            .map_err(database_error)?;
-        insert_event_row(&transaction, event)?;
-        update_next_sequence(&transaction, next_sequence)?;
-        StepTx::commit_revision(transaction).map_err(database_error)
-    }
-
     pub(crate) fn modify_order(
         &mut self,
         order: &Order,
