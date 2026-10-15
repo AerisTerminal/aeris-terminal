@@ -303,19 +303,8 @@ fn chart_order_flow_trades(
         .collect()
 }
 
-fn initial_symbol_browser(startup: &MarketWorkerStartup) -> rithmic_shell::RithmicSymbolBrowser {
-    match startup {
-        MarketWorkerStartup::Rithmic => rithmic_shell::RithmicSymbolBrowser::default(),
-        MarketWorkerStartup::Loading(_) => demand_startup_symbol_browser(),
-    }
-}
-
-/// Market-demand endpoints issue their own startup catalog search as request 1.
-fn demand_startup_symbol_browser() -> rithmic_shell::RithmicSymbolBrowser {
-    rithmic_shell::RithmicSymbolBrowser::rithmic_catalog_awaiting_search(
-        std::num::NonZeroUsize::MIN,
-        "",
-    )
+fn initial_symbol_browser(_: &MarketWorkerStartup) -> rithmic_shell::RithmicSymbolBrowser {
+    rithmic_shell::RithmicSymbolBrowser::default()
 }
 
 fn import_drawings(chart: &mut AerisChartView, drawings: &WorkspaceInstrumentDrawingsState) {
@@ -2433,6 +2422,28 @@ impl WorkspaceSurface {
             let Some(selection) = self.symbol_browser.select(index) else {
                 return false;
             };
+            if target == SymbolSelectionTarget::Chart {
+                let request = aeris_desktop::market_worker::CatalogSelectionRequest {
+                    sequence: 0,
+                    browser_generation: selection.generation.get() as u64,
+                    provider: provider.to_string(),
+                    symbol: selection.instrument.symbol.clone(),
+                    exchange: selection.instrument.exchange.clone(),
+                    entitlement_id: descriptor.selection_entitlement_id.to_string(),
+                    interval: self.interval,
+                };
+                if self.market_worker.try_select_catalog(request).is_err() {
+                    self.symbol_browser.reject_selection(selection.generation);
+                    self.symbol_message = format!("{display} market selection is busy; try again");
+                    cx.notify();
+                    return false;
+                }
+                self.pending_symbol_selection_target = Some(target);
+                self.market_state.symbol_selection_pending = true;
+                self.symbol_message = format!("Selecting {}", selection.instrument.display_symbol);
+                cx.notify();
+                return true;
+            }
             let request = SelectProviderInstrument {
                 startup_resolve: false,
                 consumer_id: 0,
@@ -3343,6 +3354,20 @@ impl WorkspaceSurface {
             MarketWorkerMessage::EngineSwitchMarker { sequence } => {
                 self.apply_rithmic_switch_marker(sequence, cx);
             }
+            MarketWorkerMessage::SelectedInstrument(instrument) => {
+                self.apply_selected_instrument(instrument);
+            }
+            MarketWorkerMessage::CatalogSwitchCommitted {
+                sequence,
+                browser_generation,
+                instrument,
+                interval,
+            } => self.apply_catalog_switch(sequence, browser_generation, instrument, interval, cx),
+            MarketWorkerMessage::CatalogSwitchFailed {
+                sequence: _,
+                browser_generation,
+                detail,
+            } => self.reject_catalog_switch(browser_generation, &detail, cx),
             MarketWorkerMessage::Connection {
                 state,
                 message,
@@ -3406,19 +3431,35 @@ impl WorkspaceSurface {
             MarketWorkerMessage::ChartViewport {
                 start_unix_nanos,
                 end_unix_nanos,
-            } => {
-                let viewport = (start_unix_nanos, end_unix_nanos);
-                self.restored_viewport = Some(viewport);
-                self.last_persisted_viewport = Some(viewport);
-                if let Some(chart) = &self.chart {
-                    chart.update(cx, |chart, chart_cx| {
-                        if chart.set_visible_time_range_unix_nanos(start_unix_nanos, end_unix_nanos)
-                        {
-                            chart_cx.notify();
-                        }
-                    });
+            } => self.apply_restored_viewport(start_unix_nanos, end_unix_nanos, cx),
+        }
+    }
+
+    fn apply_restored_viewport(
+        &mut self,
+        start_unix_nanos: i64,
+        end_unix_nanos: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = (start_unix_nanos, end_unix_nanos);
+        self.restored_viewport = Some(viewport);
+        self.last_persisted_viewport = Some(viewport);
+        if let Some(chart) = &self.chart {
+            chart.update(cx, |chart, chart_cx| {
+                if chart.set_visible_time_range_unix_nanos(start_unix_nanos, end_unix_nanos) {
+                    chart_cx.notify();
                 }
-            }
+            });
+        }
+    }
+
+    fn apply_selected_instrument(&mut self, instrument: InstallProviderInstrument) {
+        if self.product.as_ref().is_some_and(|product| {
+            product.provider == instrument.provider
+                && product.instrument_id == instrument.instrument_id
+        }) {
+            self.product = Some(instrument);
+            self.chart_persistence_dirty = true;
         }
     }
 
@@ -3930,6 +3971,44 @@ impl WorkspaceSurface {
         }
     }
 
+    fn apply_catalog_switch(
+        &mut self,
+        sequence: u64,
+        browser_generation: u64,
+        instrument: InstallProviderInstrument,
+        interval: ChartInterval,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.confirm_catalog_selection(browser_generation) {
+            return;
+        }
+        self.pending_symbol_selection_target = None;
+        self.consume_catalog_search_authorization();
+        self.market_state.symbol_selection_pending = false;
+        self.pending_linked_instrument = Some(instrument.clone());
+        self.rithmic_pending_product = Some(instrument);
+        self.rithmic_pending_interval = Some(interval);
+        self.rithmic_pending_sequence = Some(sequence);
+        self.rithmic_switch = RithmicSwitchState::Pending;
+        self.apply_rithmic_switch_marker(sequence, cx);
+    }
+
+    fn reject_catalog_switch(
+        &mut self,
+        browser_generation: u64,
+        detail: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if usize_generation(browser_generation)
+            .is_some_and(|generation| self.symbol_browser.reject_selection(generation))
+        {
+            self.market_state.symbol_selection_pending = false;
+            self.pending_symbol_selection_target = None;
+            self.symbol_message = format!("Market selection failed: {detail}");
+            cx.notify();
+        }
+    }
+
     /// Commits a Rithmic switch's identity without touching the chart.
     ///
     /// The marker only says "everything after this belongs to the new
@@ -4158,17 +4237,7 @@ impl WorkspaceSurface {
                 });
             }
         }
-        let autoload_catalog = should_autoload_rithmic_catalog(
-            state,
-            &message,
-            self.market_state.rithmic_autoload_started,
-        );
         self.connection_message = Some(stable_connection_message(state, message));
-        if autoload_catalog {
-            self.market_state.rithmic_autoload_started = true;
-            self.market_state.rithmic_autoload_selection_pending = true;
-            let _ = self.search_symbol_query(default_listing_query(self.provider), cx);
-        }
         cx.notify();
     }
 
@@ -4867,39 +4936,11 @@ impl WorkspaceSurface {
     }
 
     fn select_rithmic_symbol(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        let Some(selection) = self.symbol_browser.select(index) else {
-            return false;
-        };
-        let entitlement_id = format!(
-            "rithmic-test:{}:{}",
-            selection.instrument.exchange, selection.instrument.symbol
-        );
-        let request = SelectProviderInstrument {
-            startup_resolve: false,
-            consumer_id: 0,
-            selection_generation: u64::try_from(selection.generation.get()).unwrap_or(u64::MAX),
-            search_generation: u64::try_from(selection.search_generation.get()).unwrap_or(u64::MAX),
-            provider: "rithmic".to_string(),
-            symbol: selection.instrument.symbol.clone(),
-            exchange: selection.instrument.exchange.clone(),
-            entitlement_id,
-        };
-        let dispatched = if self.market_worker.try_select_provider(request).is_ok() {
-            self.market_state.symbol_selection_pending = true;
-            self.order_book
-                .update(cx, aeris_terminal_ui::ReadOnlyOrderBookView::clear);
-            self.symbol_message = format!(
-                "Selecting {} · {}",
-                selection.instrument.display_symbol, selection.instrument.exchange
-            );
-            true
-        } else {
-            self.symbol_browser.reject_selection(selection.generation);
-            self.symbol_message = "Symbol selection is busy; try again".to_string();
-            false
-        };
-        cx.notify();
-        dispatched
+        self.select_instrument(
+            InstrumentMenuSelection(index),
+            SymbolSelectionTarget::Chart,
+            cx,
+        )
     }
 
     fn apply_catalog_event(&mut self, event: ProviderCatalogEvent, cx: &mut Context<Self>) {
@@ -4925,9 +4966,6 @@ impl WorkspaceSurface {
                 command_generation,
                 instrument,
             } => {
-                // Engine providers resolve selections through the same
-                // switch flow: the pending product replaces the chart only
-                // when its covering snapshot arrives.
                 if self.pending_symbol_selection_target == Some(SymbolSelectionTarget::Watchlist) {
                     let Some(_selection) = usize_generation(command_generation)
                         .and_then(|generation| self.symbol_browser.resolve_selection(generation))
@@ -4944,43 +4982,13 @@ impl WorkspaceSurface {
                     self.market_state.symbol_selection_pending = false;
                     self.symbol_message = "Watchlist symbol resolved".to_string();
                     cx.notify();
-                    return;
                 }
-                if !self.confirm_catalog_selection(command_generation) {
-                    return;
-                }
-                self.pending_symbol_selection_target = None;
-                self.consume_catalog_search_authorization();
-                let display = terminal_provider_display(self.symbol_provider);
-                let interval = super::instrument_interval(
-                    &instrument,
-                    self.rithmic_pending_interval.unwrap_or(self.interval),
-                );
-                let Ok(sequence) = self
-                    .market_worker
-                    .try_select_engine(instrument.clone(), interval)
-                else {
-                    self.market_state.symbol_selection_pending = false;
-                    self.symbol_message = format!("{display} market history could not start");
-                    return;
-                };
-                self.pending_linked_instrument = Some(instrument.clone());
-                self.rithmic_pending_product = Some(instrument);
-                self.rithmic_pending_interval = Some(interval);
-                self.rithmic_pending_sequence = Some(sequence);
-                self.rithmic_switch = RithmicSwitchState::Pending;
-                self.chart_state = ChartState::Loading;
-                self.chart_state_message = format!("Loading {} market history", interval.label());
-                self.symbol_message = format!("Loading the selected {display} market");
             }
-            ProviderCatalogEvent::StartupInstrumentResolved(instrument) => {
-                let same_instrument = self.product.as_ref().is_some_and(|product| {
-                    product.provider == instrument.provider
-                        && product.instrument_id == instrument.instrument_id
-                });
-                if same_instrument {
-                    self.product = Some(instrument);
-                    self.chart_persistence_dirty = true;
+            ProviderCatalogEvent::CatalogReady { .. } => {
+                if !self.market_state.rithmic_autoload_started {
+                    self.market_state.rithmic_autoload_started = true;
+                    self.market_state.rithmic_autoload_selection_pending = true;
+                    let _ = self.search_symbol_query(default_listing_query(self.provider), cx);
                 }
             }
             ProviderCatalogEvent::CommandRejected { rejection, command } => {

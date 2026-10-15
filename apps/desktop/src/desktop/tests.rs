@@ -24,13 +24,13 @@ use super::{
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
     ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
-    resting_entry_order_type, series_selector_label, should_autoload_rithmic_catalog,
-    should_finish_chrome_overlay_close, stabilized_connection_state, stable_connection_message,
-    stopped_worker_chart_detail, switch_requires_chart_cover, symbol_input_action,
-    symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
-    timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
-    timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
-    timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
+    resting_entry_order_type, series_selector_label, should_finish_chrome_overlay_close,
+    stabilized_connection_state, stable_connection_message, stopped_worker_chart_detail,
+    switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
+    timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
+    timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
+    timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
+    watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
     workspace_label, workspace_maximize_transition, workspace_split_ratio, workspace_switch,
     wrapped_workspace_index,
@@ -2592,20 +2592,12 @@ fn dead_rithmic_worker_stop_transition_is_applied_once() {
 
 #[test]
 fn rithmic_catalog_ready_autoloads_once_without_owning_reconnects() {
-    assert!(should_autoload_rithmic_catalog(
-        FeedConnectionState::Authenticating,
-        crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE,
-        false,
-    ));
-    assert!(!should_autoload_rithmic_catalog(
-        FeedConnectionState::Authenticating,
-        crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE,
-        true,
-    ));
-    assert!(!should_autoload_rithmic_catalog(
-        FeedConnectionState::Recovering,
-        "Rithmic realtime is recovering; retained history remains visible",
-        false,
+    let event = aeris_market_runtime::MarketRuntimeEvent::CatalogReady {
+        provider: "rithmic".into(),
+    };
+    assert!(matches!(
+        aeris_desktop::market_worker::classify_provider_catalog_event(event).0,
+        Some(aeris_desktop::market_worker::ProviderCatalogEvent::CatalogReady { provider }) if provider == "rithmic"
     ));
 }
 
@@ -2618,11 +2610,6 @@ fn first_rithmic_connection_is_not_presented_as_recovery_and_autoloads_catalog()
     assert_eq!(discovering, FeedConnectionState::Discovering);
     let ready = stabilized_connection_state(Some(discovering), FeedConnectionState::Authenticating);
     assert_eq!(ready, FeedConnectionState::Authenticating);
-    assert!(should_autoload_rithmic_catalog(
-        ready,
-        crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE,
-        false,
-    ));
 }
 
 #[test]

@@ -1313,23 +1313,6 @@ impl Coordinator<'_> {
         let Some(descriptor) = self.providers.descriptor(provider) else {
             return;
         };
-        if let ProviderEventKind::Calendar {
-            instrument_id,
-            status,
-            valid_from_utc_ms,
-            valid_until_utc_ms,
-        } = kind
-        {
-            self.accept_provider_calendar(
-                provider,
-                generation,
-                &instrument_id,
-                status,
-                valid_from_utc_ms,
-                valid_until_utc_ms,
-            );
-            return;
-        }
         let feed_state = trading_feed_state(&kind);
         match kind {
             ProviderEventKind::TransportReplaced => unreachable!("handled before dispatch"),
@@ -1340,7 +1323,10 @@ impl Coordinator<'_> {
                     descriptor.capabilities.live_model,
                 );
             }
-            ProviderEventKind::Connected | ProviderEventKind::Heartbeat(_) => {
+            ProviderEventKind::Connected => {
+                self.provider_connected(provider, generation, descriptor);
+            }
+            ProviderEventKind::Heartbeat(_) => {
                 self.mark_lifecycle_online(
                     provider,
                     generation,
@@ -1393,13 +1379,35 @@ impl Coordinator<'_> {
             ProviderEventKind::TradeRecovery(instrument) => {
                 self.request_provider_trade_recovery(provider, generation, &instrument);
             }
-            ProviderEventKind::Calendar { .. } => {
-                unreachable!("calendar update handled before dispatch")
-            }
+            ProviderEventKind::Calendar {
+                instrument_id,
+                status,
+                valid_from_utc_ms,
+                valid_until_utc_ms,
+            } => self.accept_provider_calendar(
+                provider,
+                generation,
+                &instrument_id,
+                status,
+                valid_from_utc_ms,
+                valid_until_utc_ms,
+            ),
         }
         if let Some(state) = feed_state {
             self.publish_provider_feed(provider, generation, state);
         }
+    }
+
+    fn provider_connected(
+        &mut self,
+        provider: &str,
+        generation: u64,
+        descriptor: super::ProviderDescriptor,
+    ) {
+        if descriptor.presentation.catalog_refresh_on_startup {
+            self.publish_catalog_ready(provider);
+        }
+        self.mark_lifecycle_online(provider, generation, descriptor.capabilities.live_model);
     }
 
     fn request_provider_trade_recovery(

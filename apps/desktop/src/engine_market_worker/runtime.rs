@@ -4,8 +4,8 @@ use super::{
     ChartState, EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent,
     MarketService, MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
     apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
-    handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
-    initialize_market_screen_endpoint, mpsc, process_command, shared_market_runtime,
+    initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
+    process_command, shared_market_runtime,
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_observability::diagnostic;
@@ -252,7 +252,7 @@ fn initialize_record(
 /// Applies one event drained directly from the runtime-owned consumer outbox.
 fn apply_received_event(
     market: &MarketService,
-    client_id: u64,
+    _client_id: u64,
     (consumer_id, event): (u64, aeris_market_runtime::MarketConsumerEvent),
     endpoints: &mut [EndpointRecord],
 ) -> Result<(), String> {
@@ -279,16 +279,9 @@ fn apply_received_event(
     else {
         return Ok(());
     };
-    match handle_startup_catalog_event(market, client_id, record, &event) {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(error) => {
-            let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Error,
-                message: error,
-            });
-            return Ok(());
-        }
+    if let MarketRuntimeEvent::SelectionOutcome(outcome) = event {
+        apply_selection_outcome(record, outcome)?;
+        return Ok(());
     }
     let endpoint = &mut record.endpoint;
     let (catalog, event) = classify_provider_catalog_event(event);
@@ -344,6 +337,102 @@ fn apply_received_event(
             state: ChartState::Error,
             message: error,
         });
+    }
+    Ok(())
+}
+
+fn apply_selection_outcome(
+    record: &mut EndpointRecord,
+    outcome: aeris_market_runtime::SelectionOutcome,
+) -> Result<(), String> {
+    match outcome {
+        aeris_market_runtime::SelectionOutcome::Selected {
+            generation,
+            descriptor,
+            ..
+        } => {
+            let selected = descriptor.instrument;
+            if let Err(error) = aeris_desktop::trading::register_provider_instrument(&selected) {
+                aeris_desktop::trading::report_practice_registration_error(error);
+            }
+            if record
+                .pending_selection
+                .as_ref()
+                .is_none_or(|(pending, _, _)| *pending == generation.0.get())
+            {
+                record.product = selected.clone();
+                if let Some((_, _, interval)) = record.pending_selection.take() {
+                    record.interval = interval;
+                    if let Some((sequence, browser_generation)) =
+                        record.pending_catalog_selection.take()
+                    {
+                        record
+                            .endpoint
+                            .messages
+                            .send(MarketWorkerMessage::CatalogSwitchCommitted {
+                                sequence,
+                                browser_generation,
+                                instrument: selected,
+                                interval,
+                            })
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        record
+                            .endpoint
+                            .messages
+                            .send(MarketWorkerMessage::EngineSwitchMarker {
+                                sequence: generation.0.get(),
+                            })
+                            .map_err(|error| error.to_string())?;
+                    }
+                } else {
+                    record
+                        .endpoint
+                        .messages
+                        .send(MarketWorkerMessage::SelectedInstrument(selected))
+                        .map_err(|error| error.to_string())?;
+                }
+                record.endpoint.active_generation = generation.0.get();
+                record.endpoint.live = false;
+                record.session_status_sent = None;
+            }
+        }
+        aeris_market_runtime::SelectionOutcome::Failed { generation, error } => {
+            if record
+                .pending_selection
+                .as_ref()
+                .is_some_and(|(pending, _, _)| *pending == generation.0.get())
+            {
+                record.pending_selection = None;
+                if let Some((sequence, browser_generation)) =
+                    record.pending_catalog_selection.take()
+                {
+                    record
+                        .endpoint
+                        .messages
+                        .send(MarketWorkerMessage::CatalogSwitchFailed {
+                            sequence,
+                            browser_generation,
+                            detail: format!("{error:?}"),
+                        })
+                        .map_err(|send| send.to_string())?;
+                }
+                record
+                    .endpoint
+                    .messages
+                    .send(MarketWorkerMessage::State {
+                        state: if record.endpoint.live {
+                            ChartState::Ready
+                        } else {
+                            ChartState::Loading
+                        },
+                        message: format!(
+                            "Market selection failed; retaining previous chart: {error:?}"
+                        ),
+                    })
+                    .map_err(|error| error.to_string())?;
+            }
+        }
     }
     Ok(())
 }

@@ -1494,7 +1494,7 @@ impl MarketService {
         &self,
         client_id: u64,
         request: super::SelectionRequest,
-    ) -> Result<super::SelectionOutcome, String> {
+    ) -> Result<(), String> {
         id(request.consumer_id)?;
         id(request.generation)?;
         self.request(|reply| {

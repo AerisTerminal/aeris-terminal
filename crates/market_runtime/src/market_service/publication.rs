@@ -245,7 +245,9 @@ pub(super) fn series_state_payload(
 
 impl ConsumerEvents {
     pub(super) fn has_pending(&self) -> bool {
-        self.provider.is_some()
+        !self.selection_outcomes.is_empty()
+            || self.catalog_ready.is_some()
+            || self.provider.is_some()
             || !self.series.is_empty()
             || self.study_invalidated.is_some()
             || !self.study_outputs.is_empty()
@@ -263,26 +265,31 @@ impl ConsumerEvents {
     }
 
     pub(super) fn pop(&mut self) -> Option<MarketRuntimeEvent> {
-        self.provider
-            .take()
-            .or_else(|| self.series.pop_front())
-            .or_else(|| self.study_invalidated.take())
-            .or_else(|| self.study_outputs.pop_first().map(|(_, event)| event))
-            .or_else(|| self.study_removed.take())
-            .or_else(|| self.series_state.take())
-            .or_else(|| self.demand_error.take())
-            .or_else(|| self.price_alerts.pop_front())
-            .or_else(|| self.order_book.take())
+        self.selection_outcomes
+            .pop_front()
+            .or_else(|| self.catalog_ready.take())
             .or_else(|| {
-                self.trade_tape
+                self.provider
                     .take()
-                    .map(MarketRuntimeEvent::TradeTapeSnapshot)
+                    .or_else(|| self.series.pop_front())
+                    .or_else(|| self.study_invalidated.take())
+                    .or_else(|| self.study_outputs.pop_first().map(|(_, event)| event))
+                    .or_else(|| self.study_removed.take())
+                    .or_else(|| self.series_state.take())
+                    .or_else(|| self.demand_error.take())
+                    .or_else(|| self.price_alerts.pop_front())
+                    .or_else(|| self.order_book.take())
+                    .or_else(|| {
+                        self.trade_tape
+                            .take()
+                            .map(MarketRuntimeEvent::TradeTapeSnapshot)
+                    })
+                    .or_else(|| self.startup_catalog_selection.take())
+                    .or_else(|| self.startup_catalog_search.take())
+                    .or_else(|| self.catalog_selection.take())
+                    .or_else(|| self.catalog_search.take())
+                    .or_else(|| self.catalog_screen.take())
             })
-            .or_else(|| self.startup_catalog_selection.take())
-            .or_else(|| self.startup_catalog_search.take())
-            .or_else(|| self.catalog_selection.take())
-            .or_else(|| self.catalog_search.take())
-            .or_else(|| self.catalog_screen.take())
     }
 
     pub(super) fn catalog_search_slot(

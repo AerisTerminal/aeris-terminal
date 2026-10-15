@@ -146,6 +146,9 @@ the check.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider
   and command kind. Startup resolution uses its own kind, not a numeric generation sentinel;
   consumer retirement clears every pending command through `ConsumerRegistry::remove_consumer`.
+- Chart selections, including startup and restored instruments, resolve and install demand through
+  the coordinator's `select_and_demand` command; desktop code never owns startup catalog resolution
+  or interprets provider display text as a readiness signal.
 - `HistoryTracker` alone owns per-series current/backfill lanes, retry deadlines, empty coverage,
   detached windows and cancellation. History requests and completions carry the same exact
   provider/demand/sequence ticket; retirement prunes the tracker, never parallel coordinator maps.

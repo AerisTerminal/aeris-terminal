@@ -265,7 +265,7 @@ enum Command {
         StreamRequirements,
         Reply<()>,
     ),
-    SelectAndDemand(ClientId, SelectionRequest, Reply<SelectionOutcome>),
+    SelectAndDemand(ClientId, SelectionRequest, Reply<()>),
     RegisterStudy(
         ClientId,
         ConsumerId,
@@ -730,6 +730,8 @@ struct DemandWaiter {
 /// book, provider state, or catalog result fully supersedes the one before it.
 #[derive(Clone, Default)]
 struct ConsumerEvents {
+    selection_outcomes: VecDeque<MarketRuntimeEvent>,
+    catalog_ready: Option<MarketRuntimeEvent>,
     provider: Option<MarketRuntimeEvent>,
     series: VecDeque<MarketRuntimeEvent>,
     /// Set when the series queue could not hold one more distinct bar. The

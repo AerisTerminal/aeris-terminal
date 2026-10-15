@@ -3228,19 +3228,6 @@ struct InstrumentMenuEntry {
     selection: InstrumentMenuSelection,
 }
 
-fn should_autoload_rithmic_catalog(
-    state: FeedConnectionState,
-    message: &str,
-    autoload_started: bool,
-) -> bool {
-    if state != FeedConnectionState::Authenticating
-        || !message.contains(crate::desktop::engine_market_worker::RITHMIC_CATALOG_READY_MESSAGE)
-    {
-        return false;
-    }
-    !autoload_started
-}
-
 struct HeaderState {
     theme: AerisTheme,
     provider: TerminalProvider,
@@ -3893,10 +3880,10 @@ fn catalog_rejection_message(
 
 fn provider_catalog_event_provider(event: &ProviderCatalogEvent) -> &str {
     match event {
+        ProviderCatalogEvent::CatalogReady { provider } => provider,
         ProviderCatalogEvent::SearchCompleted(result)
         | ProviderCatalogEvent::SearchPreview(result) => &result.provider,
-        ProviderCatalogEvent::SelectionInstalled { instrument, .. }
-        | ProviderCatalogEvent::StartupInstrumentResolved(instrument) => &instrument.provider,
+        ProviderCatalogEvent::SelectionInstalled { instrument, .. } => &instrument.provider,
         ProviderCatalogEvent::CommandRejected { rejection, .. }
         | ProviderCatalogEvent::ScreenRejected(rejection) => &rejection.provider,
         ProviderCatalogEvent::ScreenCompleted(screen) => &screen.provider,

@@ -90,6 +90,18 @@ impl Default for RithmicSymbolBrowser {
 }
 
 impl RithmicSymbolBrowser {
+    #[cfg(test)]
+    pub(crate) fn rithmic_catalog_awaiting_search(request_id: NonZeroUsize, query: &str) -> Self {
+        Self {
+            maximum_results: MAXIMUM_RITHMIC_SYMBOL_RESULTS,
+            allow_empty_query: true,
+            next_search_id: request_id.get(),
+            pending_search_id: Some(request_id),
+            pending_search_query: Some(query.to_string()),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn change_catalog(&mut self) {
         self.pending_search_id = None;
         self.pending_search_query = None;
@@ -100,17 +112,6 @@ impl RithmicSymbolBrowser {
         self.pending_selection = None;
         self.selected = None;
         self.allow_empty_query = true;
-    }
-
-    pub(crate) fn rithmic_catalog_awaiting_search(request_id: NonZeroUsize, query: &str) -> Self {
-        Self {
-            maximum_results: MAXIMUM_RITHMIC_SYMBOL_RESULTS,
-            allow_empty_query: true,
-            next_search_id: request_id.get(),
-            pending_search_id: Some(request_id),
-            pending_search_query: Some(query.to_string()),
-            ..Self::default()
-        }
     }
 
     pub(crate) fn begin_search(

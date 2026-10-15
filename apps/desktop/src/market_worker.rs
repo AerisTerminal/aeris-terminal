@@ -148,16 +148,15 @@ pub enum ProviderCatalogCommand {
 }
 
 pub enum ProviderCatalogEvent {
+    CatalogReady {
+        provider: String,
+    },
     SearchCompleted(ProviderInstrumentSearchResult),
     SearchPreview(ProviderInstrumentSearchResult),
     SelectionInstalled {
         command_generation: u64,
         instrument: InstallProviderInstrument,
     },
-    /// The runtime re-resolved the restored startup instrument against the
-    /// live provider catalog. Identity is unchanged; metadata such as the
-    /// price increment is authoritative and replaces the restored copy.
-    StartupInstrumentResolved(InstallProviderInstrument),
     CommandRejected {
         rejection: ProviderCatalogRejected,
         command: ProviderCatalogCommand,
@@ -171,6 +170,9 @@ pub fn classify_provider_catalog_event(
     event: MarketRuntimeEvent,
 ) -> (Option<ProviderCatalogEvent>, Option<MarketRuntimeEvent>) {
     match event {
+        MarketRuntimeEvent::CatalogReady { provider } => {
+            (Some(ProviderCatalogEvent::CatalogReady { provider }), None)
+        }
         // Consumer ownership, provider identity and callback generation are
         // already fenced before catalog events enter the runtime-owned consumer
         // outbox. Desktop only translates the accepted callback into its
@@ -334,6 +336,18 @@ pub enum MarketWorkerMessage {
     },
     EngineSwitchMarker {
         sequence: u64,
+    },
+    SelectedInstrument(InstallProviderInstrument),
+    CatalogSwitchCommitted {
+        sequence: u64,
+        browser_generation: u64,
+        instrument: InstallProviderInstrument,
+        interval: ChartInterval,
+    },
+    CatalogSwitchFailed {
+        sequence: u64,
+        browser_generation: u64,
+        detail: String,
     },
     ChartViewport {
         start_unix_nanos: i64,
@@ -726,6 +740,7 @@ pub enum MarketWorkerCommand {
     ProviderSelect(SelectProviderInstrument),
     ProviderScreen(ScreenProviderMarkets),
     EngineSelect(Box<EngineSelectionRequest>),
+    SelectCatalog(Box<CatalogSelectionRequest>),
     ChartViewport(ChartViewportUpdate),
     DepthVisible(bool),
     ResourceClass(ConsumerResourceClass),
@@ -752,6 +767,16 @@ pub struct StudyReinitializationRequest {
 pub struct EngineSelectionRequest {
     pub sequence: u64,
     pub product: InstallProviderInstrument,
+    pub interval: ChartInterval,
+}
+#[derive(Clone, Debug)]
+pub struct CatalogSelectionRequest {
+    pub sequence: u64,
+    pub browser_generation: u64,
+    pub provider: String,
+    pub symbol: String,
+    pub exchange: String,
+    pub entitlement_id: String,
     pub interval: ChartInterval,
 }
 
@@ -1199,6 +1224,30 @@ impl MarketDataWorker {
         sequence.store(next, Ordering::Release);
         Ok(next)
     }
+    /// Sends a listed symbol directly to runtime-owned catalog resolution and
+    /// demand installation. No desktop-side provider selection is required.
+    ///
+    /// # Errors
+    /// Reports a full or disconnected bounded command queue.
+    pub fn try_select_catalog(
+        &self,
+        mut request: CatalogSelectionRequest,
+    ) -> Result<u64, ProviderCommandUnavailable> {
+        let (Some(commands), Some(sequence)) = (
+            self.commands.as_ref(),
+            self.engine_selection_sequence.as_ref(),
+        ) else {
+            return Err(ProviderCommandUnavailable);
+        };
+        let next = sequence.load(Ordering::Acquire).saturating_add(1);
+        request.sequence = next;
+        commands
+            .try_send(MarketWorkerCommand::SelectCatalog(Box::new(request)))
+            .map_err(|_| ProviderCommandUnavailable)?;
+        sequence.store(next, Ordering::Release);
+        commands.notify();
+        Ok(next)
+    }
 
     pub fn send_ui_diagnostics(&self, feedback: UiDiagnosticsFeedback) {
         if let Some(sender) = &self.ui_diagnostics {
@@ -1365,6 +1414,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::ProviderScreen(_)
                     | MarketWorkerCommand::EngineSelect(_)
+                    | MarketWorkerCommand::SelectCatalog(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_)
@@ -1379,6 +1429,7 @@ impl MarketDataWorker {
                     | MarketWorkerCommand::ProviderSelect(_)
                     | MarketWorkerCommand::ProviderScreen(_)
                     | MarketWorkerCommand::EngineSelect(_)
+                    | MarketWorkerCommand::SelectCatalog(_)
                     | MarketWorkerCommand::ChartViewport(_)
                     | MarketWorkerCommand::DepthVisible(_)
                     | MarketWorkerCommand::ResourceClass(_)

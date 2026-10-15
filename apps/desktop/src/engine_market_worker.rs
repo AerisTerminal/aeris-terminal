@@ -20,8 +20,7 @@ use aeris_application::{
 };
 use aeris_contracts::{
     EngineFaultCode, FailureStage, InstallProviderInstrument, ProviderConnectionState,
-    ProviderInstrumentSummary, ProviderState, SearchProviderInstruments, SelectProviderInstrument,
-    SeriesLoadState, WorkspacePaneKind, WorkspaceState,
+    ProviderState, SeriesLoadState, WorkspacePaneKind, WorkspaceState,
 };
 #[cfg(test)]
 use aeris_contracts::{SeriesKey, WorkspacePaneState, WorkspaceTabState};
@@ -54,8 +53,6 @@ const SUBSCRIPTION_ID: &str = "desktop_runtime_rithmic_bars";
 const WORKER_LABEL: &str = "Rithmic market runtime";
 const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_runtime_hyperliquid_bars";
 const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid market runtime";
-pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
-    "Rithmic session is ready for instrument search";
 const WORKSPACE_ADDITION_CAPACITY: usize = super::local_state::MAXIMUM_WATCHLIST_ENTRIES
     + super::MAXIMUM_OPEN_WORKSPACES * (super::CHART_PANE_CAPACITY + 1);
 
@@ -94,11 +91,6 @@ fn chart_streams(depth_visible: bool) -> StreamRequirements {
     }
 }
 
-enum StartupResolution {
-    Searching(InstallProviderInstrument),
-    Selecting(InstallProviderInstrument),
-}
-
 /// What a runtime consumer endpoint is for, which decides whether it ever demands a series.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EndpointRole {
@@ -121,8 +113,8 @@ struct EndpointRecord {
     product: InstallProviderInstrument,
     interval: ChartInterval,
     role: EndpointRole,
-    startup_resolution: Option<StartupResolution>,
-    startup_command_generation: u64,
+    pending_selection: Option<(u64, InstallProviderInstrument, ChartInterval)>,
+    pending_catalog_selection: Option<(u64, u64)>,
     /// Instrument and calendar revision of the last session status sent to the chart.
     session_status_sent: Option<(String, u64)>,
     endpoint: WorkerEndpoint,
@@ -601,8 +593,8 @@ fn worker_endpoint(
         product,
         interval,
         role: EndpointRole::Market,
-        startup_resolution: None,
-        startup_command_generation: selection_commands::next_startup_command_generation(),
+        pending_selection: None,
+        pending_catalog_selection: None,
         session_status_sent: None,
         endpoint: WorkerEndpoint {
             consumer_id,
@@ -787,8 +779,8 @@ mod selection_commands;
 #[cfg(test)]
 use selection_commands::retain_depth_visibility;
 use selection_commands::{
-    handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
-    initialize_market_screen_endpoint, process_command,
+    initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint,
+    process_command,
 };
 
 #[path = "engine_market_worker/publications.rs"]
@@ -829,11 +821,9 @@ mod tests {
         let product = default_hyperliquid_product();
         let (_pane, mut record) =
             worker_endpoint(1, 2, product.clone(), 41, ChartInterval::Minute1, None, 5);
-        record.startup_resolution = Some(StartupResolution::Searching(product));
 
         // The order book opens while the restored instrument is still being
-        // re-resolved: no demand exists yet, so nothing is pushed to the runtime,
-        // but the intent must survive until `begin_endpoint_demand` installs it.
+        // resolved: no demand exists yet, so the intent is retained for selection.
         assert_eq!(
             retain_depth_visibility(&mut record.endpoint, true, true),
             None

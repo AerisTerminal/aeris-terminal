@@ -88,7 +88,13 @@ impl Boundary {
             },
             reply,
         ));
-        received.recv().expect("exactly one selection reply").expect("transport")
+        received.recv().expect("selection accepted").expect("transport");
+        let outcomes = self.events().into_iter().filter_map(|event| match event {
+            MarketRuntimeEvent::SelectionOutcome(outcome) => Some(outcome),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(outcomes.len(), 1, "exactly one selection outcome");
+        outcomes.into_iter().next().expect("selection outcome")
     }
 
     pub(super) fn history_request(&self) -> super::super::super::HistoryRequest {
@@ -173,7 +179,8 @@ fn select_and_demand_rejects_invalid_interval_without_retiring_previous_series()
     use super::super::super::descriptors::{InstrumentRef, InstrumentRequest, SelectionOutcome};
 
     let mut boundary = Boundary::new();
-    boundary.demand(boundary.series(), 1);
+    let series = boundary.series();
+    boundary.demand(series, 1);
     let initial = boundary.history_request();
     boundary.complete(initial, minute_bars(0, 3), Some(minute_bars(3, 1)[0]));
     boundary.events();
@@ -181,6 +188,7 @@ fn select_and_demand_rejects_invalid_interval_without_retiring_previous_series()
         provider_id: "rithmic".into(),
         instrument_id: boundary.series().instrument_id,
         entitlement_id: boundary.series().entitlement_id,
+        query: None,
     });
     let failed = boundary.select(2, reference, aeris_market_data::ChartInterval::Day3);
     assert!(matches!(failed, SelectionOutcome::Failed { .. }));
@@ -200,6 +208,7 @@ fn select_and_demand_resolves_once_and_rejects_retired_generation() {
         provider_id: "rithmic".into(),
         instrument_id: boundary.series().instrument_id,
         entitlement_id: boundary.series().entitlement_id,
+        query: None,
     });
     let selected = boundary.select(2, reference.clone(), aeris_market_data::ChartInterval::Minute1);
     assert!(matches!(selected, SelectionOutcome::Selected { generation: selected, .. } if selected == generation(2)));
@@ -210,4 +219,120 @@ fn select_and_demand_resolves_once_and_rejects_retired_generation() {
             .and_then(|demand| demand.generation),
         Some(generation(2)),
     );
+}
+
+#[test]
+fn select_and_demand_supersedes_pending_catalog_and_drops_late_callback() {
+    use super::super::super::descriptors::{
+        InstrumentRef, InstrumentRequest, SelectionError, SelectionOutcome, SelectionRequest,
+    };
+    let mut boundary = Boundary::new();
+    let reference = InstrumentRequest::Ref(InstrumentRef {
+        provider_id: "rithmic".into(),
+        instrument_id: boundary.series().instrument_id,
+        entitlement_id: boundary.series().entitlement_id,
+        query: None,
+    });
+    let pending = SelectionRequest {
+        consumer_id: boundary.consumer.0.get(),
+        generation: 2,
+        instrument: reference.clone(),
+        interval: aeris_market_data::ChartInterval::Minute1,
+        streams: StreamRequirements::BARS,
+        viewport: None,
+    };
+    boundary.coordinator.command_fences.record(
+        boundary.consumer,
+        "rithmic".into(),
+        super::super::super::CommandKind::Selection,
+        pending.generation,
+    );
+    boundary.coordinator.pending_selections.insert(
+        boundary.consumer,
+        (client(1), pending, "rithmic".into()),
+    );
+    let (reply, received) = std::sync::mpsc::sync_channel(1);
+    boundary.command(Command::SelectAndDemand(client(1), SelectionRequest {
+        consumer_id: boundary.consumer.0.get(),
+        generation: 3,
+        instrument: reference,
+        interval: aeris_market_data::ChartInterval::Minute1,
+        streams: StreamRequirements::BARS,
+        viewport: None,
+    }, reply));
+    received.recv().expect("accepted").expect("owned consumer");
+    let outcomes = boundary.events().into_iter().filter_map(|event| match event {
+        MarketRuntimeEvent::SelectionOutcome(outcome) => Some(outcome),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert!(matches!(outcomes.as_slice(), [
+        SelectionOutcome::Failed { generation: first, error: SelectionError::Superseded },
+        SelectionOutcome::Selected { generation: last, .. },
+    ] if *first == generation(2) && *last == generation(3)));
+    boundary.coordinator.handle_catalog_selection(
+        boundary.consumer.0.get(), 2, instrument(),
+    );
+    assert!(boundary.events().into_iter().all(|event|
+        !matches!(event, MarketRuntimeEvent::SelectionOutcome(_))));
+}
+
+#[test]
+fn catalog_symbol_selection_commits_only_after_its_fenced_resolution() {
+    use super::super::super::descriptors::{
+        InstrumentRequest, SelectionOutcome, SelectionRequest,
+    };
+    let mut boundary = Boundary::new();
+    boundary.demand(boundary.series(), 1);
+    let selected = instrument();
+    let request = SelectionRequest {
+        consumer_id: boundary.consumer.0.get(),
+        generation: 2,
+        instrument: InstrumentRequest::CatalogSymbol {
+            provider_id: selected.provider.clone(),
+            symbol: selected.provider_symbol.clone(),
+            exchange: selected.venue_id.clone(),
+            entitlement_id: selected.entitlement_id.clone(),
+        },
+        interval: aeris_market_data::ChartInterval::Minute1,
+        streams: StreamRequirements::BARS,
+        viewport: None,
+    };
+    boundary.coordinator.command_fences.record_operation(
+        boundary.consumer,
+        selected.provider.clone(),
+        super::super::super::CommandKind::Selection,
+        request.generation,
+        true,
+    );
+    boundary.coordinator.pending_selections.insert(
+        boundary.consumer,
+        (client(1), request, selected.provider.clone()),
+    );
+    assert!(boundary.events().into_iter().all(|event|
+        !matches!(event, MarketRuntimeEvent::SelectionOutcome(_))));
+    boundary.coordinator.handle_provider_catalog(
+        &selected.provider,
+        super::super::super::ProviderCatalogEvent::SelectionResolved {
+            consumer_id: boundary.consumer.0.get(),
+            command_generation: 2,
+            instrument: selected.clone(),
+        },
+    );
+    let outcomes = boundary.events().into_iter().filter_map(|event| match event {
+        MarketRuntimeEvent::SelectionOutcome(outcome) => Some(outcome),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert!(matches!(outcomes.as_slice(),
+        [SelectionOutcome::Selected { generation: epoch, descriptor, .. }]
+            if *epoch == generation(2) && descriptor.instrument.instrument_id == selected.instrument_id));
+    boundary.coordinator.handle_provider_catalog(
+        &selected.provider,
+        super::super::super::ProviderCatalogEvent::SelectionResolved {
+            consumer_id: boundary.consumer.0.get(),
+            command_generation: 2,
+            instrument: selected.clone(),
+        },
+    );
+    assert!(boundary.events().into_iter().all(|event|
+        !matches!(event, MarketRuntimeEvent::SelectionOutcome(_))));
 }

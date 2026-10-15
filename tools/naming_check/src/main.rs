@@ -2228,22 +2228,13 @@ mod tests {
         }
     }
     #[test]
-    fn desktop_startup_catalog_resolution_uses_command_fences() {
+    fn runtime_owns_startup_catalog_resolution_and_selection() {
         let source = manifest("apps/desktop/src/engine_market_worker/selection_commands.rs");
-        for required in [
+        for forbidden in [
             "StartupResolution::Searching",
             "handle_startup_catalog_event",
-            "market.search_provider_instruments",
-            "market.select_provider_instrument",
             "startup_resolve: true",
             "record.startup_command_generation",
-        ] {
-            assert!(
-                source.contains(required),
-                "startup catalog path lost {required}"
-            );
-        }
-        for forbidden in [
             "STARTUP_CATALOG_COMMAND_GENERATION",
             "STARTUP_CATALOG_RESOLUTION_TIMEOUT",
             "poll_market_event_until",
@@ -2252,9 +2243,19 @@ mod tests {
         ] {
             assert!(
                 !source.contains(forbidden),
-                "startup catalog path must not block the shared workspace worker through {forbidden}"
+                "desktop must not resolve startup catalogs through {forbidden}"
             );
         }
+        assert!(source.contains("market.select_and_demand("));
+        let runtime = manifest("crates/market_runtime/src/market_service/instrument_selection.rs");
+        assert!(
+            runtime.contains("fn begin_selection(")
+                && runtime.contains("pending_selections")
+                && runtime.contains("ProviderCatalogCommand::Search(search)")
+                && runtime.contains("SelectionError::Superseded")
+        );
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        assert!(!desktop.contains("RITHMIC_CATALOG_READY_MESSAGE"));
         let fences = manifest("crates/market_runtime/src/market_service/command_fences.rs");
         for required in [
             "CommandKind::StartupResolve",

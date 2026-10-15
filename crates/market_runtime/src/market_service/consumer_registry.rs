@@ -23,6 +23,8 @@ impl<'a, 'b> ConsumerRegistry<'a, 'b> {
         owner.consumer_clients.remove(&consumer);
         owner.consumer_epochs.remove(&consumer);
         owner.command_fences.remove_consumer(consumer);
+        owner.pending_selections.remove(&consumer);
+        owner.selection_epochs.remove(&consumer);
         owner.price_alerts.remove_consumer(consumer);
         if let Err(error) = owner.reconcile_price_alert_leases() {
             aeris_observability::diagnostic!("Aeris price alert lease release failed: {error}");

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 pub(super) enum CommandKind {
     Search,
     Select,
+    Selection,
     Screen,
     StartupResolve,
 }
@@ -76,9 +77,17 @@ impl CommandFences {
         selection: bool,
     ) -> Option<CommandKind> {
         let kinds = if selection {
-            [CommandKind::StartupResolve, CommandKind::Select]
+            [
+                CommandKind::StartupResolve,
+                CommandKind::Selection,
+                CommandKind::Select,
+            ]
         } else {
-            [CommandKind::StartupResolve, CommandKind::Search]
+            [
+                CommandKind::StartupResolve,
+                CommandKind::Selection,
+                CommandKind::Search,
+            ]
         };
         kinds.into_iter().find(|kind| {
             self.pending
@@ -163,12 +172,13 @@ mod tests {
         for kind in [
             CommandKind::Search,
             CommandKind::Select,
+            CommandKind::Selection,
             CommandKind::Screen,
             CommandKind::StartupResolve,
         ] {
             fences.record(consumer, "rithmic".into(), kind, 1);
         }
-        assert_eq!(fences.count_for(consumer), 4);
+        assert_eq!(fences.count_for(consumer), 5);
         fences.remove_consumer(consumer);
         assert_eq!(fences.count_for(consumer), 0);
     }

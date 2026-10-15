@@ -125,6 +125,217 @@ pub(super) fn validate_provider_instrument(
 }
 
 impl Coordinator<'_> {
+    /// Starts a bounded selection. Catalog IO is never performed on the
+    /// coordinator: the provider's fenced callback finishes the command.
+    pub(super) fn begin_selection(
+        &mut self,
+        client_id: ClientId,
+        request: super::SelectionRequest,
+    ) -> Result<(), String> {
+        const MAXIMUM_SELECTION_OUTCOMES: usize = 1024;
+        const MAXIMUM_SELECTION_EPOCHS: usize = 1024;
+        let consumer = ConsumerId(id(request.consumer_id)?);
+        authorize_consumer(&self.engine, client_id, consumer)?;
+        let generation = super::GenerationId(id(request.generation)?);
+        let events = self
+            .events
+            .get(&consumer)
+            .ok_or("consumer outbox is unavailable")?;
+        if events.selection_outcomes.len()
+            + usize::from(self.pending_selections.contains_key(&consumer))
+            >= MAXIMUM_SELECTION_OUTCOMES
+        {
+            return Err("selection outcome capacity is exhausted".into());
+        }
+        let seen = self.selection_epochs.entry(consumer).or_default();
+        if seen.contains(&request.generation) {
+            return Ok(());
+        }
+        if seen.len() >= MAXIMUM_SELECTION_EPOCHS {
+            let _ = seen.pop_first();
+        }
+        seen.insert(request.generation);
+        if self
+            .engine
+            .current_demand(consumer)
+            .and_then(|demand| demand.generation)
+            .is_some_and(|active| request.generation < active.0.get())
+        {
+            self.publish_selection_outcome(
+                consumer,
+                SelectionOutcome::Failed {
+                    generation,
+                    error: SelectionError::Superseded,
+                },
+            );
+            return Ok(());
+        }
+        if let Some((_, old, _)) = self.pending_selections.get(&consumer) {
+            if request.generation <= old.generation {
+                self.publish_selection_outcome(
+                    consumer,
+                    SelectionOutcome::Failed {
+                        generation,
+                        error: SelectionError::Superseded,
+                    },
+                );
+                return Ok(());
+            }
+            self.retire_pending_selection(consumer)?;
+        }
+        // A known instrument and the ungated public default need no network
+        // callback. Both use the same transactional commit path.
+        let provider = match &request.instrument {
+            InstrumentRequest::Default => super::descriptors::default_instrument().provider,
+            InstrumentRequest::Ref(reference) => reference.provider_id.clone(),
+            InstrumentRequest::CatalogSymbol { provider_id, .. } => provider_id.clone(),
+        };
+        if matches!(request.instrument, InstrumentRequest::Default)
+            || matches!(&request.instrument, InstrumentRequest::Ref(reference)
+                if self.catalog.contains_key(&(reference.provider_id.clone(), reference.instrument_id.clone())))
+        {
+            let outcome = self.select_and_demand(client_id, &request);
+            self.publish_selection_outcome(consumer, outcome);
+            return Ok(());
+        }
+        self.dispatch_unresolved_selection(client_id, consumer, generation, request, provider);
+        Ok(())
+    }
+
+    fn retire_pending_selection(&mut self, consumer: ConsumerId) -> Result<(), String> {
+        let Some((_, old, provider)) = self.pending_selections.remove(&consumer) else {
+            return Ok(());
+        };
+        let old_generation = super::GenerationId(id(old.generation)?);
+        let kind = if matches!(old.instrument, InstrumentRequest::Default) {
+            super::CommandKind::StartupResolve
+        } else {
+            super::CommandKind::Selection
+        };
+        let _ = self
+            .command_fences
+            .take(consumer, &provider, kind, old.generation);
+        self.publish_selection_outcome(
+            consumer,
+            SelectionOutcome::Failed {
+                generation: old_generation,
+                error: SelectionError::Superseded,
+            },
+        );
+        Ok(())
+    }
+
+    fn dispatch_unresolved_selection(
+        &mut self,
+        client_id: ClientId,
+        consumer: ConsumerId,
+        generation: super::GenerationId,
+        request: super::SelectionRequest,
+        provider: String,
+    ) {
+        if let InstrumentRequest::CatalogSymbol {
+            provider_id,
+            symbol,
+            exchange,
+            entitlement_id,
+        } = &request.instrument
+        {
+            let selection = SelectProviderInstrument {
+                consumer_id: request.consumer_id,
+                selection_generation: request.generation,
+                search_generation: request.generation,
+                startup_resolve: false,
+                provider: provider_id.clone(),
+                symbol: symbol.clone(),
+                exchange: exchange.clone(),
+                entitlement_id: entitlement_id.clone(),
+            };
+            let dispatched = validate_provider_selection(&selection)
+                .and_then(|()| self.ensure_catalog_session(&provider))
+                .and_then(|()| {
+                    self.providers
+                        .dispatch_catalog(&provider, ProviderCatalogCommand::Select(selection))
+                });
+            match dispatched {
+                Ok(()) => {
+                    self.command_fences.record_operation(
+                        consumer,
+                        provider.clone(),
+                        super::CommandKind::Selection,
+                        request.generation,
+                        true,
+                    );
+                    self.pending_selections
+                        .insert(consumer, (client_id, request, provider));
+                }
+                Err(error) => self.publish_selection_outcome(
+                    consumer,
+                    SelectionOutcome::Failed {
+                        generation,
+                        error: SelectionError::DemandRejected(error),
+                    },
+                ),
+            }
+            return;
+        }
+        let InstrumentRequest::Ref(reference) = &request.instrument else {
+            unreachable!("default resolved before catalog dispatch")
+        };
+        let query = reference.query.clone().unwrap_or_else(|| {
+            reference
+                .instrument_id
+                .rsplit(':')
+                .next()
+                .unwrap_or(&reference.instrument_id)
+                .to_owned()
+        });
+        let kind = super::CommandKind::Selection;
+        let search = SearchProviderInstruments {
+            consumer_id: request.consumer_id,
+            search_generation: request.generation,
+            startup_resolve: false,
+            provider: provider.clone(),
+            query,
+            maximum_results: 32,
+            categories: aeris_contracts::InstrumentSearchCategories::ALL,
+        };
+        let dispatched = self.ensure_catalog_session(&provider).and_then(|()| {
+            self.providers
+                .dispatch_catalog(&provider, ProviderCatalogCommand::Search(search))
+        });
+        match dispatched {
+            Ok(()) => {
+                self.command_fences
+                    .record(consumer, provider.clone(), kind, request.generation);
+                self.pending_selections
+                    .insert(consumer, (client_id, request, provider));
+            }
+            Err(error) => self.publish_selection_outcome(
+                consumer,
+                SelectionOutcome::Failed {
+                    generation,
+                    error: SelectionError::DemandRejected(error),
+                },
+            ),
+        }
+    }
+
+    pub(super) fn publish_catalog_ready(&mut self, provider: &str) {
+        for events in self.events.values_mut() {
+            events.catalog_ready = Some(MarketRuntimeEvent::CatalogReady {
+                provider: provider.to_owned(),
+            });
+        }
+    }
+
+    fn publish_selection_outcome(&mut self, consumer: ConsumerId, outcome: SelectionOutcome) {
+        if let Some(events) = self.events.get_mut(&consumer) {
+            events
+                .selection_outcomes
+                .push_back(MarketRuntimeEvent::SelectionOutcome(outcome));
+        }
+    }
+
     pub(super) fn select_and_demand(
         &mut self,
         client_id: ClientId,
@@ -219,7 +430,14 @@ impl Coordinator<'_> {
                 .filter(|instrument| instrument.entitlement_id == reference.entitlement_id)
                 .cloned(),
             InstrumentRequest::Default => {
-                let default = super::descriptors::default_instrument();
+                let mut default = super::descriptors::default_instrument();
+                if let Some(epoch) = self
+                    .engine
+                    .provider_status(&default.provider)
+                    .and_then(|status| status.generation)
+                {
+                    default.session_generation = epoch.0.get();
+                }
                 Some(
                     self.catalog
                         .get(&(default.provider.clone(), default.instrument_id.clone()))
@@ -227,6 +445,7 @@ impl Coordinator<'_> {
                         .unwrap_or(default),
                 )
             }
+            InstrumentRequest::CatalogSymbol { .. } => None,
         }
         .ok_or(SelectionError::InstrumentUnavailable)?;
         let provider = self
@@ -512,7 +731,9 @@ impl Coordinator<'_> {
                 instrument,
             } => {
                 self.restore_provider_catalog_health(&instrument.provider);
-                self.handle_catalog_selection(consumer_id, command_generation, instrument);
+                if !self.finish_selection(consumer_id, command_generation, &instrument) {
+                    self.handle_catalog_selection(consumer_id, command_generation, instrument);
+                }
             }
             ProviderCatalogEvent::Rejected {
                 rejection,
@@ -658,6 +879,76 @@ impl Coordinator<'_> {
         let Ok(consumer_id) = id(result.consumer_id).map(ConsumerId) else {
             return;
         };
+        if self
+            .pending_selections
+            .get(&consumer_id)
+            .is_some_and(|(_, request, provider)| {
+                request.generation == result.search_generation && *provider == result.provider
+            })
+        {
+            if self
+                .command_fences
+                .take(
+                    consumer_id,
+                    &result.provider,
+                    super::CommandKind::Selection,
+                    result.search_generation,
+                )
+                .is_none()
+            {
+                return;
+            }
+            let Some((_, request, _)) = self.pending_selections.get(&consumer_id) else {
+                return;
+            };
+            let InstrumentRequest::Ref(reference) = &request.instrument else {
+                return;
+            };
+            let query = reference
+                .query
+                .as_deref()
+                .unwrap_or_else(|| reference.instrument_id.rsplit(':').next().unwrap_or(""));
+            let normalized = query.strip_prefix('/').unwrap_or(query);
+            let selected = result.instruments.iter().find(|candidate| {
+                [candidate.symbol.as_str(), candidate.display_symbol.as_str()]
+                    .into_iter()
+                    .any(|value| {
+                        value == query || value.strip_prefix('/').unwrap_or(value) == normalized
+                    })
+            });
+            let dispatched = selected
+                .ok_or_else(|| "instrument was not found in provider catalog".to_owned())
+                .and_then(|candidate| {
+                    self.providers.dispatch_catalog(
+                        &result.provider,
+                        ProviderCatalogCommand::Select(SelectProviderInstrument {
+                            consumer_id: result.consumer_id,
+                            selection_generation: result.search_generation,
+                            search_generation: result.search_generation,
+                            startup_resolve: false,
+                            provider: result.provider.clone(),
+                            symbol: candidate.symbol.clone(),
+                            exchange: candidate.exchange.clone(),
+                            entitlement_id: reference.entitlement_id.clone(),
+                        }),
+                    )
+                });
+            match dispatched {
+                Ok(()) => {
+                    self.command_fences.record_operation(
+                        consumer_id,
+                        result.provider,
+                        super::CommandKind::Selection,
+                        result.search_generation,
+                        true,
+                    );
+                }
+                Err(error) => {
+                    self.fail_pending_selection(consumer_id, SelectionError::DemandRejected(error));
+                }
+            }
+            return;
+        }
         let Some(kind) = self.command_fences.kind_for(
             consumer_id,
             &result.provider,
@@ -720,6 +1011,95 @@ impl Coordinator<'_> {
         }
     }
 
+    fn finish_selection(
+        &mut self,
+        raw_consumer: u64,
+        generation: u64,
+        instrument: &InstallProviderInstrument,
+    ) -> bool {
+        let Ok(consumer) = id(raw_consumer).map(ConsumerId) else {
+            return false;
+        };
+        let Some((client, request, provider)) = self.pending_selections.get(&consumer).cloned()
+        else {
+            return false;
+        };
+        if provider != instrument.provider
+            || request.generation != generation
+            || !self.command_fences.accepts(
+                consumer,
+                &provider,
+                super::CommandKind::Selection,
+                generation,
+            )
+        {
+            return false;
+        }
+        self.command_fences.take(
+            consumer,
+            &provider,
+            super::CommandKind::Selection,
+            generation,
+        );
+        self.pending_selections.remove(&consumer);
+        let expected_entitlement = match &request.instrument {
+            InstrumentRequest::Ref(reference) => &reference.entitlement_id,
+            InstrumentRequest::CatalogSymbol { entitlement_id, .. } => entitlement_id,
+            InstrumentRequest::Default => return true,
+        };
+        let outcome = if matches!(&request.instrument, InstrumentRequest::Ref(reference)
+            if instrument.instrument_id != reference.instrument_id)
+            || instrument.entitlement_id != *expected_entitlement
+        {
+            SelectionOutcome::Failed {
+                generation: super::GenerationId(id(generation).expect("validated selection epoch")),
+                error: SelectionError::InstrumentUnavailable,
+            }
+        } else {
+            match self.install_provider_instrument(instrument) {
+                Ok(()) => {
+                    let mut resolved = request;
+                    resolved.instrument =
+                        InstrumentRequest::Ref(super::descriptors::InstrumentRef {
+                            provider_id: instrument.provider.clone(),
+                            instrument_id: instrument.instrument_id.clone(),
+                            entitlement_id: instrument.entitlement_id.clone(),
+                            query: None,
+                        });
+                    self.select_and_demand(client, &resolved)
+                }
+                Err(error) => SelectionOutcome::Failed {
+                    generation: super::GenerationId(
+                        id(generation).expect("validated selection epoch"),
+                    ),
+                    error: SelectionError::DemandRejected(error),
+                },
+            }
+        };
+        self.publish_selection_outcome(consumer, outcome);
+        true
+    }
+
+    fn fail_pending_selection(&mut self, consumer: ConsumerId, error: SelectionError) {
+        if let Some((_, request, provider)) = self.pending_selections.remove(&consumer) {
+            let _ = self.command_fences.take(
+                consumer,
+                &provider,
+                super::CommandKind::Selection,
+                request.generation,
+            );
+            self.publish_selection_outcome(
+                consumer,
+                SelectionOutcome::Failed {
+                    generation: super::GenerationId(
+                        id(request.generation).expect("validated selection epoch"),
+                    ),
+                    error,
+                },
+            );
+        }
+    }
+
     pub(super) fn reject_overflowed_catalog(&mut self, provider: &str) {
         let screens = self
             .command_fences
@@ -736,6 +1116,7 @@ impl Coordinator<'_> {
         for kind in [
             super::CommandKind::Search,
             super::CommandKind::Select,
+            super::CommandKind::Selection,
             super::CommandKind::StartupResolve,
         ] {
             for (consumer_id, command_generation, selection) in
@@ -774,6 +1155,13 @@ impl Coordinator<'_> {
         ) else {
             return;
         };
+        if kind == super::CommandKind::Selection {
+            self.fail_pending_selection(
+                consumer_id,
+                SelectionError::DemandRejected(format!("{:?}", rejection.reason)),
+            );
+            return;
+        }
         self.command_fences.take(
             consumer_id,
             &rejection.provider,

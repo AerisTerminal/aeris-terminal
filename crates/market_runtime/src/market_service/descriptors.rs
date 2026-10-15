@@ -79,13 +79,56 @@ pub struct InstrumentRef {
     pub provider_id: String,
     pub instrument_id: String,
     pub entitlement_id: String,
+    /// Optional provider catalog query for an instrument restored before its
+    /// current catalog entry has been installed. Identity is still checked.
+    pub query: Option<String>,
 }
 
 /// A fresh workspace requests the runtime's public default, not a desktop fixture.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstrumentRequest {
     Ref(InstrumentRef),
+    /// A search result has provider routing fields, but only its catalog
+    /// resolver can supply the stable instrument identity.
+    CatalogSymbol {
+        provider_id: String,
+        symbol: String,
+        exchange: String,
+        entitlement_id: String,
+    },
     Default,
+}
+impl InstrumentRequest {
+    /// A fresh workspace's provisional identity is resolved by the runtime,
+    /// not treated as authoritative restored catalog metadata.
+    #[must_use]
+    pub fn startup(instrument: &InstallProviderInstrument) -> Self {
+        let default = default_instrument();
+        if instrument.provider == default.provider
+            && instrument.instrument_id == default.instrument_id
+            && instrument.session_generation <= default.session_generation
+        {
+            Self::Default
+        } else {
+            Self::Ref(InstrumentRef {
+                provider_id: instrument.provider.clone(),
+                instrument_id: instrument.instrument_id.clone(),
+                entitlement_id: instrument.entitlement_id.clone(),
+                query: Some(
+                    match super::built_in_provider_presentations()
+                        .iter()
+                        .find(|provider| provider.id == instrument.provider)
+                        .map(|provider| provider.catalog_symbol)
+                    {
+                        Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
+                            instrument.display_symbol.clone()
+                        }
+                        _ => instrument.provider_symbol.clone(),
+                    },
+                ),
+            })
+        }
+    }
 }
 
 /// Public, ungated default for a fresh workspace. Catalog refresh replaces
@@ -134,6 +177,7 @@ pub enum SelectionOutcome {
 /// Selection failures do not retire the consumer's prior series.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SelectionError {
+    Superseded,
     InstrumentUnavailable,
     UnsupportedInterval,
     InvalidViewport,
@@ -197,5 +241,26 @@ impl ResolvedSeries {
             cadence: key.period,
             key,
         })
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_default_selection_is_ungated_and_restored_symbols_use_catalog_refs() {
+        let default = default_instrument();
+        assert_eq!(
+            InstrumentRequest::startup(&default),
+            InstrumentRequest::Default
+        );
+        let restored = InstallProviderInstrument {
+            instrument_id: "hyperliquid:perp:ETH".into(),
+            ..default
+        };
+        assert!(matches!(InstrumentRequest::startup(&restored),
+            InstrumentRequest::Ref(InstrumentRef { instrument_id, .. })
+                if instrument_id == "hyperliquid:perp:ETH"));
     }
 }

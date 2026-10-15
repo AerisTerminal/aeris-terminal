@@ -2,21 +2,12 @@
 
 use super::{
     ChartState, ConsumerResourceClass, EndpointRecord, FeedConnectionState,
-    InstallProviderInstrument, MarketPriceAlert, MarketRecoveryFailure, MarketRuntimeEvent,
-    MarketService, MarketWorkerCommand, MarketWorkerMessage, ProviderInstrumentSummary,
-    RITHMIC_CATALOG_READY_MESSAGE, ReplayRecoveryCommand, SearchProviderInstruments,
-    SelectProviderInstrument, StartupResolution, StreamRequirements, WorkerEndpoint,
-    cancel_pending_recovery, chart_demand_streams, chart_streams, provider_display_name,
-    retire_endpoint, send_recovery, series_key,
+    InstallProviderInstrument, MarketPriceAlert, MarketRecoveryFailure, MarketService,
+    MarketWorkerCommand, MarketWorkerMessage, ReplayRecoveryCommand, StreamRequirements,
+    WorkerEndpoint, cancel_pending_recovery, chart_demand_streams, chart_streams,
+    provider_display_name, retire_endpoint, send_recovery,
 };
-use aeris_observability::diagnostic;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static STARTUP_COMMAND_SEQUENCE: AtomicU64 = AtomicU64::new(1 << 48);
-
-pub(super) fn next_startup_command_generation() -> u64 {
-    STARTUP_COMMAND_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-}
+use aeris_market_runtime::{InstrumentRef, InstrumentRequest, SelectionRequest};
 
 pub(super) fn fence_recovery_command(
     endpoint: &WorkerEndpoint,
@@ -43,14 +34,7 @@ pub(super) fn initialize_catalog_endpoint(
     endpoint: &mut WorkerEndpoint,
 ) -> Result<(), String> {
     market.register_consumer(client_id, workspace_id, endpoint.consumer_id)?;
-    endpoint
-        .messages
-        .send(MarketWorkerMessage::Connection {
-            state: FeedConnectionState::Authenticating,
-            message: RITHMIC_CATALOG_READY_MESSAGE.to_string(),
-            transport_rtt_nanos: None,
-        })
-        .map_err(|error| error.to_string())
+    Ok(())
 }
 
 pub(super) fn initialize_market_screen_endpoint(
@@ -84,33 +68,6 @@ pub(super) fn initialize_endpoint(
         )?;
     }
 
-    // Restored provider metadata (price increment, session) is never trusted:
-    // the live catalog re-resolves it before any market data reaches the chart.
-    let refresh_catalog = aeris_market_runtime::built_in_provider_presentations()
-        .iter()
-        .find(|descriptor| descriptor.id == record.product.provider)
-        .is_some_and(|descriptor| descriptor.catalog_refresh_on_startup);
-    if refresh_catalog {
-        let requested = record.product.clone();
-        record.startup_resolution = Some(StartupResolution::Searching(requested.clone()));
-        let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
-            state: ChartState::Loading,
-            message: "Refreshing provider instrument metadata".to_string(),
-        });
-        return market.search_provider_instruments(
-            client_id,
-            SearchProviderInstruments {
-                consumer_id: record.endpoint.consumer_id,
-                search_generation: record.startup_command_generation,
-                startup_resolve: true,
-                provider: requested.provider.clone(),
-                query: catalog_symbol(&requested),
-                maximum_results: 32,
-                categories: aeris_contracts::InstrumentSearchCategories::ALL,
-            },
-        );
-    }
-    market.install_provider_instrument(&record.product)?;
     begin_endpoint_demand(market, client_id, record)
 }
 
@@ -120,21 +77,25 @@ fn begin_endpoint_demand(
     record: &mut EndpointRecord,
 ) -> Result<(), String> {
     let provider_name = provider_display_name(record.product.provider.as_str());
-    let series = series_key(&record.product, record.interval)?;
     let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
         state: ChartState::Loading,
         message: format!("Loading {provider_name} history"),
     });
-    if let Err(error) = market.set_demand(
+    let instrument = InstrumentRequest::startup(&record.product);
+    if let Err(error) = market.select_and_demand(
         client_id,
-        record.endpoint.consumer_id,
-        record.endpoint.active_generation,
-        &series,
-        chart_demand_streams(
-            market,
-            &record.product.provider,
-            record.endpoint.depth_visible,
-        )?,
+        SelectionRequest {
+            consumer_id: record.endpoint.consumer_id,
+            generation: record.endpoint.active_generation,
+            instrument,
+            interval: record.interval,
+            streams: chart_demand_streams(
+                market,
+                &record.product.provider,
+                record.endpoint.depth_visible,
+            )?,
+            viewport: None,
+        },
     ) {
         let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
             state: ChartState::Error,
@@ -143,185 +104,15 @@ fn begin_endpoint_demand(
         return Ok(());
     }
 
-    // Catalog population is ancillary to an already resolved market demand.
-    // A picker refresh failure must not block or tear down the price stream.
-    let _ = market.search_provider_instruments(
-        client_id,
-        SearchProviderInstruments {
-            consumer_id: record.endpoint.consumer_id,
-            search_generation: 1,
-            startup_resolve: false,
-            provider: record.product.provider.clone(),
-            query: String::new(),
-            maximum_results: u32::try_from(
-                crate::desktop::rithmic_shell::MAXIMUM_RITHMIC_SYMBOL_RESULTS,
-            )
-            .unwrap_or(u32::MAX),
-            categories: aeris_contracts::InstrumentSearchCategories::ALL,
-        },
-    );
     Ok(())
 }
-
-pub(super) fn handle_startup_catalog_event(
-    market: &MarketService,
-    client_id: u64,
-    record: &mut EndpointRecord,
-    event: &MarketRuntimeEvent,
-) -> Result<bool, String> {
-    let resolution = match &record.startup_resolution {
-        Some(StartupResolution::Searching(requested)) => Some((true, requested.clone())),
-        Some(StartupResolution::Selecting(requested)) => Some((false, requested.clone())),
-        None => None,
-    };
-
-    let Some((searching, requested)) = resolution else {
-        return Ok(is_retired_startup_catalog_event(
-            event,
-            record.startup_command_generation,
-        ));
-    };
-
-    if searching {
-        match event {
-            MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
-                if result.consumer_id == record.endpoint.consumer_id
-                    && result.provider == requested.provider
-                    && result.search_generation == record.startup_command_generation =>
-            {
-                let candidate =
-                    startup_catalog_candidate(result.instruments.as_slice(), &requested)?;
-                market.select_provider_instrument(
-                    client_id,
-                    SelectProviderInstrument {
-                        consumer_id: record.endpoint.consumer_id,
-                        selection_generation: record.startup_command_generation,
-                        search_generation: record.startup_command_generation,
-                        startup_resolve: true,
-                        provider: requested.provider.clone(),
-                        symbol: candidate.symbol,
-                        exchange: candidate.exchange,
-                        entitlement_id: requested.entitlement_id.clone(),
-                    },
-                )?;
-                record.startup_resolution = Some(StartupResolution::Selecting(requested));
-                return Ok(true);
-            }
-            MarketRuntimeEvent::ProviderCatalogRejected(rejection)
-                if rejection.consumer_id == record.endpoint.consumer_id
-                    && rejection.provider == requested.provider
-                    && rejection.command_generation == record.startup_command_generation =>
-            {
-                record.startup_resolution = None;
-                diagnostic!(
-                    "Aeris startup catalog refresh for {} was rejected: {:?}",
-                    requested.display_symbol,
-                    rejection.reason
-                );
-                return Err("Provider startup catalog refresh was rejected".to_string());
-            }
-            _ => return Ok(false),
-        }
-    }
-
-    match event {
-        MarketRuntimeEvent::ProviderInstrumentSelection(selection)
-            if selection.consumer_id.0.get() == record.endpoint.consumer_id
-                && selection.command_generation == record.startup_command_generation =>
-        {
-            let instrument = &selection.instrument;
-            if instrument.provider != requested.provider
-                || instrument.provider_symbol != requested.provider_symbol
-                || instrument.entitlement_id != requested.entitlement_id
-            {
-                record.startup_resolution = None;
-                return Err("Provider startup selection identity mismatched".to_string());
-            }
-            if let Err(error) = aeris_desktop::trading::register_provider_instrument(instrument) {
-                aeris_desktop::trading::report_practice_registration_error(error);
-            }
-            record.product.clone_from(instrument);
-            record.startup_resolution = None;
-            let _ = record
-                .endpoint
-                .messages
-                .send(MarketWorkerMessage::ProviderCatalog(
-                    aeris_desktop::market_worker::ProviderCatalogEvent::StartupInstrumentResolved(
-                        instrument.clone(),
-                    ),
-                ));
-            begin_endpoint_demand(market, client_id, record)?;
-            Ok(true)
-        }
-        MarketRuntimeEvent::ProviderCatalogRejected(rejection)
-            if rejection.consumer_id == record.endpoint.consumer_id
-                && rejection.provider == requested.provider
-                && rejection.command_generation == record.startup_command_generation =>
-        {
-            record.startup_resolution = None;
-            diagnostic!(
-                "Aeris startup selection for {} was rejected: {:?}",
-                requested.display_symbol,
-                rejection.reason
-            );
-            Err("Provider startup selection was rejected".to_string())
-        }
-        _ => Ok(false),
-    }
-}
-
-fn startup_catalog_candidate(
-    candidates: &[ProviderInstrumentSummary],
-    requested: &InstallProviderInstrument,
-) -> Result<ProviderInstrumentSummary, String> {
-    let symbol = catalog_symbol(requested);
-    let normalized = symbol.strip_prefix('/').unwrap_or(&symbol);
-    let matches = |candidate: &ProviderInstrumentSummary| {
-        [candidate.symbol.as_str(), candidate.display_symbol.as_str()]
-            .into_iter()
-            .any(|value| value == symbol || value.strip_prefix('/').unwrap_or(value) == normalized)
-    };
-    candidates
-        .iter()
-        .find(|candidate| matches(candidate) && candidate.exchange == requested.venue_id)
-        .or_else(|| candidates.iter().find(|candidate| matches(candidate)))
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "Provider catalog no longer contains {}",
-                requested.display_symbol
-            )
-        })
-}
-
-fn catalog_symbol(product: &InstallProviderInstrument) -> String {
-    let source = aeris_market_runtime::built_in_provider_presentations()
-        .iter()
-        .find(|descriptor| descriptor.id == product.provider)
-        .map(|descriptor| descriptor.catalog_symbol);
-    match source {
-        Some(aeris_contracts::ProviderCatalogSymbol::DisplaySymbol) => {
-            product.display_symbol.clone()
-        }
-        Some(aeris_contracts::ProviderCatalogSymbol::ProviderSymbol) | None => {
-            product.provider_symbol.clone()
-        }
-    }
-}
-
-fn is_retired_startup_catalog_event(event: &MarketRuntimeEvent, generation: u64) -> bool {
-    match event {
-        MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
-            result.search_generation == generation
-        }
-        MarketRuntimeEvent::ProviderInstrumentSelection(selection) => {
-            selection.command_generation == generation
-        }
-        MarketRuntimeEvent::ProviderCatalogRejected(rejection) => {
-            rejection.command_generation == generation
-        }
-        _ => false,
-    }
+fn instrument_ref(product: &InstallProviderInstrument) -> InstrumentRequest {
+    InstrumentRequest::Ref(InstrumentRef {
+        provider_id: product.provider.clone(),
+        instrument_id: product.instrument_id.clone(),
+        entitlement_id: product.entitlement_id.clone(),
+        query: Some(product.provider_symbol.clone()),
+    })
 }
 
 /// Records the desired order-book depth visibility and applies it to installed demand.
@@ -364,11 +155,14 @@ pub(super) fn process_command(
     record: &mut EndpointRecord,
     command: MarketWorkerCommand,
 ) -> Result<(), String> {
+    if let MarketWorkerCommand::SelectCatalog(request) = &command {
+        return process_catalog_select(market, client_id, record, request);
+    }
     let EndpointRecord {
         product,
         interval,
         endpoint,
-        startup_resolution,
+        pending_selection,
         ..
     } = record;
     match command {
@@ -390,9 +184,10 @@ pub(super) fn process_command(
             product,
             interval,
             endpoint,
-            startup_resolution,
+            pending_selection,
             &request,
         ),
+        MarketWorkerCommand::SelectCatalog(_) => unreachable!("handled before other commands"),
         MarketWorkerCommand::Recovery {
             selection_generation,
             command,
@@ -420,7 +215,7 @@ pub(super) fn process_command(
             client_id,
             endpoint,
             &product.provider,
-            startup_resolution.is_some(),
+            endpoint.active_generation == 0,
             visible,
         ),
         MarketWorkerCommand::ResourceClass(resource_class) => {
@@ -441,32 +236,49 @@ pub(super) fn process_command(
     }
 }
 
+fn process_catalog_select(
+    market: &MarketService,
+    client_id: u64,
+    record: &mut EndpointRecord,
+    request: &aeris_desktop::market_worker::CatalogSelectionRequest,
+) -> Result<(), String> {
+    let endpoint = &mut record.endpoint;
+    cancel_pending_recovery(endpoint)?;
+    market.select_and_demand(
+        client_id,
+        SelectionRequest {
+            consumer_id: endpoint.consumer_id,
+            generation: request.sequence,
+            instrument: aeris_market_runtime::InstrumentRequest::CatalogSymbol {
+                provider_id: request.provider.clone(),
+                symbol: request.symbol.clone(),
+                exchange: request.exchange.clone(),
+                entitlement_id: request.entitlement_id.clone(),
+            },
+            interval: request.interval,
+            streams: chart_demand_streams(market, &request.provider, endpoint.depth_visible)?,
+            viewport: None,
+        },
+    )?;
+    record.pending_selection = Some((request.sequence, record.product.clone(), request.interval));
+    record.pending_catalog_selection = Some((request.sequence, request.browser_generation));
+    Ok(())
+}
+
 fn process_engine_select(
     market: &MarketService,
     client_id: u64,
     product: &mut InstallProviderInstrument,
     interval: &mut aeris_market_data::ChartInterval,
     endpoint: &mut WorkerEndpoint,
-    startup_resolution: &mut Option<StartupResolution>,
+    pending_selection: &mut Option<(
+        u64,
+        InstallProviderInstrument,
+        aeris_market_data::ChartInterval,
+    )>,
     request: &aeris_desktop::market_worker::EngineSelectionRequest,
 ) -> Result<(), String> {
-    *startup_resolution = None;
-    let series = match series_key(&request.product, request.interval) {
-        Ok(series) => series,
-        Err(error) => {
-            let _ = endpoint.messages.send(MarketWorkerMessage::State {
-                state: ChartState::Error,
-                message: error,
-            });
-            return Ok(());
-        }
-    };
     cancel_pending_recovery(endpoint)?;
-    let _ = endpoint
-        .messages
-        .send(MarketWorkerMessage::EngineSwitchMarker {
-            sequence: request.sequence,
-        });
     let _ = endpoint.messages.send(MarketWorkerMessage::State {
         state: ChartState::Loading,
         message: format!(
@@ -474,17 +286,26 @@ fn process_engine_select(
             provider_display_name(&request.product.provider)
         ),
     });
-    endpoint.live = false;
-    endpoint.active_generation = request.sequence;
-    product.clone_from(&request.product);
-    *interval = request.interval;
-    market.set_demand(
+    market.select_and_demand(
         client_id,
-        endpoint.consumer_id,
-        request.sequence,
-        &series,
-        chart_demand_streams(market, &request.product.provider, endpoint.depth_visible)?,
-    )
+        SelectionRequest {
+            consumer_id: endpoint.consumer_id,
+            generation: request.sequence,
+            instrument: instrument_ref(&request.product),
+            interval: request.interval,
+            streams: chart_demand_streams(
+                market,
+                &request.product.provider,
+                endpoint.depth_visible,
+            )?,
+            viewport: None,
+        },
+    )?;
+    // The endpoint adopts the new binding only after Selected arrives ahead
+    // of its first snapshot. A failure leaves the old series live.
+    *pending_selection = Some((request.sequence, request.product.clone(), request.interval));
+    let _ = (product, interval);
+    Ok(())
 }
 
 fn process_study_command(
@@ -600,56 +421,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_symbol_uses_descriptor_identity_source() {
-        let mut product = InstallProviderInstrument {
-            provider: "tastytrade".to_string(),
-            provider_symbol: "/ES".to_string(),
-            display_symbol: "/ESZ6".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(catalog_symbol(&product), "/ESZ6");
-
-        product.provider = "hyperliquid".to_string();
-        product.provider_symbol = "BTC".to_string();
-        product.display_symbol = "BTC-PERP".to_string();
-        assert_eq!(catalog_symbol(&product), "BTC");
-    }
-
-    #[test]
-    fn startup_candidate_accepts_old_and_normalized_futures_display_symbols() {
+    fn restored_selection_preserves_catalog_identity() {
         let product = InstallProviderInstrument {
             provider: "tastytrade".into(),
             provider_symbol: "/ESZ26:XCME".into(),
+            instrument_id: "tastytrade:future:/ESZ26:XCME".into(),
             display_symbol: "ESZ6".into(),
+            entitlement_id: "futures".into(),
             venue_id: "CME".into(),
             ..Default::default()
         };
-        for display in ["ESZ6", "/ESZ6"] {
-            let mut candidate = ProviderInstrumentSummary {
-                symbol: "/ESZ6".into(),
-                display_symbol: display.into(),
-                exchange: "CME".into(),
-                ..Default::default()
-            };
-            assert_eq!(
-                startup_catalog_candidate(&[candidate.clone()], &product)
-                    .unwrap()
-                    .symbol,
-                "/ESZ6"
-            );
-            candidate.display_symbol = "ESZ6".into();
-            assert_eq!(
-                startup_catalog_candidate(
-                    &[candidate],
-                    &InstallProviderInstrument {
-                        display_symbol: "/ESZ6".into(),
-                        ..product.clone()
-                    }
-                )
-                .unwrap()
-                .symbol,
-                "/ESZ6"
-            );
-        }
+        assert!(
+            matches!(instrument_ref(&product), InstrumentRequest::Ref(reference)
+            if reference.instrument_id == product.instrument_id
+                && reference.entitlement_id == product.entitlement_id)
+        );
     }
 }

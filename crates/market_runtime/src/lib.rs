@@ -267,6 +267,8 @@ pub struct MarketStudyOutputsInvalidated {
 /// or process-reconnect replay exists on this boundary.
 #[derive(Clone, Debug)]
 pub enum MarketRuntimeEvent {
+    SelectionOutcome(market_service::SelectionOutcome),
+    CatalogReady { provider: String },
     ProviderState(aeris_contracts::ProviderState),
     SeriesSnapshot(aeris_market_engine::ConsumerPublication),
     SeriesUpdate(aeris_market_engine::ConsumerSeriesUpdate),
@@ -299,7 +301,9 @@ impl MarketRuntimeEvent {
             Self::StudyOutputSnapshot(event) => event.generation,
             Self::StudyOutputsInvalidated(event) => event.generation,
             Self::StudyRemoved(event) => event.generation,
-            Self::ProviderState(_)
+            Self::SelectionOutcome(_)
+            | Self::CatalogReady { .. }
+            | Self::ProviderState(_)
             | Self::PriceAlertTriggered(_)
             | Self::ProviderInstrumentSearchResult(_)
             | Self::ProviderInstrumentSearchPreview(_)

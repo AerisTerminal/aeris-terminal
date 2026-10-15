@@ -343,6 +343,8 @@ impl<'a> Coordinator<'a> {
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             command_fences: super::CommandFences::default(),
+            pending_selections: BTreeMap::new(),
+            selection_epochs: BTreeMap::new(),
         };
         for provider in coordinator.provider_registry.catalog_connect_ids() {
             let _ = coordinator.ensure_provider_connection(provider);
@@ -950,6 +952,9 @@ pub(super) struct Coordinator<'a> {
     /// Provider callbacks are fenced here before entering the canonical consumer
     /// outbox, so desktop presentation code never needs a second pending-command map.
     pub(super) command_fences: super::CommandFences,
+    pub(super) pending_selections:
+        BTreeMap<ConsumerId, (ClientId, super::SelectionRequest, String)>,
+    pub(super) selection_epochs: BTreeMap<ConsumerId, std::collections::BTreeSet<u64>>,
 }
 
 impl Coordinator<'_> {
@@ -1216,8 +1221,7 @@ impl Coordinator<'_> {
                 }
             }
             Command::SelectAndDemand(client_id, request, reply) => {
-                let outcome = self.select_and_demand(client_id, &request);
-                let _ = reply.send(Ok(outcome));
+                let _ = reply.send(self.begin_selection(client_id, request));
             }
             command @ (Command::BrokerAuthorizationChanged(..)
             | Command::AvailableStreams(..)
@@ -2955,6 +2959,8 @@ mod tests {
             catalog: BTreeMap::new(),
             catalog_sessions: BTreeMap::new(),
             command_fences: super::super::CommandFences::default(),
+            pending_selections: BTreeMap::new(),
+            selection_epochs: BTreeMap::new(),
         }
     }
 
