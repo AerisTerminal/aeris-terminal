@@ -2355,6 +2355,9 @@ mod tests {
     mod boundary {
         include!("tests/boundary.rs");
     }
+    mod replay {
+        include!("replay/mod.rs");
+    }
     mod characterization {
         include!("tests/characterization.rs");
     }
@@ -3521,81 +3524,6 @@ mod tests {
             )
             .expect("trade study registers");
         (coordinator, selected, selected_series, study_id)
-    }
-
-    #[test]
-    fn explicit_rithmic_sequence_gap_reseeds_without_trade_ordinal_inference() {
-        use aeris_rithmic_protocol_adapter::ProviderInvalidationReason;
-
-        let (mut coordinator, _, series, _) = trade_recovery_study_fixture();
-        assert!(
-            coordinator
-                .series
-                .trade_lifecycle(&series)
-                .is_some_and(SeriesLifecycle::history_ready)
-        );
-        history_epoch(&mut coordinator, "rithmic", ProviderGeneration(nonzero(1)));
-        coordinator.handle_provider_event(super::super::provider_event::ProviderEvent::rithmic(
-            RithmicRealtimeEvent::Recovering(1, Some(ProviderInvalidationReason::SequenceGap)),
-        ));
-        assert!(
-            !coordinator
-                .series
-                .trade_lifecycle(&series)
-                .is_some_and(SeriesLifecycle::history_ready),
-            "adapter-confirmed sequence gap must retire the live seam"
-        );
-        assert!(matches!(
-            coordinator
-                .series
-                .trade_lifecycle_mut(&series)
-                .map(|live| live.state()),
-            Some(SeriesState::Recovering {
-                reason: super::super::lifecycle::RecoveryReason::SequenceGap,
-                ..
-            }),
-        ));
-        let provider_generation = ProviderGeneration(nonzero(1));
-        let mut forming = minute_bars(4, 1)[0];
-        forming.source_sequence = 5;
-        finish_history(
-            &mut coordinator,
-            &series,
-            provider_generation,
-            None,
-            Ok(HistorySnapshot {
-                price_scale: 2,
-                quantity_scale: 0,
-                bars: minute_bars(0, 4),
-                forming: Some(FormingBar {
-                    bar: forming,
-                    trades: Some(1),
-                }),
-                handoff_boundary_unix_nanos: Some(forming.exchange_timestamp_unix_nanos),
-                backwards_exhausted: false,
-            }),
-        );
-        coordinator.mark_lifecycle_online("rithmic", 1, super::super::LiveModel::TradeBuilt);
-        coordinator.publish_lifecycle_live();
-        let live = coordinator
-            .series
-            .trade_lifecycle(&series)
-            .expect("reseeded trade lifecycle");
-        assert!(live.history_ready(), "explicit gap reseeds into Live");
-        let model = live.trade_model().expect("trade model");
-        assert_eq!(model.forming_tail_sequence, Some(forming.source_sequence));
-        assert_eq!(
-            model
-                .bars
-                .iter()
-                .map(|bar| bar.exchange_timestamp_unix_nanos)
-                .collect::<Vec<_>>(),
-            minute_bars(0, 5)
-                .iter()
-                .map(|bar| bar.exchange_timestamp_unix_nanos)
-                .collect::<Vec<_>>(),
-            "completed history is contiguous with exactly one forming bar"
-        );
     }
 
     struct OutputAncestryRecoveryFixture {

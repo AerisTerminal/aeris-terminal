@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) struct Boundary {
-    coordinator: Coordinator<'static>,
+    pub(super) coordinator: Coordinator<'static>,
     commands: std::sync::mpsc::SyncSender<Command>,
     command_receiver: std::sync::mpsc::Receiver<Command>,
     provider_events: std::sync::mpsc::SyncSender<RithmicRealtimeEvent>,
@@ -12,14 +12,16 @@ pub(super) struct Boundary {
     series: BarSeriesKey,
     consumer: ConsumerId,
     provider_generation: u64,
+    clock: std::sync::Arc<super::super::super::clock::ScriptedClock>,
 }
 
 impl Boundary {
     pub(super) fn new() -> Self {
+        let clock = std::sync::Arc::new(super::super::super::clock::ScriptedClock::new(
+            1_800_000_000_000_000_000,
+        ));
         let (coordinator, history, provider_events, provider_requests) = scripted_rithmic_coordinator(
-            std::sync::Arc::new(super::super::super::clock::ScriptedClock::new(
-                1_800_000_000_000_000_000,
-            )),
+            clock.clone(),
         );
         let (commands, command_receiver) = std::sync::mpsc::sync_channel(32);
         let mut boundary = Self {
@@ -32,6 +34,7 @@ impl Boundary {
             series: series(),
             consumer: consumer(1),
             provider_generation: 1,
+            clock,
         };
         boundary.provider_event(RithmicRealtimeEvent::Connecting(1));
         boundary.provider_event(RithmicRealtimeEvent::Connected(1));
@@ -53,6 +56,29 @@ impl Boundary {
         boundary
     }
 
+    pub(super) fn register_replay_session(
+        &mut self,
+        session: Box<dyn super::super::super::provider_session::ProviderSession>,
+    ) {
+        self.coordinator.provider_registry.register(
+            "rithmic",
+            session,
+            super::super::super::reconnect::ReconnectPolicy::rithmic_recovery(),
+            self.clock.as_ref(),
+        );
+        assert!(self.coordinator.ensure_provider_connection("rithmic"));
+    }
+
+    pub(super) fn advance(&mut self, duration: std::time::Duration) {
+        self.clock.advance(duration);
+        self.tick();
+    }
+
+    pub(super) fn registry_epoch(&self) -> u64 {
+        self.coordinator.provider_registry.epoch("rithmic")
+            .expect("scripted registry connection").get().get()
+    }
+
     fn command(&mut self, command: Command) {
         self.commands.send(command).expect("bounded coordinator command");
         self.tick();
@@ -67,6 +93,15 @@ impl Boundary {
             series, StreamRequirements::BARS, reply,
         ));
         received.recv().expect("demand reply").expect("demand succeeds");
+    }
+
+    pub(super) fn viewport(&mut self, generation_number: u64, start: i64, end: i64) {
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        self.command(Command::Viewport(
+            client(1), self.consumer, generation(generation_number),
+            aeris_market_engine::Viewport::try_new(start, end).expect("valid viewport"), reply,
+        ));
+        received.recv().expect("viewport reply").expect("viewport accepted");
     }
 
     pub(super) fn select(
@@ -111,6 +146,16 @@ impl Boundary {
         bars: Vec<MarketBar>,
         forming: Option<MarketBar>,
     ) {
+        self.complete_with_exhaustion(request, bars, forming, false);
+    }
+
+    pub(super) fn complete_with_exhaustion(
+        &mut self,
+        request: super::super::super::HistoryRequest,
+        bars: Vec<MarketBar>,
+        forming: Option<MarketBar>,
+        backwards_exhausted: bool,
+    ) {
         self.command(Command::HistoryCompleted(
             request.series,
             request.provider_generation,
@@ -121,7 +166,7 @@ impl Boundary {
                 bars,
                 forming: forming.map(|bar| FormingBar { bar, trades: None }),
                 handoff_boundary_unix_nanos: Some(180_000_000_000),
-                backwards_exhausted: false,
+                backwards_exhausted,
             }),
             request.ticket,
         ));

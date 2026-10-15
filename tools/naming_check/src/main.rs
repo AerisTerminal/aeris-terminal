@@ -24,6 +24,23 @@ const MARKET_CHARACTERIZATION_TESTS: &[&str] = &[
     "characterization_stale_generation_history_completion_is_ignored",
     "characterization_symbol_or_timeframe_change_keeps_provider_session",
 ];
+const MARKET_REPLAY_TESTS: &[&str] = &[
+    "replay_day3_round_trip",
+    "replay_stall_while_open",
+    "replay_stall_while_closed",
+    "replay_cme_roll_across_dst",
+    "replay_non_cme_calendar_resolution",
+    "replay_backoff_schedules",
+    "replay_stale_epoch_completion",
+    "replay_overflow_covering_snapshot",
+    "replay_reseed_during_live_flow",
+    "replay_switch_storm",
+    "replay_gap_recovery",
+    "replay_history_exhaustion",
+    "replay_superseded_generations",
+    "replay_quote_lease_share_release",
+    "replay_sanitized_public_fixture",
+];
 const PLATFORM_FILE_EXCEPTIONS: &[&str] = &[
     "Cargo.lock",
     "Cargo.toml",
@@ -86,18 +103,9 @@ fn main() -> ExitCode {
         eprintln!("failed to inspect repository names: {error}");
         return ExitCode::FAILURE;
     }
-    let characterization =
-        root.join("crates/market_runtime/src/market_service/tests/characterization.rs");
-    match fs::read_to_string(&characterization) {
-        Ok(source) => {
-            if !missing_market_characterization_tests(&source).is_empty() {
-                violations.push(relative_to(&root, &characterization));
-            }
-        }
-        Err(error) => {
-            eprintln!("failed to read market characterization tests: {error}");
-            return ExitCode::FAILURE;
-        }
+    if let Err(error) = inspect_market_test_names(&root, &mut violations) {
+        eprintln!("failed to read market test names: {error}");
+        return ExitCode::FAILURE;
     }
     for path in [
         "crates/market_runtime/src/market_service/calendar/mod.rs",
@@ -210,8 +218,39 @@ fn generic_market_provider_violations(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(violations)
 }
 
+fn inspect_market_test_names(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
+    for (path, missing) in [
+        (
+            "crates/market_runtime/src/market_service/tests/characterization.rs",
+            missing_market_characterization_tests as fn(&str) -> Vec<&'static str>,
+        ),
+        (
+            "crates/market_runtime/src/market_service/replay/mod.rs",
+            missing_market_replay_tests as fn(&str) -> Vec<&'static str>,
+        ),
+    ] {
+        let file = root.join(path);
+        if !missing(&fs::read_to_string(&file)?).is_empty() {
+            violations.push(relative_to(root, &file));
+        }
+    }
+    Ok(())
+}
+
 fn missing_market_characterization_tests(source: &str) -> Vec<&'static str> {
     MARKET_CHARACTERIZATION_TESTS
+        .iter()
+        .copied()
+        .filter(|name| {
+            !source
+                .lines()
+                .any(|line| line.trim() == format!("fn {name}() {{"))
+        })
+        .collect()
+}
+
+fn missing_market_replay_tests(source: &str) -> Vec<&'static str> {
+    MARKET_REPLAY_TESTS
         .iter()
         .copied()
         .filter(|name| {
@@ -1595,6 +1634,26 @@ mod tests {
             let without = source.replace(&format!("fn {required}() {{"), "");
             assert_eq!(
                 super::missing_market_characterization_tests(&without),
+                vec![*required],
+                "{required} must be individually enforced"
+            );
+        }
+    }
+
+    #[test]
+    fn market_replay_names_are_required_individually() {
+        let source = fs::read_to_string(
+            repository_root().join("crates/market_runtime/src/market_service/replay/mod.rs"),
+        )
+        .expect("market replay tests");
+        assert_eq!(
+            super::missing_market_replay_tests(&source),
+            Vec::<&str>::new()
+        );
+        for required in super::MARKET_REPLAY_TESTS {
+            let without = source.replace(&format!("fn {required}() {{"), "");
+            assert_eq!(
+                super::missing_market_replay_tests(&without),
                 vec![*required],
                 "{required} must be individually enforced"
             );

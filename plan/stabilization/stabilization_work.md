@@ -115,7 +115,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-14 | Low-Medium | `TradeLiveHandoff` is overloaded and allocates per event | M3.2 | closed in this commit; the bounded Indexed correction overlay still recomputes its retained bars |
 | MD-15 | Medium | The desktop re-derives runtime state to work around fencing gaps | M2.8 (market), M3.1 (presentation state), M3.9, M6.3 (desktop) | open |
 | MD-16 | Low | Smaller defects and inconsistencies | M2.10, M3.2, M3.5, M3.6, M6.6 | M2.10 history comments, M3.2 trade retention/demand-dirty/provider wording, and M3.5 Rithmic presentation and capability documentation closed; other items open |
-| MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | open |
+| MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | closed in this commit |
 | TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | open |
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | open |
@@ -454,7 +454,9 @@ Status: in progress
   - Part 2/3: `MarketService::select_and_demand` submits one coordinator command carrying the consumer, generation, catalog reference or ungated public default, interval, streams and viewport; a typed `Selected` or `Failed` result returns to the caller. Calendar/identity/viewport errors leave the previous demand untouched, while a failure after provisional installation restores the previous engine demand, subscription, viewport and queued events under the same coordinator turn. Tests cover selected/stale generations, an unsupported interval preserving live deltas, an ungated registered default, and exact rollback; the full workspace gate passed. The desktop still uses the old bridge path until part 3/3 moves its startup catalog and selections together; M3.10 remains unchecked.
   - Part 3/3: The coordinator fences one pending asynchronous catalog selection per consumer, emits one outbox outcome per epoch before the selected snapshot, rejects late superseded callbacks, and resolves catalog symbols from picker entries without a desktop-side chart selection round trip. Desktop startup sends only runtime selection; the picker no longer waits for a removed startup search; readiness uses `CatalogReady` rather than display-text matching. One bounded endpoint command queue/outbox remains. Scripted supersession and catalog callback tests, the complete fmt/Clippy/workspace-tests/naming gate, and a fresh-root default BTC chart without input passed.
   - Isolated live evidence at `m3-10-final`: one `ETH-USDC` invoke closed search and published a 1,599-bar zero-gap snapshot within 5 seconds. Ten alternating BTC/ETH search-result invokes ended on ETH at the ETH price axis; the last zero-gap snapshot was followed by live updates, and the chart still showed only ETH prices 30 seconds later. One Hyperliquid socket opened at epoch 2; the validation desktop and host exited.
-- [ ] M3.11 market-replay-harness - Deterministic market replay harness with permanent scenarios
+- [x] M3.11 market-replay-harness - Deterministic market replay harness with permanent scenarios
+  - `ReplayHarness` drives coordinator commands and scripted registry history/demand through the existing bounded event boundary. Fifteen named scenarios cover 50 alternating selections with late completions, epoch rebind, typed sequence gap, one forming bar, exhausted backfill, overflow, stalls, calendars, backoff, leases and Day3; the private-map sequence-gap test moved to the harness.
+  - The sanitized Hyperliquid public candle-shape fixture contains no private fields. Two consecutive replay runs, the four characterization tests and the full workspace gate passed. Existing private-map tests for unrelated behavior remain as complementary coverage, not a second replay implementation.
 - [ ] M3.12 hyperliquid-lifecycle-probe - Live Hyperliquid market lifecycle probe with JSON evidence
 
 ### M4 trading core
@@ -586,6 +588,7 @@ the repo root `AGENTS.md`.
 - Trade-built series share that lifecycle owner; `SeriesLiveMap` cannot return to market-service production source (M3.2, this commit).
 - Generic market-service lifecycle/history/calendar/quote/outbox/coordinator/realtime/runtime/publication source contains no provider-id literals, including after test modules; provider replay aggregation does not live on `ChartInterval` (M3.5, this commit).
 - Provider catalog command/event traffic crosses one bounded `ProviderCatalogChannel`; provider-specific wire commands are translated within its registered channel (M3.6, this commit).
+- The market replay scenario names remain in `market_service/replay/mod.rs` and are checked by `aeris_naming_check` (M3.11, this commit).
 
 ## 6. Progress log
 
@@ -649,6 +652,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M3.10 feat(market): publish registry-backed selection descriptors (M3.10 part 1/3) - complete four-provider metadata and calendar-resolved series are published without a second provider table; transactional selection follows.
 - 2026-10-15 M3.10 feat(market): add transactional runtime chart selection (M3.10 part 2/3) - direct typed selection and rollback keep old live demand on failure; desktop migration follows.
 - 2026-10-15 M3.10 feat(market): resolve chart selections inside the coordinator (M3.10 part 3/3) - fenced catalog callbacks, typed outbox outcomes and one-invoke desktop picks; full gate and isolated fresh-default/ten-switch checks passed.
+- 2026-10-15 M3.11 test(market): replay market lifecycle through scripted registry - 50-switch late-completion replay, recovery, exhaustion and calendar scenarios passed twice; naming and full workspace gate green.
 
 ## 7. Known gaps / deferred
 

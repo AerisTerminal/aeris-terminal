@@ -119,6 +119,8 @@ the check.
 - Keep the four coordinator command/event characterization scenarios under
   `market_service/tests/characterization.rs`; `tools/naming_check` requires their exact names so
   lifecycle refactors cannot silently drop the baseline.
+- Keep the deterministic market replay scenarios under `market_service/replay/mod.rs`;
+  `tools/naming_check` requires their names so lifecycle changes retain replay coverage.
 - Coordinator-owned watchdog, history retry and trade-handoff timestamps use the injected
   `market_service::clock::Clock`; direct system time belongs only in `SystemClock`.
 - Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;
