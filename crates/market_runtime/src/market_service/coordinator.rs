@@ -8262,6 +8262,56 @@ mod tests {
     }
 
     #[test]
+    fn retired_epoch_connected_does_not_publish_catalog_ready() {
+        use aeris_market_engine::fence::{EpochSequence, ProviderTag};
+
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        register(&mut coordinator, owner);
+        coordinator.events.insert(owner, ConsumerEvents::default());
+        let (history, _requests) = std::sync::mpsc::sync_channel(1);
+        coordinator.providers.records.insert(
+            "ctrader",
+            super::super::ProviderDispatchRecord {
+                descriptor: super::super::ctrader::DESCRIPTOR,
+                history: &history,
+                lifecycle: None,
+                ctrader: None,
+                hyperliquid: None,
+                tastytrade: None,
+                rithmic: None,
+                catalog: None,
+            },
+        );
+        assert!(
+            super::super::ctrader::DESCRIPTOR
+                .presentation
+                .catalog_refresh_on_startup
+        );
+        let mut epochs = EpochSequence::<ProviderTag>::default();
+        let retired = epochs.next();
+        let current = epochs.next();
+        coordinator.provider_epochs.bind("ctrader", current);
+        let connected = |epoch| super::super::ProviderEvent {
+            provider: "ctrader",
+            generation: epoch,
+            wire_generation: epoch.get().get(),
+            kind: super::super::ProviderEventKind::Connected,
+        };
+        coordinator.handle_bound_provider_event(connected(retired));
+        assert!(
+            coordinator.events.get_mut(&owner).unwrap().pop().is_none(),
+            "retired Connected must not publish CatalogReady"
+        );
+        assert_eq!(coordinator.provider_epochs.stale_counts().0, 1);
+        coordinator.handle_bound_provider_event(connected(current));
+        assert!(matches!(
+            coordinator.events.get_mut(&owner).unwrap().pop(),
+            Some(MarketRuntimeEvent::CatalogReady { provider }) if provider == "ctrader"
+        ));
+    }
+
+    #[test]
     fn superseded_startup_search_result_never_reaches_consumer() {
         let mut coordinator = coordinator();
         let owner = consumer(1);
