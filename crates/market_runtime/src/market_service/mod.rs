@@ -57,6 +57,8 @@ use crate::rithmic_realtime::{
 };
 
 mod alerts;
+pub mod descriptors;
+pub use descriptors::{InstrumentDescriptor, ResolvedSeries};
 mod quotes;
 pub use quotes::{QuoteSourceKind, QuoteState};
 mod trading_feed;
@@ -1137,6 +1139,23 @@ pub fn built_in_provider_presentations() -> &'static [ProviderPresentationDescri
             BUILT_IN_PROVIDER_DESCRIPTORS
                 .iter()
                 .map(|descriptor| *descriptor.presentation)
+                .collect()
+        })
+        .as_slice()
+}
+
+/// Published provider metadata comes from the same registry that starts sessions.
+#[must_use]
+pub fn published_provider_descriptors() -> &'static [descriptors::ProviderDescriptor] {
+    static DESCRIPTORS: std::sync::OnceLock<Vec<descriptors::ProviderDescriptor>> =
+        std::sync::OnceLock::new();
+    DESCRIPTORS
+        .get_or_init(|| {
+            BUILT_IN_PROVIDER_DESCRIPTORS
+                .iter()
+                .map(|registration| {
+                    descriptors::ProviderDescriptor::from_presentation(registration.presentation)
+                })
                 .collect()
         })
         .as_slice()

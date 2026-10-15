@@ -1,6 +1,82 @@
 use super::*;
 
 #[test]
+fn every_registered_provider_has_a_complete_published_descriptor() {
+    let descriptors = published_provider_descriptors();
+    assert_eq!(descriptors.len(), BUILT_IN_PROVIDER_DESCRIPTORS.len());
+    for registration in BUILT_IN_PROVIDER_DESCRIPTORS {
+        let descriptor = descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == registration.id)
+            .expect("registered provider has a published descriptor");
+        assert_ne!(descriptor.display_name, "");
+        assert_ne!(descriptor.logo_key, "");
+        assert!(descriptor.symbol_browser);
+        assert_eq!(
+            descriptor.autoload_catalog,
+            registration.presentation.catalog_refresh_on_startup
+        );
+        assert_ne!(descriptor.offered_intervals.len(), 0);
+    }
+}
+
+#[test]
+fn published_instrument_series_uses_calendar_resolved_daily_cadence() {
+    let hyperliquid = InstallProviderInstrument {
+        provider: "hyperliquid".into(),
+        instrument_id: "hyperliquid:perp:BTC".into(),
+        provider_symbol: "BTC".into(),
+        display_symbol: "BTC-USDC".into(),
+        venue_id: "hyperliquid".into(),
+        entitlement_id: "hyperliquid-public".into(),
+        price_scale: 8,
+        session_generation: 1,
+        selection_generation: 1,
+        ..Default::default()
+    };
+    let descriptor =
+        InstrumentDescriptor::from_install(&hyperliquid, &HYPERLIQUID_PRESENTATION, true)
+            .expect("valid catalog entry");
+    assert_eq!(
+        descriptor.calendar_source,
+        aeris_instruments::CalendarSourceKind::AlwaysOpen
+    );
+    assert!(descriptor.quote_capability);
+    assert_eq!(
+        ResolvedSeries::resolve(
+            &hyperliquid,
+            aeris_market_data::ChartInterval::Day1,
+            &HYPERLIQUID_PRESENTATION
+        )
+        .expect("UTC daily candle")
+        .cadence,
+        BarPeriod::time(86_400).expect("day"),
+    );
+
+    let cme = InstallProviderInstrument {
+        provider: "rithmic".into(),
+        instrument_id: "instrument:rithmic:CME:ES".into(),
+        provider_symbol: "ES".into(),
+        display_symbol: "ES".into(),
+        venue_id: "CME".into(),
+        entitlement_id: "rithmic-test:CME:ES".into(),
+        session_generation: 1,
+        selection_generation: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        ResolvedSeries::resolve(
+            &cme,
+            aeris_market_data::ChartInterval::Day1,
+            &RITHMIC_PRESENTATION
+        )
+        .expect("CME trading day")
+        .cadence,
+        BarPeriod::session(1).expect("session"),
+    );
+}
+
+#[test]
 fn reconnect_status_is_plain_language_and_clears_after_streaming_resumes() {
     let lifecycle = ProviderRuntimeLifecycle::default();
     lifecycle.observe_generation(2, true);

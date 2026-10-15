@@ -325,8 +325,11 @@ pub use aeris_market_engine::{
     InstrumentStreamKey, LeaseOwner, MarketStream, ProviderGeneration as MarketProviderGeneration,
     SeriesSnapshot as CanonicalMarketSeriesSnapshot, SeriesTailOperation, StreamRequirements,
 };
+pub use market_service::descriptors::{
+    ConnectMethod, InstrumentDescriptor, ProviderDescriptor, ResolvedSeries,
+};
 pub use market_service::{
     CtraderStreamStatistics, CtraderVenueEventSink, CtraderVenueLink, MarketService,
     MarketServiceStatus, QuoteSubscription, RithmicLoginSummary, RithmicServer,
-    built_in_provider_presentations,
+    built_in_provider_presentations, published_provider_descriptors,
 };
