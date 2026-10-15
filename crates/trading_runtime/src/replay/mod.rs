@@ -64,6 +64,10 @@ impl ReplayHarness {
         self.command(|reply| Command::RegisterInstrument(instrument, reply))
     }
 
+    fn register_risk_profile(&mut self, profile: RiskProfile) -> Result<(), String> {
+        self.command(|reply| Command::RegisterRiskProfile(profile, reply))
+    }
+
     fn place_order(&mut self, order: PlaceOrder) -> Result<Order, String> {
         self.command(|reply| Command::Place(order, reply))
     }
@@ -384,6 +388,14 @@ fn start_golden_service(
     directory: &TestDirectory,
     clock: std::sync::Arc<crate::clock::ManualClock>,
 ) -> ReplayHarness {
+    start_golden_service_with_instrument(directory, clock, instrument())
+}
+
+fn start_golden_service_with_instrument(
+    directory: &TestDirectory,
+    clock: std::sync::Arc<crate::clock::ManualClock>,
+    instrument: TradingInstrument,
+) -> ReplayHarness {
     let mut configuration = config(directory);
     configuration.clock = clock;
     configuration.retention.maximum_fills = 64;
@@ -403,9 +415,185 @@ fn start_golden_service(
         })
         .expect("account registers");
     service
-        .register_instrument(instrument())
+        .register_instrument(instrument)
         .expect("instrument registers");
     service
+}
+
+fn crypto_replay_harness(
+    directory: &TestDirectory,
+    clock: std::sync::Arc<crate::clock::ManualClock>,
+) -> (ReplayHarness, TradingInstrument) {
+    let mut crypto = instrument();
+    crypto.instrument_id = InstrumentId::try_new("instrument:fixture:crypto:BTC").expect("crypto");
+    crypto.contract.instrument_class = aeris_instruments::InstrumentClass::CryptoPerpetual;
+    crypto.contract.point_value = Some(InstrumentDecimal::try_new(100, 2).expect("point value"));
+    crypto.contract.expiry = None;
+    crypto.contract.last_trade = None;
+    crypto.contract.session_hours.clear();
+    crypto.contract.provenance.provider_symbol = "BTC".to_string();
+    crypto.contract.provenance.display_symbol = "BTC".to_string();
+    let mut harness = start_golden_service_with_instrument(directory, clock, crypto.clone());
+    let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    harness
+        .register_risk_profile(RiskProfile {
+            account_id: account_id.clone(),
+            profile_id: "replay-risk".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("zero"),
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("limit"),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::Intraday,
+            max_contracts: FixedPoint::try_new(10, 0).expect("contracts"),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            economic_event_rule: None,
+            enabled: true,
+        })
+        .expect("risk profile");
+    (harness, crypto)
+}
+
+fn crypto_replay_quote(
+    crypto: &TradingInstrument,
+    bid: i64,
+    ask: i64,
+    sequence: u64,
+    time: i64,
+) -> SimulatedMarketObservation {
+    SimulatedMarketObservation {
+        instrument_id: crypto.instrument_id.clone(),
+        bid: FixedPoint::try_new(bid, 2).expect("bid"),
+        ask: FixedPoint::try_new(ask, 2).expect("ask"),
+        provenance: provenance(sequence, time),
+    }
+}
+
+fn assert_crypto_fill_accounting(harness: &ReplayHarness, fill: &Fill, expected: FixedPoint) {
+    let database = rusqlite::Connection::open(&harness.configuration.database_path)
+        .expect("accounting reader");
+    let stored_realized: i64 = database
+        .query_row(
+            "SELECT realized_gross_units FROM fill_accounting WHERE fill_id = ?1",
+            [fill.id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("durable fill accounting");
+    assert_eq!(stored_realized, expected.units());
+}
+
+fn crypto_stop_restart_accounting_scenario() -> String {
+    let directory = TestDirectory::new("crypto-stop-restart-golden");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let (mut harness, crypto) = crypto_replay_harness(&directory, clock.clone());
+    let mut trace = String::new();
+    let entry_quote = crypto_replay_quote(&crypto, 10_000, 10_025, 1, 1_000);
+    harness
+        .observe_market(entry_quote.clone())
+        .expect("fresh quote");
+    let mut entry = market_order("crypto-entry", OrderSide::Buy, 2, 2_000);
+    entry.instrument_id = crypto.instrument_id.clone();
+    harness.place_order(entry).expect("buy accepted");
+    let entry_fills = harness
+        .observe_market(crypto_replay_quote(&crypto, 10_000, 10_025, 3, 3_000))
+        .expect("market buy fills");
+    assert_eq!(entry_fills.len(), 1);
+    assert_eq!(
+        entry_fills[0].price,
+        FixedPoint::try_new(10_025, 2).expect("ask")
+    );
+    record("market buy at ask", &harness, &mut trace);
+
+    let mut stop = market_order("crypto-stop", OrderSide::Sell, 4, 4_000);
+    stop.instrument_id = crypto.instrument_id.clone();
+    stop.order_type = OrderType::Stop;
+    stop.time_in_force = TimeInForce::GoodTillCancelled;
+    stop.stop_price = Some(FixedPoint::try_new(9_800, 2).expect("stop"));
+    harness.place_order(stop).expect("stop accepted");
+    record("sell stop working", &harness, &mut trace);
+    let before_restart = harness.snapshot().expect("before first restart");
+    harness.restart().expect("first restart");
+    record("restart without chart demand", &harness, &mut trace);
+    assert_eq!(
+        harness.snapshot().expect("restored").orders,
+        before_restart.orders
+    );
+    assert_eq!(
+        harness
+            .observe_market(crypto_replay_quote(&crypto, 10_000, 10_025, 3, 3_000))
+            .expect("retired quote"),
+        []
+    );
+    assert_eq!(
+        harness.snapshot().expect("stale").fills,
+        before_restart.fills
+    );
+    assert_eq!(
+        harness.snapshot().expect("stale").orders,
+        before_restart.orders
+    );
+    assert_eq!(
+        harness.snapshot().expect("stale").revision,
+        before_restart.revision
+    );
+    record("stale pre-restart quote ignored", &harness, &mut trace);
+
+    clock.set_wall_unix_nanos(5_000);
+    let exit_fills = harness
+        .observe_market(crypto_replay_quote(&crypto, 9_750, 9_775, 5, 5_000))
+        .expect("new stop quote");
+    assert_eq!(exit_fills.len(), 1);
+    assert_eq!(
+        exit_fills[0].price,
+        FixedPoint::try_new(9_750, 2).expect("bid")
+    );
+    let closed = harness.snapshot().expect("flat snapshot");
+    let expected =
+        FixedPoint::try_new(-275, 2).expect("bid minus ask times quantity and point value");
+    assert_eq!(closed.positions[0].net_quantity.units(), 0);
+    assert_eq!(closed.positions[0].realized_pnl, expected);
+    assert_eq!(
+        closed.fill_realized_pnl.get(&exit_fills[0].id),
+        Some(&expected)
+    );
+    assert_eq!(closed.risk_meters[0].current_realized_pnl, expected);
+    assert_eq!(closed.account_pnl[0].realized, expected);
+    assert_crypto_fill_accounting(&harness, &exit_fills[0], expected);
+    record("stop filled at bid and flat", &harness, &mut trace);
+    let committed = harness.snapshot().expect("before second restart");
+    harness.restart().expect("second restart");
+    let recovered = harness.snapshot().expect("second recovery");
+    assert_eq!(
+        (
+            recovered.orders,
+            recovered.order_events,
+            recovered.fills,
+            recovered.positions,
+            recovered.revision
+        ),
+        (
+            committed.orders,
+            committed.order_events,
+            committed.fills,
+            committed.positions,
+            committed.revision
+        )
+    );
+    record("second restart preserves facts", &harness, &mut trace);
+    format!("{trace}\n{}", harness.transcript())
+}
+
+#[test]
+fn replay_crypto_stop_restart_accounting_golden() {
+    let first = crypto_stop_restart_accounting_scenario();
+    assert_eq!(first, crypto_stop_restart_accounting_scenario());
+    assert_eq!(
+        first.trim_end(),
+        include_str!("../tests/replay_crypto_stop_restart_accounting_golden.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+    );
 }
 
 #[test]

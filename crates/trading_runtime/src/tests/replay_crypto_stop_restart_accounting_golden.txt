@@ -1,0 +1,22 @@
+market buy at ask revision=6 orders=[sim-order-1:filled] events=[sim-event-2,sim-event-1] fills=[sim-fill-2] pnl=0@2/-25@2/4999975@2
+sell stop working revision=7 orders=[sim-order-1:filled,sim-order-3:working] events=[sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-2] pnl=0@2/-25@2/4999975@2
+restart without chart demand revision=7 orders=[sim-order-1:filled,sim-order-3:working] events=[sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-2] pnl=0@2/-25@2/4999975@2
+stale pre-restart quote ignored revision=7 orders=[sim-order-1:filled,sim-order-3:working] events=[sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-2] pnl=0@2/-25@2/4999975@2
+stop filled at bid and flat revision=8 orders=[sim-order-1:filled,sim-order-3:filled] events=[sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-4,sim-fill-2] pnl=-275@2/0@2/4999725@2
+second restart preserves facts revision=8 orders=[sim-order-1:filled,sim-order-3:filled] events=[sim-event-4,sim-event-3,sim-event-2,sim-event-1] fills=[sim-fill-4,sim-fill-2] pnl=-275@2/0@2/4999725@2
+
+revision=8
+order sim-order-1 crypto-entry buy market day 1@0 1@0 - - filled 2000 aeris-sim:fixture:1:2:2000
+order sim-order-3 crypto-stop sell stop gtc 1@0 1@0 - 9800@2 filled 4000 aeris-sim:fixture:1:4:4000
+event sim-event-4 sim-order-3 4 filled 5000 Some("touch fill") aeris-sim:fixture:1:5:5000
+event sim-event-3 sim-order-3 3 accepted 4000 Some("accepted by local simulated venue") aeris-sim:fixture:1:4:4000
+event sim-event-2 sim-order-1 2 filled 3000 Some("touch fill") aeris-sim:fixture:1:3:3000
+event sim-event-1 sim-order-1 1 accepted 2000 Some("RISK WARNING · order has no attached stop; loss at stop is unbounded") aeris-sim:fixture:1:2:2000
+fill sim-fill-4 sim-order-3 aeris-sim-1 instrument:fixture:crypto:BTC sell 9750@2 1@0 5000 aeris-sim:fixture:1:5:5000
+fill sim-fill-2 sim-order-1 aeris-sim-1 instrument:fixture:crypto:BTC buy 10025@2 1@0 3000 aeris-sim:fixture:1:3:3000
+position aeris-sim-1 instrument:fixture:crypto:BTC 0@0 - -275@2 0@2 5000
+pnl aeris-sim-1 USD -275@2 0@2 4999725@2
+fill_pnl sim-fill-4 -275@2
+trade_pnl sim-fill-4 -275@2
+managed_brackets=[]
+risk_locks=[]
