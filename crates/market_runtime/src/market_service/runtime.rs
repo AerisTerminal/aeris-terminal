@@ -16,7 +16,6 @@ use super::{
     try_send_hyperliquid_catalog, try_send_rithmic_catalog, validate_provider_instrument,
     validate_provider_screen, validate_provider_search, validate_provider_selection,
 };
-use crate::MarketRuntimeEvent;
 use crate::hyperliquid_display_depth::{
     HyperliquidDisplayDepthControl, HyperliquidDisplayDepthEvent,
 };
@@ -1749,7 +1748,7 @@ impl MarketService {
         &self,
         client_id: u64,
         consumer_id: u64,
-    ) -> Result<Option<MarketRuntimeEvent>, String> {
+    ) -> Result<Option<crate::MarketConsumerEvent>, String> {
         self.request(|reply| {
             Ok(Command::Drain(
                 ClientId(id(client_id)?),
@@ -1768,7 +1767,7 @@ impl MarketService {
         &self,
         client_id: u64,
         consumer_budgets: &[(u64, usize)],
-    ) -> Result<Vec<(u64, MarketRuntimeEvent)>, String> {
+    ) -> Result<Vec<(u64, crate::MarketConsumerEvent)>, String> {
         let consumer_budgets = consumer_budgets
             .iter()
             .map(|(consumer_id, maximum)| Ok((ConsumerId(id(*consumer_id)?), *maximum)))

@@ -223,6 +223,8 @@ pub struct MarketDemandError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarketStudyOutputSnapshot {
     pub consumer_id: aeris_market_engine::ConsumerId,
+    /// The exact demand selection that produced these immutable study points.
+    pub generation: Option<aeris_market_engine::GenerationId>,
     pub study_id: study::StudyInstanceId,
     pub output_id: study::StudyOutputId,
     pub study_identifier: String,
@@ -244,6 +246,7 @@ pub struct MarketStudyOutputSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketStudyRemoved {
     pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: Option<aeris_market_engine::GenerationId>,
     pub study_ids: Vec<study::StudyInstanceId>,
 }
 
@@ -253,6 +256,7 @@ pub struct MarketStudyRemoved {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MarketStudyOutputsInvalidated {
     pub consumer_id: aeris_market_engine::ConsumerId,
+    pub generation: Option<aeris_market_engine::GenerationId>,
     pub study_ids: Vec<study::StudyInstanceId>,
 }
 
@@ -282,6 +286,37 @@ pub enum MarketRuntimeEvent {
     ProviderMarketScreenRejected(aeris_contracts::ProviderCatalogRejected),
     Fault(aeris_contracts::Fault),
 }
+
+impl MarketRuntimeEvent {
+    fn selection_generation(&self) -> Option<aeris_market_engine::GenerationId> {
+        match self {
+            Self::SeriesSnapshot(event) => Some(event.generation),
+            Self::SeriesUpdate(event) => Some(event.generation),
+            Self::SeriesState(event) => Some(event.generation),
+            Self::DemandError(event) => Some(event.generation),
+            Self::OrderBookSnapshot(event) => Some(event.generation),
+            Self::TradeTapeSnapshot(event) => Some(event.generation),
+            Self::StudyOutputSnapshot(event) => event.generation,
+            Self::StudyOutputsInvalidated(event) => event.generation,
+            Self::StudyRemoved(event) => event.generation,
+            Self::ProviderState(_)
+            | Self::PriceAlertTriggered(_)
+            | Self::ProviderInstrumentSearchResult(_)
+            | Self::ProviderInstrumentSearchPreview(_)
+            | Self::ProviderInstrumentSelection(_)
+            | Self::ProviderCatalogRejected(_)
+            | Self::ProviderMarketScreen(_)
+            | Self::ProviderMarketScreenRejected(_)
+            | Self::Fault(_) => None,
+        }
+    }
+}
+
+/// The required envelope for every runtime-to-client consumer event variant.
+/// Its epoch identifies the registered consumer lifetime, not an adapter wire
+/// generation. Demand-bound payloads additionally carry their selection epoch.
+pub type MarketConsumerEvent =
+    aeris_market_engine::fence::Fenced<aeris_market_engine::fence::ConsumerTag, MarketRuntimeEvent>;
 
 pub use aeris_market_engine::{
     ConsumerId as MarketConsumerId, ConsumerPublication as MarketSeriesSnapshot,

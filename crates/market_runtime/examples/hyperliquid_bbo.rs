@@ -31,7 +31,7 @@ fn run(market: &MarketService, symbol: &str, seconds: u64) -> Result<(), String>
     let mut count = 0;
     while Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
-            match event {
+            match event.value {
                 MarketRuntimeEvent::ProviderInstrumentSearchPreview(result)
                 | MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
                     if !selected =>

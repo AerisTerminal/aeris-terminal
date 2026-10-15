@@ -253,9 +253,10 @@ fn initialize_record(
 fn apply_received_event(
     market: &MarketService,
     client_id: u64,
-    (consumer_id, event): (u64, MarketRuntimeEvent),
+    (consumer_id, event): (u64, aeris_market_runtime::MarketConsumerEvent),
     endpoints: &mut [EndpointRecord],
 ) -> Result<(), String> {
+    let event = event.value;
     if consumer_id == 0 {
         let MarketRuntimeEvent::Fault(fault) = event else {
             return Err("engine pushed an unrouted market message".to_string());

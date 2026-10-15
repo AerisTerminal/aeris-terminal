@@ -437,7 +437,7 @@ fn drive(market: &MarketService, started: Instant) -> Result<(), String> {
     )?;
     while Instant::now() < deadline {
         while let Some(event) = market.poll_event(CLIENT, CONSUMER)? {
-            driver.handle(event)?;
+            driver.handle(event.value)?;
         }
         if driver.live_finished() {
             break;

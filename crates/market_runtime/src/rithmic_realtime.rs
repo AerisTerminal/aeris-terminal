@@ -46,7 +46,9 @@ const CALLBACK_DEPTH_LEVELS: usize = 4_096;
 /// Tight bound for adapter/control queues that cannot wake the blocking
 /// provider loop directly. Warm symbol replacement should not inherit a frame-
 /// sized scheduling delay before it reaches the authenticated session.
-const EVENT_WAIT: Duration = Duration::from_millis(2);
+// Rithmic's adapter-owned control and transport channels remain independent
+// of the waitable desktop consumer outbox.
+const ADAPTER_CONTROL_WAIT: Duration = Duration::from_millis(2);
 const MESSAGE_SILENCE: Duration = Duration::from_mins(2);
 const ENVIRONMENT_CAPACITY: usize = 8;
 
@@ -450,7 +452,7 @@ fn run_catalog_session(
                 &mut selections,
             );
         }
-        thread::sleep(EVENT_WAIT);
+        thread::sleep(ADAPTER_CONTROL_WAIT);
     }
 }
 
@@ -1051,7 +1053,7 @@ fn handle_idle_catalog(
     channels: ProviderChannels<'_>,
     last_generation: u64,
 ) -> IdleCatalogOutcome {
-    let control = match channels.catalog_controls.recv_timeout(EVENT_WAIT) {
+    let control = match channels.catalog_controls.recv_timeout(ADAPTER_CONTROL_WAIT) {
         Ok(control) => control,
         Err(RecvTimeoutError::Timeout) => return IdleCatalogOutcome::Unchanged,
         Err(RecvTimeoutError::Disconnected) => return IdleCatalogOutcome::Closed,
@@ -1095,7 +1097,10 @@ fn reject_unavailable_provider(channels: ProviderChannels<'_>) {
         while let Ok(control) = channels.catalog_controls.try_recv() {
             reject_catalog_control(channels.catalog_publications, control, None);
         }
-        match channels.realtime_controls.recv_timeout(EVENT_WAIT) {
+        match channels
+            .realtime_controls
+            .recv_timeout(ADAPTER_CONTROL_WAIT)
+        {
             Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
                 channels.publish_realtime(RithmicRealtimeEvent::Disconnected(
                     demand.requested_generation(),
@@ -1407,7 +1412,7 @@ fn run_demand(
             subscription_dirty = true;
             channels.publish_realtime(RithmicRealtimeEvent::Connecting(generation));
         }
-        std::thread::sleep(EVENT_WAIT);
+        std::thread::sleep(ADAPTER_CONTROL_WAIT);
     }
 }
 
@@ -1612,7 +1617,10 @@ fn wait_for_replacement(
         if channels.login_changed(login) {
             return SelectionExit::Idle { generation };
         }
-        match channels.realtime_controls.recv_timeout(EVENT_WAIT) {
+        match channels
+            .realtime_controls
+            .recv_timeout(ADAPTER_CONTROL_WAIT)
+        {
             Ok(RithmicRealtimeControl::Subscribe(demand)) if !demand.is_empty() => {
                 return SelectionExit::Replace {
                     demand,

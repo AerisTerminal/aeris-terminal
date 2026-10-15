@@ -5,8 +5,9 @@ use super::{
     SeriesTailOperation, authorize_consumer,
 };
 use crate::{
-    MarketDemandError, MarketDemandErrorScope, MarketOrderBookSnapshot, MarketRuntimeEvent,
-    MarketSeriesState, MarketStudyOutputsInvalidated, MarketStudyRemoved, MarketTradeTapeSnapshot,
+    MarketConsumerEvent, MarketDemandError, MarketDemandErrorScope, MarketOrderBookSnapshot,
+    MarketRuntimeEvent, MarketSeriesState, MarketStudyOutputsInvalidated, MarketStudyRemoved,
+    MarketTradeTapeSnapshot,
 };
 use aeris_observability::diagnostic;
 use std::sync::Arc;
@@ -331,6 +332,7 @@ impl ConsumerEvents {
     pub(super) fn publish_study_removed(
         &mut self,
         consumer_id: ConsumerId,
+        generation: Option<GenerationId>,
         removed: &[super::StudyInstanceId],
     ) {
         if removed.is_empty() {
@@ -345,7 +347,7 @@ impl ConsumerEvents {
 
         let mut study_ids = match self.study_removed.take() {
             Some(MarketRuntimeEvent::StudyRemoved(previous))
-                if previous.consumer_id == consumer_id =>
+                if previous.consumer_id == consumer_id && previous.generation == generation =>
             {
                 previous.study_ids
             }
@@ -356,6 +358,7 @@ impl ConsumerEvents {
         study_ids.dedup();
         self.study_removed = Some(MarketRuntimeEvent::StudyRemoved(MarketStudyRemoved {
             consumer_id,
+            generation,
             study_ids,
         }));
     }
@@ -365,6 +368,7 @@ impl ConsumerEvents {
     pub(super) fn publish_study_invalidated(
         &mut self,
         consumer_id: ConsumerId,
+        generation: Option<GenerationId>,
         invalidated: &[super::StudyInstanceId],
     ) {
         if invalidated.is_empty() {
@@ -378,7 +382,7 @@ impl ConsumerEvents {
             .retain(|output, _| !invalidated_set.contains(&output.study_id));
         let mut study_ids = match self.study_invalidated.take() {
             Some(MarketRuntimeEvent::StudyOutputsInvalidated(previous))
-                if previous.consumer_id == consumer_id =>
+                if previous.consumer_id == consumer_id && previous.generation == generation =>
             {
                 previous.study_ids
             }
@@ -390,6 +394,7 @@ impl ConsumerEvents {
         self.study_invalidated = Some(MarketRuntimeEvent::StudyOutputsInvalidated(
             MarketStudyOutputsInvalidated {
                 consumer_id,
+                generation,
                 study_ids,
             },
         ));
@@ -505,7 +510,7 @@ impl Coordinator<'_> {
         &mut self,
         client_id: ClientId,
         consumer_budgets: Vec<(ConsumerId, usize)>,
-        reply: &Reply<Vec<(u64, MarketRuntimeEvent)>>,
+        reply: &Reply<Vec<(u64, MarketConsumerEvent)>>,
     ) {
         if !self.attached.contains(&client_id) {
             let _ = reply.send(Err("market client is not attached".to_string()));
@@ -547,10 +552,27 @@ impl Coordinator<'_> {
                 let Some(event) = events.pop() else {
                     continue;
                 };
-                batch.push((consumer_id.0.get(), event));
+                progressed = true;
+                if event.selection_generation().is_some_and(|generation| {
+                    self.engine
+                        .current_demand(*consumer_id)
+                        .and_then(|demand| demand.generation)
+                        != Some(generation)
+                }) {
+                    continue;
+                }
+                let Some(epoch) = self.consumer_epochs.get(consumer_id).copied() else {
+                    continue;
+                };
+                batch.push((
+                    consumer_id.0.get(),
+                    aeris_market_engine::fence::Fenced {
+                        epoch,
+                        value: event,
+                    },
+                ));
                 *budget -= 1;
                 remaining -= 1;
-                progressed = true;
                 if remaining == 0 {
                     break;
                 }
@@ -567,12 +589,27 @@ impl Coordinator<'_> {
         &mut self,
         client_id: ClientId,
         consumer_id: ConsumerId,
-        reply: &Reply<Option<MarketRuntimeEvent>>,
+        reply: &Reply<Option<MarketConsumerEvent>>,
     ) {
         let result = authorize_consumer(&self.engine, client_id, consumer_id).map(|()| {
-            self.events
-                .get_mut(&consumer_id)
-                .and_then(ConsumerEvents::pop)
+            let current = self
+                .engine
+                .current_demand(consumer_id)
+                .and_then(|demand| demand.generation);
+            let epoch = self.consumer_epochs.get(&consumer_id).copied()?;
+            let events = self.events.get_mut(&consumer_id)?;
+            while let Some(event) = events.pop() {
+                if event
+                    .selection_generation()
+                    .is_none_or(|generation| current == Some(generation))
+                {
+                    return Some(aeris_market_engine::fence::Fenced {
+                        epoch,
+                        value: event,
+                    });
+                }
+            }
+            None
         });
         let _ = reply.send(result);
     }

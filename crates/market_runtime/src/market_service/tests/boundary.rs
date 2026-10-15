@@ -103,7 +103,7 @@ impl Boundary {
         let (reply, received) = std::sync::mpsc::sync_channel(1);
         self.command(Command::DrainClient(client(1), vec![(self.consumer, 256)], reply));
         received.recv().expect("poll reply").expect("poll succeeds")
-            .into_iter().map(|(_, event)| event).collect()
+            .into_iter().map(|(_, event)| event.value).collect()
     }
 
     pub(super) fn status(&mut self) -> MarketServiceStatus {

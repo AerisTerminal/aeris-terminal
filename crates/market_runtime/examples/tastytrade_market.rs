@@ -43,7 +43,7 @@ fn run(market: &MarketService) -> Result<(), String> {
     let mut live_timing = LiveTiming::default();
     while Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
-            match event {
+            match event.value {
                 MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
                     selection_started = search_timings
                         .accept(market, result, &query, true)?
@@ -305,7 +305,10 @@ fn measure_idle_reconnect(
         if Instant::now() >= reconnect_deadline {
             return Err("Tastytrade did not return to live after idle stop".into());
         }
-        if let Some(MarketRuntimeEvent::ProviderState(state)) = market.poll_event(1, 2)?
+        if let Some(aeris_market_engine::fence::Fenced {
+            value: MarketRuntimeEvent::ProviderState(state),
+            ..
+        }) = market.poll_event(1, 2)?
             && state.provider == "tastytrade"
             && state.state == ProviderConnectionState::Online
             && state.generation > old_generation
@@ -551,7 +554,7 @@ fn run_soak(market: &MarketService) -> Result<(), String> {
                 market,
                 index,
                 query,
-                event,
+                event.value,
                 &mut SoakEventState {
                     selected: &mut selected,
                     instruments: &mut instruments,
@@ -764,7 +767,7 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
     let mut instrument = None;
     while instrument.is_none() && Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
-            match event {
+            match event.value {
                 MarketRuntimeEvent::ProviderInstrumentSearchResult(result) => {
                     select(market, result, &query)?;
                 }
@@ -810,7 +813,7 @@ fn run_timeframe_cycle(market: &MarketService) -> Result<(), String> {
         let until = Instant::now() + Duration::from_millis(delay);
         while Instant::now() < until {
             if let Some(event) = market.poll_event(1, 1)? {
-                match event {
+                match event.value {
                     MarketRuntimeEvent::ProviderState(state) => println!(
                         "Provider transition: {:?} detail={:?} generation={:?}",
                         state.state, state.detail, state.generation
@@ -851,7 +854,7 @@ fn settle_cycle(market: &MarketService) -> Result<(), String> {
     let (mut updates, mut order_books, mut tapes, mut snapshots) = (0, 0, 0, 0);
     while Instant::now() < deadline {
         if let Some(event) = market.poll_event(1, 1)? {
-            match event {
+            match event.value {
                 MarketRuntimeEvent::ProviderState(state) => println!(
                     "Settle provider transition: {:?} detail={:?} generation={:?}",
                     state.state, state.detail, state.generation
@@ -909,7 +912,7 @@ fn run_history_load(market: &MarketService) -> Result<(), String> {
             let Some(event) = market.poll_event(1, consumer)? else {
                 continue;
             };
-            match event {
+            match event.value {
                 MarketRuntimeEvent::ProviderInstrumentSearchResult(result)
                 | MarketRuntimeEvent::ProviderInstrumentSearchPreview(result)
                     if !selecting =>

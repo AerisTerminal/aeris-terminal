@@ -25,6 +25,7 @@ use crate::{
         StudyRuntimeError,
     },
 };
+use aeris_market_engine::fence::{ConsumerTag, Epoch, EpochSequence};
 use aeris_observability::diagnostic;
 
 pub(super) struct OwnedCoordinatorChannels {
@@ -318,6 +319,8 @@ impl<'a> Coordinator<'a> {
             provider_registry,
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
+            consumer_epochs: BTreeMap::new(),
+            consumer_epoch_sequence: EpochSequence::default(),
             pending: BTreeMap::new(),
             history: super::history::tracker::HistoryTracker::default(),
             events: BTreeMap::new(),
@@ -915,6 +918,8 @@ pub(super) struct Coordinator<'a> {
     pub(super) provider_registry: super::provider_session::ProviderRegistry,
     pub(super) attached: BTreeSet<ClientId>,
     pub(super) consumer_clients: BTreeMap<ConsumerId, ClientId>,
+    pub(super) consumer_epochs: BTreeMap<ConsumerId, Epoch<ConsumerTag>>,
+    consumer_epoch_sequence: EpochSequence<ConsumerTag>,
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     pub(super) history: super::history::tracker::HistoryTracker,
     pub(super) events: BTreeMap<ConsumerId, ConsumerEvents>,
@@ -1739,6 +1744,8 @@ impl Coordinator<'_> {
             .insert(identity.consumer_id, ConsumerEvents::default());
         self.consumer_clients
             .insert(identity.consumer_id, identity.client_id);
+        self.consumer_epochs
+            .insert(identity.consumer_id, self.consumer_epoch_sequence.next());
         Ok(())
     }
 
@@ -1808,7 +1815,13 @@ impl Coordinator<'_> {
             .remove_subtree(study_id)
             .map_err(|error| error.to_string())?;
         if let Some(events) = self.events.get_mut(&owner) {
-            events.publish_study_removed(owner, &removed);
+            events.publish_study_removed(
+                owner,
+                self.engine
+                    .current_demand(owner)
+                    .and_then(|demand| demand.generation),
+                &removed,
+            );
         }
         self.reconcile_study_market_data()?;
         Ok(removed)
@@ -1842,7 +1855,13 @@ impl Coordinator<'_> {
         match prepared {
             Ok(executed) => {
                 if let Some(events) = self.events.get_mut(&owner) {
-                    events.publish_study_invalidated(owner, &affected);
+                    events.publish_study_invalidated(
+                        owner,
+                        self.engine
+                            .current_demand(owner)
+                            .and_then(|demand| demand.generation),
+                        &affected,
+                    );
                 }
                 self.publish_study_outputs(&executed);
                 Ok(affected)
@@ -1886,6 +1905,10 @@ impl Coordinator<'_> {
                     events.publish_study_output(MarketRuntimeEvent::StudyOutputSnapshot(
                         MarketStudyOutputSnapshot {
                             consumer_id: owner,
+                            generation: self
+                                .engine
+                                .current_demand(owner)
+                                .and_then(|demand| demand.generation),
                             study_id,
                             output_id,
                             study_identifier: study_identifier.clone(),
@@ -2903,6 +2926,8 @@ mod tests {
             },
             attached: BTreeSet::new(),
             consumer_clients: BTreeMap::new(),
+            consumer_epochs: BTreeMap::new(),
+            consumer_epoch_sequence: EpochSequence::default(),
             pending: BTreeMap::new(),
             history: super::super::history::tracker::HistoryTracker::default(),
             events: BTreeMap::new(),
@@ -2962,12 +2987,14 @@ mod tests {
             .events
             .get_mut(&consumer_id)
             .expect("outbox")
-            .series_state = Some(super::super::series_state(
-            consumer_id,
-            generation(1),
-            series(),
-            SeriesLoadState::Ready,
-            None,
+            .provider = Some(MarketRuntimeEvent::ProviderState(
+            aeris_contracts::ProviderState {
+                provider: "fixture".to_string(),
+                state: ProviderConnectionState::Online,
+                generation: 1,
+                detail: None,
+                transport_rtt_nanos: None,
+            },
         ));
         coordinator.signal_pending_consumers();
         assert!(coordinator.outbox.wait(owner, Duration::ZERO));
@@ -2981,6 +3008,33 @@ mod tests {
         coordinator.outbox.notify(owner);
         coordinator.detach_client(owner);
         assert!(!coordinator.outbox.wait(owner, Duration::ZERO));
+    }
+
+    #[test]
+    fn consumer_registration_mints_new_epoch_after_retirement() {
+        let mut coordinator = coordinator();
+        let owner = client(1);
+        let consumer_id = consumer(1);
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_attach(owner, &reply);
+        received.recv().expect("attach reply").expect("attached");
+        let identity = ConsumerIdentity {
+            client_id: owner,
+            workspace_id: WorkspaceId(nonzero(1)),
+            consumer_id,
+        };
+        coordinator
+            .handle_register(identity)
+            .expect("first registration");
+        let first = coordinator.consumer_epochs[&consumer_id];
+        coordinator
+            .handle_remove(owner, consumer_id)
+            .expect("retirement");
+        assert!(!coordinator.consumer_epochs.contains_key(&consumer_id));
+        coordinator
+            .handle_register(identity)
+            .expect("second registration");
+        assert_ne!(coordinator.consumer_epochs[&consumer_id], first);
     }
 
     fn history_epoch(
@@ -4319,6 +4373,65 @@ mod tests {
                     && snapshot.output_id == study_id.output(0)
                     && snapshot.series.generation() == 2
         ));
+    }
+
+    #[test]
+    fn study_output_from_previous_selection_never_reaches_consumer() {
+        let mut coordinator = coordinator();
+        let owner = consumer(1);
+        let client_id = client(1);
+        coordinator.attached.insert(client_id);
+        coordinator
+            .handle_register(ConsumerIdentity {
+                client_id,
+                workspace_id: WorkspaceId(nonzero(1)),
+                consumer_id: owner,
+            })
+            .expect("consumer registers");
+        let selected = instrument();
+        coordinator
+            .install_provider_instrument(&selected)
+            .expect("instrument installs");
+        let key = series();
+        coordinator
+            .engine
+            .set_series_demand(owner, generation(1), &key)
+            .expect("initial selection");
+        coordinator
+            .engine
+            .install_history(
+                ProviderGeneration(nonzero(selected.session_generation)),
+                &key,
+                2,
+                0,
+                minute_bars(0, 3),
+            )
+            .expect("canonical bars");
+        coordinator
+            .handle_register_study(client_id, owner, study_registration(key.clone()))
+            .expect("study publishes");
+        assert!(
+            !coordinator
+                .events
+                .get(&owner)
+                .expect("outbox")
+                .study_outputs
+                .is_empty()
+        );
+        coordinator
+            .engine
+            .set_series_demand(owner, generation(2), &key)
+            .expect("new selection");
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_drain_client(client_id, vec![(owner, 32)], &reply);
+        let delivered = result.recv().expect("reply").expect("authorized");
+        assert!(
+            delivered.iter().all(|(_, event)| !matches!(
+                &event.value,
+                MarketRuntimeEvent::StudyOutputSnapshot(_)
+            )),
+            "retired study output must not be delivered after selection changes"
+        );
     }
 
     #[test]
@@ -7553,14 +7666,13 @@ mod tests {
         assert!(history.range.is_none());
     }
 
-    fn queued_state(consumer_id: ConsumerId, value: u64) -> MarketRuntimeEvent {
-        MarketRuntimeEvent::SeriesState(crate::MarketSeriesState {
-            consumer_id,
-            generation: generation(value),
-            series: None,
-            state: super::super::SeriesLoadState::Resolving,
+    fn queued_state(_consumer_id: ConsumerId, value: u64) -> MarketRuntimeEvent {
+        MarketRuntimeEvent::ProviderState(aeris_contracts::ProviderState {
+            provider: "fixture".to_string(),
+            state: ProviderConnectionState::Online,
+            generation: value,
             detail: None,
-            presentation: None,
+            transport_rtt_nanos: None,
         })
     }
 
@@ -7581,6 +7693,9 @@ mod tests {
             (foreign, second_client),
         ] {
             coordinator.consumer_clients.insert(consumer_id, owner);
+            coordinator
+                .consumer_epochs
+                .insert(consumer_id, coordinator.consumer_epoch_sequence.next());
             coordinator
                 .events
                 .insert(consumer_id, ConsumerEvents::default());
@@ -7649,6 +7764,9 @@ mod tests {
         let available = consumer(2);
         for consumer_id in [constrained, available] {
             coordinator.consumer_clients.insert(consumer_id, owner);
+            coordinator
+                .consumer_epochs
+                .insert(consumer_id, coordinator.consumer_epoch_sequence.next());
             coordinator
                 .events
                 .insert(consumer_id, ConsumerEvents::default());

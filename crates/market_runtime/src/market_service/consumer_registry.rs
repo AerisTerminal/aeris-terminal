@@ -21,6 +21,7 @@ impl<'a, 'b> ConsumerRegistry<'a, 'b> {
         let removed_studies = !owner.studies.remove_consumer(consumer).is_empty();
         owner.events.remove(&consumer);
         owner.consumer_clients.remove(&consumer);
+        owner.consumer_epochs.remove(&consumer);
         owner.command_fences.remove_consumer(consumer);
         owner.price_alerts.remove_consumer(consumer);
         if let Err(error) = owner.reconcile_price_alert_leases() {

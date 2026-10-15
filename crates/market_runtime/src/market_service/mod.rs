@@ -286,11 +286,15 @@ enum Command {
     ),
     AcquireQuote(InstrumentStreamKey, Reply<MarketDataLeaseId>),
     SetTradingInterest(aeris_trading::market::QuoteInterest, Reply<()>),
-    Drain(ClientId, ConsumerId, Reply<Option<MarketRuntimeEvent>>),
+    Drain(
+        ClientId,
+        ConsumerId,
+        Reply<Option<crate::MarketConsumerEvent>>,
+    ),
     DrainClient(
         ClientId,
         Vec<(ConsumerId, usize)>,
-        Reply<Vec<(u64, MarketRuntimeEvent)>>,
+        Reply<Vec<(u64, crate::MarketConsumerEvent)>>,
     ),
     HistoryCompleted(
         BarSeriesKey,

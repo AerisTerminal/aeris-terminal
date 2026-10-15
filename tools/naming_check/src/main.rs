@@ -156,6 +156,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    if let Err(error) = inspect_consumer_delivery(&root, &mut violations) {
+        eprintln!("failed to inspect consumer event fencing boundary: {error}");
+        return ExitCode::FAILURE;
+    }
 
     if violations.is_empty() {
         println!("snake_case naming check passed");
@@ -302,6 +306,33 @@ fn public_provider_event_has_raw_generation(source: &str) -> bool {
         .map(|field| field.trim().trim_start_matches("pub(super) ").trim())
         .collect();
     fields.contains(&"generation: u64") || !fields.contains(&"generation: Epoch<ProviderTag>")
+}
+
+fn consumer_delivery_is_unfenced(consumer: &str, runtime: &str, commands: &str) -> bool {
+    let consumer = production_source_prefix(consumer);
+    let runtime = production_source_prefix(runtime);
+    let commands = production_source_prefix(commands);
+    !consumer.contains("pub type MarketConsumerEvent =")
+        || !consumer.contains("Fenced<aeris_market_engine::fence::ConsumerTag, MarketRuntimeEvent>")
+        || !runtime.contains("Result<Option<crate::MarketConsumerEvent>, String>")
+        || !runtime.contains("Result<Vec<(u64, crate::MarketConsumerEvent)>, String>")
+        || !commands.contains("Reply<Option<crate::MarketConsumerEvent>>")
+        || !commands.contains("Reply<Vec<(u64, crate::MarketConsumerEvent)>>")
+        || runtime.contains("Result<Option<MarketRuntimeEvent>, String>")
+        || runtime.contains("Result<Vec<(u64, MarketRuntimeEvent)>, String>")
+}
+
+fn inspect_consumer_delivery(root: &Path, violations: &mut Vec<PathBuf>) -> io::Result<()> {
+    let consumer_file = root.join("crates/market_runtime/src/lib.rs");
+    let consumer = fs::read_to_string(&consumer_file)?;
+    let runtime =
+        fs::read_to_string(root.join("crates/market_runtime/src/market_service/runtime.rs"))?;
+    let commands =
+        fs::read_to_string(root.join("crates/market_runtime/src/market_service/mod.rs"))?;
+    if consumer_delivery_is_unfenced(&consumer, &runtime, &commands) {
+        violations.push(relative_to(root, &consumer_file));
+    }
+    Ok(())
 }
 
 fn inspect_directory(
@@ -607,6 +638,31 @@ mod tests {
         assert!(super::public_provider_event_has_raw_generation(
             "#[cfg(test)] mod tests { struct ProviderEvent { generation: Epoch<ProviderTag> } }\n\
              pub(super) struct ProviderEvent { generation: u64 }"
+        ));
+    }
+
+    #[test]
+    fn consumer_events_require_one_typed_envelope_even_after_a_test_module() {
+        let runtime = "fn drain() -> Result<Option<crate::MarketConsumerEvent>, String> { todo!() }\n\
+            fn drain_client() -> Result<Vec<(u64, crate::MarketConsumerEvent)>, String> { todo!() }";
+        let commands = "Drain(Reply<Option<crate::MarketConsumerEvent>>),\n\
+            DrainClient(Reply<Vec<(u64, crate::MarketConsumerEvent)>>)";
+        let fenced = "#[cfg(test)] mod tests { pub type MarketConsumerEvent = MarketRuntimeEvent; }\n\
+            pub type MarketConsumerEvent =\n\
+            aeris_market_engine::fence::Fenced<aeris_market_engine::fence::ConsumerTag, MarketRuntimeEvent>;";
+        assert!(!super::consumer_delivery_is_unfenced(
+            fenced, runtime, commands
+        ));
+        assert!(super::consumer_delivery_is_unfenced(
+            "#[cfg(test)] mod tests { pub type MarketConsumerEvent = Fenced<aeris_market_engine::fence::ConsumerTag, MarketRuntimeEvent>; }\n\
+             pub type MarketConsumerEvent = MarketRuntimeEvent;",
+            runtime,
+            commands
+        ));
+        assert!(super::consumer_delivery_is_unfenced(
+            fenced,
+            "fn drain() -> Result<Option<MarketRuntimeEvent>, String> { todo!() }",
+            commands
         ));
     }
     use std::{

@@ -138,6 +138,9 @@ the check.
 - Provider events and history completions carry registry-minted `Epoch<ProviderTag>` identities;
   the coordinator rejects retired epochs by equality and counts their drops. Adapter wire
   generation numbers never serve as market event identities.
+- Every runtime-to-consumer market event variant leaves the coordinator inside a
+  `Fenced<ConsumerTag, MarketRuntimeEvent>` envelope for that registered consumer lifetime;
+  selection-bound events are rejected against the exact current demand before delivery.
 - Provider catalog controls and responses pass through one bounded `ProviderCatalogChannel`
   boundary; provider-specific command translation stays with each registered channel.
 - Catalog callbacks pass through coordinator-owned `CommandFences`, keyed by consumer, provider
