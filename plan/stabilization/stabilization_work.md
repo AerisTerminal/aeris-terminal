@@ -504,6 +504,8 @@ Status: in progress
   - Store open sweeps at most 32 exact-name stale preflight directories, deleting only known copied SQLite files; unknown contents are preserved and cleanup failures are logged through observability. Deterministic tests cover stale cleanup and a refused unsafe directory.
   - Before the split, 108 trading tests passed (4 ignored). After the split, 110 passed (4 ignored), including all historical migration, persistence/restart, scripted venue and golden tests. Existing store-test suffix is byte-identical; full workspace fmt, strict Clippy, tests and naming_check passed. TR-12 remains open for M5.9 and M8.10 cleanup.
 - [ ] M4.7 runtime-owned-quotes - Trading runtime owns its quotes; the desktop relay is removed
+  - M4.7 part 1/3: The market owner projects only provider-verified expiry, first-notice, last-trade, weekly hours and session generation into `InstrumentTerms`. On restored quote leases without catalog entries it searches and selects the exact saved route through a bounded, generation-fenced provider catalog request; no terms are synthesized. Feed attachment snapshots include only quotes from the current provider generation.
+  - Market/domain crate checks and the full fmt, workspace strict Clippy, workspace tests and naming gate passed. Focused tests cover invalid dates, restored route resolution with no chart, rejected early/retired callbacks and current-generation snapshot quotes. Execution still uses desktop observations alone until the atomic part 3 cutover; M4.7 remains unchecked.
 - [ ] M4.8 provider-neutral-gating - Session and freshness gating for every provider
 - [ ] M4.9 fill-accounting-consolidation - One fill-accounting implementation (V20)
 - [ ] M4.10 facts-only-persistence - Commit-then-apply steps; no durable writes per quote
@@ -711,6 +713,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-15 M4.4 perf(trading): index owner order lookups and executable demand - removed order and reverse-broker scans with index-consistency coverage; measured 409.646 ms scan vs 0.281 ms indexed for 1,000 lookups at 50,000 orders.
 - 2026-10-15 M4.5 refactor(trading): split core behavior into focused modules - moved owner methods and broker/group implementations mechanically with unchanged goldens and scripted scenarios; full gates passed.
 - 2026-10-15 M4.6 refactor(trading): split SQLite store by table family - preserved V1–V19 and restart assertions, added StepTx and bounded safe preflight scratch cleanup with failure diagnostics.
+- 2026-10-15 M4.7 part 1/3 feat(market): restore trading lease routes with verified terms - preserved provider contract fields, resolved chart-free routes through the catalog and fenced the current quote snapshot; full gate passed.
 
 ## 7. Known gaps / deferred
 

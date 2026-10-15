@@ -583,7 +583,7 @@ impl Coordinator<'_> {
         self.reconcile_order_books();
     }
 
-    fn ensure_catalog_session(&mut self, provider: &str) -> Result<(), String> {
+    pub(super) fn ensure_catalog_session(&mut self, provider: &str) -> Result<(), String> {
         if !self.provider_registry.catalog_uses_session(provider) {
             return Ok(());
         }
@@ -804,7 +804,11 @@ impl Coordinator<'_> {
             }
             ProviderCatalogEvent::SearchCompleted(result) => {
                 self.restore_provider_catalog_health(&result.provider);
-                self.handle_catalog_search(result);
+                if result.consumer_id == 0 {
+                    self.finish_trading_route_search(&result);
+                } else {
+                    self.handle_catalog_search(result);
+                }
             }
             ProviderCatalogEvent::SearchPreliminary(result) => {
                 self.handle_catalog_search_preview(result);
@@ -815,6 +819,10 @@ impl Coordinator<'_> {
                 instrument,
             } => {
                 self.restore_provider_catalog_health(&instrument.provider);
+                if consumer_id == 0 {
+                    self.finish_trading_route_resolution(command_generation, &instrument);
+                    return;
+                }
                 if !self.finish_selection(consumer_id, command_generation, &instrument) {
                     self.handle_catalog_selection(consumer_id, command_generation, instrument);
                 }
@@ -822,7 +830,17 @@ impl Coordinator<'_> {
             ProviderCatalogEvent::Rejected {
                 rejection,
                 selection,
-            } => self.handle_catalog_rejection(rejection, selection),
+            } => {
+                if rejection.consumer_id == 0 && selection {
+                    self.reject_trading_route_resolution(
+                        &rejection.provider,
+                        rejection.command_generation,
+                    );
+                    self.control_retry = true;
+                } else {
+                    self.handle_catalog_rejection(rejection, selection);
+                }
+            }
             ProviderCatalogEvent::RefreshFailed(detail) => {
                 self.degrade_provider_catalog_health(provider, &detail);
             }

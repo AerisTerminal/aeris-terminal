@@ -221,6 +221,9 @@ fn coordinator_turn(
     if due.contains(TimerKey::HISTORY_RETRY) {
         coordinator.retry_history();
     }
+    if active || due.contains(TimerKey::CONTROL_RETRY) {
+        coordinator.resolve_trading_routes();
+    }
     coordinator.publish_failed_provider_controls();
     if active || !coordinator.dirty_series.is_empty() || due.0 != 0 {
         coordinator.refresh_deadlines();
@@ -335,6 +338,9 @@ impl<'a> Coordinator<'a> {
             outbox: Arc::new(super::outbox::ConsumerOutbox::default()),
             trading_feed_snapshot_sent: false,
             trading_interest_revision: 0,
+            trading_routes: BTreeMap::new(),
+            pending_trading_routes: BTreeMap::new(),
+            next_trading_route_command: 0,
             control_retry: false,
             series_effects: super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),
@@ -936,6 +942,11 @@ pub(super) struct Coordinator<'a> {
     pub(super) trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
     trading_feed_snapshot_sent: bool,
     trading_interest_revision: u64,
+    /// Durable route identities received from trading, not contract terms.
+    trading_routes: BTreeMap<(String, String), aeris_trading::market::MarketRoute>,
+    /// One fenced catalog resolution per missing leased route (at most 256).
+    pending_trading_routes: BTreeMap<(String, String), (u64, Option<u64>, bool)>,
+    next_trading_route_command: u64,
     pub(super) control_retry: bool,
     pub(super) series_effects: super::lifecycle::EffectBuf,
     pub(super) order_books: BTreeMap<(String, String), ProviderOrderBook>,
@@ -1495,6 +1506,22 @@ impl Coordinator<'_> {
             )
             .map_err(|error| error.to_string())?;
         self.trading_interest_revision = interest.revision;
+        self.trading_routes = interest
+            .routes
+            .iter()
+            .map(|route| {
+                (
+                    (
+                        route.provider_id.clone(),
+                        route.instrument_id.as_str().to_string(),
+                    ),
+                    route.clone(),
+                )
+            })
+            .collect();
+        self.pending_trading_routes
+            .retain(|key, _| self.trading_routes.contains_key(key));
+        self.resolve_trading_routes();
         self.reconcile_order_books();
         for route in &interest.routes {
             self.publish_trading_session(&super::InstrumentStreamKey {
@@ -1506,6 +1533,185 @@ impl Coordinator<'_> {
         self.mark_alert_demand_changed();
         self.pending_activity = true;
         Ok(())
+    }
+
+    /// A restored instrument lease cannot drive a provider until its catalog
+    /// entry has been resolved. Never synthesize terms from the stored route.
+    fn resolve_trading_routes(&mut self) {
+        let routes = self.trading_routes.values().cloned().collect::<Vec<_>>();
+        for route in routes {
+            let key = (
+                route.provider_id.clone(),
+                route.instrument_id.as_str().to_string(),
+            );
+            if self.catalog.get(&key).is_some_and(|installed| {
+                installed.provider_symbol == route.provider_symbol
+                    && installed.venue_id == route.venue_id
+                    && installed.entitlement_id.as_str()
+                        == route.entitlement_id.as_deref().unwrap_or("")
+                    && super::instrument_terms_from_install(installed).is_ok()
+            }) {
+                self.pending_trading_routes.remove(&key);
+                continue;
+            }
+            let current = self
+                .engine
+                .provider_status(&route.provider_id)
+                .and_then(|status| status.generation)
+                .map(|generation| generation.0.get());
+            if self
+                .pending_trading_routes
+                .get(&key)
+                .is_some_and(|(_, generation, _)| current.is_none() || *generation == current)
+            {
+                continue;
+            }
+            if self.ensure_catalog_session(&route.provider_id).is_err() {
+                self.control_retry = true;
+                continue;
+            }
+            let current = self
+                .engine
+                .provider_status(&route.provider_id)
+                .and_then(|status| status.generation)
+                .map(|generation| generation.0.get());
+            let generation = self.next_trading_route_command.saturating_add(1);
+            if generation == self.next_trading_route_command {
+                self.control_retry = true;
+                continue;
+            }
+            // Some providers require a search result before selection; the
+            // bounded search also proves the saved route still exists.
+            let search = super::SearchProviderInstruments {
+                consumer_id: 0, // Reserved for the market owner's lease restoration.
+                search_generation: generation,
+                startup_resolve: true,
+                provider: route.provider_id.clone(),
+                query: route.provider_symbol.clone(),
+                maximum_results: u32::try_from(super::MAXIMUM_CATALOG_INSTRUMENTS)
+                    .unwrap_or(u32::MAX),
+                categories: aeris_contracts::InstrumentSearchCategories::ALL,
+            };
+            if let Err(error) = self.providers.dispatch_catalog(
+                &route.provider_id,
+                super::ProviderCatalogCommand::Search(search),
+            ) {
+                diagnostic!("Trading route catalog resolution deferred: {error}");
+                self.control_retry = true;
+                continue;
+            }
+            self.next_trading_route_command = generation;
+            self.pending_trading_routes
+                .insert(key, (generation, current, false));
+        }
+    }
+
+    pub(super) fn finish_trading_route_search(
+        &mut self,
+        result: &aeris_contracts::ProviderInstrumentSearchResult,
+    ) {
+        let route = self.trading_routes.values().find(|route| {
+            result.provider_generation != 0
+                && route.provider_id == result.provider
+                && self
+                    .pending_trading_routes
+                    .get(&(
+                        route.provider_id.clone(),
+                        route.instrument_id.as_str().to_string(),
+                    ))
+                    .is_some_and(|(generation, expected, sent)| {
+                        *generation == result.search_generation
+                            && !sent
+                            && expected
+                                .is_none_or(|generation| generation == result.provider_generation)
+                    })
+        });
+        let Some(route) = route.cloned() else {
+            return;
+        };
+        if !result.instruments.iter().any(|instrument| {
+            instrument.symbol == route.provider_symbol && instrument.exchange == route.venue_id
+        }) {
+            self.reject_trading_route_resolution(&route.provider_id, result.search_generation);
+            self.control_retry = true;
+            return;
+        }
+        let selection = super::SelectProviderInstrument {
+            consumer_id: 0,
+            selection_generation: result.search_generation,
+            search_generation: result.search_generation,
+            startup_resolve: true,
+            provider: route.provider_id.clone(),
+            symbol: route.provider_symbol.clone(),
+            exchange: route.venue_id.clone(),
+            entitlement_id: route.entitlement_id.clone().unwrap_or_default(),
+        };
+        match self.providers.dispatch_catalog(
+            &route.provider_id,
+            super::ProviderCatalogCommand::Select(selection),
+        ) {
+            Ok(()) => {
+                if let Some(pending) = self
+                    .pending_trading_routes
+                    .get_mut(&(route.provider_id, route.instrument_id.as_str().to_string()))
+                {
+                    pending.1 = Some(result.provider_generation);
+                    pending.2 = true;
+                }
+            }
+            Err(error) => {
+                diagnostic!("Trading route selection deferred: {error}");
+                self.reject_trading_route_resolution(&result.provider, result.search_generation);
+                self.control_retry = true;
+            }
+        }
+    }
+
+    pub(super) fn finish_trading_route_resolution(
+        &mut self,
+        command_generation: u64,
+        instrument: &InstallProviderInstrument,
+    ) {
+        let key = (
+            instrument.provider.clone(),
+            instrument.instrument_id.clone(),
+        );
+        let Some(route) = self.trading_routes.get(&key) else {
+            return;
+        };
+        let Some(&(pending, expected_generation, selection_sent)) =
+            self.pending_trading_routes.get(&key)
+        else {
+            return;
+        };
+        let current_generation = self
+            .engine
+            .provider_status(&route.provider_id)
+            .and_then(|status| status.generation)
+            .map(|generation| generation.0.get());
+        if !selection_sent
+            || pending != command_generation
+            || expected_generation != Some(instrument.session_generation)
+            || current_generation
+                .is_some_and(|generation| generation != instrument.session_generation)
+            || route.provider_symbol != instrument.provider_symbol
+            || route.venue_id != instrument.venue_id
+            || route.entitlement_id.as_deref() != Some(instrument.entitlement_id.as_str())
+            || route.price_scale != u8::try_from(instrument.price_scale).unwrap_or(u8::MAX)
+            || route.quantity_scale != u8::try_from(instrument.quantity_scale).unwrap_or(u8::MAX)
+        {
+            return;
+        }
+        if super::instrument_terms_from_install(instrument).is_ok()
+            && self.install_provider_instrument(instrument).is_ok()
+        {
+            self.pending_trading_routes.remove(&key);
+        }
+    }
+
+    pub(super) fn reject_trading_route_resolution(&mut self, provider: &str, generation: u64) {
+        self.pending_trading_routes
+            .retain(|key, (pending, _, _)| key.0 != provider || *pending != generation);
     }
 
     pub(super) fn publish_trading_session(&self, key: &super::InstrumentStreamKey) {
@@ -1551,6 +1757,23 @@ impl Coordinator<'_> {
             }
         }
         for (key, _) in self.engine.instrument_subscriptions() {
+            if let Some(quote) = self
+                .quotes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .latest(&key)
+                .filter(|state| {
+                    self.engine
+                        .provider_status(&key.provider)
+                        .and_then(|status| status.generation)
+                        .is_some_and(|generation| {
+                            generation.0.get() == state.quote.provider_generation
+                        })
+                })
+            {
+                self.trading_feed
+                    .publish(aeris_trading::market::MarketFeedEvent::Quote(quote.quote));
+            }
             self.publish_trading_session(&key);
             if let Some(generation) = self
                 .engine
@@ -2595,6 +2818,7 @@ mod tests {
             Some(aeris_trading::market::MarketFeedEvent::Quote(quote))
                 if quote.bid.units() == 100 && quote.ask.units() == 101
         ));
+        assert_snapshot_quote_uses_current_provider_generation(&mut coordinator, &instrument);
         assert!(coordinator.engine.release_data_lease(lease));
         coordinator.reconcile_order_books();
         assert!(coordinator.order_books.is_empty());
@@ -2606,6 +2830,29 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    fn assert_snapshot_quote_uses_current_provider_generation(
+        coordinator: &mut Coordinator<'_>,
+        instrument: &InstallProviderInstrument,
+    ) {
+        coordinator.publish_trading_feed_snapshot();
+        assert!(matches!(
+            coordinator.trading_feed.receive(Duration::ZERO),
+            Some(aeris_trading::market::MarketFeedEvent::Quote(quote))
+                if quote.bid.units() == 100 && quote.provider_generation == 2
+        ));
+        coordinator
+            .engine
+            .begin_provider_session(&instrument.provider, ProviderGeneration(nonzero(3)))
+            .expect("provider reconnect");
+        coordinator.publish_trading_feed_snapshot();
+        while let Some(event) = coordinator.trading_feed.receive(Duration::ZERO) {
+            assert!(
+                !matches!(event, aeris_trading::market::MarketFeedEvent::Quote(_)),
+                "a retired provider quote cannot be replayed on feed attachment"
+            );
+        }
     }
 
     #[test]
@@ -2832,6 +3079,150 @@ mod tests {
         );
     }
 
+    struct RecordingCatalog(std::sync::Mutex<Vec<super::super::ProviderCatalogCommand>>);
+    impl super::super::ProviderCatalogChannel for RecordingCatalog {
+        fn try_recv(&self) -> Option<super::super::ProviderCatalogEvent> {
+            None
+        }
+
+        fn send(
+            &self,
+            _: &str,
+            command: super::super::ProviderCatalogCommand,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().push(command);
+            Ok(())
+        }
+    }
+
+    fn coordinator_with_trading_catalog() -> (Coordinator<'static>, &'static RecordingCatalog) {
+        let mut coordinator = coordinator();
+        coordinator.trading_feed.attach();
+        let channel = Box::leak(Box::new(RecordingCatalog(
+            std::sync::Mutex::new(Vec::new()),
+        )));
+        let (history, _) = std::sync::mpsc::sync_channel(1);
+        let history = Box::leak(Box::new(history));
+        coordinator.providers.records.insert(
+            "hyperliquid",
+            super::super::ProviderDispatchRecord {
+                descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
+                history,
+                lifecycle: None,
+                ctrader: None,
+                hyperliquid: None,
+                tastytrade: None,
+                rithmic: None,
+                catalog: Some(channel),
+            },
+        );
+        (coordinator, channel)
+    }
+
+    #[test]
+    fn restored_trading_route_resolves_verified_catalog_without_a_chart() {
+        let (mut coordinator, channel) = coordinator_with_trading_catalog();
+        let mut instrument = hyperliquid_instrument();
+        instrument.contract_metadata = Some(Box::new(aeris_contracts::ProviderContractMetadata {
+            currency: Some("USD".into()),
+            point_value: Some(1),
+            point_value_scale: Some(0),
+            ..Default::default()
+        }));
+        let route = super::super::instrument_terms_from_install(&instrument)
+            .unwrap()
+            .route;
+        coordinator
+            .install_trading_interest(&aeris_trading::market::QuoteInterest {
+                revision: 1,
+                routes: vec![route.clone()],
+            })
+            .unwrap();
+        assert_eq!(coordinator.engine.subscriptions().len(), 0);
+        assert!(
+            coordinator
+                .provider_demand(&instrument.provider)
+                .missing_catalog
+        );
+        let super::super::ProviderCatalogCommand::Search(search) =
+            channel.0.lock().unwrap().pop().unwrap()
+        else {
+            panic!("restoring interest must first search the provider catalog");
+        };
+        assert_eq!(search.consumer_id, 0);
+        assert_eq!(search.query, route.provider_symbol);
+        coordinator.handle_provider_catalog(
+            &instrument.provider,
+            super::super::ProviderCatalogEvent::SelectionResolved {
+                consumer_id: 0,
+                command_generation: search.search_generation,
+                instrument: instrument.clone(),
+            },
+        );
+        assert!(
+            coordinator.catalog.is_empty(),
+            "selection requires a verified search"
+        );
+        coordinator.handle_provider_catalog(
+            &instrument.provider,
+            super::super::ProviderCatalogEvent::SearchCompleted(
+                aeris_contracts::ProviderInstrumentSearchResult {
+                    consumer_id: 0,
+                    provider: instrument.provider.clone(),
+                    provider_generation: instrument.session_generation,
+                    search_generation: search.search_generation,
+                    instruments: vec![aeris_contracts::ProviderInstrumentSummary {
+                        symbol: route.provider_symbol.clone(),
+                        exchange: route.venue_id.clone(),
+                        ..Default::default()
+                    }],
+                },
+            ),
+        );
+        let super::super::ProviderCatalogCommand::Select(selection) =
+            channel.0.lock().unwrap().pop().unwrap()
+        else {
+            panic!("a verified route must then be selected");
+        };
+        assert_eq!(
+            selection.entitlement_id,
+            route.entitlement_id.clone().unwrap()
+        );
+        coordinator.handle_provider_catalog(
+            &instrument.provider,
+            super::super::ProviderCatalogEvent::SelectionResolved {
+                consumer_id: 0,
+                command_generation: selection.selection_generation + 1,
+                instrument: instrument.clone(),
+            },
+        );
+        assert!(coordinator.catalog.is_empty(), "retired callback is fenced");
+        coordinator.handle_provider_catalog(
+            &instrument.provider,
+            super::super::ProviderCatalogEvent::SelectionResolved {
+                consumer_id: 0,
+                command_generation: selection.selection_generation,
+                instrument: instrument.clone(),
+            },
+        );
+        assert_eq!(
+            coordinator
+                .provider_demand(&instrument.provider)
+                .instruments
+                .len(),
+            1
+        );
+        let mut terms_seen = false;
+        while let Some(event) = coordinator.trading_feed.receive(Duration::ZERO) {
+            if let aeris_trading::market::MarketFeedEvent::Terms(terms) = event {
+                assert_eq!(terms.route, route);
+                assert_eq!(terms.session_generation, instrument.session_generation);
+                terms_seen = true;
+            }
+        }
+        assert!(terms_seen);
+    }
+
     #[test]
     fn trading_feed_price_alerts_use_engine_leases_instead_of_outside_demand() {
         let mut coordinator = coordinator();
@@ -3003,6 +3394,9 @@ mod tests {
             trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
             trading_feed_snapshot_sent: false,
             trading_interest_revision: 0,
+            trading_routes: BTreeMap::new(),
+            pending_trading_routes: BTreeMap::new(),
+            next_trading_route_command: 0,
             control_retry: false,
             series_effects: super::super::lifecycle::EffectBuf::default(),
             order_books: BTreeMap::new(),

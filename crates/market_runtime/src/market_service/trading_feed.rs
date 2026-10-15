@@ -9,7 +9,9 @@ use std::{
 };
 
 use aeris_contracts::{InstallProviderInstrument, ProviderInstrumentClass};
-use aeris_instruments::{InstrumentClass, InstrumentDecimal, InstrumentId, PriceGrid};
+use aeris_instruments::{
+    ContractDate, InstrumentClass, InstrumentDecimal, InstrumentId, PriceGrid, SessionHours,
+};
 use aeris_trading::market::MarketFeedEvent;
 use aeris_trading::market::{InstrumentTerms, MarketRoute};
 
@@ -101,9 +103,74 @@ pub fn instrument_terms_from_install(
             .transpose()
             .map_err(|error| error.to_string())?,
         currency,
+        expiry: metadata
+            .contract_expiry
+            .as_deref()
+            .map(parse_contract_date)
+            .transpose()?,
+        first_notice: metadata
+            .first_notice_date
+            .as_deref()
+            .map(parse_contract_date)
+            .transpose()?,
+        last_trade: metadata
+            .last_trade_date
+            .as_deref()
+            .map(parse_contract_date)
+            .transpose()?,
+        session_hours: verified_session_hours(metadata, &unavailable)?,
+        session_generation: instrument.session_generation,
     };
     terms.validate().map_err(|error| error.to_string())?;
     Ok(terms)
+}
+
+fn verified_session_hours(
+    metadata: &aeris_contracts::ProviderContractMetadata,
+    unavailable: &impl Fn(&str) -> String,
+) -> Result<Vec<SessionHours>, String> {
+    metadata
+        .session_hours
+        .iter()
+        .map(|hours| {
+            let value = SessionHours {
+                weekday: u8::try_from(hours.weekday)
+                    .map_err(|_| unavailable("session weekday is invalid"))?,
+                open_seconds: hours.open_seconds,
+                close_seconds: hours.close_seconds,
+                timezone: hours.timezone.clone(),
+            };
+            value
+                .validate()
+                .map_err(|_| unavailable("session hours are invalid"))?;
+            Ok(value)
+        })
+        .collect()
+}
+
+fn parse_contract_date(value: &str) -> Result<ContractDate, String> {
+    let (year, rest) = value
+        .split_once('-')
+        .ok_or_else(|| "provider contract date is invalid".to_string())?;
+    let (month, day) = rest
+        .split_once('-')
+        .ok_or_else(|| "provider contract date is invalid".to_string())?;
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return Err("provider contract date is invalid".into());
+    }
+    let date = ContractDate {
+        year: year
+            .parse()
+            .map_err(|_| "provider contract date is invalid")?,
+        month: month
+            .parse()
+            .map_err(|_| "provider contract date is invalid")?,
+        day: day
+            .parse()
+            .map_err(|_| "provider contract date is invalid")?,
+    };
+    date.validate().map_err(|error| error.to_string())?;
+    Ok(date)
 }
 
 fn checked_scale(scale: u32) -> Result<u8, String> {
@@ -223,6 +290,7 @@ mod tests {
     fn trading_feed_terms_keep_verified_significant_figure_grid() {
         let instrument = InstallProviderInstrument {
             provider: "hyperliquid".into(),
+            session_generation: 1,
             instrument_id: "hyperliquid:perp:BTC".into(),
             provider_symbol: "BTC".into(),
             display_symbol: "BTC-USDC".into(),
@@ -259,5 +327,55 @@ mod tests {
             .unwrap()
             .price_max_decimals = None;
         assert!(instrument_terms_from_install(&incomplete).is_err());
+    }
+
+    #[test]
+    fn trading_feed_terms_preserve_verified_contract_dates_hours_and_generation() {
+        let instrument = InstallProviderInstrument {
+            provider: "fixture".into(),
+            instrument_id: "fixture:future".into(),
+            provider_symbol: "FUT".into(),
+            display_symbol: "Future".into(),
+            venue_id: "EXCHANGE".into(),
+            entitlement_id: "public".into(),
+            session_generation: 27,
+            selection_generation: 1,
+            price_scale: 2,
+            quantity_scale: 0,
+            contract_metadata: Some(Box::new(aeris_contracts::ProviderContractMetadata {
+                currency: Some("USD".into()),
+                point_value: Some(50),
+                point_value_scale: Some(0),
+                contract_expiry: Some("2026-12-18".into()),
+                first_notice_date: Some("2026-12-01".into()),
+                last_trade_date: Some("2026-12-17".into()),
+                session_hours: vec![aeris_contracts::ProviderSessionHours {
+                    weekday: 1,
+                    open_seconds: 3600,
+                    close_seconds: 7200,
+                    timezone: "America/Chicago".into(),
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let terms = instrument_terms_from_install(&instrument).unwrap();
+        assert_eq!(terms.session_generation, 27);
+        assert_eq!(
+            terms.expiry,
+            Some(aeris_instruments::ContractDate {
+                year: 2026,
+                month: 12,
+                day: 18
+            })
+        );
+        assert_eq!(terms.first_notice.unwrap().day, 1);
+        assert_eq!(terms.last_trade.unwrap().day, 17);
+        assert_eq!(terms.session_hours.len(), 1);
+        assert_eq!(terms.session_hours[0].timezone, "America/Chicago");
+
+        let mut invalid = instrument;
+        invalid.contract_metadata.as_mut().unwrap().contract_expiry = Some("2026-02-30".into());
+        assert!(instrument_terms_from_install(&invalid).is_err());
     }
 }

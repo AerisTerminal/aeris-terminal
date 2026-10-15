@@ -2,7 +2,8 @@
 
 use crate::FixedPoint;
 use aeris_instruments::{
-    InstrumentClass, InstrumentDecimal, InstrumentId, PriceGrid, SessionPhase,
+    ContractDate, InstrumentClass, InstrumentDecimal, InstrumentId, MAXIMUM_SESSION_SEGMENTS,
+    PriceGrid, SessionHours, SessionPhase,
 };
 use std::{collections::BTreeSet, error::Error, fmt};
 
@@ -160,6 +161,11 @@ pub struct InstrumentTerms {
     pub point_value: Option<InstrumentDecimal>,
     pub quantity_increment: Option<InstrumentDecimal>,
     pub currency: String,
+    pub expiry: Option<ContractDate>,
+    pub first_notice: Option<ContractDate>,
+    pub last_trade: Option<ContractDate>,
+    pub session_hours: Vec<SessionHours>,
+    pub session_generation: u64,
 }
 
 impl InstrumentTerms {
@@ -174,6 +180,20 @@ impl InstrumentTerms {
             .map_err(|_| MarketFeedError::InvalidPriceGrid)?;
         if self.currency.trim().is_empty() || self.currency.len() > 16 {
             return Err(MarketFeedError::InvalidRoute("currency"));
+        }
+        for date in [self.expiry, self.first_notice, self.last_trade]
+            .into_iter()
+            .flatten()
+        {
+            date.validate().map_err(|_| MarketFeedError::InvalidTerms)?;
+        }
+        if self.session_generation == 0 || self.session_hours.len() > MAXIMUM_SESSION_SEGMENTS {
+            return Err(MarketFeedError::InvalidTerms);
+        }
+        for hours in &self.session_hours {
+            hours
+                .validate()
+                .map_err(|_| MarketFeedError::InvalidTerms)?;
         }
         Ok(())
     }
@@ -243,6 +263,7 @@ pub enum MarketFeedError {
     InvalidSessionTime,
     RouteMismatch,
     InvalidPriceGrid,
+    InvalidTerms,
     InvalidRevision,
     DuplicateRoute,
     InterestLimitExceeded,
