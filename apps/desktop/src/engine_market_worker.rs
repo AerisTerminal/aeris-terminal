@@ -1,7 +1,7 @@
 //! Desktop-side bridge from the in-process market runtime to GPUI chart workers.
 
 #[cfg(test)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -11,7 +11,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use aeris_application::{
@@ -56,10 +56,6 @@ const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_runtime_hyperliquid_bars";
 const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid market runtime";
 pub(crate) const RITHMIC_CATALOG_READY_MESSAGE: &str =
     "Rithmic session is ready for instrument search";
-/// Foreground selections live in latest-value slots outside the event reader.
-/// Keep the reader wait short so a symbol click cannot sit behind a half-frame
-/// polling quantum before the runtime receives it.
-const EVENT_WAIT: Duration = Duration::from_millis(2);
 const WORKSPACE_ADDITION_CAPACITY: usize = super::local_state::MAXIMUM_WATCHLIST_ENTRIES
     + super::MAXIMUM_OPEN_WORKSPACES * (super::CHART_PANE_CAPACITY + 1);
 
@@ -258,6 +254,7 @@ impl WorkspaceMarketFactory {
                     "the market workspace runtime is unavailable".to_string()
                 }
             })?;
+        wake_market_bridges();
         Ok(worker)
     }
 }
@@ -608,6 +605,7 @@ fn worker_endpoint(
             None,
             Some(Arc::clone(&selection_sequence)),
         )
+        .with_command_wake(Arc::new(wake_market_bridges))
         .with_resource_class_slot(Arc::clone(&pending_resource_class))
         .with_depth_visibility_slot(Arc::clone(&pending_depth_visible))
         .with_foreground_selection_slots(
@@ -670,6 +668,12 @@ fn spawn_group(
         })
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn wake_market_bridges() {
+    if let Some(market) = started_market_runtime() {
+        market.wake_bridges();
+    }
 }
 
 /// User-visible provider name for worker status and error messages.

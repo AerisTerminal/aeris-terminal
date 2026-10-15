@@ -33,12 +33,14 @@ pub(super) struct OwnedCoordinatorChannels {
     pub(super) quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     pub(super) quotes: Arc<Mutex<super::quotes::QuoteBook>>,
     pub(super) trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
+    pub(super) outbox: Arc<super::outbox::ConsumerOutbox>,
 }
 
 struct FeedChannels {
     releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     quotes: Arc<Mutex<super::quotes::QuoteBook>>,
     trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
+    outbox: Arc<super::outbox::ConsumerOutbox>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -81,6 +83,7 @@ pub(super) fn spawn_coordinator(
                 quote_releases,
                 quotes,
                 trading_feed,
+                outbox,
             } = channels;
             {
                 let dispatch = providers.dispatch();
@@ -94,6 +97,7 @@ pub(super) fn spawn_coordinator(
                         releases: quote_releases,
                         quotes,
                         trading_feed,
+                        outbox,
                     },
                 );
             }
@@ -122,6 +126,7 @@ fn run_coordinator(
     coordinator.quote_releases = Some(feeds.releases);
     coordinator.quotes = feeds.quotes;
     coordinator.trading_feed = feeds.trading_feed;
+    coordinator.outbox = feeds.outbox;
     let demand_flushers = coordinator
         .providers
         .records
@@ -218,6 +223,7 @@ fn coordinator_turn(
     if active || !coordinator.dirty_series.is_empty() || due.0 != 0 {
         coordinator.refresh_deadlines();
     }
+    coordinator.signal_pending_consumers();
     let wait = if drained >= REALTIME_DRAIN_BUDGET {
         Some(Duration::ZERO)
     } else {
@@ -322,6 +328,7 @@ impl<'a> Coordinator<'a> {
             quote_releases: None,
             quotes: Arc::new(Mutex::new(super::quotes::QuoteBook::default())),
             trading_feed: Arc::new(super::trading_feed::TradingFeedOutbox::default()),
+            outbox: Arc::new(super::outbox::ConsumerOutbox::default()),
             trading_feed_snapshot_sent: false,
             trading_interest_revision: 0,
             control_retry: false,
@@ -509,6 +516,78 @@ pub(super) fn performance_baseline() -> Result<serde_json::Value, String> {
         "covering_snapshot_nanos": overflow_nanos,
         "overflow_events_dropped": capacity,
         "cpu_measurement": "active single-thread coordinator workload: zero idle turns; 63 loaded batches of 64 series",
+    }))
+}
+
+pub(super) fn bridge_wake_performance() -> Result<serde_json::Value, String> {
+    use std::{num::NonZeroU64, sync::mpsc};
+
+    const SAMPLES: usize = 256;
+    const IDLE_WINDOW: Duration = Duration::from_secs(30);
+    let (mut coordinator, keys) = benchmark_coordinator()?;
+    let consumer = ConsumerId(NonZeroU64::MIN);
+    let client = ClientId(NonZeroU64::MIN);
+    coordinator.attached.insert(client);
+    coordinator.consumer_clients.insert(consumer, client);
+    coordinator.outbox.attach(client);
+    let outbox = Arc::clone(&coordinator.outbox);
+    let (received, times) = mpsc::sync_channel::<Instant>(1);
+    let bridge = thread::spawn(move || -> Result<(Vec<u128>, usize), String> {
+        let mut latencies = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            if !outbox.wait(client, Duration::from_secs(5)) {
+                return Err("bridge publication wake timed out".into());
+            }
+            let started = times.recv().map_err(|error| error.to_string())?;
+            latencies.push(started.elapsed().as_nanos());
+        }
+        let idle_start = Instant::now();
+        let mut idle_wakeups = 0;
+        while let Some(remaining) = IDLE_WINDOW.checked_sub(idle_start.elapsed()) {
+            if outbox.wait(client, remaining) {
+                idle_wakeups += 1;
+            }
+        }
+        Ok((latencies, idle_wakeups))
+    });
+    for _ in 0..SAMPLES {
+        let started = Instant::now();
+        coordinator
+            .events
+            .get_mut(&consumer)
+            .ok_or("benchmark consumer outbox missing")?
+            .series_state = Some(super::series_state(
+            consumer,
+            GenerationId(NonZeroU64::MIN),
+            keys[0].clone(),
+            super::SeriesLoadState::Live,
+            None,
+        ));
+        received.send(started).map_err(|error| error.to_string())?;
+        coordinator.signal_pending_consumers();
+        // The event remains coordinator-owned until the bridge has received
+        // the wake; no repeated notification is generated while it is idle.
+        while coordinator
+            .events
+            .get_mut(&consumer)
+            .and_then(ConsumerEvents::pop)
+            .is_none()
+        {
+            thread::yield_now();
+        }
+        // A rendezvous on the next single-slot timestamp prevents sample
+        // replacement; receipt timing includes only wake and scheduling.
+    }
+    let (mut latencies, idle_wakeups) = bridge
+        .join()
+        .map_err(|_| "bridge benchmark worker panicked".to_string())??;
+    latencies.sort_unstable();
+    Ok(serde_json::json!({
+        "bridge_wake_latency_p50_nanos": latencies[SAMPLES / 2],
+        "bridge_wake_latency_p99_nanos": latencies[SAMPLES * 99 / 100],
+        "bridge_idle_wakeups_per_second": f64::from(u32::try_from(idle_wakeups).unwrap_or(u32::MAX)) / IDLE_WINDOW.as_secs_f64(),
+        "bridge_idle_window_seconds": IDLE_WINDOW.as_secs(),
+        "bridge_wake_samples": SAMPLES,
     }))
 }
 
@@ -839,6 +918,7 @@ pub(super) struct Coordinator<'a> {
     pub(super) pending: BTreeMap<BarSeriesKey, Vec<DemandWaiter>>,
     pub(super) history: super::history::tracker::HistoryTracker,
     pub(super) events: BTreeMap<ConsumerId, ConsumerEvents>,
+    pub(super) outbox: Arc<super::outbox::ConsumerOutbox>,
     pub(super) series: lifecycle::SeriesLifecycles,
     pub(super) dirty_series: BTreeSet<BarSeriesKey>,
     deadlines: BTreeMap<Instant, TimerKey>,
@@ -868,6 +948,17 @@ pub(super) struct Coordinator<'a> {
 }
 
 impl Coordinator<'_> {
+    pub(super) fn signal_pending_consumers(&self) {
+        for (consumer, events) in &self.events {
+            if events.has_pending()
+                && let Some(client) = self.consumer_clients.get(consumer)
+                && self.attached.contains(client)
+            {
+                self.outbox.notify(*client);
+            }
+        }
+    }
+
     pub(super) fn ensure_provider_connection(&mut self, id: &str) -> bool {
         if !self.provider_registry.contains(id) {
             return true;
@@ -1066,6 +1157,7 @@ impl Coordinator<'_> {
     }
 
     pub(super) fn detach_client(&mut self, client_id: ClientId) {
+        self.outbox.retire(client_id);
         let mut removed_consumer = false;
         let mut removed_study = false;
         for consumer_id in self.engine.detach_client(client_id) {
@@ -1124,7 +1216,7 @@ impl Coordinator<'_> {
             | Command::Status(..)
             | Command::Attach(..)
             | Command::Detach(..)
-            | Command::PollClient(..)) => self.handle_service_command(command),
+            | Command::DrainClient(..)) => self.handle_service_command(command),
             command => self.handle_consumer_command(command),
         }
     }
@@ -1206,8 +1298,8 @@ impl Coordinator<'_> {
                 self.release_unused_live_market_data();
                 let _ = reply.send(Ok(()));
             }
-            Command::PollClient(client_id, consumer_budgets, reply) => {
-                self.handle_poll_client(client_id, consumer_budgets, &reply);
+            Command::DrainClient(client_id, consumer_budgets, reply) => {
+                self.handle_drain_client(client_id, consumer_budgets, &reply);
             }
             _ => unreachable!("only service commands reach service dispatch"),
         }
@@ -1292,8 +1384,8 @@ impl Coordinator<'_> {
             Command::SetTradingInterest(interest, reply) => {
                 let _ = reply.send(self.install_trading_interest(&interest));
             }
-            Command::Poll(client_id, consumer_id, reply) => {
-                self.handle_poll(client_id, consumer_id, &reply);
+            Command::Drain(client_id, consumer_id, reply) => {
+                self.handle_drain(client_id, consumer_id, &reply);
             }
             Command::Request(..)
             | Command::HistoryCompleted(..)
@@ -1301,7 +1393,7 @@ impl Coordinator<'_> {
             | Command::Status(..)
             | Command::Attach(..)
             | Command::Detach(..)
-            | Command::PollClient(..)
+            | Command::DrainClient(..)
             | Command::AvailableStreams(..)
             | Command::InstalledInstrument(..)
             | Command::BrokerAuthorizationChanged(..) => {
@@ -2814,6 +2906,7 @@ mod tests {
             pending: BTreeMap::new(),
             history: super::super::history::tracker::HistoryTracker::default(),
             events: BTreeMap::new(),
+            outbox: Arc::new(super::super::outbox::ConsumerOutbox::default()),
             series: super::super::lifecycle::SeriesLifecycles::default(),
             dirty_series: BTreeSet::new(),
             deadlines: BTreeMap::new(),
@@ -2847,6 +2940,47 @@ mod tests {
                 true,
             )
             .expect("consumer registers");
+    }
+
+    #[test]
+    fn consumer_outbox_wakes_only_after_publication_and_retires_with_client() {
+        let mut coordinator = coordinator();
+        let owner = client(1);
+        let consumer_id = consumer(1);
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_attach(owner, &reply);
+        received.recv().expect("attach reply").expect("attached");
+        coordinator
+            .handle_register(ConsumerIdentity {
+                client_id: owner,
+                workspace_id: WorkspaceId(nonzero(1)),
+                consumer_id,
+            })
+            .expect("register");
+        assert!(!coordinator.outbox.wait(owner, Duration::ZERO));
+        coordinator
+            .events
+            .get_mut(&consumer_id)
+            .expect("outbox")
+            .series_state = Some(super::super::series_state(
+            consumer_id,
+            generation(1),
+            series(),
+            SeriesLoadState::Ready,
+            None,
+        ));
+        coordinator.signal_pending_consumers();
+        assert!(coordinator.outbox.wait(owner, Duration::ZERO));
+        let (reply, received) = std::sync::mpsc::sync_channel(1);
+        coordinator.handle_drain_client(owner, vec![(consumer_id, 1)], &reply);
+        assert_eq!(
+            received.recv().expect("drain").expect("owner batch").len(),
+            1
+        );
+        assert!(!coordinator.outbox.wait(owner, Duration::ZERO));
+        coordinator.outbox.notify(owner);
+        coordinator.detach_client(owner);
+        assert!(!coordinator.outbox.wait(owner, Duration::ZERO));
     }
 
     fn history_epoch(
@@ -7473,7 +7607,7 @@ mod tests {
             .push_back(queued_state(foreign, 1));
 
         let (reply, result) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_poll_client(
+        coordinator.handle_drain_client(
             first_client,
             vec![
                 (first, REALTIME_DRAIN_BUDGET),
@@ -7529,7 +7663,7 @@ mod tests {
         }
 
         let (reply, result) = std::sync::mpsc::sync_channel(1);
-        coordinator.handle_poll_client(owner, vec![(constrained, 1), (available, 4)], &reply);
+        coordinator.handle_drain_client(owner, vec![(constrained, 1), (available, 4)], &reply);
         let batch = result
             .recv()
             .expect("poll reply arrives")

@@ -195,6 +195,7 @@ struct MarketRuntime {
     quote_releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     quotes: Arc<Mutex<quotes::QuoteBook>>,
     trading_feed: Arc<trading_feed::TradingFeedOutbox>,
+    outbox: Arc<outbox::ConsumerOutbox>,
 }
 
 struct MarketServiceProviders {
@@ -284,8 +285,8 @@ enum Command {
     ),
     AcquireQuote(InstrumentStreamKey, Reply<MarketDataLeaseId>),
     SetTradingInterest(aeris_trading::market::QuoteInterest, Reply<()>),
-    Poll(ClientId, ConsumerId, Reply<Option<MarketRuntimeEvent>>),
-    PollClient(
+    Drain(ClientId, ConsumerId, Reply<Option<MarketRuntimeEvent>>),
+    DrainClient(
         ClientId,
         Vec<(ConsumerId, usize)>,
         Reply<Vec<(u64, MarketRuntimeEvent)>>,
@@ -1687,6 +1688,14 @@ use command_fences::{CommandFences, CommandKind};
 pub fn coordinator_performance_baseline() -> Result<serde_json::Value, String> {
     coordinator::performance_baseline()
 }
+
+/// Measures the coordinator-to-bridge wake and a real 30-second idle wait.
+///
+/// # Errors
+/// Returns an error if the bounded benchmark cannot deliver a publication.
+pub fn bridge_wake_performance() -> Result<serde_json::Value, String> {
+    coordinator::bridge_wake_performance()
+}
 use coordinator::{Coordinator, OwnedCoordinatorChannels, spawn_coordinator};
 
 fn try_enqueue_history(
@@ -1769,6 +1778,7 @@ fn configured_engine_from_descriptors(
     Ok(engine)
 }
 
+mod outbox;
 mod publication;
 use publication::{
     engine_install_failure_stage, fail_waiters, publish_state, series_state, series_state_payload,

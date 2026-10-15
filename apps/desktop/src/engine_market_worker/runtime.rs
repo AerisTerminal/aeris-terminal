@@ -1,12 +1,12 @@
 //! Runtime.
 
 use super::{
-    ChartState, EVENT_WAIT, EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent,
+    ChartState, EndpointRecord, EndpointRole, FeedConnectionState, MarketRuntimeEvent,
     MarketService, MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
     apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
     handle_startup_catalog_event, initialize_catalog_endpoint, initialize_endpoint,
     initialize_market_screen_endpoint, mpsc, process_command, set_resource_class,
-    shared_market_runtime, thread,
+    shared_market_runtime,
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_observability::diagnostic;
@@ -109,24 +109,31 @@ fn run_attached_workers(
             })
             .collect::<Vec<_>>();
         if consumer_budgets.is_empty() {
-            thread::sleep(EVENT_WAIT);
+            let _ready = market.wait_for_events(
+                client_id,
+                next_session_status_at.saturating_duration_since(Instant::now()),
+            );
             continue;
         }
-        let events = match market.poll_events(client_id, &consumer_budgets) {
+        let events = match market.drain_events(client_id, &consumer_budgets) {
             Ok(events) => events,
             Err(error) => {
                 report_runtime_failure(endpoints, &error);
                 return Err(error);
             }
         };
-        if events.is_empty() {
-            thread::sleep(EVENT_WAIT);
-        }
+        let empty = events.is_empty();
         for event in events {
             if let Err(error) = apply_received_event(market, client_id, event, endpoints) {
                 report_runtime_failure(endpoints, &error);
                 return Err(error);
             }
+        }
+        if empty {
+            let _ready = market.wait_for_events(
+                client_id,
+                next_session_status_at.saturating_duration_since(Instant::now()),
+            );
         }
     }
     Ok(())

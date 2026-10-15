@@ -936,8 +936,29 @@ fn feedback_generation(feedback: &UiDiagnosticsFeedback) -> NonZeroU64 {
     }
 }
 
+struct WorkerCommandSender {
+    sender: SyncSender<MarketWorkerCommand>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl WorkerCommandSender {
+    fn notify(&self) {
+        if let Some(wake) = &self.wake {
+            wake();
+        }
+    }
+}
+
+impl std::ops::Deref for WorkerCommandSender {
+    type Target = SyncSender<MarketWorkerCommand>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sender
+    }
+}
+
 pub struct MarketDataWorker {
-    commands: Option<SyncSender<MarketWorkerCommand>>,
+    commands: Option<WorkerCommandSender>,
     resource_class: Option<Arc<Mutex<Option<ConsumerResourceClass>>>>,
     depth_visible: Option<Arc<Mutex<Option<bool>>>>,
     provider_selection: Option<Arc<Mutex<Option<SelectProviderInstrument>>>>,
@@ -961,7 +982,10 @@ impl MarketDataWorker {
         engine_selection_sequence: Option<Arc<AtomicU64>>,
     ) -> Self {
         Self {
-            commands: Some(commands),
+            commands: Some(WorkerCommandSender {
+                sender: commands,
+                wake: None,
+            }),
             resource_class: None,
             depth_visible: None,
             provider_selection: None,
@@ -973,6 +997,20 @@ impl MarketDataWorker {
             ui_diagnostics,
             engine_selection_sequence,
             study_request_sequence: AtomicU64::new(0),
+        }
+    }
+
+    #[must_use]
+    pub fn with_command_wake(mut self, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        if let Some(commands) = &mut self.commands {
+            commands.wake = Some(wake);
+        }
+        self
+    }
+
+    fn notify_command(&self) {
+        if let Some(commands) = &self.commands {
+            commands.notify();
         }
     }
 
@@ -1036,10 +1074,12 @@ impl MarketDataWorker {
             *slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(alerts);
+            self.notify_command();
             return Ok(());
         }
         commands
             .try_send(MarketWorkerCommand::ReplacePriceAlerts(alerts))
+            .inspect(|()| commands.notify())
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::ReplacePriceAlerts(alerts)) => {
                     TrySendError::Full(alerts)
@@ -1084,6 +1124,7 @@ impl MarketDataWorker {
         });
         commands
             .try_send(MarketWorkerCommand::RegisterStudy(request))
+            .inspect(|()| commands.notify())
             .map_err(|error| {
                 let (full, command) = match error {
                     TrySendError::Full(command) => (true, command),
@@ -1119,6 +1160,7 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::RemoveStudy(study_id))
+            .inspect(|()| commands.notify())
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::RemoveStudy(study_id)) => {
                     TrySendError::Full(study_id)
@@ -1152,6 +1194,7 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::ReinitializeStudy(request))
+            .inspect(|()| commands.notify())
             .map_err(|error| {
                 let (full, command) = match error {
                     TrySendError::Full(command) => (true, command),
@@ -1200,10 +1243,12 @@ impl MarketDataWorker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
             sequence.store(next, Ordering::Release);
+            self.notify_command();
             return Ok(next);
         }
         commands
             .try_send(MarketWorkerCommand::EngineSelect(request))
+            .inspect(|()| commands.notify())
             .map_err(|error| {
                 let (full, command) = match error {
                     TrySendError::Full(command) => (true, command),
@@ -1251,6 +1296,7 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::ChartViewport(update))
+            .inspect(|()| commands.notify())
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::ChartViewport(update)) => {
                     TrySendError::Full(update)
@@ -1278,6 +1324,7 @@ impl MarketDataWorker {
             *slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(visible);
+            self.notify_command();
             return Ok(());
         }
         let Some(commands) = self.commands.as_ref() else {
@@ -1285,6 +1332,7 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::DepthVisible(visible))
+            .inspect(|()| commands.notify())
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::DepthVisible(visible)) => {
                     TrySendError::Full(visible)
@@ -1335,6 +1383,7 @@ impl MarketDataWorker {
             *slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resource_class);
+            self.notify_command();
             return Ok(());
         }
         let Some(commands) = self.commands.as_ref() else {
@@ -1342,6 +1391,7 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::ResourceClass(resource_class))
+            .inspect(|()| commands.notify())
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::ResourceClass(resource_class)) => {
                     TrySendError::Full(resource_class)
@@ -1386,6 +1436,7 @@ impl MarketDataWorker {
                 selection_generation,
                 command,
             })
+            .inspect(|()| commands.notify())
             .map_err(|error| match error {
                 TrySendError::Full(MarketWorkerCommand::Recovery { command, .. }) => {
                     TrySendError::Full(command)
@@ -1439,6 +1490,7 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::ProviderSearch(search))
+            .inspect(|()| commands.notify())
             .map_err(|_| ProviderCommandUnavailable)
     }
 
@@ -1455,6 +1507,7 @@ impl MarketDataWorker {
         };
         commands
             .try_send(MarketWorkerCommand::ProviderScreen(screen))
+            .inspect(|()| commands.notify())
             .map_err(|_| ProviderCommandUnavailable)
     }
 
@@ -1473,10 +1526,12 @@ impl MarketDataWorker {
             *pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(selection);
+            self.notify_command();
             return Ok(());
         }
         commands
             .try_send(MarketWorkerCommand::ProviderSelect(selection))
+            .inspect(|()| commands.notify())
             .map_err(|_| ProviderCommandUnavailable)
     }
 
@@ -1491,6 +1546,9 @@ impl MarketDataWorker {
             return (Vec::new(), newly_disconnected);
         };
         let (messages, disconnected) = receiver.drain_up_to(limit);
+        if !messages.is_empty() {
+            self.notify_command();
+        }
         if disconnected {
             let newly_disconnected = self.connected;
             self.connected = false;
@@ -1518,7 +1576,9 @@ impl MarketDataWorker {
             return None;
         }
         if let Some(commands) = self.commands.take() {
-            let _ = commands.try_send(MarketWorkerCommand::Shutdown);
+            let _ = commands
+                .try_send(MarketWorkerCommand::Shutdown)
+                .inspect(|()| commands.notify());
             drop(commands);
         }
         drop(self.messages.take());

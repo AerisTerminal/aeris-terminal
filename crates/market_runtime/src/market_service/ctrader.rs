@@ -1258,7 +1258,7 @@ impl Worker {
     }
     fn step(&mut self) -> Result<(), HostFault> {
         if self.sink.is_none() {
-            return self.poll_events();
+            return self.drain_host_events();
         }
         self.open_epoch()?;
         match self.reconcile() {
@@ -1270,7 +1270,7 @@ impl Worker {
             Err(Failure::Host(fault)) => return Err(fault),
         }
         self.history_step()?;
-        self.poll_events()?;
+        self.drain_host_events()?;
         Ok(())
     }
     fn controls(&mut self) {
@@ -1533,7 +1533,7 @@ impl Worker {
         }
         Ok(())
     }
-    fn poll_events(&mut self) -> Result<(), HostFault> {
+    fn drain_host_events(&mut self) -> Result<(), HostFault> {
         let hosts: Vec<_> = self.hosts.keys().copied().collect();
         for live in hosts {
             for _ in 0..EVENTS_PER_HOST_TURN {

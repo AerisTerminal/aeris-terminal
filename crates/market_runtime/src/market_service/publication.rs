@@ -243,6 +243,24 @@ pub(super) fn series_state_payload(
 }
 
 impl ConsumerEvents {
+    pub(super) fn has_pending(&self) -> bool {
+        self.provider.is_some()
+            || !self.series.is_empty()
+            || self.study_invalidated.is_some()
+            || !self.study_outputs.is_empty()
+            || self.study_removed.is_some()
+            || self.series_state.is_some()
+            || self.demand_error.is_some()
+            || !self.price_alerts.is_empty()
+            || self.order_book.is_some()
+            || self.trade_tape.is_some()
+            || self.startup_catalog_selection.is_some()
+            || self.startup_catalog_search.is_some()
+            || self.catalog_selection.is_some()
+            || self.catalog_search.is_some()
+            || self.catalog_screen.is_some()
+    }
+
     pub(super) fn pop(&mut self) -> Option<MarketRuntimeEvent> {
         self.provider
             .take()
@@ -477,10 +495,13 @@ impl Coordinator<'_> {
             .insert(client_id)
             .then_some(())
             .ok_or_else(|| "client identity is already attached".to_string());
+        if result.is_ok() {
+            self.outbox.attach(client_id);
+        }
         let _ = reply.send(result);
     }
 
-    pub(super) fn handle_poll_client(
+    pub(super) fn handle_drain_client(
         &mut self,
         client_id: ClientId,
         consumer_budgets: Vec<(ConsumerId, usize)>,
@@ -538,10 +559,11 @@ impl Coordinator<'_> {
                 break;
             }
         }
+        self.signal_pending_consumers();
         let _ = reply.send(Ok(batch));
     }
 
-    pub(super) fn handle_poll(
+    pub(super) fn handle_drain(
         &mut self,
         client_id: ClientId,
         consumer_id: ConsumerId,

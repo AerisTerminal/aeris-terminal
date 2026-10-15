@@ -25,10 +25,11 @@ use crate::rithmic_realtime::RithmicLoginRevision;
 use aeris_contracts::ProviderPresentationDescriptor;
 use aeris_trading::market::{MarketFeedError, QuoteInterest, QuoteInterestSink};
 
-struct QuoteChannels {
+struct RuntimeChannels {
     releases: Arc<Mutex<Vec<MarketDataLeaseId>>>,
     latest: Arc<Mutex<super::quotes::QuoteBook>>,
     trading_feed: Arc<super::trading_feed::TradingFeedOutbox>,
+    outbox: Arc<super::outbox::ConsumerOutbox>,
 }
 
 struct MarketQuoteInterestSink(MarketService);
@@ -1133,6 +1134,7 @@ impl MarketService {
         let quote_releases = Arc::new(Mutex::new(Vec::new()));
         let quotes = Arc::new(Mutex::new(super::quotes::QuoteBook::default()));
         let trading_feed = Arc::new(super::trading_feed::TradingFeedOutbox::default());
+        let outbox = Arc::new(super::outbox::ConsumerOutbox::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_provider_workers = Arc::new(Mutex::new(BTreeSet::new()));
         let broker_api = Arc::new(super::tastytrade::BrokerApi::default());
@@ -1156,11 +1158,12 @@ impl MarketService {
                 quote_releases: Arc::clone(&quote_releases),
                 quotes: Arc::clone(&quotes),
                 trading_feed: Arc::clone(&trading_feed),
+                outbox: Arc::clone(&outbox),
             },
             Arc::clone(&shutdown),
             Arc::new(super::clock::SystemClock),
         )?];
-        Self::build_market_service(
+        let market = Self::build_market_service(
             command_tx,
             shutdown,
             active_provider_workers,
@@ -1170,12 +1173,14 @@ impl MarketService {
                 presentations: provider_presentations,
                 search_preparers: provider_search_preparers,
             },
-            QuoteChannels {
+            RuntimeChannels {
                 releases: quote_releases,
                 latest: quotes,
                 trading_feed,
+                outbox,
             },
-        )
+        )?;
+        Ok(market)
     }
 
     fn build_market_service(
@@ -1185,12 +1190,13 @@ impl MarketService {
         mut workers: Vec<thread::JoinHandle<()>>,
         context: super::ProviderStartContext,
         providers: MarketServiceProviders,
-        channels: QuoteChannels,
+        channels: RuntimeChannels,
     ) -> Result<Self, String> {
-        let QuoteChannels {
+        let RuntimeChannels {
             releases: quote_releases,
             latest: quotes,
             trading_feed,
+            outbox,
         } = channels;
         let super::ProviderStartContext {
             tastytrade: broker_api,
@@ -1233,6 +1239,7 @@ impl MarketService {
                 quote_releases,
                 quotes,
                 trading_feed,
+                outbox,
             }),
         })
     }
@@ -1743,7 +1750,7 @@ impl MarketService {
         consumer_id: u64,
     ) -> Result<Option<MarketRuntimeEvent>, String> {
         self.request(|reply| {
-            Ok(Command::Poll(
+            Ok(Command::Drain(
                 ClientId(id(client_id)?),
                 ConsumerId(id(consumer_id)?),
                 reply,
@@ -1756,7 +1763,7 @@ impl MarketService {
     ///
     /// # Errors
     /// Returns an error for an unattached client or coordinator failure.
-    pub fn poll_events(
+    pub fn drain_events(
         &self,
         client_id: u64,
         consumer_budgets: &[(u64, usize)],
@@ -1766,12 +1773,32 @@ impl MarketService {
             .map(|(consumer_id, maximum)| Ok((ConsumerId(id(*consumer_id)?), *maximum)))
             .collect::<Result<Vec<_>, String>>()?;
         self.request(|reply| {
-            Ok(Command::PollClient(
+            Ok(Command::DrainClient(
                 ClientId(id(client_id)?),
                 consumer_budgets,
                 reply,
             ))
         })
+    }
+
+    /// Waits for a coordinator-owned consumer publication or a bridge command.
+    /// Only background bridge workers may call this; no GPUI thread waits.
+    #[must_use]
+    pub fn wait_for_events(&self, client_id: u64, timeout: Duration) -> bool {
+        id(client_id).is_ok_and(|client| self.runtime.outbox.wait(ClientId(client), timeout))
+    }
+
+    /// Signals the background bridge when its ordered command queue changes.
+    pub fn wake_bridge(&self, client_id: u64) {
+        if let Ok(client) = id(client_id) {
+            self.runtime.outbox.notify(ClientId(client));
+        }
+    }
+
+    /// Wakes attached bridge workers after a UI command enters an ordered queue.
+    /// Attachment is bounded by the engine's maximum consumer count.
+    pub fn wake_bridges(&self) {
+        self.runtime.outbox.notify_attached();
     }
 
     pub(super) fn request<T>(
@@ -2053,10 +2080,11 @@ mod tests {
                 search_preparers: BTreeMap::new(),
                 presentations: vec![*super::super::RITHMIC_DESCRIPTOR.presentation],
             },
-            QuoteChannels {
+            RuntimeChannels {
                 releases: Arc::new(Mutex::new(Vec::new())),
                 latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
                 trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
+                outbox: Arc::new(super::super::outbox::ConsumerOutbox::default()),
             },
         )
         .expect("test runtime starts");
@@ -2091,10 +2119,11 @@ mod tests {
                 search_preparers: BTreeMap::new(),
                 presentations: vec![],
             },
-            QuoteChannels {
+            RuntimeChannels {
                 releases: Arc::clone(&releases),
                 latest: Arc::new(Mutex::new(super::super::quotes::QuoteBook::default())),
                 trading_feed: Arc::new(super::super::trading_feed::TradingFeedOutbox::default()),
+                outbox: Arc::new(super::super::outbox::ConsumerOutbox::default()),
             },
         )
         .unwrap();
