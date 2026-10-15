@@ -7,8 +7,8 @@ use aeris_instruments::InstrumentId;
 use aeris_market_data::{ChartInterval, MarketBar};
 use aeris_market_engine::Viewport;
 use aeris_market_runtime::{
-    InstrumentRequest, InstrumentStreamKey, LeaseOwner, MarketRuntimeEvent, MarketService,
-    SelectionOutcome, SelectionRequest, SeriesTailOperation, StreamRequirements,
+    InstrumentRef, InstrumentRequest, InstrumentStreamKey, LeaseOwner, MarketRuntimeEvent,
+    MarketService, SelectionOutcome, SelectionRequest, SeriesTailOperation, StreamRequirements,
 };
 use serde_json::{Value, json};
 
@@ -219,6 +219,19 @@ fn closes_forming_bar(forming: bool, previous: MarketBar, next: MarketBar, secon
     forming && next.exchange_timestamp_seconds - previous.exchange_timestamp_seconds == seconds
 }
 
+fn probe_instrument(symbol: &str) -> InstrumentRequest {
+    if symbol == "BTC" {
+        InstrumentRequest::Default
+    } else {
+        InstrumentRequest::Ref(InstrumentRef {
+            provider_id: "hyperliquid".into(),
+            instrument_id: format!("hyperliquid:perp:{symbol}"),
+            entitlement_id: "hyperliquid-public".into(),
+            query: Some(symbol.into()),
+        })
+    }
+}
+
 fn select(
     service: &MarketService,
     state: &mut Observation,
@@ -229,17 +242,7 @@ fn select(
 ) -> ProbeResult<()> {
     let generation = state.generation + 1;
     state.reset(generation);
-    let instrument = if symbol == "BTC" {
-        InstrumentRequest::Default
-    } else {
-        InstrumentRequest::CatalogSymbol {
-            provider_id: "hyperliquid".into(),
-            symbol: symbol.into(),
-            exchange: "Hyperliquid".into(),
-            entitlement_id: "hyperliquid-public".into(),
-            search_generation: 0,
-        }
-    };
+    let instrument = probe_instrument(symbol);
     let started = Instant::now();
     market(service.select_and_demand(
         CLIENT,
@@ -539,8 +542,21 @@ pub(super) fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_continuity, closes_forming_bar};
+    use super::{check_continuity, closes_forming_bar, probe_instrument};
     use aeris_market_data::MarketBar;
+    use aeris_market_runtime::InstrumentRequest;
+
+    #[test]
+    fn probe_symbol_switch_uses_stable_identity_instead_of_zero_search_generation() {
+        let InstrumentRequest::Ref(reference) = probe_instrument("ETH") else {
+            panic!("switch must resolve by stable catalog identity");
+        };
+        assert_eq!(reference.provider_id, "hyperliquid");
+        assert_eq!(reference.instrument_id, "hyperliquid:perp:ETH");
+        assert_eq!(reference.entitlement_id, "hyperliquid-public");
+        assert_eq!(reference.query.as_deref(), Some("ETH"));
+        assert_eq!(probe_instrument("BTC"), InstrumentRequest::Default);
+    }
 
     fn bar(seconds: i64) -> MarketBar {
         MarketBar {
