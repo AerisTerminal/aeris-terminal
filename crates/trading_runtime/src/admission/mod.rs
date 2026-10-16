@@ -254,6 +254,57 @@ fn validate_client_id(command: &PlaceOrder, route: VenueRoute) -> Result<(), Rej
     }
 }
 
+/// The only order-admission boundary for simulated, broker and managed-child
+/// placement. Dynamic rules may persist an account lock or advance discipline
+/// state, exactly as they did before order admission was consolidated.
+pub(crate) fn admit(
+    owner: &mut TradingCore,
+    instrument: &TradingInstrument,
+    command: &PlaceOrder,
+    route: VenueRoute,
+    additional_open_orders: usize,
+    staged_instruments: &[InstrumentId],
+    enforce_risk: bool,
+) -> Result<Vec<RiskWarning>, String> {
+    if enforce_risk && owner.state.risk_locks.contains_key(&command.account_id) {
+        return Err(owner.admission_detail(command, RejectReason::AccountLocked));
+    }
+    validate_common_order(
+        instrument,
+        command,
+        route,
+        owner.state.orders.open_count(),
+        additional_open_orders,
+    )
+    .map_err(|reason| owner.admission_detail(command, reason))?;
+    BuyingPower::check(command);
+    validate_owner_trigger_side(owner, command)
+        .map_err(|reason| owner.admission_detail(command, reason))?;
+    let account = owner
+        .state
+        .accounts
+        .get(&command.account_id)
+        .ok_or_else(|| owner.admission_detail(command, RejectReason::AccountNotRegistered))?;
+    if route == VenueRoute::Simulated {
+        owner
+            .check_new_order_interest(&command.instrument_id, staged_instruments)
+            .map_err(|reason| owner.admission_detail(command, reason))?;
+        owner
+            .check_practice_market(instrument)
+            .map_err(|reason| owner.admission_detail(command, reason))?;
+    }
+    validate_currency(instrument, &account.currency, route)
+        .map_err(|reason| owner.admission_detail(command, reason))?;
+    let mut warnings = if enforce_risk {
+        owner.evaluate_order_risk(command)?.warnings
+    } else {
+        owner.validate_managed_exit(command)?;
+        Vec::new()
+    };
+    warnings.extend(price_grid_warning(instrument));
+    Ok(warnings)
+}
+
 impl TradingCore {
     pub(crate) fn resolve_order_instruction(
         &self,
@@ -269,42 +320,6 @@ impl TradingCore {
         let mut command = resolve_resting_at(command, quote.bid, quote.ask)?;
         command.provenance = quote.provenance;
         Ok(command)
-    }
-
-    /// Shared pre-persistence order checks; staged copy instruments participate in the
-    /// same market-demand bound as already committed orders and ticket interests.
-    pub(crate) fn admit(
-        &self,
-        instrument: &TradingInstrument,
-        command: &PlaceOrder,
-        route: VenueRoute,
-        additional_open_orders: usize,
-        staged_instruments: &[InstrumentId],
-        enforce_risk: bool,
-    ) -> Result<(), RejectReason> {
-        if enforce_risk && self.state.risk_locks.contains_key(&command.account_id) {
-            return Err(RejectReason::AccountLocked);
-        }
-        validate_common_order(
-            instrument,
-            command,
-            route,
-            self.state.orders.open_count(),
-            additional_open_orders,
-        )?;
-        BuyingPower::check(command);
-        validate_owner_trigger_side(self, command)?;
-        let account = self
-            .state
-            .accounts
-            .get(&command.account_id)
-            .ok_or(RejectReason::AccountNotRegistered)?;
-        if route == VenueRoute::Simulated {
-            self.check_new_order_interest(&command.instrument_id, staged_instruments)?;
-            self.check_practice_market(instrument)?;
-        }
-        validate_currency(instrument, &account.currency, route)?;
-        Ok(())
     }
 
     pub(crate) fn admission_detail(&self, command: &PlaceOrder, reason: RejectReason) -> String {
@@ -760,22 +775,15 @@ impl TradingCore {
             .get(&command.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?
             .clone();
-        self.admit(
+        let risk_warnings = admit(
+            self,
             &instrument,
             &command,
             VenueRoute::Simulated,
             staged_instruments.len(),
             staged_instruments,
             enforce_risk,
-        )
-        .map_err(|error| self.admission_detail(&command, error))?;
-        let mut risk_warnings = if enforce_risk {
-            self.evaluate_order_risk(&command)?.warnings
-        } else {
-            self.validate_managed_exit(&command)?;
-            Vec::new()
-        };
-        risk_warnings.extend(price_grid_warning(&instrument));
+        )?;
         let order = Order {
             id: OrderId::try_new(format!("sim-order-{sequence}"))
                 .map_err(|error| error.to_string())?,

@@ -200,21 +200,20 @@ impl TradingCore {
             .state
             .instruments
             .get(&command.instrument_id)
-            .ok_or("trading instrument is not registered")?;
-        self.admit(
-            instrument,
+            .ok_or("trading instrument is not registered")?
+            .clone();
+        let warnings = crate::core::admission::admit(
+            self,
+            &instrument,
             command,
             crate::VenueRoute::CtraderDemo,
             0,
             &[],
             true,
-        )
-        .map_err(|error| self.admission_detail(command, error))?;
-        let price_grid_warning = crate::core::admission::price_grid_warning(instrument);
+        )?;
         // Every M3.2 check applies to broker orders. The practice rule that the contract
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.
-        self.evaluate_order_risk(command)?;
         let time_in_force =
             crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::CtraderDemo)
                 .effective_tif(command.order_type, command.time_in_force);
@@ -271,9 +270,16 @@ impl TradingCore {
             "submitted to cTrader",
             provenance,
         )?;
-        if let Some(warning) = price_grid_warning {
+        if !warnings.is_empty() {
             event.reason = Some(aeris_trading::OrderEventReason::RiskWarning);
-            event.detail = Some(format!("submitted to cTrader · {warning}"));
+            event.detail = Some(format!(
+                "submitted to cTrader · {}",
+                warnings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
         }
         let outbound = self.venue_outbound.clone().ok_or(DEMO_VENUE_UNAVAILABLE)?;
         let reservation = outbound
