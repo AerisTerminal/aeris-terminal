@@ -79,6 +79,72 @@ fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeed
 }
 
 #[test]
+fn nonmarketable_ioc_and_fok_cancel_in_the_acceptance_step() {
+    let directory = TestDirectory::new("immediate-not-marketable");
+    let (service, _clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    service.status().expect("drain");
+    for (tif, side, price) in [
+        (TimeInForce::ImmediateOrCancel, OrderSide::Buy, 9_900),
+        (TimeInForce::FillOrKill, OrderSide::Buy, 9_900),
+        (TimeInForce::ImmediateOrCancel, OrderSide::Sell, 10_100),
+        (TimeInForce::FillOrKill, OrderSide::Sell, 10_100),
+    ] {
+        let mut request = market_order(
+            &format!("unfilled-{tif:?}-{side:?}"),
+            side,
+            1,
+            1_000_000_000_000,
+        );
+        request.order_type = OrderType::Limit;
+        request.time_in_force = tif;
+        request.limit_price = Some(FixedPoint::try_new(price, 2).expect("price"));
+        let accepted = service.place_order(request).expect("accepted");
+        assert_eq!(accepted.status, OrderStatus::Cancelled);
+        let snapshot = service.snapshot().expect("snapshot");
+        let mut events: Vec<_> = snapshot
+            .order_events
+            .iter()
+            .filter(|event| event.order_id == accepted.id)
+            .collect();
+        events.sort_by_key(|event| event.sequence);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![OrderEventKind::Accepted, OrderEventKind::Cancelled]
+        );
+        assert_eq!(
+            events[1].reason,
+            Some(aeris_trading::OrderEventReason::NotMarketable)
+        );
+        assert!(
+            snapshot
+                .fills
+                .iter()
+                .all(|fill| fill.order_id != accepted.id)
+        );
+    }
+    let before = service.snapshot().expect("before restart");
+    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    assert_eq!(
+        restarted.snapshot().expect("restored").orders,
+        before.orders
+    );
+    restarted
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown");
+}
+
+#[test]
 fn resting_at_uses_owner_quote_and_persists_only_resolved_order() {
     let directory = TestDirectory::new("resting-at-owner");
     let (service, _clock) = feed_service(&directory);

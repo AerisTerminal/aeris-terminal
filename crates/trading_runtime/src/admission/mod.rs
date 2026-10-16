@@ -206,6 +206,26 @@ pub(crate) fn resolve_resting_at(
     Ok(command)
 }
 
+/// The owner touch used for placement-time taker execution. Resting limit
+/// candidates use their stated limit instead, not this price.
+pub(crate) fn placement_touch_price(
+    order: &Order,
+    bid: FixedPoint,
+    ask: FixedPoint,
+) -> Option<FixedPoint> {
+    match (order.side, order.order_type) {
+        (OrderSide::Buy, OrderType::Market) => Some(ask),
+        (OrderSide::Sell, OrderType::Market) => Some(bid),
+        (OrderSide::Buy, OrderType::Limit) if ask.units() <= order.limit_price?.units() => {
+            Some(ask)
+        }
+        (OrderSide::Sell, OrderType::Limit) if bid.units() >= order.limit_price?.units() => {
+            Some(bid)
+        }
+        _ => None,
+    }
+}
+
 /// The shared, side-effect-free checks run before either route persists an order.
 pub(crate) fn validate_common_order(
     instrument: &TradingInstrument,
@@ -702,6 +722,36 @@ impl TradingCore {
         )?;
         step.next_sequence += 1;
         step.inserted.push((order.clone(), event));
+        if matches!(
+            order.time_in_force,
+            TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
+        ) && order.order_type == OrderType::Limit
+            && let Some(quote) = self.quote_book.observation(&order.instrument_id)
+            && placement_touch_price(&order, quote.bid, quote.ask).is_none()
+        {
+            let (cancelled, reason) = crate::book::lifecycle::cancel_with_cause(
+                order,
+                crate::book::lifecycle::CancellationCause::NotMarketable,
+                self.command_now,
+            )
+            .map_err(|error| error.to_string())?;
+            let sequence = step.next_sequence;
+            let event = OrderEvent {
+                id: OrderEventId::try_new(format!("sim-event-{sequence}"))
+                    .map_err(|error| error.to_string())?,
+                order_id: cancelled.id.clone(),
+                sequence,
+                kind: OrderEventKind::Cancelled,
+                reason: Some(reason),
+                event_unix_nanos: self.command_now,
+                detail: Some("not marketable at placement".to_string()),
+                provenance: quote.provenance,
+            };
+            event.validate().map_err(|error| error.to_string())?;
+            step.next_sequence += 1;
+            step.updated.push((cancelled.clone(), event));
+            return Ok(cancelled);
+        }
         Ok(order)
     }
 
