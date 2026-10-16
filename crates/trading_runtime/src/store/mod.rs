@@ -748,21 +748,14 @@ mod tests {
                         ('o2','c2','a','i','buy','limit','gtc',1,0,'cancelled',200,'{}',0,0),
                         ('o3','c3','a','i','buy','limit','gtc',1,0,'working',300,'{}',0,0);
                  INSERT INTO order_events(id,order_id,sequence,kind,event_unix_nanos,detail,provenance_json)
-                 VALUES ('e1','o1',1,'accepted',100,'RISK WARNING · no attached stop',
-                            '{\"venue_id\":\"aeris-sim\",\"provider_id\":\"fixture\",\"session_generation\":1,
-                              \"source_sequence\":1,\"observed_unix_nanos\":100}'),
-                        ('e2','o1',2,'filled',150,'touch fill',
-                            '{\"venue_id\":\"aeris-sim\",\"provider_id\":\"fixture\",\"session_generation\":1,
-                              \"source_sequence\":2,\"observed_unix_nanos\":150}'),
-                        ('e3','o2',3,'accepted',200,'LOCAL-MANAGED protective stop',
-                            '{\"venue_id\":\"aeris-sim\",\"provider_id\":\"fixture\",\"session_generation\":1,
-                              \"source_sequence\":3,\"observed_unix_nanos\":200}'),
-                        ('e4','o2',4,'cancelled',250,'cancelled by local command',
-                            '{\"venue_id\":\"aeris-sim\",\"provider_id\":\"fixture\",\"session_generation\":1,
-                              \"source_sequence\":4,\"observed_unix_nanos\":250}'),
-                        ('e5','o3',5,'accepted',300,NULL,
-                            '{\"venue_id\":\"aeris-sim\",\"provider_id\":\"fixture\",\"session_generation\":1,
-                              \"source_sequence\":5,\"observed_unix_nanos\":300}');",
+                 VALUES ('e1','o1',1,'accepted',100,'RISK WARNING · no attached stop','{}'),
+                        ('e2','o1',2,'filled',150,'touch fill','{}'),
+                        ('e3','o2',3,'accepted',200,'LOCAL-MANAGED protective stop','{}'),
+                        ('e4','o2',4,'cancelled',250,'cancelled by local command','{}'),
+                        ('e5','o3',5,'accepted',300,NULL,'{}');
+                 UPDATE order_events SET provenance_json='{\"venue_id\":\"aeris-sim\",
+                     \"provider_id\":\"fixture\",\"session_generation\":1,\"source_sequence\":1,
+                     \"observed_unix_nanos\":100}';",
             )
             .expect("fixture facts");
         drop(connection);

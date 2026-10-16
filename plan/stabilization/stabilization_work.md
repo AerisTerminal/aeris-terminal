@@ -796,6 +796,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M5.1 part 11 fix(trading): reject inactive broker lifecycle edges - exhaustive current-status request/admission/filled matrices and broker report/missing/deal edge tests; future group/trigger/expiry edges remain.
 - 2026-10-16 M5.1 part 12 feat(trading): persist typed lifecycle reasons and risk warnings - typed SQLite round trips and historical migration, chart annotation keyed by reason, and v2 replay ledgers with reason column; remaining lifecycle edges deferred.
 - 2026-10-16 M2-M5 docs(plan): record milestone validation results after the mission stopped - M2 (`f00d4a99`), M3 (`530a7c8d`) and M4 (`3529116c`) passed scrutiny and user-testing validation; M5 remains in progress with M5.1 parts 1-12 committed, M5.1 unchecked and VAL-TRD-030..074 unvalidated.
+- 2026-10-16 M5.1 part 12 test(trading): give the V21 lifecycle fixture valid event provenance - the typed reason restore check loads events through the production decoder, which rejects the fixture's empty provenance; one fixture update keeps the test under the Clippy length limit.
 
 ## 7. Known gaps / deferred
 
