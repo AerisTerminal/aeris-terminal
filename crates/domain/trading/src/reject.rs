@@ -12,6 +12,7 @@ pub enum RiskWarning {
         limit_percent: u8,
     },
     FastStopReentry,
+    UnverifiedPriceGrid,
 }
 
 impl RiskWarning {
@@ -23,6 +24,7 @@ impl RiskWarning {
             Self::NoAttachedStop => "no_attached_stop",
             Self::ConsistencyLimitExceeded { .. } => "consistency_limit_exceeded",
             Self::FastStopReentry => "fast_stop_reentry",
+            Self::UnverifiedPriceGrid => "unverified_price_grid",
         }
     }
 }
@@ -46,6 +48,7 @@ impl fmt::Display for RiskWarning {
             Self::FastStopReentry => {
                 f.write_str("fast re-entry within 60 seconds of a filled stop")
             }
+            Self::UnverifiedPriceGrid => f.write_str("instrument price grid is unverified"),
         }
     }
 }

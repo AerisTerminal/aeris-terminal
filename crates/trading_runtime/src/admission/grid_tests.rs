@@ -11,6 +11,19 @@ fn buying_power_hook_is_explicit_and_unrestricted_without_margin() {
 }
 
 #[test]
+fn unknown_grid_admission_attaches_typed_warning() {
+    let mut instrument = crate::tests::instrument();
+    instrument.contract.price_grid = PriceGrid::Unknown;
+    assert_eq!(
+        price_grid_warning(&instrument),
+        Some(aeris_trading::RiskWarning::UnverifiedPriceGrid)
+    );
+    instrument.contract.price_grid =
+        PriceGrid::Fixed(InstrumentDecimal::try_new(25, 2).expect("tick"));
+    assert_eq!(price_grid_warning(&instrument), None);
+}
+
+#[test]
 fn resting_at_resolves_on_touch_for_every_side() {
     let price = |units| FixedPoint::try_new(units, 2).expect("price");
     for (side, units, expected) in [

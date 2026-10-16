@@ -76,6 +76,66 @@ mod foundation;
 mod market_feed;
 
 #[test]
+fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
+    let directory = TestDirectory::new("unknown-grid-warning");
+    let service = start_service(&directory);
+    let mut instrument = instrument();
+    instrument.contract.price_grid = aeris_instruments::PriceGrid::Unknown;
+    service.register_instrument(instrument).expect("instrument");
+    let broker_id = TradingAccountId::try_new("warning-demo").expect("id");
+    service
+        .register_account(TradingAccount {
+            id: broker_id.clone(),
+            display_name: "test demo".into(),
+            environment: AccountEnvironment::Demo,
+            venue_id: "ctrader".into(),
+            broker_ref: Some("fixture-demo".into()),
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("broker account");
+    let (_generation, _receiver) = service.attach_demo_venue().expect("venue");
+    let mut request = market_order("unknown-grid", OrderSide::Buy, 1, 1_000);
+    request.order_type = OrderType::Limit;
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    request.limit_price = Some(FixedPoint::try_new(9_013, 2).expect("price"));
+    let simulated = service
+        .place_order(request.clone())
+        .expect("unknown grid accepts");
+    request.client_order_id = ClientOrderId::try_new("unknown-grid-broker").expect("id");
+    request.account_id = broker_id;
+    let broker = service.place_order(request).expect("broker accepts");
+    let snapshot = service.snapshot().expect("snapshot");
+    for placed in [simulated, broker] {
+        let event = snapshot
+            .order_events
+            .iter()
+            .find(|event| event.order_id == placed.id)
+            .expect("acceptance event");
+        assert_eq!(
+            event.reason,
+            Some(aeris_trading::OrderEventReason::RiskWarning)
+        );
+        assert!(
+            event
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("price grid is unverified"))
+        );
+    }
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    assert_eq!(
+        restarted.snapshot().expect("restored").order_events,
+        snapshot.order_events
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
 fn owner_serializes_eight_submitters_and_recovers_exact_order_revisions() {
     let directory = TestDirectory::new("owner-concurrency");
     let service = start_service(&directory);

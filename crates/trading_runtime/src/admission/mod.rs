@@ -7,7 +7,7 @@ use super::{
     multiply_quantity, order_acceptance_detail, venue,
 };
 use aeris_instruments::PriceGrid;
-use aeris_trading::{OrderSide, RejectReason, TimeInForce};
+use aeris_trading::{OrderSide, RejectReason, RiskWarning, TimeInForce};
 
 mod capabilities;
 pub(crate) use capabilities::VenueCapabilities;
@@ -87,6 +87,11 @@ pub(crate) fn validate_order_prices(
         validate_price_grid(instrument.contract.price_grid, price)?;
     }
     Ok(())
+}
+
+pub(crate) fn price_grid_warning(instrument: &TradingInstrument) -> Option<RiskWarning> {
+    matches!(instrument.contract.price_grid, PriceGrid::Unknown)
+        .then_some(RiskWarning::UnverifiedPriceGrid)
 }
 
 pub(crate) fn validate_trigger_side(
@@ -715,12 +720,13 @@ impl TradingCore {
         .map_err(|error| self.admission_detail(&command, error))?;
         self.check_practice_market(&instrument)
             .map_err(|reason| reason.to_string())?;
-        let risk_warnings = if enforce_risk {
+        let mut risk_warnings = if enforce_risk {
             self.evaluate_order_risk(&command)?.warnings
         } else {
             self.validate_managed_exit(&command)?;
             Vec::new()
         };
+        risk_warnings.extend(price_grid_warning(&instrument));
         if instrument.contract.currency != account_currency {
             return Err("Practice contract currency differs from the account currency".to_string());
         }

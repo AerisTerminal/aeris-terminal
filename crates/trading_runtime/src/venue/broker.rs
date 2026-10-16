@@ -210,6 +210,7 @@ impl TradingCore {
             true,
         )
         .map_err(|error| self.admission_detail(command, error))?;
+        let price_grid_warning = crate::core::admission::price_grid_warning(instrument);
         // Every M3.2 check applies to broker orders. The practice rule that the contract
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.
@@ -263,13 +264,17 @@ impl TradingCore {
         let order = crate::book::lifecycle::accept(order, self.command_now)
             .map_err(|error| error.to_string())?;
         order.validate().map_err(|error| error.to_string())?;
-        let event = Self::broker_event(
+        let mut event = Self::broker_event(
             &order,
             sequence,
             OrderEventKind::Accepted,
             "submitted to cTrader",
             provenance,
         )?;
+        if let Some(warning) = price_grid_warning {
+            event.reason = Some(aeris_trading::OrderEventReason::RiskWarning);
+            event.detail = Some(format!("submitted to cTrader · {warning}"));
+        }
         let outbound = self.venue_outbound.clone().ok_or(DEMO_VENUE_UNAVAILABLE)?;
         let reservation = outbound
             .try_reserve(request)
