@@ -849,6 +849,20 @@ impl TradingService {
             .map_err(|current| OrderCommandError::StaleRevision { current })
     }
 
+    /// Fences a chart/ladder modify against the owner's current revision before reading its
+    /// verified market quote. A stale drag cannot reprice a replaced or filled order.
+    ///
+    /// # Errors
+    /// Returns the current order on stale revision; otherwise reports quote or command failure.
+    pub fn modify_order_from_market_checked(
+        &self,
+        command: RevisionedModifyOrder,
+    ) -> Result<Order, OrderCommandError> {
+        self.request(|reply| Command::ModifyFromMarketChecked(command, reply))
+            .map_err(OrderCommandError::Other)?
+            .map_err(|current| OrderCommandError::StaleRevision { current })
+    }
+
     /// Moves the stop or a target a pending bracket places once its entry fills.
     ///
     /// # Errors
@@ -1405,6 +1419,7 @@ impl TradingCore {
             | Command::Modify(..)
             | Command::ModifyChecked(..)
             | Command::ModifyFromMarket(..)
+            | Command::ModifyFromMarketChecked(..)
             | Command::MovePlannedLeg(..)
             | Command::Cancel(..)
             | Command::CancelChecked(..)
@@ -1667,6 +1682,12 @@ impl TradingCore {
             }
             Command::ModifyFromMarket(order, reply) => {
                 respond(&reply, self.modify_order_from_market(order));
+            }
+            Command::ModifyFromMarketChecked(command, reply) => {
+                respond(
+                    &reply,
+                    self.modify_order_from_market_checked_internal(command),
+                );
             }
             Command::MovePlannedLeg(command, reply) => {
                 respond(&reply, self.move_planned_bracket_leg(&command));

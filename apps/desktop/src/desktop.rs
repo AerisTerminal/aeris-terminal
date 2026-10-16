@@ -2493,12 +2493,18 @@ fn dispatch_chart_cancel(
     chart: Entity<AerisChartView>,
     sequence: u32,
     client_order_id: aeris_trading::ClientOrderId,
+    expected_revision: u32,
     service: aeris_trading_runtime::TradingService,
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_outcome(
-            service.cancel_order(client_order_id),
+            service
+                .cancel_order_checked(aeris_trading_runtime::RevisionedCancelOrder {
+                    client_order_id,
+                    expected_revision: Some(expected_revision),
+                })
+                .map_err(|error| error.to_string()),
             "Practice order cancelled",
         )
     });
@@ -2653,6 +2659,7 @@ fn dispatch_chart_modify(
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let sequence = intent.sequence;
+    let order_revision = order.revision;
     let prepared = chart_modify_from_intent(intent, order, app, cx).and_then(|command| {
         aeris_desktop::trading::handle()
             .map(|service| (command, service))
@@ -2667,7 +2674,12 @@ fn dispatch_chart_modify(
     };
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_outcome(
-            service.modify_order_from_market(command),
+            service
+                .modify_order_from_market_checked(aeris_trading_runtime::RevisionedModifyOrder {
+                    order: command,
+                    expected_revision: Some(order_revision),
+                })
+                .map_err(|error| error.to_string()),
             "Practice order modified",
         )
     });
@@ -2863,7 +2875,14 @@ fn dispatch_chart_trading_intent(
         );
         return;
     };
-    dispatch_chart_cancel(chart, sequence, order.client_order_id.clone(), service, cx);
+    dispatch_chart_cancel(
+        chart,
+        sequence,
+        order.client_order_id.clone(),
+        order.revision,
+        service,
+        cx,
+    );
 }
 
 /// The selected account's pending-bracket leg on the chart's instrument that `intent` acts on.
@@ -4711,6 +4730,7 @@ fn subscribe_order_book_trading(
                 };
                 aeris_desktop::trading::modify_simulated_order_at_price(
                     order.client_order_id,
+                    order.revision,
                     order.order_type,
                     order.time_in_force,
                     &frame,

@@ -463,6 +463,7 @@ pub fn close_broker_position(account_key: String, broker_position_id: String, cx
 /// Reprices one working simulated limit order to the current best bid or ask off the UI thread.
 pub fn reprice_simulated_order(
     client_order_key: String,
+    expected_revision: u32,
     side: aeris_trading::OrderSide,
     time_in_force: aeris_trading::TimeInForce,
     frame: &aeris_market_data::OrderBookFrame,
@@ -485,6 +486,7 @@ pub fn reprice_simulated_order(
     };
     modify_simulated_order_at_price(
         client_order_id,
+        expected_revision,
         aeris_trading::OrderType::Limit,
         time_in_force,
         frame,
@@ -496,6 +498,7 @@ pub fn reprice_simulated_order(
 /// Moves one working simulated limit or stop order to an exact ladder price off the UI thread.
 pub fn modify_simulated_order_at_price(
     client_order_id: aeris_trading::ClientOrderId,
+    expected_revision: u32,
     order_type: aeris_trading::OrderType,
     time_in_force: aeris_trading::TimeInForce,
     frame: &aeris_market_data::OrderBookFrame,
@@ -530,7 +533,14 @@ pub fn modify_simulated_order_at_price(
     cx.background_executor()
         .spawn(async move {
             record_outcome(
-                service.modify_order_from_market(command),
+                service
+                    .modify_order_from_market_checked(
+                        aeris_trading_runtime::RevisionedModifyOrder {
+                            order: command,
+                            expected_revision: Some(expected_revision),
+                        },
+                    )
+                    .map_err(|error| error.to_string()),
                 "Practice order modified",
             );
         })

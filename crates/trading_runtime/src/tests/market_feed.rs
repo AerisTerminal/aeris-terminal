@@ -79,6 +79,79 @@ fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeed
 }
 
 #[test]
+fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
+    let directory = TestDirectory::new("chart-stale-revision");
+    let (service, _clock) = feed_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut request = market_order("chart-stale", OrderSide::Buy, 1, 1_000);
+    request.order_type = OrderType::Limit;
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    let accepted = service.place_order(request).expect("accepted");
+    let before = service.snapshot().expect("before");
+    let command = RevisionedModifyOrder {
+        order: ModifyOrder {
+            client_order_id: accepted.client_order_id.clone(),
+            time_in_force: accepted.time_in_force,
+            limit_price: Some(FixedPoint::try_new(9_025, 2).expect("price")),
+            stop_price: None,
+            modified_unix_nanos: 2_000,
+            provenance: accepted.provenance.clone(),
+        },
+        expected_revision: Some(accepted.revision + 1),
+    };
+    let result = service.modify_order_from_market_checked(command.clone());
+    assert_eq!(
+        result.expect_err("stale despite unavailable quote"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(accepted.clone())
+        }
+    );
+    assert_eq!(service.snapshot().expect("unchanged"), before);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    service.status().expect("drain feed");
+    let updated = service
+        .modify_order_from_market_checked(RevisionedModifyOrder {
+            expected_revision: Some(accepted.revision),
+            ..command
+        })
+        .expect("current chart revision");
+    assert_eq!(updated.revision, accepted.revision + 1);
+    assert_eq!(updated.limit_price.expect("limit").units(), 9_025);
+    assert_eq!(updated.provenance.provider_id, "fixture");
+    assert!(
+        service
+            .snapshot()
+            .expect("modified")
+            .orders
+            .contains(&updated)
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    assert!(
+        restarted
+            .snapshot()
+            .expect("recovered")
+            .orders
+            .contains(&updated)
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
 fn chart_bracket_uses_verified_grid_without_fixed_tick_and_rests() {
     let directory = TestDirectory::new("chart-significant-grid");
     let (service, _clock) = feed_service(&directory);

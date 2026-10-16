@@ -39,6 +39,7 @@ pub(crate) enum Command {
     Modify(ModifyOrder, Reply<Order>),
     ModifyChecked(RevisionedModifyOrder, Reply<Result<Order, Box<Order>>>),
     ModifyFromMarket(ModifyOrder, Reply<Order>),
+    ModifyFromMarketChecked(RevisionedModifyOrder, Reply<Result<Order, Box<Order>>>),
     MovePlannedLeg(MovePlannedBracketLeg, Reply<PlannedBracketLeg>),
     Cancel(ClientOrderId, Reply<Order>),
     CancelChecked(RevisionedCancelOrder, Reply<Result<Order, Box<Order>>>),
