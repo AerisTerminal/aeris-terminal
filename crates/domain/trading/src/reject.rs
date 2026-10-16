@@ -67,6 +67,7 @@ pub enum RejectReason {
     WrongSideTrigger,
     TifNotSupported,
     CapacityExceeded,
+    AccountLocked,
     InvalidQuantity,
     ClientIdTooLong,
     ScaleMismatch,
@@ -96,6 +97,7 @@ impl fmt::Display for RejectReason {
             Self::CapacityExceeded => {
                 f.write_str("CapacityExceeded: trading order capacity reached")
             }
+            Self::AccountLocked => f.write_str("AccountLocked: account is risk-locked"),
             Self::InvalidQuantity => f.write_str("order quantity must use whole provider units"),
             Self::ClientIdTooLong => {
                 f.write_str("cTrader ClientOrderId must be at most 50 characters")

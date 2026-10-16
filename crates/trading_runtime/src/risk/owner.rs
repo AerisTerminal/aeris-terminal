@@ -127,8 +127,8 @@ impl TradingCore {
         &mut self,
         command: &PlaceOrder,
     ) -> Result<RiskEvaluation, String> {
-        if let Some(lock) = self.state.risk_locks.get(&command.account_id) {
-            return Err(format!("account is risk-locked: {}", lock.reason));
+        if self.state.risk_locks.contains_key(&command.account_id) {
+            return Err(self.admission_detail(command, aeris_trading::RejectReason::AccountLocked));
         }
         self.check_session_plan(command)?;
         let discipline_warnings = self.check_discipline(command)?;

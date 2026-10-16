@@ -1056,7 +1056,7 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
         service
             .place_order(request("after-kill"))
             .expect_err("locked")
-            .contains("risk-locked"),
+            .contains("AccountLocked: account is risk-locked"),
         "a locked broker account accepts no new order"
     );
 }

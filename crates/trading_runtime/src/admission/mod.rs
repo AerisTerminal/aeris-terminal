@@ -172,7 +172,11 @@ impl TradingCore {
         route: VenueRoute,
         additional_open_orders: usize,
         staged_instruments: &[InstrumentId],
+        enforce_risk: bool,
     ) -> Result<(), RejectReason> {
+        if enforce_risk && self.state.risk_locks.contains_key(&command.account_id) {
+            return Err(RejectReason::AccountLocked);
+        }
         validate_common_order(
             instrument,
             command,
@@ -185,6 +189,15 @@ impl TradingCore {
             self.check_new_order_interest(&command.instrument_id, staged_instruments)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn admission_detail(&self, command: &PlaceOrder, reason: RejectReason) -> String {
+        if reason == RejectReason::AccountLocked
+            && let Some(lock) = self.state.risk_locks.get(&command.account_id)
+        {
+            return format!("{reason}: {}", lock.reason);
+        }
+        reason.to_string()
     }
 }
 
@@ -632,8 +645,9 @@ impl TradingCore {
             VenueRoute::Simulated,
             staged_instruments.len(),
             staged_instruments,
+            enforce_risk,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| self.admission_detail(&command, error))?;
         self.check_practice_market(&instrument)
             .map_err(|reason| reason.to_string())?;
         let risk_warnings = if enforce_risk {

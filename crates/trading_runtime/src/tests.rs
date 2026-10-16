@@ -1715,12 +1715,11 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
             role: ProtectiveOrderRole::StopLoss,
         })
         .expect("reduce-only protection remains available");
-    assert!(
-        service
-            .place_order(market_order("locked-entry", OrderSide::Buy, 4, 4_000))
-            .expect_err("risk-increasing order remains locked")
-            .contains("risk-locked")
-    );
+    let locked = service
+        .place_order(market_order("locked-entry", OrderSide::Buy, 4, 4_000))
+        .expect_err("risk-increasing order remains locked");
+    assert!(locked.contains("AccountLocked"), "{locked}");
+    assert!(locked.contains("manual test lock"), "{locked}");
     let mut oversized = market_order("oversized-stop", OrderSide::Sell, 5, 5_000);
     oversized.order_type = OrderType::Stop;
     oversized.quantity = FixedPoint::try_new(3, 0).expect("quantity");
