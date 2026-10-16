@@ -12,6 +12,13 @@ use aeris_trading::{OrderSide, RejectReason, TimeInForce};
 mod capabilities;
 pub(crate) use capabilities::VenueCapabilities;
 
+/// Explicit no-op buying-power step; margin is outside the solid-core venue.
+pub(crate) struct BuyingPower;
+
+impl BuyingPower {
+    fn check(_command: &PlaceOrder) {}
+}
+
 pub(crate) fn validate_time_in_force(
     kind: OrderType,
     tif: TimeInForce,
@@ -237,6 +244,7 @@ impl TradingCore {
             self.state.orders.open_count(),
             additional_open_orders,
         )?;
+        BuyingPower::check(command);
         validate_owner_trigger_side(self, command)?;
         if route == VenueRoute::Simulated {
             self.check_new_order_interest(&command.instrument_id, staged_instruments)?;

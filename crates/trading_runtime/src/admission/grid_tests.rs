@@ -3,6 +3,14 @@ use aeris_instruments::InstrumentDecimal;
 use aeris_trading::{OrderSide, OrderType, TimeInForce};
 
 #[test]
+fn buying_power_hook_is_explicit_and_unrestricted_without_margin() {
+    let command = crate::tests::market_order("no-margin", OrderSide::Buy, 1, 1_000);
+    let before = command.clone();
+    BuyingPower::check(&command);
+    assert_eq!(command, before);
+}
+
+#[test]
 fn resting_at_resolves_on_touch_for_every_side() {
     let price = |units| FixedPoint::try_new(units, 2).expect("price");
     for (side, units, expected) in [
