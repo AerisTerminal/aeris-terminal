@@ -1427,6 +1427,14 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
             && order.order_type == OrderType::Stop
             && order.stop_price == Some(FixedPoint::try_new(9_900, 2).expect("stop"))
     }));
+    assert!(
+        armed
+            .orders
+            .iter()
+            .filter(|order| order.status.is_open())
+            .all(|order| order.time_in_force == TimeInForce::GoodTillCancelled),
+        "activated stop and targets must be GTC regardless of the entry's time in force"
+    );
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");

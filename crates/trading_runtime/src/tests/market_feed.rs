@@ -1376,10 +1376,16 @@ fn assert_sink_interest_capacity() {
         order.time_in_force = TimeInForce::GoodTillCancelled;
         order.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
         if index == 256 {
+            let before = service.snapshot().unwrap();
             let previous_sends = sink.0.lock().unwrap().len();
             assert_eq!(
                 service.place_order(order).unwrap_err(),
                 "CapacityExceeded: trading order capacity reached"
+            );
+            assert_eq!(
+                service.snapshot().unwrap(),
+                before,
+                "257th order has no facts"
             );
             assert_eq!(sink.0.lock().unwrap().len(), previous_sends);
         } else {

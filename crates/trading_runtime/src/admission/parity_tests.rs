@@ -4,7 +4,7 @@ use crate::{
     tests::{TestDirectory, instrument, market_order, start_service},
 };
 use aeris_instruments::{InstrumentDecimal, PriceGrid};
-use aeris_trading::{ClientOrderId, RejectReason};
+use aeris_trading::{ClientOrderId, RejectReason, venue::VenueRequest};
 use std::time::Duration;
 
 fn shared_refusals() -> Vec<(&'static str, PlaceOrder, RejectReason)> {
@@ -149,5 +149,39 @@ fn simulated_and_broker_routes_refuse_the_same_invalid_instructions_without_fact
         assert_eq!(service.snapshot().expect("no order fact"), locked);
         assert!(outbound.try_recv().is_err());
     }
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
+fn broker_day_entry_maps_to_gtc_before_the_venue_request() {
+    let directory = TestDirectory::new("broker-day-capabilities");
+    let service = start_service(&directory);
+    service.register_instrument(instrument()).expect("terms");
+    let broker_id = TradingAccountId::try_new("day-demo").expect("broker id");
+    service
+        .register_account(TradingAccount {
+            id: broker_id.clone(),
+            display_name: "Scripted demo".into(),
+            environment: AccountEnvironment::Demo,
+            venue_id: "ctrader".into(),
+            broker_ref: Some("fixture-demo".into()),
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("demo account");
+    let (_generation, outbound) = service.attach_demo_venue().expect("venue");
+    while outbound.try_recv().is_ok() {}
+    let mut entry = market_order("broker-day", OrderSide::Buy, 1, 1_000);
+    entry.account_id = broker_id;
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::Day;
+    entry.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    let accepted = service.place_order(entry).expect("broker accepts DAY");
+    assert_eq!(accepted.time_in_force, TimeInForce::GoodTillCancelled);
+    let VenueRequest::Place(sent) = outbound.try_recv().expect("place request") else {
+        panic!("expected broker placement");
+    };
+    assert_eq!(sent.time_in_force, TimeInForce::GoodTillCancelled);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
