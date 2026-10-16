@@ -1,5 +1,7 @@
 pub(crate) mod feed;
 pub(crate) mod gating;
+#[cfg(test)]
+mod placement_atomicity_tests;
 
 use super::{Command, ManagedBracketStatus, respond};
 use aeris_instruments::{ContractMetadata, InstrumentId, InstrumentMetadataProvenance, PriceGrid};
