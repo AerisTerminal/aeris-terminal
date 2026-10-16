@@ -146,6 +146,72 @@ fn resting_at_uses_owner_quote_and_persists_only_resolved_order() {
 }
 
 #[test]
+fn wrong_side_stops_share_owner_quote_refusal_across_both_routes() {
+    let directory = TestDirectory::new("stop-route-parity");
+    let (service, _clock) = feed_service(&directory);
+    let broker_id = TradingAccountId::try_new("stop-parity-demo").expect("account id");
+    service
+        .register_account(TradingAccount {
+            id: broker_id.clone(),
+            display_name: "Scripted demo".into(),
+            environment: AccountEnvironment::Demo,
+            venue_id: "ctrader".into(),
+            broker_ref: Some("fixture-demo".into()),
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("demo account");
+    let (_generation, outbound) = service.attach_demo_venue().expect("venue");
+    while outbound.try_recv().is_ok() {}
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    service.status().expect("drain");
+    let before = service.snapshot().expect("before");
+    for (side, stop_units) in [(OrderSide::Buy, 10_025), (OrderSide::Sell, 10_000)] {
+        for kind in [OrderType::Stop, OrderType::StopLimit] {
+            for (route, account_id) in [
+                (
+                    "simulated",
+                    TradingAccountId::try_new("aeris-sim-1").expect("practice id"),
+                ),
+                ("broker", broker_id.clone()),
+            ] {
+                let mut command = market_order(
+                    &format!("wrong-side-{side:?}-{kind:?}-{route}"),
+                    side,
+                    1,
+                    1_000_000_000_000,
+                );
+                command.account_id = account_id;
+                command.order_type = kind;
+                command.time_in_force = TimeInForce::GoodTillCancelled;
+                command.stop_price = Some(FixedPoint::try_new(stop_units, 2).expect("stop"));
+                if kind == OrderType::StopLimit {
+                    command.limit_price = Some(FixedPoint::try_new(10_050, 2).expect("limit"));
+                }
+                assert_eq!(
+                    service.place_order(command).expect_err("wrong-side stop"),
+                    aeris_trading::RejectReason::WrongSideTrigger.to_string(),
+                    "{side:?}/{kind:?}/{route}"
+                );
+                assert_eq!(service.snapshot().expect("unchanged"), before);
+                assert!(outbound.try_recv().is_err(), "no broker request");
+            }
+        }
+    }
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
     let directory = TestDirectory::new("chart-stale-revision");
     let (service, _clock) = feed_service(&directory);
