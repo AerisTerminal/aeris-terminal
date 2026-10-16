@@ -14,6 +14,7 @@ aeris_application = { path = "../../application" }
 aeris_design_system = { path = "../design_system" }
 aeris_observability = { path = "../../observability" }
 aeris_terminal_ui = { path = "../terminal_ui", default-features = false }
+aeris_trading = { path = "../../domain/trading" }
 gpui.workspace = true
 num-traits = "=0.2.19"
 resvg = { version = "=0.48.1", default-features = false }

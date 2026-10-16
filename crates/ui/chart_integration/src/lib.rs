@@ -8,6 +8,7 @@ mod bridge;
 mod engine_bridge;
 mod provenance;
 mod saved_drawings;
+mod trading_projection;
 mod view;
 mod workspace;
 
@@ -52,6 +53,7 @@ pub use aeris_charts_engine::{
 pub use aeris_charts_render_gpui::input::chart_keystrokes;
 pub use bridge::ChartBridgeMetrics;
 pub use saved_drawings::saved_drawings_document;
+pub use trading_projection::chart_order_status;
 pub use view::{
     AerisChartView, BigTradesFilter, BigTradesIntensity, BigTradesSettings, BigTradesSize,
     ChartAppearanceSettings, ChartContextKind, ChartContextRequest, ChartDrawingAnchorError,

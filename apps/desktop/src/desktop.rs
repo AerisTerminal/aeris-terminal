@@ -1903,20 +1903,7 @@ fn chart_working_orders(
             let id = ChartOrderId::new(order.client_order_id.as_str()).ok()?;
             let side = chart_order_side(order.side);
             let kind = chart_order_kind(order.order_type);
-            let status = match order.status {
-                // The pinned chart engine has no Inactive state; do not present a
-                // held group leg as an executable or pending-submit order.
-                aeris_trading::OrderStatus::Inactive => return None,
-                aeris_trading::OrderStatus::Pending => ChartOrderStatus::PendingSubmit,
-                aeris_trading::OrderStatus::Working => ChartOrderStatus::Working,
-                aeris_trading::OrderStatus::PendingModify => ChartOrderStatus::PendingModify,
-                aeris_trading::OrderStatus::PartiallyFilled => ChartOrderStatus::PartiallyFilled,
-                aeris_trading::OrderStatus::PendingCancel => ChartOrderStatus::PendingCancel,
-                aeris_trading::OrderStatus::Filled => ChartOrderStatus::Filled,
-                aeris_trading::OrderStatus::Cancelled => ChartOrderStatus::Cancelled,
-                aeris_trading::OrderStatus::Expired => ChartOrderStatus::Expired,
-                aeris_trading::OrderStatus::Rejected => ChartOrderStatus::Rejected,
-            };
+            let status = aeris_chart_integration::chart_order_status(order.status);
             let semantics = chart_order_semantics(snapshot, order, price_increment);
             Some(ChartWorkingOrder {
                 id,
