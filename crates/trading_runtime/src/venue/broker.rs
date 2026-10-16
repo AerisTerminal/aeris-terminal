@@ -209,6 +209,8 @@ impl TradingCore {
             return Err("order scales do not match the instrument".into());
         }
         check_quantity_increment(instrument, command.quantity)?;
+        crate::core::admission::validate_order_prices(instrument, command)
+            .map_err(|error| error.to_string())?;
         if self.state.orders.open_count() >= MAXIMUM_OPEN_ORDERS {
             return Err("trading open-order limit reached".into());
         }

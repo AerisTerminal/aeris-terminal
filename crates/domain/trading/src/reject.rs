@@ -63,6 +63,7 @@ pub enum RejectReason {
         limit_ms: i64,
     },
     ClientIdReused,
+    OffGrid,
 }
 
 impl fmt::Display for RejectReason {
@@ -79,6 +80,7 @@ impl fmt::Display for RejectReason {
             Self::ClientIdReused => {
                 f.write_str("ClientIdReused: client order id has different instructions")
             }
+            Self::OffGrid => f.write_str("OffGrid: price is off the instrument price grid"),
         }
     }
 }

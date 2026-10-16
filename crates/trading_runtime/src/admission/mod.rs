@@ -6,7 +6,66 @@ use super::{
     TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute, check_quantity_increment,
     mirrored_client_order_id, multiply_quantity, order_acceptance_detail, venue,
 };
+use aeris_instruments::PriceGrid;
 use aeris_trading::RejectReason;
+
+/// Validates exact decimal ticks without rounding provider prices or manufacturing a tick.
+pub(crate) fn validate_price_grid(grid: PriceGrid, price: FixedPoint) -> Result<(), RejectReason> {
+    if price.units() <= 0 {
+        return Err(RejectReason::OffGrid);
+    }
+    match grid {
+        PriceGrid::Unknown => Ok(()),
+        PriceGrid::Fixed(tick) => {
+            let scale = price.scale().max(tick.scale());
+            let price_units =
+                i128::from(price.units()) * 10_i128.pow(u32::from(scale - price.scale()));
+            let tick_units =
+                i128::from(tick.units()) * 10_i128.pow(u32::from(scale - tick.scale()));
+            if price_units % tick_units == 0 {
+                Ok(())
+            } else {
+                Err(RejectReason::OffGrid)
+            }
+        }
+        PriceGrid::SignificantFigures {
+            figures,
+            max_decimals,
+        } => {
+            let mut units = price.units();
+            let mut decimals = price.scale();
+            while decimals > 0 && units % 10 == 0 {
+                units /= 10;
+                decimals -= 1;
+            }
+            if decimals == 0 {
+                return Ok(());
+            }
+            let significant_digits = units.to_string().trim_start_matches('0').len();
+            if decimals <= max_decimals && significant_digits <= usize::from(figures) {
+                Ok(())
+            } else {
+                Err(RejectReason::OffGrid)
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_order_prices(
+    instrument: &TradingInstrument,
+    command: &PlaceOrder,
+) -> Result<(), RejectReason> {
+    for price in [command.limit_price, command.stop_price]
+        .into_iter()
+        .flatten()
+    {
+        validate_price_grid(instrument.contract.price_grid, price)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod grid_tests;
 
 /// Client identity belongs to the order book, not the venue. Ignore only audit fields
 /// stamped at submission; an instruction change must never silently reuse the old order.
@@ -463,6 +522,7 @@ impl TradingCore {
             return Err("order scales do not match the instrument".to_string());
         }
         check_quantity_increment(&instrument, command.quantity)?;
+        validate_order_prices(&instrument, &command).map_err(|error| error.to_string())?;
         if self
             .state
             .orders

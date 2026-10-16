@@ -1619,7 +1619,7 @@ fn bracket_that_cannot_be_armed_is_rejected_once_and_other_orders_still_fill() {
     let mut stop = market_order("manual-stop", OrderSide::Sell, 3, 3_000);
     stop.order_type = OrderType::Stop;
     stop.time_in_force = TimeInForce::GoodTillCancelled;
-    stop.stop_price = Some(FixedPoint::try_new(40, 2).expect("stop"));
+    stop.stop_price = Some(FixedPoint::try_new(50, 2).expect("on-grid stop"));
     service.place_order(stop).expect("manual stop accepted");
     assert_eq!(
         service
