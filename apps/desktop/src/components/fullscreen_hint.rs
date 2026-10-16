@@ -96,16 +96,13 @@ impl TerminalApp {
 
 fn hint_chip(theme: &AerisTheme) -> Div {
     let colors = theme.colors;
-    div()
+    let radius = px(f32::from(RadiusToken::Full.logical_pixels()));
+    popover_surface(div(), theme, radius)
         .h(px(CHIP_HEIGHT))
         .flex()
         .items_center()
         .gap_1()
         .px_4()
-        .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(colors.border))
-        .bg(gpui_color(colors.surface_secondary))
         .text_sm()
         .text_color(gpui_color(colors.text_secondary))
         .debug_selector(|| "fullscreen_hint_chip".into())
@@ -117,6 +114,7 @@ fn hint_chip(theme: &AerisTheme) -> Div {
                 .child("Esc"),
         )
         .child("to exit full screen")
+        .child(popover_highlight(theme, radius))
 }
 
 /// The chip, centred at the top of the window while the hint is on screen. It registers no

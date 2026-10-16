@@ -1278,7 +1278,7 @@ fn workspace_tab_aria_label(label: &str, change: Option<&str>) -> String {
 }
 
 fn workspace_tab_surface_colors(theme: &AerisTheme) -> (ThemeColor, ThemeColor) {
-    (theme.colors.surface_secondary, theme.colors.surface)
+    (terminal_chrome::title_bar_fill(theme), theme.colors.surface)
 }
 
 fn workspace_tab(
@@ -1785,7 +1785,11 @@ mod tests {
     fn workspace_tabs_match_the_title_bar_until_selected() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let (inactive, active) = workspace_tab_surface_colors(&theme);
-            assert_eq!(inactive, theme.colors.surface_secondary);
+            assert_eq!(
+                inactive,
+                theme.colors.surface_secondary.over(theme.colors.surface)
+            );
+            assert!((inactive.alpha() - 1.0).abs() < f32::EPSILON);
             assert_eq!(active, theme.colors.surface);
         }
     }

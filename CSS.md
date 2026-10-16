@@ -17,6 +17,17 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
   hover and `active-bg` for a selected or open state. Press paints nothing of its own. Hover
   changes the fill only, no shadows.
+- Dark `surface-secondary`, `surface-subtle` and `surface-raised` are translucent tints of `surface`.
+  They only appear over an opaque `surface` (the window root) or `surface-popover`; never use them
+  as the fill of a layer that floats over other content.
+- Floating layers (menus, dialogs, popovers, tooltips, toasts, hints, floating toolbars) use
+  `popover_surface` and `popover_highlight` from `native_ui/theme.rs`: an opaque `surface-popover`
+  fill, a `--border-width` `border-popover` hairline, and a 1px `border-popover-highlight` inner edge
+  painted above the content. The large workspace panels (symbol, indicator and chart settings) keep
+  that edge and highlight (`popover_frame`) but fill with `surface`.
+- Button labels always use the normal platform weight, trade buttons included.
+- A fill resolved with `.over(..)` is opaque only over an opaque backdrop. Resolve a translucent
+  surface over the `surface` beneath it first (the title bar uses `title_bar_fill`).
 - Menus, dialogs and popovers never dim, tint or blur what is behind them: their dismiss scrims
   paint nothing. A popover stays inside the window, flipping to the other side of its trigger
   when there is no room.
@@ -52,18 +63,19 @@ States and modifiers: `selected` (a toggle that is on), `text_toggle` (the on st
 changes only the text: `text-interactive` → `text-active`, no fill; hover adds `hover-bg` in both states
 and never changes the text; chart-header panel toggles), `open` (a trigger whose menu
 is open), `disabled`, `loading`, `round` (circle or pill), `danger_on_hover` (close / delete icons),
-`trigger` (label left, caret right), `full_width`, `strong` (trade actions). `close_button` is the one
-close control.
+`trigger` (label left, caret right), `full_width`. Every button label, trade buttons included, uses the
+normal platform weight; there is no bold button. `close_button` is the one close control.
 
 **`MenuPanel`** + **`MenuAnchor`** + **`MenuRow`** (`menu.rs`): every dropdown, context menu, flyout and
-select menu. Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
+select menu. The panel is a popover layer (see Rules). Place a panel `At(point)`, `Anchored { Below | Above, Start | End | Stretch }` from a trigger, or
 `InFlow`. Rows: `MenuRow::compact` (menus) and `MenuRow::search_result` (search lists), with
-`checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. A `destructive` row
+`checked`, `highlighted`, `disabled`, `destructive`, `leading`, `detail`, `trailing`. Rows rest on
+`surface-popover`. A `destructive` row
 keeps the shared neutral row fills and colours only its label and glyph: `text-danger` at rest,
 `danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
 Pass glyphs through `leading_icon` so the row colours them.
 
-**`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal. Sizes `Sm` (420), `Md` (480), `Lg`
+**`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal, drawn as a popover layer. Sizes `Sm` (420), `Md` (480), `Lg`
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the
 committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Secondary`.
 
@@ -97,21 +109,26 @@ while invalid.
   --surface-raised: #f0f0f0;
   --surface-overlay: color-mix(in srgb, #000000 50%, transparent);
   --surface-inverse: #222222;
+  /* Floating layers (menus, dialogs, tooltips) */
+  --surface-popover: #ffffff;
 
   /* Borders */
-  --border: #e5e5e5;
-  --border-secondary: var(--border);
-  --border-subtle: #f0f0f0;
-  --border-softer: #f5f5f5;
-  --border-strong: #c2c2c2;
+  --border: #0a0a0a1a;
+  --border-secondary: #0a0a0a1a;
+  --border-subtle: #0a0a0a12;
+  --border-softer: #0a0a0a0d;
+  --border-strong: #0a0a0a26;
   --border-inverse: #222222;
+  /* Floating-layer edge: a 0.5px outer hairline plus a 1px inner highlight. */
+  --border-popover: #0a0a0a33;
+  --border-popover-highlight: #ffffffcc;
   --border-width: 0.5px;
 
   /* Text */
-  --text-primary: #222222;
-  --text-default: #404040;
-  --text-secondary: #646465;
-  --text-muted: #c2c2c2;
+  --text-primary: #0a0a0a;
+  --text-default: #0a0a0ad9;
+  --text-secondary: #0a0a0a8c;
+  --text-muted: #0a0a0a40;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
   --text-danger: var(--danger);
@@ -120,18 +137,18 @@ while invalid.
      step with --icon / --icon-active: normal text = normal icon colour,
      hover/active text = active icon colour. They are separate tokens on
      purpose, never point one at the other. */
-  --text-interactive: #646465;
-  --text-hover: #404040;
-  --text-active: #404040;
+  --text-interactive: #0a0a0a8c;
+  --text-hover: #0a0a0a;
+  --text-active: #0a0a0a;
 
   /* Interaction states — hover / selected fill, pressed fill, disabled fill. */
-  --hover-bg: #f0f0f0;
-  --active-bg: #e5e5e5;
-  --disabled-bg: #e5e5e5;
+  --hover-bg: #0a0a0a0d;
+  --active-bg: #0a0a0a0d;
+  --disabled-bg: #0a0a0a0d;
 
   /* Icons — normal and hovered/pressed/selected */
-  --icon: #646465;
-  --icon-active: #404040;
+  --icon: #0a0a0a8c;
+  --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -161,11 +178,11 @@ while invalid.
   --danger-foreground: #ffffff;
 
   /* Buttons — neutral default button */
-  --button-fill: #333333;
-  --button-fill-hover: #404040;
-  --button-fill-active: #222222;
-  --button-fill-foreground: #ffffff;
-  --button-fill-subtle: #f5f5f5;
+  --button-fill: #0a0a0af2;
+  --button-fill-hover: #0a0a0ada;
+  --button-fill-active: #0a0a0ac2;
+  --button-fill-foreground: #fafafaf2;
+  --button-fill-subtle: #0a0a0a14;
 
   /* Trade — dedicated buy / sell buttons. Hover and press darken the fill; no shadows. */
   --buy: #089981;
@@ -192,7 +209,7 @@ while invalid.
 
   /* Radius */
   --radius-default: 8px;
-  --radius-medium: 12px;
+  --radius-medium: 14px;
   --radius-small: 4px;
   --radius-large: 999px;
   --radius-compact: 6px;
@@ -213,43 +230,46 @@ while invalid.
 
 .dark {
   /* Surfaces */
-  --surface: #1f1f1f;
-  --surface-secondary: #222222;
-  --surface-subtle: #2b2b2b;
-  --surface-raised: #333333;
+  --surface: #171717;
+  --surface-secondary: #fafafa0f;
+  --surface-subtle: #fafafa0a;
+  --surface-raised: #fafafa14;
   --surface-overlay: color-mix(in srgb, #000000 60%, transparent);
   --surface-inverse: #ffffff;
+  --surface-popover: #262626;
 
   /* Borders */
-  --border: #333333;
-  --border-secondary: var(--border);
-  --border-subtle: #333333;
-  --border-softer: #2b2b2b;
-  --border-strong: #404040;
+  --border: #fafafa1a;
+  --border-secondary: #fafafa26;
+  --border-subtle: #fafafa12;
+  --border-softer: #fafafa0d;
+  --border-strong: #fafafa33;
   --border-inverse: #ffffff;
+  --border-popover: #000000cc;
+  --border-popover-highlight: #ffffff1a;
   --border-width: 0.5px;
 
   /* Text */
-  --text-primary: #f5f5f5;
-  --text-default: #f0f0f0;
-  --text-secondary: #c2c2c2;
-  --text-muted: #808080;
+  --text-primary: #fafafa;
+  --text-default: #fafafad9;
+  --text-secondary: #fafafa8c;
+  --text-muted: #fafafa40;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
   --text-danger: #ffa2a2;
   --text-warning: #ffb86a;
-  --text-interactive: #c2c2c2;
-  --text-hover: #f0f0f0;
-  --text-active: #f0f0f0;
+  --text-interactive: #fafafa8c;
+  --text-hover: #fafafa;
+  --text-active: #fafafa;
 
   /* Interaction states */
-  --hover-bg: #333333;
-  --active-bg: #404040;
-  --disabled-bg: #404040;
+  --hover-bg: #fafafa13;
+  --active-bg: #fafafa26;
+  --disabled-bg: #fafafa0d;
 
   /* Icons */
-  --icon: #c2c2c2;
-  --icon-active: #f0f0f0;
+  --icon: #fafafa8c;
+  --icon-active: #fafafa;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
   --positive: #089981;
@@ -279,11 +299,11 @@ while invalid.
   --danger-foreground: #ffffff;
 
   /* Buttons — neutral default button */
-  --button-fill: #f5f5f5;
-  --button-fill-hover: #e0e0e0;
-  --button-fill-active: #d4d4d4;
-  --button-fill-foreground: #404040;
-  --button-fill-subtle: #222222;
+  --button-fill: #fafafad9;
+  --button-fill-hover: #fafafac3;
+  --button-fill-active: #fafafaad;
+  --button-fill-foreground: #0a0a0ad9;
+  --button-fill-subtle: #fafafa14;
 
   /* Trade — dedicated buy / sell buttons. Hover and press brighten the fill; no shadows. */
   --buy: #089981;

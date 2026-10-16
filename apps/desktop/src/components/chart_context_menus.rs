@@ -980,17 +980,14 @@ fn chart_settings_panel(
 ) -> Stateful<Div> {
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
-    div()
-        .id("chart_settings_menu")
+    let radius = px(f32::from(RadiusToken::Medium.logical_pixels()));
+    popover_frame(div().id("chart_settings_menu"), theme, radius)
+        .bg(gpui_color(colors.surface))
         .absolute()
         .left(bounds.origin.x)
         .top(bounds.origin.y)
         .w(bounds.size.width)
         .h(bounds.size.height)
-        .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface))
         .font_family(aeris_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
         .text_color(gpui_color(colors.text_primary))
@@ -1013,6 +1010,7 @@ fn chart_settings_panel(
                     terminal, menu, content, view, theme,
                 ))),
         ))
+        .child(popover_highlight(theme, radius))
 }
 
 /// Title bar of the settings panel. Dragging it moves the panel anywhere in the window.

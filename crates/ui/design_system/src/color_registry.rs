@@ -13,12 +13,18 @@ macro_rules! platform_color_registry {
             surface_raised => "surface-raised",
             surface_overlay => "surface-overlay",
             surface_inverse => "surface-inverse",
+            /// Opaque fill for floating layers: menus, dialogs, tooltips and toasts.
+            surface_popover => "surface-popover",
             border => "border",
             border_secondary => "border-secondary",
             border_subtle => "border-subtle",
             border_softer => "border-softer",
             border_strong => "border-strong",
             border_inverse => "border-inverse",
+            /// Floating-layer outer hairline, drawn at `--border-width`.
+            border_popover => "border-popover",
+            /// Floating-layer inner highlight, drawn just inside `border_popover`.
+            border_popover_highlight => "border-popover-highlight",
             text_primary => "text-primary",
             text_default => "text-default",
             text_secondary => "text-secondary",

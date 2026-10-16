@@ -14,7 +14,7 @@ use super::{
     input::{Input, InputState},
     menu::{ANCHOR_GAP, PopupAnimationOrigin, animate_popup_from_origin},
     popup_fit::fit_to_window,
-    theme::{gpui_color, platform_border_width},
+    theme::{gpui_color, platform_border_width, popover_highlight, popover_surface},
 };
 
 type SelectionHandler = Rc<dyn Fn(String, &mut Window, &mut App)>;
@@ -189,8 +189,8 @@ impl RenderOnce for ColorPicker {
             handler: self.on_select,
         };
 
-        let panel = div()
-            .id(self.id)
+        let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
+        let panel = popover_surface(div().id(self.id), &theme, radius)
             .absolute()
             .top_full()
             .mt(ANCHOR_GAP)
@@ -200,10 +200,6 @@ impl RenderOnce for ColorPicker {
             .flex()
             .flex_col()
             .gap_2p5()
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .border(platform_border_width(&theme))
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface_secondary))
             .occlude()
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .child(saturation_value_field(&picking, &theme))
@@ -222,7 +218,8 @@ impl RenderOnce for ColorPicker {
                     .h(platform_border_width(&theme))
                     .bg(gpui_color(colors.border_secondary)),
             )
-            .child(recommended_colors(&normalized, &picking, &theme));
+            .child(recommended_colors(&normalized, &picking, &theme))
+            .child(popover_highlight(&theme, radius));
         let popup = fit_to_window(animate_popup_from_origin(
             panel,
             (animation_id, "enter"),

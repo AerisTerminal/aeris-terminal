@@ -97,22 +97,33 @@ impl Render for TooltipView {
             TooltipContent::Dynamic(label) => label(cx),
         };
         let colors = self.theme.colors;
+        let dimensions = self.theme.dimensions;
+        let radius = f32::from(RadiusToken::Sm.logical_pixels());
+        // The shared floating-layer edge: a `border-popover` hairline around an opaque
+        // `surface-popover` fill, with the `border-popover-highlight` inner edge on top.
+        let highlight = div()
+            .absolute()
+            .inset_0()
+            .rounded(px((radius - dimensions.border_width).max(0.0)))
+            .border(px(dimensions.popover_highlight_width))
+            .border_color(gpui_color(colors.border_popover_highlight));
         div().pl_2().pt_2().child(
             div()
                 .max_w(px(320.0))
                 .px_2()
                 .py_1()
-                .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-                .border(px(self.theme.dimensions.border_width))
-                .border_color(gpui_color(colors.border))
-                .bg(gpui_color(colors.surface))
+                .rounded(px(radius))
+                .border(px(dimensions.border_width))
+                .border_color(gpui_color(colors.border_popover))
+                .bg(gpui_color(colors.surface_popover))
                 .font_family(platform_font_family())
                 .font_weight(gpui::FontWeight(f32::from(
                     platform_typography().weight(TypographyRole::Normal),
                 )))
                 .text_xs()
                 .text_color(gpui_color(colors.text_primary))
-                .child(label),
+                .child(label)
+                .child(highlight),
         )
     }
 }

@@ -17,7 +17,7 @@ use super::{
     platform_font_weight,
     popup_fit::fit_to_window,
     rem_scale::ROOT_REM_PX,
-    theme::{gpui_color, platform_border_width},
+    theme::{gpui_color, platform_border_width, popover_highlight, popover_surface},
 };
 
 type Activation = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -280,9 +280,7 @@ impl MenuRow {
         label: impl Into<SharedString>,
         theme: &AerisTheme,
     ) -> Self {
-        let mut row = Self::new(id, label, theme, RowKind::SearchResult);
-        row.resting_fill = theme.colors.surface;
-        row
+        Self::new(id, label, theme, RowKind::SearchResult)
     }
 
     fn new(
@@ -296,7 +294,7 @@ impl MenuRow {
             kind,
             scale: MenuScale::BASE,
             theme: *theme,
-            resting_fill: theme.colors.surface_secondary,
+            resting_fill: theme.colors.surface_popover,
             label: label.into(),
             leading_icon: None,
             leading: None,
@@ -566,8 +564,8 @@ pub(crate) const ANCHOR_GAP: Pixels = px(4.0);
 
 /// `Aeris`'s one menu surface: dropdowns, context menus, flyouts and select menus.
 ///
-/// The panel owns the flat menu look (platform border, `--radius-default`, `surface-secondary`,
-/// no shadow), its placement, scrolling, entry motion and click containment. Its content is
+/// The panel owns the flat menu look (the popover hairline and inner highlight,
+/// `--radius-default`, `surface-popover`, no shadow), its placement, scrolling, entry motion and click containment. Its content is
 /// inset from the rounded border: GPUI clips to rectangles, and any inset of at least
 /// `r(1 - 1/√2)` keeps a row's rectangular highlight inside the panel's rounded corner, so rows
 /// never depend on their position in the panel.
@@ -700,39 +698,37 @@ impl RenderOnce for MenuPanel {
                 body.flex_1().min_h_0().overflow_y_scroll()
             })
             .when_some(self.scroll, |body, scroll| body.track_scroll(&scroll));
-        let panel = div()
-            .id(self.id.clone())
-            .occlude()
-            .flex()
-            .flex_col()
-            .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-            .border(platform_border_width(&self.theme))
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface_secondary))
-            .font_family(platform_font_family())
-            .font_weight(platform_font_weight(TypographyRole::Normal))
-            .text_color(gpui_color(colors.text_primary))
-            .when_some(self.width, Styled::w)
-            .when_some(self.max_height, Styled::max_h)
-            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .map(|panel| match self.placement {
-                MenuPlacement::At(origin) => panel.absolute().left(origin.x).top(origin.y),
-                MenuPlacement::Anchored { side, align } => {
-                    let panel = match side {
-                        MenuSide::Below => panel.absolute().top_full().mt(ANCHOR_GAP),
-                        MenuSide::Above => panel.absolute().bottom_full().mb(ANCHOR_GAP),
-                    };
-                    match align {
-                        MenuAlign::Start => panel.left_0(),
-                        MenuAlign::End => panel.right_0(),
-                        MenuAlign::Stretch => panel.left_0().right_0(),
-                    }
+        let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
+        let panel = popover_surface(
+            div().id(self.id.clone()).occlude().flex().flex_col(),
+            &self.theme,
+            radius,
+        )
+        .font_family(platform_font_family())
+        .font_weight(platform_font_weight(TypographyRole::Normal))
+        .text_color(gpui_color(colors.text_primary))
+        .when_some(self.width, Styled::w)
+        .when_some(self.max_height, Styled::max_h)
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .map(|panel| match self.placement {
+            MenuPlacement::At(origin) => panel.absolute().left(origin.x).top(origin.y),
+            MenuPlacement::Anchored { side, align } => {
+                let panel = match side {
+                    MenuSide::Below => panel.absolute().top_full().mt(ANCHOR_GAP),
+                    MenuSide::Above => panel.absolute().bottom_full().mb(ANCHOR_GAP),
+                };
+                match align {
+                    MenuAlign::Start => panel.left_0(),
+                    MenuAlign::End => panel.right_0(),
+                    MenuAlign::Stretch => panel.left_0().right_0(),
                 }
-                MenuPlacement::InFlow => panel,
-            })
-            .children(self.header)
-            .child(body);
+            }
+            MenuPlacement::InFlow => panel,
+        })
+        .children(self.header)
+        .child(body)
+        .child(popover_highlight(&self.theme, radius));
         let panel = match self.animation {
             Some(origin) => animate_popup_from_origin(
                 panel,

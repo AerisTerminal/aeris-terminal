@@ -307,7 +307,6 @@ fn order_button(
     action: impl Fn(&aeris_market_data::OrderBookFrame, Option<String>, u64, &mut App) + 'static,
 ) -> Button {
     ticket_button(id, state.theme)
-        .strong()
         .label(label)
         .disabled(!enabled)
         .on_click(frame_action(state, action))
@@ -331,7 +330,6 @@ fn trade_order_button(
     Button::new(id, state.theme)
         .variant(trade_variant(side))
         .button_size(ButtonSize::Lg)
-        .strong()
         .label(label)
         .disabled(!enabled)
         .on_click(frame_action(state, action))
@@ -500,7 +498,6 @@ fn global_actions(state: &TradingOrderControlsState<'_>) -> Div {
     action_row(
         // Cancelling needs no book frame, only the selected account.
         ticket_button("trading_cancel_all", state.theme)
-            .strong()
             .label("Cancel All")
             .disabled(!cancel_enabled)
             .on_click(move |_, _, cx| {

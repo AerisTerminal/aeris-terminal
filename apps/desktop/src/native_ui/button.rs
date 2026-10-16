@@ -270,9 +270,8 @@ impl ButtonFlags {
     const DANGER_ON_HOVER: u16 = 1 << 5;
     const TRIGGER: u16 = 1 << 6;
     const FULL_WIDTH: u16 = 1 << 7;
-    const STRONG: u16 = 1 << 8;
-    const SKIP_TAB_STOP: u16 = 1 << 9;
-    const TEXT_TOGGLE: u16 = 1 << 10;
+    const SKIP_TAB_STOP: u16 = 1 << 8;
+    const TEXT_TOGGLE: u16 = 1 << 9;
 
     const fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
@@ -451,12 +450,6 @@ impl Button {
 
     pub(crate) fn full_width(mut self) -> Self {
         self.flags.set(ButtonFlags::FULL_WIDTH, true);
-        self
-    }
-
-    /// The Theme System `Strong` label weight for primary trade actions.
-    pub(crate) fn strong(mut self) -> Self {
-        self.flags.set(ButtonFlags::STRONG, true);
         self
     }
 
@@ -690,11 +683,6 @@ fn style_frame(
     square: bool,
     radius: Pixels,
 ) -> BaseButton {
-    let label_role = if flags.has(ButtonFlags::STRONG) {
-        TypographyRole::Strong
-    } else {
-        TypographyRole::Normal
-    };
     button
         .flex()
         .flex_shrink_0()
@@ -704,7 +692,7 @@ fn style_frame(
         .h(design_rems(size.logical_height()))
         .rounded(radius)
         .font_family(platform_font_family())
-        .font_weight(platform_font_weight(label_role))
+        .font_weight(platform_font_weight(TypographyRole::Normal))
         .map(|button| {
             if size.dense_text() {
                 button.text_xs()

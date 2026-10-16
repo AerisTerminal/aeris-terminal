@@ -253,6 +253,13 @@ pub(super) fn workspace_window_drag_region(
         )
 }
 
+/// The title bar's `surface-secondary` fill resolved over the window's `surface`. Dark
+/// `surface-secondary` is a translucent tint, and the bar's tabs and caption controls derive
+/// their resting and hover fills from it, so they need the opaque colour actually on screen.
+pub(super) fn title_bar_fill(theme: &AerisTheme) -> ThemeColor {
+    theme.colors.surface_secondary.over(theme.colors.surface)
+}
+
 pub(super) fn workspace_title_bar(
     terminal: &Entity<TerminalApp>,
     state: &WorkspaceTabBarState<'_>,
@@ -292,7 +299,7 @@ pub(super) fn workspace_title_bar(
         .items_center()
         .border_b_1()
         .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface_secondary))
+        .bg(gpui_color(title_bar_fill(&theme)))
         .when(cfg!(target_os = "macos"), |bar| bar.pl(px(80.0)))
         .child(
             div()
@@ -332,6 +339,7 @@ fn workspace_caption_control(
         close,
     } = spec;
     let colors = theme.colors;
+    let hover_fill = colors.hover_bg.over(title_bar_fill(theme));
     let focus_border = platform_border_width(theme);
     let control = div()
         .id(id)
@@ -348,7 +356,7 @@ fn workspace_caption_control(
                     .bg(gpui_color(colors.danger))
                     .text_color(gpui_color(colors.danger_foreground))
             } else {
-                control.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                control.bg(gpui_color(hover_fill))
             }
         })
         .child(header_icon(icon).small());

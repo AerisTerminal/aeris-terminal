@@ -2,7 +2,7 @@ use aeris_design_system::{
     AerisTheme, RadiusToken, ThemeColor, ThemeMode, TypographyRole, platform_font_family,
     platform_typography,
 };
-use gpui::{FontWeight, Hsla, Pixels, px};
+use gpui::{Div, FontWeight, Hsla, Pixels, Styled, div, px};
 use gpui_base::{ColorTokens, RadiusTokens, Theme, ThemeAppearance};
 
 /// Text-field tokens, exactly as the Theme System `Input` uses them: a `border` field on
@@ -40,6 +40,33 @@ pub(crate) fn gpui_color(color: ThemeColor) -> Hsla {
 
 pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
     px(theme.dimensions.border_width)
+}
+
+/// Floating-layer chrome (menus, dialogs, popovers, toasts, hints): the opaque `surface-popover`
+/// fill and the `border-popover` hairline. Pair it with [`popover_highlight`] as the last child.
+pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
+    popover_frame(element, theme, radius).bg(gpui_color(theme.colors.surface_popover))
+}
+
+/// The `border-popover` edge of a floating layer without a fill. Large workspace panels (the
+/// symbol, indicator and chart settings panels) fill it with the opaque `surface` themselves.
+pub(crate) fn popover_frame<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
+    element
+        .rounded(radius)
+        .border(platform_border_width(theme))
+        .border_color(gpui_color(theme.colors.border_popover))
+}
+
+/// The `border-popover-highlight` inner edge drawn just inside a [`popover_surface`]. It is an
+/// absolutely positioned overlay with no listeners, so it never takes part in layout or hit
+/// testing; add it last so it paints above the layer's content.
+pub(crate) fn popover_highlight(theme: &AerisTheme, radius: Pixels) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded((radius - platform_border_width(theme)).max(px(0.0)))
+        .border(px(theme.dimensions.popover_highlight_width))
+        .border_color(gpui_color(theme.colors.border_popover_highlight))
 }
 
 /// Projects `Aeris`'s semantic design contract into the unstyled Base

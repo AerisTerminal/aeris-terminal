@@ -80,7 +80,6 @@ pub(super) fn chrome_overlay_layer(
                 ChromeOverlayPanelStyle {
                     interval_popup: compact_panel,
                     frameless: menu_overlay,
-                    primary_surface: quick_timeframe,
                     radius: if matches!(
                         overlay,
                         ChromeOverlay::Instrument | ChromeOverlay::Indicator
@@ -312,7 +311,6 @@ pub(super) struct ChromeOverlayPanelStyle {
     interval_popup: bool,
     /// The content is one or more `MenuPanel`s that draw their own surface.
     frameless: bool,
-    primary_surface: bool,
     radius: RadiusToken,
 }
 
@@ -325,30 +323,14 @@ pub(super) fn chrome_overlay_panel(
     phase: ChromeOverlayPhase,
     animation_origin: PopupAnimationOrigin,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let enter_offset = animation_origin.enter_offset();
+    let radius = px(f32::from(style.radius.logical_pixels()));
     div()
         .id("chrome_overlay_panel")
         .relative()
         .flex_none()
         .when(!style.frameless, |panel| {
-            panel
-                .rounded(px(f32::from(style.radius.logical_pixels())))
-                .border(platform_border_width(theme))
-                .border_color(gpui_color(if style.primary_surface {
-                    colors.border
-                } else if style.interval_popup {
-                    colors.border_secondary
-                } else {
-                    colors.border
-                }))
-                .bg(gpui_color(if style.primary_surface {
-                    colors.surface
-                } else if style.interval_popup {
-                    colors.surface_secondary
-                } else {
-                    colors.surface
-                }))
+            popover_surface(panel, theme, radius)
         })
         .when(style.frameless, Styled::max_h_full)
         .when(style.interval_popup && !style.frameless, |panel| {
@@ -360,6 +342,9 @@ pub(super) fn chrome_overlay_panel(
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(content)
+        .when(!style.frameless, |panel| {
+            panel.child(popover_highlight(theme, radius))
+        })
         .children(closing.then(|| {
             div()
                 .id("chrome_overlay_closing_blocker")

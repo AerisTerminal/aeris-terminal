@@ -912,14 +912,14 @@ fn tone_icon(tone: ToastTone, theme: &AerisTheme) -> (HugeIcon, ThemeColor) {
     }
 }
 
-/// The card every toast is drawn on.
+fn toast_radius() -> Pixels {
+    px(f32::from(RadiusToken::Default.logical_pixels()))
+}
+
+/// The card every toast is drawn on. Its first child must stay the measured content; the
+/// popover highlight is appended last.
 fn toast_surface(theme: &AerisTheme) -> Div {
-    let colors = theme.colors;
-    div()
-        .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary))
-        .bg(gpui_color(colors.surface_secondary))
+    popover_surface(div(), theme, toast_radius())
 }
 
 /// A toast's content: its icon, title and description.
@@ -977,6 +977,7 @@ pub(super) fn chart_status_card(notice: ChartSurfaceNotice, theme: &AerisTheme) 
             notice.detail.map(SharedString::from),
             theme,
         ))
+        .child(popover_highlight(theme, toast_radius()))
 }
 
 pub(super) struct ToastLayer<'a, H: ToastHost> {
@@ -1115,6 +1116,7 @@ fn toast_card<H: ToastHost>(
             .w(px(TOAST_WIDTH - 2.0 * border))
             .opacity(frame.content_opacity),
         )
+        .child(popover_highlight(theme, toast_radius()))
         .into_any_element()
 }
 

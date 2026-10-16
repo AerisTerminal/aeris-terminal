@@ -337,7 +337,6 @@ fn trade_bar_order_button(
         Button::new(id, theme)
             .variant(trade_variant(side))
             .button_size(ButtonSize::Sm)
-            .strong()
             .full_width()
             .label(label)
             .disabled(!order.ready)

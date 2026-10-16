@@ -24,7 +24,7 @@ use gpui::{
 use super::{
     button::{Button, ButtonVariant, close_button},
     platform_font_weight,
-    theme::{gpui_color, platform_border_width},
+    theme::{gpui_color, platform_border_width, popover_highlight, popover_surface},
 };
 
 type DialogHandler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -330,7 +330,6 @@ fn footer(leading: Option<AnyElement>, actions: Vec<AnyElement>, theme: &AerisTh
 
 impl RenderOnce for Dialog {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let colors = self.theme.colors;
         let theme = self.theme;
         let dismiss = self.on_dismiss.clone();
         let grab = self
@@ -359,8 +358,8 @@ impl RenderOnce for Dialog {
             })
             .children(self.children);
         let movable = self.movable;
-        let panel = div()
-            .id("dialog_panel")
+        let radius = px(f32::from(RadiusToken::Medium.logical_pixels()));
+        let panel = popover_surface(div().id("dialog_panel"), &theme, radius)
             .w(self.size.width())
             .map(|panel| match (self.max_height, movable.is_some()) {
                 (Some(height), _) => panel.max_h(height),
@@ -371,17 +370,14 @@ impl RenderOnce for Dialog {
             .when(movable.is_none(), |panel| panel.max_w(relative(1.0)))
             .flex()
             .flex_col()
-            .rounded(px(f32::from(RadiusToken::Medium.logical_pixels())))
-            .border(platform_border_width(&theme))
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface))
             .shadow_lg()
             .occlude()
             .when_some(self.focus, |panel, focus| panel.track_focus(&focus))
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .children(header)
             .child(body)
-            .children(footer);
+            .children(footer)
+            .child(popover_highlight(&theme, radius));
         let scrim = div()
             .id(self.id.clone())
             .absolute()
