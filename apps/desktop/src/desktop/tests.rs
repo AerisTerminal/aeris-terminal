@@ -3798,7 +3798,7 @@ fn working_orders_are_drawn_on_the_row_side_their_click_created() {
             let (side, order_type) = ladder_click_order(row_side, selected);
             let (limit_price, stop_price) = match order_type {
                 OrderType::Market => (None, None),
-                OrderType::Limit => (Some(price), None),
+                OrderType::Limit | OrderType::RestingAt => (Some(price), None),
                 OrderType::Stop => (None, Some(price)),
                 OrderType::StopLimit => (Some(price), Some(price)),
             };

@@ -3,6 +3,39 @@ use aeris_instruments::InstrumentDecimal;
 use aeris_trading::{OrderSide, OrderType, TimeInForce};
 
 #[test]
+fn resting_at_resolves_on_touch_for_every_side() {
+    let price = |units| FixedPoint::try_new(units, 2).expect("price");
+    for (side, units, expected) in [
+        (OrderSide::Buy, 10_025, OrderType::Limit),
+        (OrderSide::Buy, 10_050, OrderType::Stop),
+        (OrderSide::Sell, 10_000, OrderType::Limit),
+        (OrderSide::Sell, 9_975, OrderType::Stop),
+    ] {
+        let mut request = crate::tests::market_order("resting", side, 1, 1_000);
+        request.order_type = OrderType::RestingAt;
+        request.limit_price = Some(price(units));
+        let resolved = resolve_resting_at(request, price(10_000), price(10_025))
+            .expect("resolve on owner quote");
+        assert_eq!(resolved.order_type, expected, "{side:?}");
+        assert_eq!(
+            resolved.limit_price,
+            (expected == OrderType::Limit).then_some(price(units))
+        );
+        assert_eq!(
+            resolved.stop_price,
+            (expected == OrderType::Stop).then_some(price(units))
+        );
+    }
+    let mut coarse = crate::tests::market_order("coarse", OrderSide::Buy, 1, 1_000);
+    coarse.order_type = OrderType::RestingAt;
+    coarse.limit_price = Some(FixedPoint::try_new(30_884, 0).expect("coarse"));
+    assert_eq!(
+        resolve_resting_at(coarse, price(3_088_400), price(3_088_425)),
+        Err(RejectReason::ScaleMismatch)
+    );
+}
+
+#[test]
 fn venue_capabilities_resolve_day_and_protection_policy() {
     let simulated = VenueCapabilities::for_route(VenueRoute::Simulated);
     let broker = VenueCapabilities::for_route(VenueRoute::CtraderDemo);

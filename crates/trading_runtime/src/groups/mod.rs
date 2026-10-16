@@ -134,6 +134,10 @@ impl TradingCore {
         entry_command: &PlaceOrder,
         template: BracketStrategyTemplate,
     ) -> Result<BracketPlacement, String> {
+        let resolved = self
+            .resolve_order_instruction(entry_command.clone())
+            .map_err(|reason| reason.to_string())?;
+        let entry_command = &resolved;
         if self.route(&entry_command.account_id)? != VenueRoute::Simulated {
             if template.trailing_stop.is_some()
                 && !crate::core::admission::VenueCapabilities::for_route(VenueRoute::CtraderDemo)

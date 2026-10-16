@@ -7,7 +7,7 @@ use super::{
     multiply_quantity, order_acceptance_detail, venue,
 };
 use aeris_instruments::PriceGrid;
-use aeris_trading::{RejectReason, TimeInForce};
+use aeris_trading::{OrderSide, RejectReason, TimeInForce};
 
 mod capabilities;
 pub(crate) use capabilities::VenueCapabilities;
@@ -117,6 +117,40 @@ pub(crate) fn validate_owner_trigger_side(
     Ok(())
 }
 
+/// Turns a chart's price-relative instruction into one durable, executable order kind.
+/// An unresolved `RestingAt` never reaches the book, venue request or SQLite.
+pub(crate) fn resolve_resting_at(
+    mut command: PlaceOrder,
+    bid: FixedPoint,
+    ask: FixedPoint,
+) -> Result<PlaceOrder, RejectReason> {
+    if command.order_type != OrderType::RestingAt {
+        return Ok(command);
+    }
+    let price = command.limit_price.ok_or(RejectReason::OffGrid)?;
+    if price.units() <= 0 || command.stop_price.is_some() {
+        return Err(RejectReason::OffGrid);
+    }
+    let touch = match command.side {
+        OrderSide::Buy => ask,
+        OrderSide::Sell => bid,
+    }
+    .exact_rescale(price.scale())
+    .map_err(|_| RejectReason::ScaleMismatch)?;
+    let beyond = match command.side {
+        OrderSide::Buy => price.units() > touch.units(),
+        OrderSide::Sell => price.units() < touch.units(),
+    };
+    command.order_type = if beyond {
+        OrderType::Stop
+    } else {
+        OrderType::Limit
+    };
+    command.limit_price = (!beyond).then_some(price);
+    command.stop_price = beyond.then_some(price);
+    Ok(command)
+}
+
 /// The shared, side-effect-free checks run before either route persists an order.
 pub(crate) fn validate_common_order(
     instrument: &TradingInstrument,
@@ -144,6 +178,9 @@ pub(crate) fn validate_common_order(
         return Err(RejectReason::InvalidQuantity);
     }
     validate_time_in_force(command.order_type, command.time_in_force)?;
+    if command.order_type == OrderType::RestingAt {
+        return Err(RejectReason::QuoteUnavailable);
+    }
     validate_order_prices(instrument, command)?;
     if open_orders.saturating_add(staged_orders) >= MAXIMUM_OPEN_ORDERS {
         return Err(RejectReason::CapacityExceeded);
@@ -163,6 +200,22 @@ fn validate_client_id(command: &PlaceOrder, route: VenueRoute) -> Result<(), Rej
 }
 
 impl TradingCore {
+    pub(crate) fn resolve_order_instruction(
+        &self,
+        command: PlaceOrder,
+    ) -> Result<PlaceOrder, RejectReason> {
+        if command.order_type != OrderType::RestingAt {
+            return Ok(command);
+        }
+        let quote = self
+            .quote_book
+            .observation(&command.instrument_id)
+            .ok_or(RejectReason::QuoteUnavailable)?;
+        let mut command = resolve_resting_at(command, quote.bid, quote.ask)?;
+        command.provenance = quote.provenance;
+        Ok(command)
+    }
+
     /// Shared pre-persistence order checks; staged copy instruments participate in the
     /// same market-demand bound as already committed orders and ticket interests.
     pub(crate) fn admit(
@@ -482,6 +535,10 @@ impl TradingCore {
     }
 
     pub(super) fn place_order(&mut self, command: &PlaceOrder) -> Result<Order, String> {
+        let resolved = self
+            .resolve_order_instruction(command.clone())
+            .map_err(|reason| reason.to_string())?;
+        let command = &resolved;
         match self.route(&command.account_id)? {
             VenueRoute::Simulated => {}
             VenueRoute::CtraderDemo => {

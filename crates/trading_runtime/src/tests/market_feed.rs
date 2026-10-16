@@ -79,6 +79,73 @@ fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeed
 }
 
 #[test]
+fn resting_at_uses_owner_quote_and_persists_only_resolved_order() {
+    let directory = TestDirectory::new("resting-at-owner");
+    let (service, _clock) = feed_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut missing_quote = market_order("resting-no-quote", OrderSide::Buy, 1, 1_000);
+    missing_quote.order_type = OrderType::RestingAt;
+    missing_quote.limit_price = Some(FixedPoint::try_new(10_050, 2).expect("price"));
+    let before = service.snapshot().expect("before");
+    assert_eq!(
+        service
+            .place_order(missing_quote)
+            .expect_err("no owner quote"),
+        aeris_trading::RejectReason::QuoteUnavailable.to_string()
+    );
+    assert_eq!(service.snapshot().expect("unchanged"), before);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    service.status().expect("drain");
+    for (id, side, units, expected) in [
+        ("resting-buy-limit", OrderSide::Buy, 9_900, OrderType::Limit),
+        ("resting-buy-stop", OrderSide::Buy, 10_050, OrderType::Stop),
+        (
+            "resting-sell-limit",
+            OrderSide::Sell,
+            10_100,
+            OrderType::Limit,
+        ),
+        ("resting-sell-stop", OrderSide::Sell, 9_975, OrderType::Stop),
+    ] {
+        let mut request = market_order(id, side, 1, 1_000);
+        request.order_type = OrderType::RestingAt;
+        request.time_in_force = TimeInForce::GoodTillCancelled;
+        request.limit_price = Some(FixedPoint::try_new(units, 2).expect("price"));
+        let placed = service.place_order(request).expect("placed");
+        assert_eq!(placed.order_type, expected);
+        assert_eq!(
+            placed.limit_price,
+            (expected == OrderType::Limit).then_some(FixedPoint::try_new(units, 2).unwrap())
+        );
+        assert_eq!(
+            placed.stop_price,
+            (expected == OrderType::Stop).then_some(FixedPoint::try_new(units, 2).unwrap())
+        );
+    }
+    let before = service.snapshot().expect("snapshot");
+    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    assert_eq!(
+        restarted.snapshot().expect("restored").orders,
+        before.orders
+    );
+    restarted
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown");
+}
+
+#[test]
 fn chart_modify_checks_revision_before_reading_quote_or_writing_facts() {
     let directory = TestDirectory::new("chart-stale-revision");
     let (service, _clock) = feed_service(&directory);
@@ -778,32 +845,6 @@ fn market_feed_push_does_not_wait_for_undrained_owner() {
     sender.join().unwrap();
     assert!(matches!(receiver.try_recv(), Ok(Command::DrainMarketFeed)));
     assert!(receiver.try_recv().is_err());
-}
-
-#[test]
-fn owner_prices_chart_bracket_entry_against_its_current_touch() {
-    let price = |units| FixedPoint::try_new(units, 2).unwrap();
-    let (bid, ask) = (price(3_088_400), price(3_088_425));
-    for (side, entry, expected) in [
-        (OrderSide::Buy, 3_108_950, OrderType::Stop),
-        (OrderSide::Buy, 3_088_425, OrderType::Limit),
-        (OrderSide::Buy, 3_080_000, OrderType::Limit),
-        (OrderSide::Sell, 3_080_000, OrderType::Stop),
-        (OrderSide::Sell, 3_088_400, OrderType::Limit),
-        (OrderSide::Sell, 3_108_950, OrderType::Limit),
-    ] {
-        assert_eq!(
-            crate::core::resting_bracket_order_type(side, price(entry), bid, ask),
-            Ok(expected),
-            "{side:?} at {entry}"
-        );
-    }
-    let coarse = FixedPoint::try_new(30_884, 0).unwrap();
-    assert!(
-        crate::core::resting_bracket_order_type(OrderSide::Buy, coarse, bid, price(3_088_425))
-            .is_err(),
-        "an inexact quote cannot classify the bracket entry"
-    );
 }
 
 #[test]

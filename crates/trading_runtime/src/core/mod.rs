@@ -1223,30 +1223,6 @@ pub(crate) fn observation_revision(observation: &SimulatedMarketObservation) -> 
     )
 }
 
-pub(crate) fn resting_bracket_order_type(
-    side: OrderSide,
-    entry: FixedPoint,
-    bid: FixedPoint,
-    ask: FixedPoint,
-) -> Result<OrderType, String> {
-    let touch = match side {
-        OrderSide::Buy => ask,
-        OrderSide::Sell => bid,
-    }
-    .exact_rescale(entry.scale())
-    .map_err(|error| error.to_string())?
-    .units();
-    let beyond_touch = match side {
-        OrderSide::Buy => entry.units() > touch,
-        OrderSide::Sell => entry.units() < touch,
-    };
-    Ok(if beyond_touch {
-        OrderType::Stop
-    } else {
-        OrderType::Limit
-    })
-}
-
 impl TradingCore {
     pub(crate) fn open(
         database_path: &std::path::Path,
@@ -1739,7 +1715,7 @@ impl TradingCore {
             };
             match order.order_type {
                 OrderType::Market => {}
-                OrderType::Limit => order.limit_price = Some(price),
+                OrderType::Limit | OrderType::RestingAt => order.limit_price = Some(price),
                 OrderType::Stop => order.stop_price = Some(price),
                 OrderType::StopLimit => {
                     order.limit_price = Some(price);
@@ -1753,14 +1729,13 @@ impl TradingCore {
 
     fn market_resting_bracket_entry(&self, mut entry: PlaceOrder) -> Result<PlaceOrder, String> {
         let quote = self.market_observation(&entry.instrument_id)?;
-        let price = entry
-            .limit_price
-            .ok_or_else(|| "bracket entry price is unavailable".to_string())?;
-        entry.order_type = resting_bracket_order_type(entry.side, price, quote.bid, quote.ask)?;
-        entry.limit_price = (entry.order_type == OrderType::Limit).then_some(price);
-        entry.stop_price = (entry.order_type == OrderType::Stop).then_some(price);
+        if entry.limit_price.is_none() {
+            return Err("bracket entry price is unavailable".to_string());
+        }
+        entry.order_type = OrderType::RestingAt;
         entry.provenance = quote.provenance;
-        Ok(entry)
+        self.resolve_order_instruction(entry)
+            .map_err(|reason| reason.to_string())
     }
 
     fn status(&self) -> TradingServiceStatus {

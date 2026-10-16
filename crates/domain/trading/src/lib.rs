@@ -364,6 +364,8 @@ pub enum OrderType {
     Limit,
     Stop,
     StopLimit,
+    /// Admission-only instruction, resolved against the owner's live bid/ask before storage.
+    RestingAt,
 }
 
 impl OrderType {
@@ -375,6 +377,7 @@ impl OrderType {
             Self::Limit => "limit",
             Self::Stop => "stop",
             Self::StopLimit => "stop_limit",
+            Self::RestingAt => "resting_at",
         }
     }
 }

@@ -346,7 +346,9 @@ fn price_fields(
 ) {
     match order_type {
         aeris_trading::OrderType::Market => (None, None),
-        aeris_trading::OrderType::Limit => (Some(price), None),
+        aeris_trading::OrderType::Limit | aeris_trading::OrderType::RestingAt => {
+            (Some(price), None)
+        }
         aeris_trading::OrderType::Stop => (None, Some(price)),
         aeris_trading::OrderType::StopLimit => (Some(price), Some(price)),
     }

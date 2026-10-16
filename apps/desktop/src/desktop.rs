@@ -1876,7 +1876,9 @@ const fn chart_order_side(side: aeris_trading::OrderSide) -> ChartOrderSide {
 const fn chart_order_kind(order_type: aeris_trading::OrderType) -> ChartOrderKind {
     match order_type {
         aeris_trading::OrderType::Market => ChartOrderKind::Market,
-        aeris_trading::OrderType::Limit => ChartOrderKind::Limit,
+        aeris_trading::OrderType::Limit | aeris_trading::OrderType::RestingAt => {
+            ChartOrderKind::Limit
+        }
         aeris_trading::OrderType::Stop => ChartOrderKind::Stop,
         aeris_trading::OrderType::StopLimit => ChartOrderKind::StopLimit,
     }
@@ -2440,7 +2442,9 @@ fn chart_order_from_intent(
     .map_err(|_| ChartIntentRejection::Incomplete)?;
     let (limit_price, stop_price) = match order_type {
         aeris_trading::OrderType::Market => (None, None),
-        aeris_trading::OrderType::Limit => (Some(price), None),
+        aeris_trading::OrderType::Limit | aeris_trading::OrderType::RestingAt => {
+            (Some(price), None)
+        }
         aeris_trading::OrderType::Stop => (None, Some(price)),
         aeris_trading::OrderType::StopLimit => (Some(price), Some(price)),
     };
@@ -2548,7 +2552,7 @@ fn chart_bracket_from_intent(
         .as_ref()
         .ok_or(ChartIntentRejection::NoInstrument)?;
     let frame = chart_quote_frame(app, product, cx)?;
-    let entry = chart_order_from_intent(intent, app, &frame, aeris_trading::OrderType::Limit)?;
+    let entry = chart_order_from_intent(intent, app, &frame, aeris_trading::OrderType::RestingAt)?;
     let price = |price: Option<f64>| {
         price
             .and_then(|price| chart_price_fixed_point(price, product.price_scale))
@@ -2702,7 +2706,9 @@ fn chart_modify_from_intent(
     let (limit_price, stop_price) = match order.order_type {
         aeris_trading::OrderType::Limit => (Some(price), None),
         aeris_trading::OrderType::Stop => (None, Some(price)),
-        aeris_trading::OrderType::Market | aeris_trading::OrderType::StopLimit => {
+        aeris_trading::OrderType::Market
+        | aeris_trading::OrderType::StopLimit
+        | aeris_trading::OrderType::RestingAt => {
             return Err(ChartIntentRejection::Unsupported);
         }
     };
@@ -4615,7 +4621,7 @@ pub(crate) fn order_book_row_price(
     order: &aeris_trading::Order,
 ) -> Option<(OrderBookLevelSide, aeris_trading::FixedPoint)> {
     let (price, breakout) = match order.order_type {
-        aeris_trading::OrderType::Market => return None,
+        aeris_trading::OrderType::Market | aeris_trading::OrderType::RestingAt => return None,
         aeris_trading::OrderType::Limit => (order.limit_price?, false),
         aeris_trading::OrderType::Stop | aeris_trading::OrderType::StopLimit => {
             (order.stop_price?, true)

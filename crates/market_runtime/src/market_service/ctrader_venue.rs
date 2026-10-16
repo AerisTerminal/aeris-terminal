@@ -262,6 +262,7 @@ pub(super) fn place_request(
             pending_time_in_force(order.time_in_force)?,
         ),
         OrderType::StopLimit => return Err("cTrader stop-limit orders are not supported".into()),
+        OrderType::RestingAt => return Err("unresolved resting price cannot be routed".into()),
     };
     let request = NewOrder {
         symbol_id: spec.symbol_id,
