@@ -1766,23 +1766,6 @@ impl Coordinator<'_> {
             }
         }
         for (key, _) in self.engine.instrument_subscriptions() {
-            if let Some(quote) = self
-                .quotes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .latest(&key)
-                .filter(|state| {
-                    self.engine
-                        .provider_status(&key.provider)
-                        .and_then(|status| status.generation)
-                        .is_some_and(|generation| {
-                            generation.0.get() == state.quote.provider_generation
-                        })
-                })
-            {
-                self.trading_feed
-                    .publish(aeris_trading::market::MarketFeedEvent::Quote(quote.quote));
-            }
             self.publish_trading_session(&key);
             if let Some(generation) = self
                 .engine
@@ -1806,6 +1789,25 @@ impl Coordinator<'_> {
                         state,
                         provider_generation: generation.0.get(),
                     });
+            }
+            // Publish dependencies first even if the feed worker drains
+            // between individual calls; key ordering covers queued snapshots.
+            if let Some(quote) = self
+                .quotes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .latest(&key)
+                .filter(|state| {
+                    self.engine
+                        .provider_status(&key.provider)
+                        .and_then(|status| status.generation)
+                        .is_some_and(|generation| {
+                            generation.0.get() == state.quote.provider_generation
+                        })
+                })
+            {
+                self.trading_feed
+                    .publish(aeris_trading::market::MarketFeedEvent::Quote(quote.quote));
             }
         }
     }
@@ -2822,11 +2824,16 @@ mod tests {
         assert_eq!(state.quote.bid.units(), 100);
         assert_eq!(state.quote.ask.units(), 101);
         assert_eq!(state.quote.provider_generation, generation.0.get());
-        assert!(matches!(
-            coordinator.trading_feed.receive(Duration::ZERO),
-            Some(aeris_trading::market::MarketFeedEvent::Quote(quote))
-                if quote.bid.units() == 100 && quote.ask.units() == 101
-        ));
+        assert!(
+            std::iter::from_fn(|| coordinator.trading_feed.receive(Duration::ZERO)).any(
+                |event| matches!(
+                    event,
+                    aeris_trading::market::MarketFeedEvent::Quote(quote)
+                        if quote.bid.units() == 100 && quote.ask.units() == 101
+                )
+            ),
+            "leased quote reaches trading after any pending control events"
+        );
         assert_snapshot_quote_uses_current_provider_generation(&mut coordinator, &instrument);
         assert!(coordinator.engine.release_data_lease(lease));
         coordinator.reconcile_order_books();
@@ -2846,11 +2853,18 @@ mod tests {
         instrument: &InstallProviderInstrument,
     ) {
         coordinator.publish_trading_feed_snapshot();
-        assert!(matches!(
-            coordinator.trading_feed.receive(Duration::ZERO),
-            Some(aeris_trading::market::MarketFeedEvent::Quote(quote))
-                if quote.bid.units() == 100 && quote.provider_generation == 2
-        ));
+        let mut quote_seen = false;
+        while let Some(event) = coordinator.trading_feed.receive(Duration::ZERO) {
+            if let aeris_trading::market::MarketFeedEvent::Quote(quote) = event {
+                assert_eq!(quote.bid.units(), 100);
+                assert_eq!(quote.provider_generation, 2);
+                quote_seen = true;
+            }
+        }
+        assert!(
+            quote_seen,
+            "the current-generation quote is in the snapshot"
+        );
         coordinator
             .engine
             .begin_provider_session(&instrument.provider, ProviderGeneration(nonzero(3)))
@@ -2958,11 +2972,16 @@ mod tests {
                 }),
             },
         );
-        assert!(matches!(
-            coordinator.trading_feed.receive(Duration::ZERO),
-            Some(aeris_trading::market::MarketFeedEvent::Quote(quote))
-                if quote.bid.units() == 100 && quote.ask.units() == 101
-        ));
+        assert!(
+            std::iter::from_fn(|| coordinator.trading_feed.receive(Duration::ZERO)).any(
+                |event| matches!(
+                    event,
+                    aeris_trading::market::MarketFeedEvent::Quote(quote)
+                        if quote.bid.units() == 100 && quote.ask.units() == 101
+                )
+            ),
+            "chart quote reaches trading after any pending control events"
+        );
         assert!(coordinator.engine.release_data_lease(lease));
         coordinator.reconcile_order_books();
         assert!(coordinator.order_books.is_empty());

@@ -190,10 +190,10 @@ pub struct TradingFeedLink {
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 enum EventKey {
-    Quote(String),
-    Feed(String),
-    Session(String),
     Terms(String),
+    Session(String),
+    Feed(String),
+    Quote(String),
 }
 
 impl EventKey {
@@ -234,7 +234,15 @@ impl TradingFeedOutbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = EventKey::for_event(&event);
         if !pending.contains_key(&key) && pending.len() == MAXIMUM_PENDING_EVENTS {
-            pending.pop_first();
+            // Keep route and generation controls ahead of prices under load.
+            // Never evict a control just to admit a lower-priority quote.
+            if pending
+                .last_key_value()
+                .is_some_and(|(last, _)| key >= *last)
+            {
+                return;
+            }
+            pending.pop_last();
         }
         pending.insert(key, event);
         self.wake.notify_one();
@@ -262,7 +270,98 @@ impl TradingFeedOutbox {
 mod tests {
     use super::*;
     use aeris_instruments::InstrumentId;
-    use aeris_trading::market::{FeedReason, FeedState};
+    use aeris_instruments::{CalendarSourceKind, InstrumentDecimal, PriceGrid, SessionPhase};
+    use aeris_trading::market::{
+        FeedReason, FeedState, InstrumentSession, MarketRoute, TradingQuote,
+    };
+
+    #[test]
+    fn cached_snapshot_survives_a_drain_between_each_event() {
+        let outbox = TradingFeedOutbox::default();
+        let id = InstrumentId::try_new("instrument:BTC").unwrap();
+        let route = MarketRoute {
+            provider_id: "fixture".into(),
+            instrument_id: id.clone(),
+            provider_symbol: "BTC".into(),
+            display_symbol: "BTC".into(),
+            venue_id: "fixture".into(),
+            entitlement_id: None,
+            price_scale: 2,
+            quantity_scale: 0,
+        };
+        // A restored, chart-free lease already has a current-generation quote.
+        outbox.publish(MarketFeedEvent::Terms(InstrumentTerms {
+            route,
+            instrument_class: InstrumentClass::CryptoSpot,
+            price_grid: PriceGrid::Unknown,
+            point_value: Some(InstrumentDecimal::try_new(1, 0).unwrap()),
+            quantity_increment: None,
+            currency: "USD".into(),
+            expiry: None,
+            first_notice: None,
+            last_trade: None,
+            session_hours: Vec::new(),
+            session_generation: 1,
+        }));
+        let quote = TradingQuote {
+            instrument_id: id.clone(),
+            bid: aeris_trading::FixedPoint::try_new(100, 2).unwrap(),
+            ask: aeris_trading::FixedPoint::try_new(101, 2).unwrap(),
+            bid_size: None,
+            ask_size: None,
+            last: None,
+            provider_id: "fixture".into(),
+            provider_generation: 2,
+            source_sequence: Some(1),
+            exchange_unix_nanos: None,
+            received_unix_nanos: 10,
+        };
+        outbox.publish(MarketFeedEvent::Quote(quote.clone()));
+        outbox.publish(MarketFeedEvent::Session(InstrumentSession {
+            instrument_id: id.clone(),
+            provider_generation: 2,
+            phase: SessionPhase::AlwaysOpen,
+            source: CalendarSourceKind::AlwaysOpen,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        }));
+        outbox.publish(MarketFeedEvent::Feed {
+            instrument_id: id,
+            state: FeedState::Live,
+            provider_generation: 2,
+        });
+
+        // Each receive represents an individual trading-owner drain. An early
+        // quote is lost without Terms, and the first Live feed clears it.
+        let (mut terms, mut session, mut live, mut current_quote) = (false, false, false, None);
+        let mut delivered = Vec::new();
+        while let Some(event) = outbox.receive(Duration::ZERO) {
+            match &event {
+                MarketFeedEvent::Terms(_) => terms = true,
+                MarketFeedEvent::Session(_) if terms => session = true,
+                MarketFeedEvent::Feed { state, .. } if terms => {
+                    if !live || *state != FeedState::Live {
+                        current_quote = None;
+                    }
+                    live = *state == FeedState::Live;
+                }
+                MarketFeedEvent::Quote(value) if terms => current_quote = Some(value.clone()),
+                _ => {}
+            }
+            delivered.push(event);
+        }
+        assert_eq!(delivered.len(), 4, "each kind has one latest state");
+        assert!(matches!(delivered[0], MarketFeedEvent::Terms(_)));
+        assert!(matches!(delivered[1], MarketFeedEvent::Session(_)));
+        assert!(matches!(delivered[2], MarketFeedEvent::Feed { .. }));
+        assert!(matches!(delivered[3], MarketFeedEvent::Quote(_)));
+        assert!(session && live);
+        assert_eq!(
+            current_quote,
+            Some(quote),
+            "a cached quote must remain current after separate owner drains"
+        );
+    }
 
     #[test]
     fn trading_feed_events_are_bounded_and_latest_wins() {
@@ -284,6 +383,89 @@ mod tests {
             })
         ));
         assert!(inbox.receive(Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn full_outbox_prefers_controls_to_cached_quotes() {
+        let outbox = TradingFeedOutbox::default();
+        for number in 0..MAXIMUM_PENDING_EVENTS {
+            outbox.publish(MarketFeedEvent::Quote(TradingQuote {
+                instrument_id: InstrumentId::try_new(format!("instrument:{number}")).unwrap(),
+                bid: aeris_trading::FixedPoint::try_new(100, 2).unwrap(),
+                ask: aeris_trading::FixedPoint::try_new(101, 2).unwrap(),
+                bid_size: None,
+                ask_size: None,
+                last: None,
+                provider_id: "fixture".into(),
+                provider_generation: 1,
+                source_sequence: Some(1),
+                exchange_unix_nanos: None,
+                received_unix_nanos: 10,
+            }));
+        }
+        let id = InstrumentId::try_new("instrument:control").unwrap();
+        outbox.publish(MarketFeedEvent::Session(InstrumentSession {
+            instrument_id: id.clone(),
+            provider_generation: 1,
+            phase: SessionPhase::AlwaysOpen,
+            source: CalendarSourceKind::AlwaysOpen,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        }));
+        outbox.publish(MarketFeedEvent::Feed {
+            instrument_id: id,
+            state: FeedState::Live,
+            provider_generation: 1,
+        });
+        assert!(matches!(
+            outbox.receive(Duration::ZERO),
+            Some(MarketFeedEvent::Session(_))
+        ));
+        assert!(matches!(
+            outbox.receive(Duration::ZERO),
+            Some(MarketFeedEvent::Feed { .. })
+        ));
+        let mut quote_count = 0;
+        while let Some(event) = outbox.receive(Duration::ZERO) {
+            assert!(matches!(event, MarketFeedEvent::Quote(_)));
+            quote_count += 1;
+        }
+        assert_eq!(quote_count, MAXIMUM_PENDING_EVENTS - 2);
+    }
+
+    #[test]
+    fn full_control_outbox_does_not_evict_state_for_a_quote() {
+        let outbox = TradingFeedOutbox::default();
+        for number in 0..MAXIMUM_PENDING_EVENTS {
+            outbox.publish(MarketFeedEvent::Session(InstrumentSession {
+                instrument_id: InstrumentId::try_new(format!("instrument:{number}")).unwrap(),
+                provider_generation: 1,
+                phase: SessionPhase::AlwaysOpen,
+                source: CalendarSourceKind::AlwaysOpen,
+                session_end_unix_nanos: None,
+                next_open_unix_nanos: None,
+            }));
+        }
+        outbox.publish(MarketFeedEvent::Quote(TradingQuote {
+            instrument_id: InstrumentId::try_new("instrument:overflow").unwrap(),
+            bid: aeris_trading::FixedPoint::try_new(100, 2).unwrap(),
+            ask: aeris_trading::FixedPoint::try_new(101, 2).unwrap(),
+            bid_size: None,
+            ask_size: None,
+            last: None,
+            provider_id: "fixture".into(),
+            provider_generation: 1,
+            source_sequence: Some(1),
+            exchange_unix_nanos: None,
+            received_unix_nanos: 10,
+        }));
+        for _ in 0..MAXIMUM_PENDING_EVENTS {
+            assert!(matches!(
+                outbox.receive(Duration::ZERO),
+                Some(MarketFeedEvent::Session(_))
+            ));
+        }
+        assert!(outbox.receive(Duration::ZERO).is_none());
     }
 
     #[test]
