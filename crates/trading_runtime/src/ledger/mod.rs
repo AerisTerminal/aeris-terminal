@@ -69,7 +69,6 @@ impl TradingCore {
         update: FillMemoryUpdate,
     ) {
         self.state.next_sequence = update.next_sequence;
-        self.eligible_after.remove(&order.id);
         self.state.orders.insert(order.id.clone(), order);
         self.state.order_events.push_back(event);
         self.state.fills.push_back(fill.clone());

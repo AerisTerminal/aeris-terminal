@@ -196,6 +196,7 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     let accepted = service.place_order(order).expect("accepted");
     assert_eq!(accepted.accepted_unix_nanos, 1_000_000_000_000);
     assert_eq!(accepted.updated_unix_nanos, 1_000_000_000_000);
+    assert_eq!(accepted.eligible_after_unix_nanos, 1_000_000_000_000);
     clock.set_wall_unix_nanos(1_090_000_000_000);
     let cancelled = service
         .cancel_order(ClientOrderId::try_new("clock-limit").expect("id"))
@@ -203,6 +204,10 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     assert_eq!(cancelled.revision, 2);
     assert_eq!(cancelled.updated_unix_nanos, 1_090_000_000_000);
     assert_eq!(cancelled.terminal_unix_nanos, Some(1_090_000_000_000));
+    assert_eq!(
+        cancelled.eligible_after_unix_nanos,
+        accepted.eligible_after_unix_nanos
+    );
     let first = service.snapshot().expect("snapshot");
     let event = first
         .order_events
@@ -247,6 +252,7 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
         .expect("modify");
     assert_eq!(modified.revision, 2);
     assert_eq!(modified.updated_unix_nanos, 1_090_000_000_000);
+    assert_eq!(modified.eligible_after_unix_nanos, 1_090_000_000_000);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     let orders = restarted.snapshot().expect("restored").orders;
@@ -313,6 +319,11 @@ fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
         })
         .expect("matching revision");
     assert_eq!(modified.revision, accepted.revision + 1);
+    assert_eq!(
+        modified.eligible_after_unix_nanos,
+        modified.updated_unix_nanos
+    );
+    assert!(modified.eligible_after_unix_nanos >= accepted.eligible_after_unix_nanos);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
     let restarted = start_service(&directory);
     let before = restarted.snapshot().expect("restored");

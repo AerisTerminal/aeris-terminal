@@ -49,6 +49,7 @@ pub(crate) fn accept(mut order: Order, owner_unix_nanos: i64) -> Result<Order, L
     order.revision = 1;
     order.accepted_unix_nanos = owner_unix_nanos;
     order.updated_unix_nanos = owner_unix_nanos;
+    order.eligible_after_unix_nanos = owner_unix_nanos;
     Ok(order)
 }
 
@@ -82,6 +83,7 @@ pub(crate) fn modify(mut order: Order, owner_unix_nanos: i64) -> Result<Order, L
         return Err(LifecycleError::InvalidTransition(order.status));
     }
     advance(&mut order, owner_unix_nanos)?;
+    order.eligible_after_unix_nanos = owner_unix_nanos;
     Ok(order)
 }
 
@@ -375,6 +377,21 @@ mod tests {
         assert!(child.validate().is_ok());
         assert!(modify(child.clone(), 3).is_err());
         assert!(fill_simulated(child, 3).is_err());
+    }
+
+    #[test]
+    fn owner_eligibility_advances_only_on_executable_acceptance_and_modification() {
+        let mut order = super::super::tests::order(1, OrderStatus::Working);
+        order.revision = 0;
+        order.accepted_unix_nanos = 0;
+        order.updated_unix_nanos = 0;
+        order.eligible_after_unix_nanos = 0;
+        let accepted = accept(order, 12).expect("accept");
+        assert_eq!(accepted.eligible_after_unix_nanos, 12);
+        let modified = modify(accepted, 23).expect("modify");
+        assert_eq!(modified.eligible_after_unix_nanos, 23);
+        let cancelled = cancel(modified, 34).expect("cancel");
+        assert_eq!(cancelled.eligible_after_unix_nanos, 23);
     }
 
     #[test]

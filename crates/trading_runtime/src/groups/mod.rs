@@ -580,8 +580,6 @@ impl TradingCore {
         self.state.next_sequence = armed.next_sequence;
         for (order, event) in armed.children {
             self.state.order_events.push_back(event);
-            self.eligible_after
-                .insert(order.id.clone(), order.submitted_unix_nanos);
             self.state.orders.insert(order.id.clone(), order);
         }
         self.state

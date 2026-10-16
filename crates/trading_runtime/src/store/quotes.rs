@@ -88,8 +88,8 @@ fn persist_quote_orders_and_fills(
                     "UPDATE orders SET status=?1, time_in_force=?2, quantity_units=?3,
                          quantity_scale=?4, filled_units=?5, filled_scale=?6, limit_units=?7,
                          limit_scale=?8, stop_units=?9, stop_scale=?10, provenance_json=?11,
-                         terminal_unix_nanos=?12, revision=?13, updated_unix_nanos=?14
-                         WHERE id=?15",
+                         terminal_unix_nanos=?12, revision=?13, updated_unix_nanos=?14,
+                         eligible_after_unix_nanos=?15 WHERE id=?16",
                     params![
                         order.status.as_str(),
                         order.time_in_force.as_str(),
@@ -105,6 +105,7 @@ fn persist_quote_orders_and_fills(
                         order.terminal_unix_nanos,
                         order.revision,
                         order.updated_unix_nanos,
+                        order.eligible_after_unix_nanos,
                         id.as_str(),
                     ],
                 )

@@ -497,14 +497,11 @@ impl TradingCore {
             return Ok(Vec::new());
         }
         let working_state = self.state.clone();
-        let working_eligibility = self.eligible_after.clone();
         let original = std::mem::replace(&mut self.state, working_state);
-        let original_eligibility = std::mem::replace(&mut self.eligible_after, working_eligibility);
         self.quote_planning = true;
         let result = self.plan_market_quote(observation);
         self.quote_planning = false;
         let planned = std::mem::replace(&mut self.state, original);
-        let planned_eligibility = std::mem::replace(&mut self.eligible_after, original_eligibility);
         let fills = result?;
         if fills.is_empty()
             && planned.revision == self.state.revision
@@ -516,7 +513,6 @@ impl TradingCore {
             && planned.risk_locks == self.state.risk_locks
         {
             self.state = planned;
-            self.eligible_after = planned_eligibility;
             return Ok(fills);
         }
         if let Err(error) = self.store.commit_quote_step(&self.state, &planned) {
@@ -524,7 +520,6 @@ impl TradingCore {
             return Err(error);
         }
         self.state = planned;
-        self.eligible_after = planned_eligibility;
         self.enforce_memory_retention();
         Ok(fills)
     }
@@ -624,17 +619,11 @@ impl TradingCore {
                 {
                     return true;
                 }
-                let after = self
-                    .eligible_after
-                    .get(order_id)
-                    .copied()
-                    .or_else(|| {
-                        self.state
-                            .orders
-                            .get(order_id)
-                            .map(|order| order.submitted_unix_nanos)
-                    })
-                    .unwrap_or(i64::MAX);
+                let after = self.state.orders.get(order_id).map_or(i64::MAX, |order| {
+                    order
+                        .eligible_after_unix_nanos
+                        .max(self.recovery_quote_floor)
+                });
                 observation.provenance.observed_unix_nanos > after
             });
         }

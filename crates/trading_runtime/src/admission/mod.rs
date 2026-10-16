@@ -209,8 +209,6 @@ impl TradingCore {
     ) {
         self.state.accounts.remove(account_id);
         self.state.orders.remove_account(account_id);
-        self.eligible_after
-            .retain(|order_id, _| !account_order_ids.contains(order_id.as_str()));
         self.state
             .order_events
             .retain(|event| !account_order_ids.contains(event.order_id.as_str()));
@@ -493,6 +491,7 @@ impl TradingCore {
             revision: 0,
             accepted_unix_nanos: 0,
             updated_unix_nanos: 0,
+            eligible_after_unix_nanos: 0,
             terminal_unix_nanos: None,
             provenance: command.provenance.clone(),
         };

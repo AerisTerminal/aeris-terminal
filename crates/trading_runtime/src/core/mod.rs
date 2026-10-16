@@ -531,9 +531,8 @@ pub(crate) struct TradingCore {
     published_interest: Vec<MarketRoute>,
     interest_revision: u64,
     observation_cursors: BTreeMap<InstrumentId, ObservationCursor>,
-    /// Owner-local acceptance floor, bounded by `MAXIMUM_OPEN_ORDERS`. On recovery, the
-    /// current wall time fences quotes received before this process started.
-    eligible_after: BTreeMap<OrderId, i64>,
+    /// Recovery fence for pre-start quotes; each order owns its durable acceptance floor.
+    recovery_quote_floor: i64,
     execution: ExecutionPolicy,
     venue_outbound: Option<VenueRequestSender>,
     venue_inbox: Weak<VenueInbox>,
@@ -1259,16 +1258,7 @@ impl TradingCore {
     ) -> Result<Self, StoreError> {
         let mut store = TradingStore::open(database_path, retention)?;
         let state = store.load_state().map_err(StoreError::Other)?;
-        let eligible_after = state
-            .orders
-            .open_orders()
-            .map(|order| {
-                (
-                    order.id.clone(),
-                    clock.wall_unix_nanos().max(order.submitted_unix_nanos),
-                )
-            })
-            .collect();
+        let recovery_quote_floor = clock.wall_unix_nanos();
         let mut core = Self {
             store,
             state,
@@ -1288,7 +1278,7 @@ impl TradingCore {
             published_interest: Vec::new(),
             interest_revision: 0,
             observation_cursors: BTreeMap::new(),
-            eligible_after,
+            recovery_quote_floor,
             execution,
             venue_outbound: None,
             venue_inbox,
@@ -1871,12 +1861,6 @@ impl TradingCore {
                 .insert(protective.client_order_id.clone(), protective);
         }
         for (order, event) in step.inserted.into_iter().chain(step.updated) {
-            if order.status.is_open() {
-                self.eligible_after
-                    .insert(order.id.clone(), self.command_now);
-            } else {
-                self.eligible_after.remove(&order.id);
-            }
             self.state.orders.insert(order.id.clone(), order);
             self.state.order_events.push_back(event);
         }
