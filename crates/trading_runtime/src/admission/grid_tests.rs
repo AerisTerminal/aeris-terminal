@@ -223,3 +223,48 @@ fn shared_admission_rejects_quantity_capacity_and_broker_client_length() {
         );
     }
 }
+
+#[test]
+fn bracket_levels_are_validated_before_admitting_the_entry() {
+    let mut instrument = crate::tests::instrument();
+    instrument.contract.price_grid =
+        PriceGrid::Fixed(InstrumentDecimal::try_new(50, 2).expect("grid"));
+    let mut template = crate::BracketStrategyTemplate {
+        template_id: "grid-bracket".into(),
+        revision: 1,
+        name: "Grid bracket".into(),
+        stop_offset_ticks: 1,
+        targets: vec![crate::BracketTarget {
+            offset_ticks: 1,
+            quantity_percent: 100,
+        }],
+        trailing_stop: None,
+        break_even: None,
+        enabled: true,
+    };
+    let entry = FixedPoint::try_new(10_000, 2).expect("entry");
+    assert_eq!(
+        validate_bracket_levels(&instrument, OrderSide::Buy, entry, &template),
+        Err(RejectReason::OffGrid),
+        "a 0.25 tick-sized target is not on the 0.50 price grid"
+    );
+    template.stop_offset_ticks = 2;
+    assert_eq!(
+        validate_bracket_levels(&instrument, OrderSide::Buy, entry, &template),
+        Err(RejectReason::OffGrid),
+        "an on-grid stop cannot hide an off-grid target"
+    );
+    template.stop_offset_ticks = 1;
+    instrument.contract.price_grid =
+        PriceGrid::Fixed(InstrumentDecimal::try_new(25, 2).expect("grid"));
+    assert_eq!(
+        validate_bracket_levels(&instrument, OrderSide::Buy, entry, &template),
+        Ok(())
+    );
+    let low_entry = FixedPoint::try_new(25, 2).expect("entry");
+    assert_eq!(
+        validate_bracket_levels(&instrument, OrderSide::Buy, low_entry, &template),
+        Err(RejectReason::WrongSideTrigger),
+        "protection cannot cross or reach zero relative to its entry"
+    );
+}

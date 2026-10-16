@@ -1542,6 +1542,37 @@ fn fixed_stop_bracket_template() -> BracketStrategyTemplate {
     }
 }
 
+#[test]
+fn bracket_off_grid_child_refuses_entry_without_writing_facts() {
+    let directory = TestDirectory::new("bracket-grid-preflight");
+    let service = start_service(&directory);
+    let mut contract = instrument();
+    contract.contract.price_grid =
+        aeris_instruments::PriceGrid::Fixed(InstrumentDecimal::try_new(50, 2).expect("grid"));
+    service.register_instrument(contract).expect("instrument");
+    let mut entry = market_order("bracket-grid", OrderSide::Buy, 1, 1_000);
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::GoodTillCancelled;
+    entry.limit_price = Some(price(10_000));
+    entry.quantity = quantity(2);
+    let mut template = fixed_stop_bracket_template();
+    template.stop_offset_ticks = 1;
+    template.targets[0].offset_ticks = 1;
+    template.targets[1].offset_ticks = 2;
+    let before = service.snapshot().expect("before");
+    assert_eq!(
+        service
+            .place_inline_bracket(PlaceInlineBracket { entry, template })
+            .expect_err("off-grid stop and target refuse the whole group"),
+        aeris_trading::RejectReason::OffGrid.to_string()
+    );
+    assert_eq!(service.snapshot().expect("after"), before);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let reopened = start_service(&directory);
+    assert_eq!(reopened.snapshot().expect("restored"), before);
+    reopened.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
 fn place_managed_bracket(service: &TradingService, entry: PlaceOrder) {
     let placement = service
         .place_inline_bracket(PlaceInlineBracket {

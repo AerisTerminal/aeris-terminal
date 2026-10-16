@@ -138,6 +138,21 @@ impl TradingCore {
             .resolve_order_instruction(entry_command.clone())
             .map_err(|reason| reason.to_string())?;
         let entry_command = &resolved;
+        template.validate()?;
+        if let Some(price) = entry_command.limit_price.or(entry_command.stop_price) {
+            let instrument = self
+                .state
+                .instruments
+                .get(&entry_command.instrument_id)
+                .ok_or_else(|| "trading instrument is not registered".to_string())?;
+            crate::core::admission::validate_bracket_levels(
+                instrument,
+                entry_command.side,
+                price,
+                &template,
+            )
+            .map_err(|reason| reason.to_string())?;
+        }
         if self.route(&entry_command.account_id)? != VenueRoute::Simulated {
             if template.trailing_stop.is_some()
                 && !crate::core::admission::VenueCapabilities::for_route(VenueRoute::CtraderDemo)

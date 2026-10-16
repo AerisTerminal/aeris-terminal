@@ -1,10 +1,11 @@
 use super::{
-    AccountEnvironment, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE, FixedPoint, InstrumentId,
-    MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType, PlaceOrder, PlaceProtectiveOrder,
-    ProtectiveOrder, ProtectiveOrderRole, TradeCopyDispatch, TradingAccount, TradingAccountId,
-    TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute, mirrored_client_order_id,
-    multiply_quantity, order_acceptance_detail, venue,
+    AccountEnvironment, BracketStrategyTemplate, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE,
+    FixedPoint, InstrumentId, MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order,
+    OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType,
+    PlaceOrder, PlaceProtectiveOrder, ProtectiveOrder, ProtectiveOrderRole, TradeCopyDispatch,
+    TradingAccount, TradingAccountId, TradingCore, TradingInstrument, VenueRequestReceiver,
+    VenueRoute, instrument_tick_units, mirrored_client_order_id, multiply_quantity,
+    order_acceptance_detail, shifted_price, venue,
 };
 use aeris_instruments::PriceGrid;
 use aeris_trading::{OrderSide, RejectReason, RiskWarning, TimeInForce};
@@ -85,6 +86,36 @@ pub(crate) fn validate_order_prices(
         .flatten()
     {
         validate_price_grid(instrument.contract.price_grid, price)?;
+    }
+    Ok(())
+}
+
+/// Price the protection relative to its entry before committing the entry. A
+/// distance measured in entry ticks need not land on the instrument's price
+/// grid at every resulting price (notably around significant-figure boundaries).
+pub(crate) fn validate_bracket_levels(
+    instrument: &TradingInstrument,
+    side: OrderSide,
+    entry: FixedPoint,
+    template: &BracketStrategyTemplate,
+) -> Result<(), RejectReason> {
+    validate_price_grid(instrument.contract.price_grid, entry)?;
+    let tick = instrument_tick_units(instrument, entry).map_err(|_| RejectReason::OffGrid)?;
+    let stop = shifted_price(entry, template.stop_offset_ticks, -side.sign(), tick)
+        .map_err(|_| RejectReason::WrongSideTrigger)?;
+    let check_side = |price: FixedPoint, winning: bool| {
+        let distance =
+            (i128::from(price.units()) - i128::from(entry.units())) * i128::from(side.sign());
+        if (winning && distance <= 0) || (!winning && distance >= 0) {
+            return Err(RejectReason::WrongSideTrigger);
+        }
+        validate_price_grid(instrument.contract.price_grid, price)
+    };
+    check_side(stop, false)?;
+    for target in &template.targets {
+        let price = shifted_price(entry, target.offset_ticks, side.sign(), tick)
+            .map_err(|_| RejectReason::WrongSideTrigger)?;
+        check_side(price, true)?;
     }
     Ok(())
 }
