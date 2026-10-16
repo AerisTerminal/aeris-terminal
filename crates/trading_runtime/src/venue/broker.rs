@@ -251,9 +251,13 @@ impl TradingCore {
             stop_price: command.stop_price,
             status: OrderStatus::Pending,
             submitted_unix_nanos: command.submitted_unix_nanos,
+            revision: 0,
+            accepted_unix_nanos: 0,
             terminal_unix_nanos: None,
             provenance: provenance.clone(),
         };
+        let order = crate::book::lifecycle::accept(order, self.command_now)
+            .map_err(|error| error.to_string())?;
         order.validate().map_err(|error| error.to_string())?;
         let event = Self::broker_event(
             &order,
@@ -797,9 +801,13 @@ impl TradingCore {
             stop_price: None,
             status: OrderStatus::Working,
             submitted_unix_nanos: report.executed_unix_nanos,
+            revision: 0,
+            accepted_unix_nanos: 0,
             terminal_unix_nanos: None,
             provenance: provenance.clone(),
         };
+        let order = crate::book::lifecycle::accept(order, provenance.observed_unix_nanos)
+            .map_err(|error| error.to_string())?;
         order.validate().map_err(|error| error.to_string())?;
         Ok(order)
     }

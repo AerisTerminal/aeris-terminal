@@ -827,6 +827,34 @@ mod tests {
     }
 
     #[test]
+    fn early_v22_order_without_acceptance_column_value_restores_submitted_time() {
+        let connection = Connection::open_in_memory().expect("fixture");
+        create_schema_at(&connection, 22);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                 VALUES ('a','Practice','simulated','USD',2);
+                 INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+                 VALUES ('i',2,0,'{}');
+                 INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                    time_in_force,quantity_units,quantity_scale,limit_units,limit_scale,status,
+                    submitted_unix_nanos,provenance_json,filled_units,filled_scale)
+                 VALUES ('o','c','a','i','buy','limit','gtc',1,0,100,2,'working',123,
+                    '{\"venue_id\":\"aeris-sim\",\"provider_id\":\"fixture\",\"session_generation\":1,
+                      \"source_sequence\":1,\"observed_unix_nanos\":123}',0,0);",
+            )
+            .expect("early V22 order");
+        let store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        let orders = store.load_orders().expect("legacy V22 order");
+        let order = orders.values().next().expect("one order");
+        assert_eq!(order.revision, 1);
+        assert_eq!(order.accepted_unix_nanos, 123);
+    }
+
+    #[test]
     fn v19_fills_and_cycles_migrate_through_routes_to_v21_with_backup() {
         let path = temporary_database("v19-accounting");
         let connection = Connection::open(&path).expect("fixture");

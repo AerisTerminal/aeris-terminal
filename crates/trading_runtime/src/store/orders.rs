@@ -23,8 +23,8 @@ impl TradingStore {
             tx.execute(
                 "UPDATE orders SET status = ?1, time_in_force = ?2,
                     limit_units = ?3, limit_scale = ?4, stop_units = ?5,
-                    stop_scale = ?6, provenance_json = ?7, terminal_unix_nanos = ?8
-                 WHERE id = ?9",
+                    stop_scale = ?6, provenance_json = ?7, terminal_unix_nanos = ?8,
+                    revision = ?9 WHERE id = ?10",
                 params![
                     order.status.as_str(),
                     order.time_in_force.as_str(),
@@ -34,6 +34,7 @@ impl TradingStore {
                     order.stop_price.map(FixedPoint::scale),
                     encode_provenance(&order.provenance),
                     order.terminal_unix_nanos,
+                    order.revision,
                     order.id.as_str(),
                 ],
             )
@@ -282,7 +283,8 @@ impl TradingStore {
                 "SELECT id, client_order_id, account_id, instrument_id, side, order_type,
                     time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
                     stop_units, stop_scale, status, submitted_unix_nanos, provenance_json,
-                    filled_units, filled_scale, terminal_unix_nanos
+                    filled_units, filled_scale, terminal_unix_nanos, revision,
+                    accepted_unix_nanos
              FROM orders ORDER BY submitted_unix_nanos",
             )
             .map_err(database_error)?;
@@ -308,6 +310,8 @@ impl TradingStore {
                     row.get::<_, i64>(16)?,
                     row.get::<_, u8>(17)?,
                     row.get::<_, Option<i64>>(18)?,
+                    row.get::<_, u32>(19)?,
+                    row.get::<_, Option<i64>>(20)?,
                 ))
             })
             .map_err(database_error)?;
@@ -332,6 +336,8 @@ impl TradingStore {
                 filled_units,
                 filled_scale,
                 terminal_unix_nanos,
+                revision,
+                accepted_unix_nanos,
             ) = row.map_err(database_error)?;
             let id = OrderId::try_new(id).map_err(|error| error.to_string())?;
             let order = Order {
@@ -351,6 +357,9 @@ impl TradingStore {
                 stop_price: optional_fixed(stop_units, stop_scale)?,
                 status: parse_status(&status)?,
                 submitted_unix_nanos: submitted,
+                revision,
+                // Early V22 builds wrote this nullable column only at migration.
+                accepted_unix_nanos: accepted_unix_nanos.unwrap_or(submitted),
                 terminal_unix_nanos,
                 provenance: decode_provenance(&provenance)?,
             };
@@ -434,9 +443,9 @@ pub(super) fn insert_order_row(transaction: &Transaction<'_>, order: &Order) -> 
             "INSERT INTO orders(id, client_order_id, account_id, instrument_id, side, order_type,
             time_in_force, quantity_units, quantity_scale, limit_units, limit_scale, stop_units,
             stop_scale, status, submitted_unix_nanos, provenance_json, filled_units, filled_scale,
-            terminal_unix_nanos)
+            terminal_unix_nanos, revision, accepted_unix_nanos)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19)",
+            ?17, ?18, ?19, ?20, ?21)",
             params![
                 order.id.as_str(),
                 order.client_order_id.as_str(),
@@ -457,6 +466,8 @@ pub(super) fn insert_order_row(transaction: &Transaction<'_>, order: &Order) -> 
                 order.filled_quantity.units(),
                 order.filled_quantity.scale(),
                 order.terminal_unix_nanos,
+                order.revision,
+                order.accepted_unix_nanos,
             ],
         )
         .map_err(database_error)?;

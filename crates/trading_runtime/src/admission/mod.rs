@@ -489,9 +489,13 @@ impl TradingCore {
             stop_price: command.stop_price,
             status: OrderStatus::Working,
             submitted_unix_nanos: command.submitted_unix_nanos,
+            revision: 0,
+            accepted_unix_nanos: 0,
             terminal_unix_nanos: None,
             provenance: command.provenance.clone(),
         };
+        let order = crate::book::lifecycle::accept(order, self.command_now)
+            .map_err(|error| error.to_string())?;
         order.validate().map_err(|error| error.to_string())?;
         let event = OrderEvent {
             id: OrderEventId::try_new(format!("sim-event-{sequence}"))

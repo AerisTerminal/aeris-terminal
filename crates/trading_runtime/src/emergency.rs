@@ -332,27 +332,14 @@ impl TradingCore {
             observation.ask
         };
         let provenance = observation.provenance.clone();
-        let order = Order {
-            id: OrderId::try_new(format!("sim-flatten-order-{sequence}"))
-                .map_err(|error| error.to_string())?,
-            client_order_id: ClientOrderId::try_new(format!("sim-flatten-{sequence}"))
-                .map_err(|error| error.to_string())?,
-            account_id: account_id.clone(),
-            instrument_id: observation.instrument_id.clone(),
+        let order = flatten_order(
+            account_id,
+            observation,
+            sequence,
             side,
-            order_type: OrderType::Market,
-            time_in_force: TimeInForce::ImmediateOrCancel,
             quantity,
-            filled_quantity: FixedPoint::try_new(0, quantity.scale())
-                .map_err(|error| error.to_string())?,
-            limit_price: None,
-            stop_price: None,
-            status: OrderStatus::Working,
-            submitted_unix_nanos: provenance.observed_unix_nanos,
-            terminal_unix_nanos: None,
-            provenance: provenance.clone(),
-        };
-        order.validate().map_err(|error| error.to_string())?;
+            self.command_now,
+        )?;
         let accepted = flatten_acceptance_event(&order, sequence)?;
         self.store
             .insert_order(&order, &accepted, sequence + 1, false)?;
@@ -396,4 +383,40 @@ impl TradingCore {
         );
         Ok(Some(fill))
     }
+}
+
+fn flatten_order(
+    account_id: &TradingAccountId,
+    observation: &SimulatedMarketObservation,
+    sequence: u64,
+    side: OrderSide,
+    quantity: FixedPoint,
+    command_now: i64,
+) -> Result<Order, String> {
+    let order = Order {
+        id: OrderId::try_new(format!("sim-flatten-order-{sequence}"))
+            .map_err(|error| error.to_string())?,
+        client_order_id: ClientOrderId::try_new(format!("sim-flatten-{sequence}"))
+            .map_err(|error| error.to_string())?,
+        account_id: account_id.clone(),
+        instrument_id: observation.instrument_id.clone(),
+        side,
+        order_type: OrderType::Market,
+        time_in_force: TimeInForce::ImmediateOrCancel,
+        quantity,
+        filled_quantity: FixedPoint::try_new(0, quantity.scale())
+            .map_err(|error| error.to_string())?,
+        limit_price: None,
+        stop_price: None,
+        status: OrderStatus::Working,
+        submitted_unix_nanos: observation.provenance.observed_unix_nanos,
+        revision: 0,
+        accepted_unix_nanos: 0,
+        terminal_unix_nanos: None,
+        provenance: observation.provenance.clone(),
+    };
+    let accepted =
+        crate::book::lifecycle::accept(order, command_now).map_err(|error| error.to_string())?;
+    accepted.validate().map_err(|error| error.to_string())?;
+    Ok(accepted)
 }

@@ -54,6 +54,37 @@ fn setup(
     (directory, service, receiver)
 }
 
+#[test]
+fn simulated_and_broker_acceptance_have_durable_initial_lifecycle_fields() {
+    let (directory, service, _receiver) = setup("initial-lifecycle");
+    let simulated = service
+        .place_order({
+            let mut order = limit_request("local-initial", 9_000);
+            order.account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
+            order
+        })
+        .expect("simulated acceptance");
+    let broker = service
+        .place_order(limit_request("broker-initial", 9_000))
+        .expect("broker submission");
+    for order in [&simulated, &broker] {
+        assert_eq!(order.revision, 1);
+        assert!(order.accepted_unix_nanos > order.submitted_unix_nanos);
+    }
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    let orders = restarted.snapshot().expect("restored orders").orders;
+    for expected in [simulated, broker] {
+        assert_eq!(
+            orders.iter().find(|order| order.id == expected.id),
+            Some(&expected)
+        );
+    }
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
 fn request(id: &str) -> PlaceOrder {
     let mut request = market_order(id, OrderSide::Buy, 1, 1_000);
     request.account_id = broker().id;

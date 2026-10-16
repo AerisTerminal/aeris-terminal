@@ -193,11 +193,13 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     order.order_type = OrderType::Limit;
     order.time_in_force = TimeInForce::GoodTillCancelled;
     order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
-    service.place_order(order).expect("accepted");
+    let accepted = service.place_order(order).expect("accepted");
+    assert_eq!(accepted.accepted_unix_nanos, 1_000_000_000_000);
     clock.set_wall_unix_nanos(1_090_000_000_000);
     let cancelled = service
         .cancel_order(ClientOrderId::try_new("clock-limit").expect("id"))
         .expect("cancel");
+    assert_eq!(cancelled.revision, 2);
     assert_eq!(cancelled.terminal_unix_nanos, Some(1_090_000_000_000));
     let first = service.snapshot().expect("snapshot");
     let event = first
@@ -215,6 +217,7 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     let cancelled = service
         .cancel_order(ClientOrderId::try_new("clock-limit-2").expect("id"))
         .expect("second cancel");
+    assert_eq!(cancelled.revision, 2);
     assert_eq!(cancelled.terminal_unix_nanos, Some(1_090_000_000_000));
     let last = service.snapshot().expect("snapshot");
     let event = last
@@ -252,6 +255,8 @@ fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_res
     let original = service
         .place_order(request.clone())
         .expect("first acceptance");
+    assert_eq!(original.revision, 1);
+    assert!(original.accepted_unix_nanos > 0);
     let baseline = service.snapshot().expect("initial facts");
     assert_eq!(
         service.place_order(request.clone()).expect("retry"),

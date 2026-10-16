@@ -197,6 +197,8 @@ mod tests {
             stop_price: None,
             status,
             submitted_unix_nanos: 1,
+            revision: 1,
+            accepted_unix_nanos: 1,
             terminal_unix_nanos: None,
             provenance: TradingProvenance {
                 venue_id: "test".into(),
