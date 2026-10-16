@@ -527,6 +527,7 @@ Status: in progress
   - Retention runs from the hourly owner timer, not store open, commands or quotes; deletion is capped at 5,000 rows per table per run, including combined per-kind user-record pruning. A 12,000-excess-row test requires three runs (5,000/5,000/2,000). Intentional golden differences: `simulated_stop_golden.txt` changes stop-touch revision 8→9 because that quote now bumps for a durable fill; `simulated_golden.txt` changes only flatten/bracket/reverse/kill revisions (10→8, 13→11, 17→13, 23→17, 26→20), removing retention/mark-driven revisions. No order, event, fill or P&L value changed. Full fmt, workspace strict Clippy, workspace tests and naming check passed.
   - At baseline `20be05fd`: **1,244.4 quotes/s** (1,000 quotes in 803.5697 ms); after M4.10 part 4/4 at parent `6aff3a98` plus this uncommitted patch: **1,203,224.6 quotes/s** (1,000 quotes in 831.1 µs), same machine, open position, release profile, exact command `$env:CARGO_BUILD_JOBS='2'; cargo test -p aeris_trading_runtime --release --locked benchmark_quotes_with_one_open_position -- --ignored --nocapture`. The combined isolated GUI pass, including VAL-CROSS-009, is still outstanding.
   - VAL-TRD-029 follow-up: `replay_crypto_stop_restart_accounting_golden` and its frozen transcript cover a crypto market buy at ask, working sell stop with no chart demand, restart and replay of the old quote without a fill, a fresh bid stop fill, exact fill-accounting/risk/account agreement, and a second facts-and-revision recovery. The two original golden files remain unchanged.
+  - GUI follow-up: The bottom panel formerly skipped every quote-only snapshot once its durable revision matched, freezing open-position and account unrealized P&L even though the owner held current marks. The panel now refreshes account summaries and open positions on changed ephemeral P&L without copying committed trade history; an unchanged mark still avoids a redraw. A controller regression covers same-revision marks.
 
 ### M5 trading engine
 
@@ -747,6 +748,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M4.10 part 3/4 feat(trading): M4.10 part 3/4 - staged multi-effect quote facts on a private projection and committed one SQLite transaction before memory/publication; failed-commit replay covers bracket arming and OCO cancellation.
 - 2026-10-16 M4.10 part 4/4 feat(trading): M4.10 part 4/4 - zero SQLite writes and no full clone for mark-only quotes; hourly retention caps each table at 5,000 deletions; release quote throughput measured before 1,244.4 vs after 1,203,224.6 quotes/s; combined GUI still outstanding.
 - 2026-10-16 M4.10 test(trading): M4.10 VAL-TRD-029 replay golden - froze the chart-free crypto command/stop/restart/accounting recovery transcript without changing earlier goldens.
+- 2026-10-16 M4.10 fix(desktop): refresh mark-only bottom panel P&L - follow-up to GUI pane-free validation; same-revision owner marks now refresh open rows and account summaries without recopying trade history.
 
 ## 7. Known gaps / deferred
 

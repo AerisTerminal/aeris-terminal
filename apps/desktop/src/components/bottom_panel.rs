@@ -200,30 +200,33 @@ impl Default for BottomPanelState {
 }
 
 impl BottomPanelState {
-    /// Adopts a newer owner snapshot. Returns whether the visible history changed.
+    /// Adopts committed facts on revision changes and ephemeral marks on quote-only updates.
     pub(super) fn apply_snapshot(
         &mut self,
         snapshot: &aeris_trading_runtime::TradingSnapshot,
     ) -> bool {
-        if self.history.revision == Some(snapshot.revision) {
+        let facts_changed = self.history.revision != Some(snapshot.revision);
+        if !facts_changed && self.history.account_pnl.as_ref() == snapshot.account_pnl.as_slice() {
             return false;
         }
-        self.history.revision = Some(snapshot.revision);
-        self.history.round_trips = snapshot.round_trips.clone().into();
-        self.history.accounts = snapshot.accounts.clone().into();
+        if facts_changed {
+            self.history.revision = Some(snapshot.revision);
+            self.history.round_trips = snapshot.round_trips.clone().into();
+            self.history.accounts = snapshot.accounts.clone().into();
+            self.history.symbols = Arc::new(
+                snapshot
+                    .instruments
+                    .iter()
+                    .map(|instrument| {
+                        (
+                            instrument.instrument_id.clone(),
+                            instrument.contract.provenance.display_symbol.clone(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         self.history.account_pnl = snapshot.account_pnl.clone().into();
-        self.history.symbols = Arc::new(
-            snapshot
-                .instruments
-                .iter()
-                .map(|instrument| {
-                    (
-                        instrument.instrument_id.clone(),
-                        instrument.contract.provenance.display_symbol.clone(),
-                    )
-                })
-                .collect(),
-        );
         self.adopt_positions(open_positions(
             &snapshot.positions,
             &snapshot.broker_positions,
@@ -1512,6 +1515,67 @@ mod tests {
             unrealized_pnl: money(-1_250),
             last_fill_unix_nanos: 40,
         }
+    }
+
+    fn marked_snapshot(mark: i64) -> aeris_trading_runtime::TradingSnapshot {
+        let mut position = simulated_position("practice", 100_000_000);
+        position.unrealized_pnl = aeris_trading::FixedPoint::try_new(mark, 2).expect("mark");
+        aeris_trading_runtime::TradingSnapshot {
+            revision: 4,
+            market_observation_error: None,
+            accounts: Vec::new(),
+            instruments: Vec::new(),
+            orders: Vec::new(),
+            order_events: Vec::new(),
+            fills: Vec::new(),
+            completed_trade_pnl: BTreeMap::new(),
+            fill_realized_pnl: BTreeMap::new(),
+            round_trips: vec![open_round_trip("practice")],
+            positions: vec![position],
+            broker_positions: Vec::new(),
+            broker_balances: BTreeMap::new(),
+            connected_broker_accounts: BTreeSet::new(),
+            position_pnl: Vec::new(),
+            account_pnl: vec![account_pnl("practice", "USD", Some(50_000), 0, Some(mark))],
+            risk_profiles: Vec::new(),
+            risk_meters: Vec::new(),
+            risk_locks: Vec::new(),
+            risk_rule_states: Vec::new(),
+            discipline_states: Vec::new(),
+            session_plans: Vec::new(),
+            session_adherence_reviews: Vec::new(),
+            trade_copiers: Vec::new(),
+            copy_dispatches: Vec::new(),
+            strategy_templates: Vec::new(),
+            managed_brackets: Vec::new(),
+            planned_bracket_legs: Vec::new(),
+            protective_orders: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mark_only_snapshot_refreshes_open_position_and_summary_without_revision_bump() {
+        let mut panel = BottomPanelState::default();
+        let first = marked_snapshot(100);
+        assert!(panel.apply_snapshot(&first));
+        let frozen_history = panel.history.round_trips.clone();
+        assert!(
+            !panel.apply_snapshot(&first),
+            "unchanged mark does not redraw"
+        );
+        let second = marked_snapshot(250);
+        assert_eq!(first.revision, second.revision);
+        assert!(panel.apply_snapshot(&second), "new mark redraws the panel");
+        assert_eq!(
+            panel.positions.positions[0].open_pnl,
+            Some(aeris_trading::FixedPoint::try_new(250, 2).expect("mark"))
+        );
+        assert_eq!(
+            panel.history.summaries[0].unrealized,
+            panel.positions.positions[0].open_pnl
+        );
+        assert!(Arc::ptr_eq(&frozen_history, &panel.history.round_trips));
+        assert!(!panel.apply_snapshot(&second));
     }
 
     fn broker_ids(state: &BottomPanelState) -> Vec<String> {
