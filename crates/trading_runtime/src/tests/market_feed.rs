@@ -502,6 +502,211 @@ fn quote_book_validates_and_fences_generation_and_source_sequence() {
     );
 }
 
+fn seeded_quote_book() -> (
+    crate::core::market::feed::QuoteBook,
+    BTreeMap<InstrumentId, MarketRoute>,
+) {
+    let mut book = crate::core::market::feed::QuoteBook::default();
+    let routes = [(route().instrument_id.clone(), route())].into();
+    assert!(
+        book.accept(MarketFeedEvent::Quote(quote(2, 4, 10_000, 10_025)), &routes)
+            .unwrap()
+    );
+    (book, routes)
+}
+
+#[test]
+fn quote_book_rejects_non_positive_prices_without_retiring_quote() {
+    let (mut book, routes) = seeded_quote_book();
+    for (bid, ask) in [(0, 10_025), (-1, 10_025), (10_000, 0), (10_000, -1)] {
+        assert_eq!(
+            book.accept(MarketFeedEvent::Quote(quote(3, 5, bid, ask)), &routes),
+            Err(MarketFeedError::InvalidSpread)
+        );
+        assert_eq!(
+            book.quote(&route().instrument_id).unwrap().source_sequence,
+            Some(4)
+        );
+    }
+}
+
+#[test]
+fn quote_book_rejects_crossed_or_equal_spread_without_retiring_quote() {
+    let (mut book, routes) = seeded_quote_book();
+    for (bid, ask) in [(10_025, 10_025), (10_026, 10_025)] {
+        assert_eq!(
+            book.accept(MarketFeedEvent::Quote(quote(3, 5, bid, ask)), &routes),
+            Err(MarketFeedError::InvalidSpread)
+        );
+        assert_eq!(
+            book.quote(&route().instrument_id).unwrap().source_sequence,
+            Some(4)
+        );
+    }
+}
+
+#[test]
+fn quote_book_rejects_wrong_bid_or_ask_scale_without_retiring_quote() {
+    let (mut book, routes) = seeded_quote_book();
+    for bid_side in [true, false] {
+        let mut invalid = quote(3, 5, 10_000, 10_025);
+        if bid_side {
+            invalid.bid = FixedPoint::try_new(10_000, 3).unwrap();
+        } else {
+            invalid.ask = FixedPoint::try_new(10_025, 3).unwrap();
+        }
+        assert_eq!(
+            book.accept(MarketFeedEvent::Quote(invalid), &routes),
+            Err(MarketFeedError::InvalidScale)
+        );
+        assert_eq!(
+            book.quote(&route().instrument_id).unwrap().source_sequence,
+            Some(4)
+        );
+    }
+}
+
+#[test]
+fn quote_book_ignores_older_provider_generation() {
+    let (mut book, routes) = seeded_quote_book();
+    assert!(
+        !book
+            .accept(MarketFeedEvent::Quote(quote(1, 99, 9_900, 10_000)), &routes)
+            .unwrap()
+    );
+    assert_eq!(
+        book.quote(&route().instrument_id).unwrap().source_sequence,
+        Some(4)
+    );
+}
+
+#[test]
+fn quote_book_ignores_lower_source_sequence_in_same_generation() {
+    let (mut book, routes) = seeded_quote_book();
+    assert!(
+        !book
+            .accept(MarketFeedEvent::Quote(quote(2, 3, 9_900, 10_000)), &routes)
+            .unwrap()
+    );
+    assert_eq!(
+        book.quote(&route().instrument_id).unwrap().source_sequence,
+        Some(4)
+    );
+}
+
+#[test]
+fn mixed_control_overflow_drops_oldest_terms_and_requests_full_refresh() {
+    let (commands, receiver) = mpsc::sync_channel(1);
+    let inbox =
+        crate::core::market::feed::MarketFeedInbox::new(commands, Arc::new(AtomicBool::new(false)));
+    let mut oldest = terms();
+    oldest.route.provider_symbol = "OLDEST".into();
+    inbox.push(MarketFeedEvent::Terms(oldest)).unwrap();
+    for index in 0..1_023 {
+        let event = if index % 2 == 0 {
+            feed_state(route().instrument_id, 1, FeedState::Live)
+        } else {
+            live_session(route().instrument_id, 1)
+        };
+        inbox.push(event).unwrap();
+    }
+    assert!(matches!(receiver.try_recv(), Ok(Command::DrainMarketFeed)));
+    assert!(
+        receiver.try_recv().is_err(),
+        "only one drain wake is queued"
+    );
+    inbox
+        .push(MarketFeedEvent::Quote(quote(2, 3, 10_000, 10_025)))
+        .unwrap();
+    inbox
+        .push(MarketFeedEvent::Quote(quote(2, 2, 9_900, 10_000)))
+        .unwrap();
+    inbox
+        .push(MarketFeedEvent::Quote(quote(2, 4, 10_050, 10_075)))
+        .unwrap();
+    inbox.push(MarketFeedEvent::Terms(terms())).unwrap();
+    assert!(receiver.try_recv().is_err());
+    let batch = inbox.drain();
+    assert_eq!(batch.quotes.len(), 1);
+    assert_eq!(batch.quotes[0].source_sequence, Some(4));
+    assert_eq!(batch.controls.len(), 1_024);
+    assert!(matches!(&batch.controls[0], MarketFeedEvent::Feed { .. }));
+    assert!(matches!(&batch.controls[1], MarketFeedEvent::Session(_)));
+    assert!(
+        matches!(&batch.controls[1_023], MarketFeedEvent::Terms(terms) if terms.route.provider_symbol == "ESZ6")
+    );
+    assert!(batch.resync);
+
+    let directory = TestDirectory::new("mixed-overflow-refresh");
+    let configuration = config(&directory);
+    let (commands, _receiver) = mpsc::sync_channel(1);
+    let feed = Arc::new(crate::core::market::feed::MarketFeedInbox::new(
+        commands,
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let mut owner = crate::TradingCore::open(
+        &configuration.database_path,
+        configuration.retention,
+        configuration.clock,
+        configuration.execution,
+        std::sync::Weak::new(),
+        feed.clone(),
+    )
+    .unwrap();
+    let sink = Arc::new(RecordedInterest::default());
+    let (reply, response) = mpsc::sync_channel(1);
+    owner.dispatch_market_command(Command::AttachMarketFeed(sink.clone(), reply));
+    response.recv().unwrap().unwrap();
+    owner.replace_ticket_interest(vec![route()]).unwrap();
+    owner.recompute_quote_interest().unwrap();
+    let published = sink.0.lock().unwrap().clone();
+    assert_eq!(published.len(), 1);
+    for index in 0..1_025 {
+        let mut control = terms();
+        control.route.provider_symbol = format!("OVERFLOW-{index}");
+        feed.push(MarketFeedEvent::Terms(control)).unwrap();
+    }
+    owner.drain_market_feed();
+    owner.recompute_quote_interest().unwrap();
+    let updates = sink.0.lock().unwrap();
+    assert_eq!(
+        updates.len(),
+        2,
+        "resync republishes a full interest snapshot"
+    );
+    assert_eq!(updates[1].routes, published[0].routes);
+    assert!(updates[1].revision > published[0].revision);
+    drop(updates);
+}
+
+#[test]
+fn market_feed_push_does_not_wait_for_undrained_owner() {
+    let (commands, receiver) = mpsc::sync_channel(1);
+    commands.try_send(Command::DrainMarketFeed).unwrap();
+    let inbox = Arc::new(crate::core::market::feed::MarketFeedInbox::new(
+        commands,
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let (done, finished) = mpsc::sync_channel(1);
+    let sender = std::thread::spawn(move || {
+        for index in 0..2_048 {
+            let event = if index % 2 == 0 {
+                MarketFeedEvent::Terms(terms())
+            } else {
+                MarketFeedEvent::Quote(quote(2, 4, 10_000, 10_025))
+            };
+            inbox.push(event).unwrap();
+        }
+        done.send(()).unwrap();
+    });
+    finished
+        .recv_timeout(Duration::from_secs(2))
+        .expect("push must finish while the owner does not drain");
+    sender.join().unwrap();
+    assert!(matches!(receiver.try_recv(), Ok(Command::DrainMarketFeed)));
+    assert!(receiver.try_recv().is_err());
+}
+
 #[test]
 fn owner_prices_chart_bracket_entry_against_its_current_touch() {
     let price = |units| FixedPoint::try_new(units, 2).unwrap();
