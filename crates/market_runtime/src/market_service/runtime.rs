@@ -1742,7 +1742,7 @@ impl MarketService {
             .name("aeris-trading-feed".into())
             .spawn(move || {
                 while !shutdown.load(Ordering::Acquire) {
-                    if let Some(event) = inbox.receive(Duration::from_secs(30))
+                    if let Some(event) = inbox.receive_until_shutdown(&shutdown)
                         && !shutdown.load(Ordering::Acquire)
                     {
                         (link.events)(event);

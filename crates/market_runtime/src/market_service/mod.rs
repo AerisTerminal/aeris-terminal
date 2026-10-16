@@ -66,6 +66,10 @@ pub use quotes::{QuoteSourceKind, QuoteState};
 mod trading_feed;
 pub use trading_feed::TradingFeedLink;
 pub use trading_feed::instrument_terms_from_install;
+#[cfg(any(test, feature = "replay"))]
+mod scripted_provider;
+#[cfg(any(test, feature = "replay"))]
+pub use scripted_provider::ScriptedQuoteProvider;
 pub(crate) mod clock;
 pub(crate) mod reconnect;
 use alerts::PriceAlertRegistry;
@@ -1217,6 +1221,8 @@ struct ProviderRuntimeSpec {
     descriptor: ProviderDescriptor,
     history: Option<Box<dyn HistorySource>>,
     realtime: ProviderRealtimeSpec,
+    #[cfg(any(test, feature = "replay"))]
+    scripted: Option<scripted_provider::ScriptedChannels>,
 }
 
 struct ProviderRealtimeSpec {
@@ -1229,6 +1235,8 @@ impl ProviderRuntimeSpec {
             descriptor: tastytrade::DESCRIPTOR,
             history: None,
             realtime: ProviderRealtimeSpec { enabled: true },
+            #[cfg(any(test, feature = "replay"))]
+            scripted: None,
         }
     }
     fn rithmic(history: Box<dyn HistorySource>, enabled: bool) -> Self {
@@ -1236,6 +1244,8 @@ impl ProviderRuntimeSpec {
             descriptor: RITHMIC_DESCRIPTOR,
             history: Some(history),
             realtime: ProviderRealtimeSpec { enabled },
+            #[cfg(any(test, feature = "replay"))]
+            scripted: None,
         }
     }
 
@@ -1244,6 +1254,8 @@ impl ProviderRuntimeSpec {
             descriptor: HYPERLIQUID_DESCRIPTOR,
             history: Some(history),
             realtime: ProviderRealtimeSpec { enabled },
+            #[cfg(any(test, feature = "replay"))]
+            scripted: None,
         }
     }
 
@@ -1252,6 +1264,8 @@ impl ProviderRuntimeSpec {
             descriptor: ctrader::DESCRIPTOR,
             history: None,
             realtime: ProviderRealtimeSpec { enabled: true },
+            #[cfg(any(test, feature = "replay"))]
+            scripted: None,
         }
     }
 }

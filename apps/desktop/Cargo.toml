@@ -46,6 +46,7 @@ embed-resource.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+aeris_market_runtime = { path = "../../crates/market_runtime", features = ["replay"] }
 
 [lints]
 workspace = true

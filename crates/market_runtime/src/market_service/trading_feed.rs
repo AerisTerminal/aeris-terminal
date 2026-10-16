@@ -1,11 +1,12 @@
 //! Bounded, latest-wins delivery from the market coordinator to trading.
 //! The coordinator never invokes an external callback or waits on trading.
 
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Condvar, Mutex},
-    time::Duration,
 };
 
 use aeris_contracts::{InstallProviderInstrument, ProviderInstrumentClass};
@@ -248,6 +249,7 @@ impl TradingFeedOutbox {
         self.wake.notify_one();
     }
 
+    #[cfg(test)]
     pub(super) fn receive(&self, timeout: Duration) -> Option<MarketFeedEvent> {
         let pending = self
             .pending
@@ -258,6 +260,20 @@ impl TradingFeedOutbox {
             .wait_timeout_while(pending, timeout, |events| events.is_empty())
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .0;
+        pending.pop_first().map(|(_, event)| event)
+    }
+
+    pub(super) fn receive_until_shutdown(&self, shutdown: &AtomicBool) -> Option<MarketFeedEvent> {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pending = self
+            .wake
+            .wait_while(pending, |events| {
+                events.is_empty() && !shutdown.load(Ordering::Acquire)
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pending.pop_first().map(|(_, event)| event)
     }
 
