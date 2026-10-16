@@ -453,7 +453,6 @@ fn valid_chart_settings_template(template: &WorkspaceChartSettingsTemplateState)
     !name.is_empty()
         && name.len() <= MAXIMUM_CHART_SETTINGS_TEMPLATE_NAME_BYTES
         && !template.name.chars().any(char::is_control)
-        && aeris_chart_integration::ChartType::from_identifier(&template.chart_type).is_some()
         && template.crosshair_mode <= 3
         && valid_chart_time_zone(&template.time_zone)
         && template
@@ -868,7 +867,6 @@ mod tests {
     fn chart_settings_template(name: impl Into<String>) -> WorkspaceChartSettingsTemplateState {
         WorkspaceChartSettingsTemplateState {
             name: name.into(),
-            chart_type: "candles".to_string(),
             appearance: round_trip_chart_state().appearance,
             crosshair_mode: 1,
             time_zone: "Europe/London".to_string(),

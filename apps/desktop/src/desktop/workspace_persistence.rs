@@ -392,7 +392,6 @@ mod tests {
         let (state, _receiver) = persistence();
         let template = WorkspaceChartSettingsTemplateState {
             name: "Scalping".to_string(),
-            chart_type: "candles".to_string(),
             appearance: None,
             crosshair_mode: 1,
             time_zone: "Etc/UTC".to_string(),

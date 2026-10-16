@@ -13,6 +13,39 @@ const SIZE_CHOICES: [(&str, BigTradesSize); 3] = [
     ("Large", BigTradesSize::Large),
 ];
 
+/// A titled group of indicator settings on one borderless `surface-secondary` card with no
+/// lines between its rows, matching the chart settings panel's groups.
+pub(super) fn settings_group(
+    title: impl Into<SharedString>,
+    rows: impl IntoIterator<Item = AnyElement>,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let colors = theme.colors;
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(platform_font_weight(TypographyRole::Strong))
+                .text_color(gpui_color(colors.text_secondary))
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .px_3()
+                .py_1()
+                .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
+                .bg(gpui_color(colors.surface_secondary))
+                .children(rows),
+        )
+        .into_any_element()
+}
+
+/// One setting inside a [`settings_group`] card: label and description above its control.
 pub(super) fn setting_row(
     label: &'static str,
     description: &'static str,
@@ -24,10 +57,7 @@ pub(super) fn setting_row(
         .flex()
         .flex_col()
         .gap_2()
-        .px_3()
         .py_2()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .bg(gpui_color(colors.surface))
         .child(
             div()
                 .flex()
@@ -226,7 +256,7 @@ fn show_volume_row(
 ) -> AnyElement {
     let update = app.clone();
     div()
-        .px_3()
+        .py_1()
         .child(
             SwitchRow::new(
                 "big_trades_show_volume",
@@ -259,13 +289,26 @@ pub(super) fn big_trades_dialog_layer(
     })
     .title("Indicator settings")
     .subtitle("Big Trades")
+    .panel_surface()
     .max_height(px(640.0))
-    .child(filter_row(app, dialog, theme))
-    .when(dialog.intensity.is_none(), |body| {
-        body.child(minimum_volume_row(dialog, theme))
-    })
-    .child(size_row(app, dialog, theme))
-    .child(show_volume_row(app, dialog, theme))
+    .child(settings_group(
+        "Filter",
+        std::iter::once(filter_row(app, dialog, theme)).chain(
+            dialog
+                .intensity
+                .is_none()
+                .then(|| minimum_volume_row(dialog, theme)),
+        ),
+        theme,
+    ))
+    .child(settings_group(
+        "Bubbles",
+        [
+            size_row(app, dialog, theme),
+            show_volume_row(app, dialog, theme),
+        ],
+        theme,
+    ))
     .children(dialog.message.as_ref().map(|message| {
         div()
             .text_sm()

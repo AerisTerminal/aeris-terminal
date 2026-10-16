@@ -224,14 +224,13 @@ pub struct WorkspaceWatchlistEntryState {
     pub instrument: Option<InstallProviderInstrument>,
 }
 
-/// One locally persisted chart appearance template. Market data, indicators,
-/// drawings, and scale state are deliberately excluded.
+/// One locally persisted chart styling template. The chart type, market data, indicators,
+/// drawings, and scale state are deliberately excluded. Tag 2 held the chart type in older
+/// templates; it is ignored on decode and must not be reused.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct WorkspaceChartSettingsTemplateState {
     #[prost(string, tag = "1")]
     pub name: String,
-    #[prost(string, tag = "2")]
-    pub chart_type: String,
     #[prost(message, optional, tag = "3")]
     pub appearance: Option<WorkspaceChartAppearanceState>,
     #[prost(uint32, tag = "4")]

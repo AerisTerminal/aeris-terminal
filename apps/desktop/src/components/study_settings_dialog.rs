@@ -1,4 +1,6 @@
-use super::big_trades_dialog::{DropdownChoice, SettingDropdown, setting_row as described_row};
+use super::big_trades_dialog::{
+    DropdownChoice, SettingDropdown, setting_row as described_row, settings_group,
+};
 use super::*;
 
 fn constraint_hint(control: &StudySettingControl) -> Option<String> {
@@ -185,7 +187,6 @@ fn line_thickness_row(
     dialog: &StudySettingsDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let colors = theme.colors;
     let choices = SettingDropdown {
         menu: "study_line_width",
         label: "Line thickness",
@@ -200,35 +201,12 @@ fn line_thickness_row(
             .collect(),
     }
     .render(app, WorkspaceSurface::set_study_settings_line_width, theme);
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .bg(gpui_color(field_surface(theme)))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_primary))
-                        .child("Line thickness"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(gpui_color(colors.text_muted))
-                        .child("Stroke width of every line this study draws"),
-                ),
-        )
-        .child(choices)
-        .into_any_element()
+    described_row(
+        "Line thickness",
+        "Stroke width of every line this study draws.",
+        choices,
+        theme,
+    )
 }
 
 /// A swatch that opens the color picker for one study line. Picks change only the draft.
@@ -343,10 +321,7 @@ fn setting_row(
             .flex()
             .flex_col()
             .gap_2()
-            .px_3()
             .py_2()
-            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-            .bg(gpui_color(field_surface(theme)))
             .child(
                 div().flex().items_start().justify_between().gap_3().child(
                     div()
@@ -390,48 +365,35 @@ fn study_settings_body(
     cx: &App,
 ) -> AnyElement {
     let colors = theme.colors;
-    // The dialog body owns padding and scrolling; this column only spaces the settings rows.
-    let mut body = div().flex().flex_col().gap_2();
-    let mut last_group: Option<&str> = None;
+    // The dialog body owns padding and scrolling; this column only spaces the setting groups.
+    let mut body = div().flex().flex_col().gap_3();
+    // Consecutive settings that share a presentation group form one card; ungrouped settings
+    // are the study's inputs.
+    let mut groups: Vec<(SharedString, Vec<AnyElement>)> = Vec::new();
+    let mut last_group: Option<Option<&str>> = None;
     for (index, spec) in dialog.specs.iter().enumerate() {
-        if !workspace_surface::study_setting_condition_matches(
-            dialog,
-            spec.presentation.visible_when.as_ref(),
-            cx,
-        ) {
+        let Some(row) = setting_row(app, dialog, index, spec, theme, cx) else {
             continue;
-        }
+        };
         let group = spec.presentation.group.as_deref();
-        if group != last_group {
-            if let Some(group) = group {
-                body = body.child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(group.to_string()),
+        match groups.last_mut() {
+            Some((_, rows)) if last_group == Some(group) => rows.push(row),
+            _ => {
+                let title = group.map_or_else(
+                    || SharedString::from("Inputs"),
+                    |group| SharedString::from(group.to_string()),
                 );
+                groups.push((title, vec![row]));
             }
-            last_group = group;
         }
-        if let Some(row) = setting_row(app, dialog, index, spec, theme, cx) {
-            body = body.child(row);
-        }
+        last_group = Some(group);
     }
-    body = body
-        .child(
-            div()
-                .mt_1()
-                .text_xs()
-                .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_muted))
-                .child("Style"),
-        )
-        .child(line_thickness_row(app, dialog, theme));
-    if !dialog.output_colors.is_empty() {
-        body = body.child(output_colors_row(app, dialog, theme));
+    for (title, rows) in groups {
+        body = body.child(settings_group(title, rows, theme));
     }
+    let style_rows = std::iter::once(line_thickness_row(app, dialog, theme))
+        .chain((!dialog.output_colors.is_empty()).then(|| output_colors_row(app, dialog, theme)));
+    body = body.child(settings_group("Style", style_rows, theme));
     if let Some(message) = &dialog.message {
         body = body.child(
             div()
@@ -469,6 +431,7 @@ pub(super) fn study_settings_dialog_layer(
     )
     .title("Study settings")
     .subtitle(dialog.title.clone())
+    .panel_surface()
     .max_height(px(640.0))
     .child(study_settings_body(app, dialog, theme, cx))
     .footer_leading(

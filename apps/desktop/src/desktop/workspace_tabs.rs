@@ -1376,7 +1376,6 @@ impl TerminalApp {
         let snapshot = self.chart_settings_snapshot(menu, cx)?;
         Some(WorkspaceChartSettingsTemplateState {
             name,
-            chart_type: snapshot.chart_type.identifier().to_string(),
             appearance: Some(workspace_surface::persisted_chart_appearance(
                 &snapshot.appearance,
             )),
@@ -1400,9 +1399,6 @@ impl TerminalApp {
         let Some(surface) = self.chart_settings_surface(menu) else {
             return;
         };
-        let Some(chart_type) = ChartType::from_identifier(&template.chart_type) else {
-            return;
-        };
         let Some(appearance) = template
             .appearance
             .as_ref()
@@ -1423,7 +1419,6 @@ impl TerminalApp {
         };
         let legend = workspace_surface::restored_chart_legend(template.legend);
         surface.update(cx, |surface, surface_cx| {
-            surface.set_chart_type(chart_type, surface_cx);
             surface.set_chart_appearance(&appearance, surface_cx);
             surface.set_chart_crosshair_mode(crosshair_mode, surface_cx);
             surface.set_chart_time_zone(time_zone, surface_cx);

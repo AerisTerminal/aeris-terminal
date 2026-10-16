@@ -1,10 +1,11 @@
 use aeris_contracts::{
     AccountSessionState, AccountView, InstallProviderInstrument, ProviderConnectionState,
-    ProviderState, SeriesCadence, SeriesKey, WorkspaceChartState, WorkspaceChartStudyState,
-    WorkspaceDrawingTemplateState, WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState,
-    WorkspaceSplitAxis, WorkspaceState, WorkspaceStudyDependencyKind,
-    WorkspaceStudyDependencyState, WorkspaceStudyMarketStream, WorkspaceStudySettingState,
-    WorkspaceTabState, WorkspaceWatchlistEntryState, workspace_study_setting_state,
+    ProviderState, SeriesCadence, SeriesKey, WorkspaceChartSettingsTemplateState,
+    WorkspaceChartState, WorkspaceChartStudyState, WorkspaceDrawingTemplateState,
+    WorkspaceLayoutState, WorkspacePaneKind, WorkspacePaneState, WorkspaceSplitAxis,
+    WorkspaceState, WorkspaceStudyDependencyKind, WorkspaceStudyDependencyState,
+    WorkspaceStudyMarketStream, WorkspaceStudySettingState, WorkspaceTabState,
+    WorkspaceWatchlistEntryState, workspace_study_setting_state,
 };
 use prost::Message as _;
 
@@ -185,6 +186,33 @@ fn retired_process_lifecycle_workspace_fields_are_ignored_when_loading_old_bytes
         .expect("retired tags decode as unknown fields");
     assert_eq!(decoded.provider, "rithmic");
     assert_eq!(decoded.schema_revision, 7);
+}
+
+#[test]
+fn chart_settings_templates_saved_with_a_chart_type_load_their_styling_only() {
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct LegacyChartSettingsTemplateState {
+        #[prost(string, tag = "1")]
+        name: String,
+        #[prost(string, tag = "2")]
+        chart_type: String,
+        #[prost(uint32, tag = "4")]
+        crosshair_mode: u32,
+        #[prost(string, tag = "5")]
+        time_zone: String,
+    }
+
+    let legacy = LegacyChartSettingsTemplateState {
+        name: "Scalping".into(),
+        chart_type: "footprint".into(),
+        crosshair_mode: 2,
+        time_zone: "Europe/London".into(),
+    };
+    let decoded = WorkspaceChartSettingsTemplateState::decode(legacy.encode_to_vec().as_slice())
+        .expect("the retired chart type decodes as an unknown field");
+    assert_eq!(decoded.name, "Scalping");
+    assert_eq!(decoded.crosshair_mode, 2);
+    assert_eq!(decoded.time_zone, "Europe/London");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use super::big_trades_dialog::{SettingDropdown, dropdown_choices, setting_row};
+use super::big_trades_dialog::{SettingDropdown, dropdown_choices, setting_row, settings_group};
 use super::*;
 
 const PLACEMENT_CHOICES: [(&str, VolumePlacement); 2] = [
@@ -131,7 +131,7 @@ fn average_switch_row(
 ) -> AnyElement {
     let update = app.clone();
     div()
-        .px_3()
+        .py_1()
         .child(
             SwitchRow::new(
                 "volume_average_enabled",
@@ -211,15 +211,35 @@ pub(super) fn volume_dialog_layer(
     })
     .title("Indicator settings")
     .subtitle("Volume")
+    .panel_surface()
     .max_height(px(680.0))
-    .child(columns_row(app, dialog, theme))
-    .child(placement_row(app, dialog, theme))
-    .child(average_switch_row(app, dialog, theme))
-    .when(dialog.draft.average.enabled, |body| {
-        body.child(average_kind_row(app, dialog, theme))
-            .child(average_length_row(dialog, theme))
-            .child(average_color_row(app, dialog, theme))
-    })
+    .child(settings_group(
+        "Columns",
+        [
+            columns_row(app, dialog, theme),
+            placement_row(app, dialog, theme),
+        ],
+        theme,
+    ))
+    .child(settings_group(
+        "Moving average",
+        std::iter::once(average_switch_row(app, dialog, theme)).chain(
+            dialog
+                .draft
+                .average
+                .enabled
+                .then(|| {
+                    [
+                        average_kind_row(app, dialog, theme),
+                        average_length_row(dialog, theme),
+                        average_color_row(app, dialog, theme),
+                    ]
+                })
+                .into_iter()
+                .flatten(),
+        ),
+        theme,
+    ))
     .children(dialog.message.as_ref().map(|message| {
         div()
             .text_sm()

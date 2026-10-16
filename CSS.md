@@ -24,10 +24,11 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
   `popover_surface` and `popover_highlight` from `native_ui/theme.rs`: an opaque `surface-popover`
   fill, a `--border-width` `border-popover` hairline, and a 1px `border-popover-highlight` inner edge
   painted above the content.
-- Large workspace panels (the symbol, indicator and chart settings panels and the header account
-  menu) keep the popover edge and highlight but fill with the main `surface` (`surface_panel`, or
-  `MenuPanel::on_surface`). Their content sits on borderless `surface-secondary` cards: no outlined
-  blocks and no hairlines between rows. Size and style settings are dropdowns, not tab groups.
+- Large workspace panels (the symbol, indicator and chart settings panels, the indicator settings
+  dialogs and the header account menu) keep the popover edge and highlight but fill with the main
+  `surface` (`surface_panel`, `MenuPanel::on_surface`, or `Dialog::panel_surface`). Their content
+  sits on titled, borderless `surface-secondary` group cards: no outlined blocks and no hairlines
+  between rows. Size and style settings are dropdowns, not tab groups.
 - Nothing inside a `surface-popover` layer rests on plain `surface` in dark mode. Fields and setting
   rows use `field_surface` (`surface`, `surface-secondary` in dark), and buttons use the `Secondary`
   variant.
@@ -82,7 +83,8 @@ keeps the shared neutral row fills and colours only its label and glyph: `text-d
 `danger-hover` while hovered or highlighted, and `danger-disabled` with no hover while disabled.
 Pass glyphs through `leading_icon` so the row colours them.
 
-**`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal, drawn as a popover layer. Sizes `Sm` (420), `Md` (480), `Lg`
+**`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal, drawn as a popover layer;
+`panel_surface` fills an indicator settings dialog with `surface` instead. Sizes `Sm` (420), `Md` (480), `Lg`
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the
 committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Primary`.
 
