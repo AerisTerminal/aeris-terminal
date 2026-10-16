@@ -223,7 +223,9 @@ impl TradingCore {
             state.cooldown_until_unix_nanos = None;
             state.rapid_loss_count = 0;
             state.loss_window_started_unix_nanos = None;
-            self.store.put_discipline_state(&state)?;
+            if !self.quote_planning {
+                self.store.put_discipline_state(&state)?;
+            }
             self.state
                 .discipline_states
                 .insert(command.account_id.clone(), state.clone());

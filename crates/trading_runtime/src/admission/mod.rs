@@ -700,8 +700,71 @@ impl TradingCore {
                 dispatches.push(dispatch);
             }
         }
-        self.commit_order_step(step, dispatches)?;
-        Ok(source)
+        self.commit_placement_step(step, dispatches, source)
+    }
+
+    /// Compose acceptance, copied orders and any taker fills on a private projection.
+    /// The same fact writer used for quote execution commits the entire step once.
+    fn commit_placement_step(
+        &mut self,
+        step: OrderStep,
+        dispatches: Vec<TradeCopyDispatch>,
+        source: Order,
+    ) -> Result<Order, String> {
+        let candidates = step
+            .inserted
+            .iter()
+            .filter_map(|(order, _)| {
+                let quote = self.quote_book.observation(&order.instrument_id)?;
+                let price = placement_touch_price(order, quote.bid, quote.ask)?;
+                Some((order.id.clone(), quote, price))
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            self.commit_order_step(step, dispatches)?;
+            return Ok(source);
+        }
+        let projection = self.state.clone();
+        let original = std::mem::replace(&mut self.state, projection);
+        let previous_dispatches = self.copy_dispatches.clone();
+        self.quote_planning = true;
+        let result = (|| {
+            self.commit_order_step(step, dispatches)?;
+            for (id, observation, price) in candidates {
+                let instrument = self
+                    .state
+                    .instruments
+                    .get(&observation.instrument_id)
+                    .ok_or("placement instrument disappeared")?
+                    .clone();
+                self.validate_mark_to_market(&observation, &instrument)?;
+                let fills =
+                    self.execute_market_fills(vec![(id, price)], &observation, &instrument)?;
+                self.bump_revision()?;
+                self.reconcile_managed_brackets(&fills, &observation, &instrument)?;
+                self.align_position_protection(&fills, &observation)?;
+                self.update_mark_to_market(&observation, &instrument)?;
+                self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
+            }
+            Ok::<_, String>(())
+        })();
+        self.quote_planning = false;
+        let planned = std::mem::replace(&mut self.state, original);
+        if let Err(error) = result {
+            self.copy_dispatches = previous_dispatches;
+            return Err(error);
+        }
+        if let Err(error) = self.store.commit_quote_step(&self.state, &planned) {
+            self.copy_dispatches = previous_dispatches;
+            return Err(error);
+        }
+        self.state = planned;
+        self.enforce_memory_retention();
+        self.state
+            .orders
+            .get(&source.id)
+            .cloned()
+            .ok_or_else(|| "placed order disappeared".to_string())
     }
 
     fn stage_single_order(

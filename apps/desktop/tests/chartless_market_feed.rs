@@ -204,7 +204,8 @@ fn chartless_scripted_provider_marks_and_executes_stop_through_both_attachments(
     assert_eq!(baseline.positions[0].net_quantity.units(), 1);
     assert_eq!(market.status().unwrap().retained_series, 0);
 
-    for (sequence, bid, expected) in [(3, 10_075, 25), (4, 10_100, 50)] {
+    // The entry now takes the first ask (100.25) at placement, not the next ask (100.50).
+    for (sequence, bid, expected) in [(3, 10_075, 50), (4, 10_100, 75)] {
         provider
             .quote(
                 bid,

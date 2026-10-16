@@ -79,6 +79,105 @@ fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeed
 }
 
 #[test]
+fn market_and_marketable_limit_fill_at_placement_touch_and_restore() {
+    for (index, side, kind, tif, limit, expected) in [
+        (
+            0,
+            OrderSide::Buy,
+            OrderType::Market,
+            TimeInForce::ImmediateOrCancel,
+            None,
+            10_025,
+        ),
+        (
+            1,
+            OrderSide::Sell,
+            OrderType::Market,
+            TimeInForce::ImmediateOrCancel,
+            None,
+            10_000,
+        ),
+        (
+            2,
+            OrderSide::Buy,
+            OrderType::Limit,
+            TimeInForce::GoodTillCancelled,
+            Some(10_100),
+            10_025,
+        ),
+        (
+            3,
+            OrderSide::Sell,
+            OrderType::Limit,
+            TimeInForce::ImmediateOrCancel,
+            Some(9_900),
+            10_000,
+        ),
+        (
+            4,
+            OrderSide::Buy,
+            OrderType::Limit,
+            TimeInForce::FillOrKill,
+            Some(10_100),
+            10_025,
+        ),
+    ] {
+        let directory = TestDirectory::new(&format!("placement-touch-{index}"));
+        let (service, _clock) = feed_service(&directory);
+        service
+            .set_ticket_interest(vec![route()])
+            .expect("ticket interest");
+        let feed = service
+            .attach_market_feed(Arc::new(RecordedInterest::default()))
+            .expect("feed");
+        feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+        feed.push(live_session(route().instrument_id, 1))
+            .expect("session");
+        feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+            .expect("live");
+        feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+            .expect("quote");
+        service.status().expect("drain");
+        let mut request = market_order(&format!("placement-{index}"), side, 1, 1_000_000_000_000);
+        request.order_type = kind;
+        request.time_in_force = tif;
+        request.limit_price = limit.map(|units| FixedPoint::try_new(units, 2).expect("limit"));
+        let order = service.place_order(request).expect("placement");
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.revision, 2);
+        let snapshot = service.snapshot().expect("snapshot");
+        let fill = snapshot
+            .fills
+            .iter()
+            .find(|fill| fill.order_id == order.id)
+            .expect("fill");
+        assert_eq!(fill.price, FixedPoint::try_new(expected, 2).expect("price"));
+        assert_eq!(fill.provenance.observed_unix_nanos, 1_000_001_000_000);
+        let mut events = snapshot
+            .order_events
+            .iter()
+            .filter(|event| event.order_id == order.id)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sequence);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![OrderEventKind::Accepted, OrderEventKind::Filled]
+        );
+        let before = service.snapshot().expect("before restart");
+        service.shutdown(Duration::from_secs(5)).expect("shutdown");
+        let restarted = TradingService::start(config(&directory)).expect("restart");
+        let after = restarted.snapshot().expect("restored");
+        assert_eq!(after.orders, before.orders);
+        assert_eq!(after.order_events, before.order_events);
+        assert_eq!(after.fills, before.fills);
+        assert_eq!(after.positions, before.positions);
+        restarted
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown");
+    }
+}
+
+#[test]
 fn nonmarketable_ioc_and_fok_cancel_in_the_acceptance_step() {
     let directory = TestDirectory::new("immediate-not-marketable");
     let (service, _clock) = feed_service(&directory);
@@ -1347,7 +1446,7 @@ fn assert_position_interest(
             false,
         )
         .unwrap();
-    published(vec![route()]);
+    published(vec![]);
     feed.push(MarketFeedEvent::Quote(quote(1, 6, 10_100, 10_125)))
         .unwrap();
     published(vec![]);
