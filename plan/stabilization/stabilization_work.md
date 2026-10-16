@@ -312,7 +312,7 @@ Status: validated (2026-10-13), pushed (f2170311)
 
 ### M2 market foundations
 
-Status: in progress
+Status: validated (2026-10-14) at `f00d4a99`; scrutiny and user-testing pass, VAL-MKT-001..030 all pass
 
 - [x] M2.1 market-characterization-tests - Characterization tests at the coordinator command/event boundary
   - Four scripted command/event scenarios pin reseed continuity, overflow covering snapshots,
@@ -404,7 +404,7 @@ Status: in progress
 
 ### M3 market lifecycle
 
-Status: in progress
+Status: validated (2026-10-15) at `530a7c8d`; scrutiny and user-testing pass, VAL-MKT-031..061 all pass
 
 - [x] M3.1 series-lifecycle-candle-path - One per-series state machine, ported for candle providers
   - Round-2 evidence repair (VAL-MKT-034): the existing `AERIS_LIVE_SNAPSHOT` diagnostic now includes at most 32 `{start_utc_ns, missing_intervals}` records and `gaps_truncated` while retaining its existing interior-gap metric and diagnostic gate. The test checks a two-minute gap and 33-gap truncation. Two isolated borrowed-demo EURUSD 1m sessions, current and detached pre-M3 `f00d4a99`, each showed the same seven gaps (37 minutes) in their snapshot and their 1,601-bar raw decoded page, with both adjacent bars present and no page seam. Sanitized UTC-only primary pages, snapshots and a per-gap table are in the mission `validation/market-lifecycle/evidence/ctrader-eurusd/`; temporary instrumentation was removed, no orders placed.
@@ -479,7 +479,7 @@ Status: in progress
 
 ### M4 trading core
 
-Status: implementation and isolated GUI verification complete (2026-10-16); milestone validation pending
+Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VAL-TRD-001..029 and VAL-CROSS-009 all pass (GUI assertions use retained isolated-run evidence)
 
 - [x] M4.1 trading-clock-command-time - Injected trading clock; cancel events at command time
   - Injected `Clock` via `TradingServiceConfig`; owner command stamps clamp backward wall steps. The cancel event uses the owner command time rather than the order's old observation. `current_unix_nanos` is removed; direct production time reads remain in `clock.rs` only.
@@ -540,7 +540,7 @@ Status: implementation and isolated GUI verification complete (2026-10-16); mile
 
 ### M5 trading engine
 
-Status: in progress
+Status: in progress; the mission stopped on 2026-10-16 after M5.1 part 12. No M5 item is complete: M5.1 parts 1-12 are committed but the remaining work named in part 12 is open, none of the M5 assertions VAL-TRD-030..074 have been validated, and M5.2-M5.12 have not started. Resume at the M5.1 remainder.
 
 - [ ] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -795,6 +795,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M5.1 part 10 feat(trading): fence modify and cancel by order revision - owner-side optional revision guard returns current order on stale instructions, with no persisted facts or venue dispatch; simulated and broker restart tests pass. Existing unguarded callers and move-leg fencing remain.
 - 2026-10-16 M5.1 part 11 fix(trading): reject inactive broker lifecycle edges - exhaustive current-status request/admission/filled matrices and broker report/missing/deal edge tests; future group/trigger/expiry edges remain.
 - 2026-10-16 M5.1 part 12 feat(trading): persist typed lifecycle reasons and risk warnings - typed SQLite round trips and historical migration, chart annotation keyed by reason, and v2 replay ledgers with reason column; remaining lifecycle edges deferred.
+- 2026-10-16 M2-M5 docs(plan): record milestone validation results after the mission stopped - M2 (`f00d4a99`), M3 (`530a7c8d`) and M4 (`3529116c`) passed scrutiny and user-testing validation; M5 remains in progress with M5.1 parts 1-12 committed, M5.1 unchecked and VAL-TRD-030..074 unvalidated.
 
 ## 7. Known gaps / deferred
 
