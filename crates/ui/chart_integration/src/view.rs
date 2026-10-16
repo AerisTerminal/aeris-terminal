@@ -1637,7 +1637,6 @@ impl AerisChartView {
         self.sync_hollow_candles();
         apply_platform_chrome_contract(&mut self.engine, time_labels);
         self.sync_big_trades_options();
-        self.sync_footprint_visual_options();
         self.invalidate_series_layout();
     }
 

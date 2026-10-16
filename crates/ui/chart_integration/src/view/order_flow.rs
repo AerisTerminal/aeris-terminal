@@ -2,7 +2,6 @@ use super::{
     AerisChartView, BigTradesFilter, BigTradesSettings, ChartTheme, FootprintDisplayMode,
     OrderFlowAggregation, OrderFlowSettings, OrderFlowSweep, OrderFlowTrade, platform_theme,
 };
-use aeris_charts_render::color::Color;
 use num_traits::ToPrimitive;
 
 use aeris_charts_engine::{
@@ -314,10 +313,7 @@ impl AerisChartView {
     ) -> OrderFlowPresentationOptions {
         OrderFlowPresentationOptions {
             aggregation,
-            visual: footprint_visual_options(
-                cell_mode(self.order_flow_settings.display_mode),
-                self.theme,
-            ),
+            visual: footprint_visual_options(cell_mode(self.order_flow_settings.display_mode)),
             show_footprint: self.chart_type == super::ChartType::Footprint,
             show_cumulative_delta: self.order_flow_settings.show_cumulative_delta,
             show_delta_histogram: self.order_flow_settings.show_delta_histogram,
@@ -447,29 +443,6 @@ impl AerisChartView {
         }
     }
 
-    /// Retokenizes the drawn footprint's cell colors for the current theme.
-    pub(super) fn sync_footprint_visual_options(&mut self) {
-        let Some(id) = self.footprint_series_id() else {
-            return;
-        };
-        let Some(mut options) = self.engine.footprint_series_options(id) else {
-            return;
-        };
-        let mut visual = footprint_visual_options(options.visual.cell_mode, self.theme);
-        visual.adaptive_rows = options.visual.adaptive_rows;
-        if visual == options.visual {
-            return;
-        }
-        options.visual = visual;
-        if self
-            .engine
-            .apply_footprint_series_options(id, options)
-            .is_ok()
-        {
-            self.invalidate_series_frame();
-        }
-    }
-
     pub(super) fn drawn_big_trades(&self) -> Option<aeris_charts_engine::NativePrimitiveId> {
         self.order_flow_state
             .as_ref()
@@ -501,26 +474,11 @@ fn big_trades_options(settings: BigTradesSettings, theme: ChartTheme) -> BigTrad
     }
 }
 
-/// Footprint cells in the chart direction tokens: sells on `bearish`, buys on `bullish`. The
-/// engine derives the track, volume-bar, and imbalance shades from these hues.
-fn footprint_visual_options(
-    cell_mode: FootprintCellMode,
-    theme: ChartTheme,
-) -> FootprintVisualOptions {
-    let colors = platform_theme(theme).colors;
-    let defaults = FootprintVisualOptions::default();
-    let token = |value: String, fallback: Color| Color::parse_css(&value).unwrap_or(fallback);
-    let bullish = token(colors.bullish.css_rgba(), defaults.ask_color);
-    let bearish = token(colors.bearish.css_rgba(), defaults.bid_color);
+/// Footprint cells keep the engine's order-flow tokens, which both themes share.
+fn footprint_visual_options(cell_mode: FootprintCellMode) -> FootprintVisualOptions {
     FootprintVisualOptions {
         cell_mode,
-        bid_color: bearish,
-        ask_color: bullish,
-        positive_delta_color: bullish,
-        negative_delta_color: bearish,
-        stacked_bid_color: bearish,
-        stacked_ask_color: bullish,
-        ..defaults
+        ..FootprintVisualOptions::default()
     }
 }
 
