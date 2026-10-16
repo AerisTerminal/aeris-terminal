@@ -145,7 +145,14 @@ pub(crate) fn broker_report(
     binding: bool,
     owner_unix_nanos: i64,
 ) -> Result<Option<(Order, OrderEventKind)>, LifecycleError> {
-    if !current.status.is_open() {
+    if !matches!(
+        current.status,
+        OrderStatus::Pending
+            | OrderStatus::Working
+            | OrderStatus::PartiallyFilled
+            | OrderStatus::PendingModify
+            | OrderStatus::PendingCancel
+    ) {
         return Err(LifecycleError::InvalidTransition(current.status));
     }
     let pending_request = !resolve_pending
@@ -245,7 +252,14 @@ pub(crate) fn broker_missing(
     bound: bool,
     owner_unix_nanos: i64,
 ) -> Result<(Order, OrderEventKind, &'static str), LifecycleError> {
-    if !order.status.is_open() {
+    if !matches!(
+        order.status,
+        OrderStatus::Pending
+            | OrderStatus::Working
+            | OrderStatus::PartiallyFilled
+            | OrderStatus::PendingModify
+            | OrderStatus::PendingCancel
+    ) {
         return Err(LifecycleError::InvalidTransition(order.status));
     }
     let (status, kind, detail) = if order.filled_quantity == order.quantity {
@@ -282,6 +296,9 @@ pub(crate) fn broker_deal(
     provenance: TradingProvenance,
     owner_unix_nanos: i64,
 ) -> Result<Order, LifecycleError> {
+    if current.status == OrderStatus::Inactive {
+        return Err(LifecycleError::InvalidTransition(current.status));
+    }
     let quantity = if mirror || filled_by_deals.units() > current.quantity.units() {
         filled_by_deals
     } else {
@@ -533,6 +550,156 @@ mod tests {
                 "{status:?}"
             );
             assert!(cancel(original, 2).is_err(), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn broker_transition_table_excludes_held_and_terminal_orders() {
+        let sample = super::super::tests::order(1, OrderStatus::Working);
+        let report = BrokerOrder {
+            broker_order_id: "broker-1".into(),
+            client_order_id: Some(sample.client_order_id.as_str().into()),
+            instrument_id: sample.instrument_id.clone(),
+            side: sample.side,
+            kind: BrokerOrderKind::Limit,
+            quantity: sample.quantity,
+            filled_quantity: sample.filled_quantity,
+            limit_price: sample.limit_price,
+            stop_price: sample.stop_price,
+            broker_position_id: None,
+            closing: false,
+        };
+        for status in [
+            OrderStatus::Pending,
+            OrderStatus::Working,
+            OrderStatus::PartiallyFilled,
+            OrderStatus::PendingModify,
+            OrderStatus::PendingCancel,
+        ] {
+            let current = super::super::tests::order(1, status);
+            assert!(
+                broker_report(
+                    &current,
+                    &report,
+                    BrokerOrderState::Expired,
+                    false,
+                    false,
+                    2
+                )
+                .expect("allowed report")
+                .is_some(),
+                "{status:?}"
+            );
+            assert!(broker_missing(current, true, 2).is_ok(), "{status:?}");
+        }
+        for status in [
+            OrderStatus::Inactive,
+            OrderStatus::Filled,
+            OrderStatus::Cancelled,
+            OrderStatus::Expired,
+            OrderStatus::Rejected,
+        ] {
+            let current = super::super::tests::order(1, status);
+            assert!(
+                broker_report(
+                    &current,
+                    &report,
+                    BrokerOrderState::Expired,
+                    false,
+                    false,
+                    2
+                )
+                .is_err(),
+                "{status:?}"
+            );
+            assert!(broker_missing(current, true, 2).is_err(), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn broker_deal_rejects_inactive_but_keeps_late_terminal_accounting() {
+        let inactive = super::super::tests::order(1, OrderStatus::Inactive);
+        assert!(
+            broker_deal(
+                &inactive,
+                inactive.quantity,
+                false,
+                inactive.provenance.clone(),
+                2
+            )
+            .is_err()
+        );
+        for status in [
+            OrderStatus::Pending,
+            OrderStatus::Working,
+            OrderStatus::PartiallyFilled,
+            OrderStatus::PendingModify,
+            OrderStatus::PendingCancel,
+            OrderStatus::Filled,
+            OrderStatus::Cancelled,
+            OrderStatus::Expired,
+            OrderStatus::Rejected,
+        ] {
+            let current = super::super::tests::order(1, status);
+            assert!(
+                broker_deal(
+                    &current,
+                    current.quantity,
+                    false,
+                    current.provenance.clone(),
+                    2,
+                )
+                .is_ok(),
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_and_request_edge_matrix_has_no_implicit_status_transitions() {
+        let statuses = [
+            OrderStatus::Inactive,
+            OrderStatus::Pending,
+            OrderStatus::Working,
+            OrderStatus::PendingModify,
+            OrderStatus::PartiallyFilled,
+            OrderStatus::PendingCancel,
+            OrderStatus::Filled,
+            OrderStatus::Cancelled,
+            OrderStatus::Expired,
+            OrderStatus::Rejected,
+        ];
+        for status in statuses {
+            let mut new = super::super::tests::order(1, status);
+            new.revision = 0;
+            new.accepted_unix_nanos = 0;
+            new.updated_unix_nanos = 0;
+            assert_eq!(
+                accept(new, 2).is_ok(),
+                matches!(
+                    status,
+                    OrderStatus::Inactive | OrderStatus::Pending | OrderStatus::Working
+                ),
+                "admission: {status:?}"
+            );
+            let original = super::super::tests::order(1, status);
+            let executable = matches!(status, OrderStatus::Working | OrderStatus::PartiallyFilled);
+            assert_eq!(
+                fill_simulated(original.clone(), 2).is_ok(),
+                executable,
+                "fill: {status:?}"
+            );
+            for pending in statuses {
+                assert_eq!(
+                    request(original.clone(), pending, 2).is_ok(),
+                    executable
+                        && matches!(
+                            pending,
+                            OrderStatus::PendingModify | OrderStatus::PendingCancel
+                        ),
+                    "request: {status:?} -> {pending:?}"
+                );
+            }
         }
     }
 }
