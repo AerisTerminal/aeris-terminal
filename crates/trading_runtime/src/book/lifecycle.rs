@@ -231,10 +231,6 @@ pub(crate) fn resize(
 }
 
 /// Emits a Triggered event alongside the returned order, without a new status.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "M5.3 wires stop triggering and the event")
-)]
 pub(crate) fn trigger(
     mut order: Order,
     owner_unix_nanos: i64,

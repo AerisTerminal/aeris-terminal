@@ -386,12 +386,38 @@ impl TradingCore {
     ) -> Result<Vec<Fill>, String> {
         let mut fills = Vec::with_capacity(candidates.len());
         for (order_id, price) in candidates {
-            let order = self
+            let mut order = self
                 .state
                 .orders
                 .get(&order_id)
                 .cloned()
                 .ok_or_else(|| "working order disappeared".to_string())?;
+            if order.order_type == OrderType::Stop && order.triggered_unix_nanos.is_none() {
+                let sequence = self.state.next_sequence;
+                let (triggered, kind) = crate::book::lifecycle::trigger(
+                    order,
+                    observation.provenance.observed_unix_nanos,
+                )
+                .map_err(|error| error.to_string())?;
+                let event = OrderEvent {
+                    id: OrderEventId::try_new(format!("sim-event-{sequence}"))
+                        .map_err(|error| error.to_string())?,
+                    order_id: triggered.id.clone(),
+                    sequence,
+                    kind,
+                    reason: None,
+                    event_unix_nanos: observation.provenance.observed_unix_nanos,
+                    detail: Some("stop triggered at touch".to_string()),
+                    provenance: observation.provenance.clone(),
+                };
+                event.validate().map_err(|error| error.to_string())?;
+                self.state
+                    .orders
+                    .insert(triggered.id.clone(), triggered.clone());
+                self.state.order_events.push_back(event);
+                self.state.next_sequence = sequence + 1;
+                order = triggered;
+            }
             let sequence = self.state.next_sequence;
             let fill = Fill {
                 id: FillId::try_new(format!("sim-fill-{sequence}"))
