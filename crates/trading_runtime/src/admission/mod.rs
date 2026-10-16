@@ -3,8 +3,8 @@ use super::{
     MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order, OrderEvent, OrderEventId,
     OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType, PlaceOrder, PlaceProtectiveOrder,
     ProtectiveOrder, ProtectiveOrderRole, TradeCopyDispatch, TradingAccount, TradingAccountId,
-    TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute, check_quantity_increment,
-    mirrored_client_order_id, multiply_quantity, order_acceptance_detail, venue,
+    TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute, mirrored_client_order_id,
+    multiply_quantity, order_acceptance_detail, venue,
 };
 use aeris_instruments::PriceGrid;
 use aeris_trading::{RejectReason, TimeInForce};
@@ -112,6 +112,48 @@ pub(crate) fn validate_owner_trigger_side(
         validate_trigger_side(command, observation.bid, observation.ask)?;
     }
     Ok(())
+}
+
+/// The shared, side-effect-free checks run before either route persists an order.
+pub(crate) fn validate_common_order(
+    instrument: &TradingInstrument,
+    command: &PlaceOrder,
+    route: VenueRoute,
+    open_orders: usize,
+    staged_orders: usize,
+) -> Result<(), RejectReason> {
+    validate_client_id(command, route)?;
+    if command.quantity.scale() != instrument.quantity_scale
+        || command
+            .limit_price
+            .into_iter()
+            .chain(command.stop_price)
+            .any(|price| price.scale() != instrument.price_scale)
+    {
+        return Err(RejectReason::ScaleMismatch);
+    }
+    if command.quantity.units() <= 0
+        || instrument
+            .contract
+            .order_quantity_increment
+            .is_some_and(|increment| command.quantity.units() % increment.units() != 0)
+    {
+        return Err(RejectReason::InvalidQuantity);
+    }
+    validate_time_in_force(command.order_type, command.time_in_force)?;
+    validate_order_prices(instrument, command)?;
+    if open_orders.saturating_add(staged_orders) >= MAXIMUM_OPEN_ORDERS {
+        return Err(RejectReason::CapacityExceeded);
+    }
+    Ok(())
+}
+
+fn validate_client_id(command: &PlaceOrder, route: VenueRoute) -> Result<(), RejectReason> {
+    if matches!(route, VenueRoute::CtraderDemo) && command.client_order_id.as_str().len() > 50 {
+        Err(RejectReason::ClientIdTooLong)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -398,9 +440,8 @@ impl TradingCore {
         match self.route(&command.account_id)? {
             VenueRoute::Simulated => {}
             VenueRoute::CtraderDemo => {
-                if command.client_order_id.as_str().len() > 50 {
-                    return Err("cTrader ClientOrderId must be at most 50 characters".into());
-                }
+                validate_client_id(command, VenueRoute::CtraderDemo)
+                    .map_err(|error| error.to_string())?;
                 if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
                     return existing_client_order(existing, command)
                         .map_err(|error| error.to_string());
@@ -562,29 +603,15 @@ impl TradingCore {
         if instrument.contract.currency != account_currency {
             return Err("Practice contract currency differs from the account currency".to_string());
         }
-        if command.quantity.scale() != instrument.quantity_scale
-            || command
-                .limit_price
-                .into_iter()
-                .chain(command.stop_price)
-                .any(|price| price.scale() != instrument.price_scale)
-        {
-            return Err("order scales do not match the instrument".to_string());
-        }
-        check_quantity_increment(&instrument, command.quantity)?;
-        validate_time_in_force(command.order_type, command.time_in_force)
-            .map_err(|error| error.to_string())?;
-        validate_order_prices(&instrument, &command).map_err(|error| error.to_string())?;
+        validate_common_order(
+            &instrument,
+            &command,
+            VenueRoute::Simulated,
+            self.state.orders.open_count(),
+            additional_open_orders,
+        )
+        .map_err(|error| error.to_string())?;
         validate_owner_trigger_side(self, &command).map_err(|error| error.to_string())?;
-        if self
-            .state
-            .orders
-            .open_count()
-            .saturating_add(additional_open_orders)
-            >= MAXIMUM_OPEN_ORDERS
-        {
-            return Err("simulated venue open-order limit reached".to_string());
-        }
         let order = Order {
             id: OrderId::try_new(format!("sim-order-{sequence}"))
                 .map_err(|error| error.to_string())?,

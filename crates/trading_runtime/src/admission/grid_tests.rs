@@ -82,3 +82,50 @@ fn fixed_and_significant_figure_grids_reject_off_grid_prices() {
         Ok(())
     );
 }
+
+#[test]
+fn shared_admission_rejects_quantity_capacity_and_broker_client_length() {
+    let mut instrument = crate::tests::instrument();
+    let mut order = crate::tests::market_order("capacity", OrderSide::Buy, 1, 1_000);
+    for route in [VenueRoute::Simulated, VenueRoute::CtraderDemo] {
+        assert_eq!(
+            validate_common_order(&instrument, &order, route, MAXIMUM_OPEN_ORDERS, 0),
+            Err(RejectReason::CapacityExceeded)
+        );
+        order.quantity = FixedPoint::try_new(0, order.quantity.scale()).expect("quantity");
+        assert_eq!(
+            validate_common_order(&instrument, &order, route, 0, 0),
+            Err(RejectReason::InvalidQuantity)
+        );
+        order.quantity = FixedPoint::try_new(1, order.quantity.scale()).expect("quantity");
+        assert_eq!(
+            validate_common_order(&instrument, &order, route, 0, 0),
+            Ok(())
+        );
+    }
+    order.client_order_id = aeris_trading::ClientOrderId::try_new("x".repeat(51)).expect("id");
+    assert_eq!(
+        validate_common_order(&instrument, &order, VenueRoute::CtraderDemo, 0, 0),
+        Err(RejectReason::ClientIdTooLong)
+    );
+    assert_eq!(
+        validate_common_order(&instrument, &order, VenueRoute::Simulated, 0, 0),
+        Ok(())
+    );
+    instrument.contract.order_quantity_increment =
+        Some(InstrumentDecimal::try_new(2, 0).expect("increment"));
+    order.client_order_id = aeris_trading::ClientOrderId::try_new("increment").expect("id");
+    for route in [VenueRoute::Simulated, VenueRoute::CtraderDemo] {
+        assert_eq!(
+            validate_common_order(&instrument, &order, route, 0, 0),
+            Err(RejectReason::InvalidQuantity)
+        );
+    }
+    order.quantity = FixedPoint::try_new(1, 1).expect("wrong quantity scale");
+    for route in [VenueRoute::Simulated, VenueRoute::CtraderDemo] {
+        assert_eq!(
+            validate_common_order(&instrument, &order, route, 0, 0),
+            Err(RejectReason::ScaleMismatch)
+        );
+    }
+}

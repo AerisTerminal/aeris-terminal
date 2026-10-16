@@ -3,8 +3,8 @@
 use crate::BracketStrategyTemplate;
 use crate::venue::{VenueEvent, VenueRequest, VenueUpdate};
 use crate::{
-    DEMO_VENUE_UNAVAILABLE, FlattenOutcome, MAXIMUM_OPEN_ORDERS, ModifyOrder, PlaceOrder,
-    TradingCore, TradingProvenance, check_quantity_increment, store::BrokerFillRecord,
+    DEMO_VENUE_UNAVAILABLE, FlattenOutcome, ModifyOrder, PlaceOrder, TradingCore,
+    TradingProvenance, store::BrokerFillRecord,
 };
 use aeris_trading::{
     AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
@@ -191,33 +191,21 @@ impl TradingCore {
         if self.venue_outbound.is_none() {
             return Err(DEMO_VENUE_UNAVAILABLE.into());
         }
-        if command.client_order_id.as_str().len() > 50 {
-            return Err("cTrader ClientOrderId must be at most 50 characters".into());
-        }
         let instrument = self
             .state
             .instruments
             .get(&command.instrument_id)
             .ok_or("trading instrument is not registered")?;
-        if command.quantity.scale() != instrument.quantity_scale
-            || command
-                .limit_price
-                .into_iter()
-                .chain(command.stop_price)
-                .any(|price| price.scale() != instrument.price_scale)
-        {
-            return Err("order scales do not match the instrument".into());
-        }
-        check_quantity_increment(instrument, command.quantity)?;
-        crate::core::admission::validate_time_in_force(command.order_type, command.time_in_force)
-            .map_err(|error| error.to_string())?;
-        crate::core::admission::validate_order_prices(instrument, command)
-            .map_err(|error| error.to_string())?;
+        crate::core::admission::validate_common_order(
+            instrument,
+            command,
+            crate::VenueRoute::CtraderDemo,
+            self.state.orders.open_count(),
+            0,
+        )
+        .map_err(|error| error.to_string())?;
         crate::core::admission::validate_owner_trigger_side(self, command)
             .map_err(|error| error.to_string())?;
-        if self.state.orders.open_count() >= MAXIMUM_OPEN_ORDERS {
-            return Err("trading open-order limit reached".into());
-        }
         // Every M3.2 check applies to broker orders. The practice rule that the contract
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.

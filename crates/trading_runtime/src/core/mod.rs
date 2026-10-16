@@ -2014,21 +2014,6 @@ pub(crate) fn is_simulated(
         .is_some_and(|account| account.environment == AccountEnvironment::Simulated)
 }
 
-/// Orders must be whole multiples of the provider's quantity step.
-pub(crate) fn check_quantity_increment(
-    instrument: &TradingInstrument,
-    quantity: FixedPoint,
-) -> Result<(), String> {
-    if instrument
-        .contract
-        .order_quantity_increment
-        .is_some_and(|increment| quantity.units() % increment.units() != 0)
-    {
-        return Err("order quantity must use whole provider units".to_string());
-    }
-    Ok(())
-}
-
 /// Orders the touch simulator may fill: executable simulated-account orders on the
 /// observed instrument. Broker orders are filled only by their broker.
 pub(crate) fn market_fill_candidates(

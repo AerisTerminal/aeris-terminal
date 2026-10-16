@@ -66,6 +66,10 @@ pub enum RejectReason {
     OffGrid,
     WrongSideTrigger,
     TifNotSupported,
+    CapacityExceeded,
+    InvalidQuantity,
+    ClientIdTooLong,
+    ScaleMismatch,
 }
 
 impl fmt::Display for RejectReason {
@@ -89,6 +93,14 @@ impl fmt::Display for RejectReason {
             Self::TifNotSupported => {
                 f.write_str("TifNotSupported: IOC and FOK are unavailable for stop orders")
             }
+            Self::CapacityExceeded => {
+                f.write_str("CapacityExceeded: trading order capacity reached")
+            }
+            Self::InvalidQuantity => f.write_str("order quantity must use whole provider units"),
+            Self::ClientIdTooLong => {
+                f.write_str("cTrader ClientOrderId must be at most 50 characters")
+            }
+            Self::ScaleMismatch => f.write_str("order scales do not match the instrument"),
         }
     }
 }
