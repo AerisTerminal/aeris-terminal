@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -245,6 +245,33 @@ pub(super) const MIGRATION_V21: &str = "
      WHERE status IN ('working','partially_filled','pending');
  CREATE INDEX fills_account_execution ON fills(account_id,instrument_id,execution_unix_nanos);
  CREATE INDEX order_events_order_sequence ON order_events(order_id,sequence);";
+/// Lifecycle metadata for existing facts. Historical details remain display text;
+/// only recognized legacy phrases acquire a stable code, never a guessed reason.
+pub(super) const MIGRATION_V22: &str = "
+ ALTER TABLE orders ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ ALTER TABLE orders ADD COLUMN accepted_unix_nanos INTEGER;
+ ALTER TABLE orders ADD COLUMN updated_unix_nanos INTEGER;
+ ALTER TABLE orders ADD COLUMN triggered_unix_nanos INTEGER;
+ ALTER TABLE orders ADD COLUMN terminal_unix_nanos INTEGER;
+ ALTER TABLE orders ADD COLUMN expires_at_unix_nanos INTEGER;
+ ALTER TABLE orders ADD COLUMN eligible_after_unix_nanos INTEGER;
+ ALTER TABLE orders ADD COLUMN group_id TEXT;
+ ALTER TABLE order_events ADD COLUMN reason_code TEXT;
+ ALTER TABLE order_events ADD COLUMN reason_json TEXT;
+ UPDATE orders SET accepted_unix_nanos=submitted_unix_nanos,
+     updated_unix_nanos=submitted_unix_nanos,
+     eligible_after_unix_nanos=submitted_unix_nanos,
+     terminal_unix_nanos=CASE WHEN status IN ('filled','cancelled','rejected','expired')
+         THEN COALESCE((SELECT MAX(event_unix_nanos) FROM order_events
+             WHERE order_id=orders.id AND kind IN ('filled','cancelled','rejected','expired')),
+             submitted_unix_nanos)
+         ELSE NULL END;
+ UPDATE order_events SET reason_code=CASE
+     WHEN kind='filled' AND detail='touch fill' THEN 'touch_fill'
+     WHEN kind='cancelled' AND detail='cancelled by local command' THEN 'user_cancel'
+     WHEN kind='accepted' AND detail LIKE 'RISK WARNING%' THEN 'risk_warning'
+     WHEN kind='accepted' AND detail LIKE 'LOCAL-MANAGED%' THEN 'local_managed'
+     ELSE NULL END;";
 
 pub(super) struct Migration {
     pub(super) from: u32,
@@ -357,6 +384,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 20,
         to: 21,
         sql: MIGRATION_V21,
+    },
+    Migration {
+        from: 21,
+        to: 22,
+        sql: MIGRATION_V22,
     },
 ];
 

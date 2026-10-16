@@ -731,6 +731,102 @@ mod tests {
     }
 
     #[test]
+    fn v21_lifecycle_fixture_migrates_to_v22_without_losing_events_or_orders() {
+        let path = temporary_database("v21-lifecycle");
+        let connection = Connection::open(&path).expect("fixture");
+        create_schema_at(&connection, 21);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                 VALUES ('a','Practice','simulated','USD',2);
+                 INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+                 VALUES ('i',2,0,'{}');
+                 INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                     time_in_force,quantity_units,quantity_scale,status,submitted_unix_nanos,
+                     provenance_json,filled_units,filled_scale)
+                 VALUES ('o1','c1','a','i','buy','market','gtc',1,0,'filled',100,'{}',1,0),
+                        ('o2','c2','a','i','buy','limit','gtc',1,0,'cancelled',200,'{}',0,0),
+                        ('o3','c3','a','i','buy','limit','gtc',1,0,'working',300,'{}',0,0);
+                 INSERT INTO order_events(id,order_id,sequence,kind,event_unix_nanos,detail,provenance_json)
+                 VALUES ('e1','o1',1,'accepted',100,'RISK WARNING · no attached stop','{}'),
+                        ('e2','o1',2,'filled',150,'touch fill','{}'),
+                        ('e3','o2',3,'accepted',200,'LOCAL-MANAGED protective stop','{}'),
+                        ('e4','o2',4,'cancelled',250,'cancelled by local command','{}'),
+                        ('e5','o3',5,'accepted',300,NULL,'{}');",
+            )
+            .expect("fixture facts");
+        drop(connection);
+
+        let store = TradingStore::open(&path, TradingRetention::default()).expect("V22 migration");
+        let version: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 22);
+        let (revision, accepted, updated, terminal): (u32, i64, i64, Option<i64>) = store
+            .connection
+            .query_row(
+                "SELECT revision,accepted_unix_nanos,updated_unix_nanos,terminal_unix_nanos
+                 FROM orders WHERE id='o2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("backfilled order");
+        assert_eq!(
+            (revision, accepted, updated, terminal),
+            (1, 200, 200, Some(250))
+        );
+        let events: Vec<(String, Option<String>, Option<String>)> = store
+            .connection
+            .prepare("SELECT detail, reason_code, reason_json FROM order_events WHERE detail IS NOT NULL ORDER BY sequence")
+            .expect("events")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("event rows")
+            .map(|row| row.expect("event"))
+            .collect();
+        assert_eq!(
+            events,
+            [
+                (
+                    "RISK WARNING · no attached stop".into(),
+                    Some("risk_warning".into()),
+                    None
+                ),
+                ("touch fill".into(), Some("touch_fill".into()), None),
+                (
+                    "LOCAL-MANAGED protective stop".into(),
+                    Some("local_managed".into()),
+                    None
+                ),
+                (
+                    "cancelled by local command".into(),
+                    Some("user_cancel".into()),
+                    None
+                ),
+            ]
+        );
+        for table in ["orders", "order_events"] {
+            let count: u32 = store
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("row count");
+            assert_eq!(count, if table == "orders" { 3 } else { 5 });
+        }
+        let backup = path.parent().expect("parent").join("backups");
+        assert!(backup.read_dir().expect("backups").any(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with("trading-v21-")
+        }));
+        drop(store);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
+
+    #[test]
     fn v19_fills_and_cycles_migrate_through_routes_to_v21_with_backup() {
         let path = temporary_database("v19-accounting");
         let connection = Connection::open(&path).expect("fixture");
