@@ -195,11 +195,13 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
     let accepted = service.place_order(order).expect("accepted");
     assert_eq!(accepted.accepted_unix_nanos, 1_000_000_000_000);
+    assert_eq!(accepted.updated_unix_nanos, 1_000_000_000_000);
     clock.set_wall_unix_nanos(1_090_000_000_000);
     let cancelled = service
         .cancel_order(ClientOrderId::try_new("clock-limit").expect("id"))
         .expect("cancel");
     assert_eq!(cancelled.revision, 2);
+    assert_eq!(cancelled.updated_unix_nanos, 1_090_000_000_000);
     assert_eq!(cancelled.terminal_unix_nanos, Some(1_090_000_000_000));
     let first = service.snapshot().expect("snapshot");
     let event = first
@@ -218,6 +220,7 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
         .cancel_order(ClientOrderId::try_new("clock-limit-2").expect("id"))
         .expect("second cancel");
     assert_eq!(cancelled.revision, 2);
+    assert_eq!(cancelled.updated_unix_nanos, 1_090_000_000_000);
     assert_eq!(cancelled.terminal_unix_nanos, Some(1_090_000_000_000));
     let last = service.snapshot().expect("snapshot");
     let event = last
@@ -227,9 +230,27 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
         .find(|e| e.kind == OrderEventKind::Cancelled)
         .expect("second cancel event");
     assert!(event.event_unix_nanos >= 1_090_000_000_000);
+    let mut third = market_order("clock-modify", OrderSide::Buy, 1, 1_002_000_000_000);
+    third.order_type = OrderType::Limit;
+    third.time_in_force = TimeInForce::GoodTillCancelled;
+    third.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+    let accepted = service.place_order(third).expect("third accepted");
+    let modified = service
+        .modify_order(ModifyOrder {
+            client_order_id: accepted.client_order_id.clone(),
+            time_in_force: TimeInForce::GoodTillCancelled,
+            limit_price: Some(FixedPoint::try_new(8_975, 2).expect("new limit")),
+            stop_price: None,
+            modified_unix_nanos: 1_002_000_000_000,
+            provenance: provenance(3, 1_002_000_000_000),
+        })
+        .expect("modify");
+    assert_eq!(modified.revision, 2);
+    assert_eq!(modified.updated_unix_nanos, 1_090_000_000_000);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
     let orders = restarted.snapshot().expect("restored").orders;
+    assert!(orders.contains(&modified));
     assert!(
         orders
             .iter()

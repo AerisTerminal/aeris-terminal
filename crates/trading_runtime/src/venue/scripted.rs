@@ -70,6 +70,7 @@ fn simulated_and_broker_acceptance_have_durable_initial_lifecycle_fields() {
     for order in [&simulated, &broker] {
         assert_eq!(order.revision, 1);
         assert!(order.accepted_unix_nanos > order.submitted_unix_nanos);
+        assert_eq!(order.updated_unix_nanos, order.accepted_unix_nanos);
     }
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
     let restarted = TradingService::start(config(&directory)).expect("restart");
@@ -233,6 +234,7 @@ fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
             .place_order(request(&format!("queued-{index}")))
             .expect("queue place");
     }
+    let before = service.snapshot().expect("facts before rejected requests");
     let modify = ModifyOrder {
         client_order_id: placed.client_order_id.clone(),
         time_in_force: TimeInForce::GoodTillCancelled,
@@ -255,6 +257,50 @@ fn saturated_writer_does_not_leave_pending_modify_or_cancel() {
         order_status(&service, &placed.client_order_id),
         OrderStatus::Working
     );
+    assert_eq!(service.snapshot().expect("unchanged facts"), before);
+}
+
+#[test]
+fn pending_broker_modify_preserves_revision_and_time_after_restart() {
+    let (directory, service, receiver) = setup("pending-revision");
+    let placed = service
+        .place_order(limit_request("pending-revision", 9_000))
+        .expect("place");
+    assert!(matches!(
+        receiver.recv().expect("place request"),
+        VenueRequest::Place(_)
+    ));
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            order_update(report(&placed, "501", 0), BrokerOrderState::Accepted),
+        ))
+        .expect("ack");
+    let pending = service
+        .modify_order(ModifyOrder {
+            client_order_id: placed.client_order_id.clone(),
+            time_in_force: TimeInForce::GoodTillCancelled,
+            limit_price: Some(point(9_025, 2)),
+            stop_price: None,
+            modified_unix_nanos: 3_000,
+            provenance: crate::tests::provenance(3, 3_000),
+        })
+        .expect("modify request");
+    assert_eq!(pending.status, OrderStatus::PendingModify);
+    assert!(pending.revision > placed.revision);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    assert!(
+        restarted
+            .snapshot()
+            .expect("restored")
+            .orders
+            .contains(&pending)
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
 }
 
 #[test]
@@ -408,10 +454,10 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
         modified_unix_nanos: 3_000,
         provenance: crate::tests::provenance(99, 3_000),
     };
-    assert_eq!(
-        service.modify_order(change).expect("modify").status,
-        OrderStatus::PendingModify
-    );
+    let pending_modify = service.modify_order(change).expect("modify");
+    assert_eq!(pending_modify.status, OrderStatus::PendingModify);
+    assert_eq!(pending_modify.revision, 2);
+    assert!(pending_modify.updated_unix_nanos >= pending.accepted_unix_nanos);
     let VenueRequest::Amend(amendment) = receiver.recv().expect("modify") else {
         panic!("an amend request");
     };
@@ -432,10 +478,10 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
     assert_eq!(order.status, OrderStatus::Working);
     assert_eq!(order.limit_price, Some(point(9_025, 2)));
 
-    assert_eq!(
-        service.cancel_order(id.clone()).expect("cancel").status,
-        OrderStatus::PendingCancel
-    );
+    let pending_cancel = service.cancel_order(id.clone()).expect("cancel");
+    assert_eq!(pending_cancel.status, OrderStatus::PendingCancel);
+    assert!(pending_cancel.revision > order.revision);
+    assert!(pending_cancel.updated_unix_nanos >= pending_modify.updated_unix_nanos);
     assert!(matches!(
         receiver.recv().expect("cancel"),
         VenueRequest::Cancel { .. }

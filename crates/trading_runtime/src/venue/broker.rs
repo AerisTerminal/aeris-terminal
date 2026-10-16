@@ -253,6 +253,7 @@ impl TradingCore {
             submitted_unix_nanos: command.submitted_unix_nanos,
             revision: 0,
             accepted_unix_nanos: 0,
+            updated_unix_nanos: 0,
             terminal_unix_nanos: None,
             provenance: provenance.clone(),
         };
@@ -330,10 +331,9 @@ impl TradingCore {
             stop_loss: None,
             take_profit: None,
         });
-        let pending = Order {
-            status: OrderStatus::PendingModify,
-            ..order
-        };
+        let pending =
+            crate::book::lifecycle::request(order, OrderStatus::PendingModify, self.command_now)
+                .map_err(|error| error.to_string())?;
         self.queue_broker_transition(
             &pending,
             OrderEventKind::Modified,
@@ -359,10 +359,9 @@ impl TradingCore {
             broker_account: self.broker_account(&order.account_id)?,
             broker_order_id,
         };
-        let pending = Order {
-            status: OrderStatus::PendingCancel,
-            ..order
-        };
+        let pending =
+            crate::book::lifecycle::request(order, OrderStatus::PendingCancel, self.command_now)
+                .map_err(|error| error.to_string())?;
         self.queue_broker_transition(
             &pending,
             OrderEventKind::Cancelled,
@@ -803,6 +802,7 @@ impl TradingCore {
             submitted_unix_nanos: report.executed_unix_nanos,
             revision: 0,
             accepted_unix_nanos: 0,
+            updated_unix_nanos: 0,
             terminal_unix_nanos: None,
             provenance: provenance.clone(),
         };

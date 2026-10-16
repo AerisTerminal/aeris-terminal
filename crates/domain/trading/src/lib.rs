@@ -470,6 +470,8 @@ pub struct Order {
     pub revision: u32,
     /// Trading-owner time when the order was locally admitted.
     pub accepted_unix_nanos: i64,
+    /// Trading-owner time of the most recent locally committed transition.
+    pub updated_unix_nanos: i64,
     /// Owner-command time of the final transition, if known.
     pub terminal_unix_nanos: Option<i64>,
     pub provenance: TradingProvenance,
@@ -508,7 +510,10 @@ impl Order {
             }
             _ => {}
         }
-        if self.submitted_unix_nanos <= 0 || self.accepted_unix_nanos <= 0 {
+        if self.submitted_unix_nanos <= 0
+            || self.accepted_unix_nanos <= 0
+            || self.updated_unix_nanos <= 0
+        {
             return Err(TradingValidationError::InvalidTimestamp);
         }
         if self.revision == 0 {
@@ -924,6 +929,7 @@ mod tests {
             submitted_unix_nanos: 1,
             revision: 1,
             accepted_unix_nanos: 1,
+            updated_unix_nanos: 1,
             terminal_unix_nanos: None,
             provenance: TradingProvenance {
                 venue_id: "test".to_string(),

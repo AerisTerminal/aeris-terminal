@@ -852,6 +852,7 @@ mod tests {
         let order = orders.values().next().expect("one order");
         assert_eq!(order.revision, 1);
         assert_eq!(order.accepted_unix_nanos, 123);
+        assert_eq!(order.updated_unix_nanos, 123);
     }
 
     #[test]

@@ -412,6 +412,7 @@ fn flatten_order(
         submitted_unix_nanos: observation.provenance.observed_unix_nanos,
         revision: 0,
         accepted_unix_nanos: 0,
+        updated_unix_nanos: 0,
         terminal_unix_nanos: None,
         provenance: observation.provenance.clone(),
     };

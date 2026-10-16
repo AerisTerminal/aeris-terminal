@@ -142,6 +142,8 @@ impl TradingCore {
             provenance: command.provenance.clone(),
             ..order.clone()
         };
+        let modified = crate::book::lifecycle::modify(modified, self.command_now)
+            .map_err(|error| error.to_string())?;
         modified.validate().map_err(|error| error.to_string())?;
         // A pending bracket's legs keep their distances and follow the entry.
         if let Some(bracket) = self.awaiting_bracket(&order.client_order_id) {
