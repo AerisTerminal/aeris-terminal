@@ -143,6 +143,11 @@ impl TradingCore {
         command: &PlaceOrder,
         template: &BracketStrategyTemplate,
     ) -> Result<Order, String> {
+        if !crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::CtraderDemo)
+            .native_sltp()
+        {
+            return Err("broker route does not support native protection".into());
+        }
         let take_profit_ticks = match template.targets.as_slice() {
             [] => None,
             [target] if target.quantity_percent == 100 => Some(target.offset_ticks),
@@ -202,7 +207,9 @@ impl TradingCore {
         // currency equal the account currency does not: the broker converts profit and loss
         // into the deposit currency.
         self.evaluate_order_risk(command)?;
-        let time_in_force = broker_time_in_force(command.order_type, command.time_in_force);
+        let time_in_force =
+            crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::CtraderDemo)
+                .effective_tif(command.order_type, command.time_in_force);
         let request = VenueRequest::Place(VenueOrder {
             client_order_id: command.client_order_id.clone(),
             broker_account: self.broker_account(&command.account_id)?,
@@ -286,7 +293,10 @@ impl TradingCore {
         if command.modified_unix_nanos <= 0 {
             return Err("order modification timestamp must be positive".into());
         }
-        if broker_time_in_force(order.order_type, command.time_in_force) != order.time_in_force {
+        if crate::core::admission::VenueCapabilities::for_route(crate::VenueRoute::CtraderDemo)
+            .effective_tif(order.order_type, command.time_in_force)
+            != order.time_in_force
+        {
             return Err("cTrader cannot change an order's time in force".into());
         }
         let instrument = self
@@ -1165,17 +1175,6 @@ impl TradingCore {
         self.state.orders.insert(updated.id.clone(), updated);
         self.state.order_events.push_back(event);
         self.bump_revision()
-    }
-}
-
-/// The time in force a broker order actually carries. Market orders fill or cancel at once.
-/// cTrader offers no day orders, so a day pending order rests good-till-cancelled
-/// (maintainer decision, 2026-10-08); the stored order says so.
-const fn broker_time_in_force(order_type: OrderType, requested: TimeInForce) -> TimeInForce {
-    match (order_type, requested) {
-        (OrderType::Market, _) => TimeInForce::ImmediateOrCancel,
-        (_, TimeInForce::Day) => TimeInForce::GoodTillCancelled,
-        (_, requested) => requested,
     }
 }
 

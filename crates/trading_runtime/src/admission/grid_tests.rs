@@ -3,6 +3,29 @@ use aeris_instruments::InstrumentDecimal;
 use aeris_trading::{OrderSide, OrderType, TimeInForce};
 
 #[test]
+fn venue_capabilities_resolve_day_and_protection_policy() {
+    let simulated = VenueCapabilities::for_route(VenueRoute::Simulated);
+    let broker = VenueCapabilities::for_route(VenueRoute::CtraderDemo);
+    assert_eq!(
+        simulated.effective_tif(OrderType::Limit, TimeInForce::Day),
+        TimeInForce::Day
+    );
+    assert_eq!(
+        broker.effective_tif(OrderType::Limit, TimeInForce::Day),
+        TimeInForce::GoodTillCancelled
+    );
+    assert_eq!(
+        broker.effective_tif(OrderType::Market, TimeInForce::Day),
+        TimeInForce::ImmediateOrCancel
+    );
+    assert_eq!(broker.client_id_limit, Some(50));
+    assert!(broker.native_sltp());
+    assert!(!broker.managed_trailing());
+    assert!(simulated.managed_trailing());
+    assert!(!simulated.native_sltp());
+}
+
+#[test]
 fn stop_ioc_and_fok_are_rejected_for_both_venues() {
     for order_type in [OrderType::Stop, OrderType::StopLimit] {
         for tif in [TimeInForce::ImmediateOrCancel, TimeInForce::FillOrKill] {

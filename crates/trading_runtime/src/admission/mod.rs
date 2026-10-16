@@ -9,6 +9,9 @@ use super::{
 use aeris_instruments::PriceGrid;
 use aeris_trading::{RejectReason, TimeInForce};
 
+mod capabilities;
+pub(crate) use capabilities::VenueCapabilities;
+
 pub(crate) fn validate_time_in_force(
     kind: OrderType,
     tif: TimeInForce,
@@ -149,7 +152,10 @@ pub(crate) fn validate_common_order(
 }
 
 fn validate_client_id(command: &PlaceOrder, route: VenueRoute) -> Result<(), RejectReason> {
-    if matches!(route, VenueRoute::CtraderDemo) && command.client_order_id.as_str().len() > 50 {
+    if VenueCapabilities::for_route(route)
+        .client_id_limit
+        .is_some_and(|limit| command.client_order_id.as_str().len() > limit)
+    {
         Err(RejectReason::ClientIdTooLong)
     } else {
         Ok(())
