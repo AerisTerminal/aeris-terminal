@@ -7,7 +7,22 @@ use super::{
     mirrored_client_order_id, multiply_quantity, order_acceptance_detail, venue,
 };
 use aeris_instruments::PriceGrid;
-use aeris_trading::RejectReason;
+use aeris_trading::{RejectReason, TimeInForce};
+
+pub(crate) fn validate_time_in_force(
+    kind: OrderType,
+    tif: TimeInForce,
+) -> Result<(), RejectReason> {
+    if matches!(kind, OrderType::Stop | OrderType::StopLimit)
+        && matches!(
+            tif,
+            TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
+        )
+    {
+        return Err(RejectReason::TifNotSupported);
+    }
+    Ok(())
+}
 
 /// Validates exact decimal ticks without rounding provider prices or manufacturing a tick.
 pub(crate) fn validate_price_grid(grid: PriceGrid, price: FixedPoint) -> Result<(), RejectReason> {
@@ -557,6 +572,8 @@ impl TradingCore {
             return Err("order scales do not match the instrument".to_string());
         }
         check_quantity_increment(&instrument, command.quantity)?;
+        validate_time_in_force(command.order_type, command.time_in_force)
+            .map_err(|error| error.to_string())?;
         validate_order_prices(&instrument, &command).map_err(|error| error.to_string())?;
         validate_owner_trigger_side(self, &command).map_err(|error| error.to_string())?;
         if self

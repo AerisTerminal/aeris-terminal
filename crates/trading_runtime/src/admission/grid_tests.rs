@@ -1,6 +1,19 @@
 use super::*;
 use aeris_instruments::InstrumentDecimal;
-use aeris_trading::{OrderSide, OrderType};
+use aeris_trading::{OrderSide, OrderType, TimeInForce};
+
+#[test]
+fn stop_ioc_and_fok_are_rejected_for_both_venues() {
+    for order_type in [OrderType::Stop, OrderType::StopLimit] {
+        for tif in [TimeInForce::ImmediateOrCancel, TimeInForce::FillOrKill] {
+            assert_eq!(
+                validate_time_in_force(order_type, tif),
+                Err(RejectReason::TifNotSupported),
+            );
+        }
+        assert_eq!(validate_time_in_force(order_type, TimeInForce::Day), Ok(()));
+    }
+}
 
 #[test]
 fn stop_triggers_must_be_strictly_outside_the_touch() {

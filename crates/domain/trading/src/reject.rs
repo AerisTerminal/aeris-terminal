@@ -65,6 +65,7 @@ pub enum RejectReason {
     ClientIdReused,
     OffGrid,
     WrongSideTrigger,
+    TifNotSupported,
 }
 
 impl fmt::Display for RejectReason {
@@ -84,6 +85,9 @@ impl fmt::Display for RejectReason {
             Self::OffGrid => f.write_str("OffGrid: price is off the instrument price grid"),
             Self::WrongSideTrigger => {
                 f.write_str("WrongSideTrigger: stop must trigger beyond the current bid or ask")
+            }
+            Self::TifNotSupported => {
+                f.write_str("TifNotSupported: IOC and FOK are unavailable for stop orders")
             }
         }
     }
