@@ -399,6 +399,44 @@ impl TradingCore {
         }
     }
 }
+
+#[cfg(test)]
+impl TradingCore {
+    /// Exercise the group branch without another order, position or ticket
+    /// masking it. Normal bracket transitions overlap one of those sources.
+    pub(crate) fn assert_group_only_interest_for_test(
+        &mut self,
+        sink: std::sync::Arc<dyn aeris_trading::market::QuoteInterestSink>,
+        expected: &MarketRoute,
+    ) {
+        assert!(self.state.orders.open_orders().next().is_none());
+        assert!(
+            self.state
+                .positions
+                .values()
+                .all(|position| position.net_quantity.units() == 0)
+        );
+        let group = self
+            .state
+            .managed_brackets
+            .values_mut()
+            .next()
+            .expect("saved bracket");
+        group.status = ManagedBracketStatus::AwaitingEntry;
+        self.interest_sink = Some(sink);
+        self.recompute_quote_interest()
+            .expect("group-only interest");
+        assert_eq!(self.published_interest, vec![expected.clone()]);
+        self.state
+            .managed_brackets
+            .values_mut()
+            .next()
+            .unwrap()
+            .status = ManagedBracketStatus::Cancelled;
+        self.recompute_quote_interest().expect("retired group");
+        assert_eq!(self.published_interest, []);
+    }
+}
 use super::{
     ClientOrderId, Fill, FixedPoint, ObservationCursor, Order, Position,
     SimulatedMarketObservation, TradingCore, TradingInstrument, market_fill_candidates,

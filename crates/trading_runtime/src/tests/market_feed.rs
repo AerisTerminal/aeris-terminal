@@ -975,7 +975,195 @@ fn ticket_interest_is_bounded_and_unchanged_sets_are_not_republished() {
 }
 
 #[test]
-fn admission_refuses_the_257th_routed_instrument_before_persisting() {
+fn quote_interest_tracks_orders_planned_legs_positions_tickets_and_capacity() {
+    let directory = TestDirectory::new("complete-interest-lifecycle");
+    let (service, _clock) = feed_service(&directory);
+    let sink = Arc::new(RecordedInterest::default());
+    let feed = service.attach_market_feed(sink.clone()).unwrap();
+    let published = |mut expected: Vec<MarketRoute>| {
+        service.status().unwrap();
+        expected.sort_by(|left, right| left.instrument_id.cmp(&right.instrument_id));
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap()
+                .last()
+                .map(|item| item.routes.clone())
+                .unwrap_or_default(),
+            expected
+        );
+    };
+    let count = || sink.0.lock().unwrap().len();
+    feed.push(MarketFeedEvent::Terms(terms())).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    published(vec![]);
+
+    let mut limit = market_order("interest-limit", OrderSide::Buy, 1, 1_000);
+    limit.order_type = OrderType::Limit;
+    limit.time_in_force = TimeInForce::GoodTillCancelled;
+    limit.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
+    service.place_order(limit).unwrap();
+    published(vec![route()]);
+    let sends = count();
+    service.set_ticket_interest(vec![route()]).unwrap();
+    published(vec![route()]);
+    assert_eq!(count(), sends, "an unchanged union sends nothing");
+    service.set_ticket_interest(vec![]).unwrap();
+    published(vec![route()]);
+    assert_eq!(count(), sends);
+    service
+        .cancel_order(ClientOrderId::try_new("interest-limit").unwrap())
+        .unwrap();
+    published(vec![]);
+
+    service.set_ticket_interest(vec![route()]).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 2, 10_000, 10_025)))
+        .unwrap();
+    published(vec![route()]);
+    let mut entry = market_order("interest-bracket", OrderSide::Buy, 2, 1_000);
+    entry.order_type = OrderType::Limit;
+    entry.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    let bracket = service
+        .place_chart_bracket_from_market(PlaceChartBracket {
+            entry,
+            stop_price: FixedPoint::try_new(9_800, 2).unwrap(),
+            target_price: FixedPoint::try_new(10_000, 2).unwrap(),
+        })
+        .unwrap();
+    assert!(matches!(bracket, BracketPlacement::Managed(_)));
+    let snapshot = service.snapshot().unwrap();
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .filter(|order| order.status.is_open())
+            .count(),
+        1
+    );
+    assert_eq!(
+        snapshot.managed_brackets[0].status,
+        ManagedBracketStatus::AwaitingEntry
+    );
+    service.set_ticket_interest(Vec::new()).unwrap();
+    published(vec![route()]); // The planned stop and target have not become orders yet.
+    service
+        .cancel_order(ClientOrderId::try_new("interest-bracket").unwrap())
+        .unwrap();
+    assert_eq!(
+        service.snapshot().unwrap().managed_brackets[0].status,
+        ManagedBracketStatus::Cancelled
+    );
+    published(vec![]);
+
+    assert_position_interest(&service, &feed, &published, &count);
+    assert_ticket_interest(&service, &published);
+    service.shutdown(Duration::from_secs(2)).unwrap();
+    assert_group_only_interest(&directory);
+    assert_sink_interest_capacity();
+}
+
+fn assert_position_interest(
+    service: &TradingService,
+    feed: &Arc<crate::core::market::feed::MarketFeedInbox>,
+    published: &impl Fn(Vec<MarketRoute>),
+    count: &impl Fn() -> usize,
+) {
+    service.set_ticket_interest(vec![route()]).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 3, 10_000, 10_025)))
+        .unwrap();
+    published(vec![route()]);
+    service
+        .place_order_from_market(
+            market_order("interest-long", OrderSide::Buy, 3, 1_000),
+            false,
+        )
+        .unwrap();
+    service.set_ticket_interest(Vec::new()).unwrap();
+    published(vec![route()]); // The filled order is terminal; the position owns the lease.
+    let sends = count();
+    feed.push(MarketFeedEvent::Quote(quote(1, 4, 10_100, 10_125)))
+        .unwrap();
+    published(vec![route()]);
+    assert_eq!(sends, count(), "a mark-only change does not resend demand");
+    service
+        .place_order_from_market(
+            market_order("interest-flat", OrderSide::Sell, 5, 1_000),
+            false,
+        )
+        .unwrap();
+    published(vec![route()]);
+    feed.push(MarketFeedEvent::Quote(quote(1, 6, 10_100, 10_125)))
+        .unwrap();
+    published(vec![]);
+    assert_eq!(
+        service.snapshot().unwrap().positions[0]
+            .net_quantity
+            .units(),
+        0
+    );
+}
+
+fn assert_ticket_interest(service: &TradingService, published: &impl Fn(Vec<MarketRoute>)) {
+    let tickets = (0..64)
+        .map(|index| {
+            let mut ticket = route();
+            ticket.instrument_id =
+                InstrumentId::try_new(format!("instrument:fixture:ticket:{index}")).unwrap();
+            ticket
+        })
+        .collect::<Vec<_>>();
+    service.set_ticket_interest(tickets.clone()).unwrap();
+    published(tickets.clone());
+    assert_eq!(
+        service.set_ticket_interest(vec![route(); 65]).unwrap_err(),
+        "ticket quote interest limit reached"
+    );
+    published(tickets);
+    service.set_ticket_interest(Vec::new()).unwrap();
+    published(vec![]);
+}
+
+fn assert_group_only_interest(directory: &TestDirectory) {
+    let configuration = config(directory);
+    let (commands, _receiver) = std::sync::mpsc::sync_channel(1);
+    let mut core = TradingCore::open(
+        &configuration.database_path,
+        configuration.retention,
+        configuration.clock,
+        configuration.execution,
+        std::sync::Weak::new(),
+        Arc::new(crate::core::market::feed::MarketFeedInbox::new(
+            commands,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )),
+    )
+    .unwrap();
+    let group_sink = Arc::new(RecordedInterest::default());
+    core.assert_group_only_interest_for_test(group_sink.clone(), &route());
+    assert_eq!(
+        group_sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|item| item.routes.clone())
+            .collect::<Vec<_>>(),
+        vec![vec![route()], vec![]]
+    );
+    drop(core);
+}
+
+fn assert_sink_interest_capacity() {
     let directory = TestDirectory::new("interest-capacity");
     let (service, _clock) = feed_service(&directory);
     let sink = Arc::new(RecordedInterest::default());
@@ -1008,14 +1196,30 @@ fn admission_refuses_the_257th_routed_instrument_before_persisting() {
         order.time_in_force = TimeInForce::GoodTillCancelled;
         order.limit_price = Some(FixedPoint::try_new(9_000, 2).unwrap());
         if index == 256 {
+            let previous_sends = sink.0.lock().unwrap().len();
             assert_eq!(
                 service.place_order(order).unwrap_err(),
                 "trading quote interest limit reached"
             );
+            assert_eq!(sink.0.lock().unwrap().len(), previous_sends);
         } else {
             service.place_order(order).unwrap();
         }
         service.status().unwrap();
+        let history = sink.0.lock().unwrap();
+        assert_eq!(
+            history.last().unwrap().routes,
+            (0..=index.min(255))
+                .map(|number| {
+                    let mut expected = route();
+                    expected.instrument_id =
+                        InstrumentId::try_new(format!("instrument:fixture:{number}")).unwrap();
+                    (expected.instrument_id.clone(), expected)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_values()
+                .collect::<Vec<_>>()
+        );
     }
     let history = sink.0.lock().unwrap();
     assert_eq!(history.last().unwrap().routes.len(), 256);
