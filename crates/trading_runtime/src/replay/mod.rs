@@ -45,6 +45,13 @@ impl ReplayHarness {
         self.current().store.crash_during_commit(nth);
     }
 
+    fn venue_event(&mut self, event: &crate::venue::VenueEvent) -> Result<(), String> {
+        self.core
+            .as_mut()
+            .expect("replay core is open")
+            .apply_venue_event(event)
+    }
+
     fn command<T>(&mut self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (sender, receiver) = mpsc::sync_channel(REPLY_CAPACITY);
         assert!(
@@ -1067,6 +1074,116 @@ fn replay_failed_broker_submit_does_not_publish_reserved_request() {
         next.try_recv(),
         Ok(crate::venue::VenueRequest::Place(_))
     ));
+}
+
+#[test]
+fn broker_report_and_deal_commit_failures_preserve_order_lifecycle_facts() {
+    use crate::venue::{VenueEvent, VenueUpdate};
+    use aeris_trading::venue::{BrokerFill, BrokerOrder, BrokerOrderKind, BrokerOrderState};
+
+    let directory = TestDirectory::new("broker-report-rollback");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let account_id = TradingAccountId::try_new("replay-demo").expect("id");
+    harness
+        .register_account(TradingAccount {
+            id: account_id.clone(),
+            display_name: "replay demo".into(),
+            environment: AccountEnvironment::Demo,
+            venue_id: "ctrader".into(),
+            broker_ref: Some("sanitized".into()),
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("account");
+    let (generation, requests) = harness.command(Command::AttachVenue).expect("attach");
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(crate::venue::VenueRequest::Reconcile { .. })
+    ));
+    let mut request = market_order("broker-rollback", OrderSide::Buy, 1, 1_000);
+    request.account_id = account_id;
+    let placed = harness.place_order(request).expect("place");
+    assert!(matches!(
+        requests.try_recv(),
+        Ok(crate::venue::VenueRequest::Place(_))
+    ));
+    let event = |generation, update| VenueEvent {
+        session_generation: generation,
+        broker_account: "sanitized".into(),
+        observed_unix_nanos: 5_000,
+        update,
+    };
+    let report = BrokerOrder {
+        broker_order_id: "501".into(),
+        client_order_id: Some(placed.client_order_id.as_str().into()),
+        instrument_id: placed.instrument_id.clone(),
+        side: placed.side,
+        kind: BrokerOrderKind::Market,
+        quantity: placed.quantity,
+        filled_quantity: placed.filled_quantity,
+        limit_price: None,
+        stop_price: None,
+        broker_position_id: Some("77".into()),
+        closing: false,
+    };
+    let accepted = event(
+        generation,
+        VenueUpdate::Order {
+            order: report.clone(),
+            state: BrokerOrderState::Accepted,
+            reason: None,
+        },
+    );
+    assert_failed_venue_commit(&mut harness, &accepted);
+    let (generation, _) = harness.command(Command::AttachVenue).expect("reattach");
+    harness
+        .venue_event(&event(generation, accepted.update))
+        .expect("ack");
+    let deal = event(
+        generation,
+        VenueUpdate::Fill(BrokerFill {
+            broker_deal_id: "d1".into(),
+            broker_order_id: "501".into(),
+            broker_position_id: "77".into(),
+            instrument_id: placed.instrument_id,
+            side: placed.side,
+            price: FixedPoint::try_new(9_000, 2).expect("price"),
+            quantity: placed.quantity,
+            executed_unix_nanos: 5_000,
+            commission: None,
+            realized: None,
+        }),
+    );
+    assert_failed_venue_commit(&mut harness, &deal);
+    let (generation, _) = harness.command(Command::AttachVenue).expect("reattach");
+    harness
+        .venue_event(&event(generation, deal.update.clone()))
+        .expect("deal");
+    let committed = harness.snapshot().expect("committed");
+    let order = committed
+        .orders
+        .iter()
+        .find(|order| order.id == placed.id)
+        .expect("order");
+    assert_eq!(
+        (order.status, order.revision, order.terminal_unix_nanos),
+        (OrderStatus::Filled, 3, Some(5_000))
+    );
+    harness
+        .venue_event(&event(generation, deal.update))
+        .expect("replayed deal");
+    assert_eq!(harness.snapshot().expect("idempotent replay"), committed);
+}
+
+fn assert_failed_venue_commit(harness: &mut ReplayHarness, event: &crate::venue::VenueEvent) {
+    let before = harness.snapshot().expect("before failed commit");
+    harness.crash_during_commit(1);
+    assert!(harness.venue_event(event).is_err());
+    assert_eq!(harness.snapshot().expect("memory"), before);
+    harness.restart().expect("restart after failed commit");
+    assert_eq!(harness.snapshot().expect("disk"), before);
 }
 
 #[test]
