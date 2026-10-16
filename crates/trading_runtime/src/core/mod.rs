@@ -1947,12 +1947,12 @@ pub(crate) fn touch_price(
         (OrderSide::Buy, OrderType::Limit)
             if observation.ask.units() <= order.limit_price?.units() =>
         {
-            Some(observation.ask)
+            order.limit_price
         }
         (OrderSide::Sell, OrderType::Limit)
             if observation.bid.units() >= order.limit_price?.units() =>
         {
-            Some(observation.bid)
+            order.limit_price
         }
         (OrderSide::Buy, OrderType::Stop)
             if observation.ask.units() >= order.stop_price?.units() =>

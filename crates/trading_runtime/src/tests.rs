@@ -1441,6 +1441,49 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
 }
 
 #[test]
+fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
+    let directory = TestDirectory::new("resting-limit-price");
+    let service = start_service(&directory);
+    service.register_instrument(instrument()).expect("terms");
+    let place_limit = |id, side, limit| {
+        let mut order = market_order(id, side, 1, 1_000);
+        order.order_type = OrderType::Limit;
+        order.time_in_force = TimeInForce::GoodTillCancelled;
+        order.limit_price = Some(price(limit));
+        service.place_order(order).expect("limit accepted")
+    };
+    let buy = place_limit("resting-buy", OrderSide::Buy, 9_900);
+    service
+        .observe_market(observation(9_775, 9_800, 2, 2_000))
+        .expect("ask crosses the buy limit");
+    let snapshot = service.snapshot().expect("buy fill");
+    assert_eq!(
+        snapshot
+            .fills
+            .iter()
+            .find(|fill| fill.order_id == buy.id)
+            .expect("buy fills")
+            .price,
+        price(9_900)
+    );
+    let sell = place_limit("resting-sell", OrderSide::Sell, 10_200);
+    service
+        .observe_market(observation(10_300, 10_325, 3, 3_000))
+        .expect("bid crosses the sell limit");
+    let snapshot = service.snapshot().expect("sell fill");
+    assert_eq!(
+        snapshot
+            .fills
+            .iter()
+            .find(|fill| fill.order_id == sell.id)
+            .expect("sell fills")
+            .price,
+        price(10_200)
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_moved() {
     let directory = TestDirectory::new("planned-bracket-legs");
     let service = start_service(&directory);
