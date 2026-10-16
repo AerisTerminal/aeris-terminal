@@ -1493,6 +1493,9 @@ impl TradingCore {
         {
             self.timer_calls += 1;
         }
+        if let Err(error) = self.cancel_due_markets() {
+            aeris_observability::diagnostic!("market order timeout persistence failed: {error}");
+        }
         self.request_unrealized_pnl();
         if self.command_now >= self.next_retention_at {
             match self.store.enforce_retention() {

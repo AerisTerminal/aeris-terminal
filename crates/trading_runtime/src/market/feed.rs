@@ -72,6 +72,19 @@ impl QuoteBook {
         super::gating::fresh_quote(now, quote.received_unix_nanos, class, policy)
     }
 
+    /// Only an actually missing quote on a current Live generation may wait.
+    /// A stale quote, retired generation or non-Live feed must still reject.
+    pub(crate) fn live_without_quote(&self, id: &InstrumentId) -> bool {
+        self.entries.get(id).is_some_and(|entry| {
+            entry.feed == Some(FeedState::Live)
+                && entry.quote.is_none()
+                && entry
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.provider_generation == entry.generation)
+        })
+    }
+
     pub(crate) fn observation(&self, id: &InstrumentId) -> Option<SimulatedMarketObservation> {
         let entry = self.entries.get(id)?;
         let quote = entry.quote.as_ref()?;

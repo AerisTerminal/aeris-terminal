@@ -309,9 +309,15 @@ pub(crate) fn admit(
         owner
             .check_new_order_interest(&command.instrument_id, staged_instruments)
             .map_err(|reason| owner.admission_detail(command, reason))?;
-        owner
-            .check_practice_market(instrument)
-            .map_err(|reason| owner.admission_detail(command, reason))?;
+        match owner.check_practice_market(instrument) {
+            Ok(()) => {}
+            Err(RejectReason::QuoteUnavailable)
+                if command.order_type == OrderType::Market
+                    && owner
+                        .quote_book
+                        .live_without_quote(&instrument.instrument_id) => {}
+            Err(reason) => return Err(owner.admission_detail(command, reason)),
+        }
     }
     validate_currency(instrument, &account.currency, route)
         .map_err(|reason| owner.admission_detail(command, reason))?;

@@ -244,6 +244,144 @@ fn nonmarketable_ioc_and_fok_cancel_in_the_acceptance_step() {
 }
 
 #[test]
+fn market_without_quote_waits_five_seconds_then_cancels_or_fills() {
+    let directory = TestDirectory::new("market-no-quote-deadline");
+    let (service, clock) = feed_service(&directory);
+    service.set_ticket_interest(vec![route()]).expect("ticket");
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    service.status().expect("drain");
+
+    let waiting = service
+        .place_order(market_order(
+            "market-timeout",
+            OrderSide::Buy,
+            1,
+            1_000_000_000_000,
+        ))
+        .expect("live feed without quote admits market order");
+    assert_eq!(waiting.status, OrderStatus::Working);
+    clock.advance(Duration::from_millis(4_999));
+    assert_eq!(
+        service.snapshot().unwrap().orders[0].status,
+        OrderStatus::Working
+    );
+    clock.advance(Duration::from_millis(1));
+    let expired = service.snapshot().unwrap();
+    let cancelled = expired
+        .orders
+        .iter()
+        .find(|order| order.id == waiting.id)
+        .unwrap();
+    assert_eq!(cancelled.status, OrderStatus::Cancelled);
+    assert_eq!(cancelled.terminal_unix_nanos, Some(1_005_000_000_000));
+    assert_eq!(
+        expired
+            .order_events
+            .iter()
+            .find(|event| event.order_id == waiting.id && event.kind == OrderEventKind::Cancelled)
+            .expect("timeout event")
+            .reason,
+        Some(aeris_trading::OrderEventReason::NoQuote)
+    );
+    assert_eq!(expired.fills.len(), 0);
+
+    let arriving = service
+        .place_order(market_order(
+            "market-arrives",
+            OrderSide::Buy,
+            1,
+            1_005_000_000_000,
+        ))
+        .expect("second waiting market order");
+    let mut arriving_quote = quote(1, 1, 10_000, 10_025);
+    arriving_quote.received_unix_nanos = 1_005_001_000_000;
+    feed.push(MarketFeedEvent::Quote(arriving_quote))
+        .expect("fresh quote");
+    service.status().expect("drain");
+    let filled = service.snapshot().unwrap();
+    assert_eq!(
+        filled
+            .orders
+            .iter()
+            .find(|order| order.id == arriving.id)
+            .unwrap()
+            .status,
+        OrderStatus::Filled
+    );
+    assert_eq!(filled.fills.len(), 1);
+    assert_eq!(
+        filled.fills[0].price,
+        FixedPoint::try_new(10_025, 2).unwrap()
+    );
+    assert_eq!(
+        filled
+            .orders
+            .iter()
+            .find(|order| order.id == waiting.id)
+            .unwrap()
+            .status,
+        OrderStatus::Cancelled
+    );
+    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    let restored = restarted.snapshot().expect("restored");
+    assert_eq!(restored.orders, filled.orders);
+    assert_eq!(restored.order_events, filled.order_events);
+    assert_eq!(restored.fills, filled.fills);
+    restarted
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown");
+}
+
+#[test]
+fn waiting_market_deadline_survives_restart_without_a_feed() {
+    let directory = TestDirectory::new("market-wait-restart");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    service.status().expect("drain");
+    let waiting = service
+        .place_order(market_order(
+            "restart-wait",
+            OrderSide::Buy,
+            1,
+            1_000_000_000_000,
+        ))
+        .expect("waiting");
+    service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    clock.advance(Duration::from_secs(5));
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = start_service_with_config(configuration);
+    let snapshot = restarted.snapshot().expect("expired on recovery");
+    let order = snapshot
+        .orders
+        .iter()
+        .find(|order| order.id == waiting.id)
+        .unwrap();
+    assert_eq!(order.status, OrderStatus::Cancelled);
+    assert_eq!(order.revision, 2);
+    assert_eq!(order.terminal_unix_nanos, Some(1_005_000_000_000));
+    assert_eq!(snapshot.fills.len(), 0);
+    restarted
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown");
+}
+
+#[test]
 fn resting_at_uses_owner_quote_and_persists_only_resolved_order() {
     let directory = TestDirectory::new("resting-at-owner");
     let (service, _clock) = feed_service(&directory);

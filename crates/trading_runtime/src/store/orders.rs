@@ -810,6 +810,7 @@ fn parse_event_reason(value: &str) -> Result<OrderEventReason, String> {
         "kill_switch" => Ok(OrderEventReason::KillSwitch),
         "flatten" => Ok(OrderEventReason::Flatten),
         "not_marketable" => Ok(OrderEventReason::NotMarketable),
+        "no_quote" => Ok(OrderEventReason::NoQuote),
         "risk_warning" => Ok(OrderEventReason::RiskWarning),
         "local_managed" => Ok(OrderEventReason::LocalManaged),
         _ => Err("stored order event reason is invalid".to_string()),

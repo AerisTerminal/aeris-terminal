@@ -104,16 +104,18 @@ pub(crate) enum CancellationCause {
     KillSwitch,
     Flatten,
     NotMarketable,
+    NoQuote,
 }
 
 impl CancellationCause {
-    const fn reason(self) -> OrderEventReason {
+    pub(crate) const fn reason(self) -> OrderEventReason {
         match self {
             Self::User => OrderEventReason::UserCancel,
             Self::Cascade => OrderEventReason::Cascade,
             Self::KillSwitch => OrderEventReason::KillSwitch,
             Self::Flatten => OrderEventReason::Flatten,
             Self::NotMarketable => OrderEventReason::NotMarketable,
+            Self::NoQuote => OrderEventReason::NoQuote,
         }
     }
 }
@@ -644,6 +646,7 @@ mod tests {
             CancellationCause::KillSwitch,
             CancellationCause::Flatten,
             CancellationCause::NotMarketable,
+            CancellationCause::NoQuote,
         ] {
             let (cancelled, reason) =
                 cancel_with_cause(super::super::tests::order(1, S::Inactive), cause, 2)

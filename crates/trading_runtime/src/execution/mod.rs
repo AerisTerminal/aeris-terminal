@@ -1,6 +1,6 @@
 use super::{
     ClientOrderId, Fill, FillId, FillMemoryUpdate, FixedPoint, ManagedBracketStatus, ModifyOrder,
-    Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep,
+    Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType,
     RevisionedCancelOrder, RevisionedModifyOrder, SimulatedMarketObservation, TimeInForce,
     TradingAccountId, TradingCore, TradingInstrument, VenueRoute, is_simulated, planned_leg,
 };
@@ -102,7 +102,12 @@ impl TradingCore {
             return Ok(order);
         }
         let mut step = OrderStep::new(self.state.next_sequence);
-        let cancelled = self.stage_cancellation(&mut step, order, reconcile_bracket)?;
+        let cancelled = self.stage_cancellation(
+            &mut step,
+            order,
+            reconcile_bracket,
+            crate::book::lifecycle::CancellationCause::User,
+        )?;
         self.commit_order_step(step, Vec::new())?;
         Ok(cancelled)
     }
@@ -112,6 +117,7 @@ impl TradingCore {
         step: &mut OrderStep,
         order: Order,
         reconcile_bracket: bool,
+        cause: crate::book::lifecycle::CancellationCause,
     ) -> Result<Order, String> {
         let sequence = step.next_sequence;
         let provenance = order.provenance.clone();
@@ -121,15 +127,25 @@ impl TradingCore {
             order_id: order.id.clone(),
             sequence,
             kind: OrderEventKind::Cancelled,
-            reason: Some(aeris_trading::OrderEventReason::UserCancel),
+            reason: Some(cause.reason()),
             event_unix_nanos: self.command_now,
-            detail: Some("cancelled by local command".to_string()),
+            detail: Some(match cause {
+                crate::book::lifecycle::CancellationCause::NoQuote => {
+                    "no quote within five seconds".to_string()
+                }
+                _ => "cancelled by local command".to_string(),
+            }),
             provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
         step.next_sequence += 1;
-        let cancelled = crate::book::lifecycle::cancel(order, self.command_now)
-            .map_err(|error| error.to_string())?;
+        let cancelled = if cause == crate::book::lifecycle::CancellationCause::User {
+            crate::book::lifecycle::cancel(order, self.command_now)
+        } else {
+            crate::book::lifecycle::cancel_with_cause(order, cause, self.command_now)
+                .map(|(order, _)| order)
+        }
+        .map_err(|error| error.to_string())?;
         step.updated.push((cancelled.clone(), event));
         if reconcile_bracket {
             let affected = self.state.managed_brackets.iter().find_map(|(_, bracket)| {
@@ -155,12 +171,57 @@ impl TradingCore {
                         .cloned()
                         .ok_or_else(|| "managed target disappeared".to_string())?;
                     if target_order.status.is_open() {
-                        self.stage_cancellation(step, target_order, false)?;
+                        self.stage_cancellation(
+                            step,
+                            target_order,
+                            false,
+                            crate::book::lifecycle::CancellationCause::User,
+                        )?;
                     }
                 }
             }
         }
         Ok(cancelled)
+    }
+
+    /// One bounded owner deadline scan, over the indexed open-order set only.
+    pub(crate) fn next_market_timeout_unix_nanos(&self) -> Option<i64> {
+        self.state
+            .orders
+            .open_orders()
+            .filter(|order| {
+                order.order_type == OrderType::Market
+                    && is_simulated(&self.state.accounts, &order.account_id)
+            })
+            .map(|order| order.accepted_unix_nanos.saturating_add(5_000_000_000))
+            .min()
+    }
+
+    pub(crate) fn cancel_due_markets(&mut self) -> Result<(), String> {
+        let due = self
+            .state
+            .orders
+            .open_orders()
+            .filter(|order| {
+                order.order_type == OrderType::Market
+                    && order.accepted_unix_nanos.saturating_add(5_000_000_000) <= self.command_now
+                    && is_simulated(&self.state.accounts, &order.account_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if due.is_empty() {
+            return Ok(());
+        }
+        let mut step = OrderStep::new(self.state.next_sequence);
+        for order in due {
+            self.stage_cancellation(
+                &mut step,
+                order,
+                true,
+                crate::book::lifecycle::CancellationCause::NoQuote,
+            )?;
+        }
+        self.commit_order_step(step, Vec::new())
     }
 
     pub(super) fn modify_order(&mut self, mut command: ModifyOrder) -> Result<Order, String> {
@@ -290,7 +351,12 @@ impl TradingCore {
                         .iter()
                         .any(|(updated, _)| updated.id == order.id)
                 {
-                    cancelled.push(self.stage_cancellation(&mut step, order, true)?);
+                    cancelled.push(self.stage_cancellation(
+                        &mut step,
+                        order,
+                        true,
+                        crate::book::lifecycle::CancellationCause::User,
+                    )?);
                 }
             } else {
                 broker_candidates.push(client_order_id);

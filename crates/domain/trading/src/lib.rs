@@ -615,6 +615,7 @@ pub enum OrderEventReason {
     KillSwitch,
     Flatten,
     NotMarketable,
+    NoQuote,
     RiskWarning,
     LocalManaged,
 }
@@ -637,6 +638,7 @@ impl OrderEventReason {
             Self::KillSwitch => "kill_switch",
             Self::Flatten => "flatten",
             Self::NotMarketable => "not_marketable",
+            Self::NoQuote => "no_quote",
             Self::RiskWarning => "risk_warning",
             Self::LocalManaged => "local_managed",
         }
