@@ -540,7 +540,7 @@ Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VA
 
 ### M5 trading engine
 
-Status: in progress; M5.1 is complete, M5.2 parts 1-3 are committed and the remaining M5.2 work and M5.3-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
+Status: in progress; M5.1 is complete, M5.2 admission is proceeding in gated parts, and M5.3-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
 
 - [x] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -567,6 +567,7 @@ Status: in progress; M5.1 is complete, M5.2 parts 1-3 are committed and the rema
   - Part 2: `admission::validate_trigger_side` rejects buy stop/stop-limit triggers at or below the ask and sell triggers at or above the bid with typed `WrongSideTrigger`, and accepts strict opposite-side triggers. Both simulated and broker placement use the owner's available Live QuoteBook observation; no second quote owner is introduced. The pure touch-side test first failed to compile for the missing validator and now passes. If no owner Live quote exists, this check has no price reference and does not fabricate one; simulated real-feed gating separately rejects missing quotes. Broker parity with attached feed and legacy bracket-leg side checks remain for the complete M5.2 validator.
   - Part 3: `admission::validate_time_in_force` rejects IOC and FOK on Stop/StopLimit with typed `TifNotSupported` on both simulated and broker paths before writes/venue requests. DAY remains valid on either route; cTrader's existing DAY-to-GTC mapping is unchanged. The pure TIF regression first failed on missing function and reason, then passed, as did the existing scripted broker and replay suites. M5.2 remains open for the unified `admit` call, capabilities, capacity, RestingAt, bracket leg checks and GUI verification.
   - Part 4: both placement routes now call one side-effect-free common admission check for client-id length, scales, positive quantity/provider increment, TIF, grid and open-order capacity (including staged copy orders). `ClientIdTooLong`, `InvalidQuantity`, and `CapacityExceeded` are typed; the original user-facing quantity/client-id messages remain compatible. The old duplicate quantity check and broker validation branches are removed. A shared-route test failed first on missing reasons/check and now passes; existing scripted broker tests and runtime suite pass. Quote-interest capacity, risk locks, venue capabilities, RestingAt, the complete `admit()` authority and GUI pass still belong to later M5.2 parts. No schema or goldens changed.
+  - Part 5: `TradingCore::admit` now gathers the existing shared checks, owner stop-side check and bounded quote-interest check before persistence on simulated and broker orders, including staged copy and legacy managed child orders. The 257th distinct routed interest returns typed `CapacityExceeded` rather than a market-feed string, without publishing demand or inserting the order. The test first failed with the former string; runtime suite (177 passed, 5 ignored) and full fmt/strict workspace Clippy/workspace tests/naming gate passed. The session/risk checks still live outside this boundary; VenueCapabilities, typed lock, RestingAt, full route parity/group-leg checks and GUI remain to finish M5.2. No schema or golden changes.
 - [ ] M5.3 execution-fill-rules - Bid/ask fill rules, stop and stop-limit triggering, multipliers
 - [ ] M5.4 time-in-force-expiry - DAY expiry at session close or 00:00 UTC; GTC stays working
 - [ ] M5.5 order-groups-and-bracket-migration - One order-group model with migration of existing brackets (V22)
@@ -825,6 +826,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.2 part 3 feat(trading): reject stop IOC and FOK on both routes - shared TIF rule and typed refusal before any order or broker request; full admission remains open.
 - 2026-10-17 M5.2 part 3 docs(plan): correct the M5 milestone status line after the gated admission slices - M5.2 parts 1-3 are committed, later items and real-path verification remain.
 - 2026-10-17 M5.2 part 4 feat(trading): share quantity and capacity admission across routes - one common pre-persistence validator replaces duplicated checks; full admission remains open.
+- 2026-10-17 M5.2 part 5 feat(trading): preflight quote-interest capacity through shared admission - staged and committed interest count before an order fact, typed capacity refusal; full admission remains open.
 
 ## 7. Known gaps / deferred
 

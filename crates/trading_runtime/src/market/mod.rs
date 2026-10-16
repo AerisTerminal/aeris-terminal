@@ -238,12 +238,18 @@ impl TradingCore {
     pub(crate) fn check_new_order_interest(
         &self,
         id: &InstrumentId,
-    ) -> Result<(), MarketConsumerError> {
-        if !self.interested_in(id)
-            && self.state.market_routes.contains_key(id)
-            && self.collect_quote_interest(&self.ticket_interest)?.len() == MAXIMUM_QUOTE_INTEREST
-        {
-            return Err(MarketConsumerError::InterestLimit);
+        staged: &[InstrumentId],
+    ) -> Result<(), aeris_trading::RejectReason> {
+        let mut ids = self.quote_interest_ids();
+        ids.extend(self.ticket_interest.keys().cloned());
+        ids.extend(staged.iter().cloned());
+        ids.insert(id.clone());
+        let routed = ids
+            .iter()
+            .filter(|id| self.state.market_routes.contains_key(*id))
+            .count();
+        if routed > MAXIMUM_QUOTE_INTEREST {
+            return Err(aeris_trading::RejectReason::CapacityExceeded);
         }
         Ok(())
     }

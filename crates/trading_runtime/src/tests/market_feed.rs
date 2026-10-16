@@ -1272,7 +1272,7 @@ fn assert_sink_interest_capacity() {
             let previous_sends = sink.0.lock().unwrap().len();
             assert_eq!(
                 service.place_order(order).unwrap_err(),
-                "trading quote interest limit reached"
+                "CapacityExceeded: trading order capacity reached"
             );
             assert_eq!(sink.0.lock().unwrap().len(), previous_sends);
         } else {

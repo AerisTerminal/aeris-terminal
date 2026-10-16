@@ -185,7 +185,8 @@ impl TradingCore {
             );
         }
         let sequence = self.state.next_sequence;
-        let (entry, event) = self.prepare_single_order(entry_command.clone(), true, sequence, 0)?;
+        let (entry, event) =
+            self.prepare_single_order(entry_command.clone(), true, sequence, &[])?;
         let bracket = ManagedBracket {
             bracket_id: bracket_id.clone(),
             template,
@@ -550,7 +551,10 @@ impl TradingCore {
                 },
                 false,
                 sequence,
-                prepared.len(),
+                &prepared
+                    .iter()
+                    .map(|(order, _): &(Order, OrderEvent)| order.instrument_id.clone())
+                    .collect::<Vec<_>>(),
             )?;
             target_event.detail = Some(format!(
                 "{} scale-out target {}",
@@ -648,7 +652,7 @@ impl TradingCore {
             },
             false,
             sequence,
-            0,
+            &[],
         )?;
         event.detail = Some(format!(
             "{} protective stop",

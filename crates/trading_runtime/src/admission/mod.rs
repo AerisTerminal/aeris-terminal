@@ -1,5 +1,5 @@
 use super::{
-    AccountEnvironment, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE, FixedPoint,
+    AccountEnvironment, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE, FixedPoint, InstrumentId,
     MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order, OrderEvent, OrderEventId,
     OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType, PlaceOrder, PlaceProtectiveOrder,
     ProtectiveOrder, ProtectiveOrderRole, TradeCopyDispatch, TradingAccount, TradingAccountId,
@@ -152,6 +152,32 @@ fn validate_client_id(command: &PlaceOrder, route: VenueRoute) -> Result<(), Rej
     if matches!(route, VenueRoute::CtraderDemo) && command.client_order_id.as_str().len() > 50 {
         Err(RejectReason::ClientIdTooLong)
     } else {
+        Ok(())
+    }
+}
+
+impl TradingCore {
+    /// Shared pre-persistence order checks; staged copy instruments participate in the
+    /// same market-demand bound as already committed orders and ticket interests.
+    pub(crate) fn admit(
+        &self,
+        instrument: &TradingInstrument,
+        command: &PlaceOrder,
+        route: VenueRoute,
+        additional_open_orders: usize,
+        staged_instruments: &[InstrumentId],
+    ) -> Result<(), RejectReason> {
+        validate_common_order(
+            instrument,
+            command,
+            route,
+            self.state.orders.open_count(),
+            additional_open_orders,
+        )?;
+        validate_owner_trigger_side(self, command)?;
+        if route == VenueRoute::Simulated {
+            self.check_new_order_interest(&command.instrument_id, staged_instruments)?;
+        }
         Ok(())
     }
 }
@@ -452,8 +478,6 @@ impl TradingCore {
         if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
             return existing_client_order(existing, command).map_err(|error| error.to_string());
         }
-        self.check_new_order_interest(&command.instrument_id)
-            .map_err(|error| error.to_string())?;
         let copier = self
             .state
             .trade_copiers
@@ -514,7 +538,11 @@ impl TradingCore {
             command,
             enforce_risk,
             step.next_sequence,
-            step.inserted.len(),
+            &step
+                .inserted
+                .iter()
+                .map(|(order, _)| order.instrument_id.clone())
+                .collect::<Vec<_>>(),
         )?;
         step.next_sequence += 1;
         step.inserted.push((order.clone(), event));
@@ -549,7 +577,7 @@ impl TradingCore {
             return Err("protective order role does not match its order type".to_string());
         }
         let sequence = self.state.next_sequence;
-        let (order, mut event) = self.prepare_single_order(command.order, false, sequence, 0)?;
+        let (order, mut event) = self.prepare_single_order(command.order, false, sequence, &[])?;
         event.detail = Some(format!(
             "{} standalone {}",
             ManagedBracket::MANAGEMENT_LABEL,
@@ -573,7 +601,7 @@ impl TradingCore {
         mut command: PlaceOrder,
         enforce_risk: bool,
         sequence: u64,
-        additional_open_orders: usize,
+        staged_instruments: &[InstrumentId],
     ) -> Result<(Order, OrderEvent), String> {
         let account = self
             .state
@@ -592,6 +620,14 @@ impl TradingCore {
             .get(&command.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?
             .clone();
+        self.admit(
+            &instrument,
+            &command,
+            VenueRoute::Simulated,
+            staged_instruments.len(),
+            staged_instruments,
+        )
+        .map_err(|error| error.to_string())?;
         self.check_practice_market(&instrument)
             .map_err(|reason| reason.to_string())?;
         let risk_warnings = if enforce_risk {
@@ -603,15 +639,6 @@ impl TradingCore {
         if instrument.contract.currency != account_currency {
             return Err("Practice contract currency differs from the account currency".to_string());
         }
-        validate_common_order(
-            &instrument,
-            &command,
-            VenueRoute::Simulated,
-            self.state.orders.open_count(),
-            additional_open_orders,
-        )
-        .map_err(|error| error.to_string())?;
-        validate_owner_trigger_side(self, &command).map_err(|error| error.to_string())?;
         let order = Order {
             id: OrderId::try_new(format!("sim-order-{sequence}"))
                 .map_err(|error| error.to_string())?,

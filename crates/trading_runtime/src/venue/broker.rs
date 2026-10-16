@@ -196,15 +196,7 @@ impl TradingCore {
             .instruments
             .get(&command.instrument_id)
             .ok_or("trading instrument is not registered")?;
-        crate::core::admission::validate_common_order(
-            instrument,
-            command,
-            crate::VenueRoute::CtraderDemo,
-            self.state.orders.open_count(),
-            0,
-        )
-        .map_err(|error| error.to_string())?;
-        crate::core::admission::validate_owner_trigger_side(self, command)
+        self.admit(instrument, command, crate::VenueRoute::CtraderDemo, 0, &[])
             .map_err(|error| error.to_string())?;
         // Every M3.2 check applies to broker orders. The practice rule that the contract
         // currency equal the account currency does not: the broker converts profit and loss
