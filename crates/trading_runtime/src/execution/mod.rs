@@ -57,10 +57,8 @@ impl TradingCore {
         };
         event.validate().map_err(|error| error.to_string())?;
         step.next_sequence += 1;
-        let cancelled = Order {
-            status: OrderStatus::Cancelled,
-            ..order
-        };
+        let cancelled = crate::book::lifecycle::cancel(order, self.command_now)
+            .map_err(|error| error.to_string())?;
         step.updated.push((cancelled.clone(), event));
         if reconcile_bracket {
             let affected = self.state.managed_brackets.iter().find_map(|(_, bracket)| {

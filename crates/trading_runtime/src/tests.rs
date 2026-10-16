@@ -195,9 +195,10 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     order.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
     service.place_order(order).expect("accepted");
     clock.set_wall_unix_nanos(1_090_000_000_000);
-    service
+    let cancelled = service
         .cancel_order(ClientOrderId::try_new("clock-limit").expect("id"))
         .expect("cancel");
+    assert_eq!(cancelled.terminal_unix_nanos, Some(1_090_000_000_000));
     let first = service.snapshot().expect("snapshot");
     let event = first
         .order_events
@@ -211,9 +212,10 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     second.time_in_force = TimeInForce::GoodTillCancelled;
     second.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
     service.place_order(second).expect("second accepted");
-    service
+    let cancelled = service
         .cancel_order(ClientOrderId::try_new("clock-limit-2").expect("id"))
         .expect("second cancel");
+    assert_eq!(cancelled.terminal_unix_nanos, Some(1_090_000_000_000));
     let last = service.snapshot().expect("snapshot");
     let event = last
         .order_events
@@ -223,6 +225,17 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
         .expect("second cancel event");
     assert!(event.event_unix_nanos >= 1_090_000_000_000);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    let orders = restarted.snapshot().expect("restored").orders;
+    assert!(
+        orders
+            .iter()
+            .filter(|order| order.status == OrderStatus::Cancelled)
+            .all(|order| order.terminal_unix_nanos == Some(1_090_000_000_000))
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
 }
 
 #[test]

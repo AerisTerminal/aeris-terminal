@@ -1,5 +1,7 @@
 //! Owner-maintained order indexes; mutations go through this type so all views stay in sync.
 
+pub(crate) mod lifecycle;
+
 use aeris_instruments::InstrumentId;
 use aeris_trading::{ClientOrderId, Order, OrderId, TradingAccountId};
 use std::{
@@ -180,7 +182,7 @@ mod tests {
         FixedPoint, OrderSide, OrderStatus, OrderType, TimeInForce, TradingProvenance,
     };
 
-    fn order(number: u32, status: OrderStatus) -> Order {
+    pub(super) fn order(number: u32, status: OrderStatus) -> Order {
         Order {
             id: OrderId::try_new(format!("order-{number}")).unwrap(),
             client_order_id: ClientOrderId::try_new(format!("client-{number}")).unwrap(),
@@ -195,6 +197,7 @@ mod tests {
             stop_price: None,
             status,
             submitted_unix_nanos: 1,
+            terminal_unix_nanos: None,
             provenance: TradingProvenance {
                 venue_id: "test".into(),
                 provider_id: "test".into(),

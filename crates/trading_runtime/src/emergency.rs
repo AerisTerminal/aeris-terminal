@@ -349,6 +349,7 @@ impl TradingCore {
             stop_price: None,
             status: OrderStatus::Working,
             submitted_unix_nanos: provenance.observed_unix_nanos,
+            terminal_unix_nanos: None,
             provenance: provenance.clone(),
         };
         order.validate().map_err(|error| error.to_string())?;

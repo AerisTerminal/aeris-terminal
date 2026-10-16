@@ -466,6 +466,8 @@ pub struct Order {
     pub stop_price: Option<FixedPoint>,
     pub status: OrderStatus,
     pub submitted_unix_nanos: i64,
+    /// Owner-command time of the final transition, if known.
+    pub terminal_unix_nanos: Option<i64>,
     pub provenance: TradingProvenance,
 }
 
@@ -503,6 +505,9 @@ impl Order {
             _ => {}
         }
         if self.submitted_unix_nanos <= 0 {
+            return Err(TradingValidationError::InvalidTimestamp);
+        }
+        if self.terminal_unix_nanos.is_some_and(|time| time <= 0) {
             return Err(TradingValidationError::InvalidTimestamp);
         }
         self.provenance.validate()?;
@@ -910,6 +915,7 @@ mod tests {
             stop_price: None,
             status: OrderStatus::PartiallyFilled,
             submitted_unix_nanos: 1,
+            terminal_unix_nanos: None,
             provenance: TradingProvenance {
                 venue_id: "test".to_string(),
                 provider_id: "test".to_string(),
