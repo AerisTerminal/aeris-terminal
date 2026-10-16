@@ -65,6 +65,15 @@ fn advance(order: &mut Order, owner_unix_nanos: i64) -> Result<(), LifecycleErro
     Ok(())
 }
 
+/// A stale instruction returns the exact current owner fact without changing it.
+pub(crate) fn expect_revision(order: &Order, expected: Option<u32>) -> Result<(), Box<Order>> {
+    if expected.is_some_and(|revision| revision != order.revision) {
+        Err(Box::new(order.clone()))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn modify(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
     if !matches!(
         order.status,
@@ -325,6 +334,17 @@ mod tests {
     fn acceptance_cannot_reset_an_existing_revision() {
         let order = super::super::tests::order(1, OrderStatus::Working);
         assert!(accept(order, 2).is_err());
+    }
+
+    #[test]
+    fn revision_guard_returns_the_current_order_without_advancing() {
+        let order = super::super::tests::order(1, OrderStatus::Working);
+        assert_eq!(
+            expect_revision(&order, Some(2)),
+            Err(Box::new(order.clone()))
+        );
+        assert_eq!(expect_revision(&order, Some(1)), Ok(()));
+        assert_eq!(expect_revision(&order, None), Ok(()));
     }
 
     #[test]

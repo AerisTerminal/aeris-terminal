@@ -259,6 +259,42 @@ pub struct ModifyOrder {
     pub provenance: TradingProvenance,
 }
 
+/// One order modification with an optional owner-side optimistic revision fence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionedModifyOrder {
+    pub order: ModifyOrder,
+    pub expected_revision: Option<u32>,
+}
+
+/// One cancellation with an optional owner-side optimistic revision fence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionedCancelOrder {
+    pub client_order_id: ClientOrderId,
+    pub expected_revision: Option<u32>,
+}
+
+/// A stale command carries the authoritative order for rebase without another snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OrderCommandError {
+    StaleRevision { current: Box<Order> },
+    Other(String),
+}
+
+impl std::fmt::Display for OrderCommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleRevision { current } => write!(
+                formatter,
+                "stale order revision; current revision is {}",
+                current.revision
+            ),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for OrderCommandError {}
+
 /// One complete top-of-book observation used by the touch-fill simulator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SimulatedMarketObservation {
@@ -799,6 +835,19 @@ impl TradingService {
         self.request(|reply| Command::Modify(order, reply))
     }
 
+    /// Checks the revision at the trading owner before modifying either venue.
+    ///
+    /// # Errors
+    /// Returns the current order on stale revision; other command failures remain explicit.
+    pub fn modify_order_checked(
+        &self,
+        command: RevisionedModifyOrder,
+    ) -> Result<Order, OrderCommandError> {
+        self.request(|reply| Command::ModifyChecked(command, reply))
+            .map_err(OrderCommandError::Other)?
+            .map_err(|current| OrderCommandError::StaleRevision { current })
+    }
+
     /// Moves the stop or a target a pending bracket places once its entry fills.
     ///
     /// # Errors
@@ -817,6 +866,19 @@ impl TradingService {
     /// Returns an error when the order is missing, storage fails, or the owner is unavailable.
     pub fn cancel_order(&self, client_order_id: ClientOrderId) -> Result<Order, String> {
         self.request(|reply| Command::Cancel(client_order_id, reply))
+    }
+
+    /// Checks the revision at the trading owner before cancelling either venue.
+    ///
+    /// # Errors
+    /// Returns the current order on stale revision; other command failures remain explicit.
+    pub fn cancel_order_checked(
+        &self,
+        command: RevisionedCancelOrder,
+    ) -> Result<Order, OrderCommandError> {
+        self.request(|reply| Command::CancelChecked(command, reply))
+            .map_err(OrderCommandError::Other)?
+            .map_err(|current| OrderCommandError::StaleRevision { current })
     }
 
     /// Cancels every working order for one account, or all accounts when no account is supplied.
@@ -1340,9 +1402,11 @@ impl TradingCore {
             | Command::PlaceProtectiveFromMarket(..)
             | Command::EvaluateRisk(..)
             | Command::Modify(..)
+            | Command::ModifyChecked(..)
             | Command::ModifyFromMarket(..)
             | Command::MovePlannedLeg(..)
             | Command::Cancel(..)
+            | Command::CancelChecked(..)
             | Command::CancelAll(..)
             | Command::CloseBrokerPosition(..)
             | Command::AmendBrokerPositionSltp(..) => {
@@ -1597,24 +1661,20 @@ impl TradingCore {
                 respond(&reply, self.evaluate_order_risk(&order));
             }
             Command::Modify(order, reply) => respond(&reply, self.modify_order(order)),
-            Command::ModifyFromMarket(mut order, reply) => {
-                let result = self
-                    .state
-                    .orders
-                    .by_client(&order.client_order_id)
-                    .ok_or_else(|| "practice order is not registered".to_string())
-                    .and_then(|current| self.market_observation(&current.instrument_id))
-                    .and_then(|quote| {
-                        order.provenance = quote.provenance;
-                        self.modify_order(order)
-                    });
-                respond(&reply, result);
+            Command::ModifyChecked(command, reply) => {
+                respond(&reply, self.modify_order_checked_internal(command));
+            }
+            Command::ModifyFromMarket(order, reply) => {
+                respond(&reply, self.modify_order_from_market(order));
             }
             Command::MovePlannedLeg(command, reply) => {
                 respond(&reply, self.move_planned_bracket_leg(&command));
             }
             Command::Cancel(client_order_id, reply) => {
                 respond(&reply, self.cancel_order(&client_order_id));
+            }
+            Command::CancelChecked(command, reply) => {
+                respond(&reply, self.cancel_order_checked_internal(&command));
             }
             Command::CancelAll(account_id, reply) => {
                 respond(&reply, self.cancel_all(account_id.as_ref()));

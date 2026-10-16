@@ -6,9 +6,10 @@ use super::{
     BracketPlacement, BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount,
     EconomicEventRiskOutcome, EconomicEventRiskTrigger, FixedPoint, FlattenOutcome, ModifyOrder,
     MovePlannedBracketLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket,
-    PlaceOrder, PlaceProtectiveOrder, PlannedBracketLeg, Reply, RiskEvaluation, RiskProfile,
-    SessionPlan, TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument,
-    TradingServiceStatus, TradingSnapshot, UserRecord,
+    PlaceOrder, PlaceProtectiveOrder, PlannedBracketLeg, Reply, RevisionedCancelOrder,
+    RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan, TradeCopierConfig,
+    TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus, TradingSnapshot,
+    UserRecord,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -36,9 +37,11 @@ pub(crate) enum Command {
     PlaceProtectiveFromMarket(PlaceProtectiveOrder, Reply<Order>),
     EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),
     Modify(ModifyOrder, Reply<Order>),
+    ModifyChecked(RevisionedModifyOrder, Reply<Result<Order, Box<Order>>>),
     ModifyFromMarket(ModifyOrder, Reply<Order>),
     MovePlannedLeg(MovePlannedBracketLeg, Reply<PlannedBracketLeg>),
     Cancel(ClientOrderId, Reply<Order>),
+    CancelChecked(RevisionedCancelOrder, Reply<Result<Order, Box<Order>>>),
     CancelAll(Option<TradingAccountId>, Reply<Vec<Order>>),
     CloseBrokerPosition(TradingAccountId, String, Reply<()>),
     AmendBrokerPositionSltp(

@@ -334,6 +334,99 @@ fn pending_broker_modify_preserves_revision_and_time_after_restart() {
 }
 
 #[test]
+fn stale_broker_commands_do_not_reserve_venue_requests_or_mutate_facts() {
+    use crate::{OrderCommandError, RevisionedCancelOrder, RevisionedModifyOrder};
+    let (directory, service, receiver) = setup("broker-stale");
+    let placed = service
+        .place_order(limit_request("broker-stale", 9_000))
+        .expect("place");
+    assert!(matches!(
+        receiver.recv().expect("place"),
+        VenueRequest::Place(_)
+    ));
+    service
+        .demo_venue_inbox()
+        .push(venue(
+            1,
+            order_update(report(&placed, "501", 0), BrokerOrderState::Accepted),
+        ))
+        .expect("ack");
+    let current = service
+        .snapshot()
+        .expect("snapshot")
+        .orders
+        .into_iter()
+        .find(|order| order.id == placed.id)
+        .expect("current");
+    let before = service.snapshot().expect("before");
+    assert_eq!(
+        service
+            .modify_order_checked(RevisionedModifyOrder {
+                order: ModifyOrder {
+                    client_order_id: placed.client_order_id.clone(),
+                    time_in_force: TimeInForce::GoodTillCancelled,
+                    limit_price: Some(point(9_025, 2)),
+                    stop_price: None,
+                    modified_unix_nanos: 3_000,
+                    provenance: crate::tests::provenance(3, 3_000),
+                },
+                expected_revision: Some(placed.revision),
+            })
+            .expect_err("stale amend"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(current.clone())
+        }
+    );
+    assert_eq!(
+        service
+            .cancel_order_checked(RevisionedCancelOrder {
+                client_order_id: placed.client_order_id.clone(),
+                expected_revision: Some(placed.revision),
+            })
+            .expect_err("stale cancel"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(current.clone())
+        }
+    );
+    assert_eq!(service.snapshot().expect("unchanged"), before);
+    assert!(receiver.try_recv().is_err(), "no stale venue request");
+    let pending = service
+        .cancel_order_checked(RevisionedCancelOrder {
+            client_order_id: placed.client_order_id.clone(),
+            expected_revision: Some(current.revision),
+        })
+        .expect("matching revision");
+    assert_eq!(pending.revision, current.revision + 1);
+    assert!(matches!(
+        receiver.recv().expect("cancel"),
+        VenueRequest::Cancel { .. }
+    ));
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    assert!(
+        restarted
+            .snapshot()
+            .expect("restored")
+            .orders
+            .contains(&pending)
+    );
+    assert_eq!(
+        restarted
+            .cancel_order_checked(RevisionedCancelOrder {
+                client_order_id: placed.client_order_id.clone(),
+                expected_revision: Some(placed.revision),
+            })
+            .expect_err("stale after restart"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(pending)
+        }
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
 fn retired_generations_are_fenced_and_the_generation_survives_a_restart() {
     let (directory, service, receiver) = setup("venue-generation");
     let order = service

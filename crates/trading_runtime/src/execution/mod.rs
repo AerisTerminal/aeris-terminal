@@ -1,11 +1,62 @@
 use super::{
     ClientOrderId, Fill, FillId, FillMemoryUpdate, FixedPoint, ManagedBracketStatus, ModifyOrder,
     Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep,
-    SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, TradingInstrument,
-    VenueRoute, is_simulated, planned_leg,
+    RevisionedCancelOrder, RevisionedModifyOrder, SimulatedMarketObservation, TimeInForce,
+    TradingAccountId, TradingCore, TradingInstrument, VenueRoute, is_simulated, planned_leg,
 };
 
 impl TradingCore {
+    pub(super) fn modify_order_from_market(
+        &mut self,
+        mut order: ModifyOrder,
+    ) -> Result<Order, String> {
+        self.state
+            .orders
+            .by_client(&order.client_order_id)
+            .ok_or_else(|| "practice order is not registered".to_string())
+            .and_then(|current| self.market_observation(&current.instrument_id))
+            .and_then(|quote| {
+                order.provenance = quote.provenance;
+                self.modify_order(order)
+            })
+    }
+
+    pub(super) fn checked_order(
+        &self,
+        client_order_id: &ClientOrderId,
+        expected_revision: Option<u32>,
+    ) -> Result<Result<(), Box<Order>>, String> {
+        let current = self
+            .state
+            .orders
+            .by_client(client_order_id)
+            .ok_or("order client identifier is not registered")?;
+        Ok(crate::book::lifecycle::expect_revision(
+            current,
+            expected_revision,
+        ))
+    }
+
+    pub(super) fn modify_order_checked_internal(
+        &mut self,
+        command: RevisionedModifyOrder,
+    ) -> Result<Result<Order, Box<Order>>, String> {
+        match self.checked_order(&command.order.client_order_id, command.expected_revision)? {
+            Ok(()) => self.modify_order(command.order).map(Ok),
+            Err(current) => Ok(Err(current)),
+        }
+    }
+
+    pub(super) fn cancel_order_checked_internal(
+        &mut self,
+        command: &RevisionedCancelOrder,
+    ) -> Result<Result<Order, Box<Order>>, String> {
+        match self.checked_order(&command.client_order_id, command.expected_revision)? {
+            Ok(()) => self.cancel_order(&command.client_order_id).map(Ok),
+            Err(current) => Ok(Err(current)),
+        }
+    }
+
     pub(super) fn cancel_order(
         &mut self,
         client_order_id: &ClientOrderId,

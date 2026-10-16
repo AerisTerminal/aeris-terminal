@@ -263,6 +263,77 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
 }
 
 #[test]
+fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
+    let directory = TestDirectory::new("stale-order-revision");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut request = market_order("stale-order", OrderSide::Buy, 1, 1_000);
+    request.order_type = OrderType::Limit;
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    let accepted = service.place_order(request).expect("accepted");
+    let modify = ModifyOrder {
+        client_order_id: accepted.client_order_id.clone(),
+        time_in_force: TimeInForce::GoodTillCancelled,
+        limit_price: Some(FixedPoint::try_new(9_025, 2).expect("price")),
+        stop_price: None,
+        modified_unix_nanos: 2_000,
+        provenance: provenance(2, 2_000),
+    };
+    let before = service.snapshot().expect("before stale commands");
+    assert_eq!(
+        service
+            .modify_order_checked(RevisionedModifyOrder {
+                order: modify.clone(),
+                expected_revision: Some(accepted.revision + 1),
+            })
+            .expect_err("stale modify"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(accepted.clone())
+        }
+    );
+    assert_eq!(
+        service
+            .cancel_order_checked(RevisionedCancelOrder {
+                client_order_id: accepted.client_order_id.clone(),
+                expected_revision: Some(accepted.revision + 1),
+            })
+            .expect_err("stale cancel"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(accepted.clone())
+        }
+    );
+    assert_eq!(service.snapshot().expect("no facts written"), before);
+    let modified = service
+        .modify_order_checked(RevisionedModifyOrder {
+            order: modify,
+            expected_revision: Some(accepted.revision),
+        })
+        .expect("matching revision");
+    assert_eq!(modified.revision, accepted.revision + 1);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    let before = restarted.snapshot().expect("restored");
+    assert_eq!(
+        restarted
+            .cancel_order_checked(RevisionedCancelOrder {
+                client_order_id: modified.client_order_id.clone(),
+                expected_revision: Some(accepted.revision),
+            })
+            .expect_err("stale after restart"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(modified.clone())
+        }
+    );
+    assert_eq!(restarted.snapshot().expect("still unchanged"), before);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
 fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_restart() {
     let directory = TestDirectory::new("client-id-reuse");
     let service = start_service(&directory);
