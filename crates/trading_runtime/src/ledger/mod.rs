@@ -3,11 +3,11 @@ pub(crate) use position::{FillAccounting, TradeCycle};
 
 use super::{
     AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate, FixedPoint,
-    MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, OrderStatus, Position, PositionPnl,
-    ProtectiveOrderRole, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS,
-    RiskLock, RiskMeter, SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore,
-    TradingSnapshot, consistency_projection, is_simulated, negative_loss, nonnegative_difference,
-    pnl_ticks, remaining_limit, round_trip, subtract_fixed, tick_value,
+    MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, Position, PositionPnl, ProtectiveOrderRole,
+    RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter,
+    SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore, TradingSnapshot,
+    consistency_projection, is_simulated, negative_loss, nonnegative_difference, pnl_ticks,
+    remaining_limit, round_trip, subtract_fixed, tick_value,
 };
 
 impl TradingCore {
@@ -70,14 +70,7 @@ impl TradingCore {
     ) {
         self.state.next_sequence = update.next_sequence;
         self.eligible_after.remove(&order.id);
-        self.state.orders.insert(
-            order.id.clone(),
-            Order {
-                status: OrderStatus::Filled,
-                filled_quantity: order.quantity,
-                ..order
-            },
-        );
+        self.state.orders.insert(order.id.clone(), order);
         self.state.order_events.push_back(event);
         self.state.fills.push_back(fill.clone());
         self.state

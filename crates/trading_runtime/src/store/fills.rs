@@ -183,10 +183,19 @@ impl TradingStore {
         let transaction = self.connection.transaction().map_err(database_error)?;
         transaction
             .execute(
-                "UPDATE orders SET status = 'filled', filled_units = quantity_units,
-                    filled_scale = quantity_scale
-                 WHERE id = ?1 AND status IN ('working', 'partially_filled')",
-                [order.id.as_str()],
+                "UPDATE orders SET status = ?1, filled_units = ?2,
+                    filled_scale = ?3, revision = ?4, updated_unix_nanos = ?5,
+                    terminal_unix_nanos = ?6
+                 WHERE id = ?7 AND status IN ('working', 'partially_filled')",
+                params![
+                    order.status.as_str(),
+                    order.filled_quantity.units(),
+                    order.filled_quantity.scale(),
+                    order.revision,
+                    order.updated_unix_nanos,
+                    order.terminal_unix_nanos,
+                    order.id.as_str(),
+                ],
             )
             .map_err(database_error)?;
         insert_event_row(&transaction, event)?;

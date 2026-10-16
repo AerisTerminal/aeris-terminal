@@ -289,8 +289,10 @@ impl TradingCore {
                     .ok_or_else(|| "fill account disappeared".to_string())?,
                 instrument,
             )?;
+            let filled = crate::book::lifecycle::fill_simulated(order, self.command_now)
+                .map_err(|error| error.to_string())?;
             self.apply_fill_to_memory(
-                order,
+                filled,
                 event,
                 &fill,
                 FillMemoryUpdate {

@@ -16,7 +16,7 @@ impl std::fmt::Display for LifecycleError {
             Self::InvalidTransition(status) => {
                 write!(
                     formatter,
-                    "cannot cancel an order in {} state",
+                    "cannot transition an order in {} state",
                     status.as_str()
                 )
             }
@@ -103,6 +103,24 @@ pub(crate) fn cancel(order: Order, command_unix_nanos: i64) -> Result<Order, Lif
     Ok(cancelled)
 }
 
+/// Simulated execution fills the remaining order in one local transition.
+pub(crate) fn fill_simulated(
+    mut order: Order,
+    owner_unix_nanos: i64,
+) -> Result<Order, LifecycleError> {
+    if !matches!(
+        order.status,
+        OrderStatus::Working | OrderStatus::PartiallyFilled
+    ) {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    advance(&mut order, owner_unix_nanos)?;
+    order.status = OrderStatus::Filled;
+    order.filled_quantity = order.quantity;
+    order.terminal_unix_nanos = Some(owner_unix_nanos);
+    Ok(order)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +136,17 @@ mod tests {
     fn acceptance_cannot_reset_an_existing_revision() {
         let order = super::super::tests::order(1, OrderStatus::Working);
         assert!(accept(order, 2).is_err());
+    }
+
+    #[test]
+    fn simulated_fill_is_terminal_and_rejects_repeat_execution() {
+        let original = super::super::tests::order(1, OrderStatus::Working);
+        let filled = fill_simulated(original, 2).expect("fill");
+        assert_eq!(filled.revision, 2);
+        assert_eq!(filled.updated_unix_nanos, 2);
+        assert_eq!(filled.terminal_unix_nanos, Some(2));
+        assert_eq!(filled.filled_quantity, filled.quantity);
+        assert!(fill_simulated(filled, 3).is_err());
     }
 
     #[test]

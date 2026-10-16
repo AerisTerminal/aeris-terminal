@@ -362,8 +362,10 @@ impl TradingCore {
         let event = flatten_fill_event(&order, &fill, sequence + 1, provenance)?;
         let (position, policy_update) =
             self.apply_fill(&fill, Some(&current), &account, &instrument)?;
+        let filled = crate::book::lifecycle::fill_simulated(order, self.command_now)
+            .map_err(|error| error.to_string())?;
         self.store.insert_fill(
-            &order,
+            &filled,
             &event,
             &fill,
             &position,
@@ -371,7 +373,7 @@ impl TradingCore {
             sequence + 2,
         )?;
         self.apply_fill_to_memory(
-            order,
+            filled,
             event,
             &fill,
             FillMemoryUpdate {

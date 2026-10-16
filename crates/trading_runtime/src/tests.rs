@@ -2389,10 +2389,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     let open_snapshot = service.snapshot().expect("snapshot");
     assert!(open_snapshot.completed_trade_pnl.is_empty());
     assert_eq!(open_snapshot.orders[0].status, OrderStatus::Filled);
-    assert_eq!(
-        open_snapshot.orders[0].filled_quantity,
-        open_snapshot.orders[0].quantity
-    );
+    assert_filled_lifecycle(&first, &open_snapshot.orders[0]);
     assert_eq!(
         open_snapshot.positions[0].unrealized_pnl,
         FixedPoint::try_new(-1_250, 2).expect("unrealized pnl")
@@ -2447,6 +2444,7 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.orders.len(), 2);
+    assert_eq!(restored.orders, snapshot.orders);
     assert!(
         restored
             .orders
@@ -2470,6 +2468,13 @@ fn simulated_execution_and_records_survive_restart_and_export() {
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("restarted service stops");
+}
+
+fn assert_filled_lifecycle(accepted: &Order, filled: &Order) {
+    assert_eq!(filled.revision, accepted.revision + 1);
+    assert!(filled.updated_unix_nanos >= accepted.accepted_unix_nanos);
+    assert_eq!(filled.terminal_unix_nanos, Some(filled.updated_unix_nanos));
+    assert_eq!(filled.filled_quantity, filled.quantity);
 }
 
 /// Fills one market order at the observed touch: buys at `ask`, sells at `bid`.
@@ -3006,6 +3011,16 @@ fn flatten_closes_positions_and_survives_a_restart() {
     assert_eq!(snapshot.positions[0].net_quantity.units(), 0);
     assert_eq!(snapshot.fills.len(), 2);
     assert_eq!(snapshot.orders.len(), 2);
+    let flattened = snapshot
+        .orders
+        .iter()
+        .find(|order| order.id == fills.fills[0].order_id)
+        .expect("flatten order");
+    assert_eq!(flattened.revision, 2);
+    assert_eq!(
+        flattened.terminal_unix_nanos,
+        Some(flattened.updated_unix_nanos)
+    );
     service
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
@@ -3014,6 +3029,7 @@ fn flatten_closes_positions_and_survives_a_restart() {
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.positions[0].net_quantity.units(), 0);
     assert_eq!(restored.fills.len(), 2);
+    assert_eq!(restored.orders, snapshot.orders);
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("restarted service stops");
