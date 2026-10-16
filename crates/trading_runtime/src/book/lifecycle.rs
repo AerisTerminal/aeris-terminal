@@ -311,15 +311,14 @@ pub(crate) fn broker_deal(
     } else {
         current.filled_quantity
     };
-    let status = if filled == quantity {
-        OrderStatus::Filled
-    } else if !current.status.is_open()
+    let status = if !current.status.is_open()
         || matches!(
             current.status,
             OrderStatus::PendingModify | OrderStatus::PendingCancel
-        )
-    {
+        ) {
         current.status
+    } else if filled == quantity {
+        OrderStatus::Filled
     } else {
         OrderStatus::PartiallyFilled
     };
@@ -513,6 +512,111 @@ mod tests {
             ),
             (OrderStatus::Cancelled, 3, 3, Some(2))
         );
+    }
+
+    #[test]
+    fn expired_order_cannot_be_reopened_by_late_full_deal() {
+        let mut expired = super::super::tests::order(1, OrderStatus::Expired);
+        expired.terminal_unix_nanos = Some(2);
+        let late = broker_deal(
+            &expired,
+            expired.quantity,
+            false,
+            expired.provenance.clone(),
+            3,
+        )
+        .expect("late accounting");
+        assert_eq!(late.status, OrderStatus::Expired);
+        assert_eq!(late.filled_quantity, expired.quantity);
+        assert_eq!(late.terminal_unix_nanos, Some(2));
+        assert_eq!((late.revision, late.updated_unix_nanos), (2, 3));
+    }
+
+    #[test]
+    fn broker_deal_transition_table_preserves_pending_and_terminal_states() {
+        let cases = [
+            (OrderStatus::Inactive, None, None),
+            (
+                OrderStatus::Pending,
+                Some(OrderStatus::PartiallyFilled),
+                Some(OrderStatus::Filled),
+            ),
+            (
+                OrderStatus::Working,
+                Some(OrderStatus::PartiallyFilled),
+                Some(OrderStatus::Filled),
+            ),
+            (
+                OrderStatus::PartiallyFilled,
+                Some(OrderStatus::PartiallyFilled),
+                Some(OrderStatus::Filled),
+            ),
+            (
+                OrderStatus::PendingModify,
+                Some(OrderStatus::PendingModify),
+                Some(OrderStatus::PendingModify),
+            ),
+            (
+                OrderStatus::PendingCancel,
+                Some(OrderStatus::PendingCancel),
+                Some(OrderStatus::PendingCancel),
+            ),
+            (
+                OrderStatus::Filled,
+                Some(OrderStatus::Filled),
+                Some(OrderStatus::Filled),
+            ),
+            (
+                OrderStatus::Cancelled,
+                Some(OrderStatus::Cancelled),
+                Some(OrderStatus::Cancelled),
+            ),
+            (
+                OrderStatus::Expired,
+                Some(OrderStatus::Expired),
+                Some(OrderStatus::Expired),
+            ),
+            (
+                OrderStatus::Rejected,
+                Some(OrderStatus::Rejected),
+                Some(OrderStatus::Rejected),
+            ),
+        ];
+        for (status, partial_status, complete_status) in cases {
+            for (filled_units, expected) in [(1, partial_status), (2, complete_status)] {
+                let mut order = super::super::tests::order(1, status);
+                order.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+                if !status.is_open() {
+                    order.terminal_unix_nanos = Some(2);
+                }
+                let transition = broker_deal(
+                    &order,
+                    FixedPoint::try_new(filled_units, 0).expect("filled"),
+                    false,
+                    order.provenance.clone(),
+                    3,
+                );
+                match expected {
+                    Some(expected) => {
+                        let updated = transition.expect("allowed accounting");
+                        assert_eq!(updated.status, expected, "{status:?}, {filled_units}");
+                        assert_eq!(updated.revision, 2, "{status:?}, {filled_units}");
+                        assert_eq!(
+                            updated.terminal_unix_nanos,
+                            if expected.is_open() {
+                                None
+                            } else if status.is_open() {
+                                Some(3)
+                            } else {
+                                Some(2)
+                            },
+                            "{status:?}, {filled_units}"
+                        );
+                    }
+                    None => assert!(transition.is_err(), "{status:?}, {filled_units}"),
+                }
+            }
+        }
     }
 
     #[test]
