@@ -319,6 +319,8 @@ impl TradingCore {
 
 #[cfg(test)]
 mod grid_tests;
+#[cfg(test)]
+mod parity_tests;
 
 /// Client identity belongs to the order book, not the venue. Ignore only audit fields
 /// stamped at submission; an instruction change must never silently reuse the old order.
