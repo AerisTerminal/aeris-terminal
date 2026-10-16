@@ -51,13 +51,118 @@ pub(super) fn setting_row(
         .into_any_element()
 }
 
-pub(super) fn choice_tab(
-    id: (&'static str, usize),
-    label: &'static str,
-    selected: bool,
-    theme: &AerisTheme,
-) -> Tab {
-    Tab::new(id, theme).selected(selected).child(label)
+pub(super) struct DropdownChoice<T> {
+    pub(super) label: SharedString,
+    pub(super) value: T,
+    pub(super) selected: bool,
+}
+
+/// A single-choice indicator setting as a dropdown. `menu` keys the dropdown within its dialog.
+pub(super) struct SettingDropdown<'a, T> {
+    pub(super) menu: &'a str,
+    pub(super) label: &'a str,
+    pub(super) open_menu: Option<&'a str>,
+    pub(super) enabled: bool,
+    pub(super) choices: Vec<DropdownChoice<T>>,
+}
+
+impl<T: Clone + 'static> SettingDropdown<'_, T> {
+    /// A full-width secondary trigger showing the current choice and, while open, its menu.
+    /// Picking a choice closes the dropdown before `choose` applies it.
+    pub(super) fn render(
+        self,
+        app: &Entity<WorkspaceSurface>,
+        choose: impl Fn(&mut WorkspaceSurface, T, &mut Context<WorkspaceSurface>) + Clone + 'static,
+        theme: &AerisTheme,
+    ) -> AnyElement {
+        let open = self.enabled && self.open_menu == Some(self.menu);
+        let current = self
+            .choices
+            .iter()
+            .find(|choice| choice.selected)
+            .map_or_else(SharedString::default, |choice| choice.label.clone());
+        let toggle = app.clone();
+        let toggle_menu = self.menu.to_string();
+        let trigger = Button::new(
+            SharedString::from(format!("indicator_setting_{}", self.menu)),
+            theme,
+        )
+        .variant(ButtonVariant::Secondary)
+        .button_size(ButtonSize::Lg)
+        .trigger()
+        .full_width()
+        .open(open)
+        .disabled(!self.enabled)
+        .aria_label(self.label.to_string())
+        .leading(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .text_color(gpui_color(theme.colors.text_primary))
+                .child(current),
+        )
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_press(move |_, _, cx| {
+            toggle.update(cx, |surface, surface_cx| {
+                surface.toggle_indicator_settings_menu(&toggle_menu, surface_cx);
+            });
+        });
+        let menu = self.menu;
+        let panel = open.then(|| {
+            MenuPanel::new(
+                SharedString::from(format!("indicator_setting_{menu}_menu")),
+                MenuPlacement::Anchored {
+                    side: MenuSide::Below,
+                    align: MenuAlign::Stretch,
+                },
+                theme,
+            )
+            .animate_from(PopupAnimationOrigin::TOP_LEFT)
+            .children(self.choices.into_iter().enumerate().map(|(index, choice)| {
+                let pick = app.clone();
+                let choose = choose.clone();
+                let value = choice.value;
+                MenuRow::compact(
+                    SharedString::from(format!("indicator_setting_{menu}_{index}")),
+                    choice.label,
+                    theme,
+                )
+                .checked(choice.selected)
+                .on_click(move |_, _, cx| {
+                    pick.update(cx, |surface, surface_cx| {
+                        surface.close_indicator_settings_menu(surface_cx);
+                        choose(surface, value.clone(), surface_cx);
+                    });
+                })
+            }))
+        });
+        let dismiss = app.clone();
+        MenuAnchor::new(
+            SharedString::from(format!("indicator_setting_{menu}_anchor")),
+            trigger,
+        )
+        .full_width()
+        .menu(panel)
+        .on_dismiss(move |_, cx| {
+            dismiss.update(cx, WorkspaceSurface::close_indicator_settings_menu);
+        })
+        .into_any_element()
+    }
+}
+
+pub(super) fn dropdown_choices<T: Copy>(
+    choices: &[(&'static str, T)],
+    selected: impl Fn(T) -> bool,
+) -> Vec<DropdownChoice<T>> {
+    choices
+        .iter()
+        .map(|&(label, value)| DropdownChoice {
+            label: label.into(),
+            value,
+            selected: selected(value),
+        })
+        .collect()
 }
 
 fn filter_row(
@@ -65,36 +170,20 @@ fn filter_row(
     dialog: &BigTradesDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let choices = TabList::new("big_trades_filter", "Filter", theme).children(
-        FILTER_CHOICES
-            .into_iter()
-            .enumerate()
-            .map(|(index, (label, intensity))| {
-                let update = app.clone();
-                choice_tab(
-                    ("big_trades_filter", index),
-                    label,
-                    dialog.intensity == intensity,
-                    theme,
-                )
-                .on_click(move |_, _, cx| {
-                    update.update(cx, |surface, surface_cx| {
-                        surface.set_big_trades_dialog_filter(intensity, surface_cx);
-                    });
-                })
-            }),
-    );
+    let choices = SettingDropdown {
+        menu: "big_trades_filter",
+        label: "Filter",
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: dropdown_choices(&FILTER_CHOICES, |intensity| dialog.intensity == intensity),
+    }
+    .render(app, WorkspaceSurface::set_big_trades_dialog_filter, theme);
     let description = if dialog.intensity.is_some() {
         "Adapts to recent order sizes. Weak shows the most bubbles, Strong only the largest orders."
     } else {
         "Every order of at least the minimum volume."
     };
-    setting_row(
-        "Filter",
-        description,
-        div().flex().child(choices).into_any_element(),
-        theme,
-    )
+    setting_row("Filter", description, choices, theme)
 }
 
 fn minimum_volume_row(dialog: &BigTradesDialogState, theme: &AerisTheme) -> AnyElement {
@@ -114,29 +203,18 @@ fn size_row(
     dialog: &BigTradesDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let choices = TabList::new("big_trades_size", "Bubble size", theme).children(
-        SIZE_CHOICES
-            .into_iter()
-            .enumerate()
-            .map(|(index, (label, size))| {
-                let update = app.clone();
-                choice_tab(
-                    ("big_trades_size", index),
-                    label,
-                    dialog.size == size,
-                    theme,
-                )
-                .on_click(move |_, _, cx| {
-                    update.update(cx, |surface, surface_cx| {
-                        surface.set_big_trades_dialog_size(size, surface_cx);
-                    });
-                })
-            }),
-    );
+    let choices = SettingDropdown {
+        menu: "big_trades_size",
+        label: "Bubble size",
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: dropdown_choices(&SIZE_CHOICES, |size| dialog.size == size),
+    }
+    .render(app, WorkspaceSurface::set_big_trades_dialog_size, theme);
     setting_row(
         "Bubble size",
         "Bubbles grow with order volume within this range.",
-        div().flex().child(choices).into_any_element(),
+        choices,
         theme,
     )
 }

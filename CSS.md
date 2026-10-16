@@ -89,8 +89,9 @@ committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positiv
 **`TabList`** + **`Tab`** (`tab.rs`), the Theme System `.ui-tabs` / `.ui-tab`: a `surface-raised` track with
 no border; unselected tabs have no fill and `text-interactive` text, and hover / press change the text
 only (`text-hover` / `text-active`, never `hover-bg`); the selected tab is raised onto `surface` with a
-`border` outline and `text-active`. Use for tabs and single-choice option groups; `compact()` on both the
-list and its tabs in dense panel headers (bottom panel, side panels); `wrap()` for open-ended option sets;
+`border` outline and `text-active`. Use for navigation tabs and one-tap presets such as order quantities;
+a single-choice setting in a settings panel or indicator dialog is a dropdown instead. `compact()` on both the
+list and its tabs in dense panel headers (bottom panel, side panels);
 `TabList::sidebar` + `Tab::sidebar` for vertical section navigation.
 
 **`Switch`** / **`SwitchRow`** (`switch.rs`): every on/off setting, never an "On" / "Off" button.

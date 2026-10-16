@@ -1,5 +1,5 @@
 //! Shared tab components. [`TabList`] + [`Tab`] are the Theme System `.ui-tabs` / `.ui-tab`
-//! segmented control, also used for single-choice option groups; [`TabList::sidebar`] with
+//! segmented control for navigation and one-tap presets; [`TabList::sidebar`] with
 //! [`Tab::sidebar`] is the vertical section navigation of settings panels. Callers add only
 //! layout and spacing, never colors, borders or radii.
 
@@ -86,18 +86,6 @@ impl TabList {
         self.base = self.base.h(COMPACT_TAB_LIST_HEIGHT);
         self
     }
-
-    /// Lets an open-ended option set wrap onto more rows. The track keeps its inset and gap
-    /// and rounds to `--radius-default`, since a multi-row pill would read as a blob.
-    pub(crate) fn wrap(mut self) -> Self {
-        self.base = self
-            .base
-            .flex_wrap()
-            .h_auto()
-            .min_h(TAB_LIST_HEIGHT)
-            .rounded(sidebar_tab_radius());
-        self
-    }
 }
 
 impl Styled for TabList {
@@ -143,9 +131,9 @@ struct SegmentedTabColors {
     active_text: ThemeColor,
 }
 
-fn segmented_tab_colors(theme: &AerisTheme, selected: bool, disabled: bool) -> SegmentedTabColors {
+fn segmented_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColors {
     let colors = theme.colors;
-    let mut state = if selected {
+    if selected {
         SegmentedTabColors {
             fill: Some(colors.surface),
             border: Some(colors.border),
@@ -161,23 +149,17 @@ fn segmented_tab_colors(theme: &AerisTheme, selected: bool, disabled: bool) -> S
             hover_text: colors.text_hover,
             active_text: colors.text_active,
         }
-    };
-    if disabled {
-        state.text = colors.text_muted;
     }
-    state
 }
 
 /// Sidebar sections rest without a fill, take `hover-bg` on hover and stay on `active-bg`
 /// while selected.
-fn sidebar_tab_colors(theme: &AerisTheme, selected: bool, disabled: bool) -> SegmentedTabColors {
+fn sidebar_tab_colors(theme: &AerisTheme, selected: bool) -> SegmentedTabColors {
     let colors = theme.colors;
     SegmentedTabColors {
         fill: selected.then_some(colors.active_bg),
         border: None,
-        text: if disabled {
-            colors.text_muted
-        } else if selected {
+        text: if selected {
             colors.text_active
         } else {
             colors.text_interactive
@@ -195,7 +177,6 @@ pub(crate) struct Tab {
     style: StyleRefinement,
     theme: AerisTheme,
     selected: bool,
-    disabled: bool,
     compact: bool,
     surface: TabSurface,
     children: Vec<AnyElement>,
@@ -208,7 +189,6 @@ impl Tab {
             style: StyleRefinement::default(),
             theme: *theme,
             selected: false,
-            disabled: false,
             compact: false,
             surface: TabSurface::Segmented,
             children: Vec::new(),
@@ -223,12 +203,6 @@ impl Tab {
 
     pub(crate) const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
-        self
-    }
-
-    /// A tab that cannot be chosen: muted text, no hover and a not-allowed cursor.
-    pub(crate) const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
 
@@ -270,30 +244,22 @@ impl RenderOnce for Tab {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.theme.colors;
         let selected = self.selected;
-        let disabled = self.disabled;
         let tab = self
             .base
             .occlude()
             .role(gpui::Role::Tab)
             .aria_selected(selected)
-            .disabled(disabled)
             .border(platform_border_width(&self.theme))
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
-            .map(|tab| {
-                if disabled {
-                    tab.cursor_not_allowed()
-                } else {
-                    tab.cursor_pointer()
-                }
-            });
+            .cursor_pointer();
         let radius = match self.surface {
             TabSurface::Sidebar => sidebar_tab_radius(),
             TabSurface::Segmented | TabSurface::Chrome { .. } => tab_radius(),
         };
         let mut tab = match self.surface {
             TabSurface::Segmented => {
-                let state = segmented_tab_colors(&self.theme, selected, disabled);
+                let state = segmented_tab_colors(&self.theme, selected);
                 let (height, padding) = if self.compact {
                     (COMPACT_TAB_HEIGHT, COMPACT_TAB_PADDING_X)
                 } else {
@@ -314,14 +280,12 @@ impl RenderOnce for Tab {
                     )
                     .when_some(state.fill, |tab, fill| tab.bg(gpui_color(fill)))
                     .text_color(gpui_color(state.text))
-                    .when(!disabled, |tab| {
-                        tab.hover(move |tab| tab.text_color(gpui_color(state.hover_text)))
-                            .active(move |tab| tab.text_color(gpui_color(state.active_text)))
-                    })
+                    .hover(move |tab| tab.text_color(gpui_color(state.hover_text)))
+                    .active(move |tab| tab.text_color(gpui_color(state.active_text)))
                     .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary)))
             }
             TabSurface::Sidebar => {
-                let state = sidebar_tab_colors(&self.theme, selected, disabled);
+                let state = sidebar_tab_colors(&self.theme, selected);
                 // The base button centers its content; section labels read from the leading edge.
                 tab.w_full()
                     .flex()
@@ -333,7 +297,7 @@ impl RenderOnce for Tab {
                     .border_color(gpui::transparent_black())
                     .when_some(state.fill, |tab, fill| tab.bg(gpui_color(fill)))
                     .text_color(gpui_color(state.text))
-                    .when(!disabled && !selected, |tab| {
+                    .when(!selected, |tab| {
                         tab.hover(move |tab| {
                             tab.bg(gpui_color(colors.hover_bg))
                                 .text_color(gpui_color(state.hover_text))
@@ -387,20 +351,17 @@ mod tests {
     fn segmented_tabs_follow_the_theme_system_ui_tab_contract() {
         for theme in [AerisTheme::light(), AerisTheme::dark()] {
             let colors = theme.colors;
-            let resting = segmented_tab_colors(&theme, false, false);
+            let resting = segmented_tab_colors(&theme, false);
             assert_eq!(resting.fill, None);
             assert_eq!(resting.border, None);
             assert_eq!(resting.text, colors.text_interactive);
             assert_eq!(resting.hover_text, colors.text_hover);
             assert_eq!(resting.active_text, colors.text_active);
 
-            let selected = segmented_tab_colors(&theme, true, false);
+            let selected = segmented_tab_colors(&theme, true);
             assert_eq!(selected.fill, Some(colors.surface));
             assert_eq!(selected.border, Some(colors.border));
             assert_eq!(selected.text, colors.text_active);
-
-            let disabled = segmented_tab_colors(&theme, false, true);
-            assert_eq!(disabled.text, colors.text_muted);
         }
     }
 
@@ -408,10 +369,10 @@ mod tests {
     fn sidebar_sections_fill_only_while_selected() {
         let theme = AerisTheme::light();
         let colors = theme.colors;
-        let resting = sidebar_tab_colors(&theme, false, false);
+        let resting = sidebar_tab_colors(&theme, false);
         assert_eq!(resting.fill, None);
         assert_eq!(resting.text, colors.text_interactive);
-        let selected = sidebar_tab_colors(&theme, true, false);
+        let selected = sidebar_tab_colors(&theme, true);
         assert_eq!(selected.fill, Some(colors.active_bg));
         assert_eq!(selected.text, colors.text_active);
     }

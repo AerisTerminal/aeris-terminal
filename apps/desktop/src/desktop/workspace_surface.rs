@@ -5579,6 +5579,7 @@ impl WorkspaceSurface {
                 line_width: persisted_study_line_width(&active.persisted),
                 inputs,
                 _subscriptions: subscriptions,
+                menu: None,
                 message: None,
             }),
             cx,
@@ -5639,6 +5640,37 @@ impl WorkspaceSurface {
         match &mut self.indicator_settings_dialog {
             Some(IndicatorSettingsDialog::Volume(dialog)) => Some(dialog),
             _ => None,
+        }
+    }
+
+    /// The open-dropdown slot of the indicator dialog; the drawing dialog keeps its own menus.
+    const fn indicator_settings_menu_mut(&mut self) -> Option<&mut Option<String>> {
+        match &mut self.indicator_settings_dialog {
+            Some(IndicatorSettingsDialog::Study(dialog)) => Some(&mut dialog.menu),
+            Some(IndicatorSettingsDialog::BigTrades(dialog)) => Some(&mut dialog.menu),
+            Some(IndicatorSettingsDialog::Volume(dialog)) => Some(&mut dialog.menu),
+            Some(IndicatorSettingsDialog::Drawing(_)) | None => None,
+        }
+    }
+
+    /// Opens a setting's dropdown, closing any other dropdown or color picker, or closes it
+    /// when it is already open.
+    pub(super) fn toggle_indicator_settings_menu(&mut self, menu: &str, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.volume_dialog_mut() {
+            dialog.color_picker = None;
+        }
+        if let Some(open) = self.indicator_settings_menu_mut() {
+            *open = (open.as_deref() != Some(menu)).then(|| menu.to_string());
+            cx.notify();
+        }
+    }
+
+    pub(super) fn close_indicator_settings_menu(&mut self, cx: &mut Context<Self>) {
+        if self
+            .indicator_settings_menu_mut()
+            .is_some_and(|open| open.take().is_some())
+        {
+            cx.notify();
         }
     }
 
@@ -5905,6 +5937,7 @@ impl WorkspaceSurface {
                 size: settings.size,
                 show_volume: settings.show_volume,
                 minimum_volume,
+                menu: None,
                 message: None,
             }),
             cx,
@@ -6042,6 +6075,7 @@ impl WorkspaceSurface {
                 draft: settings,
                 average_length,
                 color_picker: None,
+                menu: None,
                 message: None,
             }),
             cx,
@@ -6112,6 +6146,7 @@ impl WorkspaceSurface {
         let Some(dialog) = self.volume_dialog_mut() else {
             return;
         };
+        dialog.menu = None;
         if dialog
             .color_picker
             .as_ref()

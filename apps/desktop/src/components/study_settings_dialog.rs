@@ -1,3 +1,4 @@
+use super::big_trades_dialog::{DropdownChoice, SettingDropdown};
 use super::*;
 
 fn constraint_hint(control: &StudySettingControl) -> Option<String> {
@@ -79,50 +80,41 @@ fn boolean_control(
 
 fn choice_control(
     app: &Entity<WorkspaceSurface>,
+    dialog: &StudySettingsDialogState,
     control_id: usize,
-    identifier: &str,
-    current: Option<&str>,
+    spec: &StudySettingSpec,
     options: &[aeris_market_runtime::study::StudySettingChoiceOption],
     enabled: bool,
     theme: &AerisTheme,
 ) -> AnyElement {
-    // Study authors define the options, so the set is open-ended and wraps.
-    let tabs = options.iter().enumerate().map(|(index, option)| {
-        let update = app.clone();
-        let setting_identifier = identifier.to_string();
-        let option_identifier = option.identifier.clone();
-        Tab::new(
-            (
-                "study_setting_choice",
-                control_id.saturating_mul(65).saturating_add(index),
-            ),
-            theme,
-        )
-        .selected(current == Some(option.identifier.as_str()))
-        .disabled(!enabled)
-        .child(option.label.clone())
-        .on_click(move |_, _, cx| {
-            update.update(cx, |surface, surface_cx| {
-                surface.select_study_setting_choice(
-                    &setting_identifier,
-                    &option_identifier,
-                    surface_cx,
-                );
-            });
-        })
-    });
-    div()
-        .flex()
-        .child(
-            TabList::new(
-                ("study_setting_choices", control_id),
-                identifier.to_string(),
-                theme,
-            )
-            .wrap()
-            .children(tabs),
-        )
-        .into_any_element()
+    let current = match dialog.draft_values.get(&spec.identifier) {
+        Some(StudySettingValue::Choice(value)) => Some(value.as_str()),
+        _ => None,
+    };
+    // Study authors name settings freely, so the dropdown key uses the control index.
+    let menu = format!("study_choice_{control_id}");
+    let setting_identifier = spec.identifier.clone();
+    SettingDropdown {
+        menu: &menu,
+        label: &spec.presentation.label,
+        open_menu: dialog.menu.as_deref(),
+        enabled,
+        choices: options
+            .iter()
+            .map(|option| DropdownChoice {
+                label: option.label.clone().into(),
+                value: option.identifier.clone(),
+                selected: current == Some(option.identifier.as_str()),
+            })
+            .collect(),
+    }
+    .render(
+        app,
+        move |surface, option: String, cx| {
+            surface.select_study_setting_choice(&setting_identifier, &option, cx);
+        },
+        theme,
+    )
 }
 
 fn text_control(
@@ -177,19 +169,7 @@ fn setting_control(
             theme,
         ),
         StudySettingControl::Choice { options } => {
-            let current = match dialog.draft_values.get(&spec.identifier) {
-                Some(StudySettingValue::Choice(value)) => Some(value.as_str()),
-                _ => None,
-            };
-            choice_control(
-                app,
-                control_id,
-                &spec.identifier,
-                current,
-                options,
-                enabled,
-                theme,
-            )
+            choice_control(app, dialog, control_id, spec, options, enabled, theme)
         }
         StudySettingControl::Integer { .. }
         | StudySettingControl::Decimal { .. }
@@ -202,25 +182,24 @@ fn setting_control(
 /// Host-owned style row shown for every study, independent of its SDK settings.
 fn line_thickness_row(
     app: &Entity<WorkspaceSurface>,
-    selected: u8,
+    dialog: &StudySettingsDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let choices = div().flex().child(
-        TabList::new("study_line_width", "Line thickness", theme).children(
-            (1..=MAXIMUM_STUDY_LINE_WIDTH).map(|width| {
-                let update = app.clone();
-                Tab::new(("study_line_width", usize::from(width)), theme)
-                    .selected(selected == width)
-                    .child(format!("{width} px"))
-                    .on_click(move |_, _, cx| {
-                        update.update(cx, |surface, surface_cx| {
-                            surface.set_study_settings_line_width(width, surface_cx);
-                        });
-                    })
-            }),
-        ),
-    );
+    let choices = SettingDropdown {
+        menu: "study_line_width",
+        label: "Line thickness",
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: (1..=MAXIMUM_STUDY_LINE_WIDTH)
+            .map(|width| DropdownChoice {
+                label: format!("{width} px").into(),
+                value: width,
+                selected: dialog.line_width == width,
+            })
+            .collect(),
+    }
+    .render(app, WorkspaceSurface::set_study_settings_line_width, theme);
     div()
         .flex()
         .flex_col()
@@ -364,7 +343,7 @@ fn study_settings_body(
                 .text_color(gpui_color(colors.text_muted))
                 .child("Style"),
         )
-        .child(line_thickness_row(app, dialog.line_width, theme));
+        .child(line_thickness_row(app, dialog, theme));
     if let Some(message) = &dialog.message {
         body = body.child(
             div()

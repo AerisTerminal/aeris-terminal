@@ -1,4 +1,4 @@
-use super::big_trades_dialog::{choice_tab, setting_row};
+use super::big_trades_dialog::{SettingDropdown, dropdown_choices, setting_row};
 use super::*;
 
 const PLACEMENT_CHOICES: [(&str, VolumePlacement); 2] = [
@@ -107,35 +107,21 @@ fn placement_row(
     dialog: &VolumeDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let choices = TabList::new("volume_placement", "Placement", theme).children(
-        PLACEMENT_CHOICES
-            .into_iter()
-            .enumerate()
-            .map(|(index, (label, placement))| {
-                let update = app.clone();
-                choice_tab(
-                    ("volume_placement", index),
-                    label,
-                    dialog.draft.placement == placement,
-                    theme,
-                )
-                .on_click(move |_, _, cx| {
-                    update.update(cx, |surface, surface_cx| {
-                        surface.set_volume_dialog_placement(placement, surface_cx);
-                    });
-                })
-            }),
-    );
+    let choices = SettingDropdown {
+        menu: "volume_placement",
+        label: "Placement",
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: dropdown_choices(&PLACEMENT_CHOICES, |placement| {
+            dialog.draft.placement == placement
+        }),
+    }
+    .render(app, WorkspaceSurface::set_volume_dialog_placement, theme);
     let description = match dialog.draft.placement {
         VolumePlacement::PricePane => "Columns sit along the bottom of the price chart.",
         VolumePlacement::OwnPane => "Columns get a pane and scale of their own below the price.",
     };
-    setting_row(
-        "Placement",
-        description,
-        div().flex().child(choices).into_any_element(),
-        theme,
-    )
+    setting_row("Placement", description, choices, theme)
 }
 
 fn average_switch_row(
@@ -168,35 +154,21 @@ fn average_kind_row(
     dialog: &VolumeDialogState,
     theme: &AerisTheme,
 ) -> AnyElement {
-    let choices = TabList::new("volume_average_kind", "Average type", theme).children(
-        AVERAGE_KIND_CHOICES
-            .into_iter()
-            .enumerate()
-            .map(|(index, (label, kind))| {
-                let update = app.clone();
-                choice_tab(
-                    ("volume_average_kind", index),
-                    label,
-                    dialog.draft.average.kind == kind,
-                    theme,
-                )
-                .on_click(move |_, _, cx| {
-                    update.update(cx, |surface, surface_cx| {
-                        surface.set_volume_dialog_average_kind(kind, surface_cx);
-                    });
-                })
-            }),
-    );
+    let choices = SettingDropdown {
+        menu: "volume_average_kind",
+        label: "Average type",
+        open_menu: dialog.menu.as_deref(),
+        enabled: true,
+        choices: dropdown_choices(&AVERAGE_KIND_CHOICES, |kind| {
+            dialog.draft.average.kind == kind
+        }),
+    }
+    .render(app, WorkspaceSurface::set_volume_dialog_average_kind, theme);
     let description = match dialog.draft.average.kind {
         VolumeAverageKind::Simple => "Simple: every bar in the length counts equally.",
         VolumeAverageKind::Exponential => "Exponential: recent bars count more.",
     };
-    setting_row(
-        "Average type",
-        description,
-        div().flex().child(choices).into_any_element(),
-        theme,
-    )
+    setting_row("Average type", description, choices, theme)
 }
 
 fn average_length_row(dialog: &VolumeDialogState, theme: &AerisTheme) -> AnyElement {

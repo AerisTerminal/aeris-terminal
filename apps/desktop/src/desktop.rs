@@ -1326,6 +1326,8 @@ struct VolumeDialogState {
     draft: VolumeSettings,
     average_length: Entity<InputState>,
     color_picker: Option<VolumeColorPickerState>,
+    /// The setting whose dropdown is open.
+    menu: Option<String>,
     message: Option<String>,
 }
 
@@ -1369,6 +1371,8 @@ struct BigTradesDialogState {
     size: BigTradesSize,
     show_volume: bool,
     minimum_volume: Entity<InputState>,
+    /// The setting whose dropdown is open.
+    menu: Option<String>,
     message: Option<String>,
 }
 
@@ -1381,6 +1385,8 @@ struct StudySettingsDialogState {
     line_width: u8,
     inputs: HashMap<String, Entity<InputState>>,
     _subscriptions: Vec<gpui::Subscription>,
+    /// The setting whose dropdown is open.
+    menu: Option<String>,
     message: Option<String>,
 }
 
