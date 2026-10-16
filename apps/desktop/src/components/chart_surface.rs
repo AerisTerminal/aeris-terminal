@@ -72,7 +72,7 @@ fn opaque_status_overlay(
         .child(
             div()
                 .text_sm()
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child(notice.label),
         )
         .children(notice.detail.map(|detail| {

@@ -96,13 +96,13 @@ pub(crate) fn base_theme(theme: &AerisTheme) -> Theme {
     selection.a = 0.30;
     base.tokens.colors = ColorTokens {
         background: gpui_color(colors.surface),
-        foreground: gpui_color(colors.text_primary),
+        foreground: gpui_color(colors.text_default),
         surface: gpui_color(colors.surface),
-        surface_foreground: gpui_color(colors.text_primary),
+        surface_foreground: gpui_color(colors.text_default),
         primary: gpui_color(colors.primary),
         primary_foreground: gpui_color(colors.primary_foreground),
         secondary: gpui_color(colors.surface_secondary),
-        secondary_foreground: gpui_color(colors.text_primary),
+        secondary_foreground: gpui_color(colors.text_default),
         muted: gpui_color(colors.surface_secondary),
         muted_foreground: gpui_color(colors.text_secondary),
         accent: gpui_color(colors.primary),
@@ -169,7 +169,7 @@ mod tests {
             let base = base_theme(&theme);
             assert_eq!(
                 base.tokens.colors.foreground,
-                gpui_color(theme.colors.text_primary)
+                gpui_color(theme.colors.text_default)
             );
             assert_eq!(base.tokens.colors.accent, gpui_color(theme.colors.primary));
             assert_eq!(

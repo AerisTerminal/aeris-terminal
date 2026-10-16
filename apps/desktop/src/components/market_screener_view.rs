@@ -196,7 +196,7 @@ fn page_header(
                     div()
                         .text_xl()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .child(AppView::Screener.label()),
                 )
                 .child(
@@ -319,7 +319,7 @@ fn header_cell(
                 format!("Sort by {}", spec.label)
             })
             .when(active, |cell| {
-                cell.text_color(gpui_color(colors.text_primary))
+                cell.text_color(gpui_color(colors.text_default))
             })
             .hover(move |cell| cell.text_color(gpui_color(colors.text_hover)))
             .on_click(move |_, _, cx| {
@@ -435,7 +435,7 @@ fn table_row(
                         .min_w_0()
                         .truncate()
                         .font_weight(platform_font_weight(TypographyRole::Emphasis))
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .child(row.display_symbol.clone()),
                 )
                 .children(kind),

@@ -463,7 +463,7 @@ impl Render for ReadOnlyOrderBookView {
             .bg(gpui_color(colors.surface))
             .font_family(platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
-            .text_color(gpui_color(colors.text_primary))
+            .text_color(gpui_color(colors.text_default))
             .child(
                 div()
                     .flex()

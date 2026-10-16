@@ -470,7 +470,7 @@ pub(super) fn timeframe_overlay_content(
         .w(px(width))
         .h(px(height))
         .occlude()
-        .text_color(gpui_color(colors.text_primary))
+        .text_color(gpui_color(colors.text_default))
         .child(timeframe_hover_region(
             app,
             "timeframe_overlay_root_region",

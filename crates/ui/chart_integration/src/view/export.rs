@@ -357,7 +357,7 @@ impl AerisChartView {
         );
         let colors = platform_theme(self.theme).colors;
         let palette = ExportPalette {
-            text: chart_color(colors.text_primary),
+            text: chart_color(colors.text_default),
             muted: chart_color(colors.text_secondary),
         };
         let (caption, file_name) =

@@ -25,7 +25,6 @@ macro_rules! platform_color_registry {
             border_popover => "border-popover",
             /// Floating-layer inner highlight, drawn just inside `border_popover`.
             border_popover_highlight => "border-popover-highlight",
-            text_primary => "text-primary",
             text_default => "text-default",
             text_secondary => "text-secondary",
             text_muted => "text-muted",

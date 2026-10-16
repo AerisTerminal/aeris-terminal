@@ -1688,7 +1688,7 @@ fn chart_legend_text_colors_project_platform_chrome() {
     ] {
         let palette = legend_palette(theme);
         let colors = platform.colors;
-        assert_eq!(palette.text, gpui_theme_color(colors.text_primary));
+        assert_eq!(palette.text, gpui_theme_color(colors.text_default));
         assert_eq!(palette.muted, gpui_theme_color(colors.text_secondary));
         assert_eq!(palette.hover, gpui_theme_color(colors.hover_bg));
         assert_eq!(palette.danger, gpui_theme_color(colors.danger));

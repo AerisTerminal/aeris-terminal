@@ -1307,7 +1307,7 @@ fn select_text(text: impl Into<SharedString>, theme: &AerisTheme) -> AnyElement 
         .min_w_0()
         .truncate()
         .text_sm()
-        .text_color(gpui_color(theme.colors.text_primary))
+        .text_color(gpui_color(theme.colors.text_default))
         .child(text.into())
         .into_any_element()
 }

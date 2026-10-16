@@ -38,9 +38,8 @@
   --border-width: 0.5px;
 
   /* Text */
-  --text-primary: #0a0a0a;
-  --text-default: #0a0a0ad9;
-  --text-secondary: #0a0a0a8c;
+  --text-default: #0a0a0a;
+  --text-secondary: #0a0a0a94;
   --text-muted: #0a0a0a40;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
@@ -50,7 +49,7 @@
      step with --icon / --icon-active: normal text = normal icon colour,
      hover/active text = active icon colour. They are separate tokens on
      purpose, never point one at the other. */
-  --text-interactive: #0a0a0a8c;
+  --text-interactive: #0a0a0a94;
   --text-hover: #0a0a0a;
   --text-active: #0a0a0a;
 
@@ -60,7 +59,7 @@
   --disabled-bg: #0a0a0a0d;
 
   /* Icons — normal and hovered/pressed/selected */
-  --icon: #0a0a0a8c;
+  --icon: #0a0a0a94;
   --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
@@ -163,8 +162,7 @@
   --border-width: 0.5px;
 
   /* Text */
-  --text-primary: #fafafa;
-  --text-default: #fafafad9;
+  --text-default: #fafafa;
   --text-secondary: #fafafa8c;
   --text-muted: #fafafa40;
   --text-positive: var(--positive);
@@ -255,7 +253,7 @@
 html,
 body {
   background: var(--surface);
-  color: var(--text-primary);
+  color: var(--text-default);
   font-family: var(--font-sans);
   font-synthesis: none;
   font-variant-ligatures: common-ligatures;
@@ -322,7 +320,7 @@ button,
 .button-outline {
   border: var(--border-width) solid var(--border-secondary);
   background: var(--surface-secondary);
-  color: var(--text-primary);
+  color: var(--text-default);
 }
 
 .button-outline:hover:not(:disabled):not([aria-disabled="true"]) {
@@ -341,12 +339,12 @@ button,
 
 .button-ghost:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--hover-bg);
-  color: var(--text-primary);
+  color: var(--text-default);
 }
 
 .button-ghost[aria-expanded="true"] {
   background: var(--active-bg);
-  color: var(--text-primary);
+  color: var(--text-default);
 }
 
 button:disabled,
@@ -367,7 +365,7 @@ textarea {
   border: var(--border-width) solid var(--border-secondary);
   border-radius: var(--radius-default);
   background: var(--surface-secondary);
-  color: var(--text-primary);
+  color: var(--text-default);
 }
 
 input::placeholder,

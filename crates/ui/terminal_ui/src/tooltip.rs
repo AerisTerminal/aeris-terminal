@@ -121,7 +121,7 @@ impl Render for TooltipView {
                     platform_typography().weight(TypographyRole::Normal),
                 )))
                 .text_xs()
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child(label)
                 .child(highlight),
         )

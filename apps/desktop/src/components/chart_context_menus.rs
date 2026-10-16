@@ -993,7 +993,7 @@ fn chart_settings_panel(
         .h(bounds.size.height)
         .font_family(aeris_design_system::platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
-        .text_color(gpui_color(colors.text_primary))
+        .text_color(gpui_color(colors.text_default))
         .occlude()
         .on_any_mouse_down(move |_, _, cx| {
             dismiss_overlays.update(cx, |terminal, terminal_cx| {
@@ -1050,7 +1050,7 @@ fn chart_settings_title_bar(
             div()
                 .text_sm()
                 .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child("Chart settings"),
         )
         .child(chart_settings_drag_grip(theme))
@@ -2224,7 +2224,7 @@ fn settings_label(
             div()
                 .text_sm()
                 .text_color(gpui_color(if enabled {
-                    colors.text_primary
+                    colors.text_default
                 } else {
                     colors.text_muted
                 }))
@@ -2549,7 +2549,7 @@ fn settings_select(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> 
             div()
                 .truncate()
                 .text_sm()
-                .text_color(gpui_color(theme.colors.text_primary))
+                .text_color(gpui_color(theme.colors.text_default))
                 .child(current.map_or("", |(choice, _, _)| *choice)),
         );
     let toggle = ui.terminal.clone();

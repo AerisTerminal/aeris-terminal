@@ -110,7 +110,7 @@ fn hint_chip(theme: &AerisTheme) -> Div {
         .child(
             div()
                 .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child("Esc"),
         )
         .child("to exit full screen")

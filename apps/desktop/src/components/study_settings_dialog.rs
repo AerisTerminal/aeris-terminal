@@ -334,7 +334,7 @@ fn setting_row(
                             div()
                                 .text_sm()
                                 .font_weight(platform_font_weight(TypographyRole::Strong))
-                                .text_color(gpui_color(colors.text_primary))
+                                .text_color(gpui_color(colors.text_default))
                                 .child(spec.presentation.label.clone()),
                         )
                         .children(spec.presentation.description.as_ref().map(|description| {

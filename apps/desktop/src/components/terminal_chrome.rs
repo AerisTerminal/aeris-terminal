@@ -183,7 +183,7 @@ fn header_brand(theme: &AerisTheme) -> Stateful<Div> {
                 .text_sm()
                 .font_family(aeris_design_system::brand_font_family())
                 .font_weight(gpui::FontWeight(400.0))
-                .text_color(gpui_color(theme.colors.text_primary))
+                .text_color(gpui_color(theme.colors.text_default))
                 .child("Aeris"),
         )
 }
@@ -854,12 +854,12 @@ fn connection_tooltip_row(
                 .font_family(aeris_design_system::platform_font_family())
                 .font_features(platform_tabular_numerals())
                 .text_xs()
-                .text_color(gpui_color(theme.colors.text_primary))
+                .text_color(gpui_color(theme.colors.text_default))
                 .child(value)
         } else {
             div()
                 .text_xs()
-                .text_color(gpui_color(theme.colors.text_primary))
+                .text_color(gpui_color(theme.colors.text_default))
                 .child(value)
         })
 }

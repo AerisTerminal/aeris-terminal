@@ -954,7 +954,7 @@ fn toast_body(
                     div()
                         .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .child(title),
                 )
                 .children(description.map(|description| {

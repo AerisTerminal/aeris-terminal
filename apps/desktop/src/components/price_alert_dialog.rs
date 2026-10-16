@@ -595,7 +595,7 @@ fn price_alert_existing_rows(
                         .items_center()
                         .gap_1()
                         .text_sm()
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .child(format!("{condition} ·"))
                         .child(
                             div()

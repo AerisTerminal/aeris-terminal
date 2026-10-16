@@ -532,11 +532,14 @@ mod tests {
             dark.border_secondary,
             ThemeColor::from_rgba8(250, 250, 250, 38)
         );
-        assert_eq!(light.text_primary, ThemeColor::from_rgb8(10, 10, 10));
+        assert_eq!(light.text_default, ThemeColor::from_rgb8(10, 10, 10));
+        assert_eq!(dark.text_default, ThemeColor::from_rgb8(250, 250, 250));
         assert_eq!(
             light.text_secondary,
-            ThemeColor::from_rgba8(10, 10, 10, 140)
+            ThemeColor::from_rgba8(10, 10, 10, 148)
         );
+        assert_eq!(light.text_interactive, light.text_secondary);
+        assert_eq!(light.icon, light.text_interactive);
         assert_eq!(light.text_muted, ThemeColor::from_rgba8(10, 10, 10, 64));
         assert_eq!(
             dark.text_secondary,
@@ -583,6 +586,7 @@ mod tests {
         assert_eq!(token_source(&dark_tokens, "surface"), "#171717");
         assert_eq!(token_source(&dark_tokens, "hover-bg"), "#fafafa13");
         assert_eq!(token_source(&light_tokens, "text-muted"), "#0a0a0a40");
+        assert_eq!(token_source(&light_tokens, "text-secondary"), "#0a0a0a94");
         assert_eq!(token_source(&dark_tokens, "text-secondary"), "#fafafa8c");
         assert_eq!(token_source(&dark_tokens, "danger"), "#f7525f");
         assert_eq!(token_source(&dark_tokens, "warning"), "#ff6900");

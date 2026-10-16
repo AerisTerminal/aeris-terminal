@@ -89,7 +89,7 @@ pub(super) fn chrome_menu_empty(
             div()
                 .text_size(px(13.0))
                 .font_weight(platform_font_weight(TypographyRole::Strong))
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child(title),
         )
         .child(
@@ -117,7 +117,7 @@ pub(super) fn chrome_menu_search_header(
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .text_sm()
-        .text_color(gpui_color(colors.text_primary))
+        .text_color(gpui_color(colors.text_default))
         .child(header_icon(HugeIcon::Search).with_size(px(CHROME_MENU_SEARCH_ICON_SIZE)))
         .child(
             Input::new(input)

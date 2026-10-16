@@ -402,7 +402,7 @@ fn context_row(
                 .child(
                     div()
                         .text_sm()
-                        .text_color(gpui_color(theme.colors.text_primary))
+                        .text_color(gpui_color(theme.colors.text_default))
                         .child(title),
                 )
                 .child(

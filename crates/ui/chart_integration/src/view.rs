@@ -2851,7 +2851,7 @@ impl Default for AerisChartView {
 fn legend_palette(theme: ChartTheme) -> LegendPalette {
     let colors = platform_theme(theme).colors;
     LegendPalette {
-        text: gpui_theme_color(colors.text_primary),
+        text: gpui_theme_color(colors.text_default),
         muted: gpui_theme_color(colors.text_secondary),
         hover: gpui_theme_color(colors.hover_bg),
         danger: gpui_theme_color(colors.danger),

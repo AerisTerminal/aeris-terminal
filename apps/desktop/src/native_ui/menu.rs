@@ -211,7 +211,7 @@ const fn row_ink(theme: &AerisTheme, destructive: bool, enabled: bool) -> RowInk
             hover: None,
         },
         (false, true) => RowInk {
-            label: colors.text_primary,
+            label: colors.text_default,
             icon: colors.icon,
             hover: None,
         },
@@ -717,7 +717,7 @@ impl RenderOnce for MenuPanel {
         }
         .font_family(platform_font_family())
         .font_weight(platform_font_weight(TypographyRole::Normal))
-        .text_color(gpui_color(colors.text_primary))
+        .text_color(gpui_color(colors.text_default))
         .when_some(self.width, Styled::w)
         .when_some(self.max_height, Styled::max_h)
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())

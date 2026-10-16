@@ -39,7 +39,7 @@ fn checkbox_ink(theme: &AerisTheme, checked: bool, disabled: bool) -> CheckboxIn
             border: colors.primary,
             hover_fill: Some(colors.primary_hover),
             tick: Some(colors.primary_foreground),
-            label: colors.text_primary,
+            label: colors.text_default,
         },
         (true, true) => CheckboxInk {
             fill: colors.primary_disabled,
@@ -53,7 +53,7 @@ fn checkbox_ink(theme: &AerisTheme, checked: bool, disabled: bool) -> CheckboxIn
             border: colors.border_strong,
             hover_fill: Some(colors.hover_bg),
             tick: None,
-            label: colors.text_primary,
+            label: colors.text_default,
         },
         (false, true) => CheckboxInk {
             fill: colors.disabled_bg,

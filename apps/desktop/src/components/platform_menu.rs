@@ -125,7 +125,7 @@ fn account_avatar_face(
             div()
                 .text_xs()
                 .font_weight(platform_font_weight(TypographyRole::Normal))
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child(aeris_desktop::account::profile_initials(
                     &presentation.display_name,
                     &presentation.email,
@@ -396,7 +396,7 @@ fn identity_header(
                         .min_w_0()
                         .truncate()
                         .text_sm()
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .child(name),
                 )
                 .into_any_element(),
@@ -409,7 +409,7 @@ fn identity_header(
             .child(
                 div()
                     .text_sm()
-                    .text_color(gpui_color(colors.text_primary))
+                    .text_color(gpui_color(colors.text_default))
                     .child(presentation.state),
             )
             .child(
@@ -616,7 +616,7 @@ fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> An
                 .items_center()
                 .text_xs()
                 .text_color(gpui_color(if selected {
-                    colors.text_primary
+                    colors.text_default
                 } else {
                     colors.text_secondary
                 }))
@@ -685,7 +685,7 @@ fn theme_preview(
                 .pl(px(8.0))
                 .pt(px(4.0))
                 .text_lg()
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child("Aa")
                 .children(badge),
         )
@@ -776,7 +776,7 @@ fn about_section(
                             div()
                                 .text_sm()
                                 .font_weight(platform_font_weight(TypographyRole::Strong))
-                                .text_color(gpui_color(colors.text_primary))
+                                .text_color(gpui_color(colors.text_default))
                                 .child("Aeris Terminal"),
                         )
                         .child(
@@ -801,7 +801,7 @@ fn about_section(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .child(value),
                 )
         }))

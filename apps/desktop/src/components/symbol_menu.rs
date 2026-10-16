@@ -382,7 +382,7 @@ pub(super) fn instrument_search_header(
         .border_b_1()
         .border_color(gpui_color(colors.border))
         .text_sm()
-        .text_color(gpui_color(colors.text_primary))
+        .text_color(gpui_color(colors.text_default))
         .child({
             let toggle_app = app.clone();
             Button::new("symbol_provider_switcher", theme)

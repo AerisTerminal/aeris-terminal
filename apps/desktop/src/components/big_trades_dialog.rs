@@ -67,7 +67,7 @@ pub(super) fn setting_row(
                     div()
                         .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .child(label),
                 )
                 .child(
@@ -129,7 +129,7 @@ impl<T: Clone + 'static> SettingDropdown<'_, T> {
                 .min_w_0()
                 .truncate()
                 .text_sm()
-                .text_color(gpui_color(theme.colors.text_primary))
+                .text_color(gpui_color(theme.colors.text_default))
                 .child(current),
         )
         .caret(header_icon(HugeIcon::ChevronDown))

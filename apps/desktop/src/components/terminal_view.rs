@@ -793,7 +793,7 @@ impl TerminalApp {
             .flex_col()
             .size_full()
             .bg(gpui_color(self.theme.colors.surface))
-            .text_color(gpui_color(self.theme.colors.text_primary))
+            .text_color(gpui_color(self.theme.colors.text_default))
             .font_family(aeris_design_system::platform_font_family())
             .font_weight(platform_font_weight(TypographyRole::Normal))
     }

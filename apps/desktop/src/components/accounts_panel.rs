@@ -202,7 +202,7 @@ fn provider_heading(
                     div()
                         .text_sm()
                         .font_weight(platform_font_weight(TypographyRole::Strong))
-                        .text_color(gpui_color(theme.colors.text_primary))
+                        .text_color(gpui_color(theme.colors.text_default))
                         .child(name),
                 ),
         )
@@ -506,7 +506,7 @@ fn account_row(
                 .child(
                     div()
                         .text_sm()
-                        .text_color(gpui_color(colors.text_primary))
+                        .text_color(gpui_color(colors.text_default))
                         .truncate()
                         .child(account.display_name.clone()),
                 )

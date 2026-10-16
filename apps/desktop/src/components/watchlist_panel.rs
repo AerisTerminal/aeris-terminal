@@ -196,7 +196,7 @@ fn watchlist_asset_cell(row: &WatchlistRow, theme: &AerisTheme) -> Div {
     let asset_tone = if row.message.is_some() {
         colors.text_muted
     } else {
-        colors.text_primary
+        colors.text_default
     };
     let logo = aeris_market_runtime::built_in_provider_presentations()
         .iter()

@@ -689,7 +689,7 @@ fn account_summary_stats(summary: &AccountSummary, theme: &AerisTheme) -> [Div; 
         stat(
             "Balance",
             div()
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child(trade_history_money_text(summary.balance, &summary.currency)),
         ),
         stat(

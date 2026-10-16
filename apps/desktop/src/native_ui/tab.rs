@@ -312,14 +312,14 @@ impl RenderOnce for Tab {
                 .border_color(gpui_color(if selected { colors.border } else { resting }))
                 .bg(gpui_color(if selected { selected_fill } else { resting }))
                 .text_color(gpui_color(if selected {
-                    colors.text_primary
+                    colors.text_default
                 } else {
                     colors.text_secondary
                 }))
                 .when(!selected, |tab| {
                     tab.hover(move |tab| {
                         tab.bg(gpui_color(colors.hover_bg.over(resting)))
-                            .text_color(gpui_color(colors.text_primary))
+                            .text_color(gpui_color(colors.text_default))
                     })
                 })
                 .focus_visible(move |tab| tab.border_color(gpui_color(colors.ring_primary))),

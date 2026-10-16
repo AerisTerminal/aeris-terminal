@@ -125,7 +125,7 @@ fn shortcut_row(row: &ShortcutRow, theme: &AerisTheme) -> Div {
                 .min_w_0()
                 .truncate()
                 .text_sm()
-                .text_color(gpui_color(colors.text_primary))
+                .text_color(gpui_color(colors.text_default))
                 .child(row.title),
         )
         .child(

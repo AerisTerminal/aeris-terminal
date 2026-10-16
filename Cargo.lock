@@ -166,7 +166,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_core"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1#58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5#e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -177,7 +177,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_engine"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1#58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5#e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_indicators",
@@ -189,7 +189,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_indicators"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1#58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5#e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5"
 dependencies = [
  "serde",
 ]
@@ -197,7 +197,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_native"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1#58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5#e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5"
 dependencies = [
  "ab_glyph",
  "aeris_charts_core",
@@ -210,7 +210,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1#58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5#e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5"
 dependencies = [
  "aeris_charts_core",
 ]
@@ -218,7 +218,7 @@ dependencies = [
 [[package]]
 name = "aeris_charts_render_gpui"
 version = "0.3.0"
-source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1#58e23d1aa38a4ffd8a57dbcb4c70138409bf65a1"
+source = "git+https://github.com/AerisTerminal/aeris-charts.git?rev=e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5#e66b9a41fe2a7d46db046fd33dee92fd6eeebeb5"
 dependencies = [
  "aeris_charts_core",
  "aeris_charts_engine",

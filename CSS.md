@@ -1,6 +1,6 @@
 # CSS
 
-The platform theme. This is the exact CSS the Theme System (`C:\Users\devraj\Downloads\Theme_System`)
+The platform theme. This is the exact CSS the Theme System (`C:\Users\devraj\Downloads\design_system`)
 hands out with its **Copy CSS** button, and it matches the token blocks in
 `crates/ui/design_system/platform.css` value for value.
 
@@ -12,6 +12,9 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Radii come from `RadiusToken` (`Sm` = `--radius-small`, `Default`, `Medium`, `Compact`, `Full` = `--radius-large`),
   never `rounded(px(N))`.
 - Borders use `theme.dimensions.border_width` (`--border-width`), never `border_1()` or `px(1.0)`.
+- Neutral text has three roles: `text-default` for content and labels, `text-secondary` for
+  supporting text (AA 4.5:1 on every light and dark surface), and `text-muted` for placeholders and
+  disabled text. Interactive items use `text-interactive` / `text-hover` / `text-active`.
 - Use tokens for what they name: fill with its paired text (`book-bid-fill` + `book-bid-text`,
   `negative-subtle` + `text-negative`), `buy-*` / `sell-*` for trade buttons, `buy-bubble` /
   `sell-bubble` (outlined with `bullish` / `bearish`) for big-trade chart bubbles, `hover-bg` for
@@ -135,9 +138,8 @@ while invalid.
   --border-width: 0.5px;
 
   /* Text */
-  --text-primary: #0a0a0a;
-  --text-default: #0a0a0ad9;
-  --text-secondary: #0a0a0a8c;
+  --text-default: #0a0a0a;
+  --text-secondary: #0a0a0a94;
   --text-muted: #0a0a0a40;
   --text-positive: var(--positive);
   --text-negative: var(--negative);
@@ -147,7 +149,7 @@ while invalid.
      step with --icon / --icon-active: normal text = normal icon colour,
      hover/active text = active icon colour. They are separate tokens on
      purpose, never point one at the other. */
-  --text-interactive: #0a0a0a8c;
+  --text-interactive: #0a0a0a94;
   --text-hover: #0a0a0a;
   --text-active: #0a0a0a;
 
@@ -157,7 +159,7 @@ while invalid.
   --disabled-bg: #0a0a0a0d;
 
   /* Icons — normal and hovered/pressed/selected */
-  --icon: #0a0a0a8c;
+  --icon: #0a0a0a94;
   --icon-active: #0a0a0a;
 
   /* Status — gains / losses, success / failure. Shared with the main platform. */
@@ -260,8 +262,7 @@ while invalid.
   --border-width: 0.5px;
 
   /* Text */
-  --text-primary: #fafafa;
-  --text-default: #fafafad9;
+  --text-default: #fafafa;
   --text-secondary: #fafafa8c;
   --text-muted: #fafafa40;
   --text-positive: var(--positive);
