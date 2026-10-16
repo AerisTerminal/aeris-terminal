@@ -1484,6 +1484,62 @@ fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
 }
 
 #[test]
+fn point_value_scales_exact_marks_and_closed_trade_pnl() {
+    for (label, point_value, expected_mark, expected_realized) in
+        [("future", 50, 5_000, 12_500), ("crypto", 1, 100, 250)]
+    {
+        let directory = TestDirectory::new(label);
+        let service = start_service(&directory);
+        let mut terms = instrument();
+        if label == "crypto" {
+            terms.instrument_id = InstrumentId::try_new("hyperliquid:perp:BTC").expect("id");
+            terms.contract.instrument_class = aeris_instruments::InstrumentClass::CryptoPerpetual;
+            terms.contract.expiry = None;
+            terms.contract.last_trade = None;
+            terms.contract.session_hours.clear();
+            terms.contract.provenance.provider_id = "hyperliquid".into();
+            terms.contract.provenance.provider_symbol = "BTC".into();
+            terms.contract.provenance.display_symbol = "BTC".into();
+        }
+        terms.contract.point_value =
+            Some(InstrumentDecimal::try_new(point_value, 0).expect("point value"));
+        service
+            .register_instrument(terms.clone())
+            .expect("instrument");
+        let mut buy = market_order("multiplier-buy", OrderSide::Buy, 1, 1_000);
+        buy.instrument_id = terms.instrument_id.clone();
+        buy.quantity = contracts(2);
+        service.place_order(buy).expect("buy");
+        let mut entry = observation(499_975, 500_000, 2, 2_000);
+        entry.instrument_id = terms.instrument_id.clone();
+        service.observe_market(entry).expect("entry fill");
+        let mut mark = observation(500_050, 500_075, 3, 3_000);
+        mark.instrument_id = terms.instrument_id.clone();
+        service.observe_market(mark).expect("mark");
+        assert_eq!(
+            service.snapshot().expect("marked").positions[0]
+                .unrealized_pnl
+                .units(),
+            expected_mark
+        );
+        let mut sell = market_order("multiplier-sell", OrderSide::Sell, 4, 4_000);
+        sell.instrument_id = terms.instrument_id.clone();
+        sell.quantity = contracts(2);
+        service.place_order(sell).expect("sell");
+        let mut exit = observation(500_125, 500_150, 5, 5_000);
+        exit.instrument_id = terms.instrument_id;
+        service.observe_market(exit).expect("exit fill");
+        assert_eq!(
+            service.snapshot().expect("closed").positions[0]
+                .realized_pnl
+                .units(),
+            expected_realized
+        );
+        service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    }
+}
+
+#[test]
 fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_moved() {
     let directory = TestDirectory::new("planned-bracket-legs");
     let service = start_service(&directory);
