@@ -225,6 +225,72 @@ fn cancellation_uses_command_time_even_when_wall_clock_moves_backwards() {
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
 
+#[test]
+fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_restart() {
+    let directory = TestDirectory::new("client-id-reuse");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut request = market_order("reused-id", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("limit"));
+    let original = service
+        .place_order(request.clone())
+        .expect("first acceptance");
+    let baseline = service.snapshot().expect("initial facts");
+    assert_eq!(
+        service.place_order(request.clone()).expect("retry"),
+        original
+    );
+    assert_eq!(service.snapshot().expect("idempotent facts"), baseline);
+
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(&directory)).expect("restart");
+    assert_eq!(
+        restarted.place_order(request.clone()).expect("retry"),
+        original
+    );
+    assert_eq!(restarted.snapshot().expect("restored facts"), baseline);
+    let different = [
+        PlaceOrder {
+            limit_price: Some(FixedPoint::try_new(8_975, 2).expect("different limit")),
+            ..request.clone()
+        },
+        PlaceOrder {
+            side: OrderSide::Sell,
+            ..request.clone()
+        },
+        PlaceOrder {
+            quantity: FixedPoint::try_new(2, 0).expect("different quantity"),
+            ..request.clone()
+        },
+        PlaceOrder {
+            time_in_force: TimeInForce::Day,
+            ..request.clone()
+        },
+    ];
+    for altered in different {
+        let error = restarted
+            .place_order(altered)
+            .expect_err("conflicting client id");
+        assert!(error.contains("ClientIdReused"), "{error}");
+        assert_eq!(restarted.snapshot().expect("unchanged facts"), baseline);
+    }
+    let cancelled = restarted
+        .cancel_order(request.client_order_id.clone())
+        .expect("cancel");
+    assert_eq!(cancelled.status, OrderStatus::Cancelled);
+    assert_eq!(
+        restarted.place_order(request).expect("terminal retry"),
+        cancelled
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
 pub(crate) fn instrument() -> TradingInstrument {
     TradingInstrument {
         instrument_id: InstrumentId::try_new("instrument:fixture:CME:ESZ6").expect("instrument"),

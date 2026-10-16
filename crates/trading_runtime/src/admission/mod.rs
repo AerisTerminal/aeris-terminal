@@ -6,6 +6,25 @@ use super::{
     TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute, check_quantity_increment,
     mirrored_client_order_id, multiply_quantity, order_acceptance_detail, venue,
 };
+use aeris_trading::RejectReason;
+
+/// Client identity belongs to the order book, not the venue. Ignore only audit fields
+/// stamped at submission; an instruction change must never silently reuse the old order.
+fn existing_client_order(existing: &Order, command: &PlaceOrder) -> Result<Order, RejectReason> {
+    if existing.account_id == command.account_id
+        && existing.instrument_id == command.instrument_id
+        && existing.side == command.side
+        && existing.order_type == command.order_type
+        && existing.time_in_force == command.time_in_force
+        && existing.quantity == command.quantity
+        && existing.limit_price == command.limit_price
+        && existing.stop_price == command.stop_price
+    {
+        Ok(existing.clone())
+    } else {
+        Err(RejectReason::ClientIdReused)
+    }
+}
 
 impl TradingCore {
     pub(super) fn register_account(&mut self, account: TradingAccount) -> Result<(), String> {
@@ -276,13 +295,14 @@ impl TradingCore {
                     return Err("cTrader ClientOrderId must be at most 50 characters".into());
                 }
                 if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
-                    return Ok(existing.clone());
+                    return existing_client_order(existing, command)
+                        .map_err(|error| error.to_string());
                 }
                 return self.place_broker_order(command);
             }
         }
         if let Some(existing) = self.state.orders.by_client(&command.client_order_id) {
-            return Ok(existing.clone());
+            return existing_client_order(existing, command).map_err(|error| error.to_string());
         }
         self.check_new_order_interest(&command.instrument_id)
             .map_err(|error| error.to_string())?;
@@ -361,12 +381,14 @@ impl TradingCore {
             return Err("managed protective orders are unavailable for broker accounts".into());
         }
         if let Some(existing) = self.state.orders.by_client(&command.order.client_order_id) {
+            let existing = existing_client_order(existing, &command.order)
+                .map_err(|error| error.to_string())?;
             let role_matches = self
                 .state
                 .protective_orders
                 .get(&command.order.client_order_id)
                 .is_some_and(|protective| protective.role == command.role);
-            return role_matches.then(|| existing.clone()).ok_or_else(|| {
+            return role_matches.then_some(existing).ok_or_else(|| {
                 "protective client identifier has conflicting semantics".to_string()
             });
         }

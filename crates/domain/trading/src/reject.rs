@@ -14,6 +14,7 @@ pub enum RejectReason {
         age_ms: i64,
         limit_ms: i64,
     },
+    ClientIdReused,
 }
 
 impl fmt::Display for RejectReason {
@@ -26,6 +27,9 @@ impl fmt::Display for RejectReason {
             Self::QuoteUnavailable => f.write_str("live market quote unavailable"),
             Self::QuoteStale { age_ms, limit_ms } => {
                 write!(f, "market quote stale ({age_ms} ms exceeds {limit_ms} ms)")
+            }
+            Self::ClientIdReused => {
+                f.write_str("ClientIdReused: client order id has different instructions")
             }
         }
     }

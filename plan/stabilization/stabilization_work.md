@@ -540,9 +540,11 @@ Status: implementation and isolated GUI verification complete (2026-10-16); mile
 
 ### M5 trading engine
 
-Status: pending
+Status: in progress
 
-- [ ] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V21)
+- [ ] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
+  - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
+  - Regression `client_id_resubmission_is_idempotent_only_for_matching_instructions_after_restart` failed before the fix and passes after; all trading runtime and domain tests pass. Existing goldens and scripted broker tests are unchanged.
 - [ ] M5.2 admission-validator - One admission validator for simulated and broker routes
 - [ ] M5.3 execution-fill-rules - Bid/ask fill rules, stop and stop-limit triggering, multipliers
 - [ ] M5.4 time-in-force-expiry - DAY expiry at session close or 00:00 UTC; GTC stays working
@@ -770,6 +772,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M4.7 test(trading): cover every quote interest transition - VAL-TRD-010 adds one lifecycle test with planned bracket legs, group-only projection, ticket and sink bounds, flat release and no-send checks.
 - 2026-10-16 UI (outside milestones) feat(ui): adopt the Theme System popover theme - new light/dark tokens, opaque popover layers with edge highlight, normal-weight buttons, chart settings on `surface`, and source-over `ThemeColor::over` fixing near-white title-bar hovers on translucent dark surfaces; design-system/terminal-UI/desktop tests, clippy, naming and website build pass; visual check by maintainer.
 - 2026-10-16 UI (outside milestones) feat(ui): refine panels, settings controls and theme picker - Primary/Secondary button roles, field and panel surfaces, borderless settings and accounts cards, chart settings choices as fixed-width dropdowns matching color swatches, tabular clock numerals, and a preview-tile theme picker in the platform menu; desktop tests, clippy and naming pass; visual check by maintainer.
+- 2026-10-16 M5.1 part 1 feat(trading): reject conflicting client identity on retry - unified simulated and broker order retry comparison with restart and terminal-state regression; V22 lifecycle migration and transitions remain for the next part.
 
 ## 7. Known gaps / deferred
 
