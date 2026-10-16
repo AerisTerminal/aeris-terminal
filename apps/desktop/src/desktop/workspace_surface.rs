@@ -99,6 +99,7 @@ struct WorkspaceSurfaceInitialization {
     timeframe_input: Entity<InputState>,
     time_zone_input: Entity<InputState>,
     order_quantity: order_quantity::OrderQuantityControls,
+    order_price: Entity<InputState>,
     chart_chrome: chart_chrome::ChartChromePreferences,
     restored_chart_state: Option<WorkspaceChartState>,
     retained_chart_presentation: RetainedChartPresentation,
@@ -166,6 +167,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         provider_transport_rtt_nanos: None,
         trading_pnl: TradingPnlState::default(),
         order_quantity: init.order_quantity,
+        order_price: init.order_price,
         chart_trading_visibility: init.chart_trading_visibility,
         symbol_browser: init.symbol_browser,
         symbol_message: initial_symbol_message(init.startup.provider),
@@ -1812,6 +1814,7 @@ impl WorkspaceSurface {
         timeframe_input: Entity<InputState>,
         time_zone_input: Entity<InputState>,
         order_quantity: order_quantity::OrderQuantityControls,
+        order_price: Entity<InputState>,
         chart_chrome: chart_chrome::ChartChromePreferences,
         restored_chart_state: Option<WorkspaceChartState>,
     ) -> Self {
@@ -1864,6 +1867,7 @@ impl WorkspaceSurface {
             timeframe_input,
             time_zone_input,
             order_quantity,
+            order_price,
             chart_chrome,
             retained_chart_presentation: RetainedChartPresentation {
                 drawings: PaneDrawings::restored(

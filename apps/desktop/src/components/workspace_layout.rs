@@ -443,19 +443,13 @@ pub(super) fn workspace_market_area(
                 order_book: &surface.order_book,
                 column_menu_open: surface.menu_state.order_book_column_open,
                 columns: surface.order_book.read(cx).columns(),
-                ticket: TradingOrderControlsState {
-                    app: active_surface,
-                    frame: order_book_frame.as_ref(),
-                    trading_pnl: surface.trading_pnl.current.as_ref(),
+                ticket: ticket_controls_state(
+                    active_surface,
+                    surface,
+                    order_book_frame.as_ref(),
                     has_open_position,
-                    accounts: &surface.trading_pnl.accounts,
-                    risk_locks: &surface.trading_pnl.risk_locks,
-                    feedback: surface.trading_pnl.feedback.as_ref(),
-                    market_error: surface.trading_pnl.market_error.as_deref(),
-                    order_entry: &surface.trading_pnl.order_entry,
-                    quantity: &surface.order_quantity,
                     theme,
-                },
+                ),
             },
             time_sales: TimeSalesPanelState {
                 app: active_surface.clone(),
@@ -501,6 +495,30 @@ pub(super) fn workspace_market_area(
             ))
         })
         .children(price_alert_dialog)
+}
+
+fn ticket_controls_state<'a>(
+    app: &'a Entity<WorkspaceSurface>,
+    surface: &'a WorkspaceSurface,
+    frame: Option<&'a aeris_market_data::OrderBookFrame>,
+    has_open_position: bool,
+    theme: &'a AerisTheme,
+) -> TradingOrderControlsState<'a> {
+    TradingOrderControlsState {
+        app,
+        frame,
+        trading_pnl: surface.trading_pnl.current.as_ref(),
+        has_open_position,
+        accounts: &surface.trading_pnl.accounts,
+        risk_locks: &surface.trading_pnl.risk_locks,
+        feedback: surface.trading_pnl.feedback.as_ref(),
+        market_error: surface.trading_pnl.market_error.as_deref(),
+        order_entry: &surface.trading_pnl.order_entry,
+        quantity: &surface.order_quantity,
+        price: &surface.order_price,
+        price_scale: surface.product.as_ref().map(|product| product.price_scale),
+        theme,
+    }
 }
 
 fn has_selected_open_position(

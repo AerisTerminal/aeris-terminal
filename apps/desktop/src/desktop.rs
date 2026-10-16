@@ -836,6 +836,7 @@ struct WorkspaceSurface {
     provider_transport_rtt_nanos: Option<u64>,
     trading_pnl: TradingPnlState,
     order_quantity: order_quantity::OrderQuantityControls,
+    order_price: Entity<InputState>,
     chart_trading_visibility: ChartTradingVisibilitySettings,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     symbol_message: String,
@@ -4754,6 +4755,7 @@ fn workspace_surface_entity(
         window,
         cx,
     );
+    let order_price = cx.new(|cx| InputState::new(window, cx).placeholder("Order price"));
     let workspace_lifecycle = lifecycle.clone();
     let workspace = cx.new(move |cx| {
         WorkspaceSurface::new(
@@ -4766,6 +4768,7 @@ fn workspace_surface_entity(
             timeframe_input,
             time_zone_input,
             order_quantity,
+            order_price,
             chart_chrome,
             restored.chart,
         )

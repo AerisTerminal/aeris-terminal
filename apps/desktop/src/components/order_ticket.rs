@@ -1,5 +1,7 @@
 //! Compact practice-trading controls owned by the order-book panel.
 
+use super::Input;
+use super::InputState;
 use super::{
     AerisTheme, App, Button, ButtonSize, ButtonVariant, ChromeOverlay, Div, Entity, FluentBuilder,
     HugeIcon, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Tab, TabList,
@@ -19,6 +21,8 @@ pub(super) struct TradingOrderControlsState<'a> {
     pub(super) market_error: Option<&'a str>,
     pub(super) order_entry: &'a super::TradingOrderEntryState,
     pub(super) quantity: &'a super::order_quantity::OrderQuantityControls,
+    pub(super) price: &'a Entity<InputState>,
+    pub(super) price_scale: Option<u32>,
     pub(super) theme: &'a AerisTheme,
 }
 
@@ -48,6 +52,12 @@ pub(super) fn trading_order_controls(
         .child(account_selector(state))
         .children(account_summary(state.trading_pnl, state.theme))
         .child(quantity_selector(state))
+        .child(
+            div()
+                .h(px(CONTROL_HEIGHT))
+                .flex()
+                .child(Input::new(state.price).platform(state.theme).flex_1()),
+        )
         .child(action_row(
             trade_order_button(
                 "trading_buy_market",
@@ -89,6 +99,21 @@ pub(super) fn trading_order_controls(
                     dispatch_join(frame, account, quantity, aeris_trading::OrderSide::Sell, cx);
                 },
             ),
+        ))
+        .child(action_row(
+            priced_order_button("trading_buy_limit", "Buy Limit", state, ready, true, false),
+            priced_order_button(
+                "trading_sell_limit",
+                "Sell Limit",
+                state,
+                ready,
+                false,
+                false,
+            ),
+        ))
+        .child(action_row(
+            priced_order_button("trading_buy_stop", "Buy Stop", state, ready, true, true),
+            priced_order_button("trading_sell_stop", "Sell Stop", state, ready, false, true),
         ))
         .child(position_actions(state, ready && state.has_open_position))
         .child(global_actions(state))
@@ -360,6 +385,88 @@ fn dispatch_join(
     }
 }
 
+/// Scale a typed decimal without binary floating point or silent rounding.
+fn parse_ticket_price(text: &str, scale: u32) -> Option<i64> {
+    let text = text.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > usize::try_from(scale).ok()?
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let base = 10_i64.checked_pow(scale)?;
+    let whole = whole.parse::<i64>().ok()?;
+    let fraction_units = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<i64>()
+            .ok()?
+            .checked_mul(10_i64.checked_pow(scale - u32::try_from(fraction.len()).ok()?)?)?
+    };
+    whole.checked_mul(base)?.checked_add(fraction_units)
+}
+
+fn priced_action(buy: bool, stop: bool) -> (aeris_trading::OrderSide, aeris_trading::OrderType) {
+    (
+        if buy {
+            aeris_trading::OrderSide::Buy
+        } else {
+            aeris_trading::OrderSide::Sell
+        },
+        if stop {
+            aeris_trading::OrderType::Stop
+        } else {
+            aeris_trading::OrderType::Limit
+        },
+    )
+}
+
+fn priced_order_button(
+    id: &'static str,
+    label: &'static str,
+    state: &TradingOrderControlsState<'_>,
+    enabled: bool,
+    buy: bool,
+    stop: bool,
+) -> Button {
+    let price = state.price.clone();
+    let scale = state.price_scale;
+    let (side, order_type) = priced_action(buy, stop);
+    order_button(
+        id,
+        label,
+        state,
+        enabled,
+        move |frame, account, quantity, cx| {
+            let text = price.read(cx).value();
+            let Some(price_units) = scale
+                .filter(|scale| *scale == u32::from(frame.price_scale))
+                .and_then(|scale| parse_ticket_price(text.as_ref(), scale))
+            else {
+                aeris_desktop::trading::record_notice(Err(
+                    "Enter a valid order price at the instrument's price precision".to_string(),
+                ));
+                return;
+            };
+            aeris_desktop::trading::dispatch_simulated_order_at_price(
+                frame,
+                aeris_desktop::trading::SimulatedPricedOrder {
+                    side,
+                    order_type,
+                    account_key: account,
+                    quantity,
+                    time_in_force: aeris_trading::TimeInForce::Day,
+                    price_units,
+                },
+                cx,
+            );
+        },
+    )
+}
+
 fn position_actions(state: &TradingOrderControlsState<'_>, enabled: bool) -> Div {
     action_row(
         order_button(
@@ -465,5 +572,48 @@ mod tests {
             ),
             "-USD 123456.78"
         );
+    }
+
+    #[test]
+    fn entered_price_scales_exactly_without_rounding() {
+        assert_eq!(parse_ticket_price(" 82195.25 ", 2), Some(8_219_525));
+        assert_eq!(parse_ticket_price("0.00000001", 8), Some(1));
+        assert_eq!(parse_ticket_price("1.234", 2), None);
+        assert_eq!(parse_ticket_price("", 2), None);
+        assert_eq!(parse_ticket_price("NaN", 2), None);
+        assert_eq!(parse_ticket_price("-1", 2), None);
+        assert_eq!(parse_ticket_price("9223372036854775808", 0), None);
+    }
+
+    #[test]
+    fn entered_price_actions_map_side_and_order_type() {
+        for (buy, stop, side, order_type) in [
+            (
+                true,
+                false,
+                aeris_trading::OrderSide::Buy,
+                aeris_trading::OrderType::Limit,
+            ),
+            (
+                false,
+                false,
+                aeris_trading::OrderSide::Sell,
+                aeris_trading::OrderType::Limit,
+            ),
+            (
+                true,
+                true,
+                aeris_trading::OrderSide::Buy,
+                aeris_trading::OrderType::Stop,
+            ),
+            (
+                false,
+                true,
+                aeris_trading::OrderSide::Sell,
+                aeris_trading::OrderType::Stop,
+            ),
+        ] {
+            assert_eq!(priced_action(buy, stop), (side, order_type));
+        }
     }
 }

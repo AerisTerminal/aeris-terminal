@@ -529,6 +529,7 @@ Status: in progress
   - VAL-TRD-029 follow-up: `replay_crypto_stop_restart_accounting_golden` and its frozen transcript cover a crypto market buy at ask, working sell stop with no chart demand, restart and replay of the old quote without a fill, a fresh bid stop fill, exact fill-accounting/risk/account agreement, and a second facts-and-revision recovery. The two original golden files remain unchanged.
   - GUI follow-up: The bottom panel formerly skipped every quote-only snapshot once its durable revision matched, freezing open-position and account unrealized P&L even though the owner held current marks. The panel now refreshes account summaries and open positions on changed ephemeral P&L without copying committed trade history; an unchanged mark still avoids a redraw. A controller regression covers same-revision marks.
   - Combined isolated GUI evidence (details and screenshots in mission `library/user-testing.md`): VAL-TRD-014 passed, with pane-free BTC unrealized P&L changing USD 61→45→29→44 at t0/+30/+60/+120 s; ETH was the only chart symbol. A hard kill recovered the ETH workspace and BTC 1 @ 82,195 position, but VAL-CROSS-009 is **not complete** without its far working limit, protective stop, sub-5-second relaunch and independent candle-range check. VAL-TRD-021's standalone limit 5% below bid cannot be placed: the compact ticket lacks a price input and the pinned chart intent enum has no standalone PlaceOrder; legend market buy worked. The drawing toolbar exposes `Create order` for a bracket, but this attempt produced no confirmation or accepted bracket; VAL-TRD-015 remains unverified. VAL-TRD-024 remains unverified because GUI quantity selection raced and the exact reversal was not obtained.
+  - Order-entry follow-up: the compact ticket now has an exact decimal price field and Buy/Sell Limit and Buy/Sell Stop actions. Empty, malformed, over-precise and overflowing text never dispatches; runtime admission remains authoritative. This closes the VAL-TRD-021 / VAL-CROSS-009 **GUI order-entry gap** identified above, but those assertions still need their isolated real-desktop checks.
 
 ### M5 trading engine
 
@@ -751,6 +752,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M4.10 test(trading): M4.10 VAL-TRD-029 replay golden - froze the chart-free crypto command/stop/restart/accounting recovery transcript without changing earlier goldens.
 - 2026-10-16 M4.10 fix(desktop): refresh mark-only bottom panel P&L - follow-up to GUI pane-free validation; same-revision owner marks now refresh open rows and account summaries without recopying trade history.
 - 2026-10-16 M4.10 docs(trading): record combined isolated GUI outcomes - pane-free marks passed; chart standalone limit gap and incomplete bracket, reversal and full hard-kill contract recorded without claiming passes.
+- 2026-10-16 M4 follow-up feat(desktop): add priced order ticket entry - exact scale conversion and all four priced side/type actions close the VAL-TRD-021 / VAL-CROSS-009 GUI entry gap; real-path assertions pending.
 
 ## 7. Known gaps / deferred
 
