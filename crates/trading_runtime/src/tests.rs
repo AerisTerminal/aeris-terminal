@@ -345,6 +345,61 @@ fn stale_modify_and_cancel_return_current_order_without_committing_facts() {
 }
 
 #[test]
+fn stale_revision_after_fill_returns_the_terminal_order_without_a_new_fact() {
+    let directory = TestDirectory::new("filled-stale-order");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let accepted = service
+        .place_order(market_order("filled-stale", OrderSide::Buy, 1, 1_000))
+        .expect("accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("filled");
+    let before = service.snapshot().expect("filled snapshot");
+    let current = before
+        .orders
+        .iter()
+        .find(|order| order.id == accepted.id)
+        .expect("filled order")
+        .clone();
+    assert_eq!(current.status, OrderStatus::Filled);
+    assert_eq!(current.revision, accepted.revision + 1);
+    assert_eq!(
+        service
+            .cancel_order_checked(RevisionedCancelOrder {
+                client_order_id: accepted.client_order_id.clone(),
+                expected_revision: Some(accepted.revision),
+            })
+            .expect_err("stale cancel"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(current.clone())
+        }
+    );
+    assert_eq!(
+        service
+            .modify_order_checked(RevisionedModifyOrder {
+                order: ModifyOrder {
+                    client_order_id: accepted.client_order_id,
+                    time_in_force: TimeInForce::GoodTillCancelled,
+                    limit_price: Some(FixedPoint::try_new(9_000, 2).expect("price")),
+                    stop_price: None,
+                    modified_unix_nanos: 3_000,
+                    provenance: provenance(3, 3_000),
+                },
+                expected_revision: Some(accepted.revision),
+            })
+            .expect_err("stale modify"),
+        OrderCommandError::StaleRevision {
+            current: Box::new(current)
+        }
+    );
+    assert_eq!(service.snapshot().expect("unchanged"), before);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn client_id_resubmission_is_idempotent_only_for_matching_instructions_after_restart() {
     let directory = TestDirectory::new("client-id-reuse");
     let service = start_service(&directory);

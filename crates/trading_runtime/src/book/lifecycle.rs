@@ -1,7 +1,8 @@
 //! Pure order transitions; the caller commits the returned value and its event atomically.
 
 use aeris_trading::{
-    FixedPoint, Order, OrderEventKind, OrderStatus, TradingProvenance,
+    FixedPoint, Order, OrderEventKind, OrderEventReason, OrderStatus, OrderType, TimeInForce,
+    TradingProvenance,
     venue::{BrokerOrder, BrokerOrderState},
 };
 
@@ -11,6 +12,14 @@ pub(crate) enum LifecycleError {
     InvalidTimestamp,
     RevisionExhausted,
     AlreadyAccepted,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "M5.5 group coverage producer uses this validation"
+        )
+    )]
+    InvalidQuantity,
 }
 
 impl std::fmt::Display for LifecycleError {
@@ -28,6 +37,83 @@ impl std::fmt::Display for LifecycleError {
             Self::AlreadyAccepted => {
                 formatter.write_str("order already has an acceptance revision")
             }
+            Self::InvalidQuantity => formatter.write_str("resized quantity is invalid"),
+        }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "M5.5 group modification causes have no producer yet"
+    )
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ModificationCause {
+    User,
+    Management,
+    Coverage,
+    LegMoved,
+    ParentRepriced,
+}
+
+impl ModificationCause {
+    const fn reason(self) -> OrderEventReason {
+        match self {
+            Self::User => OrderEventReason::UserModify,
+            Self::Management => OrderEventReason::Management,
+            Self::Coverage => OrderEventReason::Coverage,
+            Self::LegMoved => OrderEventReason::LegMoved,
+            Self::ParentRepriced => OrderEventReason::ParentRepriced,
+        }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "M5.5 group coverage producer is pending")
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResizeCause {
+    CoverageShrink,
+    CoverageGrow,
+}
+
+impl ResizeCause {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "M5.5 group coverage producer is pending")
+    )]
+    const fn reason(self) -> OrderEventReason {
+        match self {
+            Self::CoverageShrink => OrderEventReason::CoverageShrink,
+            Self::CoverageGrow => OrderEventReason::CoverageGrow,
+        }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "M5.3 and M5.9 cancellation producers are pending")
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CancellationCause {
+    User,
+    Cascade,
+    KillSwitch,
+    Flatten,
+    NotMarketable,
+}
+
+impl CancellationCause {
+    const fn reason(self) -> OrderEventReason {
+        match self {
+            Self::User => OrderEventReason::UserCancel,
+            Self::Cascade => OrderEventReason::Cascade,
+            Self::KillSwitch => OrderEventReason::KillSwitch,
+            Self::Flatten => OrderEventReason::Flatten,
+            Self::NotMarketable => OrderEventReason::NotMarketable,
         }
     }
 }
@@ -75,7 +161,15 @@ pub(crate) fn expect_revision(order: &Order, expected: Option<u32>) -> Result<()
     }
 }
 
-pub(crate) fn modify(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
+pub(crate) fn modify(order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
+    modify_with_cause(order, ModificationCause::User, owner_unix_nanos).map(|(order, _)| order)
+}
+
+pub(crate) fn modify_with_cause(
+    mut order: Order,
+    cause: ModificationCause,
+    owner_unix_nanos: i64,
+) -> Result<(Order, OrderEventReason), LifecycleError> {
     if !matches!(
         order.status,
         OrderStatus::Working | OrderStatus::PartiallyFilled
@@ -84,6 +178,109 @@ pub(crate) fn modify(mut order: Order, owner_unix_nanos: i64) -> Result<Order, L
     }
     advance(&mut order, owner_unix_nanos)?;
     order.eligible_after_unix_nanos = owner_unix_nanos;
+    Ok((order, cause.reason()))
+}
+
+/// Activates a held group leg; it cannot fill on the activation quote.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "M5.5 introduces real inactive group legs")
+)]
+pub(crate) fn activate(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
+    if order.status != OrderStatus::Inactive {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    advance(&mut order, owner_unix_nanos)?;
+    order.status = OrderStatus::Working;
+    order.eligible_after_unix_nanos = owner_unix_nanos;
+    Ok(order)
+}
+
+/// Resizes group coverage without changing the order identity or fill history.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "M5.5 introduces group coverage")
+)]
+pub(crate) fn resize(
+    mut order: Order,
+    quantity: FixedPoint,
+    cause: ResizeCause,
+    owner_unix_nanos: i64,
+) -> Result<(Order, OrderEventReason), LifecycleError> {
+    if !matches!(
+        order.status,
+        OrderStatus::Inactive | OrderStatus::Working | OrderStatus::PartiallyFilled
+    ) {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    if quantity.scale() != order.quantity.scale()
+        || quantity.units() <= order.filled_quantity.units()
+        || match cause {
+            ResizeCause::CoverageGrow => quantity.units() <= order.quantity.units(),
+            ResizeCause::CoverageShrink => quantity.units() >= order.quantity.units(),
+        }
+    {
+        return Err(LifecycleError::InvalidQuantity);
+    }
+    advance(&mut order, owner_unix_nanos)?;
+    order.quantity = quantity;
+    order.eligible_after_unix_nanos = owner_unix_nanos;
+    Ok((order, cause.reason()))
+}
+
+/// Emits a Triggered event alongside the returned order, without a new status.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "M5.3 wires stop triggering and the event")
+)]
+pub(crate) fn trigger(
+    mut order: Order,
+    owner_unix_nanos: i64,
+) -> Result<(Order, OrderEventKind), LifecycleError> {
+    if order.status != OrderStatus::Working
+        || !matches!(order.order_type, OrderType::Stop | OrderType::StopLimit)
+        || order.triggered_unix_nanos.is_some()
+    {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    advance(&mut order, owner_unix_nanos)?;
+    order.triggered_unix_nanos = Some(owner_unix_nanos);
+    Ok((order, OrderEventKind::Triggered))
+}
+
+/// Only a due DAY order may expire; the scheduled deadline remains unchanged.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "M5.4 wires the DAY owner timer")
+)]
+pub(crate) fn expire(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
+    if !matches!(
+        order.status,
+        OrderStatus::Inactive | OrderStatus::Working | OrderStatus::PartiallyFilled
+    ) {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    if order.time_in_force != TimeInForce::Day
+        || order
+            .expires_at_unix_nanos
+            .is_none_or(|due| owner_unix_nanos < due)
+    {
+        return Err(LifecycleError::InvalidTimestamp);
+    }
+    advance(&mut order, owner_unix_nanos)?;
+    order.status = OrderStatus::Expired;
+    order.terminal_unix_nanos = Some(owner_unix_nanos);
+    Ok(order)
+}
+
+/// Refuses a pending broker admission, not a previously executable order.
+pub(crate) fn reject(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
+    if order.status != OrderStatus::Pending {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    advance(&mut order, owner_unix_nanos)?;
+    order.status = OrderStatus::Rejected;
+    order.terminal_unix_nanos = Some(owner_unix_nanos);
     Ok(order)
 }
 
@@ -107,9 +304,20 @@ pub(crate) fn request(
 }
 
 pub(crate) fn cancel(order: Order, command_unix_nanos: i64) -> Result<Order, LifecycleError> {
+    if order.status == OrderStatus::Inactive {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    cancel_with_cause(order, CancellationCause::User, command_unix_nanos).map(|(order, _)| order)
+}
+
+pub(crate) fn cancel_with_cause(
+    order: Order,
+    cause: CancellationCause,
+    command_unix_nanos: i64,
+) -> Result<(Order, OrderEventReason), LifecycleError> {
     if !matches!(
         order.status,
-        OrderStatus::Working | OrderStatus::PartiallyFilled
+        OrderStatus::Inactive | OrderStatus::Working | OrderStatus::PartiallyFilled
     ) {
         return Err(LifecycleError::InvalidTransition(order.status));
     }
@@ -117,7 +325,7 @@ pub(crate) fn cancel(order: Order, command_unix_nanos: i64) -> Result<Order, Lif
     advance(&mut cancelled, command_unix_nanos)?;
     cancelled.status = OrderStatus::Cancelled;
     cancelled.terminal_unix_nanos = Some(command_unix_nanos);
-    Ok(cancelled)
+    Ok((cancelled, cause.reason()))
 }
 
 /// Simulated execution fills the remaining order in one local transition.
@@ -231,8 +439,10 @@ pub(crate) fn broker_refusal(
     mut order: Order,
     owner_unix_nanos: i64,
 ) -> Result<Option<Order>, LifecycleError> {
+    if order.status == OrderStatus::Pending {
+        return reject(order, owner_unix_nanos).map(Some);
+    }
     order.status = match order.status {
-        OrderStatus::Pending => OrderStatus::Rejected,
         OrderStatus::PendingModify | OrderStatus::PendingCancel => {
             if order.filled_quantity.units() == 0 {
                 OrderStatus::Working
@@ -340,6 +550,151 @@ pub(crate) fn broker_deal(
 mod tests {
     use super::*;
     use aeris_trading::venue::BrokerOrderKind;
+    use aeris_trading::{OrderEventReason, OrderType, TimeInForce};
+
+    #[test]
+    fn simulated_lifecycle_transition_table() {
+        use OrderStatus as S;
+        let statuses = [
+            S::Inactive,
+            S::Pending,
+            S::Working,
+            S::PendingModify,
+            S::PartiallyFilled,
+            S::PendingCancel,
+            S::Filled,
+            S::Cancelled,
+            S::Expired,
+            S::Rejected,
+        ];
+        for status in statuses {
+            let mut order = super::super::tests::order(1, status);
+            order.order_type = OrderType::StopLimit;
+            order.stop_price = order.limit_price;
+            order.time_in_force = TimeInForce::Day;
+            order.expires_at_unix_nanos = Some(2);
+            let active = matches!(status, S::Working | S::PartiallyFilled);
+            let open = matches!(status, S::Inactive | S::Working | S::PartiallyFilled);
+            for (edge, result, allowed) in [
+                (
+                    "activate",
+                    activate(order.clone(), 2),
+                    status == S::Inactive,
+                ),
+                (
+                    "modify",
+                    modify_with_cause(order.clone(), ModificationCause::Management, 2)
+                        .map(|(o, _)| o),
+                    active,
+                ),
+                (
+                    "resize",
+                    resize(
+                        order.clone(),
+                        FixedPoint::try_new(3, 0).expect("quantity"),
+                        ResizeCause::CoverageGrow,
+                        2,
+                    )
+                    .map(|(o, _)| o),
+                    open,
+                ),
+                (
+                    "trigger",
+                    trigger(order.clone(), 2).map(|(order, _)| order),
+                    status == S::Working,
+                ),
+                ("fill", fill_simulated(order.clone(), 2), active),
+                (
+                    "cancel",
+                    cancel_with_cause(order.clone(), CancellationCause::Cascade, 2).map(|(o, _)| o),
+                    open,
+                ),
+                ("expire", expire(order.clone(), 2), open),
+                ("reject", reject(order.clone(), 2), status == S::Pending),
+            ] {
+                assert_eq!(result.is_ok(), allowed, "{status:?} {edge}");
+                if let Ok(updated) = result {
+                    assert_eq!(updated.revision, order.revision + 1, "{status:?} {edge}");
+                    assert_eq!(updated.updated_unix_nanos, 2, "{status:?} {edge}");
+                    assert_eq!(updated.accepted_unix_nanos, order.accepted_unix_nanos);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simulated_lifecycle_causes_and_deadlines() {
+        use OrderStatus as S;
+        for cause in [
+            ModificationCause::User,
+            ModificationCause::Management,
+            ModificationCause::Coverage,
+            ModificationCause::LegMoved,
+            ModificationCause::ParentRepriced,
+        ] {
+            let (modified, reason) =
+                modify_with_cause(super::super::tests::order(1, S::Working), cause, 2)
+                    .expect("modify");
+            assert_eq!(reason, cause.reason());
+            assert_eq!(modified.eligible_after_unix_nanos, 2);
+        }
+        for cause in [
+            CancellationCause::User,
+            CancellationCause::Cascade,
+            CancellationCause::KillSwitch,
+            CancellationCause::Flatten,
+            CancellationCause::NotMarketable,
+        ] {
+            let (cancelled, reason) =
+                cancel_with_cause(super::super::tests::order(1, S::Inactive), cause, 2)
+                    .expect("cancel");
+            assert_eq!(reason, cause.reason());
+            assert_eq!(cancelled.terminal_unix_nanos, Some(2));
+        }
+        let working = super::super::tests::order(1, S::Working);
+        assert!(trigger(working.clone(), 2).is_err(), "only stops trigger");
+        let mut stop = working.clone();
+        stop.order_type = OrderType::StopLimit;
+        stop.stop_price = stop.limit_price;
+        let (triggered, kind) = trigger(stop, 2).expect("trigger");
+        assert_eq!(kind, OrderEventKind::Triggered);
+        assert_eq!(triggered.status, S::Working);
+        assert_eq!(triggered.triggered_unix_nanos, Some(2));
+        assert!(trigger(triggered, 3).is_err(), "one trigger only");
+        let mut day = working;
+        day.time_in_force = TimeInForce::Day;
+        day.expires_at_unix_nanos = Some(3);
+        assert!(expire(day.clone(), 2).is_err(), "too early");
+        let expired = expire(day, 3).expect("due");
+        assert_eq!(expired.terminal_unix_nanos, Some(3));
+        assert_eq!(expired.expires_at_unix_nanos, Some(3));
+        assert!(fill_simulated(expired, 4).is_err(), "expired cannot fill");
+        let mut covered = super::super::tests::order(1, S::Working);
+        covered.quantity = FixedPoint::try_new(3, 0).expect("quantity");
+        let (shrunk, reason) = resize(
+            covered.clone(),
+            FixedPoint::try_new(2, 0).expect("quantity"),
+            ResizeCause::CoverageShrink,
+            2,
+        )
+        .expect("shrink");
+        assert_eq!(reason, OrderEventReason::CoverageShrink);
+        assert_eq!(shrunk.quantity.units(), 2);
+        assert!(
+            resize(
+                covered,
+                FixedPoint::try_new(4, 0).expect("quantity"),
+                ResizeCause::CoverageShrink,
+                2,
+            )
+            .is_err(),
+            "direction must match cause"
+        );
+        assert_eq!(
+            OrderEventReason::Cascade,
+            CancellationCause::Cascade.reason()
+        );
+    }
 
     #[test]
     fn terminal_order_cannot_be_cancelled_again() {
