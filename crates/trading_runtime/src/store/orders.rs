@@ -734,6 +734,7 @@ pub(super) fn parse_time_in_force(value: &str) -> Result<TimeInForce, String> {
 }
 pub(super) fn parse_status(value: &str) -> Result<OrderStatus, String> {
     match value {
+        "inactive" => Ok(OrderStatus::Inactive),
         "pending" => Ok(OrderStatus::Pending),
         "working" => Ok(OrderStatus::Working),
         "pending_modify" => Ok(OrderStatus::PendingModify),
@@ -741,6 +742,7 @@ pub(super) fn parse_status(value: &str) -> Result<OrderStatus, String> {
         "pending_cancel" => Ok(OrderStatus::PendingCancel),
         "filled" => Ok(OrderStatus::Filled),
         "cancelled" => Ok(OrderStatus::Cancelled),
+        "expired" => Ok(OrderStatus::Expired),
         "rejected" => Ok(OrderStatus::Rejected),
         _ => Err("stored order status is invalid".to_string()),
     }
@@ -748,10 +750,38 @@ pub(super) fn parse_status(value: &str) -> Result<OrderStatus, String> {
 pub(super) fn parse_event_kind(value: &str) -> Result<OrderEventKind, String> {
     match value {
         "accepted" => Ok(OrderEventKind::Accepted),
+        "activated" => Ok(OrderEventKind::Activated),
         "modified" => Ok(OrderEventKind::Modified),
+        "resized" => Ok(OrderEventKind::Resized),
+        "triggered" => Ok(OrderEventKind::Triggered),
         "filled" => Ok(OrderEventKind::Filled),
         "cancelled" => Ok(OrderEventKind::Cancelled),
+        "expired" => Ok(OrderEventKind::Expired),
         "rejected" => Ok(OrderEventKind::Rejected),
         _ => Err("stored order event kind is invalid".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_wire_tests {
+    use super::*;
+
+    #[test]
+    fn new_status_and_event_values_round_trip_without_aliases() {
+        for status in [OrderStatus::Inactive, OrderStatus::Expired] {
+            assert_eq!(parse_status(status.as_str()), Ok(status));
+        }
+        for kind in [
+            OrderEventKind::Triggered,
+            OrderEventKind::Expired,
+            OrderEventKind::Activated,
+            OrderEventKind::Resized,
+        ] {
+            assert_eq!(parse_event_kind(kind.as_str()), Ok(kind));
+        }
+        assert!(
+            parse_status("triggered").is_err(),
+            "trigger is an event, not a status"
+        );
     }
 }

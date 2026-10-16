@@ -34,7 +34,10 @@ impl std::fmt::Display for LifecycleError {
 
 /// Initializes the one order identity and acceptance time for either route.
 pub(crate) fn accept(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
-    if !matches!(order.status, OrderStatus::Working | OrderStatus::Pending) {
+    if !matches!(
+        order.status,
+        OrderStatus::Inactive | OrderStatus::Working | OrderStatus::Pending
+    ) {
         return Err(LifecycleError::InvalidTransition(order.status));
     }
     if owner_unix_nanos <= 0 {
@@ -158,9 +161,8 @@ pub(crate) fn broker_report(
         }
         BrokerOrderState::PartiallyFilled => (working, OrderEventKind::Filled),
         BrokerOrderState::Filled => (OrderStatus::Filled, OrderEventKind::Filled),
-        BrokerOrderState::Cancelled | BrokerOrderState::Expired => {
-            (OrderStatus::Cancelled, OrderEventKind::Cancelled)
-        }
+        BrokerOrderState::Cancelled => (OrderStatus::Cancelled, OrderEventKind::Cancelled),
+        BrokerOrderState::Expired => (OrderStatus::Expired, OrderEventKind::Expired),
         BrokerOrderState::CancelRejected if current.status == OrderStatus::PendingCancel => {
             (working, OrderEventKind::Rejected)
         }
@@ -326,6 +328,19 @@ mod tests {
     }
 
     #[test]
+    fn inactive_child_is_admitted_but_never_executable() {
+        let mut child = super::super::tests::order(1, OrderStatus::Inactive);
+        child.revision = 0;
+        child.accepted_unix_nanos = 0;
+        child.updated_unix_nanos = 0;
+        let child = accept(child, 2).expect("held child");
+        assert_eq!((child.revision, child.accepted_unix_nanos), (1, 2));
+        assert!(child.validate().is_ok());
+        assert!(modify(child.clone(), 3).is_err());
+        assert!(fill_simulated(child, 3).is_err());
+    }
+
+    #[test]
     fn simulated_fill_is_terminal_and_rejects_repeat_execution() {
         let original = super::super::tests::order(1, OrderStatus::Working);
         let filled = fill_simulated(original, 2).expect("fill");
@@ -482,11 +497,13 @@ mod tests {
             );
         }
         for status in [
+            OrderStatus::Inactive,
             OrderStatus::Pending,
             OrderStatus::PendingModify,
             OrderStatus::PendingCancel,
             OrderStatus::Filled,
             OrderStatus::Cancelled,
+            OrderStatus::Expired,
             OrderStatus::Rejected,
         ] {
             let original = super::super::tests::order(1, status);

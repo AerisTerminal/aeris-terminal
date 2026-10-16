@@ -585,6 +585,16 @@ fn refusals_rejections_and_expiry_are_terminal_and_ignore_late_updates() {
         );
         inbox.push(venue(1, update)).expect("terminal");
         assert!(!order_status(&service, &order.client_order_id).is_open());
+        if state == Some(BrokerOrderState::Expired) {
+            assert_eq!(
+                order_status(&service, &order.client_order_id),
+                OrderStatus::Expired
+            );
+            assert_eq!(
+                service.snapshot().expect("snapshot").order_events[0].kind,
+                aeris_trading::OrderEventKind::Expired
+            );
+        }
         assert_broker_lifecycle(&service, &order, 2, true);
         let events = service.snapshot().expect("snapshot").order_events.len();
         inbox

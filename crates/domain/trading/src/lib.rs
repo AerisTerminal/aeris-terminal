@@ -404,6 +404,7 @@ impl TimeInForce {
 /// Current lifecycle state of one canonical order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderStatus {
+    Inactive,
     Pending,
     Working,
     PendingModify,
@@ -411,6 +412,7 @@ pub enum OrderStatus {
     PendingCancel,
     Filled,
     Cancelled,
+    Expired,
     Rejected,
 }
 
@@ -419,6 +421,7 @@ impl OrderStatus {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Inactive => "inactive",
             Self::Pending => "pending",
             Self::Working => "working",
             Self::PendingModify => "pending_modify",
@@ -426,6 +429,7 @@ impl OrderStatus {
             Self::PendingCancel => "pending_cancel",
             Self::Filled => "filled",
             Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
             Self::Rejected => "rejected",
         }
     }
@@ -435,7 +439,8 @@ impl OrderStatus {
     pub const fn is_open(self) -> bool {
         matches!(
             self,
-            Self::Pending
+            Self::Inactive
+                | Self::Pending
                 | Self::Working
                 | Self::PendingModify
                 | Self::PartiallyFilled
@@ -503,7 +508,10 @@ impl Order {
             OrderStatus::Filled if self.filled_quantity != self.quantity => {
                 return Err(TradingValidationError::InvalidFilledQuantity);
             }
-            OrderStatus::Pending | OrderStatus::Working | OrderStatus::Rejected
+            OrderStatus::Inactive
+            | OrderStatus::Pending
+            | OrderStatus::Working
+            | OrderStatus::Rejected
                 if self.filled_quantity.units() != 0 =>
             {
                 return Err(TradingValidationError::InvalidFilledQuantity);
@@ -550,9 +558,13 @@ impl Order {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderEventKind {
     Accepted,
+    Activated,
     Modified,
+    Resized,
+    Triggered,
     Filled,
     Cancelled,
+    Expired,
     Rejected,
 }
 
@@ -562,9 +574,13 @@ impl OrderEventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
+            Self::Activated => "activated",
             Self::Modified => "modified",
+            Self::Resized => "resized",
+            Self::Triggered => "triggered",
             Self::Filled => "filled",
             Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
             Self::Rejected => "rejected",
         }
     }
@@ -952,5 +968,23 @@ mod tests {
         assert!(order.validate().is_ok());
         assert!(!order.status.is_open());
         assert!(!order.status.is_executable());
+    }
+
+    #[test]
+    fn inactive_expired_and_group_event_wire_values_are_stable() {
+        assert_eq!(OrderStatus::Inactive.as_str(), "inactive");
+        assert!(OrderStatus::Inactive.is_open());
+        assert!(!OrderStatus::Inactive.is_executable());
+        assert_eq!(OrderStatus::Expired.as_str(), "expired");
+        assert!(!OrderStatus::Expired.is_open());
+        assert!(!OrderStatus::Expired.is_executable());
+        for (kind, wire) in [
+            (OrderEventKind::Triggered, "triggered"),
+            (OrderEventKind::Expired, "expired"),
+            (OrderEventKind::Activated, "activated"),
+            (OrderEventKind::Resized, "resized"),
+        ] {
+            assert_eq!(kind.as_str(), wire);
+        }
     }
 }
