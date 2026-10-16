@@ -319,8 +319,8 @@ impl ChartIndicator {
         match self {
             Self::Volume => "Volume",
             Self::Vwap => "Volume Weighted Average Price",
-            Self::Sma => "Moving Average",
-            Self::Ema => "Moving Average Exponential",
+            Self::Sma => "Simple Moving Average",
+            Self::Ema => "Exponential Moving Average",
             Self::EmaRibbon => "EMA Ribbon",
             Self::Wma => "Weighted Moving Average",
             Self::Bollinger => "Bollinger Bands",
@@ -1078,8 +1078,10 @@ pub struct AerisChartView {
     built_for: (f32, f32, f32),
     layout_dirty: bool,
     fitted: bool,
-    /// Host-selected stroke width per external study, kept for outputs installed later.
-    study_line_widths: std::collections::BTreeMap<u64, u8>,
+    /// Host-selected presentation per external study, kept for outputs installed later.
+    study_styles: std::collections::BTreeMap<u64, studies::StudyStyle>,
+    /// The color Aeris Charts gave each external study output when it was installed.
+    study_default_colors: std::collections::BTreeMap<(u64, usize), Option<String>>,
     /// Window bounds of the chart canvas from the latest prepaint.
     viewport_bounds: Bounds<Pixels>,
     /// GPUI event translation; every interaction decision lives in the Aeris Charts controller.
@@ -1187,7 +1189,8 @@ impl AerisChartView {
             built_for: (0.0, 0.0, 0.0),
             layout_dirty: true,
             fitted: false,
-            study_line_widths: std::collections::BTreeMap::new(),
+            study_styles: std::collections::BTreeMap::new(),
+            study_default_colors: std::collections::BTreeMap::new(),
             volume_profile: None,
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
@@ -1292,7 +1295,8 @@ impl AerisChartView {
             built_for: (0.0, 0.0, 0.0),
             layout_dirty: true,
             fitted: false,
-            study_line_widths: std::collections::BTreeMap::new(),
+            study_styles: std::collections::BTreeMap::new(),
+            study_default_colors: std::collections::BTreeMap::new(),
             volume_profile: None,
             viewport_bounds: Bounds::default(),
             input: GpuiChartInput::default(),
@@ -2214,7 +2218,7 @@ impl AerisChartView {
         self.hollow_base = None;
         self.sync_hollow_candles();
         apply_product_series_markers(&mut self.engine, self.chart_type);
-        self.reapply_study_line_widths();
+        self.reapply_study_styles();
         // Volume colors are indicator settings, not chart appearance.
         self.apply_volume_style(volume_visible);
         self.invalidate_series_layout();

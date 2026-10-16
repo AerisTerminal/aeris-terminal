@@ -506,6 +506,11 @@ pub struct WorkspaceChartAppearanceState {
     /// layouts pinned the engine's reported defaults, which restore as default-following.
     #[prost(string, tag = "26")]
     pub area_bottom_color: String,
+    /// Whether `crosshair_style` is the user's choice rather than the chart default. Absent in
+    /// layouts saved before it existed, which stored the chart's former dashed default as a
+    /// plain number.
+    #[prost(bool, optional, tag = "27")]
+    pub crosshair_style_custom: Option<bool>,
 }
 
 /// Durable host-owned state for one native Study Runtime instance.
@@ -536,6 +541,10 @@ pub struct WorkspaceChartStudyState {
     /// keeps the chart's default width.
     #[prost(uint32, tag = "8")]
     pub line_width: u32,
+    /// Output line colors parallel to `output_identifiers`, as CSS strings. Empty, or an empty
+    /// entry, keeps the chart's default color for that output.
+    #[prost(string, repeated, tag = "9")]
+    pub output_colors: Vec<String>,
 }
 
 /// Durable static dependency for one native study.

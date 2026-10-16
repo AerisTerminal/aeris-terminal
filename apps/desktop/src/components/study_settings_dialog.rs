@@ -1,4 +1,4 @@
-use super::big_trades_dialog::{DropdownChoice, SettingDropdown};
+use super::big_trades_dialog::{DropdownChoice, SettingDropdown, setting_row as described_row};
 use super::*;
 
 fn constraint_hint(control: &StudySettingControl) -> Option<String> {
@@ -231,6 +231,91 @@ fn line_thickness_row(
         .into_any_element()
 }
 
+/// A swatch that opens the color picker for one study line. Picks change only the draft.
+fn output_color_control(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudySettingsDialogState,
+    draft: &StudyOutputColorDraft,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let output_index = draft.output_index;
+    let value = draft.effective_color().to_string();
+    let open_picker = dialog
+        .color_picker
+        .as_ref()
+        .filter(|picker| picker.target == output_index);
+    let toggle = app.clone();
+    let mut control = div().relative().flex().child(
+        color_swatch_button(
+            ("study_output_color", output_index),
+            draft.label.clone(),
+            &value,
+            open_picker.is_some(),
+            theme,
+        )
+        .on_press(move |_, window, cx| {
+            toggle.update(cx, |surface, surface_cx| {
+                surface.toggle_study_dialog_color_picker(output_index, window, surface_cx);
+            });
+        }),
+    );
+    if let Some(picker) = open_picker {
+        let select = app.clone();
+        let dismiss = app.clone();
+        control = control.child(gpui::deferred(
+            ColorPicker::new(
+                ("study_output_color_popover", output_index),
+                value,
+                &picker.input,
+                theme,
+            )
+            .error(picker.error.as_deref())
+            .on_select(move |value, _, cx| {
+                select.update(cx, |surface, surface_cx| {
+                    surface.set_study_dialog_color(output_index, &value, surface_cx);
+                });
+            })
+            .on_dismiss(move |_, cx| {
+                dismiss.update(cx, WorkspaceSurface::close_study_dialog_color_picker);
+            }),
+        ));
+    }
+    control.into_any_element()
+}
+
+/// Host-owned color row: one labeled swatch per line the study draws.
+fn output_colors_row(
+    app: &Entity<WorkspaceSurface>,
+    dialog: &StudySettingsDialogState,
+    theme: &AerisTheme,
+) -> AnyElement {
+    let swatches = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .children(dialog.output_colors.iter().map(|draft| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(gpui_color(theme.colors.text_secondary))
+                        .child(draft.label.clone()),
+                )
+                .child(output_color_control(app, dialog, draft, theme))
+        }))
+        .into_any_element();
+    described_row(
+        "Line colors",
+        "Color of each line this study draws.",
+        swatches,
+        theme,
+    )
+}
+
 fn setting_row(
     app: &Entity<WorkspaceSurface>,
     dialog: &StudySettingsDialogState,
@@ -344,6 +429,9 @@ fn study_settings_body(
                 .child("Style"),
         )
         .child(line_thickness_row(app, dialog, theme));
+    if !dialog.output_colors.is_empty() {
+        body = body.child(output_colors_row(app, dialog, theme));
+    }
     if let Some(message) = &dialog.message {
         body = body.child(
             div()

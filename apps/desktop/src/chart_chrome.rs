@@ -120,14 +120,14 @@ impl IndicatorSpec {
 pub const INDICATOR_SPECS: [IndicatorSpec; 12] = [
     IndicatorSpec {
         kind: IndicatorKind::Sma,
-        label: "Moving Average",
+        label: "Simple Moving Average",
         parameters: IndicatorParameters::Period { period: 20 },
         parameter_description: "Period 20",
         location: IndicatorLocation::MainChartOverlay,
     },
     IndicatorSpec {
         kind: IndicatorKind::Ema,
-        label: "Moving Average Exponential",
+        label: "Exponential Moving Average",
         parameters: IndicatorParameters::Period { period: 20 },
         parameter_description: "Period 20",
         location: IndicatorLocation::MainChartOverlay,

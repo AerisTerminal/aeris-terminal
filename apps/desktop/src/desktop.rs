@@ -1325,7 +1325,7 @@ enum IndicatorSettingsDialog {
 struct VolumeDialogState {
     draft: VolumeSettings,
     average_length: Entity<InputState>,
-    color_picker: Option<VolumeColorPickerState>,
+    color_picker: Option<DialogColorPickerState<VolumeColorTarget>>,
     /// The setting whose dropdown is open.
     menu: Option<String>,
     message: Option<String>,
@@ -1358,10 +1358,27 @@ impl VolumeColorTarget {
     }
 }
 
-struct VolumeColorPickerState {
-    target: VolumeColorTarget,
+/// The open color picker of an indicator dialog and the swatch it edits.
+struct DialogColorPickerState<Target> {
+    target: Target,
     input: Entity<InputState>,
     error: Option<String>,
+}
+
+/// One study line whose color the settings dialog edits.
+struct StudyOutputColorDraft {
+    output_index: usize,
+    label: String,
+    /// `None` keeps the chart's default color.
+    color: Option<String>,
+    default_color: String,
+}
+
+impl StudyOutputColorDraft {
+    /// The color as drawn once the draft is applied.
+    fn effective_color(&self) -> &str {
+        self.color.as_deref().unwrap_or(&self.default_color)
+    }
 }
 
 /// Draft big-trades settings; the chart changes only when the draft is applied.
@@ -1383,6 +1400,10 @@ struct StudySettingsDialogState {
     draft_values: BTreeMap<String, StudySettingValue>,
     /// Host-owned output stroke width; presentation only, so it never reinitializes the study.
     line_width: u8,
+    /// Host-owned line colors, presentation only like `line_width`.
+    output_colors: Vec<StudyOutputColorDraft>,
+    /// The picker's target is the output index of the edited line.
+    color_picker: Option<DialogColorPickerState<usize>>,
     inputs: HashMap<String, Entity<InputState>>,
     _subscriptions: Vec<gpui::Subscription>,
     /// The setting whose dropdown is open.
@@ -4412,14 +4433,20 @@ fn subscribe_indicator_input(
             cx,
             move |_, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
-                    let query = input.read(cx).value().to_string();
-                    let indicator = terminal.update(cx, |app, _| {
-                        chart_chrome::filter_indicator_specs(&query)
-                            .get(app.chrome_selection)
-                            .map(|spec| native_indicator(spec.kind))
+                    // Enter adds only the highlighted row; with nothing highlighted it is a no-op.
+                    let entry = terminal.update(cx, |app, cx| {
+                        app.menu_state
+                            .chrome_list_keyboard
+                            .then(|| {
+                                app.indicator_menu_entries(cx)
+                                    .get(app.chrome_selection)
+                                    .copied()
+                            })
+                            .flatten()
                     });
-                    if let Some(indicator) = indicator {
-                        let added = terminal.update(cx, |app, cx| app.add_indicator(indicator, cx));
+                    if let Some(entry) = entry {
+                        let added =
+                            terminal.update(cx, |app, cx| app.add_indicator_menu_entry(entry, cx));
                         if added {
                             terminal.update(cx, |app, app_cx| {
                                 app.close_chrome_overlay(window, app_cx);
@@ -4427,7 +4454,9 @@ fn subscribe_indicator_input(
                         }
                     }
                 } else if matches!(event, InputEvent::Change) {
+                    let typed = !input.read(cx).value().trim().is_empty();
                     terminal.update(cx, |app, cx| {
+                        app.menu_state.chrome_list_keyboard = typed;
                         app.chrome_selection = 0;
                         app.scrolls.indicator.set_offset(point(px(0.0), px(0.0)));
                         cx.notify();

@@ -1,5 +1,5 @@
 use super::*;
-use crate::desktop::workspace_surface::OrderFlowMenuStudy;
+use crate::desktop::workspace_surface::IndicatorMenuEntry;
 
 use super::chrome_menu::{
     ChromeMenuExtent, chrome_menu_empty, chrome_menu_group_heading, chrome_menu_scroll_body,
@@ -42,45 +42,40 @@ pub(super) struct IndicatorDialogState<'a> {
     pub(super) input: &'a Entity<InputState>,
     pub(super) message: Option<&'a str>,
     pub(super) keyboard_selection: usize,
+    pub(super) keyboard_active: bool,
     pub(super) scroll: &'a ScrollHandle,
 }
 
-fn available_indicator_rows(
+fn indicator_menu_row(
     app: &Entity<WorkspaceSurface>,
-    specs: &[&chart_chrome::IndicatorSpec],
-    keyboard_selection: usize,
+    index: usize,
+    entry: IndicatorMenuEntry,
+    highlighted: bool,
     theme: &AerisTheme,
-) -> Vec<AnyElement> {
-    specs
-        .iter()
-        .enumerate()
-        .map(|(index, spec)| {
-            let row_app = app.clone();
-            let add_app = app.clone();
-            let indicator = native_indicator(spec.kind);
-            MenuRow::search_result(("indicator_dialog_row", index), spec.label, theme)
-                .highlighted(keyboard_selection == index)
-                .on_click(move |_, window, cx| {
-                    if row_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
-                        row_app.update(cx, |app, app_cx| {
+) -> AnyElement {
+    let row_app = app.clone();
+    let add_app = app.clone();
+    MenuRow::search_result(("indicator_dialog_row", index), entry.label(), theme)
+        .highlighted(highlighted)
+        .on_click(move |_, window, cx| {
+            if row_app.update(cx, |app, cx| app.add_indicator_menu_entry(entry, cx)) {
+                row_app.update(cx, |app, app_cx| {
+                    app.close_chrome_overlay(window, app_cx);
+                });
+            }
+        })
+        .trailing(
+            compact_menu_add_button(("add_indicator", index), theme).on_click(
+                move |_, window, cx| {
+                    if add_app.update(cx, |app, cx| app.add_indicator_menu_entry(entry, cx)) {
+                        add_app.update(cx, |app, app_cx| {
                             app.close_chrome_overlay(window, app_cx);
                         });
                     }
-                })
-                .trailing(
-                    compact_menu_add_button(("add_indicator", index), theme).on_click(
-                        move |_, window, cx| {
-                            if add_app.update(cx, |app, cx| app.add_indicator(indicator, cx)) {
-                                add_app.update(cx, |app, app_cx| {
-                                    app.close_chrome_overlay(window, app_cx);
-                                });
-                            }
-                        },
-                    ),
-                )
-                .into_any_element()
-        })
-        .collect()
+                },
+            ),
+        )
+        .into_any_element()
 }
 
 pub(super) fn indicator_dialog_content(
@@ -90,35 +85,40 @@ pub(super) fn indicator_dialog_content(
     cx: &App,
 ) -> impl IntoElement + use<> {
     let colors = theme.colors;
-    let indicator_specs =
-        chart_chrome::filter_indicator_specs(state.input.read(cx).value().as_ref());
-    let hint = state.message.map_or_else(
-        || format!("{} native", indicator_specs.len()),
-        str::to_string,
-    );
-    let query = state.input.read(cx).value().to_ascii_lowercase();
-    let order_flow_studies = order_flow_menu_studies(app, &query, cx);
+    let entries = app.read(cx).indicator_menu_entries(cx);
+    let native_count = entries
+        .iter()
+        .filter(|entry| matches!(entry, IndicatorMenuEntry::Indicator(_)))
+        .count();
+    let hint = state
+        .message
+        .map_or_else(|| format!("{native_count} native"), str::to_string);
+    let highlighted = state.keyboard_active.then_some(state.keyboard_selection);
     let mut list = chrome_menu_scroll_body();
-    if !order_flow_studies.is_empty() {
-        list = list
-            .child(chrome_menu_group_heading("Order flow", &colors))
-            .children(order_flow_study_rows(app, &order_flow_studies, theme));
-    }
-    if indicator_specs.is_empty() && order_flow_studies.is_empty() {
+    if entries.is_empty() {
         list = list.child(chrome_menu_empty(
             "No matching indicators",
             "Try “average”, “bands”, or a kind like SMA.",
             &colors,
         ));
-    } else if !indicator_specs.is_empty() {
-        list = list
-            .child(chrome_menu_group_heading("Indicators", &colors))
-            .children(available_indicator_rows(
-                app,
-                &indicator_specs,
-                state.keyboard_selection,
-                theme,
-            ));
+    }
+    for (index, &entry) in entries.iter().enumerate() {
+        let starts_group = match entry {
+            IndicatorMenuEntry::OrderFlow(_) => (index == 0).then_some("Order flow"),
+            IndicatorMenuEntry::Indicator(_) => {
+                (index + native_count == entries.len()).then_some("Indicators")
+            }
+        };
+        if let Some(heading) = starts_group {
+            list = list.child(chrome_menu_group_heading(heading, &colors));
+        }
+        list = list.child(indicator_menu_row(
+            app,
+            index,
+            entry,
+            highlighted == Some(index),
+            theme,
+        ));
     }
     chrome_menu_surface(&colors, state.extent)
         .child(chrome_menu_search_header(state.input, theme, app, hint))
@@ -128,63 +128,6 @@ pub(super) fn indicator_dialog_content(
             colors.text_secondary,
             state.extent,
         ))
-}
-
-/// Tape-derived study panes that are currently hidden and match the search.
-fn order_flow_menu_studies(
-    app: &Entity<WorkspaceSurface>,
-    query: &str,
-    cx: &App,
-) -> Vec<OrderFlowMenuStudy> {
-    let surface = app.read(cx);
-    if !super::provider_trades_available(surface.provider) {
-        return Vec::new();
-    }
-    let Some(settings) = surface.chart_order_flow_settings(cx) else {
-        return Vec::new();
-    };
-    OrderFlowMenuStudy::ALL
-        .into_iter()
-        .filter(|study| !study.is_shown(settings))
-        .filter(|study| {
-            query.trim().is_empty() || study.label().to_ascii_lowercase().contains(query.trim())
-        })
-        .collect()
-}
-
-fn order_flow_study_rows(
-    app: &Entity<WorkspaceSurface>,
-    studies: &[OrderFlowMenuStudy],
-    theme: &AerisTheme,
-) -> Vec<AnyElement> {
-    studies
-        .iter()
-        .enumerate()
-        .map(|(index, &study)| {
-            let row_app = app.clone();
-            let add_app = app.clone();
-            MenuRow::search_result(("order_flow_study_row", index), study.label(), theme)
-                .on_click(move |_, window, cx| {
-                    if row_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {
-                        row_app.update(cx, |app, app_cx| {
-                            app.close_chrome_overlay(window, app_cx);
-                        });
-                    }
-                })
-                .trailing(
-                    compact_menu_add_button(("add_order_flow_study", index), theme).on_click(
-                        move |_, window, cx| {
-                            if add_app.update(cx, |app, cx| app.add_order_flow_study(study, cx)) {
-                                add_app.update(cx, |app, app_cx| {
-                                    app.close_chrome_overlay(window, app_cx);
-                                });
-                            }
-                        },
-                    ),
-                )
-                .into_any_element()
-        })
-        .collect()
 }
 
 pub(super) const fn native_indicator(kind: chart_chrome::IndicatorKind) -> ChartIndicator {

@@ -375,6 +375,7 @@ fn trusted_custom_study_restores_across_workspace_reopen_and_current_series_rebi
         .expect("custom package registry");
     let persisted = WorkspaceChartStudyState {
         line_width: 0,
+        output_colors: Vec::new(),
         local_id: 7,
         identifier: "example.workspace_reconnect".to_string(),
         implementation_revision: 1,
@@ -434,6 +435,7 @@ fn trusted_custom_study_restores_across_workspace_reopen_and_current_series_rebi
 fn missing_custom_package_does_not_starve_later_independent_study_restore() {
     let missing = WorkspaceChartStudyState {
         line_width: 0,
+        output_colors: Vec::new(),
         local_id: 1,
         identifier: "example.missing".to_string(),
         implementation_revision: 1,

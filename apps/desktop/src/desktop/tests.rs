@@ -3613,6 +3613,112 @@ fn chart_appearance_persists_theme_provenance_and_migrates_flattened_defaults() 
 }
 
 #[test]
+fn saved_crosshair_style_follows_the_chart_default_unless_the_user_chose_one() {
+    use super::workspace_surface::{persisted_chart_appearance, restored_chart_appearance};
+    use aeris_chart_integration::ChartAppearanceSettings;
+
+    let default_style = ChartAppearanceSettings::default().crosshair_style;
+    let persisted = persisted_chart_appearance(&ChartAppearanceSettings::default());
+    assert_eq!(persisted.crosshair_style_custom, Some(false));
+
+    // A layout saved before style provenance stored the former dashed default.
+    let mut legacy = persisted.clone();
+    legacy.crosshair_style = 2;
+    legacy.crosshair_style_custom = None;
+    let restored = restored_chart_appearance(&legacy).expect("legacy appearance");
+    assert_eq!(restored.crosshair_style, default_style);
+
+    // Any other legacy style was the user's pick.
+    legacy.crosshair_style = 3;
+    let restored = restored_chart_appearance(&legacy).expect("legacy pick");
+    assert_eq!(restored.crosshair_style, 3);
+
+    // With provenance, an explicit dashed pick survives.
+    let picked = ChartAppearanceSettings {
+        crosshair_style: 2,
+        ..ChartAppearanceSettings::default()
+    };
+    let persisted = persisted_chart_appearance(&picked);
+    assert_eq!(persisted.crosshair_style_custom, Some(true));
+    assert_eq!(
+        restored_chart_appearance(&persisted)
+            .expect("picked appearance")
+            .crosshair_style,
+        2
+    );
+}
+
+#[test]
+fn indicator_menu_keyboard_rows_skip_group_headings_across_both_groups() {
+    use super::workspace_surface::{
+        IndicatorMenuEntry, OrderFlowMenuStudy, indicator_menu_scroll_item,
+    };
+
+    let sma = &super::chart_chrome::INDICATOR_SPECS[0];
+    let ema = &super::chart_chrome::INDICATOR_SPECS[1];
+    let both = [
+        IndicatorMenuEntry::OrderFlow(OrderFlowMenuStudy::Delta),
+        IndicatorMenuEntry::OrderFlow(OrderFlowMenuStudy::BigTrades),
+        IndicatorMenuEntry::Indicator(sma),
+        IndicatorMenuEntry::Indicator(ema),
+    ];
+    // Children: "Order flow", Delta, Big trades, "Indicators", SMA, EMA.
+    assert_eq!(indicator_menu_scroll_item(&both, 0), Some(1));
+    assert_eq!(indicator_menu_scroll_item(&both, 1), Some(2));
+    assert_eq!(indicator_menu_scroll_item(&both, 2), Some(4));
+    assert_eq!(indicator_menu_scroll_item(&both, 3), Some(5));
+    assert_eq!(indicator_menu_scroll_item(&both, 4), None);
+
+    let natives_only = [
+        IndicatorMenuEntry::Indicator(sma),
+        IndicatorMenuEntry::Indicator(ema),
+    ];
+    assert_eq!(indicator_menu_scroll_item(&natives_only, 0), Some(1));
+    assert_eq!(indicator_menu_scroll_item(&natives_only, 1), Some(2));
+}
+
+#[test]
+fn study_line_colors_persist_only_user_picks_by_output_index() {
+    use super::StudyOutputColorDraft;
+    use super::workspace_surface::{persisted_output_colors, persisted_study_output_colors};
+    use aeris_contracts::WorkspaceChartStudyState;
+
+    let draft = |output_index: usize, color: Option<&str>| StudyOutputColorDraft {
+        output_index,
+        label: format!("EMA {output_index}"),
+        color: color.map(str::to_string),
+        default_color: "#2962ff".to_string(),
+    };
+
+    // Every line on the chart default stores nothing, so later engine defaults apply.
+    let defaults = [draft(0, None), draft(2, None)];
+    assert_eq!(persisted_output_colors(5, &defaults), Vec::<String>::new());
+
+    let picked = [
+        draft(0, None),
+        draft(2, Some("#ff6d00")),
+        draft(4, Some("#00bcd4")),
+    ];
+    let stored = persisted_output_colors(5, &picked);
+    assert_eq!(stored, ["", "", "#ff6d00", "", "#00bcd4"]);
+
+    let persisted = WorkspaceChartStudyState {
+        output_colors: stored,
+        ..WorkspaceChartStudyState::default()
+    };
+    assert_eq!(
+        persisted_study_output_colors(&persisted),
+        [
+            None,
+            None,
+            Some("#ff6d00".to_string()),
+            None,
+            Some("#00bcd4".to_string())
+        ]
+    );
+}
+
+#[test]
 fn saved_area_fill_follows_the_translucent_default_instead_of_a_pinned_fallback() {
     use super::workspace_surface::{persisted_chart_appearance, restored_chart_appearance};
     use aeris_chart_integration::{ChartAppearanceColor, ChartAppearanceSettings};

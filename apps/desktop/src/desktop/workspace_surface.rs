@@ -466,6 +466,24 @@ pub(super) fn persisted_chart_appearance(
         baseline_bottom_color: persisted_appearance_color(&appearance.baseline_bottom_color),
         background_color: persisted_appearance_color(&appearance.background_color),
         text_color: persisted_appearance_color(&appearance.text_color),
+        crosshair_style_custom: Some(
+            appearance.crosshair_style != ChartAppearanceSettings::default().crosshair_style,
+        ),
+    }
+}
+
+/// The dashed style Aeris Charts drew the crosshair with by default before it became solid.
+/// Layouts saved without style provenance stored it as a plain number.
+const LEGACY_DEFAULT_CROSSHAIR_STYLE: u8 = 2;
+
+/// A style the user chose survives; one that only recorded the chart default, including the
+/// former dashed default in a legacy layout, follows the current default.
+fn restored_crosshair_style(stored: u8, custom: Option<bool>) -> u8 {
+    let custom = custom.unwrap_or(stored != LEGACY_DEFAULT_CROSSHAIR_STYLE);
+    if custom {
+        stored
+    } else {
+        ChartAppearanceSettings::default().crosshair_style
     }
 }
 
@@ -474,7 +492,10 @@ pub(super) fn restored_chart_appearance(
 ) -> Option<ChartAppearanceSettings> {
     let grid_style = u8::try_from(appearance.grid_style).ok()?.min(4);
     let crosshair_width = u8::try_from(appearance.crosshair_width).ok()?.clamp(1, 4);
-    let crosshair_style = u8::try_from(appearance.crosshair_style).ok()?.min(4);
+    let crosshair_style = restored_crosshair_style(
+        u8::try_from(appearance.crosshair_style).ok()?.min(4),
+        appearance.crosshair_style_custom,
+    );
     let line_width = u8::try_from(appearance.line_width).ok()?.clamp(1, 4);
     let line_style = u8::try_from(appearance.line_style).ok()?.min(4);
     let series_color =
@@ -591,6 +612,38 @@ impl OrderFlowMenuStudy {
             Self::BigTrades => settings.big_trades.is_some(),
         }
     }
+}
+
+/// One addable row of the indicator menu. Rendering, arrow keys, Enter and scrolling all index
+/// the same list: hidden order-flow studies first, then the matching native indicators.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IndicatorMenuEntry {
+    OrderFlow(OrderFlowMenuStudy),
+    Indicator(&'static chart_chrome::IndicatorSpec),
+}
+
+impl IndicatorMenuEntry {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::OrderFlow(study) => study.label(),
+            Self::Indicator(spec) => spec.label,
+        }
+    }
+}
+
+/// Scroll-body child of a menu entry. Each non-empty group is preceded by its heading.
+pub(super) fn indicator_menu_scroll_item(
+    entries: &[IndicatorMenuEntry],
+    selection: usize,
+) -> Option<usize> {
+    let entry = entries.get(selection)?;
+    let order_flow_heading = usize::from(
+        entries
+            .first()
+            .is_some_and(|first| matches!(first, IndicatorMenuEntry::OrderFlow(_))),
+    );
+    let indicators_heading = usize::from(matches!(entry, IndicatorMenuEntry::Indicator(_)));
+    Some(selection + order_flow_heading + indicators_heading)
 }
 
 fn persisted_big_trades(settings: BigTradesSettings) -> WorkspaceBigTradesState {
@@ -1517,6 +1570,35 @@ fn persisted_study_line_width(persisted: &WorkspaceChartStudyState) -> u8 {
         .unwrap_or_else(|| default_study_line_width(&persisted.identifier))
 }
 
+/// Line colors a persisted study draws with by output index; `None` keeps the chart default.
+pub(super) fn persisted_study_output_colors(
+    persisted: &WorkspaceChartStudyState,
+) -> Vec<Option<String>> {
+    persisted
+        .output_colors
+        .iter()
+        .map(|color| (!color.is_empty()).then(|| color.clone()))
+        .collect()
+}
+
+/// The durable form of a dialog's colors: one entry per output, or none when every output
+/// keeps the chart default.
+pub(super) fn persisted_output_colors(
+    output_count: usize,
+    drafts: &[StudyOutputColorDraft],
+) -> Vec<String> {
+    if drafts.iter().all(|draft| draft.color.is_none()) {
+        return Vec::new();
+    }
+    let mut colors = vec![String::new(); output_count];
+    for draft in drafts {
+        if let (Some(slot), Some(color)) = (colors.get_mut(draft.output_index), &draft.color) {
+            slot.clone_from(color);
+        }
+    }
+    colors
+}
+
 /// Stroke width a study draws with until the user picks one. Exponential moving averages are
 /// one-pixel lines, matching Aeris Charts' own EMA defaults; other studies keep the chart
 /// default. Studies reach the chart as external outputs, so this host default is what applies.
@@ -1537,6 +1619,7 @@ fn legacy_runtime_study(
         legacy_runtime_study_contract(indicator)?;
     Some(WorkspaceChartStudyState {
         line_width: 0,
+        output_colors: Vec::new(),
         local_id,
         identifier: identifier.to_string(),
         implementation_revision,
@@ -2408,6 +2491,13 @@ impl WorkspaceSurface {
         }
     }
 
+    /// The indicator menu has no current item, so nothing is highlighted until the user types
+    /// or presses an arrow; that first arrow lands on the top row.
+    const fn indicator_menu_awaits_keyboard(&self) -> bool {
+        matches!(self.chrome_overlay, Some(ChromeOverlay::Indicator))
+            && !self.menu_state.chrome_list_keyboard
+    }
+
     fn scroll_chrome_selection_into_view(&self, cx: &App) {
         match self.chrome_overlay {
             Some(ChromeOverlay::Instrument) if !self.symbol_browser.results().is_empty() => {
@@ -2415,16 +2505,13 @@ impl WorkspaceSurface {
                     .instrument
                     .scroll_to_item(self.chrome_selection);
             }
-            Some(ChromeOverlay::Indicator)
-                if !chart_chrome::filter_indicator_specs(
-                    self.indicator_input.read(cx).value().as_ref(),
-                )
-                .is_empty() =>
-            {
-                // The group heading is the scroll body's first child.
-                self.scrolls
-                    .indicator
-                    .scroll_to_item(self.chrome_selection.saturating_add(1));
+            Some(ChromeOverlay::Indicator) => {
+                if let Some(item) = indicator_menu_scroll_item(
+                    &self.indicator_menu_entries(cx),
+                    self.chrome_selection,
+                ) {
+                    self.scrolls.indicator.scroll_to_item(item);
+                }
             }
             Some(ChromeOverlay::TimeZone) if !self.time_zone_matches(cx).is_empty() => {
                 self.scrolls.time_zone.scroll_to_item(self.chrome_selection);
@@ -2811,8 +2898,13 @@ impl WorkspaceSurface {
                     cx.notify();
                     return true;
                 }
+                let first_keyboard_step = self.indicator_menu_awaits_keyboard();
                 self.activate_chrome_list_keyboard();
-                self.chrome_selection = self.chrome_selection.saturating_sub(1);
+                self.chrome_selection = if first_keyboard_step {
+                    0
+                } else {
+                    self.chrome_selection.saturating_sub(1)
+                };
                 self.scroll_chrome_selection_into_view(cx);
                 cx.notify();
             }
@@ -2827,10 +2919,7 @@ impl WorkspaceSurface {
                 }
                 let count = match self.chrome_overlay {
                     Some(ChromeOverlay::Instrument) => self.instrument_entries(cx).len(),
-                    Some(ChromeOverlay::Indicator) => chart_chrome::filter_indicator_specs(
-                        self.indicator_input.read(cx).value().as_ref(),
-                    )
-                    .len(),
+                    Some(ChromeOverlay::Indicator) => self.indicator_menu_entries(cx).len(),
                     Some(ChromeOverlay::Timeframe) => self.timeframe_menu_keyboard_count(),
                     Some(ChromeOverlay::ChartType) => {
                         super::provider_chart_types(self.provider).len()
@@ -2840,8 +2929,13 @@ impl WorkspaceSurface {
                     // The Accounts panel is a form, not a keyboard-navigated list.
                     Some(ChromeOverlay::Accounts) | None => 0,
                 };
+                let first_keyboard_step = self.indicator_menu_awaits_keyboard();
                 self.activate_chrome_list_keyboard();
-                self.chrome_selection = (self.chrome_selection + 1).min(count.saturating_sub(1));
+                self.chrome_selection = if first_keyboard_step {
+                    0
+                } else {
+                    (self.chrome_selection + 1).min(count.saturating_sub(1))
+                };
                 self.scroll_chrome_selection_into_view(cx);
                 cx.notify();
             }
@@ -3822,8 +3916,16 @@ impl WorkspaceSurface {
                 || default_study_line_width(&snapshot.study_identifier),
                 |state| persisted_study_line_width(&state.persisted),
             );
+        let output_colors = self
+            .studies
+            .active
+            .iter()
+            .find(|state| state.study_id == snapshot.study_id)
+            .map(|state| persisted_study_output_colors(&state.persisted))
+            .unwrap_or_default();
         chart.update(cx, |chart, chart_cx| {
             chart.set_study_line_width(snapshot.study_id.get(), line_width);
+            chart.set_study_output_colors(snapshot.study_id.get(), &output_colors);
             match chart.install_study_output(
                 snapshot.study_id.get(),
                 snapshot.output_id.output_index,
@@ -4524,6 +4626,45 @@ impl WorkspaceSurface {
         }
         self.chart_persistence_dirty = true;
         cx.notify();
+    }
+
+    /// The indicator menu's addable rows for the current search, in display order.
+    pub(super) fn indicator_menu_entries(&self, cx: &App) -> Vec<IndicatorMenuEntry> {
+        let query = self.indicator_input.read(cx).value().to_string();
+        let normalized_query = query.trim().to_ascii_lowercase();
+        let order_flow = super::provider_trades_available(self.provider)
+            .then(|| self.chart_order_flow_settings(cx))
+            .flatten()
+            .into_iter()
+            .flat_map(|settings| {
+                OrderFlowMenuStudy::ALL
+                    .into_iter()
+                    .filter(move |study| !study.is_shown(settings))
+            })
+            .filter(|study| {
+                study
+                    .label()
+                    .to_ascii_lowercase()
+                    .contains(&normalized_query)
+            })
+            .map(IndicatorMenuEntry::OrderFlow);
+        let indicators = chart_chrome::filter_indicator_specs(&query)
+            .into_iter()
+            .map(IndicatorMenuEntry::Indicator);
+        order_flow.chain(indicators).collect()
+    }
+
+    pub(super) fn add_indicator_menu_entry(
+        &mut self,
+        entry: IndicatorMenuEntry,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match entry {
+            IndicatorMenuEntry::OrderFlow(study) => self.add_order_flow_study(study, cx),
+            IndicatorMenuEntry::Indicator(spec) => {
+                self.add_indicator(super::native_indicator(spec.kind), cx)
+            }
+        }
     }
 
     /// Adds a tape-derived order-flow indicator through the order-flow settings owner.
@@ -5570,6 +5711,26 @@ impl WorkspaceSurface {
             }
             draft_values.insert(spec.identifier.clone(), value);
         }
+        let saved_colors = persisted_study_output_colors(&active.persisted);
+        let output_colors = self.chart.as_ref().map_or_else(Vec::new, |chart| {
+            let chart = chart.read(cx);
+            registration
+                .definition
+                .outputs
+                .iter()
+                .enumerate()
+                .filter(|(_, output)| matches!(output.plot, StudyPlotKind::Line))
+                .filter_map(|(output_index, output)| {
+                    Some(StudyOutputColorDraft {
+                        output_index,
+                        label: output.title.clone(),
+                        color: saved_colors.get(output_index).cloned().flatten(),
+                        default_color: chart
+                            .study_output_default_color(study_id.get(), output_index)?,
+                    })
+                })
+                .collect()
+        });
         self.open_indicator_settings_dialog(
             IndicatorSettingsDialog::Study(StudySettingsDialogState {
                 study_id,
@@ -5577,6 +5738,8 @@ impl WorkspaceSurface {
                 specs: registration.definition.settings,
                 draft_values,
                 line_width: persisted_study_line_width(&active.persisted),
+                output_colors,
+                color_picker: None,
                 inputs,
                 _subscriptions: subscriptions,
                 menu: None,
@@ -5659,6 +5822,9 @@ impl WorkspaceSurface {
         if let Some(dialog) = self.volume_dialog_mut() {
             dialog.color_picker = None;
         }
+        if let Some(dialog) = self.study_settings_dialog_mut() {
+            dialog.color_picker = None;
+        }
         if let Some(open) = self.indicator_settings_menu_mut() {
             *open = (open.as_deref() != Some(menu)).then(|| menu.to_string());
             cx.notify();
@@ -5683,11 +5849,83 @@ impl WorkspaceSurface {
         }
     }
 
-    /// Applies a study's stroke width to the chart and its durable state.
-    fn apply_study_line_width(
+    pub(super) fn toggle_study_dialog_color_picker(
+        &mut self,
+        output_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.study_settings_dialog_mut() else {
+            return;
+        };
+        dialog.menu = None;
+        if dialog
+            .color_picker
+            .as_ref()
+            .is_some_and(|picker| picker.target == output_index)
+        {
+            dialog.color_picker = None;
+        } else if let Some(draft) = dialog
+            .output_colors
+            .iter()
+            .find(|draft| draft.output_index == output_index)
+        {
+            let current = draft.effective_color().to_ascii_uppercase();
+            let input = cx.new(|input_cx| InputState::new(window, input_cx));
+            input.update(cx, |input, input_cx| {
+                input.set_value(current, window, input_cx);
+            });
+            dialog.color_picker = Some(DialogColorPickerState {
+                target: output_index,
+                input,
+                error: None,
+            });
+        }
+        cx.notify();
+    }
+
+    pub(super) fn close_study_dialog_color_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.study_settings_dialog_mut()
+            && dialog.color_picker.take().is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn set_study_dialog_color(
+        &mut self,
+        output_index: usize,
+        color: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.study_settings_dialog_mut() else {
+            return;
+        };
+        let normalized = normalize_hex_color(color);
+        if let Some(picker) = &mut dialog.color_picker
+            && picker.target == output_index
+        {
+            picker.error = normalized
+                .is_none()
+                .then(|| "Enter a hex color such as #2962FF or #2962FF80.".to_string());
+        }
+        if let Some(color) = normalized
+            && let Some(draft) = dialog
+                .output_colors
+                .iter_mut()
+                .find(|draft| draft.output_index == output_index)
+        {
+            draft.color = (!color.eq_ignore_ascii_case(&draft.default_color)).then_some(color);
+        }
+        cx.notify();
+    }
+
+    /// Applies a study's stroke width and line colors to the chart and its durable state.
+    fn apply_study_style(
         &mut self,
         study_id: StudyInstanceId,
         width: u8,
+        output_colors: &[String],
         cx: &mut Context<Self>,
     ) {
         if let Some(active) = self
@@ -5695,14 +5933,21 @@ impl WorkspaceSurface {
             .active
             .iter_mut()
             .find(|state| state.study_id == study_id)
-            && active.persisted.line_width != u32::from(width)
+            && (active.persisted.line_width != u32::from(width)
+                || active.persisted.output_colors != output_colors)
         {
             active.persisted.line_width = u32::from(width);
+            active.persisted.output_colors = output_colors.to_vec();
             self.chart_persistence_dirty = true;
         }
+        let colors = output_colors
+            .iter()
+            .map(|color| (!color.is_empty()).then(|| color.clone()))
+            .collect::<Vec<_>>();
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
-                if chart.set_study_line_width(study_id.get(), width) {
+                let width_changed = chart.set_study_line_width(study_id.get(), width);
+                if chart.set_study_output_colors(study_id.get(), &colors) || width_changed {
                     chart_cx.notify();
                 }
             });
@@ -5813,6 +6058,10 @@ impl WorkspaceSurface {
             dialog.draft_values.insert(spec.identifier.clone(), value);
         }
         dialog.line_width = default_line_width;
+        for draft in &mut dialog.output_colors {
+            draft.color = None;
+        }
+        dialog.color_picker = None;
         dialog.message = None;
         cx.notify();
     }
@@ -5848,10 +6097,15 @@ impl WorkspaceSurface {
             let message = "Study is no longer active".to_string();
             return self.show_study_settings_message(Some(message), cx);
         };
-        self.apply_study_line_width(study_id, line_width, cx);
+        let output_colors = persisted_output_colors(
+            active.persisted.output_identifiers.len(),
+            &dialog.output_colors,
+        );
+        self.apply_study_style(study_id, line_width, &output_colors, cx);
         let active_settings = active.persisted.settings.clone();
         let mut replacement = active.persisted;
         replacement.line_width = u32::from(line_width);
+        replacement.output_colors = output_colors;
         replacement.settings = values
             .iter()
             .map(|(identifier, value)| WorkspaceStudySettingState {
@@ -6159,7 +6413,7 @@ impl WorkspaceSurface {
             input.update(cx, |input, input_cx| {
                 input.set_value(current.to_ascii_uppercase(), window, input_cx);
             });
-            dialog.color_picker = Some(VolumeColorPickerState {
+            dialog.color_picker = Some(DialogColorPickerState {
                 target,
                 input,
                 error: None,

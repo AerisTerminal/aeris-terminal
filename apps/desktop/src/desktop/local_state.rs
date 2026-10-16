@@ -522,6 +522,9 @@ fn sanitize_studies(studies: Vec<WorkspaceChartStudyState>) -> Vec<WorkspaceChar
         study.line_width = study
             .line_width
             .min(u32::from(aeris_chart_integration::MAXIMUM_STUDY_LINE_WIDTH));
+        if !valid_study_output_colors(&study) {
+            study.output_colors.clear();
+        }
         if !valid_study_header(&study, last_local_id)
             || !valid_study_settings(&study)
             || !valid_study_outputs(&study)
@@ -585,6 +588,15 @@ fn valid_study_outputs(study: &WorkspaceChartStudyState) -> bool {
             && identifier.len() <= aeris_market_runtime::study::MAXIMUM_STUDY_IDENTIFIER_BYTES
             && identifiers.insert(identifier.as_str())
     })
+}
+
+/// Presentation only: a malformed list falls back to the chart's colors instead of dropping
+/// the study.
+fn valid_study_output_colors(study: &WorkspaceChartStudyState) -> bool {
+    study.output_colors.len() <= study.output_identifiers.len()
+        && study.output_colors.iter().all(|color| {
+            color.len() <= MAXIMUM_CHART_COLOR_BYTES && !color.chars().any(char::is_control)
+        })
 }
 
 fn valid_study_dependencies(
@@ -696,6 +708,7 @@ mod tests {
     fn persisted_sma_study(local_id: u64, period: i64, visible: bool) -> WorkspaceChartStudyState {
         WorkspaceChartStudyState {
             line_width: 0,
+            output_colors: Vec::new(),
             local_id,
             identifier: aeris_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
             implementation_revision: aeris_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
@@ -716,6 +729,7 @@ mod tests {
     fn persisted_bollinger_study(local_id: u64, visible: bool) -> WorkspaceChartStudyState {
         WorkspaceChartStudyState {
             line_width: 0,
+            output_colors: Vec::new(),
             local_id,
             identifier: aeris_study_sdk::BUILTIN_BOLLINGER_IDENTIFIER.to_string(),
             implementation_revision: aeris_study_sdk::BUILTIN_BOLLINGER_IMPLEMENTATION_REVISION,
@@ -811,6 +825,7 @@ mod tests {
                 background_color: "#0b1220".to_string(),
                 text_color: "#e2e8f0".to_string(),
                 area_bottom_color: "#2563eb00".to_string(),
+                crosshair_style_custom: Some(true),
             }),
             order_flow: Some(WorkspaceOrderFlowSettingsState {
                 display_mode: 2,
@@ -1253,6 +1268,7 @@ mod tests {
             .get_or_insert_with(WorkspaceChartState::default);
         let custom = WorkspaceChartStudyState {
             line_width: 0,
+            output_colors: Vec::new(),
             local_id: 41,
             identifier: "example.workspace_reconnect".to_string(),
             implementation_revision: 3,
@@ -1295,6 +1311,7 @@ mod tests {
             persisted_sma_study(1, 20, true),
             WorkspaceChartStudyState {
                 line_width: 0,
+                output_colors: Vec::new(),
                 local_id: 2,
                 identifier: aeris_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
                 implementation_revision: aeris_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
@@ -1313,6 +1330,7 @@ mod tests {
             },
             WorkspaceChartStudyState {
                 line_width: 0,
+                output_colors: Vec::new(),
                 local_id: 3,
                 identifier: aeris_study_sdk::BUILTIN_SMA_IDENTIFIER.to_string(),
                 implementation_revision: aeris_study_sdk::BUILTIN_SMA_IMPLEMENTATION_REVISION,
@@ -1340,6 +1358,32 @@ mod tests {
         assert_eq!(studies.len(), 2);
         assert_eq!(studies[0].local_id, 1);
         assert_eq!(studies[1].local_id, 2);
+    }
+
+    #[test]
+    fn sanitizer_keeps_study_colors_and_clears_a_malformed_list_without_dropping_the_study() {
+        let mut workspace = default_workspace();
+        let chart = workspace.workspace_tabs[0].panes[0]
+            .chart
+            .get_or_insert_with(WorkspaceChartState::default);
+        let mut colored = persisted_sma_study(1, 20, true);
+        colored.output_colors = vec!["#2962ff".to_string()];
+        let mut overlong = persisted_sma_study(2, 50, true);
+        overlong.output_colors = vec!["#2962ff".to_string(), "#ff6d00".to_string()];
+        let mut control = persisted_sma_study(3, 100, true);
+        control.output_colors = vec!["#29\n62ff".to_string()];
+        chart.studies = vec![colored.clone(), overlong, control];
+
+        let sanitized = sanitize_workspace(workspace);
+        let studies = &sanitized.workspace_tabs[0].panes[0]
+            .chart
+            .as_ref()
+            .expect("chart remains")
+            .studies;
+        assert_eq!(studies.len(), 3);
+        assert_eq!(studies[0], colored);
+        assert_eq!(studies[1].output_colors, Vec::<String>::new());
+        assert_eq!(studies[2].output_colors, Vec::<String>::new());
     }
 
     #[test]
@@ -1374,6 +1418,7 @@ mod tests {
             background_color: "theme".to_string(),
             text_color: "theme".to_string(),
             area_bottom_color: "theme".to_string(),
+            crosshair_style_custom: Some(true),
         });
 
         let sanitized = sanitize_workspace(workspace);

@@ -4112,7 +4112,8 @@ fn indicator_metadata_matches_the_legacy_picker_copy() {
         "Volume Profile (Visible Range)"
     );
     assert_eq!(ChartIndicator::Vwap.parameters(), "Session anchored");
-    assert_eq!(ChartIndicator::Sma.label(), "Moving Average");
+    assert_eq!(ChartIndicator::Sma.label(), "Simple Moving Average");
+    assert_eq!(ChartIndicator::Ema.label(), "Exponential Moving Average");
     assert_eq!(ChartIndicator::Sma.parameters(), "Period 20");
     assert_eq!(
         ChartIndicator::EmaRibbon.parameters(),
@@ -5385,6 +5386,60 @@ fn appearance_reset_keeps_host_study_line_widths() {
         series_entry(&chart, series_id).line_width,
         Some(1.0),
         "resetting chart styling must not revert a study to the engine's default stroke"
+    );
+}
+
+#[test]
+fn study_output_colors_apply_to_later_outputs_and_return_to_the_engine_default() {
+    let mut chart = AerisChartView::empty();
+    let timestamps = [60_i64 * 1_000_000_000, 120_i64 * 1_000_000_000];
+    let values = [Some(10.0), Some(11.0)];
+    let descriptor = ChartStudyOutputDescriptor {
+        title: "EMA Ribbon",
+        legend_label: None,
+        plot: ChartStudyPlotKind::Line,
+        pane: ChartStudyPaneTarget::Price,
+        scale: ChartStudyScaleTarget::Primary,
+        settings_available: true,
+        threshold_region: None,
+        point_style: ChartStudyPointStyle::Uniform,
+        input_requirements: ChartStudyInputRequirements::BARS,
+    };
+    chart.set_study_line_width(9, 1);
+    chart.set_study_output_colors(9, &[None, Some("#ff00ff".to_string())]);
+    for output_index in 0..2 {
+        assert_eq!(
+            chart.install_study_output(9, output_index, descriptor, 1, &timestamps, &values),
+            Ok(true)
+        );
+    }
+    let default_first = chart
+        .study_output_default_color(9, 0)
+        .expect("engine default color");
+    assert_eq!(chart.study_output_color(9, 0), Some(default_first.clone()));
+    assert_eq!(chart.study_output_color(9, 1).as_deref(), Some("#ff00ff"));
+    let second = study_output(&chart, 9, 1).series_id;
+    assert_eq!(series_entry(&chart, second).line_width, Some(1.0));
+
+    chart.reset_appearance_settings();
+    assert_eq!(
+        chart.study_output_color(9, 1).as_deref(),
+        Some("#ff00ff"),
+        "resetting chart styling keeps a study's chosen colors"
+    );
+
+    assert!(chart.set_study_output_colors(9, &[Some("#123456".to_string()), None]));
+    assert_eq!(chart.study_output_color(9, 0).as_deref(), Some("#123456"));
+    assert_eq!(
+        chart.study_output_color(9, 1),
+        chart.study_output_default_color(9, 1),
+        "clearing a color restores the engine default"
+    );
+    chart.set_study_output_colors(9, &[Some("not a color".to_string())]);
+    assert_eq!(
+        chart.study_output_color(9, 0),
+        Some(default_first),
+        "an unparsable color keeps the default"
     );
 }
 

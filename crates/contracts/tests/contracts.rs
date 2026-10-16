@@ -95,6 +95,7 @@ fn workspace_tab() -> WorkspaceTabState {
                     visible: true,
                     output_identifiers: vec!["sma".into()],
                     line_width: 3,
+                    output_colors: vec!["#2962ff".into()],
                 }],
                 ..WorkspaceChartState::default()
             }),
