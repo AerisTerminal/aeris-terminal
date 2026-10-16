@@ -8,6 +8,14 @@ use super::{
 };
 use aeris_trading::OrderEventReason;
 
+const LOAD_ORDERS_SQL: &str = "SELECT id, client_order_id, account_id, instrument_id, side,
+    order_type, time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
+    stop_units, stop_scale, status, submitted_unix_nanos, provenance_json,
+    filled_units, filled_scale, terminal_unix_nanos, revision,
+    accepted_unix_nanos, updated_unix_nanos, eligible_after_unix_nanos,
+    triggered_unix_nanos, expires_at_unix_nanos
+    FROM orders ORDER BY submitted_unix_nanos";
+
 impl TradingStore {
     /// All the facts produced by one simulated order command are committed together.
     pub(crate) fn commit_order_step(&mut self, changes: &super::OrderStep) -> Result<(), String> {
@@ -26,7 +34,8 @@ impl TradingStore {
                     limit_units = ?3, limit_scale = ?4, stop_units = ?5,
                     stop_scale = ?6, provenance_json = ?7, terminal_unix_nanos = ?8,
                     revision = ?9, updated_unix_nanos = ?10,
-                    eligible_after_unix_nanos = ?11 WHERE id = ?12",
+                    eligible_after_unix_nanos = ?11, triggered_unix_nanos = ?12,
+                    expires_at_unix_nanos = ?13 WHERE id = ?14",
                 params![
                     order.status.as_str(),
                     order.time_in_force.as_str(),
@@ -39,6 +48,8 @@ impl TradingStore {
                     order.revision,
                     order.updated_unix_nanos,
                     order.eligible_after_unix_nanos,
+                    order.triggered_unix_nanos,
+                    order.expires_at_unix_nanos,
                     order.id.as_str(),
                 ],
             )
@@ -147,7 +158,8 @@ impl TradingStore {
              limit_scale = ?4, stop_units = ?5, stop_scale = ?6, provenance_json = ?7,
              quantity_units = ?8, quantity_scale = ?9, filled_units = ?10, filled_scale = ?11,
              revision = ?12, updated_unix_nanos = ?13, terminal_unix_nanos = ?14,
-             eligible_after_unix_nanos = ?15 WHERE id = ?16",
+             eligible_after_unix_nanos = ?15, triggered_unix_nanos = ?16,
+             expires_at_unix_nanos = ?17 WHERE id = ?18",
                 params![
                     order.status.as_str(),
                     order.time_in_force.as_str(),
@@ -164,6 +176,8 @@ impl TradingStore {
                     order.updated_unix_nanos,
                     order.terminal_unix_nanos,
                     order.eligible_after_unix_nanos,
+                    order.triggered_unix_nanos,
+                    order.expires_at_unix_nanos,
                     order.id.as_str(),
                 ],
             )
@@ -201,8 +215,9 @@ impl TradingStore {
                 "UPDATE orders SET time_in_force = ?1, limit_units = ?2, limit_scale = ?3,
                     stop_units = ?4, stop_scale = ?5, provenance_json = ?6,
                     quantity_units = ?7, quantity_scale = ?8, revision = ?9,
-                    updated_unix_nanos = ?10, eligible_after_unix_nanos = ?11
-                 WHERE id = ?12 AND status IN ('working', 'partially_filled')",
+                    updated_unix_nanos = ?10, eligible_after_unix_nanos = ?11,
+                    triggered_unix_nanos = ?12, expires_at_unix_nanos = ?13
+                 WHERE id = ?14 AND status IN ('working', 'partially_filled')",
                 params![
                     order.time_in_force.as_str(),
                     order.limit_price.map(FixedPoint::units),
@@ -215,6 +230,8 @@ impl TradingStore {
                     order.revision,
                     order.updated_unix_nanos,
                     order.eligible_after_unix_nanos,
+                    order.triggered_unix_nanos,
+                    order.expires_at_unix_nanos,
                     order.id.as_str(),
                 ],
             )
@@ -292,14 +309,7 @@ impl TradingStore {
         let mut output = BTreeMap::new();
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT id, client_order_id, account_id, instrument_id, side, order_type,
-                    time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
-                    stop_units, stop_scale, status, submitted_unix_nanos, provenance_json,
-                    filled_units, filled_scale, terminal_unix_nanos, revision,
-                    accepted_unix_nanos, updated_unix_nanos, eligible_after_unix_nanos
-             FROM orders ORDER BY submitted_unix_nanos",
-            )
+            .prepare(LOAD_ORDERS_SQL)
             .map_err(database_error)?;
         let rows = statement
             .query_map([], |row| {
@@ -327,6 +337,8 @@ impl TradingStore {
                     row.get::<_, Option<i64>>(20)?,
                     row.get::<_, Option<i64>>(21)?,
                     row.get::<_, Option<i64>>(22)?,
+                    row.get::<_, Option<i64>>(23)?,
+                    row.get::<_, Option<i64>>(24)?,
                 ))
             })
             .map_err(database_error)?;
@@ -355,6 +367,8 @@ impl TradingStore {
                 accepted_unix_nanos,
                 updated_unix_nanos,
                 eligible_after_unix_nanos,
+                triggered_unix_nanos,
+                expires_at_unix_nanos,
             ) = row.map_err(database_error)?;
             let id = OrderId::try_new(id).map_err(|error| error.to_string())?;
             let order = Order {
@@ -381,6 +395,8 @@ impl TradingStore {
                     .or(accepted_unix_nanos)
                     .unwrap_or(submitted),
                 eligible_after_unix_nanos: eligible_after_unix_nanos.unwrap_or(submitted),
+                triggered_unix_nanos,
+                expires_at_unix_nanos,
                 terminal_unix_nanos,
                 provenance: decode_provenance(&provenance)?,
             };
@@ -468,9 +484,9 @@ pub(super) fn insert_order_row(transaction: &Transaction<'_>, order: &Order) -> 
             time_in_force, quantity_units, quantity_scale, limit_units, limit_scale, stop_units,
             stop_scale, status, submitted_unix_nanos, provenance_json, filled_units, filled_scale,
             terminal_unix_nanos, revision, accepted_unix_nanos, updated_unix_nanos,
-            eligible_after_unix_nanos)
+            eligible_after_unix_nanos, triggered_unix_nanos, expires_at_unix_nanos)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 order.id.as_str(),
                 order.client_order_id.as_str(),
@@ -495,6 +511,8 @@ pub(super) fn insert_order_row(transaction: &Transaction<'_>, order: &Order) -> 
                 order.accepted_unix_nanos,
                 order.updated_unix_nanos,
                 order.eligible_after_unix_nanos,
+                order.triggered_unix_nanos,
+                order.expires_at_unix_nanos,
             ],
         )
         .map_err(database_error)?;

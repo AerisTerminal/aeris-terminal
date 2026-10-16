@@ -877,6 +877,25 @@ mod tests {
         assert_eq!(order.accepted_unix_nanos, 123);
         assert_eq!(order.updated_unix_nanos, 123);
         assert_eq!(order.eligible_after_unix_nanos, 123);
+        assert_eq!(order.triggered_unix_nanos, None);
+        assert_eq!(order.expires_at_unix_nanos, None);
+        let mut with_deadlines = order.clone();
+        with_deadlines.id = OrderId::try_new("with-deadlines").expect("id");
+        with_deadlines.client_order_id = ClientOrderId::try_new("deadline-client").expect("client");
+        with_deadlines.triggered_unix_nanos = Some(200);
+        with_deadlines.expires_at_unix_nanos = Some(300);
+        let tx = store
+            .connection
+            .unchecked_transaction()
+            .expect("transaction");
+        orders::insert_order_row(&tx, &with_deadlines).expect("insert lifecycle fields");
+        tx.commit().expect("commit");
+        let restored = store.load_orders().expect("read orders");
+        assert_eq!(
+            restored.get(&with_deadlines.id),
+            Some(&with_deadlines),
+            "both optional lifecycle columns survive the V22 store round trip"
+        );
     }
 
     #[test]

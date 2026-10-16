@@ -3821,6 +3821,8 @@ fn working_orders_are_drawn_on_the_row_side_their_click_created() {
                 accepted_unix_nanos: 1,
                 updated_unix_nanos: 1,
                 eligible_after_unix_nanos: 1,
+                triggered_unix_nanos: None,
+                expires_at_unix_nanos: None,
                 terminal_unix_nanos: None,
                 provenance: TradingProvenance {
                     venue_id: "aeris-sim".to_string(),
@@ -4179,6 +4181,8 @@ fn watchlist_activity_covers_open_orders_and_positions_of_the_selected_account_o
         accepted_unix_nanos: 1,
         updated_unix_nanos: 1,
         eligible_after_unix_nanos: 1,
+        triggered_unix_nanos: None,
+        expires_at_unix_nanos: None,
         terminal_unix_nanos: None,
         provenance: TradingProvenance {
             venue_id: "aeris-sim".to_string(),

@@ -108,8 +108,9 @@ impl TradingStore {
             .execute(
                 "UPDATE orders SET status = ?1, quantity_units = ?2, quantity_scale = ?3,
                     filled_units = ?4, filled_scale = ?5, provenance_json = ?6,
-                    revision = ?7, updated_unix_nanos = ?8, terminal_unix_nanos = ?9
-                    WHERE id = ?10",
+                    revision = ?7, updated_unix_nanos = ?8, terminal_unix_nanos = ?9,
+                    triggered_unix_nanos = ?10, expires_at_unix_nanos = ?11
+                    WHERE id = ?12",
                 params![
                     order.status.as_str(),
                     order.quantity.units(),
@@ -120,6 +121,8 @@ impl TradingStore {
                     order.revision,
                     order.updated_unix_nanos,
                     order.terminal_unix_nanos,
+                    order.triggered_unix_nanos,
+                    order.expires_at_unix_nanos,
                     order.id.as_str(),
                 ],
             )
@@ -190,8 +193,9 @@ impl TradingStore {
             .execute(
                 "UPDATE orders SET status = ?1, filled_units = ?2,
                     filled_scale = ?3, revision = ?4, updated_unix_nanos = ?5,
-                    terminal_unix_nanos = ?6
-                 WHERE id = ?7 AND status IN ('working', 'partially_filled')",
+                    terminal_unix_nanos = ?6, triggered_unix_nanos = ?7,
+                    expires_at_unix_nanos = ?8
+                 WHERE id = ?9 AND status IN ('working', 'partially_filled')",
                 params![
                     order.status.as_str(),
                     order.filled_quantity.units(),
@@ -199,6 +203,8 @@ impl TradingStore {
                     order.revision,
                     order.updated_unix_nanos,
                     order.terminal_unix_nanos,
+                    order.triggered_unix_nanos,
+                    order.expires_at_unix_nanos,
                     order.id.as_str(),
                 ],
             )

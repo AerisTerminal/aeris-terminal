@@ -415,6 +415,8 @@ fn flatten_order(
         revision: 0,
         accepted_unix_nanos: 0,
         eligible_after_unix_nanos: 0,
+        triggered_unix_nanos: None,
+        expires_at_unix_nanos: None,
         updated_unix_nanos: 0,
         terminal_unix_nanos: None,
         provenance: observation.provenance.clone(),

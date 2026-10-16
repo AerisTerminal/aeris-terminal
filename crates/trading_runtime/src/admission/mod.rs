@@ -492,6 +492,8 @@ impl TradingCore {
             accepted_unix_nanos: 0,
             updated_unix_nanos: 0,
             eligible_after_unix_nanos: 0,
+            triggered_unix_nanos: None,
+            expires_at_unix_nanos: None,
             terminal_unix_nanos: None,
             provenance: command.provenance.clone(),
         };

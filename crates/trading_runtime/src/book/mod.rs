@@ -200,6 +200,8 @@ mod tests {
             revision: 1,
             accepted_unix_nanos: 1,
             eligible_after_unix_nanos: 1,
+            triggered_unix_nanos: None,
+            expires_at_unix_nanos: None,
             updated_unix_nanos: 1,
             terminal_unix_nanos: None,
             provenance: TradingProvenance {

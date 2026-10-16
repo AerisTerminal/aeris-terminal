@@ -479,6 +479,10 @@ pub struct Order {
     pub updated_unix_nanos: i64,
     /// Latest owner time before which a resting order cannot consume a quote.
     pub eligible_after_unix_nanos: i64,
+    /// First owner-observed trigger time, if this stop has triggered.
+    pub triggered_unix_nanos: Option<i64>,
+    /// Fixed DAY expiry deadline; not the time an expiry was processed.
+    pub expires_at_unix_nanos: Option<i64>,
     /// Owner-command time of the final transition, if known.
     pub terminal_unix_nanos: Option<i64>,
     pub provenance: TradingProvenance,
@@ -530,7 +534,10 @@ impl Order {
         if self.revision == 0 {
             return Err(TradingValidationError::ZeroSequence);
         }
-        if self.terminal_unix_nanos.is_some_and(|time| time <= 0) {
+        if self.terminal_unix_nanos.is_some_and(|time| time <= 0)
+            || self.triggered_unix_nanos.is_some_and(|time| time <= 0)
+            || self.expires_at_unix_nanos.is_some_and(|time| time <= 0)
+        {
             return Err(TradingValidationError::InvalidTimestamp);
         }
         self.provenance.validate()?;
@@ -972,6 +979,8 @@ mod tests {
             revision: 1,
             accepted_unix_nanos: 1,
             eligible_after_unix_nanos: 1,
+            triggered_unix_nanos: None,
+            expires_at_unix_nanos: None,
             updated_unix_nanos: 1,
             terminal_unix_nanos: None,
             provenance: TradingProvenance {
