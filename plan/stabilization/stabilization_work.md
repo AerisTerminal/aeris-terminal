@@ -540,7 +540,7 @@ Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VA
 
 ### M5 trading engine
 
-Status: in progress; M5.1 is complete, M5.2 price-grid part 1 is underway, and M5.2-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
+Status: in progress; M5.1 is complete, M5.2 parts 1-3 are committed and the remaining M5.2 work and M5.3-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
 
 - [x] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -822,6 +822,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.2 part 1 feat(trading): enforce shared price grids on order placement - exact fixed/significant-figure grid checks on both routes and a typed OffGrid rejection; full validator remains for later parts.
 - 2026-10-17 M5.2 part 2 feat(trading): reject wrong-side stop triggers - shared strict bid/ask stop-side rule on owner Live quotes with typed rejection; unified admission remains open.
 - 2026-10-17 M5.2 part 3 feat(trading): reject stop IOC and FOK on both routes - shared TIF rule and typed refusal before any order or broker request; full admission remains open.
+- 2026-10-17 M5.2 part 3 docs(plan): correct the M5 milestone status line after the gated admission slices - M5.2 parts 1-3 are committed, later items and real-path verification remain.
 
 ## 7. Known gaps / deferred
 
