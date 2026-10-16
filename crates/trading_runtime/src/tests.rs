@@ -76,6 +76,26 @@ mod foundation;
 mod market_feed;
 
 #[test]
+fn simulated_currency_mismatch_is_typed_before_an_order_fact() {
+    let directory = TestDirectory::new("currency-admission");
+    let service = start_service(&directory);
+    let mut instrument = instrument();
+    instrument.contract.currency = "EUR".into();
+    service.register_instrument(instrument).expect("instrument");
+    let mut request = market_order("currency-mismatch", OrderSide::Buy, 1, 1_000);
+    request.order_type = OrderType::Limit;
+    request.time_in_force = TimeInForce::GoodTillCancelled;
+    request.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("price"));
+    let before = service.snapshot().expect("before");
+    assert_eq!(
+        service.place_order(request).expect_err("currency mismatch"),
+        aeris_trading::RejectReason::CurrencyMismatch.to_string()
+    );
+    assert_eq!(service.snapshot().expect("unchanged"), before);
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn unknown_grid_order_is_accepted_with_a_persisted_warning() {
     let directory = TestDirectory::new("unknown-grid-warning");
     let service = start_service(&directory);

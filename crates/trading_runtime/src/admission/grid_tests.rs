@@ -24,6 +24,23 @@ fn unknown_grid_admission_attaches_typed_warning() {
 }
 
 #[test]
+fn practice_currency_is_checked_in_shared_admission_broker_is_exempt() {
+    let instrument = crate::tests::instrument();
+    assert_eq!(
+        validate_currency(&instrument, "EUR", VenueRoute::Simulated),
+        Err(RejectReason::CurrencyMismatch)
+    );
+    assert_eq!(
+        validate_currency(&instrument, "EUR", VenueRoute::CtraderDemo),
+        Ok(())
+    );
+    assert_eq!(
+        validate_currency(&instrument, "USD", VenueRoute::Simulated),
+        Ok(())
+    );
+}
+
+#[test]
 fn resting_at_resolves_on_touch_for_every_side() {
     let price = |units| FixedPoint::try_new(units, 2).expect("price");
     for (side, units, expected) in [

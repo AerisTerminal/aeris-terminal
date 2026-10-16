@@ -94,6 +94,18 @@ pub(crate) fn price_grid_warning(instrument: &TradingInstrument) -> Option<RiskW
         .then_some(RiskWarning::UnverifiedPriceGrid)
 }
 
+pub(crate) fn validate_currency(
+    instrument: &TradingInstrument,
+    account_currency: &str,
+    route: VenueRoute,
+) -> Result<(), RejectReason> {
+    if route == VenueRoute::Simulated && instrument.contract.currency != account_currency {
+        Err(RejectReason::CurrencyMismatch)
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn validate_trigger_side(
     command: &PlaceOrder,
     bid: FixedPoint,
@@ -251,9 +263,16 @@ impl TradingCore {
         )?;
         BuyingPower::check(command);
         validate_owner_trigger_side(self, command)?;
+        let account = self
+            .state
+            .accounts
+            .get(&command.account_id)
+            .ok_or(RejectReason::AccountNotRegistered)?;
         if route == VenueRoute::Simulated {
             self.check_new_order_interest(&command.instrument_id, staged_instruments)?;
+            self.check_practice_market(instrument)?;
         }
+        validate_currency(instrument, &account.currency, route)?;
         Ok(())
     }
 
@@ -702,7 +721,6 @@ impl TradingCore {
             VenueRoute::CtraderDemo => return Err(DEMO_VENUE_UNAVAILABLE.into()),
         }
         command.provenance.venue_id.clone_from(&account.venue_id);
-        let account_currency = account.currency.clone();
         let instrument = self
             .state
             .instruments
@@ -718,8 +736,6 @@ impl TradingCore {
             enforce_risk,
         )
         .map_err(|error| self.admission_detail(&command, error))?;
-        self.check_practice_market(&instrument)
-            .map_err(|reason| reason.to_string())?;
         let mut risk_warnings = if enforce_risk {
             self.evaluate_order_risk(&command)?.warnings
         } else {
@@ -727,9 +743,6 @@ impl TradingCore {
             Vec::new()
         };
         risk_warnings.extend(price_grid_warning(&instrument));
-        if instrument.contract.currency != account_currency {
-            return Err("Practice contract currency differs from the account currency".to_string());
-        }
         let order = Order {
             id: OrderId::try_new(format!("sim-order-{sequence}"))
                 .map_err(|error| error.to_string())?,

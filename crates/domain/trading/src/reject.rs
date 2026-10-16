@@ -74,6 +74,8 @@ pub enum RejectReason {
     InvalidQuantity,
     ClientIdTooLong,
     ScaleMismatch,
+    CurrencyMismatch,
+    AccountNotRegistered,
 }
 
 impl fmt::Display for RejectReason {
@@ -106,6 +108,10 @@ impl fmt::Display for RejectReason {
                 f.write_str("cTrader ClientOrderId must be at most 50 characters")
             }
             Self::ScaleMismatch => f.write_str("order scales do not match the instrument"),
+            Self::CurrencyMismatch => {
+                f.write_str("Practice contract currency differs from the account currency")
+            }
+            Self::AccountNotRegistered => f.write_str("trading account is not registered"),
         }
     }
 }
