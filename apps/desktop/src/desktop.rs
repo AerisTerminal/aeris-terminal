@@ -2323,7 +2323,6 @@ enum ChartIntentRejection {
     NoQuote,
     InvalidPrice,
     InvalidQuantity,
-    InvalidBracket,
     PlannedLegKept,
     Unsupported,
     TradingUnavailable,
@@ -2340,9 +2339,6 @@ impl ChartIntentRejection {
             Self::NoQuote => "Waiting for a live bid and ask on this instrument.",
             Self::InvalidPrice => "That price isn't valid for this instrument.",
             Self::InvalidQuantity => "That size isn't valid for this instrument.",
-            Self::InvalidBracket => {
-                "Put the stop and the target on opposite sides of the entry, on whole ticks."
-            }
             Self::PlannedLegKept => {
                 "A pending bracket keeps its stop and target. Drag them, or cancel the entry."
             }
@@ -2480,21 +2476,6 @@ fn dispatch_chart_cancel(
     .detach();
 }
 
-fn chart_tick_offset(
-    first: aeris_trading::FixedPoint,
-    second: aeris_trading::FixedPoint,
-    tick: i64,
-) -> Option<u32> {
-    if first.scale() != second.scale() || tick <= 0 {
-        return None;
-    }
-    let distance = first.units().abs_diff(second.units());
-    let tick = u64::try_from(tick).ok()?;
-    (distance > 0 && distance.is_multiple_of(tick))
-        .then(|| u32::try_from(distance / tick).ok())
-        .flatten()
-}
-
 fn dispatch_chart_place_bracket(
     chart: Entity<AerisChartView>,
     intent: &ChartTradingIntent,
@@ -2514,7 +2495,7 @@ fn dispatch_chart_place_bracket(
                 return;
             };
             let task = cx.background_executor().spawn(async move {
-                let result = service.place_inline_bracket_from_market(command);
+                let result = service.place_chart_bracket_from_market(command);
                 aeris_desktop::trading::record_outcome(result, "Bracket placed")
             });
             cx.spawn(async move |_, cx| {
@@ -2533,7 +2514,7 @@ fn chart_bracket_from_intent(
     intent: &ChartTradingIntent,
     app: &WorkspaceSurface,
     cx: &App,
-) -> Result<aeris_trading_runtime::PlaceInlineBracket, ChartIntentRejection> {
+) -> Result<aeris_trading_runtime::PlaceChartBracket, ChartIntentRejection> {
     let product = app
         .product
         .as_ref()
@@ -2547,42 +2528,11 @@ fn chart_bracket_from_intent(
     };
     let stop_price = price(intent.stop_loss_price)?;
     let target_price = price(intent.take_profit_price)?;
-    let entry_price = entry
-        .limit_price
-        .ok_or(ChartIntentRejection::InvalidPrice)?;
-    let tick = product.price_increment.filter(|tick| *tick > 0);
-    let valid_relation = match entry.side {
-        aeris_trading::OrderSide::Buy => {
-            stop_price.units() < entry_price.units() && target_price.units() > entry_price.units()
-        }
-        aeris_trading::OrderSide::Sell => {
-            stop_price.units() > entry_price.units() && target_price.units() < entry_price.units()
-        }
-    };
-    let (stop_offset_ticks, target_offset_ticks) = tick
-        .and_then(|tick| {
-            valid_relation.then(|| {
-                Some((
-                    chart_tick_offset(entry_price, stop_price, tick)?,
-                    chart_tick_offset(entry_price, target_price, tick)?,
-                ))
-            })?
-        })
-        .ok_or(ChartIntentRejection::InvalidBracket)?;
-    let template = aeris_trading_runtime::BracketStrategyTemplate {
-        template_id: format!("chart-bracket-{}", entry.client_order_id.as_str()),
-        revision: 1,
-        name: "Chart bracket".to_string(),
-        stop_offset_ticks,
-        targets: vec![aeris_trading_runtime::BracketTarget {
-            offset_ticks: target_offset_ticks,
-            quantity_percent: 100,
-        }],
-        trailing_stop: None,
-        break_even: None,
-        enabled: true,
-    };
-    Ok(aeris_trading_runtime::PlaceInlineBracket { entry, template })
+    Ok(aeris_trading_runtime::PlaceChartBracket {
+        entry,
+        stop_price,
+        target_price,
+    })
 }
 
 fn chart_protection_from_intent(

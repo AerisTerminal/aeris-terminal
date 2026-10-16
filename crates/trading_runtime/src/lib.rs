@@ -22,6 +22,8 @@ pub(crate) use aeris_trading::{
 };
 #[cfg(test)]
 pub(crate) use core::REPLY_CAPACITY;
+#[cfg(test)]
+pub(crate) use core::chart_bracket_template;
 pub use core::market::feed::MarketFeedInbox;
 pub use core::*;
 pub(crate) use core::{

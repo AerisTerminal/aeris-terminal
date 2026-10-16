@@ -2,18 +2,91 @@ pub(super) mod planned_leg;
 pub(super) mod protection;
 
 use super::{
-    ArmedBracket, BROKER_PNL_UNAVAILABLE, BracketPlacement, BracketStrategyTemplate, ClientOrderId,
-    Fill, FixedPoint, InstrumentId, MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES,
-    ManagedBracket, ManagedBracketStatus, ModifyOrder, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderSide, OrderStatus, OrderStep, OrderType, PlaceBracket, PlaceOrder,
-    SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, TradingInstrument,
-    VenueRoute, allocated_target_quantities, favorable_tick_distance, instrument_tick_units,
+    ArmedBracket, BROKER_PNL_UNAVAILABLE, BracketPlacement, BracketStrategyTemplate, BracketTarget,
+    ClientOrderId, Fill, FixedPoint, InstrumentId, MAXIMUM_MANAGED_BRACKETS,
+    MAXIMUM_STRATEGY_TEMPLATES, ManagedBracket, ManagedBracketStatus, ModifyOrder, Order,
+    OrderEvent, OrderEventId, OrderEventKind, OrderSide, OrderStatus, OrderStep, OrderType,
+    PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOrder, SimulatedMarketObservation,
+    TimeInForce, TradingAccountId, TradingCore, TradingInstrument, VenueRoute,
+    allocated_target_quantities, favorable_tick_distance, instrument_tick_units,
     managed_child_client_order_id, negative_loss, nonnegative_difference, opposite_side,
     order_increment_units, remaining_limit, scale_currency_by_quantity_and_ticks, shifted_price,
     subtract_fixed, tick_value, tighter_stop,
 };
 
+pub(crate) fn chart_bracket_template(
+    instrument: &TradingInstrument,
+    side: OrderSide,
+    entry: FixedPoint,
+    stop: FixedPoint,
+    target: FixedPoint,
+    id: &str,
+) -> Result<BracketStrategyTemplate, String> {
+    let valid = match side {
+        OrderSide::Buy => stop.units() < entry.units() && target.units() > entry.units(),
+        OrderSide::Sell => stop.units() > entry.units() && target.units() < entry.units(),
+    };
+    if !valid || stop.scale() != entry.scale() || target.scale() != entry.scale() {
+        return Err("bracket stop and target must be on opposite sides of the entry".to_string());
+    }
+    let tick = u64::try_from(instrument_tick_units(instrument, entry)?)
+        .map_err(|_| "bracket price grid is invalid".to_string())?;
+    let offset = |price: FixedPoint| {
+        let distance = entry.units().abs_diff(price.units());
+        if tick == 0 || distance == 0 || !distance.is_multiple_of(tick) {
+            return Err("bracket levels must be on the instrument price grid".to_string());
+        }
+        u32::try_from(distance / tick).map_err(|_| "bracket leg distance overflowed".to_string())
+    };
+    Ok(BracketStrategyTemplate {
+        template_id: format!("chart-bracket-{id}"),
+        revision: 1,
+        name: "Chart bracket".to_string(),
+        stop_offset_ticks: offset(stop)?,
+        targets: vec![BracketTarget {
+            offset_ticks: offset(target)?,
+            quantity_percent: 100,
+        }],
+        trailing_stop: None,
+        break_even: None,
+        enabled: true,
+    })
+}
+
 impl TradingCore {
+    pub(super) fn place_inline_bracket_from_market(
+        &mut self,
+        bracket: PlaceInlineBracket,
+    ) -> Result<BracketPlacement, String> {
+        let entry = self.market_resting_bracket_entry(bracket.entry)?;
+        self.place_bracket_with_template(&entry, bracket.template)
+    }
+
+    pub(super) fn place_chart_bracket(
+        &mut self,
+        bracket: PlaceChartBracket,
+    ) -> Result<BracketPlacement, String> {
+        let entry = self.market_resting_bracket_entry(bracket.entry)?;
+        let instrument = self
+            .state
+            .instruments
+            .get(&entry.instrument_id)
+            .ok_or_else(|| "trading instrument is not registered".to_string())?;
+        let entry_price = entry
+            .limit_price
+            .or(entry.stop_price)
+            .ok_or_else(|| "bracket entry price is unavailable".to_string())?;
+        let template = chart_bracket_template(
+            instrument,
+            entry.side,
+            entry_price,
+            bracket.stop_price,
+            bracket.target_price,
+            entry.client_order_id.as_str(),
+        )?;
+        self.place_bracket_with_template(&entry, template)
+    }
+
     pub(super) fn register_strategy_template(
         &mut self,
         template: BracketStrategyTemplate,

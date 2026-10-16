@@ -5,10 +5,10 @@ pub(crate) mod owner;
 use super::{
     BracketPlacement, BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount,
     EconomicEventRiskOutcome, EconomicEventRiskTrigger, FixedPoint, FlattenOutcome, ModifyOrder,
-    MovePlannedBracketLeg, Order, PathBuf, PlaceBracket, PlaceInlineBracket, PlaceOrder,
-    PlaceProtectiveOrder, PlannedBracketLeg, Reply, RiskEvaluation, RiskProfile, SessionPlan,
-    TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus,
-    TradingSnapshot, UserRecord,
+    MovePlannedBracketLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket,
+    PlaceOrder, PlaceProtectiveOrder, PlannedBracketLeg, Reply, RiskEvaluation, RiskProfile,
+    SessionPlan, TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument,
+    TradingServiceStatus, TradingSnapshot, UserRecord,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -31,6 +31,7 @@ pub(crate) enum Command {
     PlaceBracketFromMarket(PlaceBracket, Reply<BracketPlacement>),
     PlaceInlineBracket(PlaceInlineBracket, Reply<BracketPlacement>),
     PlaceInlineBracketFromMarket(PlaceInlineBracket, Reply<BracketPlacement>),
+    PlaceChartBracketFromMarket(PlaceChartBracket, Reply<BracketPlacement>),
     PlaceProtective(PlaceProtectiveOrder, Reply<Order>),
     PlaceProtectiveFromMarket(PlaceProtectiveOrder, Reply<Order>),
     EvaluateRisk(PlaceOrder, Reply<RiskEvaluation>),

@@ -344,6 +344,24 @@ fn significant_figure_market_quotes_do_not_require_a_fixed_tick() {
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
 
+#[test]
+fn chart_bracket_offsets_use_verified_significant_figure_grid() {
+    let mut crypto = high_precision_crypto_instrument();
+    crypto.contract.tick_size = None;
+    crypto.contract.price_grid = aeris_instruments::PriceGrid::SignificantFigures {
+        figures: 5,
+        max_decimals: 6,
+    };
+    let entry = FixedPoint::try_new(8_210_000_000_000, 8).expect("entry");
+    let stop = FixedPoint::try_new(8_209_700_000_000, 8).expect("stop");
+    let target = FixedPoint::try_new(8_210_400_000_000, 8).expect("target");
+    let template = chart_bracket_template(&crypto, OrderSide::Buy, entry, stop, target, "chart");
+    let template = template.expect("owner uses the verified one-dollar grid");
+    assert_eq!(template.stop_offset_ticks, 3);
+    assert_eq!(template.targets[0].offset_ticks, 4);
+    assert!(chart_bracket_template(&crypto, OrderSide::Buy, entry, target, stop, "bad").is_err());
+}
+
 pub(crate) fn provenance(sequence: u64, time: i64) -> TradingProvenance {
     TradingProvenance {
         venue_id: "aeris-sim".to_string(),

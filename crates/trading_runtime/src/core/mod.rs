@@ -18,6 +18,8 @@ pub(crate) mod ledger;
 pub(crate) mod market;
 #[path = "../risk/owner.rs"]
 mod risk_owner;
+#[cfg(test)]
+pub(crate) use groups::chart_bracket_template;
 use groups::{planned_leg, protection};
 #[path = "../venue/broker.rs"]
 mod broker;
@@ -230,6 +232,13 @@ pub struct PlaceBracket {
 pub struct PlaceInlineBracket {
     pub entry: PlaceOrder,
     pub template: BracketStrategyTemplate,
+}
+/// Chart-authored prices converted to a bracket template on the trading owner's verified grid.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlaceChartBracket {
+    pub entry: PlaceOrder,
+    pub stop_price: FixedPoint,
+    pub target_price: FixedPoint,
 }
 
 /// One standalone reduce-only protection command from a chart or order surface.
@@ -699,6 +708,16 @@ impl TradingService {
         bracket: PlaceInlineBracket,
     ) -> Result<BracketPlacement, String> {
         self.request(|reply| Command::PlaceInlineBracketFromMarket(bracket, reply))
+    }
+    /// Places chart-authored bracket levels using verified instrument terms and the owner quote.
+    ///
+    /// # Errors
+    /// Returns an error for unavailable terms or quote, off-grid levels, or rejected admission.
+    pub fn place_chart_bracket_from_market(
+        &self,
+        bracket: PlaceChartBracket,
+    ) -> Result<BracketPlacement, String> {
+        self.request(|reply| Command::PlaceChartBracketFromMarket(bracket, reply))
     }
 
     /// Submits a protective order using the owner's quote.
@@ -1316,6 +1335,7 @@ impl TradingCore {
             | Command::PlaceBracketFromMarket(..)
             | Command::PlaceInlineBracket(..)
             | Command::PlaceInlineBracketFromMarket(..)
+            | Command::PlaceChartBracketFromMarket(..)
             | Command::PlaceProtective(..)
             | Command::PlaceProtectiveFromMarket(..)
             | Command::EvaluateRisk(..)
@@ -1553,13 +1573,10 @@ impl TradingCore {
                 self.place_bracket_with_template(&bracket.entry, bracket.template),
             ),
             Command::PlaceInlineBracketFromMarket(bracket, reply) => {
-                respond(
-                    &reply,
-                    self.market_resting_bracket_entry(bracket.entry)
-                        .and_then(|entry| {
-                            self.place_bracket_with_template(&entry, bracket.template)
-                        }),
-                );
+                respond(&reply, self.place_inline_bracket_from_market(bracket));
+            }
+            Command::PlaceChartBracketFromMarket(bracket, reply) => {
+                respond(&reply, self.place_chart_bracket(bracket));
             }
             Command::PlaceProtective(order, reply) => {
                 respond(&reply, self.place_protective_order(order));

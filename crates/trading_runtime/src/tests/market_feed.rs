@@ -79,6 +79,44 @@ fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeed
 }
 
 #[test]
+fn chart_bracket_uses_verified_grid_without_fixed_tick_and_rests() {
+    let directory = TestDirectory::new("chart-significant-grid");
+    let (service, _clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    let mut verified = terms();
+    verified.price_grid = aeris_instruments::PriceGrid::SignificantFigures {
+        figures: 5,
+        max_decimals: 2,
+    };
+    feed.push(MarketFeedEvent::Terms(verified)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    service.status().unwrap();
+    let mut entry = market_order("chart-significant", OrderSide::Buy, 2, 1_000);
+    entry.order_type = OrderType::Limit;
+    entry.limit_price = Some(FixedPoint::try_new(9_999, 2).unwrap());
+    let placed = service
+        .place_chart_bracket_from_market(PlaceChartBracket {
+            entry,
+            stop_price: FixedPoint::try_new(9_996, 2).unwrap(),
+            target_price: FixedPoint::try_new(10_003, 2).unwrap(),
+        })
+        .expect("chart bracket accepts significant-figure grid");
+    let BracketPlacement::Managed(bracket) = placed else {
+        panic!("expected managed bracket");
+    };
+    assert_eq!(bracket.template.stop_offset_ticks, 3);
+    assert_eq!(bracket.template.targets[0].offset_ticks, 4);
+    assert_eq!(service.snapshot().unwrap().orders.len(), 1);
+    service.shutdown(Duration::from_secs(2)).unwrap();
+}
+
+#[test]
 fn all_practice_entry_shapes_obey_provider_neutral_session_phases() {
     for phase in [
         SessionPhase::Closed,
