@@ -407,6 +407,7 @@ impl TradingCore {
             ManagedBracket::MANAGEMENT_LABEL,
             command.role.as_str()
         ));
+        event.reason = Some(aeris_trading::OrderEventReason::LocalManaged);
         event.validate().map_err(|error| error.to_string())?;
         let protective = ProtectiveOrder {
             client_order_id: order.client_order_id.clone(),
@@ -504,6 +505,8 @@ impl TradingCore {
             order_id: order.id.clone(),
             sequence,
             kind: OrderEventKind::Accepted,
+            reason: (!risk_warnings.is_empty())
+                .then_some(aeris_trading::OrderEventReason::RiskWarning),
             event_unix_nanos: command.submitted_unix_nanos,
             detail: Some(order_acceptance_detail(&risk_warnings)),
             provenance: command.provenance,

@@ -2,6 +2,54 @@
 use aeris_instruments::SessionPhase;
 use core::fmt;
 
+/// Provider-neutral, structured advisory returned by risk evaluation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RiskWarning {
+    ApproachingDailyLossLimit,
+    NoAttachedStop,
+    ConsistencyLimitExceeded {
+        current_percent: u8,
+        limit_percent: u8,
+    },
+    FastStopReentry,
+}
+
+impl RiskWarning {
+    /// Stable reason code, independent of display copy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApproachingDailyLossLimit => "approaching_daily_loss_limit",
+            Self::NoAttachedStop => "no_attached_stop",
+            Self::ConsistencyLimitExceeded { .. } => "consistency_limit_exceeded",
+            Self::FastStopReentry => "fast_stop_reentry",
+        }
+    }
+}
+
+impl fmt::Display for RiskWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApproachingDailyLossLimit => {
+                f.write_str("account is within 20% of its daily loss limit")
+            }
+            Self::NoAttachedStop => {
+                f.write_str("order has no attached stop; loss at stop is unbounded")
+            }
+            Self::ConsistencyLimitExceeded {
+                current_percent,
+                limit_percent,
+            } => write!(
+                f,
+                "largest winning trade is {current_percent}% of gross winning P/L; profile limit is {limit_percent}%"
+            ),
+            Self::FastStopReentry => {
+                f.write_str("fast re-entry within 60 seconds of a filled stop")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectReason {
     MarketClosed {

@@ -243,6 +243,7 @@ impl TradingCore {
             order_id: order.id.clone(),
             sequence,
             kind: OrderEventKind::Modified,
+            reason: Some(aeris_trading::OrderEventReason::LocalManaged),
             event_unix_nanos,
             detail: Some(format!(
                 "{} protection resized to the position",

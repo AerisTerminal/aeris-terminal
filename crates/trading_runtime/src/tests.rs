@@ -1990,10 +1990,13 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
             .order_events
             .iter()
             .filter(|event| event.kind == OrderEventKind::Accepted)
-            .all(|event| event
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.starts_with("RISK WARNING")))
+            .all(
+                |event| event.reason == Some(aeris_trading::OrderEventReason::RiskWarning)
+                    && event
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| !detail.starts_with("RISK WARNING"))
+            )
     );
     assert_eq!(
         service.snapshot().expect("snapshot").risk_meters[0].contracts_remaining,
@@ -2008,7 +2011,19 @@ fn maximum_contracts_counts_all_working_order_scenarios() {
             .expect_err("third working order exceeds the limit")
             .contains("maximum-contract")
     );
+    let events = service.snapshot().expect("before restart").order_events;
     service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    let restarted = start_service(&directory);
+    assert_eq!(
+        restarted
+            .snapshot()
+            .expect("typed reason restored")
+            .order_events,
+        events
+    );
+    restarted
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 }
@@ -2390,8 +2405,11 @@ fn filled_stop_produces_a_fast_reentry_warning() {
     assert!(
         evaluation
             .warnings
-            .iter()
-            .any(|warning| warning.contains("fast re-entry"))
+            .contains(&aeris_trading::RiskWarning::FastStopReentry)
+    );
+    assert!(
+        !order_acceptance_detail(&evaluation.warnings).contains("RISK WARNING"),
+        "display text must not be a control-flow discriminator"
     );
     service
         .shutdown(Duration::from_secs(2))

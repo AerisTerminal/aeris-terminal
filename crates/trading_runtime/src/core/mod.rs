@@ -60,7 +60,8 @@ use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
 use aeris_trading::{
     AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order,
     OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
-    TimeInForce, TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
+    RiskWarning, TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
+    project_unrealized_pnl,
 };
 pub use groups::planned_leg::{MovePlannedBracketLeg, PlannedBracketLeg};
 use std::{
@@ -1905,11 +1906,15 @@ pub(crate) fn fill_policy_persistence(update: &FillPolicyUpdate) -> FillPolicyPe
     }
 }
 
-pub(crate) fn order_acceptance_detail(warnings: &[String]) -> String {
+pub(crate) fn order_acceptance_detail(warnings: &[RiskWarning]) -> String {
     if warnings.is_empty() {
         return "accepted by local simulated venue".to_string();
     }
-    format!("RISK WARNING · {}", warnings.join(" · "))
+    warnings
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" · ")
         .chars()
         .take(256)
         .collect()
@@ -1922,6 +1927,7 @@ pub(crate) fn flatten_acceptance_event(order: &Order, sequence: u64) -> Result<O
         order_id: order.id.clone(),
         sequence,
         kind: OrderEventKind::Accepted,
+        reason: None,
         event_unix_nanos: order.submitted_unix_nanos,
         detail: Some("accepted by local flatten command".to_string()),
         provenance: order.provenance.clone(),
@@ -1942,6 +1948,7 @@ pub(crate) fn flatten_fill_event(
         order_id: order.id.clone(),
         sequence,
         kind: OrderEventKind::Filled,
+        reason: None,
         event_unix_nanos: fill.execution_unix_nanos,
         detail: Some("filled by local flatten command".to_string()),
         provenance,

@@ -4,6 +4,7 @@ use super::{
     SessionPlan, TradingAccountId, TradingCore, TrailingDrawdownMode, VenueRoute,
     consistency_projection, subtract_fixed,
 };
+use aeris_trading::RiskWarning;
 
 impl TradingCore {
     pub(super) fn register_risk_profile(&mut self, profile: RiskProfile) -> Result<(), String> {
@@ -198,7 +199,10 @@ impl TradingCore {
         Ok(())
     }
 
-    pub(super) fn check_discipline(&mut self, command: &PlaceOrder) -> Result<Vec<String>, String> {
+    pub(super) fn check_discipline(
+        &mut self,
+        command: &PlaceOrder,
+    ) -> Result<Vec<RiskWarning>, String> {
         if self.strictly_reduces_position(command)? {
             return Ok(Vec::new());
         }
@@ -241,7 +245,7 @@ impl TradingCore {
             let elapsed = command.submitted_unix_nanos.saturating_sub(last_stop);
             (0..=FAST_STOP_REENTRY_NANOS).contains(&elapsed)
         }) {
-            warnings.push("fast re-entry within 60 seconds of a filled stop".to_string());
+            warnings.push(RiskWarning::FastStopReentry);
         }
         Ok(warnings)
     }
@@ -443,16 +447,16 @@ impl TradingCore {
         command: &PlaceOrder,
         profile: &RiskProfile,
         current_realized: FixedPoint,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<RiskWarning>, String> {
         let mut warnings = Vec::new();
         if current_realized.units() < 0
             && current_realized.units().unsigned_abs() * 100
                 >= profile.daily_loss_limit.units().unsigned_abs() * 80
         {
-            warnings.push("account is within 20% of its daily loss limit".to_string());
+            warnings.push(RiskWarning::ApproachingDailyLossLimit);
         }
         if command.stop_price.is_none() {
-            warnings.push("order has no attached stop; loss at stop is unbounded".to_string());
+            warnings.push(RiskWarning::NoAttachedStop);
         }
         if let Some(limit) = profile.consistency_max_single_trade_percent {
             let state = self
@@ -462,9 +466,10 @@ impl TradingCore {
                 .ok_or_else(|| "risk rule state is unavailable".to_string())?;
             let (current, _) = consistency_projection(state, limit)?;
             if current > limit {
-                warnings.push(format!(
-                    "largest winning trade is {current}% of gross winning P/L; profile limit is {limit}%"
-                ));
+                warnings.push(RiskWarning::ConsistencyLimitExceeded {
+                    current_percent: current,
+                    limit_percent: limit,
+                });
             }
         }
         Ok(warnings)

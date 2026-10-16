@@ -326,13 +326,16 @@ fn ledger(snapshot: &TradingSnapshot) -> String {
     for event in &snapshot.order_events {
         writeln!(
             result,
-            "event {} {} {} {} {} {:?} {}",
+            "event {} {} {} {} {} {:?} {} {}",
             event.id.as_str(),
             event.order_id.as_str(),
             event.sequence,
             event.kind.as_str(),
             event.event_unix_nanos,
             event.detail,
+            event
+                .reason
+                .map_or("-", aeris_trading::OrderEventReason::as_str),
             origin(&event.provenance)
         )
         .expect("write event");
@@ -597,7 +600,7 @@ fn replay_crypto_stop_restart_accounting_golden() {
     assert_eq!(first, crypto_stop_restart_accounting_scenario());
     assert_eq!(
         first.trim_end(),
-        include_str!("../tests/replay_crypto_stop_restart_accounting_golden.txt")
+        include_str!("../tests/replay_crypto_stop_restart_accounting_golden_v2.txt")
             .replace("\r\n", "\n")
             .trim_end()
     );
@@ -826,7 +829,7 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_golden() {
     );
     assert_eq!(
         first.trim_end(),
-        include_str!("../tests/simulated_golden.txt")
+        include_str!("../tests/simulated_golden_v2.txt")
             .replace("\r\n", "\n")
             .trim_end()
     );
@@ -881,7 +884,7 @@ fn simulated_bracket_stop_touch_cancels_target_golden() {
     );
     assert_eq!(
         first.trim_end(),
-        include_str!("../tests/simulated_stop_golden.txt")
+        include_str!("../tests/simulated_stop_golden_v2.txt")
             .replace("\r\n", "\n")
             .trim_end()
     );

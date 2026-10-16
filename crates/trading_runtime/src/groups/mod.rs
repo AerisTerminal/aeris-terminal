@@ -557,6 +557,7 @@ impl TradingCore {
                 ManagedBracket::MANAGEMENT_LABEL,
                 index + 1
             ));
+            target_event.reason = Some(aeris_trading::OrderEventReason::LocalManaged);
             target_event.validate().map_err(|error| error.to_string())?;
             prepared.push((target_order, target_event));
             sequence = sequence
@@ -606,6 +607,7 @@ impl TradingCore {
             order_id: entry_order.id.clone(),
             sequence,
             kind: OrderEventKind::Rejected,
+            reason: Some(aeris_trading::OrderEventReason::LocalManaged),
             event_unix_nanos: observation.provenance.observed_unix_nanos,
             detail: Some(format!(
                 "{} bracket protection was not placed: {reason}",
@@ -654,6 +656,7 @@ impl TradingCore {
             "{} protective stop",
             ManagedBracket::MANAGEMENT_LABEL
         ));
+        event.reason = Some(aeris_trading::OrderEventReason::LocalManaged);
         event.validate().map_err(|error| error.to_string())?;
         Ok((order, event, client_order_id))
     }

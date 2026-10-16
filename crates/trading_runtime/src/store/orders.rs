@@ -6,6 +6,7 @@ use super::{
     Value, VecDeque, database_error, fixed, json, json_i64, json_string, json_u64, optional_fixed,
     params, split_optional, sqlite_i64, sqlite_u64,
 };
+use aeris_trading::OrderEventReason;
 
 impl TradingStore {
     /// All the facts produced by one simulated order command are committed together.
@@ -387,7 +388,8 @@ impl TradingStore {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT id, order_id, sequence, kind, event_unix_nanos, detail, provenance_json
+                "SELECT id, order_id, sequence, kind, event_unix_nanos, detail, provenance_json,
+                        reason_code
              FROM order_events ORDER BY sequence",
             )
             .map_err(database_error)?;
@@ -401,17 +403,19 @@ impl TradingStore {
                     row.get::<_, i64>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(database_error)?;
         for row in rows {
-            let (id, order, sequence, kind, time, detail, provenance) =
+            let (id, order, sequence, kind, time, detail, provenance, reason) =
                 row.map_err(database_error)?;
             let event = OrderEvent {
                 id: OrderEventId::try_new(id).map_err(|error| error.to_string())?,
                 order_id: OrderId::try_new(order).map_err(|error| error.to_string())?,
                 sequence: sqlite_u64(sequence)?,
                 kind: parse_event_kind(&kind)?,
+                reason: reason.as_deref().map(parse_event_reason).transpose()?,
                 event_unix_nanos: time,
                 detail,
                 provenance: decode_provenance(&provenance)?,
@@ -494,10 +498,12 @@ pub(super) fn insert_event_row(
 ) -> Result<(), String> {
     let sequence = sqlite_i64(event.sequence)?;
     transaction.execute(
-        "INSERT INTO order_events(id, order_id, sequence, kind, event_unix_nanos, detail, provenance_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO order_events(id, order_id, sequence, kind, event_unix_nanos, detail, provenance_json,
+             reason_code)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![event.id.as_str(), event.order_id.as_str(), sequence, event.kind.as_str(),
-            event.event_unix_nanos, event.detail, encode_provenance(&event.provenance)],
+            event.event_unix_nanos, event.detail, encode_provenance(&event.provenance),
+            event.reason.map(OrderEventReason::as_str)],
     ).map_err(database_error)?;
     Ok(())
 }
@@ -762,6 +768,16 @@ pub(super) fn parse_event_kind(value: &str) -> Result<OrderEventKind, String> {
     }
 }
 
+fn parse_event_reason(value: &str) -> Result<OrderEventReason, String> {
+    match value {
+        "touch_fill" => Ok(OrderEventReason::TouchFill),
+        "user_cancel" => Ok(OrderEventReason::UserCancel),
+        "risk_warning" => Ok(OrderEventReason::RiskWarning),
+        "local_managed" => Ok(OrderEventReason::LocalManaged),
+        _ => Err("stored order event reason is invalid".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod lifecycle_wire_tests {
     use super::*;
@@ -783,5 +799,18 @@ mod lifecycle_wire_tests {
             parse_status("triggered").is_err(),
             "trigger is an event, not a status"
         );
+    }
+
+    #[test]
+    fn recognized_historical_reason_codes_have_exact_typed_values() {
+        for reason in [
+            OrderEventReason::TouchFill,
+            OrderEventReason::UserCancel,
+            OrderEventReason::RiskWarning,
+            OrderEventReason::LocalManaged,
+        ] {
+            assert_eq!(parse_event_reason(reason.as_str()), Ok(reason));
+        }
+        assert!(parse_event_reason("display text is not a reason").is_err());
     }
 }

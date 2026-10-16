@@ -2014,10 +2014,11 @@ fn chart_order_semantics(
     // and an inline chip would cover the marker's quantity, drag surface and cursor.
     let mut annotations = Vec::new();
     if let Some(warning) = snapshot.order_events.iter().find_map(|event| {
-        (event.order_id == order.id && event.kind == aeris_trading::OrderEventKind::Accepted)
-            .then_some(event.detail.as_deref())
-            .flatten()
-            .filter(|detail| detail.starts_with("RISK WARNING"))
+        (event.order_id == order.id
+            && event.kind == aeris_trading::OrderEventKind::Accepted
+            && event.reason == Some(aeris_trading::OrderEventReason::RiskWarning))
+        .then_some(event.detail.as_deref())
+        .flatten()
     }) {
         annotations.push(ChartTradingAnnotation {
             id: "risk-warning".to_string(),

@@ -11,7 +11,7 @@ pub mod market;
 pub mod reject;
 pub mod venue;
 pub mod venue_outbox;
-pub use reject::RejectReason;
+pub use reject::{RejectReason, RiskWarning};
 
 /// Maximum decimal scale accepted by canonical trading values.
 pub const MAXIMUM_DECIMAL_SCALE: u8 = 18;
@@ -586,6 +586,28 @@ impl OrderEventKind {
     }
 }
 
+/// Stable reason for a lifecycle fact; detail is display-only, not a control-flow key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderEventReason {
+    TouchFill,
+    UserCancel,
+    RiskWarning,
+    LocalManaged,
+}
+
+impl OrderEventReason {
+    /// Stable SQLite wire code, including recognized V22 historical reasons.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TouchFill => "touch_fill",
+            Self::UserCancel => "user_cancel",
+            Self::RiskWarning => "risk_warning",
+            Self::LocalManaged => "local_managed",
+        }
+    }
+}
+
 /// One immutable lifecycle event for an order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderEvent {
@@ -593,6 +615,7 @@ pub struct OrderEvent {
     pub order_id: OrderId,
     pub sequence: u64,
     pub kind: OrderEventKind,
+    pub reason: Option<OrderEventReason>,
     pub event_unix_nanos: i64,
     pub detail: Option<String>,
     pub provenance: TradingProvenance,
@@ -985,6 +1008,36 @@ mod tests {
             (OrderEventKind::Resized, "resized"),
         ] {
             assert_eq!(kind.as_str(), wire);
+        }
+    }
+
+    #[test]
+    fn lifecycle_reasons_and_risk_warning_codes_do_not_depend_on_display_text() {
+        for (reason, wire) in [
+            (OrderEventReason::TouchFill, "touch_fill"),
+            (OrderEventReason::UserCancel, "user_cancel"),
+            (OrderEventReason::RiskWarning, "risk_warning"),
+            (OrderEventReason::LocalManaged, "local_managed"),
+        ] {
+            assert_eq!(reason.as_str(), wire);
+        }
+        for (warning, wire) in [
+            (RiskWarning::NoAttachedStop, "no_attached_stop"),
+            (RiskWarning::FastStopReentry, "fast_stop_reentry"),
+            (
+                RiskWarning::ApproachingDailyLossLimit,
+                "approaching_daily_loss_limit",
+            ),
+            (
+                RiskWarning::ConsistencyLimitExceeded {
+                    current_percent: 51,
+                    limit_percent: 50,
+                },
+                "consistency_limit_exceeded",
+            ),
+        ] {
+            assert_eq!(warning.as_str(), wire);
+            assert!(!warning.to_string().contains("RISK WARNING"));
         }
     }
 }

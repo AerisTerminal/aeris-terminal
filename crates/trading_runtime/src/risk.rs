@@ -230,7 +230,7 @@ impl RiskLock {
 /// Result of evaluating one order against the account's current rules.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RiskEvaluation {
-    pub warnings: Vec<String>,
+    pub warnings: Vec<aeris_trading::RiskWarning>,
     pub projected_contracts: FixedPoint,
     pub current_realized_pnl: FixedPoint,
 }

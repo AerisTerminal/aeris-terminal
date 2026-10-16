@@ -1142,6 +1142,7 @@ impl TradingCore {
             order_id: order.id.clone(),
             sequence,
             kind,
+            reason: None,
             event_unix_nanos: provenance.observed_unix_nanos,
             detail: Some(detail.to_string()),
             provenance,
