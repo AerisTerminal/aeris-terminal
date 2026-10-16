@@ -64,6 +64,7 @@ pub enum RejectReason {
     },
     ClientIdReused,
     OffGrid,
+    WrongSideTrigger,
 }
 
 impl fmt::Display for RejectReason {
@@ -81,6 +82,9 @@ impl fmt::Display for RejectReason {
                 f.write_str("ClientIdReused: client order id has different instructions")
             }
             Self::OffGrid => f.write_str("OffGrid: price is off the instrument price grid"),
+            Self::WrongSideTrigger => {
+                f.write_str("WrongSideTrigger: stop must trigger beyond the current bid or ask")
+            }
         }
     }
 }

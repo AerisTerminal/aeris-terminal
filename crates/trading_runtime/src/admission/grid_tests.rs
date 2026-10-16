@@ -1,5 +1,30 @@
 use super::*;
 use aeris_instruments::InstrumentDecimal;
+use aeris_trading::{OrderSide, OrderType};
+
+#[test]
+fn stop_triggers_must_be_strictly_outside_the_touch() {
+    let mut order = crate::tests::market_order("trigger-side", OrderSide::Buy, 1, 1_000);
+    order.order_type = OrderType::Stop;
+    order.stop_price = Some(FixedPoint::try_new(10_050, 2).expect("trigger"));
+    let bid = FixedPoint::try_new(10_000, 2).expect("bid");
+    let ask = FixedPoint::try_new(10_050, 2).expect("ask");
+    assert_eq!(
+        validate_trigger_side(&order, bid, ask),
+        Err(RejectReason::WrongSideTrigger)
+    );
+    order.stop_price = Some(FixedPoint::try_new(10_075, 2).expect("trigger"));
+    assert_eq!(validate_trigger_side(&order, bid, ask), Ok(()));
+    order.side = OrderSide::Sell;
+    order.order_type = OrderType::StopLimit;
+    order.stop_price = Some(bid);
+    assert_eq!(
+        validate_trigger_side(&order, bid, ask),
+        Err(RejectReason::WrongSideTrigger)
+    );
+    order.stop_price = Some(FixedPoint::try_new(9_975, 2).expect("trigger"));
+    assert_eq!(validate_trigger_side(&order, bid, ask), Ok(()));
+}
 
 #[test]
 fn fixed_and_significant_figure_grids_reject_off_grid_prices() {

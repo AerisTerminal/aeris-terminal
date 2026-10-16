@@ -64,6 +64,41 @@ pub(crate) fn validate_order_prices(
     Ok(())
 }
 
+pub(crate) fn validate_trigger_side(
+    command: &PlaceOrder,
+    bid: FixedPoint,
+    ask: FixedPoint,
+) -> Result<(), RejectReason> {
+    if !matches!(command.order_type, OrderType::Stop | OrderType::StopLimit) {
+        return Ok(());
+    }
+    let Some(trigger) = command.stop_price else {
+        return Ok(());
+    };
+    if trigger.scale() != bid.scale() || trigger.scale() != ask.scale() {
+        return Err(RejectReason::WrongSideTrigger);
+    }
+    let wrong_side = match command.side {
+        aeris_trading::OrderSide::Buy => trigger.units() <= ask.units(),
+        aeris_trading::OrderSide::Sell => trigger.units() >= bid.units(),
+    };
+    if wrong_side {
+        Err(RejectReason::WrongSideTrigger)
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_owner_trigger_side(
+    owner: &TradingCore,
+    command: &PlaceOrder,
+) -> Result<(), RejectReason> {
+    if let Some(observation) = owner.quote_book.observation(&command.instrument_id) {
+        validate_trigger_side(command, observation.bid, observation.ask)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod grid_tests;
 
@@ -523,6 +558,7 @@ impl TradingCore {
         }
         check_quantity_increment(&instrument, command.quantity)?;
         validate_order_prices(&instrument, &command).map_err(|error| error.to_string())?;
+        validate_owner_trigger_side(self, &command).map_err(|error| error.to_string())?;
         if self
             .state
             .orders
