@@ -220,6 +220,7 @@ pub(super) fn platform_menu_layer(
         });
     });
     let panel = MenuPanel::new("platform_menu", MenuPlacement::At(origin), theme)
+        .on_surface()
         .width(px(PLATFORM_MENU_WIDTH))
         .animate_from(animation_origin)
         .children(header)
@@ -540,6 +541,11 @@ fn run_account_action(
     terminal.close_platform_menu(window, cx);
 }
 
+/// One section of the menu, drawn straight on the panel's `surface`.
+fn section() -> Div {
+    div().flex_none().flex().flex_col().px_2()
+}
+
 fn section_title(title: &'static str, theme: &AerisTheme) -> Div {
     div()
         .h(px(SECTION_TITLE_HEIGHT))
@@ -565,16 +571,12 @@ const fn theme_card_id(mode: ThemeMode) -> &'static str {
     }
 }
 
-/// Theme section: one card per mode, each a miniature layout painted with
-/// that mode's own tokens. The menu stays open after a pick so the whole
+/// Theme section: one preview tile per mode, painted with that mode's own
+/// tokens. The menu stays open after a pick so the whole
 /// panel re-renders in the new mode.
 fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
-    div()
+    section()
         .h(px(THEME_SECTION_HEIGHT))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .px_2()
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("Theme", theme))
         .child(
@@ -588,26 +590,6 @@ fn theme_section(theme: &AerisTheme, on_select: &ThemeSelect) -> Div {
 fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> AnyElement {
     let colors = theme.colors;
     let selected = theme.mode == mode;
-    let border_width = platform_border_width(theme);
-    let radio = div()
-        .size(px(12.0))
-        .flex_none()
-        .rounded_full()
-        .border(border_width)
-        .border_color(gpui_color(if selected {
-            colors.ring_primary
-        } else {
-            colors.border_strong
-        }))
-        .flex()
-        .items_center()
-        .justify_center()
-        .children(selected.then(|| {
-            div()
-                .size(px(6.0))
-                .rounded_full()
-                .bg(gpui_color(colors.ring_primary))
-        }));
     BaseButton::new(theme_card_id(mode))
         .accessibility_label(format!("{} theme", theme_mode_name(mode)))
         .group(theme_card_id(mode))
@@ -621,104 +603,99 @@ fn theme_card(mode: ThemeMode, theme: &AerisTheme, on_select: ThemeSelect) -> An
             on_select(mode, window, cx);
             cx.stop_propagation();
         })
-        .child(
-            theme_preview(&AerisTheme::for_mode(mode))
-                .border_color(gpui_color(if selected {
-                    colors.ring_primary
-                } else {
-                    colors.border_secondary
-                }))
-                .when(!selected, |preview| {
-                    preview.group_hover(theme_card_id(mode), move |style| {
-                        style.border_color(gpui_color(colors.border_strong))
-                    })
-                }),
-        )
+        .child(theme_preview(
+            &AerisTheme::for_mode(mode),
+            theme,
+            selected,
+            theme_card_id(mode),
+        ))
         .child(
             div()
                 .h(px(THEME_CARD_LABEL_HEIGHT))
                 .flex()
                 .items_center()
-                .gap(px(6.0))
                 .text_xs()
                 .text_color(gpui_color(if selected {
                     colors.text_primary
                 } else {
                     colors.text_secondary
                 }))
-                .child(radio)
                 .child(theme_mode_name(mode)),
         )
         .into_any_element()
 }
 
-/// Miniature layout built only from plain panels: a title bar, a side panel,
-/// the main panel with a bottom panel under it, and a right panel. The
-/// rounded frame paints the preview background itself because GPUI's
-/// `overflow_hidden` clips to a rectangle: a square inner fill would paint
-/// over the rounded border corners. The title bar uses the inner radius so
-/// it stays inside the curve.
-fn theme_preview(preview: &AerisTheme) -> Div {
+/// Inset of the preview's sample window from the tile's top and left edges; it runs off the
+/// right and bottom edges.
+const THEME_PREVIEW_WINDOW_TOP: f32 = 22.0;
+const THEME_PREVIEW_WINDOW_LEFT: f32 = 16.0;
+const THEME_PREVIEW_BADGE_SIZE: f32 = 18.0;
+
+/// A tile in the previewed mode's own tokens: a `surface-raised` backdrop with one sample
+/// window on `surface` showing "Aa" in that mode's text color, and a `primary` check badge on
+/// the selected mode. Colors resolve over the mode's `surface` because its dark tints are
+/// translucent and the tile must look the same in either menu. GPUI clips to rectangles, so
+/// the window takes the tile's radius at the corner it shares with it.
+fn theme_preview(
+    preview: &AerisTheme,
+    theme: &AerisTheme,
+    selected: bool,
+    group: &'static str,
+) -> Div {
     let colors = preview.colors;
-    let border_width = platform_border_width(preview);
-    let radius = f32::from(RadiusToken::Default.logical_pixels());
-    let inner_radius = px((radius - preview.dimensions.border_width).max(0.0));
-    let panel = || {
+    let radius = px(f32::from(RadiusToken::Default.logical_pixels()));
+    let tile = colors.surface_raised.over(colors.surface);
+    let hovered = colors.hover_bg.over(tile);
+    let badge = selected.then(|| {
         div()
-            .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-            .border(border_width)
-            .border_color(gpui_color(colors.border_secondary))
-            .bg(gpui_color(colors.surface_secondary))
-    };
+            .absolute()
+            .right(px(8.0))
+            .bottom(px(8.0))
+            .size(px(THEME_PREVIEW_BADGE_SIZE))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui_color(theme.colors.primary))
+            .child(
+                header_icon(HugeIcon::Tick)
+                    .with_size(px(12.0))
+                    .color(gpui_color(theme.colors.primary_foreground)),
+            )
+    });
     div()
+        .relative()
         .h(px(THEME_PREVIEW_HEIGHT))
         .w_full()
-        .flex()
-        .flex_col()
-        .rounded(px(radius))
-        .border(border_width)
-        .bg(gpui_color(colors.surface))
+        .rounded(radius)
+        .bg(gpui_color(tile))
+        .when(!selected, |preview| {
+            preview.group_hover(group, move |style| style.bg(gpui_color(hovered)))
+        })
         .child(
             div()
-                .h(px(10.0))
-                .flex_none()
-                .rounded_tl(inner_radius)
-                .rounded_tr(inner_radius)
-                .bg(gpui_color(colors.surface_secondary))
-                .border_b(border_width)
-                .border_color(gpui_color(colors.border_secondary)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .gap(px(3.0))
-                .p(px(4.0))
-                .child(panel().w(px(16.0)).flex_none())
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .child(panel().flex_1())
-                        .child(panel().h(px(14.0)).flex_none()),
-                )
-                .child(panel().w(px(22.0)).flex_none()),
+                .absolute()
+                .top(px(THEME_PREVIEW_WINDOW_TOP))
+                .left(px(THEME_PREVIEW_WINDOW_LEFT))
+                .right_0()
+                .bottom_0()
+                .rounded_tl(px(f32::from(RadiusToken::Sm.logical_pixels())))
+                .rounded_br(radius)
+                .bg(gpui_color(colors.surface))
+                .pl(px(8.0))
+                .pt(px(4.0))
+                .text_lg()
+                .text_color(gpui_color(colors.text_primary))
+                .child("Aa")
+                .children(badge),
         )
 }
 
 /// Window section: the frameless mode switch with a one-line description of what it does.
 fn window_section(frameless: bool, on_toggle: &FramelessToggle, theme: &AerisTheme) -> Div {
     let on_toggle = on_toggle.clone();
-    div()
+    section()
         .h(px(WINDOW_SECTION_HEIGHT))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .px_2()
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("Window", theme))
         .child(
@@ -779,12 +756,8 @@ fn about_section(
 ) -> Div {
     let colors = theme.colors;
     let height = about_section_height(details.len(), rithmic_notices);
-    div()
+    section()
         .h(px(height))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .px_2()
         .pb(px(SECTION_BOTTOM_PADDING))
         .child(section_title("About", theme))
         .child(

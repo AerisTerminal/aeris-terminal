@@ -479,7 +479,7 @@ fn hex_input_row(picking: &Picking, theme: &AerisTheme) -> impl IntoElement {
         )
         .child(
             Button::new("native_color_apply", theme)
-                .variant(ButtonVariant::Outline)
+                .variant(ButtonVariant::Primary)
                 .button_size(ButtonSize::Default)
                 .label("Set")
                 .on_click(move |_, window, cx| {

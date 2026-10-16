@@ -429,7 +429,7 @@ impl RenderOnce for Dialog {
 pub(crate) enum ConfirmationTone {
     /// Irreversible removal; uses the `Destructive` button.
     Destructive,
-    /// Creating or committing something; uses the `Secondary` (brand) button.
+    /// Creating or committing something; uses the `Primary` (brand) button.
     Positive,
 }
 
@@ -437,7 +437,7 @@ impl ConfirmationTone {
     const fn button_variant(self) -> ButtonVariant {
         match self {
             Self::Destructive => ButtonVariant::Destructive,
-            Self::Positive => ButtonVariant::Secondary,
+            Self::Positive => ButtonVariant::Primary,
         }
     }
 }
@@ -600,7 +600,7 @@ mod tests {
         );
         assert_eq!(
             ConfirmationTone::Positive.button_variant(),
-            ButtonVariant::Secondary
+            ButtonVariant::Primary
         );
     }
 }

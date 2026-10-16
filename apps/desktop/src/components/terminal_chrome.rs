@@ -1311,6 +1311,7 @@ pub(super) fn time_zone_selector(
         .variant(ButtonVariant::Ghost)
         .button_size(ButtonSize::Lg)
         .label(clock)
+        .tabular_numerals()
         .caret(header_icon(HugeIcon::ChevronDown))
         .on_click(move |event, window, cx| {
             open_app.update(cx, |app, app_cx| {

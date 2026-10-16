@@ -417,7 +417,7 @@ pub(super) fn order_quantity_menu_layer(
             )
             .child(
                 Button::new("chart_trade_quantity_apply", theme)
-                    .variant(ButtonVariant::Secondary)
+                    .variant(ButtonVariant::Primary)
                     .label("Set")
                     .on_click(move |_, window, cx| {
                         submit.update(cx, |surface, surface_cx| {

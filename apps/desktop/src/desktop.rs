@@ -236,8 +236,8 @@ use native_ui::{
     switch::{Switch, SwitchRow},
     tab::{Tab, TabList},
     theme::{
-        base_theme, gpui_color, platform_border_width, popover_frame, popover_highlight,
-        popover_surface,
+        base_theme, field_surface, gpui_color, platform_border_width, popover_highlight,
+        popover_surface, surface_panel,
     },
     tooltip::{TooltipSpec, with_tooltip},
 };
@@ -5076,6 +5076,8 @@ struct TerminalApp {
     chart_settings_placement: chart_context_menus::ChartSettingsPlacement,
     chart_settings_section: ChartSettingsSection,
     chart_settings_color_picker: Option<ChartColorPickerState>,
+    /// The settings dropdown that is open, by its row id.
+    chart_settings_select: Option<&'static str>,
     chart_settings_template_overlay: ChartSettingsTemplateOverlay,
     chart_settings_template_name: Option<Entity<InputState>>,
     chart_settings_template_error: Option<String>,

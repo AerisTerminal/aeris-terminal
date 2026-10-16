@@ -9,7 +9,8 @@
 //! | Variant       | Look                                    | Use for                               |
 //! |---------------|-----------------------------------------|---------------------------------------|
 //! | `Default`     | `button-fill` neutral fill              | the main neutral action               |
-//! | `Secondary`   | brand `primary` blue fill               | the committing action of a form/dialog |
+//! | `Primary`     | brand `primary` blue fill               | the committing action of a form/dialog |
+//! | `Secondary`   | `surface-secondary` + `border-secondary` | controls inside popovers and panels  |
 //! | `Outline`     | `surface` + `border`, `text-default`    | Cancel, triggers, steppers, filters    |
 //! | `Ghost`       | no fill or border, `text-default`       | toolbar, header and icon actions       |
 //! | `Destructive` | `danger` fill                           | irreversible actions                   |
@@ -40,7 +41,7 @@ use crate::desktop::assets::UiIcon;
 use super::{
     icon::Icon,
     loader::Loader,
-    platform_font_weight,
+    platform_font_weight, platform_tabular_numerals,
     rem_scale::design_rems,
     theme::{gpui_color, platform_border_width},
     tooltip::TooltipSpec,
@@ -56,7 +57,10 @@ pub(crate) enum ButtonVariant {
     /// `default`: neutral `button-fill`, darker on hover and press.
     #[default]
     Default,
-    /// `secondary`: the brand `primary` blue, for the action that commits a form or dialog.
+    /// `primary`: the brand `primary` blue, for the action that commits a form or dialog.
+    Primary,
+    /// `secondary`: `surface-secondary` with a `border-secondary` outline and `text-default`.
+    /// Hover and press lay `hover-bg` and `active-bg` over the fill; the outline stays.
     Secondary,
     /// `outline`: `surface` with a `border` outline and `text-default`. Hover drops the outline
     /// and fills with `hover-bg`.
@@ -165,7 +169,7 @@ fn button_appearance(
             colors.disabled_bg,
             colors.text_muted,
         ),
-        ButtonVariant::Secondary => ramp(
+        ButtonVariant::Primary => ramp(
             colors.primary,
             colors.primary_foreground,
             colors.primary_hover,
@@ -173,6 +177,19 @@ fn button_appearance(
             colors.primary_disabled,
             colors.primary_disabled_foreground,
         ),
+        // The web lays `hover-bg`/`active-bg` over the fill as a background image; compositing
+        // the tokens here paints the same colour over any surface.
+        ButtonVariant::Secondary => ButtonAppearance {
+            border: Some(colors.border_secondary),
+            ..ramp(
+                colors.surface_secondary,
+                colors.text_default,
+                colors.hover_bg.over(colors.surface_secondary),
+                colors.active_bg.over(colors.surface_secondary),
+                colors.disabled_bg,
+                colors.text_muted,
+            )
+        },
         ButtonVariant::Outline | ButtonVariant::Ghost => {
             let outline = variant == ButtonVariant::Outline;
             ButtonAppearance {
@@ -272,6 +289,7 @@ impl ButtonFlags {
     const FULL_WIDTH: u16 = 1 << 7;
     const SKIP_TAB_STOP: u16 = 1 << 8;
     const TEXT_TOGGLE: u16 = 1 << 9;
+    const TABULAR_NUMERALS: u16 = 1 << 10;
 
     const fn has(self, flag: u16) -> bool {
         self.0 & flag != 0
@@ -450,6 +468,13 @@ impl Button {
 
     pub(crate) fn full_width(mut self) -> Self {
         self.flags.set(ButtonFlags::FULL_WIDTH, true);
+        self
+    }
+
+    /// Equal-width digits for a label that changes while shown, such as a clock, so its width
+    /// never jitters as the digits change.
+    pub(crate) fn tabular_numerals(mut self) -> Self {
+        self.flags.set(ButtonFlags::TABULAR_NUMERALS, true);
         self
     }
 
@@ -715,6 +740,9 @@ fn style_frame(
             }
         })
         .when(flags.has(ButtonFlags::FULL_WIDTH), Styled::w_full)
+        .when(flags.has(ButtonFlags::TABULAR_NUMERALS), |button| {
+            button.font_features(platform_tabular_numerals())
+        })
         .when(flags.has(ButtonFlags::DISABLED), Styled::cursor_not_allowed)
         .when(flags.has(ButtonFlags::LOADING), |button| {
             button.cursor_default().opacity(0.8)
@@ -1028,7 +1056,7 @@ mod tests {
                     ),
                 ),
                 (
-                    ButtonVariant::Secondary,
+                    ButtonVariant::Primary,
                     (
                         c.primary,
                         c.primary_foreground,
@@ -1111,6 +1139,37 @@ mod tests {
             assert_eq!(resolved.foreground, c.text_muted);
             let resting = ResolvedStyle::new(&outline, ButtonFlags::default());
             assert_eq!(resting.border, Some(c.border));
+        }
+    }
+
+    #[test]
+    fn secondary_overlays_its_states_on_surface_secondary_and_keeps_its_border() {
+        for theme in [AerisTheme::light(), AerisTheme::dark()] {
+            let c = theme.colors;
+            let secondary = button_appearance(&theme, ButtonVariant::Secondary, false);
+            // ui-button-secondary: bg surface-secondary, border border-secondary, text-default
+            assert_eq!(secondary.fill, Some(c.surface_secondary));
+            assert_eq!(secondary.border, Some(c.border_secondary));
+            assert_eq!(secondary.foreground, c.text_default);
+            assert!(!secondary.border_rests_only);
+            // hover/active lay hover-bg/active-bg over the fill
+            assert_eq!(secondary.hover_fill, c.hover_bg.over(c.surface_secondary));
+            assert_eq!(
+                secondary.selected_fill,
+                c.active_bg.over(c.surface_secondary)
+            );
+            let mut open = ButtonFlags::default();
+            open.set(ButtonFlags::OPEN, true);
+            assert_eq!(
+                ResolvedStyle::new(&secondary, open).border,
+                Some(c.border_secondary)
+            );
+            // disabled: bg disabled-bg, text-muted
+            let mut disabled = ButtonFlags::default();
+            disabled.set(ButtonFlags::DISABLED, true);
+            let resolved = ResolvedStyle::new(&secondary, disabled);
+            assert_eq!(resolved.fill, Some(c.disabled_bg));
+            assert_eq!(resolved.foreground, c.text_muted);
         }
     }
 

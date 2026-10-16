@@ -386,7 +386,7 @@ pub(super) fn instrument_search_header(
         .child({
             let toggle_app = app.clone();
             Button::new("symbol_provider_switcher", theme)
-                .variant(ButtonVariant::Outline)
+                .variant(ButtonVariant::Secondary)
                 .round()
                 .open(state.provider_menu_open)
                 .aria_label("Switch market provider")

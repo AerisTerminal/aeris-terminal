@@ -1923,7 +1923,7 @@ pub(super) fn drawing_settings_dialog_layer(
         )
         .action(
             Button::new("drawing_settings_ok", theme)
-                .variant(ButtonVariant::Secondary)
+                .variant(ButtonVariant::Primary)
                 .label("Ok")
                 .on_click(move |_, window, cx| {
                     confirm.update(cx, |surface, surface_cx| {

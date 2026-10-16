@@ -1,4 +1,5 @@
 use super::*;
+use drawing_context_toolbar::{choice_glyph, width_glyph};
 
 pub(super) fn overlay_height(rows: f32, separators: f32) -> f32 {
     scaled_overlay_height(rows, separators, MenuScale::BASE)
@@ -911,6 +912,7 @@ pub(super) fn chart_settings_menu_layer(
         terminal,
         menu,
         color_picker: view.color_picker,
+        open_select: view.open_select,
         theme,
     };
     let content = match view.section {
@@ -957,6 +959,8 @@ pub(super) struct ChartSettingsView<'a> {
     pub(super) section: ChartSettingsSection,
     pub(super) snapshot: &'a ChartSettingsSnapshot,
     pub(super) color_picker: Option<&'a ChartColorPickerState>,
+    /// The dropdown that is open, by its row id.
+    pub(super) open_select: Option<&'static str>,
     pub(super) templates: ChartSettingsTemplateView<'a>,
 }
 
@@ -981,8 +985,7 @@ fn chart_settings_panel(
     let colors = theme.colors;
     let dismiss_overlays = terminal.clone();
     let radius = px(f32::from(RadiusToken::Medium.logical_pixels()));
-    popover_frame(div().id("chart_settings_menu"), theme, radius)
-        .bg(gpui_color(colors.surface))
+    surface_panel(div().id("chart_settings_menu"), theme, radius)
         .absolute()
         .left(bounds.origin.x)
         .top(bounds.origin.y)
@@ -1072,8 +1075,6 @@ fn chart_settings_drag_grip(theme: &AerisTheme) -> Div {
         .justify_center()
         .gap_1()
         .rounded(px(f32::from(RadiusToken::Full.logical_pixels())))
-        .border_1()
-        .border_color(gpui_color(theme.colors.border_secondary))
         .bg(gpui_color(theme.colors.surface_secondary));
     for _ in 0..3 {
         grip = grip.child(
@@ -1199,7 +1200,6 @@ fn chart_settings_sidebar(
     templates: ChartSettingsTemplateView<'_>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let sections = TabList::sidebar("chart_settings_sections", "Chart settings sections")
         .flex_1()
         .min_h_0()
@@ -1225,8 +1225,6 @@ fn chart_settings_sidebar(
         .flex_col()
         .gap_3()
         .p_2()
-        .border_r(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary))
         .child(sections)
         .child(chart_settings_template_control(
             terminal, menu, templates, theme,
@@ -1239,11 +1237,10 @@ fn chart_settings_template_control(
     state: ChartSettingsTemplateView<'_>,
     theme: &AerisTheme,
 ) -> impl IntoElement {
-    let colors = theme.colors;
     let toggle = terminal.clone();
     let open = state.overlay.menu_open();
     let button = Button::new("chart_settings_templates", theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Secondary)
         .button_size(ButtonSize::Lg)
         .trigger()
         .full_width()
@@ -1278,9 +1275,6 @@ fn chart_settings_template_control(
     // belong to the trigger and its menus.
     div()
         .w_full()
-        .pt_3()
-        .border_t(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary))
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
         .child(
             MenuAnchor::new("chart_settings_template_anchor", trigger)
@@ -1504,12 +1498,13 @@ const SETTINGS_SWITCH_COLUMN_WIDTH: f32 = 44.0;
 const CROSSHAIR_HIDDEN: u8 = 2;
 
 /// What every settings row needs: the app that applies changes, the chart they target, the
-/// open color picker and the theme.
+/// open color picker and dropdown, and the theme.
 #[derive(Clone, Copy)]
 struct SettingsUi<'a> {
     terminal: &'a Entity<TerminalApp>,
     menu: &'a ChartContextMenu,
     color_picker: Option<&'a ChartColorPickerState>,
+    open_select: Option<&'static str>,
     theme: &'a AerisTheme,
 }
 
@@ -1731,7 +1726,7 @@ fn footprint_groups(
         settings_group(
             title,
             [
-                settings_stacked_choice_row(
+                settings_select_row(
                     ui,
                     ChoiceRow::new("footprint_display", "Display"),
                     &[
@@ -1744,7 +1739,7 @@ fn footprint_groups(
                         mode("Histogram", FootprintDisplayMode::BidAskHistogram),
                     ],
                 ),
-                settings_choice_row(
+                settings_select_row(
                     ui,
                     ChoiceRow::new("footprint_row_size", "Row size").hint("Ticks per row"),
                     &[
@@ -1922,7 +1917,7 @@ fn line_width_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> A
             ChartSettingsAction::LineWidth(width),
         )
     };
-    settings_choice_row(
+    settings_select_row(
         ui,
         ChoiceRow::new("line_width", "Width"),
         &[width("1", 1), width("2", 2), width("3", 3), width("4", 4)],
@@ -1937,7 +1932,7 @@ fn line_style_row(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -> A
             ChartSettingsAction::LineStyle(style),
         )
     };
-    settings_choice_row(
+    settings_select_row(
         ui,
         ChoiceRow::new("line_style", "Style"),
         &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
@@ -2014,7 +2009,7 @@ fn canvas_grid_group(ui: SettingsUi<'_>, appearance: &ChartAppearanceSettings) -
                 },
                 visible,
             ),
-            settings_choice_row(
+            settings_select_row(
                 ui,
                 ChoiceRow::new("grid_style", "Style").enabled(visible),
                 &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
@@ -2065,7 +2060,7 @@ fn canvas_crosshair_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
     settings_group(
         "Crosshair",
         [
-            settings_choice_row(
+            settings_select_row(
                 ui,
                 ChoiceRow::new("crosshair_mode", "Mode")
                     .hint(crosshair_mode_hint(snapshot.crosshair_mode)),
@@ -2085,12 +2080,12 @@ fn canvas_crosshair_group(ui: SettingsUi<'_>, snapshot: &ChartSettingsSnapshot) 
                 },
                 visible,
             ),
-            settings_choice_row(
+            settings_select_row(
                 ui,
                 ChoiceRow::new("crosshair_width", "Width").enabled(visible),
                 &[width("1", 1), width("2", 2), width("3", 3)],
             ),
-            settings_choice_row(
+            settings_select_row(
                 ui,
                 ChoiceRow::new("crosshair_style", "Style").enabled(visible),
                 &[style("Solid", 0), style("Dotted", 1), style("Dashed", 2)],
@@ -2181,31 +2176,22 @@ fn settings_section(groups: Vec<AnyElement>) -> AnyElement {
         .into_any_element()
 }
 
-/// A titled group of related rows in one bordered block, rows divided by hairlines.
+/// A titled group of related rows on one borderless `surface-secondary` card, with no lines
+/// between its rows.
 fn settings_group(
     title: &'static str,
     rows: impl IntoIterator<Item = AnyElement>,
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
-    let mut block = div()
+    let block = div()
         .flex()
         .flex_col()
         .px_3()
+        .py_1()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(platform_border_width(theme))
-        .border_color(gpui_color(colors.border_secondary));
-    for (index, row) in rows.into_iter().enumerate() {
-        block = block.child(
-            div()
-                .when(index > 0, |divided| {
-                    divided
-                        .border_t(platform_border_width(theme))
-                        .border_color(gpui_color(colors.border_subtle))
-                })
-                .child(row),
-        );
-    }
+        .bg(gpui_color(colors.surface_secondary))
+        .children(rows);
     div()
         .flex()
         .flex_col()
@@ -2333,7 +2319,6 @@ fn effective_appearance_color(
     }
 }
 
-/// The outline button that shows a color's swatch and hex code and opens its picker.
 /// A color as a round swatch over the transparency backdrop, so translucent colors read.
 pub(super) fn color_swatch_dot(value: &str, theme: &AerisTheme) -> Div {
     let colors = theme.colors;
@@ -2352,6 +2337,11 @@ pub(super) fn color_swatch_dot(value: &str, theme: &AerisTheme) -> Div {
         )
 }
 
+/// Width of every settings control trigger, color swatches and dropdowns alike, so the
+/// controls in a column line up.
+const SETTINGS_CONTROL_WIDTH: f32 = 120.0;
+
+/// The secondary button that shows a color's swatch and hex code and opens its picker.
 pub(super) fn color_swatch_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
@@ -2361,7 +2351,8 @@ pub(super) fn color_swatch_button(
 ) -> Button {
     let colors = theme.colors;
     Button::new(id, theme)
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Secondary)
+        .w(design_rems(SETTINGS_CONTROL_WIDTH))
         .open(open)
         .aria_label(label)
         .leading(color_swatch_dot(value, theme))
@@ -2519,58 +2510,111 @@ fn settings_color_pair_row(
         .into_any_element()
 }
 
-/// The single-choice tabs of one setting.
-fn settings_choice_tabs(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> TabList {
-    let mut tabs = TabList::new(row.id, row.label, ui.theme);
-    for (index, (choice, selected, action)) in choices.iter().copied().enumerate() {
-        let terminal = ui.terminal.clone();
-        let menu = ui.menu.clone();
-        tabs = tabs.child(
-            Tab::new((row.id, index), ui.theme)
-                .selected(selected)
-                .disabled(!row.enabled)
-                .aria_label(choice)
-                .on_click(move |_, _, cx| {
-                    terminal.update(cx, |terminal, terminal_cx| {
-                        terminal.apply_chart_settings_action(&menu, action, terminal_cx);
-                    });
-                    cx.stop_propagation();
-                })
-                .child(choice),
-        );
+/// A width choice previews its stroke, a line style its dash pattern; other choices read as
+/// their label alone.
+fn settings_choice_glyph(
+    choice: &'static str,
+    action: ChartSettingsAction,
+    theme: &AerisTheme,
+) -> Option<AnyElement> {
+    match action {
+        ChartSettingsAction::LineWidth(width) | ChartSettingsAction::CrosshairWidth(width) => {
+            Some(width_glyph(f64::from(width), theme).into_any_element())
+        }
+        ChartSettingsAction::LineStyle(_)
+        | ChartSettingsAction::GridStyle(_)
+        | ChartSettingsAction::CrosshairStyle(_) => {
+            Some(choice_glyph(&choice.to_ascii_lowercase(), theme))
+        }
+        _ => None,
     }
-    tabs
 }
 
-fn settings_choice_row(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> AnyElement {
+/// A single-choice setting as a dropdown: a secondary trigger showing the current choice and,
+/// while open, its menu, sized like the color swatch buttons. Presses inside the control belong to it, not to the panel that closes
+/// its popovers on any other press.
+fn settings_select(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> Div {
+    let theme = ui.theme;
+    let open = row.enabled && ui.open_select == Some(row.id);
+    let current = choices.iter().find(|(_, selected, _)| *selected);
+    let shown = div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_2()
+        .children(
+            current.and_then(|&(choice, _, action)| settings_choice_glyph(choice, action, theme)),
+        )
+        .child(
+            div()
+                .truncate()
+                .text_sm()
+                .text_color(gpui_color(theme.colors.text_primary))
+                .child(current.map_or("", |(choice, _, _)| *choice)),
+        );
+    let toggle = ui.terminal.clone();
+    let id = row.id;
+    let trigger = Button::new(id, theme)
+        .variant(ButtonVariant::Secondary)
+        .trigger()
+        .full_width()
+        .open(open)
+        .disabled(!row.enabled)
+        .aria_label(row.label)
+        .leading(shown)
+        .caret(header_icon(HugeIcon::ChevronDown))
+        .on_click(move |_, _, cx| {
+            toggle.update(cx, |terminal, terminal_cx| {
+                terminal.toggle_chart_settings_select(id, terminal_cx);
+            });
+        });
+    let panel = open.then(|| {
+        MenuPanel::new(
+            SharedString::from(format!("{id}_menu")),
+            MenuPlacement::Anchored {
+                side: MenuSide::Below,
+                align: MenuAlign::Stretch,
+            },
+            theme,
+        )
+        .animate_from(PopupAnimationOrigin::TOP_LEFT)
+        .children(choices.iter().copied().enumerate().map(
+            |(index, (choice, selected, action))| {
+                let choose = ui.terminal.clone();
+                let menu = ui.menu.clone();
+                MenuRow::compact((id, index), choice, theme)
+                    .when_some(
+                        settings_choice_glyph(choice, action, theme),
+                        MenuRow::leading,
+                    )
+                    .checked(selected)
+                    .on_click(move |_, _, cx| {
+                        choose.update(cx, |terminal, terminal_cx| {
+                            terminal.choose_chart_settings_option(&menu, action, terminal_cx);
+                        });
+                    })
+            },
+        ))
+    });
+    div()
+        .w(design_rems(SETTINGS_CONTROL_WIDTH))
+        .flex_none()
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .child(
+            MenuAnchor::new(SharedString::from(format!("{id}_anchor")), trigger)
+                .full_width()
+                .menu(panel),
+        )
+}
+
+fn settings_select_row(ui: SettingsUi<'_>, row: ChoiceRow, choices: Choices<'_>) -> AnyElement {
     settings_row(
         row.label,
         row.hint,
         row.enabled,
-        settings_choice_tabs(ui, row, choices),
+        settings_select(ui, row, choices),
         ui.theme,
     )
-}
-
-/// A choice with too many options to share a line with its label: the label above, the options
-/// below, wrapping when the panel is narrow.
-fn settings_stacked_choice_row(
-    ui: SettingsUi<'_>,
-    row: ChoiceRow,
-    choices: Choices<'_>,
-) -> AnyElement {
-    div()
-        .py_3()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(settings_label(row.label, row.hint, row.enabled, ui.theme))
-        .child(
-            div()
-                .flex()
-                .child(settings_choice_tabs(ui, row, choices).wrap()),
-        )
-        .into_any_element()
 }
 
 pub(super) fn chart_css_color(value: &str, fallback: ThemeColor) -> Hsla {

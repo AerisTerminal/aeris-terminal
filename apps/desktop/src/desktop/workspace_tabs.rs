@@ -188,6 +188,7 @@ impl TerminalApp {
             chart_settings_placement: chart_context_menus::ChartSettingsPlacement::default(),
             chart_settings_section: ChartSettingsSection::Symbol,
             chart_settings_color_picker: None,
+            chart_settings_select: None,
             chart_settings_template_overlay: ChartSettingsTemplateOverlay::Closed,
             chart_settings_template_name: None,
             chart_settings_template_error: None,
@@ -934,6 +935,7 @@ impl TerminalApp {
         if let Some(menu) = self.chart_settings_menu.take() {
             self.set_workspace_chart_pointers_suspended(menu.workspace_id, false, cx);
             self.chart_settings_color_picker = None;
+            self.chart_settings_select = None;
             self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
             self.chart_settings_template_name = None;
             self.chart_settings_template_error = None;
@@ -1000,6 +1002,7 @@ impl TerminalApp {
         if self.chart_settings_section != section {
             self.chart_settings_section = section;
             self.chart_settings_color_picker = None;
+            self.chart_settings_select = None;
             self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
             cx.notify();
         }
@@ -1007,13 +1010,39 @@ impl TerminalApp {
 
     pub(super) fn dismiss_chart_settings_overlays(&mut self, cx: &mut Context<Self>) {
         let color_was_open = self.chart_settings_color_picker.take().is_some();
+        let select_was_open = self.chart_settings_select.take().is_some();
         let template_was_open = self.chart_settings_template_overlay.menu_open();
         if template_was_open {
             self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
         }
-        if color_was_open || template_was_open {
+        if color_was_open || select_was_open || template_was_open {
             cx.notify();
         }
+    }
+
+    /// Opens a settings dropdown, closing every other settings popover, or closes it when it
+    /// is already open.
+    pub(super) fn toggle_chart_settings_select(
+        &mut self,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.chart_settings_color_picker = None;
+        self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
+        self.chart_settings_select = (self.chart_settings_select != Some(id)).then_some(id);
+        cx.notify();
+    }
+
+    /// Applies a dropdown choice and closes its dropdown.
+    pub(super) fn choose_chart_settings_option(
+        &mut self,
+        menu: &ChartContextMenu,
+        action: ChartSettingsAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.chart_settings_select = None;
+        self.apply_chart_settings_action(menu, action, cx);
+        cx.notify();
     }
 
     pub(super) fn toggle_chart_color_picker(
@@ -1023,6 +1052,7 @@ impl TerminalApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.chart_settings_select = None;
         if self
             .chart_settings_color_picker
             .as_ref()
@@ -1332,6 +1362,7 @@ impl TerminalApp {
             });
         }
         self.chart_settings_color_picker = None;
+        self.chart_settings_select = None;
         self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
         cx.notify();
     }
@@ -1403,6 +1434,7 @@ impl TerminalApp {
 
     pub(super) fn toggle_chart_settings_template_menu(&mut self, cx: &mut Context<Self>) {
         self.chart_settings_color_picker = None;
+        self.chart_settings_select = None;
         self.chart_settings_template_overlay = if self.chart_settings_template_overlay.menu_open() {
             ChartSettingsTemplateOverlay::Closed
         } else {
@@ -2010,6 +2042,7 @@ impl TerminalApp {
                 self.set_workspace_chart_pointers_suspended(menu.workspace_id, true, cx);
                 self.chart_settings_section = ChartSettingsSection::Symbol;
                 self.chart_settings_color_picker = None;
+                self.chart_settings_select = None;
                 self.chart_settings_template_overlay = ChartSettingsTemplateOverlay::Closed;
                 self.chart_settings_template_name = None;
                 self.chart_settings_template_error = None;
@@ -3350,6 +3383,7 @@ impl TerminalApp {
                         section: self.chart_settings_section,
                         snapshot: &snapshot,
                         color_picker: self.chart_settings_color_picker.as_ref(),
+                        open_select: self.chart_settings_select,
                         templates: ChartSettingsTemplateView {
                             overlay: self.chart_settings_template_overlay,
                             name_input: self.chart_settings_template_name.as_ref(),

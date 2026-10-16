@@ -21,15 +21,21 @@ pub(crate) struct InputAppearance {
 pub(crate) fn input_appearance(theme: &AerisTheme) -> InputAppearance {
     let colors = &theme.colors;
     InputAppearance {
-        fill: match theme.mode {
-            ThemeMode::Light => colors.surface,
-            ThemeMode::Dark => colors.surface_secondary,
-        },
+        fill: field_surface(theme),
         hover_fill: colors.hover_bg,
         border: colors.border,
         focus_ring: colors.ring_primary,
         invalid_border: colors.danger,
         invalid_ring: colors.danger_ring,
+    }
+}
+
+/// The Theme System `bg-surface dark:bg-surface-secondary` pair for fields and setting rows
+/// inside a layer: plain `surface` in light mode, `surface-secondary` in dark mode.
+pub(crate) const fn field_surface(theme: &AerisTheme) -> ThemeColor {
+    match theme.mode {
+        ThemeMode::Light => theme.colors.surface,
+        ThemeMode::Dark => theme.colors.surface_secondary,
     }
 }
 
@@ -45,12 +51,17 @@ pub(crate) fn platform_border_width(theme: &AerisTheme) -> Pixels {
 /// Floating-layer chrome (menus, dialogs, popovers, toasts, hints): the opaque `surface-popover`
 /// fill and the `border-popover` hairline. Pair it with [`popover_highlight`] as the last child.
 pub(crate) fn popover_surface<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
-    popover_frame(element, theme, radius).bg(gpui_color(theme.colors.surface_popover))
+    popover_edge(element, theme, radius).bg(gpui_color(theme.colors.surface_popover))
 }
 
-/// The `border-popover` edge of a floating layer without a fill. Large workspace panels (the
-/// symbol, indicator and chart settings panels) fill it with the opaque `surface` themselves.
-pub(crate) fn popover_frame<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
+/// A floating workspace panel (the symbol, indicator and chart settings panels and the account
+/// menu): the popover edge around the main `surface`. Cards inside it use `surface-secondary`.
+/// Pair it with [`popover_highlight`] as the last child.
+pub(crate) fn surface_panel<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
+    popover_edge(element, theme, radius).bg(gpui_color(theme.colors.surface))
+}
+
+fn popover_edge<E: Styled>(element: E, theme: &AerisTheme, radius: Pixels) -> E {
     element
         .rounded(radius)
         .border(platform_border_width(theme))

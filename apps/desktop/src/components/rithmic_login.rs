@@ -501,7 +501,7 @@ pub(super) fn rithmic_login_dialog_layer(
         )
         .action(
             Button::new("rithmic_login_save", theme)
-                .variant(ButtonVariant::Secondary)
+                .variant(ButtonVariant::Primary)
                 .label(if signing_in { "Signing in" } else { "Connect" })
                 .loading(signing_in)
                 .disabled(signing_in || dialog.system.is_none())

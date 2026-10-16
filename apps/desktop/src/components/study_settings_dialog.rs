@@ -228,7 +228,7 @@ fn line_thickness_row(
         .px_3()
         .py_2()
         .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-        .bg(gpui_color(colors.surface))
+        .bg(gpui_color(field_surface(theme)))
         .child(
             div()
                 .flex()
@@ -282,7 +282,7 @@ fn setting_row(
             .px_3()
             .py_2()
             .rounded(px(f32::from(RadiusToken::Sm.logical_pixels())))
-            .bg(gpui_color(colors.surface))
+            .bg(gpui_color(field_surface(theme)))
             .child(
                 div().flex().items_start().justify_between().gap_3().child(
                     div()
@@ -417,7 +417,7 @@ pub(super) fn study_settings_dialog_layer(
     )
     .action(
         Button::new("study_settings_cancel", theme)
-            .variant(ButtonVariant::Outline)
+            .variant(ButtonVariant::Secondary)
             .label("Cancel")
             .on_click(move |_, _, cx| {
                 cancel.update(cx, WorkspaceSurface::close_study_settings_dialog);
@@ -425,7 +425,7 @@ pub(super) fn study_settings_dialog_layer(
     )
     .action(
         Button::new("study_settings_save", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Primary)
             .label(if busy { "Applying…" } else { "Apply" })
             .loading(busy)
             .disabled(busy)

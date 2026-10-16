@@ -23,8 +23,14 @@ hands out with its **Copy CSS** button, and it matches the token blocks in
 - Floating layers (menus, dialogs, popovers, tooltips, toasts, hints, floating toolbars) use
   `popover_surface` and `popover_highlight` from `native_ui/theme.rs`: an opaque `surface-popover`
   fill, a `--border-width` `border-popover` hairline, and a 1px `border-popover-highlight` inner edge
-  painted above the content. The large workspace panels (symbol, indicator and chart settings) keep
-  that edge and highlight (`popover_frame`) but fill with `surface`.
+  painted above the content.
+- Large workspace panels (the symbol, indicator and chart settings panels and the header account
+  menu) keep the popover edge and highlight but fill with the main `surface` (`surface_panel`, or
+  `MenuPanel::on_surface`). Their content sits on borderless `surface-secondary` cards: no outlined
+  blocks and no hairlines between rows. Size and style settings are dropdowns, not tab groups.
+- Nothing inside a `surface-popover` layer rests on plain `surface` in dark mode. Fields and setting
+  rows use `field_surface` (`surface`, `surface-secondary` in dark), and buttons use the `Secondary`
+  variant.
 - Button labels always use the normal platform weight, trade buttons included.
 - A fill resolved with `.over(..)` is opaque only over an opaque backdrop. Resolve a translucent
   surface over the `surface` beneath it first (the title bar uses `title_bar_fill`).
@@ -50,8 +56,9 @@ focus state. Callers add only layout (flex, gaps, margins, an explicit width).
 | Variant | Look | Use for |
 | --- | --- | --- |
 | `Default` | `button-fill` neutral fill | the main neutral action |
-| `Secondary` | brand `primary` blue fill | the action that commits a form or dialog (Apply, Create, Save) |
-| `Outline` | `surface` + `border`, `text-default`; hover drops the border and fills `hover-bg` | Cancel, select triggers, steppers, filters |
+| `Primary` | brand `primary` blue fill | the action that commits a form or dialog (Apply, Create, Save, Set) |
+| `Secondary` | `.ui-button-secondary`: `surface-secondary` + `border-secondary`, `text-default`; hover / open lay `hover-bg` / `active-bg` over the fill and keep the border; disabled `disabled-bg` + `text-muted` | controls inside popover layers (chart settings triggers and swatches, the symbol menu's provider switcher, settings dialog actions) |
+| `Outline` | `surface` + `border`, `text-default`; hover drops the border and fills `hover-bg` | Cancel, select triggers, steppers, filters on window surfaces |
 | `Ghost` | no fill or border, `text-default`; hover fills `hover-bg` | toolbar, header and icon actions |
 | `Destructive` | `danger` fill | irreversible actions (Delete, Reset to defaults) |
 | `Buy` / `Sell` | `buy` / `sell` fill | trade orders only |
@@ -77,7 +84,7 @@ Pass glyphs through `leading_icon` so the row colours them.
 
 **`Dialog`** + **`ConfirmationDialog`** (`dialog.rs`): every modal, drawn as a popover layer. Sizes `Sm` (420), `Md` (480), `Lg`
 (560); `title` / `subtitle` or a custom `header`; `footer_leading` plus `action`s (Cancel first, then the
-committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Secondary`.
+committing action). `ConfirmationTone::Destructive` uses `Destructive`, `Positive` uses `Primary`.
 
 **`TabList`** + **`Tab`** (`tab.rs`), the Theme System `.ui-tabs` / `.ui-tab`: a `surface-raised` track with
 no border; unselected tabs have no fill and `text-interactive` text, and hover / press change the text

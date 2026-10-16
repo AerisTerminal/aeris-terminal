@@ -943,7 +943,7 @@ fn templates_menu(ui: ToolbarUi<'_>) -> MenuPanel {
                 )
                 .child(
                     Button::new("drawing_context_template_save", theme)
-                        .variant(ButtonVariant::Secondary)
+                        .variant(ButtonVariant::Primary)
                         .label("Save")
                         .on_press(move |_, _, cx| {
                             save.update(cx, TerminalApp::save_drawing_template);

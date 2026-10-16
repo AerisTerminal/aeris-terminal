@@ -743,7 +743,7 @@ pub(super) fn price_alert_dialog_layer(
     )
     .action(
         Button::new("price_alert_create", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Primary)
             .icon(header_icon(HugeIcon::Add))
             .label("Create alert")
             .disabled(alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER)

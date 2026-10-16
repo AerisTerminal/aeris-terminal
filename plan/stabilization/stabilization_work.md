@@ -769,6 +769,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-16 M4.7 test(trading): exercise chartless stop through market lease - VAL-TRD-009 scripted market feed, P&L marks and stop fill pass with zero chart subscriptions.
 - 2026-10-16 M4.7 test(trading): cover every quote interest transition - VAL-TRD-010 adds one lifecycle test with planned bracket legs, group-only projection, ticket and sink bounds, flat release and no-send checks.
 - 2026-10-16 UI (outside milestones) feat(ui): adopt the Theme System popover theme - new light/dark tokens, opaque popover layers with edge highlight, normal-weight buttons, chart settings on `surface`, and source-over `ThemeColor::over` fixing near-white title-bar hovers on translucent dark surfaces; design-system/terminal-UI/desktop tests, clippy, naming and website build pass; visual check by maintainer.
+- 2026-10-16 UI (outside milestones) feat(ui): refine panels, settings controls and theme picker - Primary/Secondary button roles, field and panel surfaces, borderless settings and accounts cards, chart settings choices as fixed-width dropdowns matching color swatches, tabular clock numerals, and a preview-tile theme picker in the platform menu; desktop tests, clippy and naming pass; visual check by maintainer.
 
 ## 7. Known gaps / deferred
 

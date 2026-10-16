@@ -220,7 +220,7 @@ fn credential_editor(
                 )
                 .child(
                     Button::new("save_context_credentials", theme)
-                        .variant(ButtonVariant::Secondary)
+                        .variant(ButtonVariant::Primary)
                         .button_size(ButtonSize::Sm)
                         .label("Save")
                         .on_click(move |_, window, cx| {

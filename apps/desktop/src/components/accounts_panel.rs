@@ -39,11 +39,6 @@ pub(super) fn accounts_panel_content(
             connections.brokers.get(HostedBroker::Ctrader),
             theme,
         ))
-        .child(
-            div()
-                .h(px(theme.dimensions.border_width))
-                .bg(gpui_color(colors.border_secondary)),
-        )
         .child(section_label("Trading accounts", theme))
         .child(practice_accounts(app_state, app, theme))
         .children(broker_accounts(app_state, app, theme))
@@ -161,6 +156,7 @@ fn section_label(label: &'static str, theme: &AerisTheme) -> impl IntoElement {
         .child(label.to_uppercase())
 }
 
+/// A borderless `surface-secondary` card on the panel's `surface`.
 fn card(id: &'static str, theme: &AerisTheme) -> Stateful<Div> {
     div()
         .id(id)
@@ -169,9 +165,7 @@ fn card(id: &'static str, theme: &AerisTheme) -> Stateful<Div> {
         .gap_2()
         .p_2()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(theme.colors.border_secondary))
-        .bg(gpui_color(theme.colors.surface))
+        .bg(gpui_color(theme.colors.surface_secondary))
 }
 
 fn status_dot(active: bool, theme: &AerisTheme) -> impl IntoElement {
@@ -422,7 +416,7 @@ fn practice_accounts(
     let open = app.clone();
     list.child(
         Button::new("accounts_new_practice_account", theme)
-            .variant(ButtonVariant::Outline)
+            .variant(ButtonVariant::Secondary)
             .icon(header_icon(HugeIcon::Add))
             .label("New practice account")
             .button_size(ButtonSize::Lg)
@@ -467,22 +461,18 @@ fn account_row(
         .items_center()
         .gap_2()
         .rounded(px(f32::from(RadiusToken::Default.logical_pixels())))
-        .border(px(theme.dimensions.border_width))
-        .border_color(gpui_color(if selected {
-            colors.border
-        } else {
-            colors.border_secondary
-        }))
         .bg(gpui_color(if selected {
-            colors.active_bg.over(colors.surface)
+            colors.active_bg.over(colors.surface_secondary)
         } else {
-            colors.surface
+            colors.surface_secondary
         }))
         .when(selectable, |row| {
             row.cursor_pointer()
                 .role(Role::Button)
                 .aria_label(format!("Trade on {}", account.display_name))
-                .hover(move |row| row.bg(gpui_color(colors.hover_bg.over(colors.surface))))
+                .hover(move |row| {
+                    row.bg(gpui_color(colors.hover_bg.over(colors.surface_secondary)))
+                })
                 .on_click(move |_, _, cx| {
                     select.update(cx, |surface, surface_cx| {
                         surface.trading_pnl.order_entry.selected_account_id =

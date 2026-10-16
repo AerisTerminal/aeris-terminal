@@ -274,7 +274,7 @@ pub(super) fn volume_dialog_layer(
     )
     .action(
         Button::new("volume_apply", theme)
-            .variant(ButtonVariant::Secondary)
+            .variant(ButtonVariant::Primary)
             .label("Apply")
             .on_click(move |_, _, cx| {
                 apply.update(cx, WorkspaceSurface::apply_volume_dialog);
