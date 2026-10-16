@@ -150,6 +150,36 @@ fn order_status(service: &TradingService, id: &ClientOrderId) -> OrderStatus {
         .status
 }
 
+fn assert_broker_lifecycle(
+    service: &TradingService,
+    original: &Order,
+    revision: u32,
+    terminal: bool,
+) {
+    let snapshot = service.snapshot().expect("snapshot");
+    let current = snapshot
+        .orders
+        .iter()
+        .find(|order| order.id == original.id)
+        .expect("order");
+    assert_eq!(current.revision, revision);
+    assert!(current.updated_unix_nanos >= original.accepted_unix_nanos);
+    assert_eq!(
+        current.terminal_unix_nanos,
+        terminal.then_some(current.updated_unix_nanos)
+    );
+}
+
+fn assert_broker_orders_survive_restart(directory: &TestDirectory, service: &TradingService) {
+    let before = service.snapshot().expect("before restart").orders;
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = TradingService::start(config(directory)).expect("restart");
+    assert_eq!(restarted.snapshot().expect("restored").orders, before);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
 fn fill(deal: &str, broker_order_id: &str, quantity: i64) -> BrokerFill {
     BrokerFill {
         broker_deal_id: deal.into(),
@@ -445,6 +475,7 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
     assert!(service.cancel_order(id.clone()).is_err());
     push(report(&pending, "501", 0), BrokerOrderState::Accepted);
     assert_eq!(order_status(&service, &id), OrderStatus::Working);
+    assert_broker_lifecycle(&service, &pending, 2, false);
 
     let change = ModifyOrder {
         client_order_id: id.clone(),
@@ -456,7 +487,7 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
     };
     let pending_modify = service.modify_order(change).expect("modify");
     assert_eq!(pending_modify.status, OrderStatus::PendingModify);
-    assert_eq!(pending_modify.revision, 2);
+    assert_eq!(pending_modify.revision, 3);
     assert!(pending_modify.updated_unix_nanos >= pending.accepted_unix_nanos);
     let VenueRequest::Amend(amendment) = receiver.recv().expect("modify") else {
         panic!("an amend request");
@@ -477,6 +508,7 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
         .expect("order");
     assert_eq!(order.status, OrderStatus::Working);
     assert_eq!(order.limit_price, Some(point(9_025, 2)));
+    assert_broker_lifecycle(&service, &pending, 4, false);
 
     let pending_cancel = service.cancel_order(id.clone()).expect("cancel");
     assert_eq!(pending_cancel.status, OrderStatus::PendingCancel);
@@ -488,9 +520,11 @@ fn pending_requests_survive_acceptance_and_replacements_apply_the_brokers_prices
     ));
     push(report(&order, "501", 0), BrokerOrderState::CancelRejected);
     assert_eq!(order_status(&service, &id), OrderStatus::Working);
+    assert_broker_lifecycle(&service, &pending, 6, false);
     service.cancel_order(id.clone()).expect("retry cancel");
     push(report(&order, "501", 0), BrokerOrderState::Cancelled);
     assert_eq!(order_status(&service, &id), OrderStatus::Cancelled);
+    assert_broker_lifecycle(&service, &pending, 8, true);
     push(report(&order, "501", 0), BrokerOrderState::Accepted);
     assert_eq!(
         order_status(&service, &id),
@@ -539,7 +573,7 @@ fn refusals_rejections_and_expiry_are_terminal_and_ignore_late_updates() {
         ("venue-expired", Some(BrokerOrderState::Expired)),
         ("venue-refused", None),
     ] {
-        let (_directory, service, _receiver) = setup(label);
+        let (directory, service, _receiver) = setup(label);
         let order = service.place_order(request(label)).expect("pending");
         let inbox = service.demo_venue_inbox();
         let update = state.map_or_else(
@@ -551,6 +585,7 @@ fn refusals_rejections_and_expiry_are_terminal_and_ignore_late_updates() {
         );
         inbox.push(venue(1, update)).expect("terminal");
         assert!(!order_status(&service, &order.client_order_id).is_open());
+        assert_broker_lifecycle(&service, &order, 2, true);
         let events = service.snapshot().expect("snapshot").order_events.len();
         inbox
             .push(venue(
@@ -562,6 +597,7 @@ fn refusals_rejections_and_expiry_are_terminal_and_ignore_late_updates() {
             service.snapshot().expect("snapshot").order_events.len(),
             events
         );
+        assert_broker_orders_survive_restart(&directory, &service);
     }
 }
 
@@ -593,7 +629,7 @@ fn a_report_for_another_account_never_moves_an_order() {
 
 #[test]
 fn deals_record_once_and_closing_deals_mirror_broker_orders() {
-    let (_directory, service, _receiver) = setup("venue-fills");
+    let (directory, service, _receiver) = setup("venue-fills");
     let mut place = request("filled");
     place.quantity = point(3, 0);
     let order = service.place_order(place).expect("pending");
@@ -622,6 +658,7 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
         (partial.status, partial.filled_quantity),
         (OrderStatus::PartiallyFilled, point(1, 0))
     );
+    assert_broker_lifecycle(&service, &order, 3, false);
     inbox
         .push(venue(1, VenueUpdate::Fill(fill("d2", "801", 2))))
         .expect("rest");
@@ -629,6 +666,7 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
         order_status(&service, &order.client_order_id),
         OrderStatus::Filled
     );
+    assert_broker_lifecycle(&service, &order, 4, true);
 
     // A server stop-loss closes the position through an order Aeris never placed.
     let mut close = fill("d3", "802", 3);
@@ -649,6 +687,8 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
         .find(|candidate| candidate.client_order_id.as_str() == "ct-802")
         .expect("mirrored broker order");
     assert_eq!(mirror.status, OrderStatus::Filled);
+    assert_eq!(mirror.revision, 2);
+    assert_eq!(mirror.terminal_unix_nanos, Some(mirror.updated_unix_nanos));
     let closing = snapshot
         .fills
         .iter()
@@ -656,6 +696,7 @@ fn deals_record_once_and_closing_deals_mirror_broker_orders() {
         .expect("closing fill");
     assert_eq!(snapshot.fill_realized_pnl[&closing.id], point(1_203, 2));
     assert_eq!(snapshot.round_trips.len(), 1, "the position is closed");
+    assert_broker_orders_survive_restart(&directory, &service);
 }
 
 #[test]
@@ -756,7 +797,7 @@ fn each_broker_closing_deal_is_one_round_trip_as_it_fills_and_survives_a_restart
 
 #[test]
 fn positions_follow_reports_and_reconcile_settles_every_open_order() {
-    let (_directory, service, receiver) = setup("venue-reconcile");
+    let (directory, service, receiver) = setup("venue-reconcile");
     let inbox = service.demo_venue_inbox();
     inbox
         .push(venue(1, VenueUpdate::Position(position("77", 2))))
@@ -830,9 +871,12 @@ fn positions_follow_reports_and_reconcile_settles_every_open_order() {
     };
     assert_eq!(status(&lost).status, OrderStatus::Rejected);
     assert_eq!(status(&gone).status, OrderStatus::Cancelled);
+    assert_broker_lifecycle(&service, &lost, 2, true);
+    assert_broker_lifecycle(&service, &gone, 3, true);
     let kept_now = status(&kept);
     assert_eq!(kept_now.status, OrderStatus::Working);
     assert_eq!(kept_now.limit_price, Some(point(8_950, 2)));
+    assert_broker_lifecycle(&service, &kept, 4, false);
     assert_eq!(
         snapshot
             .broker_positions
@@ -841,6 +885,7 @@ fn positions_follow_reports_and_reconcile_settles_every_open_order() {
             .collect::<Vec<_>>(),
         ["79"]
     );
+    assert_broker_orders_survive_restart(&directory, &service);
 }
 
 #[test]

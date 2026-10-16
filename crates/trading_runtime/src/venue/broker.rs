@@ -715,16 +715,16 @@ impl TradingCore {
             provenance: provenance.clone(),
         };
         fill.validate().map_err(|error| error.to_string())?;
-        let filled_by_deals = self
-            .state
-            .fills
-            .iter()
-            .filter(|known| known.order_id == current.id)
-            .try_fold(report.quantity, |total, known| {
-                total.checked_add(known.quantity)
-            })
-            .map_err(|error| error.to_string())?;
-        let updated = filled_order(&current, filled_by_deals, mirror.is_some(), provenance)?;
+        let filled_by_deals = self.deal_quantity(&current.id, report.quantity)?;
+        let updated = crate::book::lifecycle::broker_deal(
+            &current,
+            filled_by_deals,
+            mirror.is_some(),
+            provenance,
+            self.command_now,
+        )
+        .map_err(|error| error.to_string())?;
+        updated.validate().map_err(|error| error.to_string())?;
         let event = Self::broker_event(
             &updated,
             sequence,
@@ -772,6 +772,19 @@ impl TradingCore {
         self.state.order_events.push_back(event);
         self.state.fills.push_back(fill);
         self.bump_revision()
+    }
+
+    fn deal_quantity(
+        &self,
+        order_id: &OrderId,
+        incoming: FixedPoint,
+    ) -> Result<FixedPoint, String> {
+        self.state
+            .fills
+            .iter()
+            .filter(|known| &known.order_id == order_id)
+            .try_fold(incoming, |total, known| total.checked_add(known.quantity))
+            .map_err(|error| error.to_string())
     }
 
     /// A broker-originated order (a server stop-loss or take-profit, a close request, or
@@ -957,30 +970,10 @@ impl TradingCore {
             .collect();
         for order in missing {
             let bound = self.broker_order_id(&order.id).is_some();
-            let (status, kind, detail) = if order.filled_quantity == order.quantity {
-                (
-                    OrderStatus::Filled,
-                    OrderEventKind::Filled,
-                    "filled at cTrader",
-                )
-            } else if bound || order.filled_quantity.units() > 0 {
-                (
-                    OrderStatus::Cancelled,
-                    OrderEventKind::Cancelled,
-                    "no longer open at cTrader",
-                )
-            } else {
-                (
-                    OrderStatus::Rejected,
-                    OrderEventKind::Rejected,
-                    "cTrader did not receive the order",
-                )
-            };
-            let updated = Order {
-                status,
-                provenance: self.venue_provenance(),
-                ..order
-            };
+            let (mut updated, kind, detail) =
+                crate::book::lifecycle::broker_missing(order, bound, self.command_now)
+                    .map_err(|error| error.to_string())?;
+            updated.provenance = self.venue_provenance();
             let provenance = updated.provenance.clone();
             self.record_broker_transition(updated, kind, detail, provenance, None)?;
         }
@@ -1034,39 +1027,25 @@ impl TradingCore {
         {
             return Err("broker order quantity scale does not match the order".into());
         }
-        let (status, kind, detail) =
-            reported_transition(&current, report, state, reason, resolve_pending);
-        let mut updated = Order {
-            status,
-            quantity: report.quantity,
-            filled_quantity: report.filled_quantity,
-            ..current.clone()
-        };
-        // The broker's report is authoritative for prices, so a replacement applies the
-        // prices the broker confirmed rather than the request.
-        if matches!(current.order_type, OrderType::Limit | OrderType::StopLimit) {
-            updated.limit_price = report.limit_price.or(current.limit_price);
-        }
-        if matches!(current.order_type, OrderType::Stop | OrderType::StopLimit) {
-            updated.stop_price = report.stop_price.or(current.stop_price);
-        }
-        if updated.status == OrderStatus::Filled {
-            updated.filled_quantity = updated.quantity;
-        }
-        let changed = binding
-            || updated.status != current.status
-            || updated.filled_quantity != current.filled_quantity
-            || updated.limit_price != current.limit_price
-            || updated.stop_price != current.stop_price;
-        if !changed {
+        let Some((mut updated, kind)) = crate::book::lifecycle::broker_report(
+            &current,
+            report,
+            state,
+            resolve_pending,
+            binding,
+            self.command_now,
+        )
+        .map_err(|error| error.to_string())?
+        else {
             return Ok(());
-        }
+        };
         updated.provenance = self.venue_provenance();
         let provenance = updated.provenance.clone();
+        let detail = reason.unwrap_or(broker_report_detail(state));
         self.record_broker_transition(
             updated,
             kind,
-            &detail,
+            detail,
             provenance,
             binding.then_some(report.broker_order_id.as_str()),
         )
@@ -1089,16 +1068,12 @@ impl TradingCore {
         else {
             return Ok(());
         };
-        let status = match current.status {
-            OrderStatus::Pending => OrderStatus::Rejected,
-            OrderStatus::PendingModify | OrderStatus::PendingCancel => confirmed_status(&current),
-            _ => return Ok(()),
+        let Some(mut updated) = crate::book::lifecycle::broker_refusal(current, self.command_now)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
         };
-        let updated = Order {
-            status,
-            provenance: self.venue_provenance(),
-            ..current
-        };
+        updated.provenance = self.venue_provenance();
         let provenance = updated.provenance.clone();
         self.record_broker_transition(updated, OrderEventKind::Rejected, reason, provenance, None)
     }
@@ -1200,48 +1175,6 @@ impl TradingCore {
     }
 }
 
-/// The order after one more deal. Its filled quantity is the larger of what it already
-/// shows and what its deals add up to; a broker-originated order's quantity grows with its
-/// deals, since the broker reports it only through them.
-fn filled_order(
-    current: &Order,
-    filled_by_deals: FixedPoint,
-    mirror: bool,
-    provenance: TradingProvenance,
-) -> Result<Order, String> {
-    let quantity = if mirror || filled_by_deals.units() > current.quantity.units() {
-        filled_by_deals
-    } else {
-        current.quantity
-    };
-    let filled = if filled_by_deals.units() > current.filled_quantity.units() {
-        filled_by_deals
-    } else {
-        current.filled_quantity
-    };
-    let status = if filled == quantity {
-        OrderStatus::Filled
-    } else if !current.status.is_open()
-        || matches!(
-            current.status,
-            OrderStatus::PendingModify | OrderStatus::PendingCancel
-        )
-    {
-        current.status
-    } else {
-        OrderStatus::PartiallyFilled
-    };
-    let updated = Order {
-        quantity,
-        filled_quantity: filled,
-        status,
-        provenance,
-        ..current.clone()
-    };
-    updated.validate().map_err(|error| error.to_string())?;
-    Ok(updated)
-}
-
 /// The time in force a broker order actually carries. Market orders fill or cancel at once.
 /// cTrader offers no day orders, so a day pending order rests good-till-cancelled
 /// (maintainer decision, 2026-10-08); the stored order says so.
@@ -1253,87 +1186,16 @@ const fn broker_time_in_force(order_type: OrderType, requested: TimeInForce) -> 
     }
 }
 
-/// The last confirmed working status of an order with a pending request.
-fn confirmed_status(order: &Order) -> OrderStatus {
-    if order.filled_quantity.units() == 0 {
-        OrderStatus::Working
-    } else {
-        OrderStatus::PartiallyFilled
-    }
-}
-
-/// The owner status a broker report moves an order to. A pending modify or cancel stays
-/// pending until the broker answers that request, so an acceptance or a partial fill never
-/// hides an unanswered request.
-fn reported_transition(
-    current: &Order,
-    report: &BrokerOrder,
-    state: BrokerOrderState,
-    reason: Option<&str>,
-    resolve_pending: bool,
-) -> (OrderStatus, OrderEventKind, String) {
-    let pending_request = !resolve_pending
-        && matches!(
-            current.status,
-            OrderStatus::PendingModify | OrderStatus::PendingCancel
-        );
-    let working = if report.filled_quantity.units() == 0 {
-        OrderStatus::Working
-    } else {
-        OrderStatus::PartiallyFilled
-    };
-    let detail = |text: &str| reason.unwrap_or(text).to_string();
+fn broker_report_detail(state: BrokerOrderState) -> &'static str {
     match state {
-        BrokerOrderState::Accepted if pending_request => {
-            (current.status, OrderEventKind::Accepted, detail("accepted"))
-        }
-        BrokerOrderState::Accepted => (working, OrderEventKind::Accepted, detail("accepted")),
-        BrokerOrderState::Replaced if current.status == OrderStatus::PendingCancel => {
-            (current.status, OrderEventKind::Modified, detail("replaced"))
-        }
-        BrokerOrderState::Replaced => (working, OrderEventKind::Modified, detail("replaced")),
-        BrokerOrderState::PartiallyFilled if pending_request => (
-            current.status,
-            OrderEventKind::Filled,
-            detail("partially filled"),
-        ),
-        BrokerOrderState::PartiallyFilled => {
-            (working, OrderEventKind::Filled, detail("partially filled"))
-        }
-        BrokerOrderState::Filled => (
-            OrderStatus::Filled,
-            OrderEventKind::Filled,
-            detail("filled"),
-        ),
-        BrokerOrderState::Cancelled => (
-            OrderStatus::Cancelled,
-            OrderEventKind::Cancelled,
-            detail("cancelled"),
-        ),
-        BrokerOrderState::Expired => (
-            OrderStatus::Cancelled,
-            OrderEventKind::Cancelled,
-            detail("expired"),
-        ),
-        BrokerOrderState::CancelRejected if current.status == OrderStatus::PendingCancel => {
-            (working, OrderEventKind::Rejected, detail("cancel rejected"))
-        }
-        BrokerOrderState::CancelRejected => (
-            current.status,
-            OrderEventKind::Rejected,
-            detail("cancel rejected"),
-        ),
-        // A rejection after a partial fill ends the order without undoing its fills.
-        BrokerOrderState::Rejected if report.filled_quantity.units() > 0 => (
-            OrderStatus::Cancelled,
-            OrderEventKind::Rejected,
-            detail("rejected"),
-        ),
-        BrokerOrderState::Rejected => (
-            OrderStatus::Rejected,
-            OrderEventKind::Rejected,
-            detail("rejected"),
-        ),
+        BrokerOrderState::Accepted => "accepted",
+        BrokerOrderState::Replaced => "replaced",
+        BrokerOrderState::PartiallyFilled => "partially filled",
+        BrokerOrderState::Filled => "filled",
+        BrokerOrderState::Cancelled => "cancelled",
+        BrokerOrderState::Expired => "expired",
+        BrokerOrderState::CancelRejected => "cancel rejected",
+        BrokerOrderState::Rejected => "rejected",
     }
 }
 

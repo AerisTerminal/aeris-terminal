@@ -1,6 +1,9 @@
 //! Pure order transitions; the caller commits the returned value and its event atomically.
 
-use aeris_trading::{Order, OrderStatus};
+use aeris_trading::{
+    FixedPoint, Order, OrderEventKind, OrderStatus, TradingProvenance,
+    venue::{BrokerOrder, BrokerOrderState},
+};
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum LifecycleError {
@@ -121,9 +124,193 @@ pub(crate) fn fill_simulated(
     Ok(order)
 }
 
+/// Applies a broker report (or reconcile confirmation) only when a binding or fact changes.
+pub(crate) fn broker_report(
+    current: &Order,
+    report: &BrokerOrder,
+    state: BrokerOrderState,
+    resolve_pending: bool,
+    binding: bool,
+    owner_unix_nanos: i64,
+) -> Result<Option<(Order, OrderEventKind)>, LifecycleError> {
+    if !current.status.is_open() {
+        return Err(LifecycleError::InvalidTransition(current.status));
+    }
+    let pending_request = !resolve_pending
+        && matches!(
+            current.status,
+            OrderStatus::PendingModify | OrderStatus::PendingCancel
+        );
+    let working = if report.filled_quantity.units() == 0 {
+        OrderStatus::Working
+    } else {
+        OrderStatus::PartiallyFilled
+    };
+    let (status, kind) = match state {
+        BrokerOrderState::Accepted if pending_request => (current.status, OrderEventKind::Accepted),
+        BrokerOrderState::Accepted => (working, OrderEventKind::Accepted),
+        BrokerOrderState::Replaced if current.status == OrderStatus::PendingCancel => {
+            (current.status, OrderEventKind::Modified)
+        }
+        BrokerOrderState::Replaced => (working, OrderEventKind::Modified),
+        BrokerOrderState::PartiallyFilled if pending_request => {
+            (current.status, OrderEventKind::Filled)
+        }
+        BrokerOrderState::PartiallyFilled => (working, OrderEventKind::Filled),
+        BrokerOrderState::Filled => (OrderStatus::Filled, OrderEventKind::Filled),
+        BrokerOrderState::Cancelled | BrokerOrderState::Expired => {
+            (OrderStatus::Cancelled, OrderEventKind::Cancelled)
+        }
+        BrokerOrderState::CancelRejected if current.status == OrderStatus::PendingCancel => {
+            (working, OrderEventKind::Rejected)
+        }
+        BrokerOrderState::CancelRejected => (current.status, OrderEventKind::Rejected),
+        BrokerOrderState::Rejected if report.filled_quantity.units() > 0 => {
+            (OrderStatus::Cancelled, OrderEventKind::Rejected)
+        }
+        BrokerOrderState::Rejected => (OrderStatus::Rejected, OrderEventKind::Rejected),
+    };
+    let mut updated = Order {
+        status,
+        quantity: report.quantity,
+        filled_quantity: report.filled_quantity,
+        ..current.clone()
+    };
+    if matches!(
+        current.order_type,
+        aeris_trading::OrderType::Limit | aeris_trading::OrderType::StopLimit
+    ) {
+        updated.limit_price = report.limit_price.or(current.limit_price);
+    }
+    if matches!(
+        current.order_type,
+        aeris_trading::OrderType::Stop | aeris_trading::OrderType::StopLimit
+    ) {
+        updated.stop_price = report.stop_price.or(current.stop_price);
+    }
+    if status == OrderStatus::Filled {
+        updated.filled_quantity = updated.quantity;
+    }
+    if !binding
+        && updated.status == current.status
+        && updated.quantity == current.quantity
+        && updated.filled_quantity == current.filled_quantity
+        && updated.limit_price == current.limit_price
+        && updated.stop_price == current.stop_price
+    {
+        return Ok(None);
+    }
+    advance(&mut updated, owner_unix_nanos)?;
+    if !updated.status.is_open() {
+        updated.terminal_unix_nanos = Some(owner_unix_nanos);
+    }
+    Ok(Some((updated, kind)))
+}
+
+pub(crate) fn broker_refusal(
+    mut order: Order,
+    owner_unix_nanos: i64,
+) -> Result<Option<Order>, LifecycleError> {
+    order.status = match order.status {
+        OrderStatus::Pending => OrderStatus::Rejected,
+        OrderStatus::PendingModify | OrderStatus::PendingCancel => {
+            if order.filled_quantity.units() == 0 {
+                OrderStatus::Working
+            } else {
+                OrderStatus::PartiallyFilled
+            }
+        }
+        _ => return Ok(None),
+    };
+    advance(&mut order, owner_unix_nanos)?;
+    if !order.status.is_open() {
+        order.terminal_unix_nanos = Some(owner_unix_nanos);
+    }
+    Ok(Some(order))
+}
+
+pub(crate) fn broker_missing(
+    mut order: Order,
+    bound: bool,
+    owner_unix_nanos: i64,
+) -> Result<(Order, OrderEventKind, &'static str), LifecycleError> {
+    if !order.status.is_open() {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    let (status, kind, detail) = if order.filled_quantity == order.quantity {
+        (
+            OrderStatus::Filled,
+            OrderEventKind::Filled,
+            "filled at cTrader",
+        )
+    } else if bound || order.filled_quantity.units() > 0 {
+        (
+            OrderStatus::Cancelled,
+            OrderEventKind::Cancelled,
+            "no longer open at cTrader",
+        )
+    } else {
+        (
+            OrderStatus::Rejected,
+            OrderEventKind::Rejected,
+            "cTrader did not receive the order",
+        )
+    };
+    advance(&mut order, owner_unix_nanos)?;
+    order.status = status;
+    order.terminal_unix_nanos = Some(owner_unix_nanos);
+    Ok((order, kind, detail))
+}
+
+/// The larger of the broker's known filled quantity and its deduplicated deal sum.
+/// Terminal orders may receive a late deal, but an unchanged deal cannot reenter here.
+pub(crate) fn broker_deal(
+    current: &Order,
+    filled_by_deals: FixedPoint,
+    mirror: bool,
+    provenance: TradingProvenance,
+    owner_unix_nanos: i64,
+) -> Result<Order, LifecycleError> {
+    let quantity = if mirror || filled_by_deals.units() > current.quantity.units() {
+        filled_by_deals
+    } else {
+        current.quantity
+    };
+    let filled = if filled_by_deals.units() > current.filled_quantity.units() {
+        filled_by_deals
+    } else {
+        current.filled_quantity
+    };
+    let status = if filled == quantity {
+        OrderStatus::Filled
+    } else if !current.status.is_open()
+        || matches!(
+            current.status,
+            OrderStatus::PendingModify | OrderStatus::PendingCancel
+        )
+    {
+        current.status
+    } else {
+        OrderStatus::PartiallyFilled
+    };
+    let mut updated = Order {
+        quantity,
+        filled_quantity: filled,
+        status,
+        provenance,
+        ..current.clone()
+    };
+    advance(&mut updated, owner_unix_nanos)?;
+    if !status.is_open() && (current.status.is_open() || status != current.status) {
+        updated.terminal_unix_nanos = Some(owner_unix_nanos);
+    }
+    Ok(updated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_trading::venue::BrokerOrderKind;
 
     #[test]
     fn terminal_order_cannot_be_cancelled_again() {
@@ -147,6 +334,116 @@ mod tests {
         assert_eq!(filled.terminal_unix_nanos, Some(2));
         assert_eq!(filled.filled_quantity, filled.quantity);
         assert!(fill_simulated(filled, 3).is_err());
+    }
+
+    #[test]
+    fn broker_report_is_idempotent_and_terminal_reports_cannot_reopen() {
+        let mut pending = super::super::tests::order(1, OrderStatus::Pending);
+        let report = BrokerOrder {
+            broker_order_id: "broker-1".into(),
+            client_order_id: Some(pending.client_order_id.as_str().into()),
+            instrument_id: pending.instrument_id.clone(),
+            side: pending.side,
+            kind: BrokerOrderKind::Limit,
+            quantity: pending.quantity,
+            filled_quantity: pending.filled_quantity,
+            limit_price: pending.limit_price,
+            stop_price: pending.stop_price,
+            broker_position_id: None,
+            closing: false,
+        };
+        let (accepted, _) = broker_report(
+            &pending,
+            &report,
+            BrokerOrderState::Accepted,
+            false,
+            true,
+            2,
+        )
+        .expect("report")
+        .expect("binding");
+        assert_eq!(
+            (
+                accepted.status,
+                accepted.revision,
+                accepted.updated_unix_nanos
+            ),
+            (OrderStatus::Working, 2, 2)
+        );
+        assert!(
+            broker_report(
+                &accepted,
+                &report,
+                BrokerOrderState::Accepted,
+                false,
+                false,
+                3
+            )
+            .expect("replay")
+            .is_none()
+        );
+        pending = request(accepted, OrderStatus::PendingCancel, 4).expect("cancel request");
+        assert!(
+            broker_report(
+                &pending,
+                &report,
+                BrokerOrderState::Accepted,
+                false,
+                false,
+                5
+            )
+            .expect("pending acceptance")
+            .is_none()
+        );
+        let (cancelled, _) = broker_report(
+            &pending,
+            &report,
+            BrokerOrderState::Cancelled,
+            false,
+            false,
+            6,
+        )
+        .expect("cancel report")
+        .expect("transition");
+        assert_eq!(
+            (cancelled.revision, cancelled.terminal_unix_nanos),
+            (4, Some(6))
+        );
+        assert!(
+            broker_report(
+                &cancelled,
+                &report,
+                BrokerOrderState::Accepted,
+                false,
+                false,
+                7
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn late_broker_deal_preserves_a_terminal_timestamp() {
+        let mut order = super::super::tests::order(2, OrderStatus::Working);
+        order.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+        let (cancelled, _, _) = broker_missing(order, true, 2).expect("missing");
+        let late = broker_deal(
+            &cancelled,
+            FixedPoint::try_new(1, 0).expect("quantity"),
+            false,
+            cancelled.provenance.clone(),
+            3,
+        )
+        .expect("late deal");
+        assert_eq!(
+            (
+                late.status,
+                late.revision,
+                late.updated_unix_nanos,
+                late.terminal_unix_nanos
+            ),
+            (OrderStatus::Cancelled, 3, 3, Some(2))
+        );
     }
 
     #[test]

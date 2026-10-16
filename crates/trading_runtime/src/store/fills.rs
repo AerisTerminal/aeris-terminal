@@ -107,7 +107,9 @@ impl TradingStore {
         transaction
             .execute(
                 "UPDATE orders SET status = ?1, quantity_units = ?2, quantity_scale = ?3,
-                    filled_units = ?4, filled_scale = ?5, provenance_json = ?6 WHERE id = ?7",
+                    filled_units = ?4, filled_scale = ?5, provenance_json = ?6,
+                    revision = ?7, updated_unix_nanos = ?8, terminal_unix_nanos = ?9
+                    WHERE id = ?10",
                 params![
                     order.status.as_str(),
                     order.quantity.units(),
@@ -115,6 +117,9 @@ impl TradingStore {
                     order.filled_quantity.units(),
                     order.filled_quantity.scale(),
                     encode_provenance(&order.provenance),
+                    order.revision,
+                    order.updated_unix_nanos,
+                    order.terminal_unix_nanos,
                     order.id.as_str(),
                 ],
             )

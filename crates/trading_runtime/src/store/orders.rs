@@ -143,7 +143,8 @@ impl TradingStore {
                 "UPDATE orders SET status = ?1, time_in_force = ?2, limit_units = ?3,
              limit_scale = ?4, stop_units = ?5, stop_scale = ?6, provenance_json = ?7,
              quantity_units = ?8, quantity_scale = ?9, filled_units = ?10, filled_scale = ?11,
-             revision = ?12, updated_unix_nanos = ?13 WHERE id = ?14",
+             revision = ?12, updated_unix_nanos = ?13, terminal_unix_nanos = ?14
+             WHERE id = ?15",
                 params![
                     order.status.as_str(),
                     order.time_in_force.as_str(),
@@ -158,6 +159,7 @@ impl TradingStore {
                     order.filled_quantity.scale(),
                     order.revision,
                     order.updated_unix_nanos,
+                    order.terminal_unix_nanos,
                     order.id.as_str(),
                 ],
             )
