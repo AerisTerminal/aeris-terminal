@@ -118,8 +118,8 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | MD-17 | Medium | The test structure locks in the current implementation | M2.1 (part), M3.11 | closed in this commit |
 | TR-01 | Critical | The simulated venue gets prices only from chart panes | M3.8 (market side), M4.7 | open |
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | provider-neutral session, feed-generation and per-class age gates in trading owner; GUI resting-order check outstanding |
-| TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | open |
-| TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | open |
+| TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | closed: one atomic step locks, cancels non-protective orders with the kill-switch cause and flattens priced positions; unpriced positions keep protection and are reported |
+| TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | closed: FlattenScope covers every account/instrument from owner quotes; event flatten needs no observation; broker closes cover every instrument |
 | TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | open; runtime lookup scans removed in M4.4 |
 | TR-06 | High | Per-quote durable writes and retention that deletes the ledger | M4.10 (per-quote writes), M5.8 (retention and repair) | closed: checkpoint-fold retention, checkpoint repair and the seeded property identity run |
 | TR-07 | High | Position protection is built from overlapping patch layers | M5.2 (validator), M5.5 (model), M5.6 (cleanup) | closed: one group authority, legacy layers deleted in M5.6 |
@@ -127,7 +127,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-09 | Medium | The risk session never rolls over and no profile is registered | M5.10 (runtime part; desktop UI out of scope) | open |
 | TR-10 | Medium | Desktop keeps per-pane copies of trading state and resolves intents against them | M6.10 (part), M6.11 | open |
 | TR-11 | Medium | Duplicate PnL trackers and no cash ledger | M4.9 (single PnL path), M5.7 | closed: exact cost basis plus one durable cash ledger with fees |
-| TR-12 | Low | Smaller defects and debt | M4.1, M4.2, M4.5, M4.6, M5.9, M8.10 | open |
+| TR-12 | Low | Smaller defects and debt | M4.1, M4.2, M4.5, M4.6, M5.9, M8.10 | open; reverse is one atomic admitted operation since M5.9, rest stays with M8.10 |
 | UI-01 | High | Practice venue market data is relayed through the chart UI | M3.8 (market side), M4.7 | open |
 | UI-02 | High | Symbol/interval switching is a UI-owned state machine without generations | M6.3, M6.4 | open |
 | UI-03 | High | Provider-specific identity, entitlement and wording in the desktop | M6.7, M6.8, M6.9 | open |
@@ -540,7 +540,7 @@ Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VA
 
 ### M5 trading engine
 
-Status: in progress; M5.1-M5.8 code and tests are complete, M5.9-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
+Status: in progress; M5.1-M5.9 code and tests are complete, M5.10-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
 
 - [x] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -658,7 +658,7 @@ Status: in progress; M5.1-M5.8 code and tests are complete, M5.9-M5.12 remain op
     through a held leg left its working entry naked (`stage_bracket_termination` cascaded only the legs); the
     entry now cancels with the group, locked by `cancelling_a_held_leg_cancels_the_pending_entry_too`.
     Runtime 255 passed/5 ignored.
-- [ ] M5.9 emergency-operations - Kill switch, flatten scopes and atomic reverse across all instruments
+- [x] M5.9 emergency-operations - Kill switch, flatten scopes and atomic reverse across all instruments
   - Input finding from the M5.8 property run: the kill switch cancels open group legs without in-session group
     reconciliation, leaving brackets Active with dead legs until startup recovery retires them (BrokenGroup
     notice); M5.9 owns the in-session reconciliation.
@@ -717,6 +717,14 @@ Status: in progress; M5.1-M5.8 code and tests are complete, M5.9-M5.12 remain op
     lines, position flat, realized 6250). Runtime 262 passed/5 ignored; desktop 449+81; full
     fmt, strict workspace Clippy, workspace tests and naming passed. Scripted-broker parity and
     TR-03/TR-04/TR-12 closure remain; M5.9 stays unchecked.
+  - Part 3/3: `a_broker_flatten_requests_closes_for_every_instrument` proves the scripted
+    cTrader parity of VAL-TRD-062: positions on two symbols both receive close requests from
+    one account-wide flatten, and an instrument scope closes only its own.
+    `reverse_on_a_locked_account_returns_account_locked_without_a_fill` completes VAL-TRD-063
+    (atomic reverse: crash-replay and risk-reject were covered in parts 1-2). TR-03 and TR-04
+    close; TR-12's reverse part closes here, the rest stays with M8.10. The item's GUI
+    flatten-all pass (VAL-TRD-064) moves to the milestone GUI/probe pass; M5.9 is otherwise
+    complete.
 - [ ] M5.10 risk-session-rollover - Persisted risk session with rollover; bracket legs count as attached stops
 - [ ] M5.11 trading-publication-api - Change-driven, bounded publication with paged history
 - [ ] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
@@ -1024,6 +1032,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.8 part 4 feat(trading): property-test the trading invariants - 200 seeds x 500 service-level steps assert pooled coverage, fill eligibility, DAY expiry, balance identity and the equity ring bound after every step; each restart adds the durable identity (no orphan legs, checkpoint+suffix positions, checkpoint+entries balance, no stale DAY rows) and notice-free reopen equality. The run caught a pending-bracket cascade defect (held-leg cancel left the entry working); fixed in stage_bracket_termination with a focused regression. TR-06 closes. Runtime 255 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed.
 - 2026-10-17 M5.9 part 1/3 feat(trading): price emergency operations from verified runtime quotes - atomic scoped flatten/reverse through one commit_quote_step per action, typed unpriced reporting that keeps protection, sim-reverse IOC staging with enforce_risk, observation-free event risk and scoped/global broker multi-instrument close; legacy per-step fill writers deleted; regressions converted to the real feed path plus scope/unpriced/risk-reject/crash-atomicity coverage; v2 simulated golden regenerated for the new feed provenance, per-instrument revision numbering, sim-reverse leg and completed bracket. Runtime 260 passed/5 ignored; full gate green.
 - 2026-10-17 M5.9 part 2/3 feat(trading): make the kill switch the full atomic emergency action - one durable step locks the in-scope accounts, cancels non-protective orders with the typed KillSwitch cause and flattens every priced position with group reconciliation; protection is never stripped, unpriced positions keep their stop/target and land in EmergencyOutcome::unpriced; broker cancels/closes stay reported venue requests; event Lock shares lock_and_disarm without flattening; stale CancellationCause dead-code expectation removed. New VAL-TRD-061 four-instrument regression and replay crash-atomicity test; property harness now follows activation-assigned leg prices; v2 golden regenerated for the kill_switch cancel reason and the kill flatten fill. Runtime 262 passed/5 ignored; desktop 449+81; full gate green.
+- 2026-10-17 M5.9 part 3/3 test(trading): close out emergency operations - scripted cTrader two-symbol flatten parity (VAL-TRD-062: close requests for both positions, scoped variant closes one) and the locked-account reverse refusal (VAL-TRD-063). TR-03 and TR-04 closed; TR-12's reverse part closed. M5.9 complete except the milestone GUI flatten-all pass (VAL-TRD-064). Runtime 264 passed/5 ignored; full gate green.
 
 ## 7. Known gaps / deferred
 

@@ -1022,6 +1022,62 @@ fn broker_positions_close_and_amend_through_the_venue() {
 }
 
 #[test]
+fn a_broker_flatten_requests_closes_for_every_instrument() {
+    // VAL-TRD-062: a scripted cTrader account with positions on two symbols receives
+    // close requests for both from one flatten; an instrument scope closes only its own.
+    let (_directory, service, receiver) = setup("venue-flatten-all");
+    let mut second_instrument = instrument();
+    second_instrument.instrument_id =
+        crate::InstrumentId::try_new("instrument:fixture:CME:CLZ6").expect("second instrument id");
+    service
+        .register_instrument(second_instrument.clone())
+        .expect("second instrument");
+    let inbox = service.demo_venue_inbox();
+    inbox
+        .push(venue(1, VenueUpdate::Position(position("77", 2))))
+        .expect("position 77");
+    let mut second_position = position("78", 1);
+    second_position.instrument_id = second_instrument.instrument_id.clone();
+    inbox
+        .push(venue(1, VenueUpdate::Position(second_position)))
+        .expect("position 78");
+
+    let scoped = service
+        .flatten(crate::FlattenScope {
+            account: Some(broker().id),
+            instrument: Some(instrument().instrument_id),
+        })
+        .expect("instrument-scoped broker flatten");
+    assert_eq!(scoped.pending_close_requests, ["77".to_string()]);
+    assert_eq!(scoped.incomplete, None);
+    assert!(matches!(
+        receiver.recv().expect("close 77"),
+        VenueRequest::ClosePosition { broker_position_id, .. } if broker_position_id == "77"
+    ));
+
+    let all = service
+        .flatten(crate::FlattenScope {
+            account: Some(broker().id),
+            instrument: None,
+        })
+        .expect("account-wide broker flatten");
+    assert_eq!(
+        all.pending_close_requests,
+        ["77".to_string(), "78".to_string()]
+    );
+    assert_eq!(all.incomplete, None);
+    let mut closed = Vec::new();
+    while let Ok(VenueRequest::ClosePosition {
+        broker_position_id, ..
+    }) = receiver.try_recv()
+    {
+        closed.push(broker_position_id);
+    }
+    closed.sort();
+    assert_eq!(closed, ["77".to_string(), "78".to_string()]);
+}
+
+#[test]
 fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
     let directory = TestDirectory::new("venue-global");
     let service = start_service(&directory);

@@ -5260,6 +5260,49 @@ fn reverse_rejected_by_risk_leaves_the_position_untouched() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 }
+
+#[test]
+fn reverse_on_a_locked_account_returns_account_locked_without_a_fill() {
+    // VAL-TRD-063: the reverse admission runs inside the same step as the close, so a
+    // locked account refuses the whole operation and keeps the position.
+    let directory = TestDirectory::new("reverse-locked");
+    let (service, _clock, feed) = live_feed_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    bootstrap_live_feed(&feed, &instrument(), market_feed::route());
+    service.status().expect("feed drains");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    service
+        .place_order(market_order(
+            "reverse-locked-entry",
+            OrderSide::Buy,
+            2,
+            1_000,
+        ))
+        .expect("entry accepted");
+    push_live_quote(&feed, &instrument(), 2, 9_975, 10_000, 2);
+    service.status().expect("entry fills");
+    service
+        .lock_account(account.clone(), "manual lock".to_string(), 1_500)
+        .expect("account locks");
+    push_live_quote(&feed, &instrument(), 3, 10_100, 10_125, 2);
+    service.status().expect("reverse quote");
+    let before = service.snapshot().expect("before reverse");
+    let error = service
+        .reverse_position_at(account, instrument().instrument_id)
+        .expect_err("a locked account cannot reverse");
+    assert!(error.contains("AccountLocked"), "{error}");
+    assert_eq!(
+        service.snapshot().expect("after refusal"),
+        before,
+        "the refused reverse leaves the position and every fact untouched"
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
 #[test]
 fn invalid_json_never_enters_the_store() {
     let directory = TestDirectory::new("invalid-json");
