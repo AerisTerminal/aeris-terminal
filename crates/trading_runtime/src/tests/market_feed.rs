@@ -176,6 +176,76 @@ fn day_order_expires_on_owner_boundary_before_late_quote() {
     restarted.shutdown(Duration::from_secs(5)).unwrap();
 }
 
+#[test]
+fn overdue_day_order_is_expired_before_first_command_after_restart() {
+    let directory = TestDirectory::new("day-restart-expiry");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Terms(terms())).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    service.status().unwrap();
+    let mut request = market_order("day-restart", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::Day;
+    let working = service.place_order(request).unwrap();
+    assert_eq!(working.status, OrderStatus::Working);
+    service.shutdown(Duration::from_secs(5)).unwrap();
+
+    clock.set_wall_unix_nanos(2_000_001_000_000);
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let (commands, _receiver) = std::sync::mpsc::sync_channel(1);
+    let recovered_core = TradingCore::open(
+        &configuration.database_path,
+        configuration.retention,
+        configuration.clock.clone(),
+        configuration.execution,
+        std::sync::Weak::new(),
+        Arc::new(crate::core::market::feed::MarketFeedInbox::new(
+            commands,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )),
+    )
+    .unwrap();
+    let status: String = rusqlite::Connection::open(&configuration.database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status FROM orders WHERE id = ?1",
+            [working.id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "expired",
+        "store-open recovery precedes the service loop"
+    );
+    drop(recovered_core);
+    let restarted = start_service_with_config(configuration);
+    let snapshot = restarted.snapshot().expect("first command after recovery");
+    let expired = snapshot
+        .orders
+        .iter()
+        .find(|order| order.id == working.id)
+        .unwrap();
+    assert_eq!(expired.status, OrderStatus::Expired);
+    assert_eq!(expired.expires_at_unix_nanos, Some(2_000_000_000_000));
+    assert_eq!(expired.terminal_unix_nanos, Some(2_000_000_000_000));
+    assert_eq!(expired.revision, working.revision + 1);
+    assert!(snapshot.order_events.iter().any(|event| {
+        event.order_id == working.id
+            && event.kind == OrderEventKind::Expired
+            && event.event_unix_nanos == 2_000_000_000_000
+    }));
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
+}
+
 fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {
     MarketFeedEvent::Feed {
         instrument_id: id,
