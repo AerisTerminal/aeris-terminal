@@ -848,6 +848,19 @@ impl LedgerEntryKind {
     }
 }
 
+/// One equity observation of a simulated account: balance plus open unrealized P&L at a
+/// moment. Written at each fill, by the 60 s timer when equity changed, and at each risk
+/// session end; the durable history downsamples to one-minute samples for the last 7 days
+/// and hourly samples for the last year.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EquitySample {
+    /// The account the sample belongs to.
+    pub account_id: TradingAccountId,
+    /// When the sample was taken.
+    pub at_unix_nanos: i64,
+    /// The account equity in the account currency.
+    pub equity: FixedPoint,
+}
 /// One durable cash movement of a simulated account. Broker balances remain the broker's
 /// authority; broker fills only produce informational entries.
 #[derive(Clone, Debug, Eq, PartialEq)]

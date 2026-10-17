@@ -1,5 +1,7 @@
+mod equity;
 mod fees;
 mod position;
+pub(crate) use equity::{EQUITY_RING_CAPACITY, EQUITY_SAMPLE_INTERVAL_NANOS};
 #[cfg(test)]
 pub(crate) use fees::fee_for_fill;
 pub(crate) use position::{CostBasis, FillAccounting, TradeCycle};
@@ -131,6 +133,13 @@ impl TradingCore {
             fill.account_id.clone(),
             update.policy_update.discipline_state,
         );
+        // One equity sample per fill: the ring updates now, and the sample travels to the
+        // durable history with the committing transaction (quote and placement steps) or a
+        // follow-up flush (emergency close). A speculative plan that rolls back is cleared.
+        if let Some(sample) = self.record_equity_sample(&fill.account_id, fill.execution_unix_nanos)
+        {
+            self.pending_equity_samples.push(sample);
+        }
     }
 
     /// The newest simulated-account fills, within the snapshot bound.
@@ -235,6 +244,13 @@ impl TradingCore {
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
             ledger_entries: self.state.ledger_entries.clone(),
+            equity_samples: self
+                .state
+                .equity_rings
+                .values()
+                .flatten()
+                .cloned()
+                .collect(),
             fee_schedules: self
                 .state
                 .fee_schedules
@@ -264,6 +280,52 @@ impl TradingCore {
             protective_orders: self.protection_order_views(),
             recovery_notices: self.recovery_notices.clone(),
         })
+    }
+
+    /// The current balance of one simulated account: the ledger checkpoint plus the exact
+    /// sum of its remaining cash-ledger entries, or the legacy starting-equity math while a
+    /// gated pre-group store awaits its conversion backfill.
+    pub(super) fn simulated_balance(
+        &self,
+        account: &TradingAccount,
+        realized: FixedPoint,
+    ) -> Result<Option<FixedPoint>, String> {
+        let checkpoint = self.state.ledger_checkpoints.get(&account.id);
+        let ledgered = account.starting_equity.is_none()
+            || checkpoint.is_some()
+            || self
+                .state
+                .ledger_entries
+                .iter()
+                .any(|entry| entry.account_id == account.id);
+        if ledgered {
+            let mut total = match checkpoint {
+                Some(checkpoint) => checkpoint.balance,
+                None => FixedPoint::try_new(0, account.currency_scale)
+                    .map_err(|error| error.to_string())?,
+            };
+            for entry in self
+                .state
+                .ledger_entries
+                .iter()
+                .filter(|entry| entry.account_id == account.id)
+            {
+                total = total
+                    .checked_add(
+                        entry
+                            .amount
+                            .exact_rescale(account.currency_scale)
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            return Ok(Some(total));
+        }
+        account
+            .starting_equity
+            .map(|starting| starting.checked_add(realized))
+            .transpose()
+            .map_err(|error| error.to_string())
     }
 
     pub(super) fn account_pnl(&self) -> Result<Vec<AccountPnl>, String> {
@@ -302,43 +364,7 @@ impl TradingCore {
                 if account.broker_ref.is_some() {
                     return self.broker_account_pnl(account, realized, unrealized);
                 }
-                // A ledgered account's balance is its ledger checkpoint plus the exact sum
-                // of its remaining cash-ledger entries. A funded account without either is a
-                // gated pre-group store awaiting its conversion backfill and keeps the legacy
-                // starting-equity math until then.
-                let checkpoint = self.state.ledger_checkpoints.get(&account.id);
-                let ledgered = account.starting_equity.is_none()
-                    || checkpoint.is_some()
-                    || self
-                        .state
-                        .ledger_entries
-                        .iter()
-                        .any(|entry| entry.account_id == account.id);
-                let balance = if ledgered {
-                    let mut total = checkpoint.map_or(zero, |checkpoint| checkpoint.balance);
-                    for entry in self
-                        .state
-                        .ledger_entries
-                        .iter()
-                        .filter(|entry| entry.account_id == account.id)
-                    {
-                        total = total
-                            .checked_add(
-                                entry
-                                    .amount
-                                    .exact_rescale(account.currency_scale)
-                                    .map_err(|error| error.to_string())?,
-                            )
-                            .map_err(|error| error.to_string())?;
-                    }
-                    Some(total)
-                } else {
-                    account
-                        .starting_equity
-                        .map(|starting| starting.checked_add(realized))
-                        .transpose()
-                        .map_err(|error| error.to_string())?
-                };
+                let balance = self.simulated_balance(account, realized)?;
                 Ok(AccountPnl {
                     account_id: account.id.clone(),
                     currency: account.currency.clone(),

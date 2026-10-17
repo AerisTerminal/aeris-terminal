@@ -389,6 +389,8 @@ impl TradingCore {
                 next_sequence: sequence + 2,
             },
         );
+        // The fill committed above; its equity sample follows in its own small write.
+        self.flush_pending_equity_samples();
         Ok(Some(fill))
     }
 }

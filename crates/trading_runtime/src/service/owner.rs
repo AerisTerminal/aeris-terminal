@@ -2,7 +2,7 @@
 
 use super::Command;
 use crate::core::RETENTION_INTERVAL;
-use crate::{TradingCore, UNREALIZED_PNL_INTERVAL};
+use crate::{EQUITY_SAMPLE_INTERVAL, TradingCore, UNREALIZED_PNL_INTERVAL};
 use std::sync::mpsc::{self, Receiver};
 
 pub(crate) const OWNER_THREAD_NAME: &str = "aeris-trading-owner";
@@ -11,15 +11,19 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
     let mut next_refresh = core.clock.monotonic();
     // Retention is due at startup and then hourly.
     let mut next_retention = core.clock.monotonic();
+    // The equity timer samples every 60 s, starting one interval after open so a restart
+    // replays the durable history unchanged before sampling resumes.
+    let mut next_equity = core.clock.monotonic() + EQUITY_SAMPLE_INTERVAL;
     loop {
         let now = core.clock.monotonic();
         let refresh_due = core.wants_unrealized_pnl() && now >= next_refresh;
         let retention_due = now >= next_retention;
+        let equity_due = now >= next_equity;
         let wall_now = core.clock.wall_unix_nanos();
         let order_due = core
             .next_order_deadline_unix_nanos()
             .is_some_and(|deadline| wall_now >= deadline);
-        if refresh_due || retention_due || order_due {
+        if refresh_due || retention_due || equity_due || order_due {
             core.on_timer(core.clock.wall_unix_nanos());
             if refresh_due {
                 next_refresh = now + UNREALIZED_PNL_INTERVAL;
@@ -27,11 +31,14 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
             if retention_due {
                 next_retention = now + RETENTION_INTERVAL;
             }
+            if equity_due {
+                next_equity = now + EQUITY_SAMPLE_INTERVAL;
+            }
         }
         let deadline = if core.wants_unrealized_pnl() {
-            next_refresh.min(next_retention)
+            next_refresh.min(next_retention).min(next_equity)
         } else {
-            next_retention
+            next_retention.min(next_equity)
         };
         let wait = deadline.saturating_sub(core.clock.monotonic());
         let wait = core

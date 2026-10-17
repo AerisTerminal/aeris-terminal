@@ -463,6 +463,7 @@ impl TradingCore {
         observation: &SimulatedMarketObservation,
     ) -> Result<Vec<Fill>, String> {
         self.quote_commit_failed = false;
+        self.pending_equity_samples.clear();
         if self.mark_only_quote(observation)? {
             let instrument = self
                 .state
@@ -479,6 +480,9 @@ impl TradingCore {
         let result = self.plan_market_quote(observation);
         self.quote_planning = false;
         let planned = std::mem::replace(&mut self.state, original);
+        if result.is_err() {
+            self.pending_equity_samples.clear();
+        }
         let fills = result?;
         if fills.is_empty()
             && planned.revision == self.state.revision
@@ -492,10 +496,15 @@ impl TradingCore {
             self.state = planned;
             return Ok(fills);
         }
-        if let Err(error) = self.store.commit_quote_step(&self.state, &planned) {
+        if let Err(error) =
+            self.store
+                .commit_quote_step(&self.state, &planned, &self.pending_equity_samples)
+        {
+            self.pending_equity_samples.clear();
             self.quote_commit_failed = true;
             return Err(error);
         }
+        self.pending_equity_samples.clear();
         self.state = planned;
         self.enforce_memory_retention();
         Ok(fills)

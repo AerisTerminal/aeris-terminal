@@ -141,7 +141,12 @@ violations and missing verification explicitly, and never describe them as satis
   `position_checkpoints`, `ledger_checkpoints` and the `equity_samples` history; retention
   folds each pruned fill prefix and its ledger entries into those checkpoints inside the
   deletion transaction, and recovery rebuilds a checkpointed position as checkpoint plus the
-  retained fill suffix. Old P&L tables and
+  retained fill suffix. Each simulated fill carries one equity sample inside its commit
+  transaction, the 60-second owner timer adds a sample only when equity changed plus one at
+  each risk session boundary, and a 1,440-entry in-memory ring per account is rebuilt from
+  the durable history at open; retention downsamples minute samples older than seven days
+  into last-of-hour rows and drops hourly rows older than a year, with both windows trailing
+  the newest sample so a backward clock correction cannot mass-expire history. Old P&L tables and
   per-fill columns remain unread until their deferred removal migration. Store-open preflight scratch cleanup may
   remove only exact preflight directories containing solely the expected database copy and
   SQLite sidecars; preserve unknown contents and report cleanup failures through observability.

@@ -4,7 +4,7 @@
 use super::fills::{insert_fill_accounting, upsert_trade_cycle};
 use super::groups::upsert_order_group;
 use super::{
-    FixedPoint, StepTx, StoredState, TradingStore, database_error, encode_provenance,
+    EquitySample, FixedPoint, StepTx, StoredState, TradingStore, database_error, encode_provenance,
     insert_event_row, insert_order_row, params, update_next_sequence, upsert_discipline_state,
     upsert_position, upsert_position_basis, upsert_risk_rule_state,
 };
@@ -14,9 +14,15 @@ impl TradingStore {
         &mut self,
         before: &StoredState,
         after: &StoredState,
+        equity_samples: &[EquitySample],
     ) -> Result<(), String> {
+        let checkpointed = self.checkpoint_tables_present()?;
         let tx = StepTx::begin(self).map_err(database_error)?;
         persist_quote_orders_and_fills(&tx, before, after)?;
+        // One sample per fill, committed with the fill; a gated store skips the history.
+        if checkpointed {
+            super::ledger::insert_equity_samples(&tx, equity_samples)?;
+        }
         // Ledger entries are append-only in memory; a quote step appends exactly the entries
         // its fills produced.
         super::ledger::insert_ledger_entries(

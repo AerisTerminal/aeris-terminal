@@ -715,6 +715,7 @@ impl TradingCore {
         dispatches: Vec<TradeCopyDispatch>,
         source: Order,
     ) -> Result<Order, String> {
+        self.pending_equity_samples.clear();
         let candidates = step
             .inserted
             .iter()
@@ -755,13 +756,19 @@ impl TradingCore {
         self.quote_planning = false;
         let planned = std::mem::replace(&mut self.state, original);
         if let Err(error) = result {
+            self.pending_equity_samples.clear();
             self.copy_dispatches = previous_dispatches;
             return Err(error);
         }
-        if let Err(error) = self.store.commit_quote_step(&self.state, &planned) {
+        if let Err(error) =
+            self.store
+                .commit_quote_step(&self.state, &planned, &self.pending_equity_samples)
+        {
+            self.pending_equity_samples.clear();
             self.copy_dispatches = previous_dispatches;
             return Err(error);
         }
+        self.pending_equity_samples.clear();
         self.state = planned;
         self.enforce_memory_retention();
         self.state

@@ -1385,6 +1385,134 @@ fn retention_never_prunes_fills_pinned_by_a_live_group() {
         recovered.managed_brackets[0].status,
         BracketViewStatus::Active
     );
+}
+
+fn equity_watch_profile() -> RiskProfile {
+    RiskProfile {
+        account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+        profile_id: "equity-watch".to_string(),
+        version: 1,
+        session_start_unix_nanos: 1,
+        session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+        daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("daily loss"),
+        trailing_drawdown: None,
+        trailing_mode: TrailingDrawdownMode::Intraday,
+        max_contracts: FixedPoint::try_new(5, 0).expect("contracts"),
+        consistency_max_single_trade_percent: None,
+        restricted_until_unix_nanos: None,
+        economic_event_rule: None,
+        enabled: true,
+    }
+}
+
+#[test]
+fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
+    // VAL-TRD-059: every fill writes one equity sample, the 60 s timer writes only when
+    // equity changed plus one sample at each risk session boundary, and the in-memory ring
+    // is rebuilt from the durable history across a restart.
+    use crate::clock::Clock;
+    let directory = TestDirectory::new("equity-samples");
+    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let service = start_service_with_config(configuration);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    service
+        .register_risk_profile(equity_watch_profile())
+        .expect("profile registers");
+
+    // The first equity tick fires one interval after open and writes the initial sample.
+    clock.advance(Duration::from_secs(61));
+    service.status().expect("startup tick");
+    let initial = service
+        .snapshot()
+        .expect("initial snapshot")
+        .equity_samples
+        .len();
+    assert!(initial >= 1, "the startup tick samples the account");
+
+    // One sample per fill, even when equity is unchanged.
+    clock.advance(Duration::from_secs(1));
+    let now = clock.wall_unix_nanos();
+    service
+        .place_order(market_order("eq-fill", OrderSide::Buy, 1, now))
+        .expect("order accepted");
+    service
+        .observe_market(observation(10_000, 10_001, 1, now))
+        .expect("fill");
+    let after_fill = service.snapshot().expect("post-fill snapshot");
+    assert_eq!(after_fill.equity_samples.len(), initial + 1);
+    assert_eq!(
+        after_fill
+            .equity_samples
+            .last()
+            .expect("fill sample")
+            .at_unix_nanos,
+        now,
+        "the fill sample carries the fill time"
+    );
+
+    // The next tick settles the post-fill mark once; after that an unchanged equity stops
+    // the timer from writing.
+    clock.advance(Duration::from_secs(61));
+    service.status().expect("settling tick");
+    let settled = service
+        .snapshot()
+        .expect("settled snapshot")
+        .equity_samples
+        .len();
+    assert!(
+        settled == initial + 1 || settled == initial + 2,
+        "the settling tick writes at most one changed sample"
+    );
+    clock.advance(Duration::from_secs(61));
+    service.status().expect("unchanged tick");
+    assert_eq!(
+        service
+            .snapshot()
+            .expect("unchanged snapshot")
+            .equity_samples
+            .len(),
+        settled,
+        "an unchanged equity writes nothing"
+    );
+
+    // A quote move changes unrealized, so the next timer tick samples once.
+    service
+        .observe_market(observation(10_050, 10_051, 2, clock.wall_unix_nanos()))
+        .expect("quote move");
+    clock.advance(Duration::from_secs(61));
+    service.status().expect("changed tick");
+    let after_move = service.snapshot().expect("changed snapshot");
+    assert_eq!(after_move.equity_samples.len(), settled + 1);
+    assert_eq!(
+        after_move
+            .equity_samples
+            .last()
+            .expect("timer sample")
+            .at_unix_nanos,
+        clock.wall_unix_nanos(),
+        "the timer sample carries the tick time"
+    );
+
+    // A UTC-day crossing writes the risk session-end sample even though equity is unchanged.
+    clock.advance(Duration::from_mins(1_450));
+    service.status().expect("session tick");
+    let after_session = service.snapshot().expect("session snapshot");
+    assert_eq!(after_session.equity_samples.len(), settled + 2);
+    let before_restart = after_session.equity_samples;
+
+    // The ring is rebuilt from the durable history; sampling resumes one interval after
+    // open, so the immediate post-restart snapshot replays the samples unchanged.
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    let recovered = restarted
+        .snapshot()
+        .expect("recovered snapshot")
+        .equity_samples;
+    assert_eq!(recovered, before_restart);
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("shutdown");

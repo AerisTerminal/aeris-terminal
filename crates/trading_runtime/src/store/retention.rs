@@ -349,6 +349,91 @@ fn prune_ledger_entries(
     Ok(())
 }
 
+/// The equity-history retention windows: minute samples cover the last seven days, hourly
+/// samples the last year.
+const MINUTE_SAMPLE_RETENTION_NANOS: i64 = 7 * 86_400_000_000_000;
+const HOUR_SAMPLE_RETENTION_NANOS: i64 = 365 * 86_400_000_000_000;
+const HOUR_NANOS: i64 = 3_600_000_000_000;
+
+/// Collapses minute samples older than seven days into one hourly sample per account hour
+/// (the last observation of the hour wins) and drops hourly samples older than a year, at
+/// most 5,000 rows per step, inside the retention transaction.
+fn downsample_equity_history(
+    transaction: &rusqlite::Transaction<'_>,
+    now: i64,
+) -> Result<(), String> {
+    // The windows trail the newest sample, not raw wall time: a store reopened after long
+    // downtime or with a backward clock correction keeps its recent history instead of
+    // expiring it all at once.
+    let latest: i64 = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(at_unix_nanos), ?1) FROM equity_samples",
+            [now],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    let reference = now.min(latest);
+    let minute_cutoff = reference.saturating_sub(MINUTE_SAMPLE_RETENTION_NANOS);
+    let expired: Vec<(String, i64, i64, i32)> = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT account_id, at_unix_nanos, equity_units, equity_scale
+                 FROM equity_samples WHERE resolution = 'minute' AND at_unix_nanos < ?1
+                 ORDER BY at_unix_nanos LIMIT 5000",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([minute_cutoff], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i32>(3)?,
+                ))
+            })
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)?
+    };
+    // The rows arrive in ascending time order, so the last insert of each account hour is
+    // its final minute observation.
+    let mut hourly: BTreeMap<(String, i64), (i64, i32)> = BTreeMap::new();
+    for (account, at, units, scale) in expired {
+        hourly.insert((account, at.div_euclid(HOUR_NANOS)), (units, scale));
+    }
+    for ((account, hour), (units, scale)) in &hourly {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO equity_samples(
+                    account_id, at_unix_nanos, equity_units, equity_scale, resolution)
+                 VALUES (?1, ?2, ?3, ?4, 'hour')",
+                params![account, hour.saturating_mul(HOUR_NANOS), units, scale],
+            )
+            .map_err(database_error)?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM equity_samples WHERE rowid IN (
+                SELECT rowid FROM equity_samples
+                WHERE resolution = 'minute' AND at_unix_nanos < ?1
+                ORDER BY at_unix_nanos LIMIT 5000
+             )",
+            [minute_cutoff],
+        )
+        .map_err(database_error)?;
+    transaction
+        .execute(
+            "DELETE FROM equity_samples WHERE rowid IN (
+                SELECT rowid FROM equity_samples
+                WHERE resolution = 'hour' AND at_unix_nanos < ?1
+                ORDER BY at_unix_nanos LIMIT 5000
+             )",
+            [reference.saturating_sub(HOUR_SAMPLE_RETENTION_NANOS)],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
 /// The pre-V26 path for a gated store awaiting group conversion: no checkpoint tables exist,
 /// so retention keeps the legacy fill pruning until the conversion completes the chain.
 fn prune_fills_legacy(
@@ -377,6 +462,7 @@ fn prune_fills_legacy(
 impl TradingStore {
     pub(crate) fn enforce_retention(
         &mut self,
+        now: i64,
         fold: &mut CheckpointFold<'_>,
     ) -> Result<(), String> {
         let checkpointed = self.checkpoint_tables_present()?;
@@ -467,6 +553,9 @@ impl TradingStore {
                 [retained_closed_orders],
             )
             .map_err(database_error)?;
+        if checkpointed {
+            downsample_equity_history(&transaction, now)?;
+        }
         transaction.commit().map_err(database_error)
     }
 }
@@ -497,7 +586,7 @@ mod tests {
         for remaining in [7_001, 2_001, 1] {
             // No fills are seeded, so the checkpoint fold never fires.
             store
-                .enforce_retention(&mut |_, _, _| Ok(None))
+                .enforce_retention(0, &mut |_, _, _| Ok(None))
                 .expect("hourly retention");
             let count: i64 = store
                 .connection
@@ -509,5 +598,94 @@ mod tests {
                 .expect("count");
             assert_eq!(count, remaining);
         }
+    }
+
+    #[test]
+    fn equity_history_downsamples_minute_samples_to_hourly_and_drops_after_a_year() {
+        // VAL-TRD-059: minute samples older than seven days collapse into one hourly sample
+        // per account hour (the last observation wins), hourly samples older than a year
+        // drop, and the recent minute window survives intact.
+        let mut store = TradingStore::open(
+            std::path::Path::new(":memory:"),
+            super::super::TradingRetention::default(),
+        )
+        .expect("in-memory store");
+        store
+            .connection
+            .execute(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                 VALUES ('aeris-sim-1','SIM','simulated','USD',2)",
+                [],
+            )
+            .expect("account row");
+        let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+        let day: i64 = 86_400_000_000_000;
+        let now = 800 * day;
+        let base_hour = (now - 10 * day).div_euclid(HOUR_NANOS) * HOUR_NANOS;
+        for (offset, units) in [(0, 1), (60_000_000_000, 2), (120_000_000_000, 3)] {
+            store
+                .put_equity_sample(&aeris_trading::EquitySample {
+                    account_id: account.clone(),
+                    at_unix_nanos: base_hour + offset,
+                    equity: FixedPoint::try_new(units, 2).expect("equity"),
+                })
+                .expect("expired minute sample");
+        }
+        for (at, units) in [(base_hour + 2 * HOUR_NANOS, 9), (now - day, 100)] {
+            store
+                .put_equity_sample(&aeris_trading::EquitySample {
+                    account_id: account.clone(),
+                    at_unix_nanos: at,
+                    equity: FixedPoint::try_new(units, 2).expect("equity"),
+                })
+                .expect("minute sample");
+        }
+        // One hourly row inside the year and one beyond it.
+        for (at, units) in [(now - 200 * day, 7), (now - 400 * day, 5)] {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO equity_samples(
+                        account_id, at_unix_nanos, equity_units, equity_scale, resolution)
+                     VALUES (?1, ?2, ?3, 2, 'hour')",
+                    params![account.as_str(), at, units],
+                )
+                .expect("hourly sample");
+        }
+
+        store
+            .enforce_retention(now, &mut |_, _, _| Ok(None))
+            .expect("retention");
+
+        let minutes: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM equity_samples WHERE resolution = 'minute'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("minute count");
+        assert_eq!(minutes, 1, "only the recent minute sample survives");
+        let mut statement = store
+            .connection
+            .prepare(
+                "SELECT at_unix_nanos, equity_units FROM equity_samples
+                 WHERE resolution = 'hour' ORDER BY at_unix_nanos",
+            )
+            .expect("hourly query");
+        let hourly: Vec<(i64, i64)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("hourly rows")
+            .collect::<Result<_, _>>()
+            .expect("hourly decode");
+        assert_eq!(
+            hourly,
+            vec![
+                (now - 200 * day, 7),
+                (base_hour, 3),
+                (base_hour + 2 * HOUR_NANOS, 9),
+            ],
+            "the expired minutes collapse to last-of-hour and the year-old row dropped"
+        );
     }
 }

@@ -1539,6 +1539,7 @@ mod tests {
             position_pnl: Vec::new(),
             account_pnl: vec![account_pnl("practice", "USD", Some(50_000), 0, Some(mark))],
             ledger_entries: Vec::new(),
+            equity_samples: Vec::new(),
             fee_schedules: Vec::new(),
             risk_profiles: Vec::new(),
             risk_meters: Vec::new(),

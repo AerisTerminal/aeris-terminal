@@ -45,10 +45,10 @@ use aeris_instruments::{
 };
 use aeris_trading::market::MarketRoute;
 use aeris_trading::{
-    AccountEnvironment, BrokerPosition, ClientOrderId, FeeModel, FeeSchedule, Fill, FillId,
-    FixedPoint, LedgerEntry, LedgerEntryKind, Order, OrderEvent, OrderEventId, OrderEventKind,
-    OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce, TradingAccount,
-    TradingAccountId, TradingProvenance,
+    AccountEnvironment, BrokerPosition, ClientOrderId, EquitySample, FeeModel, FeeSchedule, Fill,
+    FillId, FixedPoint, LedgerEntry, LedgerEntryKind, Order, OrderEvent, OrderEventId,
+    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce,
+    TradingAccount, TradingAccountId, TradingProvenance,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -215,6 +215,8 @@ pub(super) struct StoredState {
     /// The per-account cash balance folded from pruned ledger entries. Empty for gated
     /// pre-group stores.
     pub ledger_checkpoints: BTreeMap<TradingAccountId, LedgerCheckpoint>,
+    /// The in-memory equity rings of each simulated account, rebuilt from durable samples.
+    pub equity_rings: BTreeMap<TradingAccountId, VecDeque<EquitySample>>,
     pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
     /// The broker position each retained broker fill belongs to.
     pub broker_fill_positions: BTreeMap<FillId, String>,
@@ -450,6 +452,11 @@ impl TradingStore {
         } else {
             BTreeMap::new()
         };
+        let equity_rings = if checkpoint_tables {
+            ledger::load_equity_rings(&self.connection)?
+        } else {
+            BTreeMap::new()
+        };
         let broker_positions = self.load_broker_positions()?;
         let broker_order_ids = self.load_broker_order_ids()?;
         let broker_fill_positions = self.load_broker_fill_positions()?;
@@ -479,6 +486,7 @@ impl TradingStore {
             fee_schedules,
             position_checkpoints,
             ledger_checkpoints,
+            equity_rings,
             broker_positions,
             broker_fill_positions,
             venue_generation,

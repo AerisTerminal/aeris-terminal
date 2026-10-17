@@ -60,8 +60,8 @@ use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
 use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
 use aeris_trading::{
-    AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, FeeSchedule, Fill, FillId,
-    FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
+    AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, EquitySample, FeeSchedule, Fill,
+    FillId, FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
     OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, RiskWarning, TimeInForce,
     TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
 };
@@ -92,6 +92,8 @@ pub(crate) const BROKER_PNL_UNAVAILABLE: &str =
 /// One request per connected account with open broker positions, well inside cTrader's
 /// 50 requests per second.
 pub(crate) const UNREALIZED_PNL_INTERVAL: Duration = Duration::from_secs(1);
+/// The equity timer cadence; the owner wakes on it alongside the other timer deadlines.
+pub(crate) const EQUITY_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
 pub(crate) type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -426,6 +428,8 @@ pub struct TradingSnapshot {
     pub account_pnl: Vec<AccountPnl>,
     /// The durable cash-ledger entries of every simulated account, in commit order.
     pub ledger_entries: Vec<LedgerEntry>,
+    /// The recent equity samples of each simulated account, oldest first per account.
+    pub equity_samples: Vec<EquitySample>,
     /// The simulated fee schedule of each account.
     pub fee_schedules: Vec<(TradingAccountId, FeeSchedule)>,
     pub risk_profiles: Vec<RiskProfile>,
@@ -560,6 +564,11 @@ pub(crate) struct TradingCore {
     pub(crate) clock: Arc<dyn clock::Clock>,
     command_now: i64,
     next_retention_at: i64,
+    next_equity_sample_at: i64,
+    /// The last UTC day each account was seen in by the equity timer, for session-end samples.
+    equity_session_days: BTreeMap<TradingAccountId, i64>,
+    /// Fill samples waiting for their committing transaction; cleared on every plan outcome.
+    pending_equity_samples: Vec<EquitySample>,
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
     market_observation_error: Option<String>,
     /// Quote computation runs on a private projection; only its completed facts are persisted.
@@ -1328,6 +1337,13 @@ impl TradingCore {
             command_now: clock.wall_unix_nanos(),
             // Retention runs at startup and then hourly; the owner timer drives both.
             next_retention_at: clock.wall_unix_nanos(),
+            // The first equity tick fires one interval after open so a restart replays the
+            // durable history unchanged before sampling resumes.
+            next_equity_sample_at: clock
+                .wall_unix_nanos()
+                .saturating_add(ledger::EQUITY_SAMPLE_INTERVAL_NANOS),
+            equity_session_days: BTreeMap::new(),
+            pending_equity_samples: Vec::new(),
             clock,
             copy_dispatches: std::collections::VecDeque::new(),
             market_observation_error: None,
@@ -1384,9 +1400,10 @@ impl TradingCore {
     /// writes and deletions in one transaction.
     fn enforce_retention(&mut self) -> Result<(), String> {
         let state = &self.state;
-        self.store.enforce_retention(&mut |key, base, fills| {
-            fold_position_checkpoint(state, key, base, fills)
-        })
+        self.store
+            .enforce_retention(self.command_now, &mut |key, base, fills| {
+                fold_position_checkpoint(state, key, base, fills)
+            })
     }
 
     fn repair_loaded_position_projections(&mut self) -> Result<(), String> {
@@ -1666,6 +1683,12 @@ impl TradingCore {
                 }
                 Err(error) => aeris_observability::diagnostic!("trading retention failed: {error}"),
             }
+        }
+        if self.command_now >= self.next_equity_sample_at {
+            self.next_equity_sample_at = self
+                .command_now
+                .saturating_add(ledger::EQUITY_SAMPLE_INTERVAL_NANOS);
+            self.run_equity_timer(self.command_now);
         }
         if let Err(error) = self.recompute_quote_interest() {
             self.market_observation_error = Some(error.to_string());

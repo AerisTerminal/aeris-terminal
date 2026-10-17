@@ -1,9 +1,9 @@
 use super::{
-    AccountEnvironment, BTreeMap, BrokerPosition, Connection, CostBasis, FeeModel, FeeSchedule,
-    FillId, FixedPoint, InstrumentId, LedgerCheckpoint, LedgerEntry, LedgerEntryKind, Position,
-    PositionCheckpoint, StepTx, TradingAccount, TradingAccountId, TradingInstrument, TradingStore,
-    Transaction, Value, database_error, encode_contract, json_string, json_u64, params, parse_side,
-    sqlite_i64,
+    AccountEnvironment, BTreeMap, BrokerPosition, Connection, CostBasis, EquitySample, FeeModel,
+    FeeSchedule, FillId, FixedPoint, InstrumentId, LedgerCheckpoint, LedgerEntry, LedgerEntryKind,
+    Position, PositionCheckpoint, StepTx, TradingAccount, TradingAccountId, TradingInstrument,
+    TradingStore, Transaction, Value, database_error, encode_contract, json_string, json_u64,
+    params, parse_side, sqlite_i64,
 };
 
 impl TradingStore {
@@ -1073,4 +1073,99 @@ pub(super) fn parse_environment(value: &str) -> Result<AccountEnvironment, Strin
         "live" => Ok(AccountEnvironment::Live),
         _ => Err("stored account environment is invalid".to_string()),
     }
+}
+
+impl TradingStore {
+    /// Writes one durable minute equity sample; a gated store without the V26 tables skips
+    /// sampling until its conversion finishes.
+    pub(crate) fn put_equity_sample(&self, sample: &EquitySample) -> Result<(), String> {
+        if !self.checkpoint_tables_present()? {
+            return Ok(());
+        }
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO equity_samples(
+                    account_id, at_unix_nanos, equity_units, equity_scale, resolution)
+                 VALUES (?1, ?2, ?3, ?4, 'minute')",
+                params![
+                    sample.account_id.as_str(),
+                    sample.at_unix_nanos,
+                    sample.equity.units(),
+                    sample.equity.scale(),
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+}
+
+/// Inserts fill-time equity samples inside the caller's transaction.
+pub(super) fn insert_equity_samples(
+    transaction: &Transaction<'_>,
+    samples: &[EquitySample],
+) -> Result<(), String> {
+    let mut statement = transaction
+        .prepare(
+            "INSERT OR REPLACE INTO equity_samples(
+                account_id, at_unix_nanos, equity_units, equity_scale, resolution)
+             VALUES (?1, ?2, ?3, ?4, 'minute')",
+        )
+        .map_err(database_error)?;
+    for sample in samples {
+        statement
+            .execute(params![
+                sample.account_id.as_str(),
+                sample.at_unix_nanos,
+                sample.equity.units(),
+                sample.equity.scale(),
+            ])
+            .map_err(database_error)?;
+    }
+    Ok(())
+}
+/// Loads the newest minute samples per account into the bounded in-memory rings.
+pub(super) fn load_equity_rings(
+    connection: &Connection,
+) -> Result<BTreeMap<TradingAccountId, std::collections::VecDeque<EquitySample>>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT account_id, at_unix_nanos, equity_units, equity_scale FROM (
+                SELECT account_id, at_unix_nanos, equity_units, equity_scale,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY account_id ORDER BY at_unix_nanos DESC
+                    ) AS recency
+                 FROM equity_samples WHERE resolution = 'minute')
+             WHERE recency <= ?1 ORDER BY account_id, at_unix_nanos",
+        )
+        .map_err(database_error)?;
+    let rows = statement
+        .query_map(
+            [i64::try_from(crate::core::ledger::EQUITY_RING_CAPACITY)
+                .map_err(|_| "equity ring capacity exceeds i64".to_string())?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, u8>(3)?,
+                ))
+            },
+        )
+        .map_err(database_error)?;
+    let mut rings: BTreeMap<TradingAccountId, std::collections::VecDeque<EquitySample>> =
+        BTreeMap::new();
+    for row in rows {
+        let (account, at_unix_nanos, equity_units, equity_scale) = row.map_err(database_error)?;
+        let account_id = TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+        let equity = fixed(equity_units, equity_scale)?;
+        rings
+            .entry(account_id.clone())
+            .or_default()
+            .push_back(EquitySample {
+                account_id,
+                at_unix_nanos,
+                equity,
+            });
+    }
+    Ok(rings)
 }
