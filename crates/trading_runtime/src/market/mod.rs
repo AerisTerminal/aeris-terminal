@@ -576,6 +576,7 @@ impl TradingCore {
                 .any(|order| {
                     super::is_simulated(&self.state.accounts, &order.account_id)
                         && (super::touch_price(order, observation).is_some()
+                            || super::stop_limit_crossed(order, observation)
                             || matches!(
                                 order.time_in_force,
                                 super::TimeInForce::ImmediateOrCancel
@@ -615,32 +616,38 @@ impl TradingCore {
         self.update_managed_stops(observation, &instrument)?;
         let mut candidates =
             market_fill_candidates(&self.state.orders, &self.state.accounts, observation);
+        let mut stop_limits = self
+            .state
+            .orders
+            .executable_for(&observation.instrument_id)
+            .filter(|order| {
+                super::is_simulated(&self.state.accounts, &order.account_id)
+                    && super::stop_limit_crossed(order, observation)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if self.check_practice_market(&instrument).is_err() {
             candidates.clear();
+            stop_limits.clear();
         } else {
             candidates.retain(|(order_id, _)| {
-                #[cfg(test)]
-                if !self
-                    .state
-                    .market_routes
-                    .contains_key(&observation.instrument_id)
-                {
-                    return true;
-                }
-                let after = self.state.orders.get(order_id).map_or(i64::MAX, |order| {
-                    order
-                        .eligible_after_unix_nanos
-                        .max(self.recovery_quote_floor)
-                });
-                observation.provenance.observed_unix_nanos > after
+                self.state
+                    .orders
+                    .get(order_id)
+                    .is_some_and(|order| self.quote_order_eligible(order, observation))
             });
+            stop_limits.retain(|order| self.quote_order_eligible(order, observation));
+        }
+        let triggered = !stop_limits.is_empty();
+        for order in stop_limits {
+            self.trigger_simulated_stop(order, observation)?;
         }
         let candidate_ids = candidates
             .iter()
             .map(|(order_id, _)| order_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
         let fills = self.execute_market_fills(candidates, observation, &instrument)?;
-        if !fills.is_empty() {
+        if triggered || !fills.is_empty() {
             self.bump_revision()?;
         }
         self.reconcile_managed_brackets(&fills, observation, &instrument)?;
@@ -649,6 +656,25 @@ impl TradingCore {
         self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
         self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
         Ok(fills)
+    }
+
+    fn quote_order_eligible(
+        &self,
+        order: &Order,
+        observation: &SimulatedMarketObservation,
+    ) -> bool {
+        #[cfg(test)]
+        if !self
+            .state
+            .market_routes
+            .contains_key(&observation.instrument_id)
+        {
+            return true;
+        }
+        observation.provenance.observed_unix_nanos
+            > order
+                .eligible_after_unix_nanos
+                .max(self.recovery_quote_floor)
     }
 
     pub(super) fn validate_mark_to_market(

@@ -1968,19 +1968,42 @@ pub(crate) fn touch_price(
             Some(observation.bid)
         }
         (OrderSide::Buy, OrderType::StopLimit)
-            if observation.ask.units() >= order.stop_price?.units()
+            if (order.triggered_unix_nanos.is_some()
+                || observation.ask.units() >= order.stop_price?.units())
                 && observation.ask.units() <= order.limit_price?.units() =>
         {
-            Some(observation.ask)
+            if order.triggered_unix_nanos.is_some() {
+                order.limit_price
+            } else {
+                Some(observation.ask)
+            }
         }
         (OrderSide::Sell, OrderType::StopLimit)
-            if observation.bid.units() <= order.stop_price?.units()
+            if (order.triggered_unix_nanos.is_some()
+                || observation.bid.units() <= order.stop_price?.units())
                 && observation.bid.units() >= order.limit_price?.units() =>
         {
-            Some(observation.bid)
+            if order.triggered_unix_nanos.is_some() {
+                order.limit_price
+            } else {
+                Some(observation.bid)
+            }
         }
         _ => None,
     }
+}
+
+pub(crate) fn stop_limit_crossed(order: &Order, observation: &SimulatedMarketObservation) -> bool {
+    order.order_type == OrderType::StopLimit
+        && order.triggered_unix_nanos.is_none()
+        && match order.side {
+            OrderSide::Buy => order
+                .stop_price
+                .is_some_and(|stop| observation.ask.units() >= stop.units()),
+            OrderSide::Sell => order
+                .stop_price
+                .is_some_and(|stop| observation.bid.units() <= stop.units()),
+        }
 }
 
 pub(crate) fn is_simulated(

@@ -451,6 +451,162 @@ fn assert_stop_restart(directory: &TestDirectory, snapshot: &TradingSnapshot) {
 }
 
 #[test]
+fn stop_limit_gap_through_triggers_then_rests_at_limit_across_restart() {
+    for (index, side, stop, limit, gap_bid, gap_ask, later_bid, later_ask) in [
+        (
+            0,
+            OrderSide::Buy,
+            10_100,
+            10_150,
+            10_275,
+            10_300,
+            10_115,
+            10_140,
+        ),
+        (1, OrderSide::Sell, 9_900, 9_850, 9_700, 9_725, 9_860, 9_885),
+    ] {
+        let directory = TestDirectory::new(&format!("stop-limit-gap-{index}"));
+        let (service, clock) = feed_service(&directory);
+        service.set_ticket_interest(vec![route()]).expect("ticket");
+        let feed = service
+            .attach_market_feed(Arc::new(RecordedInterest::default()))
+            .expect("feed");
+        feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+        feed.push(live_session(route().instrument_id, 1))
+            .expect("session");
+        feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+            .expect("live");
+        feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+            .expect("initial quote");
+        service.status().expect("drain");
+        let mut request = market_order(&format!("gap-{index}"), side, 1, 1_000_000_000_000);
+        request.order_type = OrderType::StopLimit;
+        request.stop_price = Some(FixedPoint::try_new(stop, 2).unwrap());
+        request.limit_price = Some(FixedPoint::try_new(limit, 2).unwrap());
+        let placed = service.place_order(request).expect("working");
+        clock.advance(Duration::from_millis(2));
+        feed.push(MarketFeedEvent::Quote(quote(1, 2, gap_bid, gap_ask)))
+            .expect("gap");
+        service.status().expect("drain");
+        let at_gap = service.snapshot().expect("gap state");
+        let triggered = at_gap
+            .orders
+            .iter()
+            .find(|order| order.id == placed.id)
+            .unwrap();
+        assert_eq!(triggered.status, OrderStatus::Working);
+        assert_eq!(triggered.triggered_unix_nanos, Some(1_000_002_000_000));
+        assert_eq!(triggered.revision, 2);
+        assert_eq!(at_gap.fills.len(), 0);
+        service.shutdown(Duration::from_secs(5)).expect("shutdown");
+        let mut config = config(&directory);
+        config.clock = clock.clone();
+        let restarted = start_service_with_config(config);
+        assert_eq!(restarted.snapshot().unwrap().orders, at_gap.orders);
+        let feed = restarted
+            .attach_market_feed(Arc::new(RecordedInterest::default()))
+            .expect("feed");
+        restarted
+            .set_ticket_interest(vec![route()])
+            .expect("ticket");
+        feed.push(live_session(route().instrument_id, 1))
+            .expect("session");
+        feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+            .expect("live");
+        clock.advance(Duration::from_millis(1));
+        feed.push(MarketFeedEvent::Quote(quote(1, 3, later_bid, later_ask)))
+            .expect("later quote");
+        restarted.status().expect("drain");
+        let after = restarted.snapshot().expect("filled");
+        assert_eq!(
+            after
+                .orders
+                .iter()
+                .find(|order| order.id == placed.id)
+                .unwrap()
+                .status,
+            OrderStatus::Filled
+        );
+        assert_eq!(after.fills.len(), 1);
+        assert_eq!(after.fills[0].price, FixedPoint::try_new(limit, 2).unwrap());
+        assert_eq!(
+            after
+                .order_events
+                .iter()
+                .filter(
+                    |event| event.order_id == placed.id && event.kind == OrderEventKind::Triggered
+                )
+                .count(),
+            1
+        );
+        restarted
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown");
+    }
+}
+
+#[test]
+fn stop_limit_trigger_and_fill_on_one_quote_uses_taker_touch() {
+    for (index, side, stop, limit, bid, ask, price) in [
+        (0, OrderSide::Buy, 10_100, 10_150, 10_095, 10_120, 10_120),
+        (1, OrderSide::Sell, 9_900, 9_850, 9_880, 9_905, 9_880),
+    ] {
+        let directory = TestDirectory::new(&format!("stop-limit-same-{index}"));
+        let (service, clock) = feed_service(&directory);
+        let feed = service
+            .attach_market_feed(Arc::new(RecordedInterest::default()))
+            .expect("feed");
+        feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+        feed.push(live_session(route().instrument_id, 1))
+            .expect("session");
+        feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+            .expect("live");
+        feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+            .expect("initial");
+        service.status().expect("drain");
+        let mut request = market_order(&format!("same-{index}"), side, 1, 1_000_000_000_000);
+        request.order_type = OrderType::StopLimit;
+        request.stop_price = Some(FixedPoint::try_new(stop, 2).unwrap());
+        request.limit_price = Some(FixedPoint::try_new(limit, 2).unwrap());
+        let placed = service.place_order(request).expect("working");
+        clock.advance(Duration::from_millis(2));
+        feed.push(MarketFeedEvent::Quote(quote(1, 2, bid, ask)))
+            .expect("triggering quote");
+        service.status().expect("drain");
+        let snapshot = service.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot
+                .orders
+                .iter()
+                .find(|order| order.id == placed.id)
+                .unwrap()
+                .status,
+            OrderStatus::Filled
+        );
+        assert_eq!(
+            snapshot.fills[0].price,
+            FixedPoint::try_new(price, 2).unwrap()
+        );
+        let mut events = snapshot
+            .order_events
+            .iter()
+            .filter(|event| event.order_id == placed.id)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sequence);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            [
+                OrderEventKind::Accepted,
+                OrderEventKind::Triggered,
+                OrderEventKind::Filled
+            ]
+        );
+        assert_eq!(events[1].event_unix_nanos, events[2].event_unix_nanos);
+        service.shutdown(Duration::from_secs(5)).expect("shutdown");
+    }
+}
+
+#[test]
 fn waiting_market_deadline_survives_restart_without_a_feed() {
     let directory = TestDirectory::new("market-wait-restart");
     let (service, clock) = feed_service(&directory);
