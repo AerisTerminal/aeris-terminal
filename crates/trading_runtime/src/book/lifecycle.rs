@@ -247,10 +247,6 @@ pub(crate) fn trigger(
 }
 
 /// Only a due DAY order may expire; the scheduled deadline remains unchanged.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "M5.4 wires the DAY owner timer")
-)]
 pub(crate) fn expire(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
     if !matches!(
         order.status,

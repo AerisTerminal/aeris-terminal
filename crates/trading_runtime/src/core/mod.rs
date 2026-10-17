@@ -1493,6 +1493,9 @@ impl TradingCore {
         {
             self.timer_calls += 1;
         }
+        if let Err(error) = self.expire_due_day_orders() {
+            aeris_observability::diagnostic!("DAY order expiry persistence failed: {error}");
+        }
         if let Err(error) = self.cancel_due_markets() {
             aeris_observability::diagnostic!("market order timeout persistence failed: {error}");
         }

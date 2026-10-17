@@ -174,40 +174,49 @@ impl TradingCore {
         .map_err(|error| error.to_string())?;
         step.updated.push((cancelled.clone(), event));
         if reconcile_bracket {
-            let affected = self.state.managed_brackets.iter().find_map(|(_, bracket)| {
-                let entry_cancelled = bracket.status == ManagedBracketStatus::AwaitingEntry
-                    && bracket.entry_client_order_id == cancelled.client_order_id;
-                let stop_cancelled = bracket.status == ManagedBracketStatus::Active
-                    && bracket.stop_client_order_id.as_ref() == Some(&cancelled.client_order_id);
-                (entry_cancelled || stop_cancelled).then(|| {
-                    (
-                        bracket.clone(),
-                        stop_cancelled.then(|| bracket.target_client_order_ids.clone()),
-                    )
-                })
-            });
-            if let Some((mut bracket, targets)) = affected {
-                bracket.status = ManagedBracketStatus::Cancelled;
-                step.brackets.push(bracket);
-                for target in targets.into_iter().flatten() {
-                    let target_order = self
-                        .state
-                        .orders
-                        .by_client(&target)
-                        .cloned()
-                        .ok_or_else(|| "managed target disappeared".to_string())?;
-                    if target_order.status.is_open() {
-                        self.stage_cancellation(
-                            step,
-                            target_order,
-                            false,
-                            crate::book::lifecycle::CancellationCause::User,
-                        )?;
-                    }
+            self.stage_bracket_termination(
+                step,
+                &cancelled,
+                crate::book::lifecycle::CancellationCause::User,
+            )?;
+        }
+        Ok(cancelled)
+    }
+
+    fn stage_bracket_termination(
+        &self,
+        step: &mut OrderStep,
+        terminal: &Order,
+        child_cause: crate::book::lifecycle::CancellationCause,
+    ) -> Result<(), String> {
+        let affected = self.state.managed_brackets.iter().find_map(|(_, bracket)| {
+            let entry = bracket.status == ManagedBracketStatus::AwaitingEntry
+                && bracket.entry_client_order_id == terminal.client_order_id;
+            let stop_terminated = bracket.status == ManagedBracketStatus::Active
+                && bracket.stop_client_order_id.as_ref() == Some(&terminal.client_order_id);
+            (entry || stop_terminated).then(|| {
+                (
+                    bracket.clone(),
+                    stop_terminated.then(|| bracket.target_client_order_ids.clone()),
+                )
+            })
+        });
+        if let Some((mut bracket, targets)) = affected {
+            bracket.status = ManagedBracketStatus::Cancelled;
+            step.brackets.push(bracket);
+            for target in targets.into_iter().flatten() {
+                let target_order = self
+                    .state
+                    .orders
+                    .by_client(&target)
+                    .cloned()
+                    .ok_or_else(|| "managed target disappeared".to_string())?;
+                if target_order.status.is_open() {
+                    self.stage_cancellation(step, target_order, false, child_cause)?;
                 }
             }
         }
-        Ok(cancelled)
+        Ok(())
     }
 
     /// One bounded owner deadline scan, over the indexed open-order set only.
@@ -221,6 +230,67 @@ impl TradingCore {
             })
             .map(|order| order.accepted_unix_nanos.saturating_add(5_000_000_000))
             .min()
+    }
+
+    /// The order book bounds this scan to the global open-order capacity.
+    pub(crate) fn next_order_deadline_unix_nanos(&self) -> Option<i64> {
+        self.next_market_timeout_unix_nanos()
+            .into_iter()
+            .chain(self.state.orders.open_orders().filter_map(|order| {
+                (order.time_in_force == TimeInForce::Day
+                    && is_simulated(&self.state.accounts, &order.account_id))
+                .then_some(order.expires_at_unix_nanos)
+                .flatten()
+            }))
+            .min()
+    }
+
+    pub(crate) fn expire_due_day_orders(&mut self) -> Result<(), String> {
+        let due = self
+            .state
+            .orders
+            .open_orders()
+            .filter(|order| {
+                order.time_in_force == TimeInForce::Day
+                    && order
+                        .expires_at_unix_nanos
+                        .is_some_and(|at| at <= self.command_now)
+                    && is_simulated(&self.state.accounts, &order.account_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if due.is_empty() {
+            return Ok(());
+        }
+        let mut step = OrderStep::new(self.state.next_sequence);
+        for order in due {
+            let deadline = order
+                .expires_at_unix_nanos
+                .ok_or_else(|| "DAY order has no expiry deadline".to_string())?;
+            let expired = crate::book::lifecycle::expire(order, deadline)
+                .map_err(|error| error.to_string())?;
+            let sequence = step.next_sequence;
+            let event = OrderEvent {
+                id: OrderEventId::try_new(format!("sim-event-{sequence}"))
+                    .map_err(|error| error.to_string())?,
+                order_id: expired.id.clone(),
+                sequence,
+                kind: OrderEventKind::Expired,
+                reason: None,
+                event_unix_nanos: deadline,
+                detail: Some("DAY session ended".to_string()),
+                provenance: expired.provenance.clone(),
+            };
+            event.validate().map_err(|error| error.to_string())?;
+            step.next_sequence += 1;
+            step.updated.push((expired.clone(), event));
+            self.stage_bracket_termination(
+                &mut step,
+                &expired,
+                crate::book::lifecycle::CancellationCause::Cascade,
+            )?;
+        }
+        self.commit_order_step(step, Vec::new())
     }
 
     pub(crate) fn cancel_due_markets(&mut self) -> Result<(), String> {

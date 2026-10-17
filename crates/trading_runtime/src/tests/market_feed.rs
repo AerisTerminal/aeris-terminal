@@ -73,7 +73,7 @@ fn live_session(id: InstrumentId, generation: u64) -> MarketFeedEvent {
 #[test]
 fn day_acceptance_fixes_session_deadline_and_restores_it() {
     let directory = TestDirectory::new("day-acceptance-deadline");
-    let (service, _clock) = feed_service(&directory);
+    let (service, clock) = feed_service(&directory);
     let feed = service
         .attach_market_feed(Arc::new(RecordedInterest::default()))
         .expect("feed");
@@ -102,8 +102,77 @@ fn day_acceptance_fixes_session_deadline_and_restores_it() {
     );
     let before = service.snapshot().unwrap();
     service.shutdown(Duration::from_secs(5)).unwrap();
-    let restarted = TradingService::start(config(&directory)).unwrap();
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = TradingService::start(configuration).unwrap();
     assert_eq!(restarted.snapshot().unwrap().orders, before.orders);
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
+}
+
+#[test]
+fn day_order_expires_on_owner_boundary_before_late_quote() {
+    let directory = TestDirectory::new("day-owner-expiry");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    service.status().expect("drain");
+    let mut request = market_order("day-expiry", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::Day;
+    let accepted = service.place_order(request).expect("day accepted");
+    clock.set_wall_unix_nanos(1_999_999_000_000);
+    assert_eq!(
+        service
+            .snapshot()
+            .unwrap()
+            .orders
+            .iter()
+            .find(|order| order.id == accepted.id)
+            .unwrap()
+            .status,
+        OrderStatus::Working
+    );
+    clock.set_wall_unix_nanos(2_000_000_000_000);
+    let snapshot = service.snapshot().expect("deadline precedes snapshot");
+    let expired = snapshot
+        .orders
+        .iter()
+        .find(|order| order.id == accepted.id)
+        .expect("expired order");
+    assert_eq!(expired.status, OrderStatus::Expired);
+    assert_eq!(expired.terminal_unix_nanos, Some(2_000_000_000_000));
+    assert_eq!(expired.expires_at_unix_nanos, Some(2_000_000_000_000));
+    assert_eq!(expired.revision, accepted.revision + 1);
+    assert!(snapshot.order_events.iter().any(|event| {
+        event.order_id == accepted.id
+            && event.kind == OrderEventKind::Expired
+            && event.event_unix_nanos == 2_000_000_000_000
+    }));
+    feed.push(MarketFeedEvent::Quote(quote(1, 2, 10_000, 10_025)))
+        .expect("late quote");
+    assert_eq!(service.snapshot().unwrap().fills.len(), 0);
+    service.shutdown(Duration::from_secs(5)).unwrap();
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = start_service_with_config(configuration);
+    assert_eq!(
+        restarted
+            .snapshot()
+            .unwrap()
+            .orders
+            .iter()
+            .find(|order| order.id == accepted.id),
+        Some(expired)
+    );
     restarted.shutdown(Duration::from_secs(5)).unwrap();
 }
 

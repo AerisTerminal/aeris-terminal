@@ -15,10 +15,10 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
         let refresh_due = core.wants_unrealized_pnl() && now >= next_refresh;
         let retention_due = now >= next_retention;
         let wall_now = core.clock.wall_unix_nanos();
-        let market_due = core
-            .next_market_timeout_unix_nanos()
+        let order_due = core
+            .next_order_deadline_unix_nanos()
             .is_some_and(|deadline| wall_now >= deadline);
-        if refresh_due || retention_due || market_due {
+        if refresh_due || retention_due || order_due {
             core.on_timer(core.clock.wall_unix_nanos());
             if refresh_due {
                 next_refresh = now + UNREALIZED_PNL_INTERVAL;
@@ -34,18 +34,18 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
         };
         let wait = deadline.saturating_sub(core.clock.monotonic());
         let wait = core
-            .next_market_timeout_unix_nanos()
-            .map_or(wait, |market| {
-                let until_market = market.saturating_sub(core.clock.wall_unix_nanos());
+            .next_order_deadline_unix_nanos()
+            .map_or(wait, |deadline| {
+                let until_deadline = deadline.saturating_sub(core.clock.wall_unix_nanos());
                 // A failed SQLite commit leaves the deadline due. Retry on a bounded
                 // cadence instead of spinning the owner at zero-duration timeouts.
-                let until_market = if until_market == 0 {
+                let until_deadline = if until_deadline == 0 {
                     1_000_000_000
                 } else {
-                    until_market
+                    until_deadline
                 };
                 wait.min(std::time::Duration::from_nanos(
-                    u64::try_from(until_market).unwrap_or_default(),
+                    u64::try_from(until_deadline).unwrap_or_default(),
                 ))
             });
         let command = match commands.recv_timeout(wait) {
@@ -56,12 +56,12 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
         let Some(command) = command else {
             break;
         };
-        // A command can wake the receiver exactly as its market deadline becomes
+        // A command can wake the receiver exactly as an order deadline becomes
         // due. Expire first so a snapshot or a late quote cannot observe/fill it.
         let command_now = core.clock.wall_unix_nanos();
         if core
-            .next_market_timeout_unix_nanos()
-            .is_some_and(|market| command_now >= market)
+            .next_order_deadline_unix_nanos()
+            .is_some_and(|deadline| command_now >= deadline)
         {
             core.on_timer(command_now);
         }
