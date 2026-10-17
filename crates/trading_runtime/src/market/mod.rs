@@ -572,16 +572,27 @@ impl TradingCore {
             && !self
                 .state
                 .orders
-                .executable_for(&observation.instrument_id)
+                .crossing_for(
+                    &observation.instrument_id,
+                    observation.bid.units(),
+                    observation.ask.units(),
+                )
+                .into_iter()
                 .any(|order| {
                     super::is_simulated(&self.state.accounts, &order.account_id)
                         && (super::touch_price(order, observation).is_some()
-                            || super::stop_limit_crossed(order, observation)
-                            || matches!(
-                                order.time_in_force,
-                                super::TimeInForce::ImmediateOrCancel
-                                    | super::TimeInForce::FillOrKill
-                            ))
+                            || super::stop_limit_crossed(order, observation))
+                })
+            && !self
+                .state
+                .orders
+                .executable_for(&observation.instrument_id)
+                .any(|order| {
+                    super::is_simulated(&self.state.accounts, &order.account_id)
+                        && matches!(
+                            order.time_in_force,
+                            super::TimeInForce::ImmediateOrCancel | super::TimeInForce::FillOrKill
+                        )
                 }))
     }
 
@@ -619,7 +630,12 @@ impl TradingCore {
         let mut stop_limits = self
             .state
             .orders
-            .executable_for(&observation.instrument_id)
+            .crossing_for(
+                &observation.instrument_id,
+                observation.bid.units(),
+                observation.ask.units(),
+            )
+            .into_iter()
             .filter(|order| {
                 super::is_simulated(&self.state.accounts, &order.account_id)
                     && super::stop_limit_crossed(order, observation)

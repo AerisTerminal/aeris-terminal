@@ -1,6 +1,7 @@
 //! Owner-maintained order indexes; mutations go through this type so all views stay in sync.
 
 pub(crate) mod lifecycle;
+mod trigger_index;
 
 use aeris_instruments::InstrumentId;
 use aeris_trading::{ClientOrderId, Order, OrderId, TradingAccountId};
@@ -18,6 +19,7 @@ pub(crate) struct OrderBook {
     open: BTreeSet<OrderId>,
     open_by_account_instrument: BTreeMap<(TradingAccountId, InstrumentId), BTreeSet<OrderId>>,
     executable_by_instrument: BTreeMap<InstrumentId, BTreeSet<OrderId>>,
+    trigger_index: trigger_index::TriggerIndex,
 }
 
 impl OrderBook {
@@ -54,6 +56,7 @@ impl OrderBook {
                 .or_default()
                 .insert(id.clone());
         }
+        self.trigger_index.insert(&order);
         self.orders.insert(id.clone(), order);
         if let Some(broker) = broker {
             self.bind_broker(broker, id);
@@ -63,6 +66,7 @@ impl OrderBook {
 
     pub(crate) fn remove(&mut self, id: &OrderId) -> Option<Order> {
         let order = self.orders.remove(id)?;
+        self.trigger_index.remove(&order);
         self.by_client.remove(&order.client_order_id);
         self.open.remove(id);
         let key = (order.account_id.clone(), order.instrument_id.clone());
@@ -163,6 +167,19 @@ impl OrderBook {
             .into_iter()
             .flat_map(|ids| ids.iter())
             .filter_map(|id| self.orders.get(id))
+    }
+
+    pub(crate) fn crossing_for(
+        &self,
+        instrument: &InstrumentId,
+        bid: i64,
+        ask: i64,
+    ) -> Vec<&Order> {
+        self.trigger_index
+            .crossing(instrument, bid, ask)
+            .iter()
+            .filter_map(|id| self.orders.get(id))
+            .collect()
     }
 }
 
@@ -291,6 +308,94 @@ mod tests {
                 }
             }
             book.assert_indexes_match_recomputation(&broker_bindings);
+        }
+    }
+
+    #[test]
+    fn crossing_index_matches_full_scan_through_mutations_and_recovery() {
+        let mut book = OrderBook::default();
+        let mut seed = 0x5314_9cda_u64;
+        for step in 0..4_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let number = (seed % 120) as u32;
+            let id = OrderId::try_new(format!("order-{number}")).unwrap();
+            if step % 13 == 0 {
+                book.remove(&id);
+            } else {
+                let status = match step % 7 {
+                    0 => OrderStatus::Inactive,
+                    1 => OrderStatus::Filled,
+                    _ => OrderStatus::Working,
+                };
+                let mut order = order(number, status);
+                order.side = if step % 2 == 0 {
+                    OrderSide::Buy
+                } else {
+                    OrderSide::Sell
+                };
+                order.order_type = match step % 4 {
+                    0 => OrderType::Market,
+                    1 => OrderType::Stop,
+                    2 => OrderType::StopLimit,
+                    _ => OrderType::Limit,
+                };
+                order.limit_price =
+                    Some(FixedPoint::try_new(90 + i64::try_from(seed % 21).unwrap(), 0).unwrap());
+                order.stop_price =
+                    Some(FixedPoint::try_new(90 + i64::try_from(seed % 23).unwrap(), 0).unwrap());
+                if order.order_type == OrderType::StopLimit && step % 3 == 0 {
+                    order.triggered_unix_nanos = Some(step);
+                }
+                book.insert(id, order);
+            }
+            let instrument = InstrumentId::try_new(format!("instrument-{}", step % 5)).unwrap();
+            let bid = 90 + step % 20;
+            let ask = bid + 1;
+            let full_scan: BTreeSet<_> = book
+                .executable_for(&instrument)
+                .filter(|order| {
+                    let price = match order.side {
+                        OrderSide::Buy => ask,
+                        OrderSide::Sell => bid,
+                    };
+                    match order.order_type {
+                        OrderType::Market => true,
+                        OrderType::Limit => order.limit_price.is_some_and(|p| match order.side {
+                            OrderSide::Buy => price <= p.units(),
+                            OrderSide::Sell => price >= p.units(),
+                        }),
+                        OrderType::Stop => order.stop_price.is_some_and(|p| match order.side {
+                            OrderSide::Buy => price >= p.units(),
+                            OrderSide::Sell => price <= p.units(),
+                        }),
+                        OrderType::StopLimit if order.triggered_unix_nanos.is_some() => {
+                            order.limit_price.is_some_and(|p| match order.side {
+                                OrderSide::Buy => price <= p.units(),
+                                OrderSide::Sell => price >= p.units(),
+                            })
+                        }
+                        OrderType::StopLimit => {
+                            order.stop_price.is_some_and(|p| match order.side {
+                                OrderSide::Buy => price >= p.units(),
+                                OrderSide::Sell => price <= p.units(),
+                            })
+                        }
+                        OrderType::RestingAt => false,
+                    }
+                })
+                .map(|order| order.id.clone())
+                .collect();
+            let indexed: BTreeSet<_> = book
+                .crossing_for(&instrument, bid, ask)
+                .into_iter()
+                .map(|order| order.id.clone())
+                .collect();
+            assert_eq!(indexed, full_scan, "step {step}");
+            if step % 103 == 0 {
+                book = OrderBook::from_stored(book.orders.clone(), BTreeMap::new());
+            }
         }
     }
 

@@ -2023,7 +2023,12 @@ pub(crate) fn market_fill_candidates(
     observation: &SimulatedMarketObservation,
 ) -> Vec<(OrderId, FixedPoint)> {
     let mut candidates = orders
-        .executable_for(&observation.instrument_id)
+        .crossing_for(
+            &observation.instrument_id,
+            observation.bid.units(),
+            observation.ask.units(),
+        )
+        .into_iter()
         .filter(|order| is_simulated(accounts, &order.account_id))
         .filter_map(|order| touch_price(order, observation).map(|price| (order.id.clone(), price)))
         .collect::<Vec<_>>();
