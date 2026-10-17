@@ -77,6 +77,7 @@ mod group_migration;
 mod group_recovery;
 mod market_feed;
 mod oco;
+mod property;
 
 #[test]
 fn simulated_currency_mismatch_is_typed_before_an_order_fact() {
@@ -1353,6 +1354,9 @@ fn retention_never_prunes_fills_pinned_by_a_live_group() {
 
     clock.advance(Duration::from_secs(3_700));
     service.status().expect("retention tick");
+    // The owner replies to a command before its next loop turn notices the due retention
+    // timer, so a second round-trip is the deterministic barrier after the retention pass.
+    service.status().expect("retention barrier");
 
     let database = rusqlite::Connection::open(config(&directory).database_path).expect("reader");
     let entry_fills: i64 = database
@@ -2010,6 +2014,55 @@ fn bracket_template() -> BracketStrategyTemplate {
         }),
         enabled: true,
     }
+}
+
+#[test]
+fn cancelling_a_held_leg_cancels_the_pending_entry_too() {
+    // Regression: a pending bracket terminated through a held leg left its working entry
+    // naked; the cascade must retire the entry with the group.
+    let directory = TestDirectory::new("held-leg-cascade");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let entry = market_order("held-leg-entry", OrderSide::Buy, 1, 1_000);
+    let awaiting = service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: bracket_template(),
+        })
+        .expect("bracket accepted");
+    let PlacementOutcome::Managed(awaiting) = awaiting else {
+        panic!("a simulated bracket is managed locally");
+    };
+    assert_eq!(awaiting.status, BracketViewStatus::AwaitingEntry);
+
+    let snapshot = service.snapshot().expect("snapshot");
+    let held_stop = snapshot
+        .orders
+        .iter()
+        .find(|order| order.order_type == OrderType::Stop && order.status == OrderStatus::Inactive)
+        .expect("held stop leg")
+        .client_order_id
+        .clone();
+    service.cancel_order(held_stop).expect("held leg cancel");
+
+    let cancelled = service.snapshot().expect("cancelled snapshot");
+    let entry = cancelled
+        .orders
+        .iter()
+        .find(|order| order.client_order_id.as_str() == "held-leg-entry")
+        .expect("entry order");
+    assert_eq!(entry.status, OrderStatus::Cancelled);
+    assert!(
+        cancelled.orders.iter().all(|order| !order.status.is_open()),
+        "no order of the cancelled bracket may stay open"
+    );
+    assert_eq!(
+        cancelled.managed_brackets[0].status,
+        BracketViewStatus::Cancelled
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
 }
 
 #[test]

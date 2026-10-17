@@ -121,7 +121,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | open |
 | TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | open |
 | TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | open; runtime lookup scans removed in M4.4 |
-| TR-06 | High | Per-quote durable writes and retention that deletes the ledger | M4.10 (per-quote writes), M5.8 (retention and repair) | open |
+| TR-06 | High | Per-quote durable writes and retention that deletes the ledger | M4.10 (per-quote writes), M5.8 (retention and repair) | closed: checkpoint-fold retention, checkpoint repair and the seeded property identity run |
 | TR-07 | High | Position protection is built from overlapping patch layers | M5.2 (validator), M5.5 (model), M5.6 (cleanup) | closed: one group authority, legacy layers deleted in M5.6 |
 | TR-08 | Medium | Fill model gaps | M5.1 (part), M5.2 (tick checks), M5.3, M5.4 | open |
 | TR-09 | Medium | The risk session never rolls over and no profile is registered | M5.10 (runtime part; desktop UI out of scope) | open |
@@ -540,7 +540,7 @@ Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VA
 
 ### M5 trading engine
 
-Status: in progress; M5.1-M5.7 code and tests are complete, M5.8-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
+Status: in progress; M5.1-M5.8 code and tests are complete, M5.9-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
 
 - [x] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -629,7 +629,7 @@ Status: in progress; M5.1-M5.7 code and tests are complete, M5.8-M5.12 remain op
   - Regressions: fee maker/taker, per-instrument override across restart, per-unit clamp/cap unit test, rejection of
     unknown accounts/instruments and invalid models, V19-legacy backfill idempotency and scale-in cost basis.
   - VAL-TRD-054/055/056/057 code-verified (workspace clippy + tests green); VAL-TRD-058 deferred to the milestone GUI pass.
-- [ ] M5.8 checkpoints-retention-equity - Checkpoints before retention, repair from checkpoints, bounded equity history
+- [x] M5.8 checkpoints-retention-equity - Checkpoints before retention, repair from checkpoints, bounded equity history
   - Part 1/2 (V26): `position_checkpoints`, `ledger_checkpoints` and `equity_samples` land in the chain after V25,
     still unreachable for a gated pre-group store. Retention now runs at startup and hourly, folds each pruned fill
     prefix through the owner position math into its position checkpoint and the pruned/orphaned ledger entries into
@@ -647,7 +647,21 @@ Status: in progress; M5.1-M5.7 code and tests are complete, M5.8-M5.12 remain op
     hourly rows older than a year in the same transaction, with both windows trailing the newest sample so a
     backward clock cannot mass-expire history. Regressions: per-fill/timer/session/restart sampling, ring bound,
     downsample collapse and year drop. Runtime 253 passed/5 ignored.
+  - Part 4 (property run, VAL-TRD-060): `tests/property.rs` drives 200 seeds x 500 steps through the service
+    (submits, cancels, modifies, quotes, partial closes, scale-ins, inline brackets, restarts, kill + unlock and
+    retention runs) and asserts after every step: pooled coverage (executable legs never oppose or exceed the
+    position, none rest on a flat account, and each role totals zero or exactly |net| unless a user action
+    disturbed the pool), per-instruction fill quote eligibility, no DAY order open past its deadline, the balance
+    identity and the 1,440-sample equity ring bound. Each of the ~3,000 restarts proves no orphan legs, position
+    = checkpoint + retained suffix, balance = ledger checkpoint + remaining entries, and exact reopen equality
+    whenever startup recovery reported no repair. The run caught a real defect: a pending bracket terminated
+    through a held leg left its working entry naked (`stage_bracket_termination` cascaded only the legs); the
+    entry now cancels with the group, locked by `cancelling_a_held_leg_cancels_the_pending_entry_too`.
+    Runtime 255 passed/5 ignored.
 - [ ] M5.9 emergency-operations - Kill switch, flatten scopes and atomic reverse across all instruments
+  - Input finding from the M5.8 property run: the kill switch cancels open group legs without in-session group
+    reconciliation, leaving brackets Active with dead legs until startup recovery retires them (BrokenGroup
+    notice); M5.9 owns the in-session reconciliation.
 - [ ] M5.10 risk-session-rollover - Persisted risk session with rollover; bracket legs count as attached stops
 - [ ] M5.11 trading-publication-api - Change-driven, bounded publication with paged history
 - [ ] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
@@ -952,6 +966,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.7 feat(trading): add the cash ledger, exact cost basis and simulated fee schedules - V25 adds `ledger_entries`, per-account `fee_schedules`, exact cost-basis columns and denormalized class/price-grid columns; `migrate_ledger` backfills deposits, realized P&L and cost bases once per store after group finalize; simulated balances become the exact sum of ledger entries (only a gated pre-group store keeps legacy math); maker/taker fee engine with per-contract/per-unit-clamped/notional-bps models and deterministic schedule codec; ledger chain printed in replay traces with 5 goldens including a fee round-trip; registration deposit, purge and delete paths covered. Runtime 248 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed. GUI pass pending (VAL-TRD-058).
 - 2026-10-17 M5.8 part 1/2 feat(trading): checkpoint retention and checkpoint-based recovery - V26 position/ledger checkpoint and equity tables; startup-plus-hourly retention folds pruned fill prefixes and ledger entries into checkpoints in the deletion transaction, pins open-order and live-group rows, and repair rebuilds checkpointed positions as checkpoint plus retained suffix; `rebuild_position_from_retained_fills` deleted; balances stay checkpoint plus exact entry sums. Runtime 250 passed/5 ignored.
 - 2026-10-17 M5.8 part 3 feat(trading): bound the equity history - one equity sample per simulated fill committed inside the fill's transaction (quote and placement steps pass the planned samples to commit_quote_step; the emergency close flushes a follow-up write), a 60 s owner timer samples only on change plus once per UTC risk-session boundary for profiled accounts, and a 1,440-entry ring per account reloads the newest durable minute samples at open with the first tick delayed one interval so restarts replay unchanged. Retention downsamples minute rows past seven days into last-of-hour rows and drops hourly rows past a year in the same transaction, windows trailing the newest sample so a backward clock cannot mass-expire history. Regressions: per-fill/timer/session/restart sampling, ring bound, downsample collapse and year drop; mark-only/failed-commit atomicity and group-recovery reopen goldens stay green. Runtime 253 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed.
+- 2026-10-17 M5.8 part 4 feat(trading): property-test the trading invariants - 200 seeds x 500 service-level steps assert pooled coverage, fill eligibility, DAY expiry, balance identity and the equity ring bound after every step; each restart adds the durable identity (no orphan legs, checkpoint+suffix positions, checkpoint+entries balance, no stale DAY rows) and notice-free reopen equality. The run caught a pending-bracket cascade defect (held-leg cancel left the entry working); fixed in stage_bracket_termination with a focused regression. TR-06 closes. Runtime 255 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed.
 
 ## 7. Known gaps / deferred
 

@@ -193,8 +193,8 @@ impl TradingCore {
         terminal: &Order,
     ) -> Result<(), String> {
         // Group-owned brackets: a terminal pending entry (or one of its held legs) cancels the
-        // group and every other held leg; a terminal active stop cancels the open targets.
-        // Cancelling one active target removes only that target.
+        // group, the still-working entry and every other held leg; a terminal active stop
+        // cancels the open targets. Cancelling one active target removes only that target.
         let owned = self.state.order_groups.values().find_map(|group| {
             if group.kind != super::GroupKind::Bracket {
                 return None;
@@ -220,6 +220,7 @@ impl TradingCore {
                 .checked_add(1)
                 .ok_or_else(|| "order group revision overflowed".to_string())?;
             let legs = group.legs.clone();
+            let entry_id = group.entry.clone();
             step.groups.push(group);
             for (index, leg) in legs.iter().enumerate() {
                 if Some(index) == terminated_leg {
@@ -244,6 +245,24 @@ impl TradingCore {
                         crate::book::lifecycle::CancellationCause::Cascade,
                     )?;
                 }
+            }
+            // A pending group terminated through one of its held legs must also cancel the
+            // still-working entry; otherwise the naked entry can fill without protection.
+            if !targets_only
+                && let Some(entry_id) = entry_id
+                && let Some(entry) = self.state.orders.get(&entry_id).cloned()
+                && entry.status.is_open()
+                && !step
+                    .updated
+                    .iter()
+                    .any(|(updated, _)| updated.id == entry.id)
+            {
+                self.stage_cancellation(
+                    step,
+                    entry,
+                    false,
+                    crate::book::lifecycle::CancellationCause::Cascade,
+                )?;
             }
         }
         // A standalone protection group retires when its only order is terminal; a fill
