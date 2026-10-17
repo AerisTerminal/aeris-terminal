@@ -2,6 +2,7 @@ mod export;
 mod fills;
 mod groups;
 mod ledger;
+mod migrate_groups;
 mod orders;
 mod quotes;
 mod retention;
@@ -357,6 +358,9 @@ impl TradingStore {
         };
         store.migrate(existed)?;
         store
+            .backfill_protection_groups()
+            .map_err(StoreError::Other)?;
+        store
             .ensure_default_strategy_templates()
             .map_err(StoreError::Other)?;
         Ok(store)
@@ -496,7 +500,7 @@ mod tests {
     use std::io::Write as _;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temporary_database(name: &str) -> PathBuf {
+    pub(super) fn temporary_database(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "aeris-trading-{name}-{}-{}",
             std::process::id(),
@@ -552,7 +556,7 @@ mod tests {
         fs::remove_dir_all(path.parent().expect("fixture parent")).expect("fixture cleanup");
     }
 
-    fn create_schema_at(connection: &Connection, version: u32) {
+    pub(super) fn create_schema_at(connection: &Connection, version: u32) {
         for migration in MIGRATIONS.iter().take(version as usize) {
             assert_eq!(migration.from + 1, migration.to);
             connection
