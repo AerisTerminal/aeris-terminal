@@ -252,63 +252,82 @@ impl TradingStore {
     }
 }
 
+const FILL_COLUMNS: &str = "SELECT id, order_id, account_id, instrument_id, side, price_units,
+    price_scale, quantity_units, quantity_scale, execution_unix_nanos, provenance_json";
+
+fn decode_fill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Fill, String>> {
+    let id: String = row.get(0)?;
+    let order: String = row.get(1)?;
+    let account: String = row.get(2)?;
+    let instrument: String = row.get(3)?;
+    let side: String = row.get(4)?;
+    let price_units: i64 = row.get(5)?;
+    let price_scale: u8 = row.get(6)?;
+    let quantity_units: i64 = row.get(7)?;
+    let quantity_scale: u8 = row.get(8)?;
+    let time: i64 = row.get(9)?;
+    let provenance: String = row.get(10)?;
+    Ok((move || {
+        let fill = Fill {
+            id: FillId::try_new(id).map_err(|error| error.to_string())?,
+            order_id: OrderId::try_new(order).map_err(|error| error.to_string())?,
+            account_id: TradingAccountId::try_new(account).map_err(|error| error.to_string())?,
+            instrument_id: InstrumentId::try_new(instrument).map_err(|error| error.to_string())?,
+            side: parse_side(&side)?,
+            price: fixed(price_units, price_scale)?,
+            quantity: fixed(quantity_units, quantity_scale)?,
+            execution_unix_nanos: time,
+            provenance: decode_provenance(&provenance)?,
+        };
+        fill.validate().map_err(|error| error.to_string())?;
+        Ok(fill)
+    })())
+}
+
 impl TradingStore {
     pub(super) fn load_fills(&self) -> Result<VecDeque<Fill>, String> {
-        let mut output = VecDeque::new();
+        // Replay order is execution time with rowid as the commit-order tie-break; the
+        // retention checkpoint fold uses the same order so checkpoint + suffix replays exactly.
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT id, order_id, account_id, instrument_id, side, price_units, price_scale,
-                    quantity_units, quantity_scale, execution_unix_nanos, provenance_json
-             FROM fills ORDER BY execution_unix_nanos",
-            )
+            .prepare(&format!(
+                "{FILL_COLUMNS} FROM fills ORDER BY execution_unix_nanos, rowid"
+            ))
             .map_err(database_error)?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, u8>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, u8>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, String>(10)?,
-                ))
-            })
+            .query_map([], decode_fill_row)
             .map_err(database_error)?;
+        let mut output = VecDeque::new();
         for row in rows {
-            let (
-                id,
-                order,
-                account,
-                instrument,
-                side,
-                price_units,
-                price_scale,
-                quantity_units,
-                quantity_scale,
-                time,
-                provenance,
-            ) = row.map_err(database_error)?;
-            let fill = Fill {
-                id: FillId::try_new(id).map_err(|error| error.to_string())?,
-                order_id: OrderId::try_new(order).map_err(|error| error.to_string())?,
-                account_id: TradingAccountId::try_new(account)
-                    .map_err(|error| error.to_string())?,
-                instrument_id: InstrumentId::try_new(instrument)
-                    .map_err(|error| error.to_string())?,
-                side: parse_side(&side)?,
-                price: fixed(price_units, price_scale)?,
-                quantity: fixed(quantity_units, quantity_scale)?,
-                execution_unix_nanos: time,
-                provenance: decode_provenance(&provenance)?,
-            };
-            fill.validate().map_err(|error| error.to_string())?;
-            output.push_back(fill);
+            output.push_back(row.map_err(database_error)??);
+        }
+        Ok(output)
+    }
+
+    /// Loads full fill rows inside an existing transaction, in replay order.
+    pub(super) fn load_fills_by_ids(
+        transaction: &rusqlite::Transaction<'_>,
+        ids: &[String],
+    ) -> Result<Vec<Fill>, String> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = (1..=ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = transaction
+            .prepare(&format!(
+                "{FILL_COLUMNS} FROM fills WHERE id IN ({placeholders})
+                 ORDER BY execution_unix_nanos, rowid"
+            ))
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(ids.iter()), decode_fill_row)
+            .map_err(database_error)?;
+        let mut output = Vec::with_capacity(ids.len());
+        for row in rows {
+            output.push(row.map_err(database_error)??);
         }
         Ok(output)
     }

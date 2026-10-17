@@ -1326,7 +1326,8 @@ impl TradingCore {
             state,
             retention,
             command_now: clock.wall_unix_nanos(),
-            next_retention_at: clock.wall_unix_nanos().saturating_add(3_600_000_000_000),
+            // Retention runs at startup and then hourly; the owner timer drives both.
+            next_retention_at: clock.wall_unix_nanos(),
             clock,
             copy_dispatches: std::collections::VecDeque::new(),
             market_observation_error: None,
@@ -1378,6 +1379,16 @@ impl TradingCore {
         Ok(core)
     }
 
+    /// Runs the bounded retention pass, folding pruned fills and ledger entries into their
+    /// checkpoints through the position math this core owns. The store keeps the checkpoint
+    /// writes and deletions in one transaction.
+    fn enforce_retention(&mut self) -> Result<(), String> {
+        let state = &self.state;
+        self.store.enforce_retention(&mut |key, base, fills| {
+            fold_position_checkpoint(state, key, base, fills)
+        })
+    }
+
     fn repair_loaded_position_projections(&mut self) -> Result<(), String> {
         let keys = self.state.positions.keys().cloned().collect::<Vec<_>>();
         let mut repaired = Vec::new();
@@ -1385,22 +1396,36 @@ impl TradingCore {
             let Some(stored) = self.state.positions.get(&key).cloned() else {
                 continue;
             };
-            if !self.position_projection_needs_repair(&stored) {
+            let checkpointed = self.state.position_checkpoints.contains_key(&key);
+            if !checkpointed && !self.position_projection_needs_repair(&stored) {
                 continue;
             }
-            let Some((rebuilt, rebuilt_basis)) = self.rebuild_position_from_retained_fills(&key)
-            else {
+            let Some((rebuilt, rebuilt_basis)) = self.rebuild_position_from_checkpoint(&key) else {
                 continue;
             };
-            // Fills are the durable ledger and positions are a projection. Only replace a loaded
-            // projection when the retained ledger reproduces both the current net quantity and
-            // the last-fill boundary. This prevents retention-truncated history from rewriting a
-            // still-valid open position while repairing projections produced by older buggy math.
+            // Fills are the durable ledger and positions are a projection. A checkpointed
+            // position replays exactly from checkpoint plus the retained suffix, so the
+            // rebuild is authoritative. Without a checkpoint, only replace a loaded
+            // projection when the retained ledger reproduces both the current net quantity
+            // and the last-fill boundary; this prevents retention-truncated history from
+            // rewriting a still-valid open position while repairing projections produced by
+            // older buggy math. The unrealized mark is not part of the projection identity:
+            // it re-derives from the next quote.
             let basis_changed = self.state.cost_basis.get(&key).copied() != rebuilt_basis;
-            if rebuilt.net_quantity == stored.net_quantity
-                && rebuilt.last_fill_unix_nanos == stored.last_fill_unix_nanos
-                && (rebuilt != stored || basis_changed)
-            {
+            let projection_matches = rebuilt.net_quantity == stored.net_quantity
+                && rebuilt.average_entry_price == stored.average_entry_price
+                && rebuilt.realized_pnl == stored.realized_pnl
+                && rebuilt.last_fill_unix_nanos == stored.last_fill_unix_nanos;
+            let replace = if checkpointed {
+                !projection_matches || basis_changed
+            } else {
+                rebuilt.net_quantity == stored.net_quantity
+                    && rebuilt.last_fill_unix_nanos == stored.last_fill_unix_nanos
+                    && (rebuilt != stored || basis_changed)
+            };
+            if replace {
+                // The unrealized mark is not part of the projection identity: it re-derives
+                // from the next quote, so the rebuilt zero mark replaces any stored value.
                 repaired.push((key, rebuilt, rebuilt_basis));
             }
         }
@@ -1445,15 +1470,22 @@ impl TradingCore {
         account_scale_mismatch || instrument_scale_mismatch || lifecycle_mismatch
     }
 
-    fn rebuild_position_from_retained_fills(
+    /// Rebuilds one position projection from its checkpoint plus the retained fill suffix.
+    /// Before the first retention run there is no checkpoint and every fill is retained, so
+    /// this is a full replay; afterwards it starts from the exact folded state.
+    fn rebuild_position_from_checkpoint(
         &self,
         key: &(TradingAccountId, InstrumentId),
     ) -> Option<(Position, Option<CostBasis>)> {
         let account = self.state.accounts.get(&key.0)?;
         let instrument = self.state.instruments.get(&key.1)?;
-        let mut rebuilt: Option<Position> = None;
-        let mut rebuilt_basis: Option<CostBasis> = None;
-        let mut saw_fill = false;
+        let checkpoint = self.state.position_checkpoints.get(key);
+        let mut rebuilt: Option<Position> = match checkpoint {
+            Some(checkpoint) => Some(position_from_checkpoint(checkpoint).ok()?),
+            None => None,
+        };
+        let mut rebuilt_basis: Option<CostBasis> = checkpoint.and_then(|c| c.cost_basis);
+        let mut saw_fill = checkpoint.is_some();
         for fill in self
             .state
             .fills
@@ -1627,7 +1659,7 @@ impl TradingCore {
         }
         self.request_unrealized_pnl();
         if self.command_now >= self.next_retention_at {
-            match self.store.enforce_retention() {
+            match self.enforce_retention() {
                 Ok(()) => {
                     self.next_retention_at = self.command_now.saturating_add(3_600_000_000_000);
                     self.enforce_memory_retention();
@@ -2204,6 +2236,64 @@ pub(crate) fn market_fill_candidates(
             .then_with(|| left_id.cmp(right_id))
     });
     candidates
+}
+
+/// Rebuilds the in-memory projection base from one position checkpoint. The unrealized mark
+/// is not checkpointed: it re-derives from the next quote.
+fn position_from_checkpoint(
+    checkpoint: &crate::core::ledger::PositionCheckpoint,
+) -> Result<Position, String> {
+    let unrealized = FixedPoint::try_new(0, checkpoint.realized_pnl.scale())
+        .map_err(|error| error.to_string())?;
+    Ok(Position {
+        account_id: checkpoint.account_id.clone(),
+        instrument_id: checkpoint.instrument_id.clone(),
+        net_quantity: checkpoint.net_quantity,
+        average_entry_price: checkpoint.average_entry_price,
+        realized_pnl: checkpoint.realized_pnl,
+        unrealized_pnl: unrealized,
+        last_fill_unix_nanos: checkpoint.last_fill_unix_nanos,
+    })
+}
+
+/// The retention fold: replays one instrument's pruned fill prefix onto its previous
+/// checkpoint through the same position math live fills use, so recovery from checkpoint
+/// plus the retained suffix lands on the pre-retention projection exactly. Returns `None`
+/// when the account or instrument is gone; retention keeps those fills.
+fn fold_position_checkpoint(
+    state: &StoredState,
+    key: &(TradingAccountId, InstrumentId),
+    base: Option<&crate::core::ledger::PositionCheckpoint>,
+    fills: &[Fill],
+) -> Result<Option<crate::core::ledger::PositionCheckpoint>, String> {
+    let Some(account) = state.accounts.get(&key.0) else {
+        return Ok(None);
+    };
+    let Some(instrument) = state.instruments.get(&key.1) else {
+        return Ok(None);
+    };
+    let mut position = base.map(position_from_checkpoint).transpose()?;
+    let mut basis = base.and_then(|checkpoint| checkpoint.cost_basis);
+    for fill in fills {
+        let (next, next_basis) =
+            next_position(position.as_ref(), basis, fill, account, instrument)?;
+        position = Some(next);
+        basis = next_basis;
+    }
+    let fill_count = base.map_or(0, |checkpoint| checkpoint.fill_count);
+    let Some(position) = position else {
+        return Ok(None);
+    };
+    Ok(Some(crate::core::ledger::PositionCheckpoint {
+        account_id: key.0.clone(),
+        instrument_id: key.1.clone(),
+        net_quantity: position.net_quantity,
+        average_entry_price: position.average_entry_price,
+        realized_pnl: position.realized_pnl,
+        cost_basis: basis,
+        last_fill_unix_nanos: position.last_fill_unix_nanos,
+        fill_count: fill_count + fills.len() as u64,
+    }))
 }
 
 pub(crate) fn next_position(

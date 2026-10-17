@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -335,6 +335,36 @@ pub(super) const MIGRATION_V25: &str = "
  ALTER TABLE positions ADD COLUMN cost_price_scale INTEGER;
  ALTER TABLE positions ADD COLUMN cost_quantity_scale INTEGER;";
 
+/// Position and ledger checkpoints plus the durable equity history. Checkpoints are written
+/// in the same transaction that prunes fills and ledger entries, so a crash leaves neither
+/// the checkpoint nor the deletion behind. Chain entry after V25, so a store still gated on
+/// legacy bracket conversion never sees these tables.
+pub(super) const MIGRATION_V26: &str = "
+ CREATE TABLE position_checkpoints (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL,
+     net_quantity_units INTEGER NOT NULL, net_quantity_scale INTEGER NOT NULL,
+     average_entry_units INTEGER, average_entry_scale INTEGER,
+     realized_units INTEGER NOT NULL, realized_scale INTEGER NOT NULL,
+     cost_basis_hi INTEGER, cost_basis_lo INTEGER, cost_basis_scale INTEGER,
+     last_fill_unix_nanos INTEGER NOT NULL,
+     fill_count INTEGER NOT NULL,
+     PRIMARY KEY (account_id, instrument_id)
+ ) STRICT;
+ CREATE TABLE ledger_checkpoints (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+     balance_units INTEGER NOT NULL, balance_scale INTEGER NOT NULL,
+     entry_count INTEGER NOT NULL,
+     at_unix_nanos INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE equity_samples (
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     at_unix_nanos INTEGER NOT NULL,
+     equity_units INTEGER NOT NULL, equity_scale INTEGER NOT NULL,
+     resolution TEXT NOT NULL,
+     PRIMARY KEY (account_id, at_unix_nanos, resolution)
+ ) STRICT;";
+
 pub(super) struct Migration {
     pub(super) from: u32,
     pub(super) to: u32,
@@ -463,6 +493,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 24,
         to: 25,
         sql: MIGRATION_V25,
+    },
+    Migration {
+        from: 25,
+        to: 26,
+        sql: MIGRATION_V26,
     },
 ];
 

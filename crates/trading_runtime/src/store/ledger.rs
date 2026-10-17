@@ -1,8 +1,9 @@
 use super::{
-    AccountEnvironment, BTreeMap, BrokerPosition, CostBasis, FeeModel, FeeSchedule, FillId,
-    FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind, Position, StepTx, TradingAccount,
-    TradingAccountId, TradingInstrument, TradingStore, Transaction, Value, database_error,
-    encode_contract, json_string, json_u64, params, parse_side, sqlite_i64,
+    AccountEnvironment, BTreeMap, BrokerPosition, Connection, CostBasis, FeeModel, FeeSchedule,
+    FillId, FixedPoint, InstrumentId, LedgerCheckpoint, LedgerEntry, LedgerEntryKind, Position,
+    PositionCheckpoint, StepTx, TradingAccount, TradingAccountId, TradingInstrument, TradingStore,
+    Transaction, Value, database_error, encode_contract, json_string, json_u64, params, parse_side,
+    sqlite_i64,
 };
 
 impl TradingStore {
@@ -487,6 +488,221 @@ impl TradingStore {
     }
 }
 
+impl TradingStore {
+    /// Whether the V26 checkpoint and equity tables exist. A gated pre-group store stays on
+    /// the legacy retention path until its conversion completes the chain.
+    pub(super) fn checkpoint_tables_present(&self) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT count(*) = 3 FROM sqlite_master
+                 WHERE type = 'table' AND name IN
+                     ('position_checkpoints', 'ledger_checkpoints', 'equity_samples')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
+    }
+}
+
+/// Loads every position checkpoint; accepts a transaction so the retention fold reads a
+/// consistent view inside its own commit.
+pub(super) fn load_position_checkpoints(
+    connection: &Connection,
+) -> Result<BTreeMap<(TradingAccountId, InstrumentId), PositionCheckpoint>, String> {
+    let mut output = BTreeMap::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT account_id, instrument_id, net_quantity_units, net_quantity_scale,
+                    average_entry_units, average_entry_scale, realized_units, realized_scale,
+                    cost_basis_hi, cost_basis_lo, cost_basis_scale,
+                    last_fill_unix_nanos, fill_count FROM position_checkpoints",
+        )
+        .map_err(database_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, u8>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<u8>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, u8>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+                row.get::<_, Option<u8>>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+            ))
+        })
+        .map_err(database_error)?;
+    for row in rows {
+        let (
+            account,
+            instrument,
+            net_units,
+            net_scale,
+            average_units,
+            average_scale,
+            realized_units,
+            realized_scale,
+            basis_hi,
+            basis_lo,
+            basis_scale,
+            last_fill,
+            fill_count,
+        ) = row.map_err(database_error)?;
+        let account_id = TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+        let instrument_id = InstrumentId::try_new(instrument).map_err(|error| error.to_string())?;
+        let cost_basis = match (basis_hi, basis_lo, basis_scale) {
+            (Some(hi), Some(lo), Some(scale)) => Some(CostBasis {
+                units: join_i128(hi, lo),
+                scale,
+            }),
+            (None, None, None) => None,
+            _ => return Err("stored position checkpoint cost basis is partial".to_string()),
+        };
+        output.insert(
+            (account_id.clone(), instrument_id.clone()),
+            PositionCheckpoint {
+                account_id,
+                instrument_id,
+                net_quantity: fixed(net_units, net_scale)?,
+                average_entry_price: optional_fixed(average_units, average_scale)?,
+                realized_pnl: fixed(realized_units, realized_scale)?,
+                cost_basis,
+                last_fill_unix_nanos: last_fill,
+                fill_count: u64::try_from(fill_count)
+                    .map_err(|_| "stored checkpoint fill count is negative".to_string())?,
+            },
+        );
+    }
+    Ok(output)
+}
+
+/// Loads every ledger checkpoint; accepts a transaction so the retention fold reads a
+/// consistent view inside its own commit.
+pub(super) fn load_ledger_checkpoints(
+    connection: &Connection,
+) -> Result<BTreeMap<TradingAccountId, LedgerCheckpoint>, String> {
+    let mut output = BTreeMap::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT account_id, balance_units, balance_scale, entry_count, at_unix_nanos
+                 FROM ledger_checkpoints",
+        )
+        .map_err(database_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, u8>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(database_error)?;
+    for row in rows {
+        let (account, units, scale, count, at) = row.map_err(database_error)?;
+        let account_id = TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+        output.insert(
+            account_id.clone(),
+            LedgerCheckpoint {
+                account_id,
+                balance: fixed(units, scale)?,
+                entry_count: u64::try_from(count)
+                    .map_err(|_| "stored ledger checkpoint count is negative".to_string())?,
+                at_unix_nanos: at,
+            },
+        );
+    }
+    Ok(output)
+}
+
+/// Upserts one position checkpoint inside the retention transaction.
+pub(super) fn upsert_position_checkpoint(
+    transaction: &Transaction<'_>,
+    checkpoint: &PositionCheckpoint,
+) -> Result<(), String> {
+    let (basis_hi, basis_lo, basis_scale) = match checkpoint.cost_basis {
+        Some(basis) => {
+            let (hi, lo) = split_i128(basis.units)?;
+            (Some(hi), Some(lo), Some(basis.scale))
+        }
+        None => (None, None, None),
+    };
+    let (average_units, average_scale) = checkpoint
+        .average_entry_price
+        .map(|price| (price.units(), price.scale()))
+        .unzip();
+    transaction
+        .execute(
+            "INSERT INTO position_checkpoints (
+                account_id, instrument_id, net_quantity_units, net_quantity_scale,
+                average_entry_units, average_entry_scale, realized_units, realized_scale,
+                cost_basis_hi, cost_basis_lo, cost_basis_scale,
+                last_fill_unix_nanos, fill_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(account_id, instrument_id) DO UPDATE SET
+                net_quantity_units=excluded.net_quantity_units,
+                net_quantity_scale=excluded.net_quantity_scale,
+                average_entry_units=excluded.average_entry_units,
+                average_entry_scale=excluded.average_entry_scale,
+                realized_units=excluded.realized_units,
+                realized_scale=excluded.realized_scale,
+                cost_basis_hi=excluded.cost_basis_hi,
+                cost_basis_lo=excluded.cost_basis_lo,
+                cost_basis_scale=excluded.cost_basis_scale,
+                last_fill_unix_nanos=excluded.last_fill_unix_nanos,
+                fill_count=excluded.fill_count",
+            params![
+                checkpoint.account_id.as_str(),
+                checkpoint.instrument_id.as_str(),
+                checkpoint.net_quantity.units(),
+                checkpoint.net_quantity.scale(),
+                average_units,
+                average_scale,
+                checkpoint.realized_pnl.units(),
+                checkpoint.realized_pnl.scale(),
+                basis_hi,
+                basis_lo,
+                basis_scale,
+                checkpoint.last_fill_unix_nanos,
+                sqlite_i64(checkpoint.fill_count)?,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+/// Upserts one ledger checkpoint inside the retention transaction.
+pub(super) fn upsert_ledger_checkpoint(
+    transaction: &Transaction<'_>,
+    checkpoint: &LedgerCheckpoint,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO ledger_checkpoints (
+                account_id, balance_units, balance_scale, entry_count, at_unix_nanos)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id) DO UPDATE SET
+                balance_units=excluded.balance_units,
+                balance_scale=excluded.balance_scale,
+                entry_count=excluded.entry_count,
+                at_unix_nanos=excluded.at_unix_nanos",
+            params![
+                checkpoint.account_id.as_str(),
+                checkpoint.balance.units(),
+                checkpoint.balance.scale(),
+                sqlite_i64(checkpoint.entry_count)?,
+                checkpoint.at_unix_nanos,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
 /// Splits an exact `i128` into the signed hi/lo pair the positions table stores.
 pub(super) fn split_i128(value: i128) -> Result<(i64, i64), String> {
     let hi = i64::try_from(value >> 64)

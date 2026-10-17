@@ -36,7 +36,9 @@ use super::{
     TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
 use crate::core::OrderGroup;
-use crate::core::ledger::{CostBasis, FillAccounting, TradeCycle};
+use crate::core::ledger::{
+    CostBasis, FillAccounting, LedgerCheckpoint, PositionCheckpoint, TradeCycle,
+};
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentClass, InstrumentDecimal, InstrumentId,
     InstrumentMetadataProvenance, PriceGrid, SessionHours,
@@ -207,6 +209,12 @@ pub(super) struct StoredState {
     pub ledger_entries: Vec<LedgerEntry>,
     /// The simulated fee schedule of each account. Empty for gated pre-group stores.
     pub fee_schedules: BTreeMap<TradingAccountId, FeeSchedule>,
+    /// The per-position projection folded from pruned fills; recovery replays it plus the
+    /// retained fill suffix. Empty for gated pre-group stores.
+    pub position_checkpoints: BTreeMap<(TradingAccountId, InstrumentId), PositionCheckpoint>,
+    /// The per-account cash balance folded from pruned ledger entries. Empty for gated
+    /// pre-group stores.
+    pub ledger_checkpoints: BTreeMap<TradingAccountId, LedgerCheckpoint>,
     pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
     /// The broker position each retained broker fill belongs to.
     pub broker_fill_positions: BTreeMap<FillId, String>,
@@ -431,6 +439,17 @@ impl TradingStore {
         } else {
             BTreeMap::new()
         };
+        let checkpoint_tables = self.checkpoint_tables_present()?;
+        let position_checkpoints = if checkpoint_tables {
+            ledger::load_position_checkpoints(&self.connection)?
+        } else {
+            BTreeMap::new()
+        };
+        let ledger_checkpoints = if checkpoint_tables {
+            ledger::load_ledger_checkpoints(&self.connection)?
+        } else {
+            BTreeMap::new()
+        };
         let broker_positions = self.load_broker_positions()?;
         let broker_order_ids = self.load_broker_order_ids()?;
         let broker_fill_positions = self.load_broker_fill_positions()?;
@@ -458,6 +477,8 @@ impl TradingStore {
             cost_basis,
             ledger_entries,
             fee_schedules,
+            position_checkpoints,
+            ledger_checkpoints,
             broker_positions,
             broker_fill_positions,
             venue_generation,
@@ -655,15 +676,17 @@ mod tests {
     #[test]
     fn migrations_are_contiguous_and_every_historical_version_reaches_head() {
         // The V24 table drop is not a chain entry: it lands through the gated finalize
-        // (the "+ 1"), then the chain resumes at 24.
+        // (the "+ 1"), then the chain resumes at 24 and runs contiguously to head.
         assert_eq!(MIGRATIONS.len() + 1, SCHEMA_VERSION as usize);
-        let (chain, post_drop) = MIGRATIONS.split_at(MIGRATIONS.len() - 1);
+        let (chain, post_drop) = MIGRATIONS.split_at(23);
         for (expected, migration) in (0..23).zip(chain) {
             assert_eq!(migration.from, expected);
             assert_eq!(migration.to, expected + 1);
         }
-        assert_eq!(post_drop[0].from, 24);
-        assert_eq!(post_drop[0].to, SCHEMA_VERSION);
+        for (expected, migration) in (24..SCHEMA_VERSION).zip(post_drop) {
+            assert_eq!(migration.from, expected);
+            assert_eq!(migration.to, expected + 1);
+        }
         for version in 0..SCHEMA_VERSION {
             let connection = Connection::open_in_memory().expect("in-memory database");
             create_schema_at(&connection, version);
@@ -710,7 +733,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

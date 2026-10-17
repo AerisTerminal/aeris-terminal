@@ -9,7 +9,8 @@ pub(crate) const OWNER_THREAD_NAME: &str = "aeris-trading-owner";
 
 pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
     let mut next_refresh = core.clock.monotonic();
-    let mut next_retention = core.clock.monotonic() + RETENTION_INTERVAL;
+    // Retention is due at startup and then hourly.
+    let mut next_retention = core.clock.monotonic();
     loop {
         let now = core.clock.monotonic();
         let refresh_due = core.wants_unrealized_pnl() && now >= next_refresh;

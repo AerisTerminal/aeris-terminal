@@ -126,7 +126,7 @@ violations and missing verification explicitly, and never describe them as satis
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V25 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V26 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -137,13 +137,20 @@ violations and missing verification explicitly, and never describe them as satis
   columns and the denormalized instrument class/price-grid columns; its backfill runs once per
   store after the group finalize as part of `complete_post_group_migrations`. A simulated
   account's balance is the exact sum of its cash-ledger entries; only a gated pre-group store
-  awaiting conversion keeps the legacy starting-equity math until its backfill. Old P&L tables and
+  awaiting conversion keeps the legacy starting-equity math until its backfill. V26 adds
+  `position_checkpoints`, `ledger_checkpoints` and the `equity_samples` history; retention
+  folds each pruned fill prefix and its ledger entries into those checkpoints inside the
+  deletion transaction, and recovery rebuilds a checkpointed position as checkpoint plus the
+  retained fill suffix. Old P&L tables and
   per-fill columns remain unread until their deferred removal migration. Store-open preflight scratch cleanup may
   remove only exact preflight directories containing solely the expected database copy and
   SQLite sidecars; preserve unknown contents and report cleanup failures through observability.
 - Simulated quote-only marks update unrealized P&L in owner memory without cloning all trading
-  state or writing SQLite. Retention runs only from the hourly owner timer and deletes at most
-  5,000 rows from each table per run; commands, quotes and store open never perform retention.
+  state or writing SQLite. Retention runs only from the owner timer at startup and hourly; each
+  run writes position and ledger checkpoints in the same transaction before pruning fills or
+  ledger entries (a crash leaves neither), never deletes rows referenced by an open order or a
+  live order group, and deletes at most 5,000 rows from each table per run. Commands, quotes
+  and store open never perform retention.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
   legacy state, write installed-app identity, promote launchers, or run updates. Only the explicit

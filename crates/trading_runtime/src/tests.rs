@@ -1135,7 +1135,260 @@ fn fee_schedule_charges_maker_and_taker_fills_per_the_model() {
         assert_eq!(commission, expected);
     }
 }
+/// Asserts the checkpoint fold and balance identity of one account after a retention run.
+fn assert_checkpoint_rows(
+    directory: &TestDirectory,
+    checkpointed_fills: i64,
+    remaining_fills: i64,
+    checkpointed_entries: i64,
+    remaining_entries: i64,
+    balance_units: i64,
+) {
+    let database = rusqlite::Connection::open(config(directory).database_path).expect("reader");
+    let folded_fills: i64 = database
+        .query_row(
+            "SELECT fill_count FROM position_checkpoints WHERE account_id = 'aeris-sim-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("position checkpoint row");
+    assert_eq!(
+        folded_fills, checkpointed_fills,
+        "the pruned prefix folded once"
+    );
+    let fills: i64 = database
+        .query_row("SELECT count(*) FROM fills", [], |row| row.get(0))
+        .expect("fill count");
+    assert_eq!(fills, remaining_fills);
+    let folded_entries: i64 = database
+        .query_row(
+            "SELECT entry_count FROM ledger_checkpoints WHERE account_id = 'aeris-sim-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("ledger checkpoint row");
+    let entries: i64 = database
+        .query_row("SELECT count(*) FROM ledger_entries", [], |row| row.get(0))
+        .expect("entry count");
+    assert_eq!(folded_entries, checkpointed_entries);
+    assert_eq!(entries, remaining_entries);
+    let checkpoint_balance: i64 = database
+        .query_row(
+            "SELECT balance_units FROM ledger_checkpoints WHERE account_id = 'aeris-sim-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("checkpoint balance");
+    let entries_sum: i64 = database
+        .query_row(
+            "SELECT COALESCE(SUM(amount_units), 0) FROM ledger_entries",
+            [],
+            |row| row.get(0),
+        )
+        .expect("entries sum");
+    assert_eq!(
+        checkpoint_balance + entries_sum,
+        balance_units,
+        "checkpoint plus the remaining entries is the exact balance"
+    );
+}
 
+#[test]
+fn retention_writes_checkpoints_and_recovers_the_exact_projection() {
+    // VAL-TRD-059: the retention run folds pruned fills and their ledger entries into
+    // checkpoints in one transaction; after a restart every position equals its checkpoint
+    // plus the retained suffix and the balance is unchanged.
+    use crate::clock::Clock;
+    let directory = TestDirectory::new("retention-checkpoint");
+    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    configuration.retention.maximum_fills = 4;
+    let service = start_service_with_config(configuration);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut schedule = aeris_trading::FeeSchedule::default();
+    schedule.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        aeris_trading::FeeModel::NotionalBps {
+            maker_bps: 1,
+            taker_bps: 2,
+        },
+    );
+    service
+        .set_fee_schedule(account, schedule)
+        .expect("fee schedule installs");
+
+    // Every round trip wins (+25.00 gross before fees), so no discipline lock engages.
+    let mut sequence = 1_u64;
+    for _ in 0..6 {
+        for (side, bid, ask) in [
+            (OrderSide::Buy, 9_999, 10_000),
+            (OrderSide::Sell, 10_050, 10_051),
+        ] {
+            clock.advance(Duration::from_secs(10));
+            let now = clock.wall_unix_nanos();
+            sequence += 1;
+            let label = format!("rt-{sequence}");
+            service
+                .place_order(market_order(&label, side, sequence, now))
+                .expect("round-trip order accepted");
+            service
+                .observe_market(observation(bid, ask, sequence, now))
+                .expect("round-trip fill");
+        }
+    }
+    // One open long 2 stays behind the round trips.
+    clock.advance(Duration::from_secs(10));
+    let now = clock.wall_unix_nanos();
+    sequence += 1;
+    let mut open_buy = market_order("open-buy", OrderSide::Buy, sequence, now);
+    open_buy.time_in_force = TimeInForce::GoodTillCancelled;
+    open_buy.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    service.place_order(open_buy).expect("open buy accepted");
+    service
+        .observe_market(observation(10_000, 10_001, sequence, now))
+        .expect("open fill");
+
+    let before = service.snapshot().expect("pre-retention snapshot");
+    // Owner memory mirrors the retention window; the durable store holds all 13 fills.
+    assert_eq!(before.fills.len(), 4);
+    assert_eq!(before.positions.len(), 1);
+    assert_eq!(
+        before.positions[0].net_quantity,
+        FixedPoint::try_new(2, 0).expect("net")
+    );
+
+    // The status wake crosses the hourly interval, so retention runs first.
+    clock.advance(Duration::from_secs(3_700));
+    service.status().expect("retention tick");
+    let during = service.snapshot().expect("post-retention snapshot");
+    assert_eq!(during.positions, before.positions);
+    assert_eq!(during.account_pnl, before.account_pnl);
+
+    assert_checkpoint_rows(
+        &directory,
+        9,
+        4,
+        13,
+        7,
+        before.account_pnl[0].balance.expect("balance").units(),
+    );
+
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    let recovered = restarted.snapshot().expect("recovered snapshot");
+    assert_eq!(recovered.positions, before.positions);
+    assert_eq!(recovered.account_pnl, before.account_pnl);
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
+
+#[test]
+fn retention_never_prunes_fills_pinned_by_a_live_group() {
+    // VAL-TRD-059: rows referenced by an active group are never deleted, even when they fall
+    // outside the retention window.
+    use crate::clock::Clock;
+    let directory = TestDirectory::new("retention-group-pin");
+    let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    configuration.retention.maximum_fills = 1;
+    let service = start_service_with_config(configuration);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+
+    // Winning round trips keep discipline locks out of the way.
+    let mut sequence = 1_u64;
+    for _ in 0..3 {
+        for (side, bid, ask) in [
+            (OrderSide::Buy, 9_999, 10_000),
+            (OrderSide::Sell, 10_010, 10_011),
+        ] {
+            clock.advance(Duration::from_secs(10));
+            let now = clock.wall_unix_nanos();
+            sequence += 1;
+            let label = format!("pin-rt-{sequence}");
+            service
+                .place_order(market_order(&label, side, sequence, now))
+                .expect("round-trip order accepted");
+            service
+                .observe_market(observation(bid, ask, sequence, now))
+                .expect("round-trip fill");
+        }
+    }
+    clock.advance(Duration::from_secs(10));
+    let now = clock.wall_unix_nanos();
+    sequence += 1;
+    let mut entry = market_order("pinned-entry", OrderSide::Buy, sequence, now);
+    entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    entry.time_in_force = TimeInForce::GoodTillCancelled;
+    let awaiting = service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: bracket_template(),
+        })
+        .expect("bracket accepted");
+    let PlacementOutcome::Managed(awaiting) = awaiting else {
+        panic!("a simulated bracket is managed locally");
+    };
+    assert_eq!(awaiting.status, BracketViewStatus::AwaitingEntry);
+    service
+        .observe_market(observation(9_975, 10_000, sequence, now))
+        .expect("entry fills");
+    let active = service.snapshot().expect("active snapshot");
+    assert_eq!(active.managed_brackets[0].status, BracketViewStatus::Active);
+    let entry_order = active
+        .orders
+        .iter()
+        .find(|order| order.client_order_id.as_str() == "pinned-entry")
+        .expect("entry order")
+        .id
+        .as_str()
+        .to_string();
+
+    clock.advance(Duration::from_secs(3_700));
+    service.status().expect("retention tick");
+
+    let database = rusqlite::Connection::open(config(&directory).database_path).expect("reader");
+    let entry_fills: i64 = database
+        .query_row(
+            "SELECT count(*) FROM fills WHERE order_id = ?1",
+            [entry_order.as_str()],
+            |row| row.get(0),
+        )
+        .expect("entry fill count");
+    assert_eq!(entry_fills, 1, "the active group's entry fill is pinned");
+    let total_fills: i64 = database
+        .query_row("SELECT count(*) FROM fills", [], |row| row.get(0))
+        .expect("fill count");
+    assert_eq!(total_fills, 1, "only the pinned fill survives");
+    let checkpointed_fills: i64 = database
+        .query_row(
+            "SELECT fill_count FROM position_checkpoints WHERE account_id = 'aeris-sim-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("position checkpoint row");
+    assert_eq!(checkpointed_fills, 6, "the prunable prefix folded exactly");
+
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let restarted = start_service(&directory);
+    let recovered = restarted.snapshot().expect("recovered snapshot");
+    assert_eq!(recovered.positions, active.positions);
+    assert_eq!(recovered.account_pnl, active.account_pnl);
+    assert_eq!(
+        recovered.managed_brackets[0].status,
+        BracketViewStatus::Active
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown");
+}
 #[test]
 fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
     // VAL-TRD-055: the ESZ6 override charges 2.50 per contract while the future class model

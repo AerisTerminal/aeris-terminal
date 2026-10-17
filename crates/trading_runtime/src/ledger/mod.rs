@@ -6,14 +6,40 @@ pub(crate) use position::{CostBasis, FillAccounting, TradeCycle};
 
 use super::{
     AccountEnvironment, AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate,
-    FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent,
-    Position, PositionPnl, ProtectionRole, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD,
-    RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter, SessionAdherenceReview, TradeRoundTrip,
-    TradingAccount, TradingAccountId, TradingCore, TradingSnapshot, consistency_projection,
-    is_simulated, negative_loss, nonnegative_difference, pnl_ticks, remaining_limit, round_trip,
-    subtract_fixed, tick_value,
+    FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind, Liquidity, MAXIMUM_SNAPSHOT_ITEMS,
+    Order, OrderEvent, Position, PositionPnl, ProtectionRole, RAPID_LOSS_COOLDOWN_NANOS,
+    RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter, SessionAdherenceReview,
+    TradeRoundTrip, TradingAccount, TradingAccountId, TradingCore, TradingSnapshot,
+    consistency_projection, is_simulated, negative_loss, nonnegative_difference, pnl_ticks,
+    remaining_limit, round_trip, subtract_fixed, tick_value,
 };
 
+/// The durable per-position projection folded from pruned fills: the exact state after every
+/// fill retention deleted for that account and instrument. Recovery replays the checkpoint
+/// plus the retained fill suffix and lands on the pre-retention projection exactly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PositionCheckpoint {
+    pub account_id: TradingAccountId,
+    pub instrument_id: InstrumentId,
+    pub net_quantity: FixedPoint,
+    pub average_entry_price: Option<FixedPoint>,
+    pub realized_pnl: FixedPoint,
+    pub cost_basis: Option<CostBasis>,
+    pub last_fill_unix_nanos: i64,
+    /// Every fill folded into this checkpoint; the retained suffix continues from here.
+    pub fill_count: u64,
+}
+
+/// The durable per-account cash balance folded from pruned ledger entries. A ledgered
+/// account's balance is this checkpoint plus the exact sum of its remaining entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LedgerCheckpoint {
+    pub account_id: TradingAccountId,
+    pub balance: FixedPoint,
+    /// Every ledger entry folded into this checkpoint.
+    pub entry_count: u64,
+    pub at_unix_nanos: i64,
+}
 impl TradingCore {
     pub(super) fn next_discipline_state(
         &self,
@@ -276,18 +302,20 @@ impl TradingCore {
                 if account.broker_ref.is_some() {
                     return self.broker_account_pnl(account, realized, unrealized);
                 }
-                // A ledgered account's balance is the exact sum of its cash-ledger entries.
-                // A funded account without entries is a gated pre-group store awaiting its
-                // conversion backfill and keeps the legacy starting-equity math until then.
+                // A ledgered account's balance is its ledger checkpoint plus the exact sum
+                // of its remaining cash-ledger entries. A funded account without either is a
+                // gated pre-group store awaiting its conversion backfill and keeps the legacy
+                // starting-equity math until then.
+                let checkpoint = self.state.ledger_checkpoints.get(&account.id);
                 let ledgered = account.starting_equity.is_none()
+                    || checkpoint.is_some()
                     || self
                         .state
                         .ledger_entries
                         .iter()
                         .any(|entry| entry.account_id == account.id);
                 let balance = if ledgered {
-                    let mut total = FixedPoint::try_new(0, account.currency_scale)
-                        .map_err(|error| error.to_string())?;
+                    let mut total = checkpoint.map_or(zero, |checkpoint| checkpoint.balance);
                     for entry in self
                         .state
                         .ledger_entries
