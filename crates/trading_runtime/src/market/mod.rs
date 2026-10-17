@@ -709,6 +709,13 @@ impl TradingCore {
         order: &Order,
         observation: &SimulatedMarketObservation,
     ) -> bool {
+        // A legacy DAY row without its acceptance-session deadline cannot be
+        // executed until recovery has assigned a verified calendar boundary.
+        if order.time_in_force == aeris_trading::TimeInForce::Day
+            && order.expires_at_unix_nanos.is_none()
+        {
+            return false;
+        }
         #[cfg(test)]
         if !self
             .state

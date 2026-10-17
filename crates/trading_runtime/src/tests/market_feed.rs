@@ -246,6 +246,70 @@ fn overdue_day_order_is_expired_before_first_command_after_restart() {
     restarted.shutdown(Duration::from_secs(5)).unwrap();
 }
 
+#[test]
+fn migrated_day_without_deadline_cannot_fill_before_calendar_recovery() {
+    let directory = TestDirectory::new("day-migrated-null-fence");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Terms(terms())).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    service.status().unwrap();
+    let mut request = market_order("migrated-day", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::Day;
+    let working = service.place_order(request).unwrap();
+    service.shutdown(Duration::from_secs(5)).unwrap();
+
+    let configuration = config(&directory);
+    rusqlite::Connection::open(&configuration.database_path)
+        .unwrap()
+        .execute(
+            "UPDATE orders SET expires_at_unix_nanos = NULL WHERE id = ?1",
+            [working.id.as_str()],
+        )
+        .unwrap();
+    for generation in 2..=3 {
+        let mut configuration = config(&directory);
+        configuration.clock = clock.clone();
+        let restarted = start_service_with_config(configuration);
+        let feed = restarted
+            .attach_market_feed(Arc::new(RecordedInterest::default()))
+            .unwrap();
+        feed.push(MarketFeedEvent::Terms(terms())).unwrap();
+        feed.push(live_session(route().instrument_id, generation))
+            .unwrap();
+        feed.push(feed_state(
+            route().instrument_id,
+            generation,
+            FeedState::Live,
+        ))
+        .unwrap();
+        feed.push(MarketFeedEvent::Quote(quote(
+            generation, generation, 9_800, 9_850,
+        )))
+        .unwrap();
+        let snapshot = restarted.snapshot().unwrap();
+        assert!(snapshot.fills.is_empty(), "unresolved DAY order filled");
+        assert_eq!(
+            snapshot
+                .orders
+                .iter()
+                .find(|order| order.id == working.id)
+                .unwrap()
+                .status,
+            OrderStatus::Working
+        );
+        restarted.shutdown(Duration::from_secs(5)).unwrap();
+    }
+}
+
 fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {
     MarketFeedEvent::Feed {
         instrument_id: id,
