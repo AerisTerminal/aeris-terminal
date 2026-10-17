@@ -1,3 +1,4 @@
+pub mod model;
 pub(super) mod planned_leg;
 pub(super) mod protection;
 

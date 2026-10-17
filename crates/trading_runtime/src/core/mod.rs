@@ -12,6 +12,9 @@ mod emergency;
 mod execution;
 #[path = "../groups/mod.rs"]
 mod groups;
+pub use groups::model::{
+    GroupKind, GroupLeg, GroupStatus, GroupValidationError, LegRole, OrderGroup, StopManagement,
+};
 #[path = "../ledger/mod.rs"]
 pub(crate) mod ledger;
 #[path = "../market/mod.rs"]
