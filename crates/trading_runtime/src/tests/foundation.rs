@@ -184,7 +184,7 @@ fn live_account_rejects_every_trading_command_without_mutation() {
         service
             .kill_switch(None, "test".into(), 2_000)
             .expect("global kill switch"),
-        0
+        EmergencyOutcome::default()
     );
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.risk_locks, []);

@@ -171,6 +171,28 @@ pub struct UnpricedPosition {
     pub net_quantity: FixedPoint,
 }
 
+/// What one kill-switch invocation did: the accounts it locked, the non-protective
+/// orders it cancelled, the closing fills it committed and what it could not finish.
+/// Locks, cancellations and simulated fills commit in one durable step.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EmergencyOutcome {
+    /// Accounts locked by this invocation.
+    pub accounts_locked: usize,
+    /// Non-protective working orders cancelled with the kill-switch cause. Protection
+    /// legs are never in this list: they retire with a flatten fill or keep working.
+    pub cancelled: Vec<Order>,
+    /// Simulated closing fills committed in the same step.
+    pub fills: Vec<Fill>,
+    /// Broker position IDs whose close requests have been submitted but not yet filled.
+    pub pending_close_requests: Vec<String>,
+    /// Positions kept because the owner holds no current verified quote for their
+    /// instrument; they are reported, never silently skipped, and keep their protection.
+    pub unpriced: Vec<UnpricedPosition>,
+    /// What could not be requested (for example with a broker venue disconnected); the
+    /// locks and every other order and position in scope were still handled.
+    pub incomplete: Option<String>,
+}
+
 pub(crate) fn respond<T>(reply: &Reply<T>, result: Result<T, String>) {
     // A retired caller cannot affect the authoritative owner.
     let _ = reply.send(result);
@@ -1091,16 +1113,22 @@ impl TradingService {
         self.request(|reply| Command::UnlockAccount(account_id, reply))
     }
 
-    /// Locks one account or every account and cancels its working orders atomically on the owner.
+    /// Locks one account or every tradable account, cancels its non-protective working
+    /// orders and flattens every priced position at the owner's verified quotes in one
+    /// durable step per invocation. Protection of flattened positions retires with the
+    /// fill; positions without a verified quote keep their protection and are reported
+    /// in `EmergencyOutcome::unpriced`. Broker cancels and closes are venue requests
+    /// reported through the outcome.
     ///
     /// # Errors
-    /// Returns an error when no target account exists, locking fails, or cancellation fails.
+    /// Returns an error when no target account exists, a targeted account is data-only,
+    /// or the durable step cannot be committed.
     pub fn kill_switch(
         &self,
         account_id: Option<TradingAccountId>,
         reason: String,
         locked_at_unix_nanos: i64,
-    ) -> Result<usize, String> {
+    ) -> Result<EmergencyOutcome, String> {
         self.request(|reply| Command::KillSwitch(account_id, reason, locked_at_unix_nanos, reply))
     }
 

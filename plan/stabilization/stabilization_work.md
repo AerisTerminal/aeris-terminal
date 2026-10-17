@@ -688,6 +688,35 @@ Status: in progress; M5.1-M5.8 code and tests are complete, M5.9-M5.12 remain op
     and the bracket completes. Runtime 260 passed/5 ignored; desktop 449+80; full fmt, strict workspace
     Clippy, workspace tests and naming passed. Kill-switch outcome/reporting (TR-03), scripted-broker
     two-symbol parity and TR-04/TR-12 closure remain; M5.9 stays unchecked.
+  - Part 2/3: The kill switch now performs the full emergency action in one durable step per
+    invocation: it locks every in-scope tradable account, cancels their non-protective working
+    orders with the typed `KillSwitch` cause (previously everything, including protection, was
+    cancelled with `user_cancel`), and flattens every priced position at the owner's verified
+    quotes with group reconciliation in the same `plan_atomic` transaction. Protection legs are
+    never stripped: they retire with the flatten fill, and a position without a current verified
+    quote keeps its stop and target and is reported in `EmergencyOutcome::unpriced`. Broker
+    accounts are locked in the same step; their cancels and position closes remain venue requests
+    reported through `pending_close_requests`/`incomplete` (the uncancellable-order report moved
+    from an error string to `incomplete` while the lock stands). The result is the new
+    `EmergencyOutcome { accounts_locked, cancelled, fills, pending_close_requests, unpriced,
+    incomplete }`; the desktop kill feedback renders it. The economic-event Lock rule now shares
+    `lock_and_disarm` (lock + non-protective cancel, no flatten) instead of calling the kill
+    switch. The stale `expect(dead_code)` on `CancellationCause` is removed: every cause now has
+    a production producer.
+  - Part 2 tests: the four-instrument VAL-TRD-061 regression (bracketed long, protected short,
+    non-protective limit, stale-quoted protected position) asserts the lock, the
+    `Cancelled{KillSwitch}` limit, both flatten fills at bid/ask, retired protection on the
+    flattened instruments, the intact stop and target on the stale instrument, the unpriced
+    report, lock enforcement and exact restart replay; a replay crash test proves a failed kill
+    commit leaves memory and disk unlocked and unflattened and retries cleanly after restart.
+    The property run caught that it recorded bracket-leg instructions before activation assigned
+    their exact limit prices (previously invisible because the old kill cancelled every leg);
+    the harness now follows the activation assignment, with richer fill forensics. The v2
+    simulated golden regenerated intentionally: the kill cancels the pending limit with the
+    `kill_switch` reason and flattens the reversed short at the ask (new fill/order/ledger
+    lines, position flat, realized 6250). Runtime 262 passed/5 ignored; desktop 449+81; full
+    fmt, strict workspace Clippy, workspace tests and naming passed. Scripted-broker parity and
+    TR-03/TR-04/TR-12 closure remain; M5.9 stays unchecked.
 - [ ] M5.10 risk-session-rollover - Persisted risk session with rollover; bracket legs count as attached stops
 - [ ] M5.11 trading-publication-api - Change-driven, bounded publication with paged history
 - [ ] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
@@ -994,6 +1023,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.8 part 3 feat(trading): bound the equity history - one equity sample per simulated fill committed inside the fill's transaction (quote and placement steps pass the planned samples to commit_quote_step; the emergency close flushes a follow-up write), a 60 s owner timer samples only on change plus once per UTC risk-session boundary for profiled accounts, and a 1,440-entry ring per account reloads the newest durable minute samples at open with the first tick delayed one interval so restarts replay unchanged. Retention downsamples minute rows past seven days into last-of-hour rows and drops hourly rows past a year in the same transaction, windows trailing the newest sample so a backward clock cannot mass-expire history. Regressions: per-fill/timer/session/restart sampling, ring bound, downsample collapse and year drop; mark-only/failed-commit atomicity and group-recovery reopen goldens stay green. Runtime 253 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed.
 - 2026-10-17 M5.8 part 4 feat(trading): property-test the trading invariants - 200 seeds x 500 service-level steps assert pooled coverage, fill eligibility, DAY expiry, balance identity and the equity ring bound after every step; each restart adds the durable identity (no orphan legs, checkpoint+suffix positions, checkpoint+entries balance, no stale DAY rows) and notice-free reopen equality. The run caught a pending-bracket cascade defect (held-leg cancel left the entry working); fixed in stage_bracket_termination with a focused regression. TR-06 closes. Runtime 255 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed.
 - 2026-10-17 M5.9 part 1/3 feat(trading): price emergency operations from verified runtime quotes - atomic scoped flatten/reverse through one commit_quote_step per action, typed unpriced reporting that keeps protection, sim-reverse IOC staging with enforce_risk, observation-free event risk and scoped/global broker multi-instrument close; legacy per-step fill writers deleted; regressions converted to the real feed path plus scope/unpriced/risk-reject/crash-atomicity coverage; v2 simulated golden regenerated for the new feed provenance, per-instrument revision numbering, sim-reverse leg and completed bracket. Runtime 260 passed/5 ignored; full gate green.
+- 2026-10-17 M5.9 part 2/3 feat(trading): make the kill switch the full atomic emergency action - one durable step locks the in-scope accounts, cancels non-protective orders with the typed KillSwitch cause and flattens every priced position with group reconciliation; protection is never stripped, unpriced positions keep their stop/target and land in EmergencyOutcome::unpriced; broker cancels/closes stay reported venue requests; event Lock shares lock_and_disarm without flattening; stale CancellationCause dead-code expectation removed. New VAL-TRD-061 four-instrument regression and replay crash-atomicity test; property harness now follows activation-assigned leg prices; v2 golden regenerated for the kill_switch cancel reason and the kill flatten fill. Runtime 262 passed/5 ignored; desktop 449+81; full gate green.
 
 ## 7. Known gaps / deferred
 

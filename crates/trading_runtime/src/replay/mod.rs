@@ -202,7 +202,7 @@ impl ReplayHarness {
         id: Option<TradingAccountId>,
         reason: String,
         at: i64,
-    ) -> Result<usize, String> {
+    ) -> Result<EmergencyOutcome, String> {
         self.command(|reply| Command::KillSwitch(id, reason, at, reply))
     }
 
@@ -1168,12 +1168,15 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario() -
     pending.limit_price = Some(FixedPoint::try_new(9_000, 2).expect("pending price"));
     service.place_order(pending).expect("pending order");
     clock.set_wall_unix_nanos(13_000);
-    assert_eq!(
-        service
-            .kill_switch(Some(account), "golden kill".to_string(), 14_000)
-            .expect("kill switch"),
-        1
-    );
+    // The kill switch locks the account, cancels the pending limit with the kill-switch
+    // cause and flattens the reversed short at the verified quote in the same step.
+    let killed = service
+        .kill_switch(Some(account), "golden kill".to_string(), 14_000)
+        .expect("kill switch");
+    assert_eq!(killed.accounts_locked, 1);
+    assert_eq!(killed.cancelled.len(), 1);
+    assert_eq!(killed.fills.len(), 1);
+    assert_eq!(killed.unpriced, []);
     record("kill switch", &service, &mut trace);
 
     let actual = format!(
@@ -1290,6 +1293,60 @@ fn replay_failed_reverse_commit_leaves_the_position_untouched() {
         harness.snapshot().expect("durable reverse"),
         after,
         "the committed reverse replays exactly"
+    );
+}
+
+#[test]
+fn replay_failed_kill_switch_commit_keeps_memory_and_disk_at_last_commit() {
+    let directory = TestDirectory::new("kill-atomic");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    harness
+        .place_order(market_order("kill-atomic-open", OrderSide::Buy, 1, 1_000))
+        .expect("buy accepted");
+    harness
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("buy fills");
+    harness
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 3, 3_000))
+        .expect("kill quote");
+    let before = harness.snapshot().expect("before kill");
+    harness.crash_during_commit(1);
+    assert!(
+        harness
+            .kill_switch(Some(account.clone()), "atomic kill".to_string(), 4_000)
+            .is_err(),
+        "injected commit failure rejects the kill switch"
+    );
+    assert_eq!(
+        harness.snapshot().expect("memory unchanged"),
+        before,
+        "a failed kill commit leaves owner memory untouched, including the lock"
+    );
+    harness.restart().expect("restart");
+    assert_eq!(
+        harness.snapshot().expect("disk unchanged"),
+        before,
+        "a failed kill commit leaves the database unlocked and unflattened"
+    );
+    // The quote book is owner memory: after a restart a fresh verified quote must arrive
+    // before the position can be flattened.
+    harness
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 4, 6_000))
+        .expect("post-restart quote");
+    let killed = harness
+        .kill_switch(Some(account), "atomic kill".to_string(), 7_000)
+        .expect("kill switch succeeds after restart");
+    assert_eq!(killed.accounts_locked, 1);
+    assert_eq!(killed.fills.len(), 1);
+    assert_eq!(killed.unpriced, []);
+    let after = harness.snapshot().expect("after kill");
+    harness.restart().expect("restart");
+    assert_eq!(
+        harness.snapshot().expect("durable kill"),
+        after,
+        "the committed kill switch replays exactly"
     );
 }
 #[test]

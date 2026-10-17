@@ -81,6 +81,48 @@ pub fn flatten_feedback(
     }
 }
 
+/// Renders one kill-switch outcome for the feedback line: locks, flatten fills,
+/// cancellations and anything left incomplete.
+///
+/// # Errors
+/// Returns the command's error, or the reported work with what could not be requested.
+pub fn kill_feedback(
+    action: &str,
+    result: Result<aeris_trading_runtime::EmergencyOutcome, String>,
+) -> Result<String, String> {
+    let outcome = result?;
+    let mut parts = vec![format!(
+        "{action}: locked {} account(s)",
+        outcome.accounts_locked
+    )];
+    if !outcome.fills.is_empty() {
+        parts.push(format!("{} flatten fill(s)", outcome.fills.len()));
+    }
+    if !outcome.cancelled.is_empty() {
+        parts.push(format!("{} order(s) cancelled", outcome.cancelled.len()));
+    }
+    if !outcome.pending_close_requests.is_empty() {
+        parts.push(format!(
+            "{} cTrader close request(s) sent",
+            outcome.pending_close_requests.len()
+        ));
+    }
+    if !outcome.unpriced.is_empty() {
+        parts.push(format!(
+            "{} position(s) lack a verified quote and keep their protection",
+            outcome.unpriced.len()
+        ));
+    }
+    let incomplete = outcome.incomplete;
+    parts.extend(incomplete.clone());
+    let message = parts.join(" · ");
+    if incomplete.is_some() {
+        Err(message)
+    } else {
+        Ok(message)
+    }
+}
+
 pub fn record_outcome<T>(result: Result<T, String>, success: &str) -> bool {
     record_result(result.map(|_| success.to_string()))
 }
@@ -572,7 +614,7 @@ pub fn cancel_simulated_accounts(cx: &mut gpui::App) {
         .detach();
 }
 
-/// Locks the selected simulated account off the UI thread.
+/// Locks the selected account, cancels its non-protective orders and flattens every priced position, off the UI thread.
 pub fn kill_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
     let Some(service) = handle() else {
         record_feedback(Err("Practice trading is unavailable".to_string()));
@@ -583,11 +625,10 @@ pub fn kill_simulated_account(account_key: Option<String>, cx: &mut gpui::App) {
     let locked_at = now();
     cx.background_executor()
         .spawn(async move {
-            record_feedback(
-                service
-                    .kill_switch(account, "manual kill switch".to_string(), locked_at)
-                    .map(|count| format!("Locked {count} practice account(s)")),
-            );
+            record_feedback(kill_feedback(
+                "Kill switch",
+                service.kill_switch(account, "manual kill switch".to_string(), locked_at),
+            ));
         })
         .detach();
 }
@@ -611,7 +652,7 @@ pub fn unlock_simulated_account(account_key: Option<String>, cx: &mut gpui::App)
         .detach();
 }
 
-/// Locks every simulated account off the UI thread.
+/// Locks every tradable account, cancels non-protective orders and flattens every priced position, off the UI thread.
 pub fn kill_simulated_accounts(cx: &mut gpui::App) {
     let Some(service) = handle() else {
         record_feedback(Err("Practice trading is unavailable".to_string()));
@@ -620,11 +661,10 @@ pub fn kill_simulated_accounts(cx: &mut gpui::App) {
     let locked_at = now();
     cx.background_executor()
         .spawn(async move {
-            record_feedback(
-                service
-                    .kill_switch(None, "manual global kill switch".to_string(), locked_at)
-                    .map(|count| format!("Locked {count} practice account(s)")),
-            );
+            record_feedback(kill_feedback(
+                "Global kill switch",
+                service.kill_switch(None, "manual global kill switch".to_string(), locked_at),
+            ));
         })
         .detach();
 }
@@ -925,6 +965,55 @@ mod tests {
         assert_eq!(
             super::flatten_feedback("Reversed", Err("no position".into())),
             Err("no position".to_string())
+        );
+    }
+
+    #[test]
+    fn kill_feedback_reports_locks_fills_unpriced_and_partial_work() {
+        use aeris_trading_runtime::EmergencyOutcome;
+        assert_eq!(
+            super::kill_feedback(
+                "Kill switch",
+                Ok(EmergencyOutcome {
+                    accounts_locked: 1,
+                    ..EmergencyOutcome::default()
+                })
+            ),
+            Ok("Kill switch: locked 1 account(s)".to_string())
+        );
+        let unpriced = EmergencyOutcome {
+            accounts_locked: 1,
+            unpriced: vec![aeris_trading_runtime::UnpricedPosition {
+                account_id: aeris_trading::TradingAccountId::try_new("aeris-sim-1")
+                    .expect("account"),
+                instrument_id: aeris_instruments::InstrumentId::try_new(
+                    "instrument:fixture:CME:ESZ6",
+                )
+                .expect("instrument"),
+                net_quantity: aeris_trading::FixedPoint::try_new(1, 0).expect("net"),
+            }],
+            ..EmergencyOutcome::default()
+        };
+        assert_eq!(
+            super::kill_feedback("Global kill switch", Ok(unpriced)),
+            Ok(
+                "Global kill switch: locked 1 account(s) · 1 position(s) lack a verified quote and keep their protection"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            super::kill_feedback(
+                "Kill switch",
+                Ok(EmergencyOutcome {
+                    accounts_locked: 1,
+                    incomplete: Some("accounts are locked; 1 cTrader order(s) could not be cancelled".into()),
+                    ..EmergencyOutcome::default()
+                })
+            ),
+            Err(
+                "Kill switch: locked 1 account(s) · accounts are locked; 1 cTrader order(s) could not be cancelled"
+                    .to_string()
+            )
         );
     }
 

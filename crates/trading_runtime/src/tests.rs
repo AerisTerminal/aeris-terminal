@@ -4966,6 +4966,250 @@ fn flatten_keeps_and_reports_positions_without_a_verified_quote() {
 }
 
 #[test]
+fn the_kill_switch_flattens_priced_instruments_and_keeps_stale_protection() {
+    // VAL-TRD-061: one account with a bracketed long, a protected short, a
+    // non-protective working limit and a protected position whose quote went stale.
+    let directory = TestDirectory::new("kill-switch-flatten");
+    let (service, clock, feed) = live_feed_service(&directory);
+    let [bracketed_long, protected_short, working_only, stale] = kill_switch_world(&service, &feed);
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+
+    // The fourth instrument's quote goes stale while the first two stay current.
+    clock.advance(Duration::from_secs(61));
+    push_live_quote(&feed, &bracketed_long, 61_001, 9_975, 10_000, 2);
+    push_live_quote(&feed, &protected_short, 61_002, 7_975, 8_000, 2);
+    service.status().expect("fresh quotes");
+
+    let outcome = service
+        .kill_switch(
+            Some(account.clone()),
+            "test kill".to_string(),
+            1_061_000_000_000,
+        )
+        .expect("kill switch commits");
+    assert_eq!(outcome.accounts_locked, 1);
+    assert_eq!(outcome.fills.len(), 2);
+    assert_eq!(outcome.unpriced.len(), 1);
+    assert_eq!(outcome.unpriced[0].instrument_id, stale.instrument_id);
+    assert_eq!(outcome.unpriced[0].net_quantity.units(), 1);
+    assert_eq!(outcome.incomplete, None);
+    assert_eq!(outcome.cancelled.len(), 1);
+    assert_eq!(
+        outcome.cancelled[0].client_order_id,
+        ClientOrderId::try_new("kill-resting").expect("client id")
+    );
+
+    let snapshot = service.snapshot().expect("snapshot");
+    assert_leg_event(
+        &snapshot,
+        &outcome.cancelled[0].id,
+        OrderEventKind::Cancelled,
+        aeris_trading::OrderEventReason::KillSwitch,
+    );
+    assert_eq!(
+        net_position_on(&snapshot, &bracketed_long.instrument_id),
+        Some(0)
+    );
+    assert_eq!(
+        net_position_on(&snapshot, &protected_short.instrument_id),
+        Some(0)
+    );
+    assert_eq!(net_position_on(&snapshot, &stale.instrument_id), Some(1));
+    assert_eq!(
+        working_orders_on(&snapshot, &bracketed_long.instrument_id),
+        0,
+        "the flattened long retires its protection"
+    );
+    assert_eq!(
+        working_orders_on(&snapshot, &protected_short.instrument_id),
+        0,
+        "the flattened short retires its protection"
+    );
+    assert_eq!(working_orders_on(&snapshot, &working_only.instrument_id), 0);
+    assert_eq!(
+        working_orders_on(&snapshot, &stale.instrument_id),
+        2,
+        "the unpriced position keeps its stop and target working"
+    );
+    assert!(
+        snapshot
+            .risk_locks
+            .iter()
+            .any(|lock| lock.account_id == account),
+        "the account is locked"
+    );
+    let refused = service
+        .place_order(market_order("after-kill", OrderSide::Buy, 1, 1_004))
+        .expect_err("a locked account accepts no new order");
+    assert!(refused.contains("AccountLocked"), "{refused}");
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+    assert_kill_switch_replay(&directory, clock, &snapshot, &stale.instrument_id);
+}
+
+/// One instrument's net position in a snapshot, if present.
+fn net_position_on(snapshot: &TradingSnapshot, instrument_id: &InstrumentId) -> Option<i64> {
+    snapshot
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == *instrument_id)
+        .map(|position| position.net_quantity.units())
+}
+
+/// The number of working orders on one instrument in a snapshot.
+fn working_orders_on(snapshot: &TradingSnapshot, instrument_id: &InstrumentId) -> usize {
+    snapshot
+        .orders
+        .iter()
+        .filter(|order| order.instrument_id == *instrument_id && order.status.is_open())
+        .count()
+}
+
+/// The four-instrument kill-switch world with entries filled: a bracketed long on the
+/// first instrument, a protected short on the second, a non-protective resting limit on
+/// the third and a bracketed position on the fourth. Returns the instruments in that
+/// order.
+fn kill_switch_world(
+    service: &TradingService,
+    feed: &crate::core::market::feed::MarketFeedInbox,
+) -> [TradingInstrument; 4] {
+    let bracketed_long = instrument();
+    let mut protected_short = instrument();
+    protected_short.instrument_id =
+        InstrumentId::try_new("instrument:fixture:CME:CLZ6").expect("second instrument id");
+    let mut working_only = instrument();
+    working_only.instrument_id =
+        InstrumentId::try_new("instrument:fixture:CME:NQZ6").expect("third instrument id");
+    let mut stale = instrument();
+    stale.instrument_id =
+        InstrumentId::try_new("instrument:fixture:CME:RTYZ6").expect("fourth instrument id");
+    let instruments = [bracketed_long, protected_short, working_only, stale];
+    let symbols = ["ESZ6", "CLZ6", "NQZ6", "RTYZ6"];
+    let routes = instruments
+        .iter()
+        .zip(symbols)
+        .map(|(instrument, symbol)| aeris_trading::market::MarketRoute {
+            provider_id: "fixture".into(),
+            instrument_id: instrument.instrument_id.clone(),
+            provider_symbol: symbol.into(),
+            display_symbol: symbol.into(),
+            venue_id: "CME".into(),
+            entitlement_id: None,
+            price_scale: 2,
+            quantity_scale: 0,
+        })
+        .collect::<Vec<_>>();
+    for (registered, route) in instruments.iter().zip(&routes) {
+        service
+            .register_instrument(registered.clone())
+            .expect("instrument registers");
+        bootstrap_live_feed(feed, registered, route.clone());
+    }
+    // Every instrument carries ticket demand, as with open charts; otherwise the interest
+    // recompute evicts an idle instrument's quote-book entry on the next command.
+    service
+        .set_ticket_interest(routes)
+        .expect("ticket interest");
+    service.status().expect("feed drains");
+    let bracket =
+        |client: &str, side: OrderSide, quantity: u64, at: i64, on: &TradingInstrument| {
+            let mut entry = market_order(client, side, quantity, at);
+            entry.instrument_id = on.instrument_id.clone();
+            PlaceInlineBracket {
+                entry,
+                template: BracketStrategyTemplate {
+                    template_id: format!("{client}-bracket"),
+                    revision: 1,
+                    name: "Kill bracket".to_string(),
+                    stop_offset_ticks: 8,
+                    targets: vec![BracketTarget {
+                        offset_ticks: 8,
+                        quantity_percent: 100,
+                    }],
+                    trailing_stop: None,
+                    break_even: None,
+                    enabled: true,
+                },
+            }
+        };
+    service
+        .place_inline_bracket(bracket(
+            "kill-long",
+            OrderSide::Buy,
+            2,
+            1_000,
+            &instruments[0],
+        ))
+        .expect("long bracket accepted");
+    service
+        .place_inline_bracket(bracket(
+            "kill-short",
+            OrderSide::Sell,
+            1,
+            1_001,
+            &instruments[1],
+        ))
+        .expect("short bracket accepted");
+    service
+        .place_inline_bracket(bracket(
+            "kill-stale",
+            OrderSide::Buy,
+            1,
+            1_002,
+            &instruments[3],
+        ))
+        .expect("stale bracket accepted");
+    let mut resting = market_order("kill-resting", OrderSide::Buy, 4, 1_003);
+    resting.instrument_id = instruments[2].instrument_id.clone();
+    resting.order_type = OrderType::Limit;
+    resting.time_in_force = TimeInForce::GoodTillCancelled;
+    resting.limit_price = Some(FixedPoint::try_new(5_000, 2).expect("limit"));
+    push_live_quote(feed, &instruments[2], 1, 9_975, 10_000, 2);
+    service.status().expect("resting quote");
+    service
+        .place_order(resting)
+        .expect("resting limit accepted");
+    push_live_quote(feed, &instruments[0], 1, 9_975, 10_000, 2);
+    push_live_quote(feed, &instruments[1], 1, 7_975, 8_000, 2);
+    push_live_quote(feed, &instruments[3], 1, 4_975, 5_000, 2);
+    service.status().expect("bracket entries fill");
+    assert_eq!(service.snapshot().expect("snapshot").fills.len(), 3);
+    instruments
+}
+
+/// Reopens the store and proves the kill-switch outcome replayed exactly: identical
+/// orders, locks and fills, and the stale instrument's protection still working.
+fn assert_kill_switch_replay(
+    directory: &TestDirectory,
+    clock: std::sync::Arc<crate::clock::ManualClock>,
+    snapshot: &TradingSnapshot,
+    stale: &InstrumentId,
+) {
+    let mut configuration = config(directory);
+    configuration.clock = clock;
+    let restarted = TradingService::start(configuration).expect("service reopens");
+    let restored = restarted.snapshot().expect("restored snapshot");
+    assert_eq!(restored.orders, snapshot.orders);
+    assert_eq!(restored.risk_locks, snapshot.risk_locks);
+    // Fill list order is commit order in memory and id order after reload; compare as sets.
+    let mut committed_fills = snapshot.fills.clone();
+    committed_fills.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    let mut restored_fills = restored.fills.clone();
+    restored_fills.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    assert_eq!(restored_fills, committed_fills);
+    assert_eq!(net_position_on(&restored, stale), Some(1));
+    assert_eq!(
+        working_orders_on(&restored, stale),
+        2,
+        "the unpriced position's protection survives the restart"
+    );
+    restarted
+        .shutdown(Duration::from_secs(2))
+        .expect("restarted service stops");
+}
+
+#[test]
 fn reverse_rejected_by_risk_leaves_the_position_untouched() {
     let directory = TestDirectory::new("reverse-risk");
     let (service, _clock, feed) = live_feed_service(&directory);

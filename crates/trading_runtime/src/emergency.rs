@@ -1,20 +1,27 @@
 use super::{
     ClientOrderId, EconomicEventRiskAction, EconomicEventRiskOutcome, EconomicEventRiskTrigger,
-    Fill, FillId, FillMemoryUpdate, FixedPoint, FlattenOutcome, FlattenScope, GroupStatus,
-    InstrumentId, Liquidity, Order, OrderId, OrderSide, OrderStatus, OrderType, PlaceOrder,
-    SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, UnpricedPosition,
-    VenueRoute, flatten_acceptance_event, flatten_fill_event,
+    EmergencyOutcome, Fill, FillId, FillMemoryUpdate, FixedPoint, FlattenOutcome, FlattenScope,
+    GroupStatus, InstrumentId, Liquidity, Order, OrderId, OrderSide, OrderStatus, OrderType,
+    PlaceOrder, SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore,
+    UnpricedPosition, VenueRoute, flatten_acceptance_event, flatten_fill_event,
 };
 use crate::book::lifecycle::CancellationCause;
 use crate::store::OrderStep;
 
 impl TradingCore {
+    /// The kill switch is one durable step per invocation: it locks every in-scope tradable
+    /// account, cancels their non-protective working orders with the kill-switch cause and
+    /// flattens every priced position at the owner's verified quotes, retiring the
+    /// flattened positions' protection in the same transaction. Positions without a
+    /// verified quote keep their protection and are reported in `unpriced`. Broker cancels
+    /// and closes are venue requests that follow the committed step; what could not be
+    /// requested is reported in `incomplete` while the locks stay in place.
     pub(super) fn kill_switch(
         &mut self,
         account_id: Option<&TradingAccountId>,
         reason: &str,
         locked_at_unix_nanos: i64,
-    ) -> Result<usize, String> {
+    ) -> Result<EmergencyOutcome, String> {
         let accounts = self
             .state
             .accounts
@@ -38,16 +45,76 @@ impl TradingCore {
             .into_iter()
             .filter(|account| self.route(account).is_ok())
             .collect::<Vec<_>>();
-        // Locking is local and always possible, so it happens first: no new order can be
-        // placed even when a broker venue is disconnected and its orders cannot be cancelled.
+        let scope = FlattenScope {
+            account: account_id.cloned(),
+            instrument: None,
+        };
+        let reason = reason.to_string();
+        let mut outcome = self.plan_atomic(|core| {
+            let mut staged = EmergencyOutcome::default();
+            for account in &tradable {
+                core.lock_account(account.clone(), reason.clone(), locked_at_unix_nanos)?;
+                staged.accounts_locked += 1;
+            }
+            let planned = core.stage_simulated_flatten(&scope, CancellationCause::KillSwitch)?;
+            staged.cancelled = planned.cancelled;
+            staged.fills = planned.fills;
+            staged.unpriced = planned.unpriced;
+            Ok(staged)
+        })?;
         for account in &tradable {
-            self.lock_account(account.clone(), reason.to_string(), locked_at_unix_nanos)?;
+            if !matches!(self.route(account), Ok(VenueRoute::CtraderDemo)) {
+                continue;
+            }
+            match self.flatten_broker_account(account, None) {
+                Ok(closed) => {
+                    outcome
+                        .pending_close_requests
+                        .extend(closed.pending_close_requests);
+                    if let Some(failure) = closed.incomplete {
+                        append_incomplete(
+                            &mut outcome.incomplete,
+                            format!("accounts are locked; {failure}"),
+                        );
+                    }
+                }
+                Err(error) => append_incomplete(
+                    &mut outcome.incomplete,
+                    format!("accounts are locked; cTrader positions were not closed: {error}"),
+                ),
+            }
         }
-        let (cancelled, failures) = self.cancel_open_orders(account_id, None)?;
-        if let Some(failure) = failures {
-            return Err(format!("accounts are locked; {failure}"));
+        Ok(outcome)
+    }
+
+    /// Locks the accounts and cancels their non-protective working orders in one durable
+    /// step; protection of still-open positions keeps working. Broker orders are cancelled
+    /// by request after the committed step. This is the economic-event lock action: no
+    /// position is closed.
+    fn lock_and_disarm(
+        &mut self,
+        account_id: &TradingAccountId,
+        reason: &str,
+        locked_at_unix_nanos: i64,
+    ) -> Result<(), String> {
+        self.route(account_id)?;
+        let scope = FlattenScope {
+            account: Some(account_id.clone()),
+            instrument: None,
+        };
+        let reason = reason.to_string();
+        self.plan_atomic(|core| {
+            core.lock_account(account_id.clone(), reason.clone(), locked_at_unix_nanos)?;
+            core.stage_scope_cancellations(&scope, CancellationCause::KillSwitch)?;
+            Ok(())
+        })?;
+        if matches!(self.route(account_id), Ok(VenueRoute::CtraderDemo)) {
+            let (_, failure) = self.cancel_open_orders(Some(account_id), None)?;
+            if let Some(failure) = failure {
+                return Err(format!("accounts are locked; {failure}"));
+            }
         }
-        Ok(cancelled.len())
+        Ok(())
     }
 
     /// Runs `plan` on a speculative projection of the state and commits every staged change
@@ -108,9 +175,11 @@ impl TradingCore {
             .cloned()
             .collect::<Vec<_>>();
         if !simulated.is_empty() {
-            let (fills, unpriced) = self.plan_atomic(|core| core.stage_simulated_flatten(scope))?;
-            outcome.fills = fills;
-            outcome.unpriced = unpriced;
+            let planned = self.plan_atomic(|core| {
+                core.stage_simulated_flatten(scope, CancellationCause::Flatten)
+            })?;
+            outcome.fills = planned.fills;
+            outcome.unpriced = planned.unpriced;
         }
         let broker = self
             .state
@@ -186,14 +255,16 @@ impl TradingCore {
             .ok_or_else(|| "a current live market quote is unavailable".to_string())
     }
 
-    /// Cancels the scope's working orders and stages one closing fill per priced in-scope
-    /// position on the speculative state. Positions without a verified quote are collected
-    /// in the unpriced report, never silently skipped, and keep their protection.
+    /// Cancels the scope's non-protective working orders with `cause` and stages one
+    /// closing fill per priced in-scope position on the speculative state. Positions
+    /// without a verified quote are collected in the unpriced report, never silently
+    /// skipped, and keep their protection.
     fn stage_simulated_flatten(
         &mut self,
         scope: &FlattenScope,
-    ) -> Result<(Vec<Fill>, Vec<UnpricedPosition>), String> {
-        self.stage_scope_cancellations(scope, CancellationCause::Flatten)?;
+        cause: CancellationCause,
+    ) -> Result<StagedFlatten, String> {
+        let cancelled = self.stage_scope_cancellations(scope, cause)?;
         let keys = self
             .state
             .positions
@@ -253,17 +324,21 @@ impl TradingCore {
             self.reconcile_order_groups(&instrument_fills, &observation, &instrument)?;
             self.align_position_protection(&instrument_fills, &observation)?;
         }
-        Ok((fills, unpriced))
+        Ok(StagedFlatten {
+            cancelled,
+            fills,
+            unpriced,
+        })
     }
 
     /// Cancels every working order in the scope that is not an active group's protection
     /// leg; a pending bracket's entry takes its held legs and group with it. Protection of
-    /// a position that stays open (unpriced) remains working.
+    /// a position that stays open (unpriced) remains working. Returns the cancelled orders.
     fn stage_scope_cancellations(
         &mut self,
         scope: &FlattenScope,
         cause: CancellationCause,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<Order>, String> {
         let protected = self
             .state
             .order_groups
@@ -290,6 +365,7 @@ impl TradingCore {
             .cloned()
             .collect::<Vec<_>>();
         let mut step = OrderStep::new(self.state.next_sequence);
+        let mut cancelled = Vec::new();
         for order in candidates {
             if step
                 .updated
@@ -298,9 +374,10 @@ impl TradingCore {
             {
                 continue;
             }
-            self.stage_cancellation(&mut step, order, true, cause)?;
+            cancelled.push(self.stage_cancellation(&mut step, order, true, cause)?);
         }
-        self.commit_order_step(step, Vec::new())
+        self.commit_order_step(step, Vec::new())?;
+        Ok(cancelled)
     }
 
     /// Stages one closing fill for a position at the verified quote. The wrapping
@@ -531,12 +608,10 @@ impl TradingCore {
             }
             match rule.action {
                 EconomicEventRiskAction::Lock => {
+                    // Lock and cancel non-protective orders without closing positions:
+                    // protection of the still-open positions keeps working.
                     let reason = format!("Economic event lock: {} ({})", event.title, event.source);
-                    self.kill_switch(
-                        Some(&profile.account_id),
-                        &reason,
-                        event.observed_unix_nanos,
-                    )?;
+                    self.lock_and_disarm(&profile.account_id, &reason, event.observed_unix_nanos)?;
                     outcome.locked_accounts += 1;
                 }
                 EconomicEventRiskAction::Flatten => {
@@ -561,6 +636,14 @@ impl TradingCore {
         }
         Ok(outcome)
     }
+}
+
+/// The staged result of a simulated flatten: the non-protective orders cancelled with
+/// the caller's cause, the closing fills and the positions kept as unpriced.
+struct StagedFlatten {
+    cancelled: Vec<Order>,
+    fills: Vec<Fill>,
+    unpriced: Vec<UnpricedPosition>,
 }
 
 fn append_incomplete(slot: &mut Option<String>, message: String) {

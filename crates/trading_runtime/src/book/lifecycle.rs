@@ -69,10 +69,6 @@ impl ResizeCause {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "M5.3 and M5.9 cancellation producers are pending")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CancellationCause {
     User,

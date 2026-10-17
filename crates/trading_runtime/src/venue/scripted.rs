@@ -1038,12 +1038,15 @@ fn a_broker_account_never_blocks_global_commands_and_kill_locks_it_offline() {
     assert_eq!(service.cancel_all(None).expect("cancel all").len(), 1);
 
     // With no venue attached the kill switch still locks every account, broker included.
-    assert_eq!(
-        service
-            .kill_switch(None, "test".into(), 5_000)
-            .expect("nothing broker-side to cancel"),
-        0
-    );
+    let outcome = service
+        .kill_switch(None, "test".into(), 5_000)
+        .expect("nothing broker-side to cancel");
+    assert_eq!(outcome.accounts_locked, 2);
+    assert_eq!(outcome.cancelled, []);
+    assert_eq!(outcome.fills, []);
+    assert_eq!(outcome.pending_close_requests, Vec::<String>::new());
+    assert_eq!(outcome.unpriced, []);
+    assert_eq!(outcome.incomplete, None);
     let locks = service.snapshot().expect("snapshot").risk_locks;
     for account in [&simulated, &broker().id] {
         assert!(
@@ -1068,10 +1071,19 @@ fn the_kill_switch_reports_broker_orders_it_could_not_cancel_after_locking() {
     service
         .place_order(request("unacknowledged"))
         .expect("pending");
-    let error = service
+    let outcome = service
         .kill_switch(Some(broker().id), "test".into(), 5_000)
-        .expect_err("cancel could not be requested");
-    assert!(error.starts_with("accounts are locked;"), "{error}");
+        .expect("the lock and simulated step still commit");
+    assert_eq!(outcome.accounts_locked, 1);
+    let incomplete = outcome.incomplete.expect("the failure is reported");
+    assert!(
+        incomplete.starts_with("accounts are locked;"),
+        "{incomplete}"
+    );
+    assert!(
+        incomplete.contains("could not be cancelled"),
+        "{incomplete}"
+    );
     assert!(
         service
             .snapshot()

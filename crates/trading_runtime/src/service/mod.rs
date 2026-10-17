@@ -4,12 +4,12 @@ pub(crate) mod owner;
 
 use super::{
     BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount, EconomicEventRiskOutcome,
-    EconomicEventRiskTrigger, FeeSchedule, FixedPoint, FlattenOutcome, FlattenScope, ModifyOrder,
-    MovePlannedLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOco,
-    PlaceOrder, PlaceProtection, PlacementOutcome, PlannedLeg, Reply, RevisionedCancelOrder,
-    RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan, TradeCopierConfig,
-    TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus, TradingSnapshot,
-    UserRecord,
+    EconomicEventRiskTrigger, EmergencyOutcome, FeeSchedule, FixedPoint, FlattenOutcome,
+    FlattenScope, ModifyOrder, MovePlannedLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket,
+    PlaceInlineBracket, PlaceOco, PlaceOrder, PlaceProtection, PlacementOutcome, PlannedLeg, Reply,
+    RevisionedCancelOrder, RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan,
+    TradeCopierConfig, TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus,
+    TradingSnapshot, UserRecord,
 };
 #[cfg(test)]
 use crate::SimulatedMarketObservation;
@@ -60,7 +60,12 @@ pub(crate) enum Command {
     RegisterStrategyTemplate(BracketStrategyTemplate, Reply<()>),
     LockAccount(TradingAccountId, String, i64, Reply<()>),
     UnlockAccount(TradingAccountId, Reply<()>),
-    KillSwitch(Option<TradingAccountId>, String, i64, Reply<usize>),
+    KillSwitch(
+        Option<TradingAccountId>,
+        String,
+        i64,
+        Reply<EmergencyOutcome>,
+    ),
     Flatten(FlattenScope, Reply<FlattenOutcome>),
     ReverseAt(
         TradingAccountId,

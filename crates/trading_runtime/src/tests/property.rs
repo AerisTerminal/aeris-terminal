@@ -472,7 +472,7 @@ fn check_memory_invariants(world: &mut PropertyWorld, step: usize) -> Result<(),
         .snapshot()
         .map_err(|error| format!("snapshot: {error}"))?;
     for order in &snapshot.orders {
-        world
+        let params = world
             .order_params
             .entry(order.id.as_str().to_string())
             .or_insert((
@@ -480,6 +480,11 @@ fn check_memory_invariants(world: &mut PropertyWorld, step: usize) -> Result<(),
                 order.side,
                 order.limit_price.map(FixedPoint::units),
             ));
+        // A bracket leg rests with a relative offset and receives its exact limit price at
+        // activation; follow that engine assignment once, like an accepted modification.
+        if params.2.is_none() {
+            params.2 = order.limit_price.map(FixedPoint::units);
+        }
     }
     // A new fill re-fitted the protection pool exactly (VAL-TRD-047).
     let newest_fill = snapshot
@@ -755,8 +760,31 @@ fn check_fill_eligibility(
             _ => price >= *bid && price <= *ask,
         };
         if !eligible {
+            let live = snapshot
+                .orders
+                .iter()
+                .find(|order| order.id == fill.order_id)
+                .map_or_else(
+                    || "live order: absent".to_string(),
+                    |order| {
+                        format!(
+                            "live order: {:?} {:?} limit={:?} stop={:?} status={:?} client={}",
+                            order.order_type,
+                            order.side,
+                            order.limit_price,
+                            order.stop_price,
+                            order.status,
+                            order.client_order_id.as_str(),
+                        )
+                    },
+                );
             return Err(format!(
-                "step {step}: fill at {price} violates its quote [{bid}, {ask}] or its order instruction"
+                "step {step}: fill {} at {price} qty {} exec {} violates its quote [{bid}, {ask}] or its order instruction {params:?} (provenance {}/{}) {live}",
+                fill.order_id.as_str(),
+                fill.quantity.units(),
+                fill.execution_unix_nanos,
+                fill.provenance.session_generation,
+                fill.provenance.source_sequence,
             ));
         }
         if fill.execution_unix_nanos > now {
