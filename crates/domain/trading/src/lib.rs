@@ -554,6 +554,10 @@ impl Order {
             OrderType::Limit if self.limit_price.is_some() && self.stop_price.is_none() => {}
             OrderType::Stop if self.limit_price.is_none() && self.stop_price.is_some() => {}
             OrderType::StopLimit if self.limit_price.is_some() && self.stop_price.is_some() => {}
+            OrderType::Limit | OrderType::Stop | OrderType::StopLimit
+                if self.status == OrderStatus::Inactive
+                    && self.limit_price.is_none()
+                    && self.stop_price.is_none() => {}
             _ => return Err(TradingValidationError::InvalidOrderPrices),
         }
         if self
@@ -1049,6 +1053,47 @@ mod tests {
         ] {
             assert_eq!(kind.as_str(), wire);
         }
+    }
+
+    #[test]
+    fn inactive_market_entry_children_can_wait_without_a_price() {
+        let mut order = Order {
+            id: OrderId::try_new("held-stop").unwrap(),
+            client_order_id: ClientOrderId::try_new("held-stop-client").unwrap(),
+            account_id: TradingAccountId::try_new("sim").unwrap(),
+            instrument_id: InstrumentId::try_new("BTC-USDC").unwrap(),
+            side: OrderSide::Sell,
+            order_type: OrderType::Stop,
+            time_in_force: TimeInForce::GoodTillCancelled,
+            quantity: FixedPoint::try_new(2, 0).unwrap(),
+            filled_quantity: FixedPoint::try_new(0, 0).unwrap(),
+            limit_price: None,
+            stop_price: None,
+            status: OrderStatus::Inactive,
+            submitted_unix_nanos: 1,
+            revision: 1,
+            accepted_unix_nanos: 1,
+            updated_unix_nanos: 1,
+            eligible_after_unix_nanos: 1,
+            triggered_unix_nanos: None,
+            expires_at_unix_nanos: None,
+            terminal_unix_nanos: None,
+            provenance: TradingProvenance {
+                venue_id: "aeris-sim".into(),
+                provider_id: "test".into(),
+                session_generation: 1,
+                source_sequence: 1,
+                observed_unix_nanos: 1,
+            },
+        };
+        assert!(order.validate().is_ok());
+        order.order_type = OrderType::Limit;
+        assert!(order.validate().is_ok());
+        order.status = OrderStatus::Working;
+        assert_eq!(
+            order.validate(),
+            Err(TradingValidationError::InvalidOrderPrices)
+        );
     }
 
     #[test]
