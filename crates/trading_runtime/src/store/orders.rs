@@ -598,27 +598,9 @@ pub(super) fn encode_contract(contract: &ContractMetadata) -> Result<String, Str
             })
         })
     };
-    let price_grid = match contract.price_grid {
-        PriceGrid::Fixed(tick) => json!({"kind": "fixed", "tick": decimal(Some(tick))}),
-        PriceGrid::SignificantFigures {
-            figures,
-            max_decimals,
-        } => {
-            json!({"kind": "significant_figures", "figures": figures, "max_decimals": max_decimals})
-        }
-        PriceGrid::Unknown => json!({"kind": "unknown"}),
-    };
-    let instrument_class = match contract.instrument_class {
-        InstrumentClass::Equity => "equity",
-        InstrumentClass::Option => "option",
-        InstrumentClass::Future => "future",
-        InstrumentClass::ForeignExchange => "foreign_exchange",
-        InstrumentClass::CryptoSpot => "crypto_spot",
-        InstrumentClass::CryptoPerpetual => "crypto_perpetual",
-        InstrumentClass::Other => "other",
-    };
     Ok(json!({"tick_size": decimal(contract.tick_size), "point_value": decimal(contract.point_value),
-        "price_grid": price_grid, "instrument_class": instrument_class,
+        "price_grid": encode_price_grid(&contract.price_grid),
+        "instrument_class": instrument_class_str(contract.instrument_class),
         "order_quantity_increment": decimal(contract.order_quantity_increment),
         "currency": contract.currency, "expiry": date(contract.expiry),
         "first_notice": date(contract.first_notice), "last_trade": date(contract.last_trade),
@@ -629,6 +611,47 @@ pub(super) fn encode_contract(contract: &ContractMetadata) -> Result<String, Str
             "provider_symbol": contract.provenance.provider_symbol,
             "display_symbol": contract.provenance.display_symbol,
             "session_generation": contract.provenance.session_generation}}).to_string())
+}
+
+pub(super) fn encode_price_grid(price_grid: &PriceGrid) -> Value {
+    let decimal =
+        |value: InstrumentDecimal| json!({"units": value.units(), "scale": value.scale()});
+    match price_grid {
+        PriceGrid::Fixed(tick) => json!({"kind": "fixed", "tick": decimal(*tick)}),
+        PriceGrid::SignificantFigures {
+            figures,
+            max_decimals,
+        } => {
+            json!({"kind": "significant_figures", "figures": figures, "max_decimals": max_decimals})
+        }
+        PriceGrid::Unknown => json!({"kind": "unknown"}),
+    }
+}
+
+pub(super) fn instrument_class_str(class: InstrumentClass) -> &'static str {
+    match class {
+        InstrumentClass::Equity => "equity",
+        InstrumentClass::Option => "option",
+        InstrumentClass::Future => "future",
+        InstrumentClass::ForeignExchange => "foreign_exchange",
+        InstrumentClass::CryptoSpot => "crypto_spot",
+        InstrumentClass::CryptoPerpetual => "crypto_perpetual",
+        InstrumentClass::Other => "other",
+    }
+}
+
+/// Parses the instrument-class string written by `instrument_class_str`.
+pub(super) fn instrument_class_parse(text: Option<&str>) -> Result<InstrumentClass, String> {
+    Ok(match text {
+        None | Some("other") => InstrumentClass::Other,
+        Some("equity") => InstrumentClass::Equity,
+        Some("option") => InstrumentClass::Option,
+        Some("future") => InstrumentClass::Future,
+        Some("foreign_exchange") => InstrumentClass::ForeignExchange,
+        Some("crypto_spot") => InstrumentClass::CryptoSpot,
+        Some("crypto_perpetual") => InstrumentClass::CryptoPerpetual,
+        Some(_) => return Err("stored instrument class is unknown".into()),
+    })
 }
 
 pub(super) fn decode_contract(
@@ -687,16 +710,9 @@ pub(super) fn decode_contract(
             }
             Some(_) => return Err("stored price grid is unknown".into()),
         },
-        instrument_class: match value.get("instrument_class").and_then(Value::as_str) {
-            None | Some("other") => InstrumentClass::Other,
-            Some("equity") => InstrumentClass::Equity,
-            Some("option") => InstrumentClass::Option,
-            Some("future") => InstrumentClass::Future,
-            Some("foreign_exchange") => InstrumentClass::ForeignExchange,
-            Some("crypto_spot") => InstrumentClass::CryptoSpot,
-            Some("crypto_perpetual") => InstrumentClass::CryptoPerpetual,
-            Some(_) => return Err("stored instrument class is unknown".into()),
-        },
+        instrument_class: instrument_class_parse(
+            value.get("instrument_class").and_then(Value::as_str),
+        )?,
         point_value: decode_decimal(value.get("point_value"))?,
         order_quantity_increment: decode_decimal(value.get("order_quantity_increment"))?,
         currency: json_string(&value, "currency")?,

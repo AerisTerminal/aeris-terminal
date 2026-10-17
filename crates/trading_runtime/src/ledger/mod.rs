@@ -1,13 +1,17 @@
+mod fees;
 mod position;
-pub(crate) use position::{FillAccounting, TradeCycle};
+#[cfg(test)]
+pub(crate) use fees::fee_for_fill;
+pub(crate) use position::{CostBasis, FillAccounting, TradeCycle};
 
 use super::{
-    AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate, FixedPoint,
-    MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, Position, PositionPnl, ProtectionRole,
-    RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter,
-    SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore, TradingSnapshot,
-    consistency_projection, is_simulated, negative_loss, nonnegative_difference, pnl_ticks,
-    remaining_limit, round_trip, subtract_fixed, tick_value,
+    AccountEnvironment, AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate,
+    FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent,
+    Position, PositionPnl, ProtectionRole, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD,
+    RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter, SessionAdherenceReview, TradeRoundTrip,
+    TradingAccount, TradingAccountId, TradingCore, TradingSnapshot, consistency_projection,
+    is_simulated, negative_loss, nonnegative_difference, pnl_ticks, remaining_limit, round_trip,
+    subtract_fixed, tick_value,
 };
 
 impl TradingCore {
@@ -75,6 +79,16 @@ impl TradingCore {
         self.state
             .fill_accounting
             .insert(fill.id.clone(), update.policy_update.accounting);
+        self.state
+            .ledger_entries
+            .extend(update.policy_update.ledger_entries.iter().cloned());
+        match update.cost_basis {
+            Some(basis) => self
+                .state
+                .cost_basis
+                .insert(update.position_key.clone(), basis),
+            None => self.state.cost_basis.remove(&update.position_key),
+        };
         self.state
             .positions
             .insert(update.position_key, update.position);
@@ -194,6 +208,13 @@ impl TradingCore {
             connected_broker_accounts: self.connected_broker_accounts.clone(),
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
+            ledger_entries: self.state.ledger_entries.clone(),
+            fee_schedules: self
+                .state
+                .fee_schedules
+                .iter()
+                .map(|(account, schedule)| (account.clone(), schedule.clone()))
+                .collect(),
             risk_profiles: self.state.risk_profiles.values().cloned().collect(),
             risk_meters: self.risk_meters()?,
             risk_locks: self.projected_risk_locks(),
@@ -255,11 +276,41 @@ impl TradingCore {
                 if account.broker_ref.is_some() {
                     return self.broker_account_pnl(account, realized, unrealized);
                 }
-                let balance = account
-                    .starting_equity
-                    .map(|starting| starting.checked_add(realized))
-                    .transpose()
-                    .map_err(|error| error.to_string())?;
+                // A ledgered account's balance is the exact sum of its cash-ledger entries.
+                // A funded account without entries is a gated pre-group store awaiting its
+                // conversion backfill and keeps the legacy starting-equity math until then.
+                let ledgered = account.starting_equity.is_none()
+                    || self
+                        .state
+                        .ledger_entries
+                        .iter()
+                        .any(|entry| entry.account_id == account.id);
+                let balance = if ledgered {
+                    let mut total = FixedPoint::try_new(0, account.currency_scale)
+                        .map_err(|error| error.to_string())?;
+                    for entry in self
+                        .state
+                        .ledger_entries
+                        .iter()
+                        .filter(|entry| entry.account_id == account.id)
+                    {
+                        total = total
+                            .checked_add(
+                                entry
+                                    .amount
+                                    .exact_rescale(account.currency_scale)
+                                    .map_err(|error| error.to_string())?,
+                            )
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Some(total)
+                } else {
+                    account
+                        .starting_equity
+                        .map(|starting| starting.checked_add(realized))
+                        .transpose()
+                        .map_err(|error| error.to_string())?
+                };
                 Ok(AccountPnl {
                     account_id: account.id.clone(),
                     currency: account.currency.clone(),

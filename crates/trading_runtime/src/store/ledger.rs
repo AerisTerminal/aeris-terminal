@@ -1,7 +1,8 @@
 use super::{
-    AccountEnvironment, BTreeMap, BrokerPosition, FixedPoint, InstrumentId, Position, StepTx,
-    TradingAccount, TradingAccountId, TradingInstrument, TradingStore, Transaction, database_error,
-    encode_contract, params, parse_side, sqlite_i64,
+    AccountEnvironment, BTreeMap, BrokerPosition, CostBasis, FeeModel, FeeSchedule, FillId,
+    FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind, Position, StepTx, TradingAccount,
+    TradingAccountId, TradingInstrument, TradingStore, Transaction, Value, database_error,
+    encode_contract, json_string, json_u64, params, parse_side, sqlite_i64,
 };
 
 impl TradingStore {
@@ -70,35 +71,67 @@ impl TradingStore {
 }
 
 impl TradingStore {
+    #[cfg(test)]
     pub(crate) fn put_account(&self, account: &TradingAccount) -> Result<(), String> {
         account.validate().map_err(|error| error.to_string())?;
         let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
-        transaction
-            .execute(
-                "INSERT INTO accounts(id, display_name, environment, currency, currency_scale,
-                    starting_equity_units, starting_equity_scale, venue_id, broker_ref)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,
-                    environment=excluded.environment, currency=excluded.currency,
-                    currency_scale=excluded.currency_scale,
-                    starting_equity_units=excluded.starting_equity_units,
-                    starting_equity_scale=excluded.starting_equity_scale,
-                    venue_id=excluded.venue_id, broker_ref=excluded.broker_ref",
-                params![
-                    account.id.as_str(),
-                    account.display_name,
-                    account.environment.as_str(),
-                    account.currency,
-                    account.currency_scale,
-                    account.starting_equity.map(FixedPoint::units),
-                    account.starting_equity.map(FixedPoint::scale),
-                    account.venue_id,
-                    account.broker_ref,
-                ],
-            )
-            .map_err(database_error)?;
+        upsert_account_row(&transaction, account)?;
         transaction.commit().map_err(database_error)
     }
+
+    /// Registers one account and its funding deposit in a single commit. Returns whether the
+    /// deposit landed: a gated pre-group store has no ledger tables yet and its backfill
+    /// writes the deposit at conversion instead.
+    pub(crate) fn put_account_with_deposit(
+        &self,
+        account: &TradingAccount,
+        deposit: Option<&LedgerEntry>,
+    ) -> Result<bool, String> {
+        account.validate().map_err(|error| error.to_string())?;
+        let deposit = match deposit {
+            Some(entry) if self.ledger_tables_present()? => Some(entry),
+            _ => None,
+        };
+        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        upsert_account_row(&transaction, account)?;
+        if let Some(entry) = deposit {
+            insert_ledger_entries(&transaction, std::slice::from_ref(entry))?;
+        }
+        transaction.commit().map_err(database_error)?;
+        Ok(deposit.is_some())
+    }
+}
+
+/// The accounts-table upsert shared by account registration paths.
+fn upsert_account_row(
+    transaction: &Transaction<'_>,
+    account: &TradingAccount,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO accounts(id, display_name, environment, currency, currency_scale,
+                starting_equity_units, starting_equity_scale, venue_id, broker_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,
+                environment=excluded.environment, currency=excluded.currency,
+                currency_scale=excluded.currency_scale,
+                starting_equity_units=excluded.starting_equity_units,
+                starting_equity_scale=excluded.starting_equity_scale,
+                venue_id=excluded.venue_id, broker_ref=excluded.broker_ref",
+            params![
+                account.id.as_str(),
+                account.display_name,
+                account.environment.as_str(),
+                account.currency,
+                account.currency_scale,
+                account.starting_equity.map(FixedPoint::units),
+                account.starting_equity.map(FixedPoint::scale),
+                account.venue_id,
+                account.broker_ref,
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
 }
 
 impl TradingStore {
@@ -260,9 +293,14 @@ impl TradingStore {
 }
 
 impl TradingStore {
-    pub(crate) fn update_position(&mut self, position: &Position) -> Result<(), String> {
+    pub(crate) fn update_position(
+        &mut self,
+        position: &Position,
+        basis: Option<CostBasis>,
+    ) -> Result<(), String> {
         let transaction = self.connection.transaction().map_err(database_error)?;
         upsert_position(&transaction, position)?;
+        upsert_position_basis(&transaction, position, basis)?;
         transaction.commit().map_err(database_error)
     }
 }
@@ -345,6 +383,49 @@ impl TradingStore {
         Ok(positions)
     }
 
+    pub(super) fn load_cost_basis(
+        &self,
+    ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), CostBasis>, String> {
+        let mut output = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT account_id, instrument_id, cost_basis_hi, cost_basis_lo,
+                    cost_price_scale, cost_quantity_scale FROM positions
+                 WHERE cost_basis_hi IS NOT NULL",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u8>(4)?,
+                    row.get::<_, u8>(5)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (account, instrument, hi, lo, price_scale, quantity_scale) =
+                row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+            let instrument_id =
+                InstrumentId::try_new(instrument).map_err(|error| error.to_string())?;
+            output.insert(
+                (account_id, instrument_id),
+                CostBasis {
+                    units: join_i128(hi, lo),
+                    scale: price_scale
+                        .checked_add(quantity_scale)
+                        .ok_or_else(|| "stored cost basis scale overflowed".to_string())?,
+                },
+            );
+        }
+        Ok(output)
+    }
     pub(super) fn load_positions(
         &self,
     ) -> Result<BTreeMap<(TradingAccountId, InstrumentId), Position>, String> {
@@ -404,6 +485,316 @@ impl TradingStore {
         }
         Ok(output)
     }
+}
+
+/// Splits an exact `i128` into the signed hi/lo pair the positions table stores.
+pub(super) fn split_i128(value: i128) -> Result<(i64, i64), String> {
+    let hi = i64::try_from(value >> 64)
+        .map_err(|_| "cost basis exceeds the stored range".to_string())?;
+    let lo = u64::try_from(value & i128::from(u64::MAX))
+        .map_err(|_| "cost basis exceeds the stored range".to_string())?
+        .cast_signed();
+    Ok((hi, lo))
+}
+
+fn join_i128(hi: i64, lo: i64) -> i128 {
+    (i128::from(hi) << 64) | i128::from(lo.cast_unsigned())
+}
+
+/// Inserts cash-ledger entries inside an existing fill commit.
+pub(super) fn insert_ledger_entries(
+    transaction: &Transaction<'_>,
+    entries: &[LedgerEntry],
+) -> Result<(), String> {
+    let mut statement = transaction
+        .prepare(
+            "INSERT INTO ledger_entries(id,account_id,kind,amount_units,amount_scale,fill_id,
+            at_unix_nanos)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        )
+        .map_err(database_error)?;
+    for entry in entries {
+        entry.validate().map_err(|error| error.to_string())?;
+        statement
+            .execute(params![
+                entry.entry_id.as_str(),
+                entry.account_id.as_str(),
+                entry.kind.as_str(),
+                entry.amount.units(),
+                sqlite_i64(u64::from(entry.amount.scale()))?,
+                entry.fill_id.as_ref().map(FillId::as_str),
+                entry.at_unix_nanos,
+            ])
+            .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+/// Serializes one fee model into its deterministic stored JSON.
+fn encode_fee_model(model: &FeeModel) -> String {
+    match model {
+        FeeModel::None => "{\"kind\":\"none\"}".to_string(),
+        FeeModel::PerContract { per_side } => {
+            format!(
+                "{{\"kind\":\"per_contract\",\"per_side\":{}}}",
+                encode_fixed(*per_side)
+            )
+        }
+        FeeModel::PerUnit {
+            per_unit,
+            minimum,
+            maximum_bps,
+        } => format!(
+            "{{\"kind\":\"per_unit\",\"per_unit\":{},\"minimum\":{},\"maximum_bps\":{}}}",
+            encode_fixed(*per_unit),
+            minimum.map_or_else(|| "null".to_string(), encode_fixed),
+            maximum_bps.map_or_else(|| "null".to_string(), |value| value.to_string()),
+        ),
+        FeeModel::NotionalBps {
+            maker_bps,
+            taker_bps,
+        } => format!(
+            "{{\"kind\":\"notional_bps\",\"maker_bps\":{maker_bps},\"taker_bps\":{taker_bps}}}"
+        ),
+    }
+}
+
+/// Serializes one fixed-point value as `{"units":N,"scale":N}`.
+fn encode_fixed(point: FixedPoint) -> String {
+    format!(
+        "{{\"units\":{},\"scale\":{}}}",
+        point.units(),
+        point.scale()
+    )
+}
+
+/// Serializes one fee schedule with sorted class and instrument keys.
+pub(super) fn encode_fee_schedule(schedule: &FeeSchedule) -> String {
+    let by_class = schedule
+        .by_class
+        .iter()
+        .map(|(class, model)| {
+            format!(
+                "\"{}\":{}",
+                super::orders::instrument_class_str(*class),
+                encode_fee_model(model)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let by_instrument = schedule
+        .by_instrument
+        .iter()
+        .map(|(instrument, model)| {
+            format!("\"{}\":{}", instrument.as_str(), encode_fee_model(model))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"by_class\":{{{by_class}}},\"by_instrument\":{{{by_instrument}}}}}")
+}
+
+/// Deserializes one stored fee schedule, rejecting unknown kinds, classes and shapes.
+pub(super) fn decode_fee_schedule(raw: &str) -> Result<FeeSchedule, String> {
+    let value: Value =
+        serde_json::from_str(raw).map_err(|_| "stored fee schedule is invalid".to_string())?;
+    let by_class = value
+        .get("by_class")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "stored fee schedule classes are missing".to_string())?;
+    let by_instrument = value
+        .get("by_instrument")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "stored fee schedule instruments are missing".to_string())?;
+    let mut schedule = FeeSchedule::default();
+    for (class, model) in by_class {
+        schedule.by_class.insert(
+            super::orders::instrument_class_parse(Some(class.as_str()))?,
+            decode_fee_model(model)?,
+        );
+    }
+    for (instrument, model) in by_instrument {
+        schedule.by_instrument.insert(
+            InstrumentId::try_new(instrument).map_err(|error| error.to_string())?,
+            decode_fee_model(model)?,
+        );
+    }
+    schedule.validate().map_err(|error| error.to_string())?;
+    Ok(schedule)
+}
+
+/// Deserializes one stored fee model.
+fn decode_fee_model(value: &Value) -> Result<FeeModel, String> {
+    match json_string(value, "kind")?.as_str() {
+        "none" => Ok(FeeModel::None),
+        "per_contract" => Ok(FeeModel::PerContract {
+            per_side: decode_fixed(value.get("per_side"))?,
+        }),
+        "per_unit" => Ok(FeeModel::PerUnit {
+            per_unit: decode_fixed(value.get("per_unit"))?,
+            minimum: decode_optional_fixed(value.get("minimum"))?,
+            maximum_bps: decode_optional_bps(value.get("maximum_bps"))?,
+        }),
+        "notional_bps" => Ok(FeeModel::NotionalBps {
+            maker_bps: decode_bps(value, "maker_bps")?,
+            taker_bps: decode_bps(value, "taker_bps")?,
+        }),
+        _ => Err("stored fee model kind is unknown".to_string()),
+    }
+}
+
+/// Deserializes one `{"units":N,"scale":N}` fixed-point value.
+fn decode_fixed(value: Option<&Value>) -> Result<FixedPoint, String> {
+    let value = value.ok_or_else(|| "stored fee value is missing".to_string())?;
+    let units = value
+        .get("units")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "stored fee units are invalid".to_string())?;
+    let scale = json_u64(value, "scale")?
+        .try_into()
+        .map_err(|_| "stored fee scale is invalid".to_string())?;
+    fixed(units, scale)
+}
+
+/// Deserializes an optional fixed-point fee bound.
+fn decode_optional_fixed(value: Option<&Value>) -> Result<Option<FixedPoint>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => decode_fixed(Some(value)).map(Some),
+    }
+}
+
+/// Deserializes an optional basis-point bound.
+fn decode_optional_bps(value: Option<&Value>) -> Result<Option<u32>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(|bps| u32::try_from(bps).map_err(|_| "stored fee bound is invalid".to_string()))
+            .transpose(),
+    }
+}
+
+/// Deserializes one required basis-point field.
+fn decode_bps(value: &Value, key: &str) -> Result<u32, String> {
+    u32::try_from(json_u64(value, key)?)
+        .map_err(|_| "stored fee basis points are invalid".to_string())
+}
+
+impl TradingStore {
+    /// All cash-ledger entries in commit order. `rowid` is insertion order, so a restart
+    /// reproduces the replayed chain exactly even when an entry's timestamp is earlier than
+    /// a later-committed entry's.
+    pub(super) fn load_ledger_entries(&self) -> Result<Vec<LedgerEntry>, String> {
+        self.connection
+            .prepare(
+                "SELECT id, account_id, kind, amount_units, amount_scale, fill_id, at_unix_nanos
+                 FROM ledger_entries ORDER BY rowid",
+            )
+            .map_err(database_error)?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u8>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .map_err(database_error)?
+            .map(|row| {
+                let (id, account, kind, units, scale, fill, at) = row.map_err(database_error)?;
+                Ok(LedgerEntry {
+                    entry_id: id,
+                    account_id: TradingAccountId::try_new(account)
+                        .map_err(|error| error.to_string())?,
+                    kind: LedgerEntryKind::parse(&kind).map_err(|error| error.to_string())?,
+                    amount: fixed(units, scale)?,
+                    fill_id: fill
+                        .map(FillId::try_new)
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
+                    at_unix_nanos: at,
+                })
+            })
+            .collect()
+    }
+
+    /// Atomically persists one account's fee schedule with its revision.
+    pub(crate) fn put_fee_schedule(
+        &mut self,
+        account_id: &TradingAccountId,
+        schedule: &FeeSchedule,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO fee_schedules(account_id, model_json) VALUES (?1, ?2)
+                 ON CONFLICT(account_id) DO UPDATE SET model_json = excluded.model_json",
+                params![account_id.as_str(), encode_fee_schedule(schedule)],
+            )
+            .map_err(database_error)?;
+        StepTx::commit_revision(transaction).map_err(database_error)
+    }
+
+    /// Every stored fee schedule, keyed by account.
+    pub(super) fn load_fee_schedules(
+        &self,
+    ) -> Result<BTreeMap<TradingAccountId, FeeSchedule>, String> {
+        self.connection
+            .prepare("SELECT account_id, model_json FROM fee_schedules ORDER BY account_id")
+            .map_err(database_error)?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?
+            .map(|row| {
+                let (account, raw) = row.map_err(database_error)?;
+                Ok((
+                    TradingAccountId::try_new(account).map_err(|error| error.to_string())?,
+                    decode_fee_schedule(&raw)?,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// Writes only the cost-basis columns; quote-mark upserts never touch them, so a mark-only
+/// write cannot erase the basis.
+pub(super) fn upsert_position_basis(
+    transaction: &Transaction<'_>,
+    position: &Position,
+    basis: Option<CostBasis>,
+) -> Result<(), String> {
+    let (hi, lo, price_scale) = match basis {
+        Some(basis) => {
+            let (hi, lo) = split_i128(basis.units)?;
+            let price_scale = basis
+                .scale
+                .checked_sub(position.net_quantity.scale())
+                .ok_or_else(|| "cost basis scale is below the quantity scale".to_string())?;
+            (Some(hi), Some(lo), Some(price_scale))
+        }
+        None => (None, None, None),
+    };
+    let quantity_scale = basis.map(|_| position.net_quantity.scale());
+    transaction
+        .execute(
+            "UPDATE positions SET cost_basis_hi = ?3, cost_basis_lo = ?4,
+                cost_price_scale = ?5, cost_quantity_scale = ?6
+             WHERE account_id = ?1 AND instrument_id = ?2",
+            params![
+                position.account_id.as_str(),
+                position.instrument_id.as_str(),
+                hi,
+                lo,
+                price_scale,
+                quantity_scale
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
 }
 
 pub(super) fn upsert_position(

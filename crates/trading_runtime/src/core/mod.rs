@@ -26,7 +26,7 @@ pub(crate) use groups::chart_bracket_template;
 #[path = "../venue/broker.rs"]
 mod broker;
 
-use self::ledger::{FillAccounting, TradeCycle};
+use self::ledger::{CostBasis, FillAccounting, TradeCycle};
 use self::market::feed::{MarketFeedInbox, QuoteBook};
 pub use self::market::gating::ExecutionPolicy;
 use crate::book::OrderBook;
@@ -60,10 +60,10 @@ use aeris_instruments::{ContractMetadata, InstrumentId};
 use aeris_trading::market::{MarketRoute, QuoteInterestSink};
 use aeris_trading::venue_outbox::{VenueRequestReceiver, VenueRequestSender};
 use aeris_trading::{
-    AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order,
-    OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
-    RiskWarning, TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
-    project_unrealized_pnl,
+    AccountEnvironment, AccountPnl, BrokerPosition, ClientOrderId, FeeSchedule, Fill, FillId,
+    FixedPoint, LedgerEntry, LedgerEntryKind, Liquidity, Order, OrderEvent, OrderEventId,
+    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, RiskWarning, TimeInForce,
+    TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
 };
 pub use groups::model::{MovePlannedLeg, PlannedLeg};
 use std::{
@@ -424,6 +424,10 @@ pub struct TradingSnapshot {
     pub connected_broker_accounts: BTreeSet<TradingAccountId>,
     pub position_pnl: Vec<PositionPnl>,
     pub account_pnl: Vec<AccountPnl>,
+    /// The durable cash-ledger entries of every simulated account, in commit order.
+    pub ledger_entries: Vec<LedgerEntry>,
+    /// The simulated fee schedule of each account.
+    pub fee_schedules: Vec<(TradingAccountId, FeeSchedule)>,
     pub risk_profiles: Vec<RiskProfile>,
     pub risk_meters: Vec<RiskMeter>,
     pub risk_locks: Vec<RiskLock>,
@@ -598,6 +602,7 @@ pub(crate) struct ObservationCursor {
 
 pub(crate) struct FillMemoryUpdate {
     position: Position,
+    cost_basis: Option<crate::core::ledger::CostBasis>,
     position_key: (TradingAccountId, InstrumentId),
     policy_update: FillPolicyUpdate,
     next_sequence: u64,
@@ -608,6 +613,8 @@ pub(crate) struct FillPolicyUpdate {
     trade_cycle: TradeCycle,
     discipline_state: DisciplineState,
     accounting: FillAccounting,
+    /// The cash-ledger entries this fill commits, realized P&L before commission.
+    ledger_entries: Vec<LedgerEntry>,
 }
 
 impl TradingService {
@@ -686,6 +693,19 @@ impl TradingService {
     /// Returns an error for invalid account data, overload, or a storage failure.
     pub fn register_account(&self, account: TradingAccount) -> Result<(), String> {
         self.request(|reply| Command::RegisterAccount(account, reply))
+    }
+
+    /// Installs the simulated fee schedule of one practice account.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown or broker account, an invalid schedule, an
+    /// unregistered per-instrument override, owner overload, or a storage failure.
+    pub fn set_fee_schedule(
+        &self,
+        account_id: TradingAccountId,
+        schedule: FeeSchedule,
+    ) -> Result<(), String> {
+        self.request(|reply| Command::SetFeeSchedule(account_id, schedule, reply))
     }
 
     /// Creates one durable simulated account with user-selected opening equity.
@@ -1349,7 +1369,7 @@ impl TradingCore {
             .delete_legacy_brackets(&converted)
             .map_err(StoreError::Other)?;
         core.store
-            .finalize_group_migration()
+            .complete_post_group_migrations()
             .map_err(StoreError::Other)?;
         core.recover_day_deadlines().map_err(StoreError::Other)?;
         // Expire durable DAY deadlines before the service acknowledges startup
@@ -1368,25 +1388,31 @@ impl TradingCore {
             if !self.position_projection_needs_repair(&stored) {
                 continue;
             }
-            let Some(rebuilt) = self.rebuild_position_from_retained_fills(&key) else {
+            let Some((rebuilt, rebuilt_basis)) = self.rebuild_position_from_retained_fills(&key)
+            else {
                 continue;
             };
             // Fills are the durable ledger and positions are a projection. Only replace a loaded
             // projection when the retained ledger reproduces both the current net quantity and
             // the last-fill boundary. This prevents retention-truncated history from rewriting a
             // still-valid open position while repairing projections produced by older buggy math.
+            let basis_changed = self.state.cost_basis.get(&key).copied() != rebuilt_basis;
             if rebuilt.net_quantity == stored.net_quantity
                 && rebuilt.last_fill_unix_nanos == stored.last_fill_unix_nanos
-                && rebuilt != stored
+                && (rebuilt != stored || basis_changed)
             {
-                repaired.push((key, rebuilt));
+                repaired.push((key, rebuilt, rebuilt_basis));
             }
         }
         if repaired.is_empty() {
             return Ok(());
         }
-        for (key, position) in repaired {
-            self.store.update_position(&position)?;
+        for (key, position, basis) in repaired {
+            self.store.update_position(&position, basis)?;
+            match basis {
+                Some(basis) => self.state.cost_basis.insert(key.clone(), basis),
+                None => self.state.cost_basis.remove(&key),
+            };
             self.state.positions.insert(key, position);
         }
         self.bump_revision()
@@ -1422,10 +1448,11 @@ impl TradingCore {
     fn rebuild_position_from_retained_fills(
         &self,
         key: &(TradingAccountId, InstrumentId),
-    ) -> Option<Position> {
+    ) -> Option<(Position, Option<CostBasis>)> {
         let account = self.state.accounts.get(&key.0)?;
         let instrument = self.state.instruments.get(&key.1)?;
         let mut rebuilt: Option<Position> = None;
+        let mut rebuilt_basis: Option<CostBasis> = None;
         let mut saw_fill = false;
         for fill in self
             .state
@@ -1434,9 +1461,15 @@ impl TradingCore {
             .filter(|fill| fill.account_id == key.0 && fill.instrument_id == key.1)
         {
             saw_fill = true;
-            rebuilt = Some(next_position(rebuilt.as_ref(), fill, account, instrument).ok()?);
+            let (position, basis) =
+                next_position(rebuilt.as_ref(), rebuilt_basis, fill, account, instrument).ok()?;
+            rebuilt = Some(position);
+            rebuilt_basis = basis;
         }
-        saw_fill.then_some(rebuilt).flatten()
+        if !saw_fill {
+            return None;
+        }
+        rebuilt.map(|position| (position, rebuilt_basis))
     }
 
     /// Applies one command on the single owner. Returns false after a shutdown checkpoint.
@@ -1446,6 +1479,9 @@ impl TradingCore {
             Command::Status(reply) => respond(&reply, Ok(self.status())),
             Command::RegisterAccount(account, reply) => {
                 respond(&reply, self.register_account(account));
+            }
+            Command::SetFeeSchedule(account_id, schedule, reply) => {
+                respond(&reply, self.set_fee_schedule(&account_id, schedule));
             }
             Command::CreatePracticeAccount(account, reply) => {
                 respond(&reply, self.create_practice_account(&account));
@@ -1967,12 +2003,17 @@ impl TradingCore {
     }
 }
 
-pub(crate) fn fill_policy_persistence(update: &FillPolicyUpdate) -> FillPolicyPersistence<'_> {
+pub(crate) fn fill_policy_persistence(
+    update: &FillPolicyUpdate,
+    cost_basis: Option<CostBasis>,
+) -> FillPolicyPersistence<'_> {
     FillPolicyPersistence {
         rule_state: update.rule_state.as_ref(),
         trade_cycle: &update.trade_cycle,
         discipline_state: &update.discipline_state,
         accounting: update.accounting,
+        ledger_entries: &update.ledger_entries,
+        cost_basis,
     }
 }
 
@@ -2167,10 +2208,11 @@ pub(crate) fn market_fill_candidates(
 
 pub(crate) fn next_position(
     current: Option<&Position>,
+    previous_basis: Option<CostBasis>,
     fill: &Fill,
     account: &TradingAccount,
     instrument: &TradingInstrument,
-) -> Result<Position, String> {
+) -> Result<(Position, Option<CostBasis>), String> {
     let signed_fill = fill
         .quantity
         .units()
@@ -2182,27 +2224,15 @@ pub(crate) fn next_position(
         .ok_or_else(|| "position quantity overflowed".to_string())?;
     let same_direction =
         previous_quantity == 0 || previous_quantity.signum() == signed_fill.signum();
-    let average_entry_price = if next_quantity == 0 {
-        None
-    } else if same_direction {
-        match current.and_then(|position| position.average_entry_price) {
-            None => Some(fill.price),
-            Some(previous_average) => Some(weighted_average_entry_price(
-                previous_average,
-                previous_quantity.unsigned_abs(),
-                fill.price,
-                signed_fill.unsigned_abs(),
-            )?),
-        }
-    } else if next_quantity.signum() == previous_quantity.signum() {
-        current.and_then(|position| position.average_entry_price)
-    } else {
-        Some(fill.price)
+    let combined_scale = fill
+        .price
+        .scale()
+        .checked_add(fill.quantity.scale())
+        .ok_or_else(|| "position cost basis scale overflowed".to_string())?;
+    let previous_basis = match (previous_basis, previous_quantity) {
+        (Some(basis), quantity) if quantity != 0 => Some(basis.rescaled(combined_scale)?),
+        _ => None,
     };
-    let prior_realized = current.map_or(
-        FixedPoint::try_new(0, account.currency_scale).map_err(|error| error.to_string())?,
-        |position| position.realized_pnl,
-    );
     let closed_quantity = if same_direction {
         0
     } else {
@@ -2210,43 +2240,179 @@ pub(crate) fn next_position(
             .unsigned_abs()
             .min(signed_fill.unsigned_abs())
     };
-    let realized_change = if closed_quantity == 0 {
-        FixedPoint::try_new(0, account.currency_scale).map_err(|error| error.to_string())?
+    // The exact basis carries the money math; the display average derives from it. A
+    // position without a basis (a defensive legacy row) keeps the rounded-average math.
+    let mut exact_share: Option<i128> = None;
+    let next_basis: Option<CostBasis> = if next_quantity == 0 {
+        exact_share = previous_basis.map(|basis| basis.units);
+        None
+    } else if same_direction {
+        Some(match previous_basis {
+            Some(basis) => basis.added(fill)?,
+            None => CostBasis::from_fill(fill)?,
+        })
+    } else if next_quantity.signum() == previous_quantity.signum() {
+        match previous_basis {
+            Some(basis) => {
+                let (remaining, share) =
+                    basis.close(previous_quantity.unsigned_abs(), closed_quantity)?;
+                exact_share = Some(share);
+                remaining
+            }
+            None => None,
+        }
     } else {
-        let entry = current
-            .and_then(|position| position.average_entry_price)
-            .ok_or_else(|| "position average is unavailable for realized PnL".to_string())?;
-        let closed_quantity = FixedPoint::try_new(
-            i64::try_from(closed_quantity)
-                .map_err(|_| "realized PnL quantity overflowed".to_string())?,
-            fill.quantity.scale(),
-        )
-        .map_err(|error| error.to_string())?;
-        realized_pnl(
-            entry,
-            fill.price,
-            previous_quantity.signum(),
-            closed_quantity,
-            account.currency_scale,
-            instrument,
-        )?
+        exact_share = previous_basis.map(|basis| basis.units);
+        Some(CostBasis {
+            units: i128::from(fill.price.units())
+                .checked_mul(i128::from(next_quantity.unsigned_abs()))
+                .ok_or_else(|| "position cost basis overflowed".to_string())?,
+            scale: combined_scale,
+        })
     };
+    let average_entry_price = next_average_entry(
+        current,
+        next_basis,
+        same_direction,
+        previous_quantity,
+        next_quantity,
+        fill,
+    )?;
+    let prior_realized = current.map_or(
+        FixedPoint::try_new(0, account.currency_scale).map_err(|error| error.to_string())?,
+        |position| position.realized_pnl,
+    );
+    let realized_change = realized_change(
+        current,
+        exact_share,
+        closed_quantity,
+        previous_quantity,
+        fill,
+        account,
+        instrument,
+    )?;
     let realized_pnl = prior_realized
         .checked_add(realized_change)
         .map_err(|error| error.to_string())?;
-    Ok(Position {
-        account_id: fill.account_id.clone(),
-        instrument_id: fill.instrument_id.clone(),
-        net_quantity: FixedPoint::try_new(next_quantity, fill.quantity.scale())
-            .map_err(|error| error.to_string())?,
-        average_entry_price,
-        realized_pnl,
-        unrealized_pnl: FixedPoint::try_new(0, account.currency_scale)
-            .map_err(|error| error.to_string())?,
-        last_fill_unix_nanos: fill.execution_unix_nanos,
-    })
+    Ok((
+        Position {
+            account_id: fill.account_id.clone(),
+            instrument_id: fill.instrument_id.clone(),
+            net_quantity: FixedPoint::try_new(next_quantity, fill.quantity.scale())
+                .map_err(|error| error.to_string())?,
+            average_entry_price,
+            realized_pnl,
+            unrealized_pnl: FixedPoint::try_new(0, account.currency_scale)
+                .map_err(|error| error.to_string())?,
+            last_fill_unix_nanos: fill.execution_unix_nanos,
+        },
+        next_basis,
+    ))
 }
 
+/// The display average after a fill: derived from the exact basis when one exists, else the
+/// legacy rounded-average math a defensive pre-basis row keeps.
+fn next_average_entry(
+    current: Option<&Position>,
+    next_basis: Option<CostBasis>,
+    same_direction: bool,
+    previous_quantity: i64,
+    next_quantity: i64,
+    fill: &Fill,
+) -> Result<Option<FixedPoint>, String> {
+    if next_quantity == 0 {
+        return Ok(None);
+    }
+    if let Some(basis) = next_basis {
+        let average =
+            aeris_trading::round_divide_i128(basis.units, i128::from(next_quantity.unsigned_abs()))
+                .map_err(|error| error.to_string())?;
+        return FixedPoint::try_new(
+            i64::try_from(average).map_err(|_| "position average overflowed".to_string())?,
+            fill.price.scale(),
+        )
+        .map(Some)
+        .map_err(|error| error.to_string());
+    }
+    if same_direction {
+        return match current.and_then(|position| position.average_entry_price) {
+            None => Ok(Some(fill.price)),
+            Some(previous_average) => weighted_average_entry_price(
+                previous_average,
+                previous_quantity.unsigned_abs(),
+                fill.price,
+                fill.quantity.units().unsigned_abs(),
+            )
+            .map(Some),
+        };
+    }
+    if next_quantity.signum() == previous_quantity.signum() {
+        return Ok(current.and_then(|position| position.average_entry_price));
+    }
+    Ok(Some(fill.price))
+}
+
+/// The realized P&L change of one fill: the exact basis-share value when a basis exists,
+/// else the legacy rounded-average computation a defensive pre-basis row keeps.
+fn realized_change(
+    current: Option<&Position>,
+    exact_share: Option<i128>,
+    closed_quantity: u64,
+    previous_quantity: i64,
+    fill: &Fill,
+    account: &TradingAccount,
+    instrument: &TradingInstrument,
+) -> Result<FixedPoint, String> {
+    let zero = FixedPoint::try_new(0, account.currency_scale).map_err(|error| error.to_string())?;
+    if closed_quantity == 0 {
+        return Ok(zero);
+    }
+    if let Some(share) = exact_share {
+        let point_value = instrument
+            .contract
+            .point_value
+            .ok_or_else(|| "instrument point value is unavailable".to_string())?;
+        let exit_value = i128::from(fill.price.units())
+            .checked_mul(i128::from(closed_quantity))
+            .ok_or_else(|| "realized PnL overflowed".to_string())?;
+        let gross = exit_value
+            .checked_sub(share)
+            .and_then(|value| value.checked_mul(i128::from(previous_quantity.signum())))
+            .and_then(|value| value.checked_mul(i128::from(point_value.units())))
+            .ok_or_else(|| "realized PnL overflowed".to_string())?;
+        let combined_scale = fill
+            .price
+            .scale()
+            .checked_add(fill.quantity.scale())
+            .ok_or_else(|| "position cost basis scale overflowed".to_string())?;
+        let raw_scale = combined_scale
+            .checked_add(point_value.scale())
+            .ok_or_else(|| "realized PnL scale overflowed".to_string())?;
+        return aeris_trading::fixed_point_from_i128_rounded(
+            gross,
+            raw_scale,
+            account.currency_scale,
+        )
+        .map_err(|error| error.to_string());
+    }
+    let entry = current
+        .and_then(|position| position.average_entry_price)
+        .ok_or_else(|| "position average is unavailable for realized PnL".to_string())?;
+    let closed_quantity = FixedPoint::try_new(
+        i64::try_from(closed_quantity)
+            .map_err(|_| "realized PnL quantity overflowed".to_string())?,
+        fill.quantity.scale(),
+    )
+    .map_err(|error| error.to_string())?;
+    realized_pnl(
+        entry,
+        fill.price,
+        previous_quantity.signum(),
+        closed_quantity,
+        account.currency_scale,
+        instrument,
+    )
+}
 pub(crate) fn weighted_average_entry_price(
     previous_average: FixedPoint,
     previous_quantity_units: u64,

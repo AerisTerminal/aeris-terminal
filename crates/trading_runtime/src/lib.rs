@@ -18,7 +18,8 @@ pub(crate) use aeris_trading::{
     AccountEnvironment, Fill, OrderEventKind, OrderSide, OrderStatus, OrderType, TimeInForce,
 };
 pub(crate) use aeris_trading::{
-    ClientOrderId, FixedPoint, Order, TradingAccount, TradingAccountId, TradingProvenance,
+    ClientOrderId, FeeSchedule, FixedPoint, Order, TradingAccount, TradingAccountId,
+    TradingProvenance,
 };
 #[cfg(test)]
 pub(crate) use core::REPLY_CAPACITY;

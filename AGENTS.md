@@ -126,13 +126,18 @@ violations and missing verification explicitly, and never describe them as satis
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V24 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V25 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
   `protective_orders` tables; it is applied by the gated `finalize_group_migration` step (after
   the group backfill and the runtime conversion of awaiting brackets), never by the migration
-  chain, so a failed conversion keeps its rows and retries on the next start. Old P&L tables and
+  chain, so a failed conversion keeps its rows and retries on the next start. V25 adds the
+  `ledger_entries` cash ledger, per-account `fee_schedules`, the exact position cost-basis
+  columns and the denormalized instrument class/price-grid columns; its backfill runs once per
+  store after the group finalize as part of `complete_post_group_migrations`. A simulated
+  account's balance is the exact sum of its cash-ledger entries; only a gated pre-group store
+  awaiting conversion keeps the legacy starting-equity math until its backfill. Old P&L tables and
   per-fill columns remain unread until their deferred removal migration. Store-open preflight scratch cleanup may
   remove only exact preflight directories containing solely the expected database copy and
   SQLite sidecars; preserve unknown contents and report cleanup failures through observability.

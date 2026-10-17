@@ -1011,6 +1011,350 @@ fn weighted_average_entry_never_disappears_when_the_exact_ratio_repeats() {
 }
 
 #[test]
+fn scale_in_realized_pnl_uses_the_exact_cost_basis_across_a_restart() {
+    // VAL-TRD-054: buying 1 @ 100.01 and 2 @ 100.02 then selling 3 @ 100.03 realizes
+    // exactly 0.04 points — 2.00 USD at the fixture's 50 USD point value — where the
+    // rounded display average of 100.02 would have realized only 1.50 USD.
+    let directory = TestDirectory::new("exact-cost-basis");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+
+    let first = market_order("basis-first", OrderSide::Buy, 1, 1_000);
+    service.place_order(first).expect("first order accepted");
+    service
+        .observe_market(observation(10_000, 10_001, 1, 1_001))
+        .expect("first fill");
+    let mut second = market_order("basis-second", OrderSide::Buy, 2, 2_000);
+    second.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    service.place_order(second).expect("second order accepted");
+    service
+        .observe_market(observation(10_001, 10_002, 2, 2_001))
+        .expect("second fill");
+    let before = service.snapshot().expect("snapshot");
+    let open = before
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == instrument().instrument_id)
+        .expect("open position");
+    assert_eq!(open.net_quantity.units(), 3);
+    assert_eq!(
+        open.average_entry_price,
+        Some(FixedPoint::try_new(10_002, 2).expect("display average"))
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let service = TradingService::start(config(&directory)).expect("service reopens");
+    let mut exit = market_order("basis-exit", OrderSide::Sell, 3, 3_000);
+    exit.quantity = FixedPoint::try_new(3, 0).expect("quantity");
+    service.place_order(exit).expect("exit accepted");
+    service
+        .observe_market(observation(10_003, 10_004, 3, 3_001))
+        .expect("exit fill");
+    let after = service.snapshot().expect("closed snapshot");
+    let closed = after
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == instrument().instrument_id)
+        .expect("closed position");
+    assert_eq!(closed.net_quantity.units(), 0);
+    assert_eq!(
+        closed.realized_pnl,
+        FixedPoint::try_new(200, 2).expect("exact realized")
+    );
+}
+#[test]
+fn fee_schedule_charges_maker_and_taker_fills_per_the_model() {
+    // VAL-TRD-055: the taker fill pays taker basis points of notional and the resting-limit
+    // fill pays maker basis points, each evaluated exactly and rounded once at the account
+    // currency scale.
+    let directory = TestDirectory::new("fee-maker-taker");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut schedule = aeris_trading::FeeSchedule::default();
+    schedule.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        aeris_trading::FeeModel::NotionalBps {
+            maker_bps: 1,
+            taker_bps: 2,
+        },
+    );
+    service
+        .set_fee_schedule(account, schedule)
+        .expect("fee schedule installs");
+
+    // Taker: the market order fills the touch at 100.01; 2 bps of 5_000.50 rounds to 1.00.
+    service
+        .place_order(market_order("fee-taker", OrderSide::Buy, 1, 1_000))
+        .expect("taker accepted");
+    let taker_fills = service
+        .observe_market(observation(10_000, 10_001, 1, 1_001))
+        .expect("taker fill");
+    assert_eq!(taker_fills.len(), 1);
+
+    // Maker: the resting limit fills when the ask drops to 99.75; 1 bps of 4_987.50 rounds
+    // to 0.50.
+    let mut resting = market_order("fee-maker", OrderSide::Buy, 2, 2_000);
+    resting.order_type = OrderType::Limit;
+    resting.limit_price = Some(FixedPoint::try_new(9_975, 2).expect("limit"));
+    service.place_order(resting).expect("resting accepted");
+    let maker_fills = service
+        .observe_market(observation(9_950, 9_975, 3, 3_001))
+        .expect("maker fill");
+    assert_eq!(maker_fills.len(), 1);
+
+    let snapshot = service.snapshot().expect("snapshot");
+    let commissions = snapshot
+        .ledger_entries
+        .iter()
+        .filter(|entry| entry.kind == aeris_trading::LedgerEntryKind::Commission)
+        .map(|entry| entry.amount.units())
+        .collect::<Vec<_>>();
+    assert_eq!(commissions, [-100, -50]);
+    assert_eq!(
+        snapshot.account_pnl[0].balance,
+        Some(FixedPoint::try_new(4_999_850, 2).expect("balance"))
+    );
+
+    // The exact fee persists on each fill's durable accounting row.
+    let database = rusqlite::Connection::open(config(&directory).database_path).expect("reader");
+    for (fill, expected) in [(&taker_fills[0], 100), (&maker_fills[0], 50)] {
+        let commission: i64 = database
+            .query_row(
+                "SELECT commission_units FROM fill_accounting WHERE fill_id = ?1",
+                [fill.id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("durable commission");
+        assert_eq!(commission, expected);
+    }
+}
+
+#[test]
+fn per_instrument_fee_override_wins_over_the_class_model_across_a_restart() {
+    // VAL-TRD-055: the ESZ6 override charges 2.50 per contract while the future class model
+    // would charge 1.00, and the schedule and its fees survive a restart byte-exact.
+    let directory = TestDirectory::new("fee-override-restart");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut schedule = aeris_trading::FeeSchedule::default();
+    schedule.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        aeris_trading::FeeModel::PerContract {
+            per_side: FixedPoint::try_new(100, 2).expect("class fee"),
+        },
+    );
+    schedule.by_instrument.insert(
+        instrument().instrument_id.clone(),
+        aeris_trading::FeeModel::PerContract {
+            per_side: FixedPoint::try_new(250, 2).expect("override fee"),
+        },
+    );
+    service
+        .set_fee_schedule(account.clone(), schedule.clone())
+        .expect("schedule");
+    service
+        .place_order(market_order("fee-override", OrderSide::Buy, 1, 1_000))
+        .expect("accepted");
+    service
+        .observe_market(observation(10_000, 10_001, 1, 1_001))
+        .expect("fill");
+    let before = service.snapshot().expect("snapshot");
+    assert_eq!(before.fee_schedules, vec![(account.clone(), schedule)]);
+    let fees = before
+        .ledger_entries
+        .iter()
+        .filter(|entry| entry.kind == aeris_trading::LedgerEntryKind::Commission)
+        .map(|entry| entry.amount.units())
+        .collect::<Vec<_>>();
+    assert_eq!(fees, [-250]);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+
+    let service = TradingService::start(config(&directory)).expect("service reopens");
+    let recovered = service.snapshot().expect("recovered snapshot");
+    assert_eq!(recovered.fee_schedules, before.fee_schedules);
+    assert_eq!(recovered.ledger_entries, before.ledger_entries);
+    service
+        .place_order(market_order("fee-override-exit", OrderSide::Sell, 2, 2_000))
+        .expect("exit accepted");
+    service
+        .observe_market(observation(10_000, 10_001, 2, 2_001))
+        .expect("exit fill");
+    let fees = service
+        .snapshot()
+        .expect("snapshot")
+        .ledger_entries
+        .iter()
+        .filter(|entry| entry.kind == aeris_trading::LedgerEntryKind::Commission)
+        .map(|entry| entry.amount.units())
+        .collect::<Vec<_>>();
+    assert_eq!(fees, [-250, -250]);
+}
+
+#[test]
+fn per_unit_fee_clamps_to_its_minimum_and_notional_cap() {
+    // VAL-TRD-055: per-unit charges clamp to the configured minimum and the notional cap,
+    // and an unset or explicit none model charges nothing.
+    let instrument = instrument();
+    let fill = |price: i64, quantity: i64| Fill {
+        id: aeris_trading::FillId::try_new("fill-1").expect("fill"),
+        order_id: aeris_trading::OrderId::try_new("sim-order-1").expect("order"),
+        account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
+        instrument_id: instrument.instrument_id.clone(),
+        side: OrderSide::Buy,
+        price: FixedPoint::try_new(price, 2).expect("price"),
+        quantity: FixedPoint::try_new(quantity, 0).expect("quantity"),
+        execution_unix_nanos: 1_000,
+        provenance: provenance(1, 1_000),
+    };
+    let fee = |model: aeris_trading::FeeModel, fill: &Fill, liquidity: aeris_trading::Liquidity| {
+        let mut schedule = aeris_trading::FeeSchedule::default();
+        schedule
+            .by_class
+            .insert(aeris_instruments::InstrumentClass::Future, model);
+        crate::core::ledger::fee_for_fill(Some(&schedule), &instrument, fill, liquidity, 2)
+            .expect("fee")
+    };
+    // 0.10 per unit on one unit clamps up to the 0.50 minimum.
+    let clamped = fee(
+        aeris_trading::FeeModel::PerUnit {
+            per_unit: FixedPoint::try_new(10, 2).expect("rate"),
+            minimum: Some(FixedPoint::try_new(50, 2).expect("minimum")),
+            maximum_bps: None,
+        },
+        &fill(10_000, 1),
+        aeris_trading::Liquidity::Taker,
+    );
+    assert_eq!(clamped, FixedPoint::try_new(50, 2).expect("minimum fee"));
+    // 5.00 per unit on ten units clamps down to 1 bps of the 50_000.00 notional: 5.00.
+    let capped = fee(
+        aeris_trading::FeeModel::PerUnit {
+            per_unit: FixedPoint::try_new(500, 2).expect("rate"),
+            minimum: None,
+            maximum_bps: Some(1),
+        },
+        &fill(10_000, 10),
+        aeris_trading::Liquidity::Taker,
+    );
+    assert_eq!(capped, FixedPoint::try_new(500, 2).expect("capped fee"));
+    // Maker and taker basis points split on the same 5_000.00 notional: 0.50 and 1.50.
+    let model = aeris_trading::FeeModel::NotionalBps {
+        maker_bps: 1,
+        taker_bps: 3,
+    };
+    assert_eq!(
+        fee(model, &fill(10_000, 1), aeris_trading::Liquidity::Maker),
+        FixedPoint::try_new(50, 2).expect("maker fee")
+    );
+    assert_eq!(
+        fee(model, &fill(10_000, 1), aeris_trading::Liquidity::Taker),
+        FixedPoint::try_new(150, 2).expect("taker fee")
+    );
+    // Free models and missing schedules charge nothing.
+    assert_eq!(
+        fee(
+            aeris_trading::FeeModel::None,
+            &fill(10_000, 1),
+            aeris_trading::Liquidity::Taker
+        ),
+        FixedPoint::try_new(0, 2).expect("free")
+    );
+    assert_eq!(
+        crate::core::ledger::fee_for_fill(
+            None,
+            &instrument,
+            &fill(10_000, 1),
+            aeris_trading::Liquidity::Taker,
+            2,
+        )
+        .expect("no schedule"),
+        FixedPoint::try_new(0, 2).expect("free")
+    );
+}
+
+#[test]
+fn fee_schedule_rejects_unknown_accounts_instruments_and_invalid_models() {
+    // VAL-TRD-055: the command validates its account, its instrument overrides, the model
+    // rates, and refuses broker accounts.
+    let directory = TestDirectory::new("fee-schedule-validation");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let unknown_account = service
+        .set_fee_schedule(
+            TradingAccountId::try_new("aeris-sim-9").expect("account"),
+            aeris_trading::FeeSchedule::default(),
+        )
+        .expect_err("unknown account");
+    assert!(unknown_account.contains("not registered"));
+
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut unknown_instrument = aeris_trading::FeeSchedule::default();
+    unknown_instrument.by_instrument.insert(
+        InstrumentId::try_new("instrument:fixture:CME:UNKNOWN").expect("instrument"),
+        aeris_trading::FeeModel::None,
+    );
+    let error = service
+        .set_fee_schedule(account.clone(), unknown_instrument)
+        .expect_err("unknown instrument");
+    assert!(error.contains("is not registered"));
+
+    let mut negative = aeris_trading::FeeSchedule::default();
+    negative.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        aeris_trading::FeeModel::PerContract {
+            per_side: FixedPoint::try_new(-1, 2).expect("negative"),
+        },
+    );
+    service
+        .set_fee_schedule(account.clone(), negative)
+        .expect_err("negative fee");
+    let mut excessive = aeris_trading::FeeSchedule::default();
+    excessive.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        aeris_trading::FeeModel::NotionalBps {
+            maker_bps: 10_001,
+            taker_bps: 2,
+        },
+    );
+    service
+        .set_fee_schedule(account, excessive)
+        .expect_err("fee rate above the maximum");
+
+    service
+        .register_account(TradingAccount {
+            id: TradingAccountId::try_new("demo-1").expect("account"),
+            display_name: "test demo".into(),
+            environment: AccountEnvironment::Demo,
+            venue_id: "ctrader".into(),
+            broker_ref: Some("fixture-demo".into()),
+            currency: "USD".into(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("broker account");
+    let broker = service
+        .set_fee_schedule(
+            TradingAccountId::try_new("demo-1").expect("account"),
+            aeris_trading::FeeSchedule::default(),
+        )
+        .expect_err("broker account");
+    assert!(broker.contains("simulated"));
+}
+
+#[test]
 fn startup_repairs_legacy_nonflat_position_with_missing_average_from_fill_ledger() {
     let directory = TestDirectory::new("position-repair");
     let service = start_service(&directory);
@@ -1118,9 +1462,13 @@ fn irreparable_legacy_position_fails_before_committing_another_fill_and_can_be_d
     connection
         .execute("DELETE FROM fills", [])
         .expect("retained fill ledger removed");
+    // Corrupt the whole projection: without the fill ledger, the display average or the
+    // exact cost basis the owner cannot recompute or continue the position safely.
     connection
         .execute(
-            "UPDATE positions SET average_units = NULL, average_scale = NULL
+            "UPDATE positions SET average_units = NULL, average_scale = NULL,
+                cost_basis_hi = NULL, cost_basis_lo = NULL, cost_price_scale = NULL,
+                cost_quantity_scale = NULL
              WHERE account_id = 'aeris-sim-1'",
             [],
         )

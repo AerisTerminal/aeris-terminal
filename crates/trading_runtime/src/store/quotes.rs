@@ -6,7 +6,7 @@ use super::groups::upsert_order_group;
 use super::{
     FixedPoint, StepTx, StoredState, TradingStore, database_error, encode_provenance,
     insert_event_row, insert_order_row, params, update_next_sequence, upsert_discipline_state,
-    upsert_position, upsert_risk_rule_state,
+    upsert_position, upsert_position_basis, upsert_risk_rule_state,
 };
 
 impl TradingStore {
@@ -17,6 +17,12 @@ impl TradingStore {
     ) -> Result<(), String> {
         let tx = StepTx::begin(self).map_err(database_error)?;
         persist_quote_orders_and_fills(&tx, before, after)?;
+        // Ledger entries are append-only in memory; a quote step appends exactly the entries
+        // its fills produced.
+        super::ledger::insert_ledger_entries(
+            &tx,
+            &after.ledger_entries[before.ledger_entries.len()..],
+        )?;
         for (key, position) in &after.positions {
             if before.positions.get(key).is_none_or(|previous| {
                 let mut prior = previous.clone();
@@ -25,6 +31,28 @@ impl TradingStore {
             }) {
                 upsert_position(&tx, position)?;
             }
+        }
+        // The basis changes exactly when a fill does; cleared entries belong to positions
+        // that went flat.
+        for (key, basis) in &after.cost_basis {
+            if before.cost_basis.get(key) != Some(basis) {
+                let position = after
+                    .positions
+                    .get(key)
+                    .ok_or("cost basis without a position")?;
+                upsert_position_basis(&tx, position, Some(*basis))?;
+            }
+        }
+        for key in before
+            .cost_basis
+            .keys()
+            .filter(|key| !after.cost_basis.contains_key(*key))
+        {
+            let position = after
+                .positions
+                .get(key)
+                .ok_or("cleared cost basis without a position")?;
+            upsert_position_basis(&tx, position, None)?;
         }
         for (key, cycle) in &after.trade_cycles {
             if before.trade_cycles.get(key) != Some(cycle) {

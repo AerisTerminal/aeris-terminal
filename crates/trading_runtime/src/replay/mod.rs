@@ -2,6 +2,7 @@
 //! Do not update the expected ledger to accommodate a simulated-path refactor.
 
 use super::*;
+use aeris_trading::{FeeModel, LedgerEntryKind};
 use std::fmt::Write;
 
 /// Single-threaded replay of the production core against a real, private SQLite file.
@@ -73,6 +74,14 @@ impl ReplayHarness {
 
     fn register_risk_profile(&mut self, profile: RiskProfile) -> Result<(), String> {
         self.command(|reply| Command::RegisterRiskProfile(profile, reply))
+    }
+
+    fn set_fee_schedule(
+        &mut self,
+        account_id: TradingAccountId,
+        schedule: aeris_trading::FeeSchedule,
+    ) -> Result<(), String> {
+        self.command(|reply| Command::SetFeeSchedule(account_id, schedule, reply))
     }
 
     fn place_order(&mut self, order: PlaceOrder) -> Result<Order, String> {
@@ -359,6 +368,7 @@ fn ledger(snapshot: &TradingSnapshot) -> String {
         )
         .expect("write fill");
     }
+    write_ledger_entries(&mut result, snapshot);
     for position in &snapshot.positions {
         writeln!(
             result,
@@ -395,6 +405,23 @@ fn ledger(snapshot: &TradingSnapshot) -> String {
     writeln!(result, "managed_brackets={:?}", snapshot.managed_brackets).expect("write brackets");
     writeln!(result, "risk_locks={:?}", snapshot.risk_locks).expect("write locks");
     result
+}
+
+/// The durable cash-ledger chain, one line per entry in commit order.
+fn write_ledger_entries(result: &mut String, snapshot: &TradingSnapshot) {
+    for entry in &snapshot.ledger_entries {
+        writeln!(
+            result,
+            "ledger {} {} {} {} {} {}",
+            entry.entry_id,
+            entry.account_id.as_str(),
+            entry.kind.as_str(),
+            point(entry.amount),
+            entry.fill_id.as_ref().map_or("-", |id| id.as_str()),
+            entry.at_unix_nanos
+        )
+        .expect("write ledger entry");
+    }
 }
 
 fn start_golden_service(
@@ -609,6 +636,129 @@ fn replay_crypto_stop_restart_accounting_golden() {
     );
 }
 
+/// One per-contract fee schedule for the fixture future class.
+fn per_contract_schedule(per_side_units: i64) -> aeris_trading::FeeSchedule {
+    let mut schedule = aeris_trading::FeeSchedule::default();
+    schedule.by_class.insert(
+        aeris_instruments::InstrumentClass::Future,
+        FeeModel::PerContract {
+            per_side: FixedPoint::try_new(per_side_units, 2).expect("fee"),
+        },
+    );
+    schedule
+}
+
+/// The ledger chain equals the expected (kind, amount-units) sequence exactly.
+fn assert_ledger_chain(harness: &ReplayHarness, expected: &[(LedgerEntryKind, i64)]) {
+    let chain = harness
+        .snapshot()
+        .expect("ledger snapshot")
+        .ledger_entries
+        .iter()
+        .map(|entry| (entry.kind, entry.amount.units()))
+        .collect::<Vec<_>>();
+    assert_eq!(chain, expected);
+}
+
+/// The exact fee-charged round trip: a funded account pays a per-contract commission on the
+/// taker entry and exit and banks the exact realized P&L between them.
+fn fee_round_trip_scenario() -> String {
+    let directory = TestDirectory::new("fee-round-trip-golden");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock.clone());
+    harness
+        .set_fee_schedule(
+            TradingAccountId::try_new("aeris-sim-1").expect("account"),
+            per_contract_schedule(125),
+        )
+        .expect("fee schedule");
+    let mut trace = String::new();
+    harness
+        .observe_market(observation(10_000, 10_025, 1, 1_000))
+        .expect("fresh quote");
+    harness
+        .place_order(market_order("fee-entry", OrderSide::Buy, 2, 2_000))
+        .expect("buy accepted");
+    let entry_fills = harness
+        .observe_market(observation(10_000, 10_025, 3, 3_000))
+        .expect("entry fill");
+    assert_eq!(entry_fills.len(), 1);
+    assert_eq!(
+        entry_fills[0].price,
+        FixedPoint::try_new(10_025, 2).expect("ask")
+    );
+    record("taker entry pays commission", &harness, &mut trace);
+
+    clock.set_wall_unix_nanos(6_000);
+    harness
+        .place_order(market_order("fee-exit", OrderSide::Sell, 4, 4_000))
+        .expect("sell accepted");
+    let exit_fills = harness
+        .observe_market(observation(10_050, 10_075, 5, 5_000))
+        .expect("exit fill");
+    assert_eq!(exit_fills.len(), 1);
+    assert_eq!(
+        exit_fills[0].price,
+        FixedPoint::try_new(10_050, 2).expect("bid")
+    );
+    let flat = harness.snapshot().expect("flat");
+    assert_eq!(flat.positions[0].net_quantity.units(), 0);
+    assert_eq!(
+        flat.positions[0].realized_pnl,
+        FixedPoint::try_new(1_250, 2).expect("exact realized")
+    );
+    assert_eq!(
+        flat.account_pnl[0].balance,
+        Some(FixedPoint::try_new(5_001_000, 2).expect("balance"))
+    );
+    assert_ledger_chain(
+        &harness,
+        &[
+            (LedgerEntryKind::Deposit, 5_000_000),
+            (LedgerEntryKind::Commission, -125),
+            (LedgerEntryKind::RealizedPnl, 1_250),
+            (LedgerEntryKind::Commission, -125),
+        ],
+    );
+    record(
+        "taker exit banks realized net of fees",
+        &harness,
+        &mut trace,
+    );
+
+    let committed = harness.snapshot().expect("before restart");
+    harness.restart().expect("restart");
+    let recovered = harness.snapshot().expect("recovered");
+    assert_eq!(recovered.ledger_entries, committed.ledger_entries);
+    assert_eq!(recovered.account_pnl, committed.account_pnl);
+    assert_ledger_chain(
+        &harness,
+        &[
+            (LedgerEntryKind::Deposit, 5_000_000),
+            (LedgerEntryKind::Commission, -125),
+            (LedgerEntryKind::RealizedPnl, 1_250),
+            (LedgerEntryKind::Commission, -125),
+        ],
+    );
+    record(
+        "restart replays the exact ledger chain",
+        &harness,
+        &mut trace,
+    );
+    format!("{trace}\n{}", harness.transcript())
+}
+
+#[test]
+fn replay_fee_round_trip_ledger_golden() {
+    let first = fee_round_trip_scenario();
+    assert_eq!(first, fee_round_trip_scenario());
+    assert_eq!(
+        first.trim_end(),
+        include_str!("../tests/replay_fee_round_trip_ledger_golden.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+    );
+}
 /// A restart must reproduce the durable facts exactly and raise no new recovery notice.
 fn assert_restart_preserves(before: &TradingSnapshot, after: &TradingSnapshot) {
     assert_eq!(

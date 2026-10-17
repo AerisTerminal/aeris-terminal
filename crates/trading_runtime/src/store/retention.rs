@@ -57,6 +57,8 @@ impl TradingStore {
                 SELECT id FROM orders WHERE account_id = ?1
              )",
             "DELETE FROM fill_accounting WHERE account_id = ?1",
+            "DELETE FROM ledger_entries WHERE account_id = ?1",
+            "DELETE FROM fee_schedules WHERE account_id = ?1",
             "DELETE FROM fills WHERE account_id = ?1",
             "DELETE FROM positions WHERE account_id = ?1",
             "DELETE FROM orders WHERE account_id = ?1",

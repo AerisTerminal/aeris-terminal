@@ -657,8 +657,12 @@ impl TradingCore {
             let Some(price) = price else {
                 continue;
             };
-            let executed =
-                self.execute_market_fills(vec![(order_id, price)], observation, &instrument)?;
+            let executed = self.execute_market_fills(
+                vec![(order_id, price)],
+                observation,
+                &instrument,
+                false,
+            )?;
             self.reconcile_order_groups(&executed, observation, &instrument)?;
             self.align_position_protection(&executed, observation)?;
             fills.extend(executed);
@@ -715,20 +719,18 @@ impl TradingCore {
             } else {
                 observation.ask
             };
-            project_unrealized_pnl(
-                current.average_entry_price.ok_or_else(|| {
-                    format!(
-                        "position average is unavailable for unrealized PnL ({}/{})",
-                        current.account_id.as_str(),
-                        current.instrument_id.as_str()
-                    )
-                })?,
-                mark,
-                current.net_quantity,
-                point_value,
-                current.realized_pnl.scale(),
-            )
-            .map_err(|error| error.to_string())?;
+            let basis = self
+                .state
+                .cost_basis
+                .get(&(current.account_id.clone(), current.instrument_id.clone()))
+                .copied();
+            let _ = unrealized_pnl(basis, current, mark, point_value).map_err(|error| {
+                format!(
+                    "unrealized PnL failed for {}/{}: {error}",
+                    current.account_id.as_str(),
+                    current.instrument_id.as_str()
+                )
+            })?;
         }
         Ok(())
     }
@@ -774,16 +776,12 @@ impl TradingCore {
                 .ok_or_else(|| "point value is unavailable for unrealized PnL".to_string())?;
             let point_value = FixedPoint::try_new(point_value.units(), point_value.scale())
                 .map_err(|error| error.to_string())?;
-            let unrealized = project_unrealized_pnl(
-                current.average_entry_price.ok_or_else(|| {
-                    "position average is unavailable for unrealized PnL".to_string()
-                })?,
+            let unrealized = unrealized_pnl(
+                self.state.cost_basis.get(&key).copied(),
+                &current,
                 mark,
-                current.net_quantity,
                 point_value,
-                current.realized_pnl.scale(),
-            )
-            .map_err(|error| error.to_string())?;
+            )?;
             if current.unrealized_pnl != unrealized {
                 let updated = Position {
                     unrealized_pnl: unrealized,
@@ -795,4 +793,46 @@ impl TradingCore {
         }
         Ok(positions_changed)
     }
+}
+/// Unrealized P&L from the exact cost basis when one is stored: signed mark value minus
+/// basis, times point value, rounded once into the account currency. A position without a
+/// basis row (a defensive legacy projection) keeps the average-price computation.
+fn unrealized_pnl(
+    basis: Option<crate::core::ledger::CostBasis>,
+    current: &Position,
+    mark: FixedPoint,
+    point_value: FixedPoint,
+) -> Result<FixedPoint, String> {
+    let currency_scale = current.realized_pnl.scale();
+    let Some(basis) = basis else {
+        return project_unrealized_pnl(
+            current
+                .average_entry_price
+                .ok_or_else(|| "position average is unavailable for unrealized PnL".to_string())?,
+            mark,
+            current.net_quantity,
+            point_value,
+            currency_scale,
+        )
+        .map_err(|error| error.to_string());
+    };
+    let quantity_scale = current.net_quantity.scale();
+    let combined_scale = mark
+        .scale()
+        .checked_add(quantity_scale)
+        .ok_or_else(|| "unrealized PnL scale overflowed".to_string())?;
+    let basis = basis.rescaled(combined_scale)?;
+    let mark_value = i128::from(mark.units())
+        .checked_mul(i128::from(current.net_quantity.units().unsigned_abs()))
+        .ok_or_else(|| "unrealized PnL overflowed".to_string())?;
+    let gross = mark_value
+        .checked_sub(basis.units)
+        .and_then(|value| value.checked_mul(i128::from(current.net_quantity.units().signum())))
+        .and_then(|value| value.checked_mul(i128::from(point_value.units())))
+        .ok_or_else(|| "unrealized PnL overflowed".to_string())?;
+    let raw_scale = combined_scale
+        .checked_add(point_value.scale())
+        .ok_or_else(|| "unrealized PnL scale overflowed".to_string())?;
+    aeris_trading::fixed_point_from_i128_rounded(gross, raw_scale, currency_scale)
+        .map_err(|error| error.to_string())
 }

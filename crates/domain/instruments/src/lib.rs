@@ -77,7 +77,7 @@ pub enum AssetClass {
 }
 
 /// Trading-specific classification, including contracts that share an asset class.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum InstrumentClass {
     Equity,
     Option,

@@ -1,11 +1,11 @@
 use super::{
     AccountEnvironment, BracketStrategyTemplate, BracketView, CreatePracticeAccount,
-    DEMO_VENUE_UNAVAILABLE, FixedPoint, InstrumentId, MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS,
-    Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType,
-    PlaceOrder, PlaceProtection, ProtectionRole, TradeCopyDispatch, TradingAccount,
-    TradingAccountId, TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute,
-    instrument_tick_units, mirrored_client_order_id, multiply_quantity, order_acceptance_detail,
-    shifted_price, venue,
+    DEMO_VENUE_UNAVAILABLE, FixedPoint, InstrumentId, LedgerEntry, LedgerEntryKind,
+    MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, OrderEventId, OrderEventKind,
+    OrderId, OrderStatus, OrderStep, OrderType, PlaceOrder, PlaceProtection, ProtectionRole,
+    TradeCopyDispatch, TradingAccount, TradingAccountId, TradingCore, TradingInstrument,
+    VenueRequestReceiver, VenueRoute, instrument_tick_units, mirrored_client_order_id,
+    multiply_quantity, order_acceptance_detail, shifted_price, venue,
 };
 use aeris_instruments::PriceGrid;
 use aeris_trading::{OrderSide, RejectReason, RiskWarning, TimeInForce};
@@ -384,7 +384,28 @@ fn existing_client_order(existing: &Order, command: &PlaceOrder) -> Result<Order
 impl TradingCore {
     pub(super) fn register_account(&mut self, account: TradingAccount) -> Result<(), String> {
         account.validate().map_err(|error| error.to_string())?;
-        self.store.put_account(&account)?;
+        // A newly funded simulated account records its opening equity as the first ledger
+        // deposit in the same commit; re-registration of a known account never redeposits.
+        let deposit = if account.environment == AccountEnvironment::Simulated
+            && !self.state.accounts.contains_key(&account.id)
+        {
+            account.starting_equity.map(|equity| LedgerEntry {
+                entry_id: format!("deposit-{}", account.id.as_str()),
+                account_id: account.id.clone(),
+                kind: LedgerEntryKind::Deposit,
+                amount: equity,
+                fill_id: None,
+                at_unix_nanos: self.command_now,
+            })
+        } else {
+            None
+        };
+        let deposited = self
+            .store
+            .put_account_with_deposit(&account, deposit.as_ref())?;
+        if let (true, Some(entry)) = (deposited, deposit) {
+            self.state.ledger_entries.push(entry);
+        }
         self.state.accounts.insert(account.id.clone(), account);
         self.bump_revision()
     }
@@ -555,7 +576,14 @@ impl TradingCore {
             .fills
             .retain(|fill| &fill.account_id != account_id);
         self.state
+            .ledger_entries
+            .retain(|entry| &entry.account_id != account_id);
+        self.state.fee_schedules.remove(account_id);
+        self.state
             .positions
+            .retain(|(stored_account, _), _| stored_account != account_id);
+        self.state
+            .cost_basis
             .retain(|(stored_account, _), _| stored_account != account_id);
         self.state.risk_profiles.remove(account_id);
         self.state.risk_locks.remove(account_id);
@@ -715,7 +743,7 @@ impl TradingCore {
                     .clone();
                 self.validate_mark_to_market(&observation, &instrument)?;
                 let fills =
-                    self.execute_market_fills(vec![(id, price)], &observation, &instrument)?;
+                    self.execute_market_fills(vec![(id, price)], &observation, &instrument, true)?;
                 self.bump_revision()?;
                 self.reconcile_order_groups(&fills, &observation, &instrument)?;
                 self.align_position_protection(&fills, &observation)?;

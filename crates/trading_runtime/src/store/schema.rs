@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -309,6 +309,32 @@ pub(super) const MIGRATION_V24: &str = "
  DROP TABLE managed_brackets;
  DROP TABLE protective_orders;";
 
+/// The simulated cash ledger, per-account fee schedules and the exact integer cost basis
+/// behind the displayed average entry. The instrument class and price-grid columns are
+/// decoded from the contract document by the Rust backfill. The migration is a chain entry
+/// reachable only after the gated V24 drop, so a store still holding awaiting legacy
+/// brackets never sees these tables.
+pub(super) const MIGRATION_V25: &str = "
+ CREATE TABLE ledger_entries (
+     id TEXT PRIMARY KEY,
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     kind TEXT NOT NULL,
+     amount_units INTEGER NOT NULL, amount_scale INTEGER NOT NULL,
+     fill_id TEXT REFERENCES fills(id),
+     at_unix_nanos INTEGER NOT NULL
+ ) STRICT;
+ CREATE INDEX ledger_entries_account ON ledger_entries(account_id, at_unix_nanos);
+ CREATE TABLE fee_schedules (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+     model_json TEXT NOT NULL
+ ) STRICT;
+ ALTER TABLE instruments ADD COLUMN instrument_class TEXT;
+ ALTER TABLE instruments ADD COLUMN price_grid_json TEXT;
+ ALTER TABLE positions ADD COLUMN cost_basis_hi INTEGER;
+ ALTER TABLE positions ADD COLUMN cost_basis_lo INTEGER;
+ ALTER TABLE positions ADD COLUMN cost_price_scale INTEGER;
+ ALTER TABLE positions ADD COLUMN cost_quantity_scale INTEGER;";
+
 pub(super) struct Migration {
     pub(super) from: u32,
     pub(super) to: u32,
@@ -430,6 +456,13 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 22,
         to: 23,
         sql: MIGRATION_V23,
+    },
+    // 23 -> 24 is the gated group-table drop applied by finalize_group_migration; the chain
+    // resumes at 24 once it landed.
+    Migration {
+        from: 24,
+        to: 25,
+        sql: MIGRATION_V25,
     },
 ];
 
@@ -687,19 +720,34 @@ impl TradingStore {
         // runtime conversion of awaiting brackets, via the finalize step below.
         let chain_target = MIGRATIONS.last().map_or(0, |migration| migration.to);
         while version < chain_target {
-            let migration = MIGRATIONS
+            let Some(migration) = MIGRATIONS
                 .iter()
                 .find(|migration| migration.from == version)
-                .ok_or_else(|| {
-                    StoreError::Other(format!(
-                        "trading schema migration from version {version} is missing"
-                    ))
-                })?;
+            else {
+                // 23 -> 24 is the gated group-table drop below; open() resumes this chain
+                // once the finalize step committed it.
+                if version == 23 {
+                    break;
+                }
+                return Err(StoreError::Other(format!(
+                    "trading schema migration from version {version} is missing"
+                )));
+            };
             self.apply_migration(migration.to, migration.sql)
                 .map_err(StoreError::Other)?;
             version = migration.to;
         }
         Ok(())
+    }
+
+    /// Runs the migration steps that must follow the group backfill and the runtime
+    /// conversion of awaiting legacy brackets: the gated V24 drop, the rest of the chain
+    /// and the V25 ledger backfill. Idempotent; a store still gated on awaiting conversions
+    /// stays at version 23.
+    pub(crate) fn complete_post_group_migrations(&mut self) -> Result<(), String> {
+        self.finalize_group_migration()?;
+        self.migrate(false).map_err(|error| error.to_string())?;
+        self.backfill_ledger()
     }
 
     /// Drops the pre-group protection tables once no awaiting legacy bracket still waits for
@@ -720,7 +768,7 @@ impl TradingStore {
         if awaiting != 0 {
             return Ok(());
         }
-        self.apply_migration(SCHEMA_VERSION, MIGRATION_V24)
+        self.apply_migration(24, MIGRATION_V24)
     }
 
     pub(super) fn back_up_before_migration(&self, old_version: u32) -> Result<(), StoreError> {

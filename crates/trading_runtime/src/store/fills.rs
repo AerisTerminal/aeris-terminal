@@ -3,7 +3,7 @@ use super::{
     InstrumentId, Order, OrderEvent, OrderId, Position, StepTx, TradeCycle, TradingAccountId,
     TradingStore, VecDeque, database_error, decode_provenance, encode_provenance, fixed,
     insert_event_row, insert_order_row, params, parse_side, sqlite_i64, update_next_sequence,
-    upsert_discipline_state, upsert_position, upsert_risk_rule_state,
+    upsert_discipline_state, upsert_position, upsert_position_basis, upsert_risk_rule_state,
 };
 
 pub(super) fn insert_fill_accounting(
@@ -14,15 +14,17 @@ pub(super) fn insert_fill_accounting(
     transaction
         .execute(
             "INSERT INTO fill_accounting(fill_id,account_id,instrument_id,
-            realized_gross_units,realized_gross_scale,cycle_id,cycle_closed,
-            cycle_realized_units,cycle_realized_scale)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            realized_gross_units,realized_gross_scale,commission_units,commission_scale,
+            cycle_id,cycle_closed,cycle_realized_units,cycle_realized_scale)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 fill.id.as_str(),
                 fill.account_id.as_str(),
                 fill.instrument_id.as_str(),
                 accounting.realized_gross.map(FixedPoint::units),
                 accounting.realized_gross.map(FixedPoint::scale),
+                accounting.commission.units(),
+                accounting.commission.scale(),
                 accounting.cycle_id,
                 accounting.cycle_closed,
                 accounting.cycle_realized.map(FixedPoint::units),
@@ -156,6 +158,11 @@ impl TradingStore {
             FillAccounting {
                 cycle_id: 0,
                 realized_gross: record.realized_pnl,
+                commission: FixedPoint::try_new(
+                    0,
+                    record.realized_pnl.map_or(2, FixedPoint::scale),
+                )
+                .map_err(|error| error.to_string())?,
                 cycle_realized: None,
                 cycle_closed: false,
             },
@@ -232,7 +239,9 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         insert_fill_accounting(&transaction, fill, policy.accounting)?;
+        super::ledger::insert_ledger_entries(&transaction, policy.ledger_entries)?;
         upsert_position(&transaction, position)?;
+        upsert_position_basis(&transaction, position, policy.cost_basis)?;
         upsert_trade_cycle(&transaction, policy.trade_cycle)?;
         if let Some(rule_state) = policy.rule_state {
             upsert_risk_rule_state(&transaction, rule_state)?;
@@ -310,7 +319,8 @@ impl TradingStore {
             .connection
             .prepare(
                 "SELECT fill_id, cycle_id, realized_gross_units, realized_gross_scale,
-                cycle_realized_units, cycle_realized_scale, cycle_closed
+                cycle_realized_units, cycle_realized_scale, cycle_closed,
+                commission_units, commission_scale
              FROM fill_accounting",
             )
             .map_err(database_error)?;
@@ -324,6 +334,8 @@ impl TradingStore {
                     row.get::<_, Option<i64>>(4)?,
                     row.get::<_, Option<u8>>(5)?,
                     row.get::<_, bool>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, u8>(8)?,
                 ))
             })
             .map_err(database_error)?;
@@ -336,12 +348,15 @@ impl TradingStore {
                 cycle_units,
                 cycle_scale,
                 cycle_closed,
+                commission_units,
+                commission_scale,
             ) = row.map_err(database_error)?;
             output.insert(
                 FillId::try_new(id).map_err(|error| error.to_string())?,
                 FillAccounting {
                     cycle_id,
                     realized_gross: super::optional_fixed(realized_units, realized_scale)?,
+                    commission: fixed(commission_units, commission_scale)?,
                     cycle_realized: super::optional_fixed(cycle_units, cycle_scale)?,
                     cycle_closed,
                 },

@@ -4,8 +4,8 @@ pub(crate) mod owner;
 
 use super::{
     BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount, EconomicEventRiskOutcome,
-    EconomicEventRiskTrigger, FixedPoint, FlattenOutcome, ModifyOrder, MovePlannedLeg, Order,
-    PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOco, PlaceOrder,
+    EconomicEventRiskTrigger, FeeSchedule, FixedPoint, FlattenOutcome, ModifyOrder, MovePlannedLeg,
+    Order, PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOco, PlaceOrder,
     PlaceProtection, PlacementOutcome, PlannedLeg, Reply, RevisionedCancelOrder,
     RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan, TradeCopierConfig,
     TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus, TradingSnapshot,
@@ -53,6 +53,7 @@ pub(crate) enum Command {
         Option<FixedPoint>,
         Reply<()>,
     ),
+    SetFeeSchedule(TradingAccountId, FeeSchedule, Reply<()>),
     RegisterRiskProfile(RiskProfile, Reply<()>),
     RegisterSessionPlan(SessionPlan, Reply<()>),
     RegisterTradeCopier(TradeCopierConfig, Reply<()>),

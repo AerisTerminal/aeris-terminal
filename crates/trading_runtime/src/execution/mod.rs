@@ -4,6 +4,7 @@ use super::{
     RevisionedCancelOrder, RevisionedModifyOrder, SimulatedMarketObservation, TimeInForce,
     TradingAccountId, TradingCore, TradingInstrument, VenueRoute, is_simulated,
 };
+use aeris_trading::Liquidity as LiquiditySide;
 
 // The simulated venue's execution boundary has only one implementation of each policy:
 // full size and the observed touch. Neither policy models depth or slippage.
@@ -610,6 +611,7 @@ impl TradingCore {
         candidates: Vec<(OrderId, FixedPoint)>,
         observation: &SimulatedMarketObservation,
         instrument: &TradingInstrument,
+        placement: bool,
     ) -> Result<Vec<Fill>, String> {
         let mut fills = Vec::with_capacity(candidates.len());
         for (order_id, price) in candidates {
@@ -619,6 +621,17 @@ impl TradingCore {
                 .get(&order_id)
                 .cloned()
                 .ok_or_else(|| "working order disappeared".to_string())?;
+            // A resting limit filled by the quote is the maker; a placement fill, a stop
+            // trigger and a market order are the taker.
+            let liquidity = if !placement
+                && (matches!(order.order_type, OrderType::Limit)
+                    || (matches!(order.order_type, OrderType::StopLimit)
+                        && order.triggered_unix_nanos.is_some()))
+            {
+                LiquiditySide::Maker
+            } else {
+                LiquiditySide::Taker
+            };
             if matches!(order.order_type, OrderType::Stop | OrderType::StopLimit)
                 && order.triggered_unix_nanos.is_none()
             {
@@ -651,7 +664,7 @@ impl TradingCore {
             };
             let position_key = (order.account_id.clone(), order.instrument_id.clone());
             let previous_position = self.state.positions.get(&position_key).cloned();
-            let (position, policy_update) = self.apply_fill(
+            let (position, cost_basis, policy_update) = self.apply_fill(
                 &fill,
                 previous_position.as_ref(),
                 self.state
@@ -659,6 +672,7 @@ impl TradingCore {
                     .get(&order.account_id)
                     .ok_or_else(|| "fill account disappeared".to_string())?,
                 instrument,
+                liquidity,
             )?;
             let filled = crate::book::lifecycle::fill_simulated(order, self.command_now)
                 .map_err(|error| error.to_string())?;
@@ -668,6 +682,7 @@ impl TradingCore {
                 &fill,
                 FillMemoryUpdate {
                     position,
+                    cost_basis,
                     position_key,
                     policy_update,
                     next_sequence: sequence + 1,

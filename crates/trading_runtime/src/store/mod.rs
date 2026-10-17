@@ -3,6 +3,7 @@ mod fills;
 mod groups;
 mod ledger;
 mod migrate_groups;
+mod migrate_ledger;
 mod orders;
 mod quotes;
 mod retention;
@@ -18,7 +19,7 @@ pub(crate) use schema::preflight_existing_database;
 #[cfg(test)]
 use schema::*;
 use {
-    ledger::{fixed, optional_fixed, split_optional, upsert_position},
+    ledger::{fixed, optional_fixed, split_optional, upsert_position, upsert_position_basis},
     orders::{
         decode_provenance, encode_contract, encode_provenance, insert_event_row, insert_order_row,
         parse_side, update_next_sequence,
@@ -35,16 +36,17 @@ use super::{
     TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
 use crate::core::OrderGroup;
-use crate::core::ledger::{FillAccounting, TradeCycle};
+use crate::core::ledger::{CostBasis, FillAccounting, TradeCycle};
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentClass, InstrumentDecimal, InstrumentId,
     InstrumentMetadataProvenance, PriceGrid, SessionHours,
 };
 use aeris_trading::market::MarketRoute;
 use aeris_trading::{
-    AccountEnvironment, BrokerPosition, ClientOrderId, Fill, FillId, FixedPoint, Order, OrderEvent,
-    OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position,
-    TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
+    AccountEnvironment, BrokerPosition, ClientOrderId, FeeModel, FeeSchedule, Fill, FillId,
+    FixedPoint, LedgerEntry, LedgerEntryKind, Order, OrderEvent, OrderEventId, OrderEventKind,
+    OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce, TradingAccount,
+    TradingAccountId, TradingProvenance,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -196,6 +198,15 @@ pub(super) struct StoredState {
     pub fill_accounting: BTreeMap<FillId, FillAccounting>,
     pub trade_cycles: BTreeMap<(TradingAccountId, InstrumentId), TradeCycle>,
     pub positions: BTreeMap<(TradingAccountId, InstrumentId), Position>,
+    /// The exact integer cost basis behind every open simulated position. Populated by the
+    /// V25 backfill and every fill commit; empty while a gated pre-group store waits for
+    /// its conversion.
+    pub cost_basis: BTreeMap<(TradingAccountId, InstrumentId), CostBasis>,
+    /// The cash-ledger entries of every simulated account in commit order. Empty while a
+    /// gated pre-group store waits for its conversion.
+    pub ledger_entries: Vec<LedgerEntry>,
+    /// The simulated fee schedule of each account. Empty for gated pre-group stores.
+    pub fee_schedules: BTreeMap<TradingAccountId, FeeSchedule>,
     pub broker_positions: BTreeMap<(TradingAccountId, String), BrokerPosition>,
     /// The broker position each retained broker fill belongs to.
     pub broker_fill_positions: BTreeMap<FillId, String>,
@@ -297,6 +308,8 @@ pub(super) struct FillPolicyPersistence<'a> {
     pub trade_cycle: &'a TradeCycle,
     pub discipline_state: &'a DisciplineState,
     pub accounting: FillAccounting,
+    pub ledger_entries: &'a [LedgerEntry],
+    pub cost_basis: Option<CostBasis>,
 }
 
 impl TradingStore {
@@ -356,10 +369,11 @@ impl TradingStore {
         };
         store.migrate(existed)?;
         store.backfill_groups().map_err(StoreError::Other)?;
-        // A store without unconverted awaiting brackets drops the pre-group tables at once;
-        // otherwise the runtime conversion in core open finalizes the drop.
+        // A store without unconverted awaiting brackets drops the pre-group tables and
+        // backfills the ledger at once; otherwise the runtime conversion in core open
+        // finalizes the drop and resumes the chain.
         store
-            .finalize_group_migration()
+            .complete_post_group_migrations()
             .map_err(StoreError::Other)?;
         store
             .ensure_default_strategy_templates()
@@ -401,6 +415,22 @@ impl TradingStore {
         let fill_accounting = self.load_fill_accounting()?;
         let trade_cycles = self.load_trade_cycles()?;
         let positions = self.load_positions()?;
+        let ledger_tables = self.ledger_tables_present()?;
+        let cost_basis = if ledger_tables {
+            self.load_cost_basis()?
+        } else {
+            BTreeMap::new()
+        };
+        let ledger_entries = if ledger_tables {
+            self.load_ledger_entries()?
+        } else {
+            Vec::new()
+        };
+        let fee_schedules = if ledger_tables {
+            self.load_fee_schedules()?
+        } else {
+            BTreeMap::new()
+        };
         let broker_positions = self.load_broker_positions()?;
         let broker_order_ids = self.load_broker_order_ids()?;
         let broker_fill_positions = self.load_broker_fill_positions()?;
@@ -425,6 +455,9 @@ impl TradingStore {
             fill_accounting,
             trade_cycles,
             positions,
+            cost_basis,
+            ledger_entries,
+            fee_schedules,
             broker_positions,
             broker_fill_positions,
             venue_generation,
@@ -491,13 +524,31 @@ fn database_error(error: rusqlite::Error) -> String {
 }
 
 /// Applies the historical migrations up to `version` so migration tests can build fixtures.
+/// Version 24 adds the group-table drop on top of the V23 chain, mirroring the gated
+/// finalize step.
 #[cfg(test)]
 pub(crate) fn create_schema_at(connection: &Connection, version: u32) {
-    for migration in MIGRATIONS.iter().take(version as usize) {
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.to <= version.min(23))
+    {
         assert_eq!(migration.from + 1, migration.to);
         connection
             .execute_batch(migration.sql)
             .expect("historical migration");
+    }
+    if version >= 24 {
+        connection
+            .execute_batch(MIGRATION_V24)
+            .expect("group table drop");
+    }
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.from >= 24 && migration.to <= version)
+    {
+        connection
+            .execute_batch(migration.sql)
+            .expect("post-drop migration");
     }
     connection
         .pragma_update(None, "user_version", version)
@@ -603,12 +654,16 @@ mod tests {
 
     #[test]
     fn migrations_are_contiguous_and_every_historical_version_reaches_head() {
-        // The V24 table drop is not a chain entry: it lands through the gated finalize.
+        // The V24 table drop is not a chain entry: it lands through the gated finalize
+        // (the "+ 1"), then the chain resumes at 24.
         assert_eq!(MIGRATIONS.len() + 1, SCHEMA_VERSION as usize);
-        for (expected, migration) in (0..SCHEMA_VERSION - 1).zip(MIGRATIONS) {
+        let (chain, post_drop) = MIGRATIONS.split_at(MIGRATIONS.len() - 1);
+        for (expected, migration) in (0..23).zip(chain) {
             assert_eq!(migration.from, expected);
             assert_eq!(migration.to, expected + 1);
         }
+        assert_eq!(post_drop[0].from, 24);
+        assert_eq!(post_drop[0].to, SCHEMA_VERSION);
         for version in 0..SCHEMA_VERSION {
             let connection = Connection::open_in_memory().expect("in-memory database");
             create_schema_at(&connection, version);
@@ -618,8 +673,8 @@ mod tests {
             };
             store.migrate(false).expect("historical schema migrates");
             store
-                .finalize_group_migration()
-                .expect("group migration finalizes");
+                .complete_post_group_migrations()
+                .expect("post-group migrations complete");
             let actual: u32 = store
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -655,7 +710,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -700,6 +755,10 @@ mod tests {
         );
         // The unconverted awaiting row gates the V24 drop; once it is gone the legacy
         // tables retire and the schema reaches head.
+        assert_gated_finalize_reaches_head(&mut store);
+    }
+
+    fn assert_gated_finalize_reaches_head(store: &mut TradingStore) {
         store.finalize_group_migration().expect("gated finalize");
         let gated: u32 = store
             .connection
@@ -716,11 +775,29 @@ mod tests {
         store
             .finalize_group_migration()
             .expect("finalize drops the legacy tables");
+        let dropped: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("dropped version");
+        assert_eq!(
+            dropped, 24,
+            "the finalize commits the drop before the chain resumes"
+        );
+        store.migrate(false).expect("chain resumes at 24");
         let head: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("head version");
         assert_eq!(head, SCHEMA_VERSION);
+        for table in ["ledger_entries", "fee_schedules"] {
+            let count: i64 = store
+                .connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("ledger table exists");
+            assert_eq!(count, 0);
+        }
         assert!(
             store
                 .connection
@@ -729,6 +806,274 @@ mod tests {
                 .is_err(),
             "the legacy table is dropped"
         );
+    }
+
+    #[test]
+    fn v23_ledger_backfill_preserves_balances_and_positions() {
+        // VAL-TRD-056: a funded fixture migrates to a ledger whose computed balance matches
+        // the pre-migration balance exactly, with no position drift and zero fees.
+        let connection = Connection::open_in_memory().expect("fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys");
+        create_schema_at(&connection, 23);
+        write_v23_ledger_fixture(&connection);
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        store.migrate(false).expect("chain to the gate");
+        store
+            .complete_post_group_migrations()
+            .expect("drop, chain and ledger backfill");
+        let version: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+
+        assert_eq!(
+            migrated_ledger_entries(&store, "cash"),
+            vec![
+                (
+                    "migration-deposit-cash".to_string(),
+                    "deposit".to_string(),
+                    1_000_000,
+                    2,
+                    None,
+                    1
+                ),
+                (
+                    "migration-pnl-fill-exit".to_string(),
+                    "realized_pnl".to_string(),
+                    300,
+                    2,
+                    Some("fill-exit".to_string()),
+                    20
+                ),
+            ]
+        );
+        assert_eq!(migrated_ledger_entries(&store, "flat"), Vec::new());
+        // The computed balance matches the pre-migration balance: starting equity plus the
+        // recorded realized total.
+        let balance: i64 = store
+            .connection
+            .query_row(
+                "SELECT COALESCE(SUM(amount_units), 0) FROM ledger_entries
+                 WHERE account_id = 'cash'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("balance");
+        assert_eq!(balance, 1_000_300);
+        // Positions keep their exact values and gain the exact integer cost basis:
+        // average price times open quantity.
+        assert_eq!(
+            migrated_position_row(&store, "instrument"),
+            (2, 10_002, 300, 0, 20_004, 2)
+        );
+        assert_eq!(
+            migrated_position_row(&store, "instrument-two"),
+            (-2, 5_000, 0, 0, 10_000, 2)
+        );
+        // The instrument query columns decode from the contract document.
+        let class: String = store
+            .connection
+            .query_row(
+                "SELECT instrument_class FROM instruments WHERE id = 'instrument'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("class column");
+        assert_eq!(class, "future");
+        // Fees stay zero: no commission or exchange-fee entries exist.
+        let fee_entries: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM ledger_entries
+                 WHERE kind IN ('commission', 'exchange_fee')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fee entries");
+        assert_eq!(fee_entries, 0);
+        // The marker makes a repeated open idempotent.
+        assert_eq!(count_cash_entries(&store), 2);
+        store.backfill_ledger().expect("second backfill is a no-op");
+        assert_eq!(count_cash_entries(&store), 2);
+    }
+
+    fn write_v23_ledger_fixture(connection: &Connection) {
+        let contract_json = super::orders::encode_contract(&crate::tests::instrument().contract)
+            .expect("contract document");
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,
+                    starting_equity_units,starting_equity_scale)
+                    VALUES ('cash','Practice','simulated','USD',2,1000000,2);
+                 INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                    VALUES ('flat','Practice Two','simulated','USD',2);",
+            )
+            .expect("fixture accounts");
+        for (id, scale) in [("instrument", 2), ("instrument-two", 2)] {
+            connection
+                .execute(
+                    "INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+                     VALUES (?1, ?2, 0, ?3)",
+                    params![id, scale, contract_json],
+                )
+                .expect("fixture instrument");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,
+                    order_type,time_in_force,quantity_units,quantity_scale,status,
+                    submitted_unix_nanos,provenance_json)
+                    VALUES ('entry-order','client-entry','cash','instrument','buy','limit',
+                        'gtc',3,0,'filled',5,'{}');
+                 INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,
+                    order_type,time_in_force,quantity_units,quantity_scale,status,
+                    submitted_unix_nanos,provenance_json)
+                    VALUES ('exit-order','client-exit','cash','instrument','sell','limit',
+                        'gtc',1,0,'filled',15,'{}');
+                 INSERT INTO fills(id,order_id,account_id,instrument_id,side,price_units,
+                    price_scale,quantity_units,quantity_scale,execution_unix_nanos,
+                    provenance_json)
+                    VALUES ('fill-entry','entry-order','cash','instrument','buy',10002,2,3,0,
+                        10,'{}');
+                 INSERT INTO fills(id,order_id,account_id,instrument_id,side,price_units,
+                    price_scale,quantity_units,quantity_scale,execution_unix_nanos,
+                    provenance_json)
+                    VALUES ('fill-exit','exit-order','cash','instrument','sell',10005,2,1,0,
+                        20,'{}');
+                 INSERT INTO fill_accounting(fill_id,account_id,instrument_id,
+                    realized_gross_units,realized_gross_scale,cycle_id,cycle_closed)
+                    VALUES ('fill-entry','cash','instrument',NULL,NULL,1,0);
+                 INSERT INTO fill_accounting(fill_id,account_id,instrument_id,
+                    realized_gross_units,realized_gross_scale,cycle_id,cycle_closed,
+                    cycle_realized_units,cycle_realized_scale)
+                    VALUES ('fill-exit','cash','instrument',300,2,1,0,300,2);
+                 INSERT INTO positions(account_id,instrument_id,net_units,net_scale,
+                    average_units,average_scale,realized_units,realized_scale,
+                    unrealized_units,unrealized_scale,last_fill_unix_nanos)
+                    VALUES ('cash','instrument',2,0,10002,2,300,2,0,2,20);
+                 INSERT INTO positions(account_id,instrument_id,net_units,net_scale,
+                    average_units,average_scale,realized_units,realized_scale,
+                    unrealized_units,unrealized_scale,last_fill_unix_nanos)
+                    VALUES ('cash','instrument-two',-2,0,5000,2,0,2,0,2,10);",
+            )
+            .expect("fixture history");
+    }
+
+    fn migrated_ledger_entries(
+        store: &TradingStore,
+        account: &str,
+    ) -> Vec<(String, String, i64, i64, Option<String>, i64)> {
+        let mut statement = store
+            .connection
+            .prepare(
+                "SELECT id, kind, amount_units, amount_scale, fill_id, at_unix_nanos
+                 FROM ledger_entries WHERE account_id = ?1 ORDER BY at_unix_nanos, id",
+            )
+            .expect("entries query");
+        statement
+            .query_map([account], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .expect("entries rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("entries")
+    }
+
+    fn migrated_position_row(
+        store: &TradingStore,
+        instrument: &str,
+    ) -> (i64, i64, i64, i64, i64, i64) {
+        store
+            .connection
+            .query_row(
+                "SELECT net_units, average_units, realized_units, cost_basis_hi,
+                    cost_basis_lo, cost_price_scale FROM positions
+                 WHERE account_id = 'cash' AND instrument_id = ?1",
+                [instrument],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("position")
+    }
+
+    #[test]
+    fn position_cost_basis_round_trips_through_the_store() {
+        let path = temporary_database("cost-basis-roundtrip");
+        let mut store = TradingStore::open(&path, TradingRetention::default()).expect("new store");
+        let account = TradingAccount {
+            id: TradingAccountId::try_new("aeris-sim-basis").expect("account"),
+            display_name: "SIM basis".to_string(),
+            environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: None,
+        };
+        store.put_account(&account).expect("account");
+        let instrument = crate::tests::instrument();
+        store.put_instrument(&instrument).expect("instrument");
+        let key = (account.id.clone(), instrument.instrument_id.clone());
+        let position = Position {
+            account_id: account.id.clone(),
+            instrument_id: instrument.instrument_id.clone(),
+            net_quantity: FixedPoint::try_new(3, 0).expect("quantity"),
+            average_entry_price: Some(FixedPoint::try_new(10_002, 2).expect("average")),
+            realized_pnl: FixedPoint::try_new(0, 2).expect("realized"),
+            unrealized_pnl: FixedPoint::try_new(0, 2).expect("unrealized"),
+            last_fill_unix_nanos: 7,
+        };
+        let basis = CostBasis {
+            units: 30_005,
+            scale: 2,
+        };
+        store
+            .update_position(&position, Some(basis))
+            .expect("position with basis");
+        let loaded = store.load_state().expect("load");
+        assert_eq!(loaded.positions.get(&key), Some(&position));
+        assert_eq!(loaded.cost_basis.get(&key), Some(&basis));
+
+        let flat = Position {
+            net_quantity: FixedPoint::try_new(0, 0).expect("flat quantity"),
+            average_entry_price: None,
+            ..position.clone()
+        };
+        store.update_position(&flat, None).expect("flat position");
+        let reloaded = store.load_state().expect("reload");
+        assert_eq!(reloaded.positions.get(&key), Some(&flat));
+        assert!(!reloaded.cost_basis.contains_key(&key));
+    }
+    fn count_cash_entries(store: &TradingStore) -> i64 {
+        store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM ledger_entries WHERE account_id = 'cash'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("entry count")
     }
     #[test]
     fn v19_instrument_fixture_keeps_terms_without_inventing_a_market_route() {
@@ -1512,8 +1857,8 @@ mod tests {
         };
         store.migrate(false).expect("schema five migration");
         store
-            .finalize_group_migration()
-            .expect("group migration finalizes");
+            .complete_post_group_migrations()
+            .expect("post-group migrations complete");
 
         let version = store
             .connection
@@ -1606,8 +1951,8 @@ mod tests {
         };
         store.migrate(false).expect("v18 and v19 migrations");
         store
-            .finalize_group_migration()
-            .expect("group migration finalizes");
+            .complete_post_group_migrations()
+            .expect("post-group migrations complete");
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

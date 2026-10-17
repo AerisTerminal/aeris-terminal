@@ -1,9 +1,9 @@
 use super::{
     ClientOrderId, EconomicEventRiskAction, EconomicEventRiskOutcome, EconomicEventRiskTrigger,
-    Fill, FillId, FillMemoryUpdate, FixedPoint, FlattenOutcome, InstrumentId, Order, OrderId,
-    OrderSide, OrderStatus, OrderType, PlaceOrder, SimulatedMarketObservation, TimeInForce,
-    TradingAccountId, TradingCore, VenueRoute, fill_policy_persistence, flatten_acceptance_event,
-    flatten_fill_event,
+    Fill, FillId, FillMemoryUpdate, FixedPoint, FlattenOutcome, InstrumentId, Liquidity, Order,
+    OrderId, OrderSide, OrderStatus, OrderType, PlaceOrder, SimulatedMarketObservation,
+    TimeInForce, TradingAccountId, TradingCore, VenueRoute, fill_policy_persistence,
+    flatten_acceptance_event, flatten_fill_event,
 };
 
 impl TradingCore {
@@ -360,8 +360,13 @@ impl TradingCore {
         };
         fill.validate().map_err(|error| error.to_string())?;
         let event = flatten_fill_event(&order, &fill, sequence + 1, provenance)?;
-        let (position, policy_update) =
-            self.apply_fill(&fill, Some(&current), &account, &instrument)?;
+        let (position, cost_basis, policy_update) = self.apply_fill(
+            &fill,
+            Some(&current),
+            &account,
+            &instrument,
+            Liquidity::Taker,
+        )?;
         let filled = crate::book::lifecycle::fill_simulated(order, self.command_now)
             .map_err(|error| error.to_string())?;
         self.store.insert_fill(
@@ -369,7 +374,7 @@ impl TradingCore {
             &event,
             &fill,
             &position,
-            fill_policy_persistence(&policy_update),
+            fill_policy_persistence(&policy_update, cost_basis),
             sequence + 2,
         )?;
         self.apply_fill_to_memory(
@@ -378,6 +383,7 @@ impl TradingCore {
             &fill,
             FillMemoryUpdate {
                 position,
+                cost_basis,
                 position_key: key.clone(),
                 policy_update,
                 next_sequence: sequence + 2,

@@ -771,6 +771,8 @@ impl TradingCore {
                 crate::core::ledger::FillAccounting {
                     cycle_id: 0,
                     realized_gross: Some(pnl),
+                    commission: FixedPoint::try_new(0, pnl.scale())
+                        .map_err(|error| error.to_string())?,
                     cycle_realized: None,
                     cycle_closed: false,
                 },

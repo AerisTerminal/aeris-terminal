@@ -1538,6 +1538,8 @@ mod tests {
             connected_broker_accounts: BTreeSet::new(),
             position_pnl: Vec::new(),
             account_pnl: vec![account_pnl("practice", "USD", Some(50_000), 0, Some(mark))],
+            ledger_entries: Vec::new(),
+            fee_schedules: Vec::new(),
             risk_profiles: Vec::new(),
             risk_meters: Vec::new(),
             risk_locks: Vec::new(),

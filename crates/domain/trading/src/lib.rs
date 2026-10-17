@@ -3,8 +3,9 @@
 //! These values contain no provider wire types, persistence handles, or UI state. The
 //! in-process trading runtime is their sole mutable owner.
 
-use aeris_instruments::InstrumentId;
+use aeris_instruments::{InstrumentClass, InstrumentId};
 use core::fmt;
+use std::collections::BTreeMap;
 use std::error::Error;
 
 pub mod market;
@@ -174,7 +175,13 @@ pub fn project_unrealized_pnl(
     fixed_point_from_i128_rounded(raw, raw_scale, currency_scale)
 }
 
-fn fixed_point_from_i128_rounded(
+/// Converts an exact `i128` amount from `source_scale` to `target_scale`, rounding once to
+/// the nearest unit with ties away from zero. This is the single rounding policy for
+/// converting position math into account-currency amounts.
+///
+/// # Errors
+/// Returns an error when the scale exceeds 18 or the result does not fit an `i64`.
+pub fn fixed_point_from_i128_rounded(
     units: i128,
     source_scale: u8,
     target_scale: u8,
@@ -200,7 +207,12 @@ fn fixed_point_from_i128_rounded(
     FixedPoint::try_new(adjusted, target_scale)
 }
 
-fn round_divide_i128(
+/// Divides an exact `i128` by a positive denominator, rounding to the nearest integer with
+/// ties away from zero.
+///
+/// # Errors
+/// Returns an error when the rounding addition overflows.
+pub fn round_divide_i128(
     numerator: i128,
     positive_denominator: i128,
 ) -> Result<i128, TradingValidationError> {
@@ -791,6 +803,211 @@ pub struct AccountPnl {
     pub equity: Option<FixedPoint>,
 }
 
+/// The kind of one cash-ledger entry. Fee entries store negative amounts, so an account's
+/// balance is the plain sum of its ledger entries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LedgerEntryKind {
+    /// A deposit or the migration baseline of a simulated account.
+    Deposit,
+    /// A manual cash correction.
+    Adjustment,
+    /// Realized profit or loss produced by a fill.
+    RealizedPnl,
+    /// Commission charged by a fill; the amount is negative.
+    Commission,
+    /// An exchange or regulatory fee charged by a fill; the amount is negative.
+    ExchangeFee,
+}
+
+impl LedgerEntryKind {
+    /// Returns the stable storage string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deposit => "deposit",
+            Self::Adjustment => "adjustment",
+            Self::RealizedPnl => "realized_pnl",
+            Self::Commission => "commission",
+            Self::ExchangeFee => "exchange_fee",
+        }
+    }
+
+    /// Parses the stable storage string.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown kind.
+    pub fn parse(value: &str) -> Result<Self, TradingValidationError> {
+        match value {
+            "deposit" => Ok(Self::Deposit),
+            "adjustment" => Ok(Self::Adjustment),
+            "realized_pnl" => Ok(Self::RealizedPnl),
+            "commission" => Ok(Self::Commission),
+            "exchange_fee" => Ok(Self::ExchangeFee),
+            _ => Err(TradingValidationError::EmptyField("ledger_entry_kind")),
+        }
+    }
+}
+
+/// One durable cash movement of a simulated account. Broker balances remain the broker's
+/// authority; broker fills only produce informational entries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LedgerEntry {
+    /// The unique entry identifier.
+    pub entry_id: String,
+    /// The account the entry belongs to.
+    pub account_id: TradingAccountId,
+    /// The entry kind.
+    pub kind: LedgerEntryKind,
+    /// The signed cash amount in the account currency.
+    pub amount: FixedPoint,
+    /// The fill that produced the entry, when one did.
+    pub fill_id: Option<FillId>,
+    /// When the entry was recorded.
+    pub at_unix_nanos: i64,
+}
+
+impl LedgerEntry {
+    /// Validates the entry invariants.
+    ///
+    /// # Errors
+    /// Returns an error when the identifier is empty or the timestamp is negative.
+    pub fn validate(&self) -> Result<(), TradingValidationError> {
+        if self.entry_id.trim().is_empty() {
+            return Err(TradingValidationError::EmptyField("ledger entry_id"));
+        }
+        if self.at_unix_nanos < 0 {
+            return Err(TradingValidationError::InvalidTimestamp);
+        }
+        Ok(())
+    }
+}
+
+/// The liquidity side of a simulated fill: placement and trigger fills pay taker fees and a
+/// resting limit fill pays maker fees.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Liquidity {
+    /// A resting limit order filled by an opposing order or quote.
+    Maker,
+    /// A fill at order placement or stop trigger.
+    Taker,
+}
+
+/// The fee model applied to one instrument class or instrument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeeModel {
+    /// No fees.
+    None,
+    /// A fixed amount per contract and side.
+    PerContract {
+        /// The non-negative amount charged per contract.
+        per_side: FixedPoint,
+    },
+    /// A per-unit amount with an optional minimum and a notional cap in basis points.
+    PerUnit {
+        /// The non-negative amount charged per quantity unit.
+        per_unit: FixedPoint,
+        /// The minimum charge per fill.
+        minimum: Option<FixedPoint>,
+        /// The cap as basis points of notional.
+        maximum_bps: Option<u32>,
+    },
+    /// Basis points of notional, split by liquidity side.
+    NotionalBps {
+        /// Basis points charged to a resting limit fill.
+        maker_bps: u32,
+        /// Basis points charged to a placement or trigger fill.
+        taker_bps: u32,
+    },
+}
+
+/// The largest fee rate a schedule may express, in basis points of notional.
+pub const MAXIMUM_FEE_BPS: u32 = 10_000;
+
+impl FeeModel {
+    /// Validates the model invariants.
+    ///
+    /// # Errors
+    /// Returns an error for a negative amount or a rate above 10,000 basis points.
+    pub fn validate(&self) -> Result<(), TradingValidationError> {
+        match self {
+            Self::None => Ok(()),
+            Self::PerContract { per_side } => non_negative_fee(*per_side, "per_side"),
+            Self::PerUnit {
+                per_unit,
+                minimum,
+                maximum_bps,
+            } => {
+                non_negative_fee(*per_unit, "per_unit")?;
+                if let Some(minimum) = minimum {
+                    non_negative_fee(*minimum, "minimum")?;
+                }
+                if let Some(bps) = maximum_bps {
+                    bounded_fee_bps(*bps)?;
+                }
+                Ok(())
+            }
+            Self::NotionalBps {
+                maker_bps,
+                taker_bps,
+            } => {
+                bounded_fee_bps(*maker_bps)?;
+                bounded_fee_bps(*taker_bps)
+            }
+        }
+    }
+}
+
+const fn non_negative_fee(
+    value: FixedPoint,
+    field: &'static str,
+) -> Result<(), TradingValidationError> {
+    if value.units() < 0 {
+        return Err(TradingValidationError::NegativeFeeAmount(field));
+    }
+    Ok(())
+}
+
+const fn bounded_fee_bps(bps: u32) -> Result<(), TradingValidationError> {
+    if bps > MAXIMUM_FEE_BPS {
+        return Err(TradingValidationError::InvalidFeeRate(bps));
+    }
+    Ok(())
+}
+
+/// The per-account fee schedule: a model per instrument class with per-instrument
+/// overrides. The default schedule is free trading.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FeeSchedule {
+    /// The model per instrument class.
+    pub by_class: BTreeMap<InstrumentClass, FeeModel>,
+    /// Per-instrument overrides that win over the class model.
+    pub by_instrument: BTreeMap<InstrumentId, FeeModel>,
+}
+
+impl FeeSchedule {
+    /// Returns the model for one instrument. A per-instrument override wins over the class
+    /// model and an unset schedule is free.
+    #[must_use]
+    pub fn model_for(&self, class: InstrumentClass, instrument: &InstrumentId) -> FeeModel {
+        self.by_instrument
+            .get(instrument)
+            .or_else(|| self.by_class.get(&class))
+            .copied()
+            .unwrap_or(FeeModel::None)
+    }
+
+    /// Validates every model in the schedule.
+    ///
+    /// # Errors
+    /// Returns the first invalid model's error.
+    pub fn validate(&self) -> Result<(), TradingValidationError> {
+        for model in self.by_class.values().chain(self.by_instrument.values()) {
+            model.validate()?;
+        }
+        Ok(())
+    }
+}
+
 /// Validation failures at the provider-neutral trading boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TradingValidationError {
@@ -801,8 +1018,10 @@ pub enum TradingValidationError {
     InvalidOrderPrices,
     InvalidAccountRoute,
     InvalidStartingEquity,
+    InvalidFeeRate(u32),
     InvalidFilledQuantity,
     InvalidTimestamp,
+    NegativeFeeAmount(&'static str),
     NonPositivePrice,
     NonPositivePointValue,
     NonPositiveQuantity,
@@ -838,6 +1057,10 @@ impl fmt::Display for TradingValidationError {
             Self::SimulationLabelMissing => {
                 formatter.write_str("simulated account display name must contain SIM")
             }
+            Self::InvalidFeeRate(rate) => {
+                write!(formatter, "fee rate {rate} basis points exceeds 10000")
+            }
+            Self::NegativeFeeAmount(field) => write!(formatter, "fee {field} must not be negative"),
             Self::ZeroSequence => formatter.write_str("generation and sequence must be non-zero"),
         }
     }
@@ -870,6 +1093,78 @@ fn power_of_ten_i128(exponent: u8) -> Result<i128, TradingValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ledger_entry_kind_round_trips_its_storage_string() {
+        for kind in [
+            LedgerEntryKind::Deposit,
+            LedgerEntryKind::Adjustment,
+            LedgerEntryKind::RealizedPnl,
+            LedgerEntryKind::Commission,
+            LedgerEntryKind::ExchangeFee,
+        ] {
+            assert_eq!(LedgerEntryKind::parse(kind.as_str()), Ok(kind));
+        }
+        assert!(LedgerEntryKind::parse("margin_reserve").is_err());
+    }
+
+    #[test]
+    fn fee_schedule_prefers_the_instrument_override_and_defaults_to_free() {
+        let equity = FeeModel::NotionalBps {
+            maker_bps: 1,
+            taker_bps: 2,
+        };
+        let override_model = FeeModel::PerContract {
+            per_side: FixedPoint::try_new(25, 2).expect("fee"),
+        };
+        let instrument = InstrumentId::try_new("aapl").expect("instrument");
+        let other = InstrumentId::try_new("msft").expect("instrument");
+        let schedule = FeeSchedule {
+            by_class: BTreeMap::from([(InstrumentClass::Equity, equity)]),
+            by_instrument: BTreeMap::from([(instrument.clone(), override_model)]),
+        };
+        assert_eq!(
+            schedule.model_for(InstrumentClass::Equity, &instrument),
+            override_model
+        );
+        assert_eq!(schedule.model_for(InstrumentClass::Equity, &other), equity);
+        assert_eq!(
+            schedule.model_for(InstrumentClass::Future, &other),
+            FeeModel::None
+        );
+        assert_eq!(
+            FeeSchedule::default().model_for(InstrumentClass::Equity, &instrument),
+            FeeModel::None
+        );
+    }
+
+    #[test]
+    fn fee_model_validation_rejects_negative_amounts_and_unbounded_rates() {
+        assert_eq!(
+            FeeModel::PerContract {
+                per_side: FixedPoint::try_new(-1, 2).expect("fee"),
+            }
+            .validate(),
+            Err(TradingValidationError::NegativeFeeAmount("per_side"))
+        );
+        assert_eq!(
+            FeeModel::NotionalBps {
+                maker_bps: 10_001,
+                taker_bps: 0,
+            }
+            .validate(),
+            Err(TradingValidationError::InvalidFeeRate(10_001))
+        );
+        assert!(
+            FeeModel::PerUnit {
+                per_unit: FixedPoint::try_new(5, 2).expect("fee"),
+                minimum: Some(FixedPoint::try_new(10, 2).expect("fee")),
+                maximum_bps: Some(500),
+            }
+            .validate()
+            .is_ok()
+        );
+    }
 
     #[test]
     fn fixed_point_never_rounds_implicitly() {
