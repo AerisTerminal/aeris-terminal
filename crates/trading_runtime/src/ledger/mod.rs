@@ -220,6 +220,7 @@ impl TradingCore {
             },
             planned_bracket_legs: self.planned_bracket_legs(),
             protective_orders: self.state.protective_orders.values().cloned().collect(),
+            recovery_notices: self.recovery_notices.clone(),
         })
     }
 

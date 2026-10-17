@@ -14,7 +14,10 @@ use super::{
     tighter_stop,
 };
 use crate::book::lifecycle::{self, CancellationCause, ModificationCause};
-use crate::{MAXIMUM_MANAGED_BRACKETS, MAXIMUM_OPEN_ORDERS, ProtectiveOrderRole};
+use crate::{
+    MAXIMUM_MANAGED_BRACKETS, MAXIMUM_OPEN_ORDERS, ProtectiveOrderRole, RecoveryNotice,
+    RecoveryNoticeKind,
+};
 use aeris_trading::{OrderEventReason, RejectReason};
 
 /// A group leg's planned activation: reprice and resize the held order, then activate it.
@@ -138,6 +141,125 @@ impl TradingCore {
                     .ok_or_else(|| "placed order group disappeared".to_string())?,
             )?,
         ))
+    }
+
+    /// Converts each legacy awaiting bracket into group authority once, at startup: a
+    /// priceable row becomes a pending group whose held legs carry exactly the prices the
+    /// legacy planned-leg projection showed, and an unpriceable row becomes a cancelled
+    /// group with a recovery notice while its entry keeps working unmanaged. Each bracket
+    /// converts in one order step, so a failed commit leaves the legacy row for the next
+    /// start.
+    pub(crate) fn convert_awaiting_brackets(&mut self) -> Result<(), String> {
+        let awaiting = self
+            .state
+            .managed_brackets
+            .values()
+            .filter(|bracket| bracket.status == ManagedBracketStatus::AwaitingEntry)
+            .cloned()
+            .collect::<Vec<_>>();
+        for bracket in awaiting {
+            self.convert_awaiting_bracket(&bracket)?;
+        }
+        Ok(())
+    }
+
+    fn convert_awaiting_bracket(&mut self, bracket: &ManagedBracket) -> Result<(), String> {
+        let entry = self
+            .order_by_client_id(&bracket.entry_client_order_id)?
+            .clone();
+        if !entry.status.is_open() {
+            // The legacy reconciler retires a stale bracket on the next quote; converting it
+            // here would invent protection for an entry that can no longer fill.
+            return Ok(());
+        }
+        let instrument = self
+            .state
+            .instruments
+            .get(&entry.instrument_id)
+            .cloned()
+            .ok_or_else(|| "awaiting bracket entry instrument is not registered".to_string())?;
+        let priced = match entry.limit_price.or(entry.stop_price) {
+            Some(base) => instrument_tick_units(&instrument, base).and_then(|tick_units| {
+                allocated_target_quantities(
+                    entry.quantity,
+                    &bracket.template.targets,
+                    order_increment_units(&instrument),
+                )
+                .map(|quantities| (base, tick_units, quantities))
+            }),
+            None => Err("the bracket's entry has no resting price".to_string()),
+        };
+        let (mut step, notice) = match priced {
+            Ok((base, tick_units, target_quantities)) => {
+                let prepared = self.prepare_owned_legs(
+                    &entry,
+                    &bracket.template,
+                    &target_quantities,
+                    Some(base),
+                    Some(tick_units),
+                    self.state.next_sequence,
+                )?;
+                let group =
+                    Self::converted_group(bracket, &entry, GroupStatus::Pending, prepared.legs)?;
+                let mut step = OrderStep::new(prepared.next_sequence);
+                step.inserted = prepared.orders;
+                step.groups.push(group);
+                (step, None)
+            }
+            Err(reason) => {
+                let group =
+                    Self::converted_group(bracket, &entry, GroupStatus::Cancelled, Vec::new())?;
+                let mut step = OrderStep::new(self.state.next_sequence);
+                step.groups.push(group);
+                let notice = RecoveryNotice {
+                    kind: RecoveryNoticeKind::UnpriceableBracket,
+                    subject: bracket.bracket_id.clone(),
+                    detail: format!(
+                        "the bracket on {} could not be priced after the upgrade: {reason}",
+                        entry.instrument_id.as_str()
+                    ),
+                };
+                (step, Some(notice))
+            }
+        };
+        step.deleted_brackets.push(bracket.bracket_id.clone());
+        self.commit_order_step(step, Vec::new())?;
+        if let Some(notice) = notice {
+            self.recovery_notices.push(notice);
+        }
+        Ok(())
+    }
+
+    /// The group a converted legacy bracket becomes, keeping its identity and template.
+    fn converted_group(
+        bracket: &ManagedBracket,
+        entry: &Order,
+        status: GroupStatus,
+        legs: Vec<GroupLeg>,
+    ) -> Result<OrderGroup, String> {
+        let group = OrderGroup {
+            group_id: bracket.bracket_id.clone(),
+            account_id: entry.account_id.clone(),
+            instrument_id: entry.instrument_id.clone(),
+            kind: GroupKind::Bracket,
+            status,
+            entry: Some(entry.id.clone()),
+            legs,
+            management: super::model::StopManagement {
+                trailing: bracket.template.trailing_stop,
+                break_even: bracket.template.break_even,
+                entry_price: None,
+            },
+            template: Some((
+                bracket.template.template_id.clone(),
+                bracket.template.revision,
+            )),
+            revision: 1,
+        };
+        group
+            .validate()
+            .map_err(|error| format!("invalid order group: {error:?}"))?;
+        Ok(group)
     }
 
     /// Builds the held stop and target legs of a pending bracket, priced from the entry's

@@ -364,6 +364,24 @@ impl UserRecord {
     }
 }
 
+/// A deterministic startup repair the user must see. It is raised once by the start that
+/// performs the repair; M5.11's typed event stream will carry it to subscribers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryNotice {
+    pub kind: RecoveryNoticeKind,
+    /// The legacy bracket or group the notice is about.
+    pub subject: String,
+    pub detail: String,
+}
+
+/// The repair a recovery notice reports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryNoticeKind {
+    /// A pre-group awaiting bracket could not be priced from its entry after the upgrade; its
+    /// group is cancelled and its entry keeps working unmanaged.
+    UnpriceableBracket,
+}
+
 /// Bounded immutable projection of current trading state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TradingSnapshot {
@@ -405,6 +423,8 @@ pub struct TradingSnapshot {
     /// The stop and targets each awaiting bracket places once its working entry fills.
     pub planned_bracket_legs: Vec<PlannedBracketLeg>,
     pub protective_orders: Vec<ProtectiveOrder>,
+    /// Startup repairs this process performed, raised once at the start that repaired them.
+    pub recovery_notices: Vec<RecoveryNotice>,
 }
 
 /// Trigger prices of the open orders protecting one practice position.
@@ -543,6 +563,9 @@ pub(crate) struct TradingCore {
     /// Broker accounts the current venue generation has announced; the rest are not
     /// reachable now.
     connected_broker_accounts: BTreeSet<TradingAccountId>,
+    /// Startup repairs (legacy awaiting-bracket conversion, group verification) raised by
+    /// this process until M5.11 publishes them as typed events.
+    recovery_notices: Vec<RecoveryNotice>,
     #[cfg(test)]
     timer_calls: usize,
 }
@@ -1235,7 +1258,20 @@ impl TradingCore {
         venue_inbox: Weak<VenueInbox>,
         market_feed: Arc<MarketFeedInbox>,
     ) -> Result<Self, StoreError> {
-        let mut store = TradingStore::open(database_path, retention)?;
+        let store = TradingStore::open(database_path, retention)?;
+        Self::open_with_store(store, retention, clock, execution, venue_inbox, market_feed)
+    }
+
+    /// Opens a core on an already migrated store. Tests arm commit failure between the store
+    /// open and this load to prove the startup conversion stays atomic and retryable.
+    pub(crate) fn open_with_store(
+        mut store: TradingStore,
+        retention: TradingRetention,
+        clock: Arc<dyn clock::Clock>,
+        execution: ExecutionPolicy,
+        venue_inbox: Weak<VenueInbox>,
+        market_feed: Arc<MarketFeedInbox>,
+    ) -> Result<Self, StoreError> {
         let state = store.load_state().map_err(StoreError::Other)?;
         let recovery_quote_floor = clock.wall_unix_nanos();
         let mut core = Self {
@@ -1263,12 +1299,17 @@ impl TradingCore {
             venue_inbox,
             venue_ingestion: 0,
             connected_broker_accounts: BTreeSet::new(),
+            recovery_notices: Vec::new(),
             #[cfg(test)]
             timer_calls: 0,
         };
         core.repair_loaded_position_projections()
             .map_err(StoreError::Other)?;
         core.align_loaded_protection().map_err(StoreError::Other)?;
+        // Awaiting brackets convert to group authority only after the legacy alignment saw
+        // the stored state exactly as the pre-switch runtime left it.
+        core.convert_awaiting_brackets()
+            .map_err(StoreError::Other)?;
         core.recover_day_deadlines().map_err(StoreError::Other)?;
         // Expire durable DAY deadlines before the service acknowledges startup
         // or accepts a quote. A failed transaction leaves recovery retryable.

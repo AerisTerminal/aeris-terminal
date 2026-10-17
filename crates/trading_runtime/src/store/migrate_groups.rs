@@ -73,7 +73,10 @@ impl TradingStore {
                 entry_order_id,management_json,template_id,template_revision,revision)
              SELECT b.bracket_id,e.account_id,e.instrument_id,'bracket',b.status,e.id,
                 json_object('trailing',json_extract(b.template_json,'$.trailing_stop'),
-                    'break_even',json_extract(b.template_json,'$.break_even')),
+                    'break_even',json_extract(b.template_json,'$.break_even'),
+                    'entry_price',CASE WHEN b.entry_price_units IS NOT NULL
+                        THEN json_object('units',b.entry_price_units,'scale',b.entry_price_scale)
+                        ELSE NULL END),
                 json_extract(b.template_json,'$.template_id'),
                 json_extract(b.template_json,'$.revision'),1
              FROM managed_brackets b JOIN orders e
@@ -160,7 +163,10 @@ impl TradingStore {
                     entry_order_id,management_json,template_id,template_revision,revision)
                  SELECT b.bracket_id,e.account_id,e.instrument_id,'bracket','active',e.id,
                     json_object('trailing',json_extract(b.template_json,'$.trailing_stop'),
-                        'break_even',json_extract(b.template_json,'$.break_even')),
+                        'break_even',json_extract(b.template_json,'$.break_even'),
+                        'entry_price',CASE WHEN b.entry_price_units IS NOT NULL
+                            THEN json_object('units',b.entry_price_units,'scale',b.entry_price_scale)
+                            ELSE NULL END),
                     json_extract(b.template_json,'$.template_id'),
                     json_extract(b.template_json,'$.revision'),1
                  FROM managed_brackets b JOIN orders e
@@ -233,7 +239,7 @@ mod tests {
     #[test]
     fn v19_protection_migrates_once_without_changing_legacy_order() {
         let connection = Connection::open_in_memory().unwrap();
-        super::super::tests::create_schema_at(&connection, 19);
+        super::super::create_schema_at(&connection, 19);
         connection
             .execute_batch(
                 "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
@@ -298,7 +304,7 @@ mod tests {
     #[test]
     fn conflicting_group_membership_aborts_the_entire_backfill() {
         let connection = Connection::open_in_memory().unwrap();
-        super::super::tests::create_schema_at(&connection, 23);
+        super::super::create_schema_at(&connection, 23);
         connection
             .execute_batch(
                 "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
@@ -339,7 +345,7 @@ mod tests {
     #[test]
     fn failed_last_bracket_leg_rolls_back_all_historical_groups() {
         let connection = Connection::open_in_memory().unwrap();
-        super::super::tests::create_schema_at(&connection, 23);
+        super::super::create_schema_at(&connection, 23);
         connection.execute_batch(
             "PRAGMA foreign_keys=ON;
              INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
@@ -424,7 +430,7 @@ mod tests {
     fn startup_backfills_schema_19_and_already_current_protection() {
         let path = super::super::tests::temporary_database("protection-groups-v19");
         let connection = Connection::open(&path).unwrap();
-        super::super::tests::create_schema_at(&connection, 19);
+        super::super::create_schema_at(&connection, 19);
         connection
             .execute_batch(
                 "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
@@ -480,7 +486,7 @@ mod tests {
     #[test]
     fn terminal_bracket_links_retained_children_without_rewriting_orders() {
         let connection = Connection::open_in_memory().unwrap();
-        super::super::tests::create_schema_at(&connection, 23);
+        super::super::create_schema_at(&connection, 23);
         connection
             .execute_batch(
                 "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
@@ -575,7 +581,7 @@ mod tests {
     fn v19_active_bracket_links_existing_orders_and_survives_reopen() {
         let path = super::super::tests::temporary_database("active-bracket-v19");
         let connection = Connection::open(&path).unwrap();
-        super::super::tests::create_schema_at(&connection, 19);
+        super::super::create_schema_at(&connection, 19);
         connection.execute_batch(
             "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
              VALUES ('sim','Sanitized','simulated','USD',2,'aeris-sim');

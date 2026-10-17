@@ -1521,6 +1521,7 @@ mod tests {
         let mut position = simulated_position("practice", 100_000_000);
         position.unrealized_pnl = aeris_trading::FixedPoint::try_new(mark, 2).expect("mark");
         aeris_trading_runtime::TradingSnapshot {
+            recovery_notices: Vec::new(),
             revision: 4,
             market_observation_error: None,
             accounts: Vec::new(),

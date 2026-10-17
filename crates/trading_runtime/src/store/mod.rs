@@ -497,6 +497,20 @@ fn database_error(error: rusqlite::Error) -> String {
     format!("trading database operation failed: {error}")
 }
 
+/// Applies the historical migrations up to `version` so migration tests can build fixtures.
+#[cfg(test)]
+pub(crate) fn create_schema_at(connection: &Connection, version: u32) {
+    for migration in MIGRATIONS.iter().take(version as usize) {
+        assert_eq!(migration.from + 1, migration.to);
+        connection
+            .execute_batch(migration.sql)
+            .expect("historical migration");
+    }
+    connection
+        .pragma_update(None, "user_version", version)
+        .expect("historical version");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,18 +573,6 @@ mod tests {
         );
         drop(store);
         fs::remove_dir_all(path.parent().expect("fixture parent")).expect("fixture cleanup");
-    }
-
-    pub(super) fn create_schema_at(connection: &Connection, version: u32) {
-        for migration in MIGRATIONS.iter().take(version as usize) {
-            assert_eq!(migration.from + 1, migration.to);
-            connection
-                .execute_batch(migration.sql)
-                .expect("historical migration");
-        }
-        connection
-            .pragma_update(None, "user_version", version)
-            .expect("historical version");
     }
 
     fn file_hash(path: &Path) -> u64 {

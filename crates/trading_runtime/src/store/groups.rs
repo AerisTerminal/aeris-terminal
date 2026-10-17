@@ -661,7 +661,7 @@ mod group_step_tests {
     #[test]
     fn group_step_rolls_back_on_last_leg_and_retries_without_orphan_members() {
         let connection = Connection::open_in_memory().unwrap();
-        super::super::tests::create_schema_at(&connection, 23);
+        super::super::create_schema_at(&connection, 23);
         connection
             .execute_batch(
                 "PRAGMA foreign_keys=ON;
@@ -747,7 +747,7 @@ mod group_step_tests {
     #[test]
     fn group_step_rejects_a_member_from_another_account() {
         let connection = Connection::open_in_memory().unwrap();
-        super::super::tests::create_schema_at(&connection, 23);
+        super::super::create_schema_at(&connection, 23);
         connection
             .execute_batch(
                 "PRAGMA foreign_keys=ON;
