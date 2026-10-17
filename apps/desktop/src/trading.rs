@@ -65,6 +65,12 @@ pub fn flatten_feedback(
             outcome.pending_close_requests.len()
         ));
     }
+    if !outcome.unpriced.is_empty() {
+        parts.push(format!(
+            "{} position(s) lack a verified quote and keep their protection",
+            outcome.unpriced.len()
+        ));
+    }
     let incomplete = outcome.incomplete;
     parts.extend(incomplete.clone());
     let message = parts.join(" · ");
@@ -741,7 +747,10 @@ pub fn flatten_simulated_account_for(
         .spawn(async move {
             record_feedback(flatten_feedback(
                 "Flattened",
-                service.flatten_account_at(account_id, instrument),
+                service.flatten(aeris_trading_runtime::FlattenScope {
+                    account: Some(account_id),
+                    instrument: Some(instrument),
+                }),
             ));
         })
         .detach();
@@ -773,21 +782,17 @@ pub fn reverse_simulated_position(
         .detach();
 }
 
-/// Flattens every simulated account using the current best bid and ask off the UI thread.
-pub fn flatten_simulated_accounts(frame: &aeris_market_data::OrderBookFrame, cx: &mut gpui::App) {
+/// Flattens every simulated account at the runtime's verified quotes off the UI thread.
+pub fn flatten_simulated_accounts(cx: &mut gpui::App) {
     let Some(service) = handle() else {
         record_feedback(Err("Practice trading is unavailable".to_string()));
-        return;
-    };
-    let Ok(instrument) = InstrumentId::try_new(frame.instrument_id.clone()) else {
-        record_feedback(Err("Flatten requires a selected instrument".to_string()));
         return;
     };
     cx.background_executor()
         .spawn(async move {
             record_feedback(flatten_feedback(
                 "Flattened all accounts",
-                service.flatten_all_at(instrument),
+                service.flatten(aeris_trading_runtime::FlattenScope::default()),
             ));
         })
         .detach();

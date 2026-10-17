@@ -507,9 +507,9 @@ fn global_actions(state: &TradingOrderControlsState<'_>) -> Div {
             "trading_flatten_all",
             "Flatten All",
             state,
-            state.frame.is_some() && !state.accounts.is_empty(),
-            |frame, _, _, cx| {
-                aeris_desktop::trading::flatten_simulated_accounts(frame, cx);
+            !state.accounts.is_empty(),
+            |_, _, _, cx| {
+                aeris_desktop::trading::flatten_simulated_accounts(cx);
             },
         ),
     )

@@ -1,9 +1,8 @@
 use super::{
-    BTreeMap, BrokerFillRecord, Fill, FillAccounting, FillId, FillPolicyPersistence, FixedPoint,
-    InstrumentId, Order, OrderEvent, OrderId, Position, StepTx, TradeCycle, TradingAccountId,
-    TradingStore, VecDeque, database_error, decode_provenance, encode_provenance, fixed,
-    insert_event_row, insert_order_row, params, parse_side, sqlite_i64, update_next_sequence,
-    upsert_discipline_state, upsert_position, upsert_position_basis, upsert_risk_rule_state,
+    BTreeMap, BrokerFillRecord, Fill, FillAccounting, FillId, FixedPoint, InstrumentId, OrderId,
+    StepTx, TradeCycle, TradingAccountId, TradingStore, VecDeque, database_error,
+    decode_provenance, encode_provenance, fixed, insert_event_row, insert_order_row, params,
+    parse_side, sqlite_i64, update_next_sequence,
 };
 
 pub(super) fn insert_fill_accounting(
@@ -182,73 +181,6 @@ impl TradingStore {
             .map_err(database_error)?;
         update_next_sequence(&transaction, next_sequence)?;
         StepTx::commit_revision(transaction).map_err(database_error)
-    }
-}
-
-impl TradingStore {
-    pub(crate) fn insert_fill(
-        &mut self,
-        order: &Order,
-        event: &OrderEvent,
-        fill: &Fill,
-        position: &Position,
-        policy: FillPolicyPersistence<'_>,
-        next_sequence: u64,
-    ) -> Result<(), String> {
-        let transaction = self.connection.transaction().map_err(database_error)?;
-        transaction
-            .execute(
-                "UPDATE orders SET status = ?1, filled_units = ?2,
-                    filled_scale = ?3, revision = ?4, updated_unix_nanos = ?5,
-                    terminal_unix_nanos = ?6, triggered_unix_nanos = ?7,
-                    expires_at_unix_nanos = ?8
-                 WHERE id = ?9 AND status IN ('working', 'partially_filled')",
-                params![
-                    order.status.as_str(),
-                    order.filled_quantity.units(),
-                    order.filled_quantity.scale(),
-                    order.revision,
-                    order.updated_unix_nanos,
-                    order.terminal_unix_nanos,
-                    order.triggered_unix_nanos,
-                    order.expires_at_unix_nanos,
-                    order.id.as_str(),
-                ],
-            )
-            .map_err(database_error)?;
-        insert_event_row(&transaction, event)?;
-        transaction
-            .execute(
-                "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
-                    price_scale, quantity_units, quantity_scale, execution_unix_nanos,
-                    provenance_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    fill.id.as_str(),
-                    fill.order_id.as_str(),
-                    fill.account_id.as_str(),
-                    fill.instrument_id.as_str(),
-                    fill.side.as_str(),
-                    fill.price.units(),
-                    fill.price.scale(),
-                    fill.quantity.units(),
-                    fill.quantity.scale(),
-                    fill.execution_unix_nanos,
-                    encode_provenance(&fill.provenance),
-                ],
-            )
-            .map_err(database_error)?;
-        insert_fill_accounting(&transaction, fill, policy.accounting)?;
-        super::ledger::insert_ledger_entries(&transaction, policy.ledger_entries)?;
-        upsert_position(&transaction, position)?;
-        upsert_position_basis(&transaction, position, policy.cost_basis)?;
-        upsert_trade_cycle(&transaction, policy.trade_cycle)?;
-        if let Some(rule_state) = policy.rule_state {
-            upsert_risk_rule_state(&transaction, rule_state)?;
-        }
-        upsert_discipline_state(&transaction, policy.discipline_state)?;
-        update_next_sequence(&transaction, next_sequence)?;
-        transaction.commit().map_err(database_error)
     }
 }
 

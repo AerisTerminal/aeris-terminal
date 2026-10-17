@@ -364,6 +364,12 @@ impl TradingCore {
 
     pub(crate) fn drain_market_feed(&mut self) {
         let batch = self.market_feed.drain();
+        self.apply_market_batch(batch);
+    }
+
+    /// Applies one drained feed batch; the replay harness drives this directly because it owns
+    /// a `TradingCore` without the service inbox.
+    pub(crate) fn apply_market_batch(&mut self, batch: crate::core::market::feed::MarketFeedBatch) {
         let mut changed = BTreeSet::new();
         for event in batch.controls {
             match event {

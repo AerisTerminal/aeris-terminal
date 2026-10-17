@@ -778,7 +778,7 @@ impl TradingCore {
             .ok_or_else(|| "placed order disappeared".to_string())
     }
 
-    fn stage_single_order(
+    pub(super) fn stage_single_order(
         &mut self,
         step: &mut OrderStep,
         command: PlaceOrder,

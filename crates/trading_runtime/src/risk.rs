@@ -91,6 +91,8 @@ pub struct EconomicEventRiskOutcome {
     pub locked_accounts: usize,
     pub flattened_accounts: usize,
     pub fills: Vec<aeris_trading::Fill>,
+    /// Positions a flatten rule kept because no current verified quote could price them.
+    pub unpriced: Vec<crate::core::UnpricedPosition>,
 }
 
 impl EconomicEventRiskTrigger {

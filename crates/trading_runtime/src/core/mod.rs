@@ -48,7 +48,7 @@ pub use crate::risk::{
 };
 pub use crate::round_trip::{TradeLeg, TradeRoundTrip};
 use crate::service::Command;
-use crate::store::{FillPolicyPersistence, OrderStep, StoredState, TradingStore};
+use crate::store::{OrderStep, StoredState, TradingStore};
 pub use crate::store::{SCHEMA_VERSION, StoreError};
 pub use crate::strategy::{
     BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, BreakEvenRule,
@@ -149,6 +149,26 @@ pub struct FlattenOutcome {
     /// What could not be requested (for example with a broker venue disconnected); every
     /// other order and position in scope was still handled.
     pub incomplete: Option<String>,
+    /// Positions kept because the owner holds no current verified quote for their
+    /// instrument. They are reported, never silently skipped, and keep their protection.
+    pub unpriced: Vec<UnpricedPosition>,
+}
+
+/// Which accounts and instruments a flatten command touches: `None` selects every account
+/// or every instrument with an open position.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FlattenScope {
+    pub account: Option<TradingAccountId>,
+    pub instrument: Option<InstrumentId>,
+}
+
+/// A position a flatten or the kill switch kept because no current verified quote could
+/// price it; its protection stays in place.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnpricedPosition {
+    pub account_id: TradingAccountId,
+    pub instrument_id: InstrumentId,
+    pub net_quantity: FixedPoint,
 }
 
 pub(crate) fn respond<T>(reply: &Reply<T>, result: Result<T, String>) {
@@ -1084,63 +1104,24 @@ impl TradingService {
         self.request(|reply| Command::KillSwitch(account_id, reason, locked_at_unix_nanos, reply))
     }
 
-    /// Cancels working orders and closes one account's simulated positions at the observed BBO.
+    /// Flattens every in-scope simulated position at the owner's own verified quotes and
+    /// requests broker closes for every in-scope instrument. Positions without a current
+    /// verified quote are reported in `unpriced` and keep their protection; cancelling the
+    /// scope's working orders and closing the priced positions commits as one durable step.
     ///
     /// # Errors
-    /// Returns an error when the observation is invalid, the account is unknown, or persistence
-    /// fails. Flattening is an administrative action and remains available while risk-locked.
-    #[cfg(test)]
-    pub fn flatten_account(
-        &self,
-        account_id: TradingAccountId,
-        observation: SimulatedMarketObservation,
-    ) -> Result<FlattenOutcome, String> {
-        self.request(|reply| Command::Flatten(account_id, observation, reply))
-    }
-
-    /// Closes and reverses the selected account's position for the observed instrument.
-    ///
-    /// # Errors
-    /// Returns an error when the position is flat, the observation is invalid,
-    /// persistence fails, or the replacement side violates account risk.
-    #[cfg(test)]
-    pub fn reverse_position(
-        &self,
-        account_id: TradingAccountId,
-        observation: SimulatedMarketObservation,
-    ) -> Result<FlattenOutcome, String> {
-        self.request(|reply| Command::Reverse(account_id, observation, reply))
-    }
-
-    /// Cancels working orders and closes simulated positions for every account at the observed BBO.
-    ///
-    /// # Errors
-    /// Returns an error when the observation is invalid, no accounts are registered, or
+    /// Returns an error when a selected account is unknown, no account is registered, or
     /// persistence fails. This administrative action remains available while risk-locked.
-    #[cfg(test)]
-    pub fn flatten_all(
-        &self,
-        observation: SimulatedMarketObservation,
-    ) -> Result<FlattenOutcome, String> {
-        self.request(|reply| Command::FlattenAll(observation, reply))
+    pub fn flatten(&self, scope: FlattenScope) -> Result<FlattenOutcome, String> {
+        self.request(|reply| Command::Flatten(scope, reply))
     }
 
-    /// Flattens the selected instrument using only the owner's validated quote.
+    /// Reverses the selected instrument using only the owner's validated quote. The closing
+    /// and opening fills commit in one step; a risk rejection leaves the position untouched.
     ///
     /// # Errors
-    /// Returns an error for an unavailable quote or failed close.
-    pub fn flatten_account_at(
-        &self,
-        account: TradingAccountId,
-        instrument: InstrumentId,
-    ) -> Result<FlattenOutcome, String> {
-        self.request(|reply| Command::FlattenAt(account, instrument, reply))
-    }
-
-    /// Reverses the selected instrument using only the owner's validated quote.
-    ///
-    /// # Errors
-    /// Returns an error for an unavailable quote or failed reversal.
+    /// Returns an error when the position is flat, the quote is unavailable, the replacement
+    /// side violates account risk, the account is locked, or persistence fails.
     pub fn reverse_position_at(
         &self,
         account: TradingAccountId,
@@ -1149,39 +1130,18 @@ impl TradingService {
         self.request(|reply| Command::ReverseAt(account, instrument, reply))
     }
 
-    /// Flattens all accounts for the selected instrument using only the owner's validated quote.
+    /// Applies every enabled account event rule once, durably fenced by event/profile
+    /// identity. Flatten rules price positions from the owner's own verified quotes and need
+    /// no caller-supplied observation.
     ///
     /// # Errors
-    /// Returns an error for an unavailable quote or failed close.
-    pub fn flatten_all_at(&self, instrument: InstrumentId) -> Result<FlattenOutcome, String> {
-        self.request(|reply| Command::FlattenAllAt(instrument, reply))
-    }
-
-    /// Applies every enabled account event rule once, durably fenced by event/profile identity.
-    /// A flatten rule remains pending until the caller supplies a valid market observation.
-    ///
-    /// # Errors
-    /// Returns an error when the trigger or observation is invalid, a complete flatten cannot be
-    /// priced, the runtime is overloaded, or durable rule state cannot be written.
-    #[cfg(test)]
+    /// Returns an error when the trigger is invalid, the runtime is overloaded, or durable
+    /// rule state cannot be written.
     pub fn apply_economic_event_risk(
         &self,
         event: EconomicEventRiskTrigger,
-        observation: Option<SimulatedMarketObservation>,
     ) -> Result<EconomicEventRiskOutcome, String> {
-        self.request(|reply| Command::ApplyEconomicEventRisk(event, observation, reply))
-    }
-
-    /// Applies an event rule using the owner's quote for the selected instrument.
-    ///
-    /// # Errors
-    /// Returns an error for a rejected rule or unavailable owner.
-    pub fn apply_economic_event_risk_at(
-        &self,
-        event: EconomicEventRiskTrigger,
-        instrument: Option<InstrumentId>,
-    ) -> Result<EconomicEventRiskOutcome, String> {
-        self.request(|reply| Command::ApplyEconomicEventRiskAt(event, instrument, reply))
+        self.request(|reply| Command::ApplyEconomicEventRisk(event, reply))
     }
 
     /// Applies one market observation and returns fills produced by the simulated venue.
@@ -1584,14 +1544,8 @@ impl TradingCore {
             Command::LockAccount(..)
             | Command::UnlockAccount(..)
             | Command::KillSwitch(..)
-            | Command::FlattenAt(..)
+            | Command::Flatten(..)
             | Command::ReverseAt(..)
-            | Command::FlattenAllAt(..)
-            | Command::ApplyEconomicEventRiskAt(..) => self.dispatch_account_command(command),
-            #[cfg(test)]
-            Command::Flatten(..)
-            | Command::Reverse(..)
-            | Command::FlattenAll(..)
             | Command::ApplyEconomicEventRisk(..) => self.dispatch_account_command(command),
             Command::PutUserRecord(record, reply) => {
                 respond(&reply, self.put_user_record(&record));
@@ -1709,54 +1663,14 @@ impl TradingCore {
                     self.kill_switch(account_id.as_ref(), &reason, locked_at),
                 );
             }
-            #[cfg(test)]
-            Command::Flatten(account_id, observation, reply) => {
-                respond(&reply, self.flatten_account(&account_id, &observation));
-            }
-            #[cfg(test)]
-            Command::Reverse(account_id, observation, reply) => {
-                respond(&reply, self.reverse_position(&account_id, &observation));
-            }
-            #[cfg(test)]
-            Command::FlattenAll(observation, reply) => {
-                respond(&reply, self.flatten_all(&observation));
-            }
-            Command::FlattenAt(account, instrument, reply) => {
-                respond(
-                    &reply,
-                    self.market_observation(&instrument)
-                        .and_then(|quote| self.flatten_account(&account, &quote)),
-                );
+            Command::Flatten(scope, reply) => {
+                respond(&reply, self.flatten_scope(&scope));
             }
             Command::ReverseAt(account, instrument, reply) => {
-                respond(
-                    &reply,
-                    self.market_observation(&instrument)
-                        .and_then(|quote| self.reverse_position(&account, &quote)),
-                );
+                respond(&reply, self.reverse_position(&account, &instrument));
             }
-            Command::FlattenAllAt(instrument, reply) => {
-                respond(
-                    &reply,
-                    self.market_observation(&instrument)
-                        .and_then(|quote| self.flatten_all(&quote)),
-                );
-            }
-            #[cfg(test)]
-            Command::ApplyEconomicEventRisk(event, observation, reply) => {
-                respond(
-                    &reply,
-                    self.apply_economic_event_risk(&event, observation.as_ref()),
-                );
-            }
-            Command::ApplyEconomicEventRiskAt(event, instrument, reply) => {
-                let quote = instrument
-                    .as_ref()
-                    .and_then(|id| self.quote_book.observation(id));
-                respond(
-                    &reply,
-                    self.apply_economic_event_risk(&event, quote.as_ref()),
-                );
+            Command::ApplyEconomicEventRisk(event, reply) => {
+                respond(&reply, self.apply_economic_event_risk(&event));
             }
             _ => unreachable!("only account commands are dispatched here"),
         }
@@ -2055,20 +1969,6 @@ impl TradingCore {
             };
             self.state.orders.remove(&retired);
         }
-    }
-}
-
-pub(crate) fn fill_policy_persistence(
-    update: &FillPolicyUpdate,
-    cost_basis: Option<CostBasis>,
-) -> FillPolicyPersistence<'_> {
-    FillPolicyPersistence {
-        rule_state: update.rule_state.as_ref(),
-        trade_cycle: &update.trade_cycle,
-        discipline_state: &update.discipline_state,
-        accounting: update.accounting,
-        ledger_entries: &update.ledger_entries,
-        cost_basis,
     }
 }
 

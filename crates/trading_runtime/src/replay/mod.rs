@@ -2,6 +2,9 @@
 //! Do not update the expected ledger to accommodate a simulated-path refactor.
 
 use super::*;
+use aeris_trading::market::{
+    FeedState, InstrumentTerms, MarketFeedEvent, MarketRoute, TradingQuote,
+};
 use aeris_trading::{FeeModel, LedgerEntryKind};
 use std::fmt::Write;
 
@@ -9,6 +12,7 @@ use std::fmt::Write;
 struct ReplayHarness {
     core: Option<TradingCore>,
     configuration: TradingServiceConfig,
+    feed_ready: bool,
 }
 
 impl ReplayHarness {
@@ -27,6 +31,7 @@ impl ReplayHarness {
         Ok(Self {
             core: Some(core),
             configuration,
+            feed_ready: false,
         })
     }
 
@@ -34,6 +39,73 @@ impl ReplayHarness {
         // Releasing the SQLite connection is part of the restart, not merely reloading state.
         drop(self.core.take());
         self.core = Self::new(self.configuration.clone())?.core;
+        self.feed_ready = false;
+        Ok(())
+    }
+
+    /// Delivers one quote through the real market-event path so flatten and reverse price from
+    /// the owner's verified quote book exactly like production; the direct-observation command
+    /// bypasses the book and cannot price them.
+    fn feed_quote(
+        &mut self,
+        instrument: &TradingInstrument,
+        observation: &SimulatedMarketObservation,
+    ) -> Result<(), String> {
+        let id = observation.instrument_id.clone();
+        let mut controls = Vec::new();
+        if !self.feed_ready {
+            controls.push(MarketFeedEvent::Terms(InstrumentTerms {
+                route: MarketRoute {
+                    provider_id: "replay-feed".to_string(),
+                    instrument_id: id.clone(),
+                    provider_symbol: "REPLAY".to_string(),
+                    display_symbol: "REPLAY".to_string(),
+                    venue_id: "REPLAY".to_string(),
+                    entitlement_id: None,
+                    price_scale: 2,
+                    quantity_scale: 0,
+                },
+                instrument_class: instrument.contract.instrument_class,
+                price_grid: instrument.contract.price_grid,
+                point_value: instrument.contract.point_value,
+                quantity_increment: instrument.contract.order_quantity_increment,
+                currency: instrument.contract.currency.clone(),
+                expiry: instrument.contract.expiry,
+                first_notice: instrument.contract.first_notice,
+                last_trade: instrument.contract.last_trade,
+                session_hours: instrument.contract.session_hours.clone(),
+                session_generation: 1,
+            }));
+            controls.push(super::market_feed::live_session(id.clone(), 1));
+            controls.push(super::market_feed::feed_state(
+                id.clone(),
+                1,
+                FeedState::Live,
+            ));
+        }
+        let quote = TradingQuote {
+            instrument_id: id,
+            bid: observation.bid,
+            ask: observation.ask,
+            bid_size: None,
+            ask_size: None,
+            last: None,
+            provider_id: "replay-feed".to_string(),
+            provider_generation: 1,
+            source_sequence: Some(observation.provenance.source_sequence),
+            exchange_unix_nanos: None,
+            received_unix_nanos: observation.provenance.observed_unix_nanos,
+        };
+        let core = self
+            .core
+            .as_mut()
+            .ok_or_else(|| "replay core is stopped".to_string())?;
+        core.apply_market_batch(crate::core::market::feed::MarketFeedBatch {
+            quotes: vec![quote],
+            controls,
+            resync: false,
+        });
+        self.feed_ready = true;
         Ok(())
     }
 
@@ -113,20 +185,16 @@ impl ReplayHarness {
         self.command(|reply| Command::Cancel(id, reply))
     }
 
-    fn flatten_account(
-        &mut self,
-        id: TradingAccountId,
-        observation: SimulatedMarketObservation,
-    ) -> Result<FlattenOutcome, String> {
-        self.command(|reply| Command::Flatten(id, observation, reply))
+    fn flatten(&mut self, scope: FlattenScope) -> Result<FlattenOutcome, String> {
+        self.command(|reply| Command::Flatten(scope, reply))
     }
 
     fn reverse_position(
         &mut self,
         id: TradingAccountId,
-        observation: SimulatedMarketObservation,
+        instrument: InstrumentId,
     ) -> Result<FlattenOutcome, String> {
-        self.command(|reply| Command::Reverse(id, observation, reply))
+        self.command(|reply| Command::ReverseAt(id, instrument, reply))
     }
 
     fn kill_switch(
@@ -1026,7 +1094,13 @@ fn script_place_touch_modify_cancel_flatten(
         .expect("cancel resting order");
     record("cancel", service, trace);
     service
-        .flatten_account(account.clone(), observation(10_100, 10_125, 6, 6_000))
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 6, 6_000))
+        .expect("flatten quote");
+    service
+        .flatten(FlattenScope {
+            account: Some(account.clone()),
+            instrument: None,
+        })
         .expect("flatten first position");
     record("flatten", service, trace);
 }
@@ -1064,7 +1138,13 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario() -
     record("bracket active", &service, &mut trace);
     clock.set_wall_unix_nanos(8_000);
     service
-        .flatten_account(account.clone(), observation(10_100, 10_125, 9, 9_000))
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 9, 9_000))
+        .expect("bracket flatten quote");
+    service
+        .flatten(FlattenScope {
+            account: Some(account.clone()),
+            instrument: None,
+        })
         .expect("flatten bracket position");
     record("bracket flatten", &service, &mut trace);
 
@@ -1075,7 +1155,10 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario() -
         .observe_market(observation(10_000, 10_025, 11, 11_000))
         .expect("reverse entry fills");
     service
-        .reverse_position(account.clone(), observation(10_100, 10_125, 12, 12_000))
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 12, 12_000))
+        .expect("reverse quote");
+    service
+        .reverse_position(account.clone(), instrument().instrument_id)
         .expect("reverse position");
     record("reverse", &service, &mut trace);
 
@@ -1100,6 +1183,115 @@ fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario() -
     actual
 }
 
+#[test]
+fn replay_failed_flatten_commit_keeps_memory_and_disk_at_last_commit() {
+    let directory = TestDirectory::new("flatten-atomic");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    harness
+        .place_order(market_order("atomic-open", OrderSide::Buy, 1, 1_000))
+        .expect("buy accepted");
+    harness
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("buy fills");
+    harness
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 3, 3_000))
+        .expect("flatten quote");
+    let before = harness.snapshot().expect("before flatten");
+    harness.crash_during_commit(1);
+    assert!(
+        harness
+            .flatten(FlattenScope {
+                account: Some(account.clone()),
+                instrument: None,
+            })
+            .is_err(),
+        "injected commit failure rejects the flatten"
+    );
+    assert_eq!(
+        harness.snapshot().expect("memory unchanged"),
+        before,
+        "a failed flatten commit leaves owner memory untouched"
+    );
+    harness.restart().expect("restart");
+    assert_eq!(
+        harness.snapshot().expect("disk unchanged"),
+        before,
+        "a failed flatten commit leaves the database untouched"
+    );
+    // The quote book is owner memory: after a restart a fresh verified quote must arrive
+    // before the position can be flattened.
+    harness
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 4, 6_000))
+        .expect("post-restart quote");
+    let flattened = harness
+        .flatten(FlattenScope {
+            account: Some(account.clone()),
+            instrument: None,
+        })
+        .expect("flatten succeeds after restart");
+    assert_eq!(flattened.fills.len(), 1);
+    let after = harness.snapshot().expect("after flatten");
+    harness.restart().expect("restart");
+    assert_eq!(
+        harness.snapshot().expect("durable flatten"),
+        after,
+        "the committed flatten replays exactly"
+    );
+}
+
+#[test]
+fn replay_failed_reverse_commit_leaves_the_position_untouched() {
+    let directory = TestDirectory::new("reverse-atomic");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    harness
+        .place_order(market_order("reverse-open", OrderSide::Buy, 1, 1_000))
+        .expect("buy accepted");
+    harness
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("buy fills");
+    harness
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 3, 3_000))
+        .expect("reverse quote");
+    let before = harness.snapshot().expect("before reverse");
+    harness.crash_during_commit(1);
+    assert!(
+        harness
+            .reverse_position(account.clone(), instrument().instrument_id)
+            .is_err(),
+        "injected commit failure rejects the reverse"
+    );
+    let unchanged = harness.snapshot().expect("memory unchanged");
+    assert_eq!(
+        unchanged, before,
+        "a failed reverse commit leaves owner memory untouched"
+    );
+    assert_eq!(unchanged.positions[0].net_quantity.units(), 1);
+    harness.restart().expect("restart");
+    assert_eq!(
+        harness.snapshot().expect("disk unchanged"),
+        before,
+        "a failed reverse commit leaves the database untouched"
+    );
+    harness
+        .feed_quote(&instrument(), &observation(10_100, 10_125, 4, 6_000))
+        .expect("post-restart quote");
+    let reversed = harness
+        .reverse_position(account.clone(), instrument().instrument_id)
+        .expect("reverse succeeds after restart");
+    assert_eq!(reversed.fills.len(), 2);
+    let after = harness.snapshot().expect("after reverse");
+    assert_eq!(after.positions[0].net_quantity.units(), -1);
+    harness.restart().expect("restart");
+    assert_eq!(
+        harness.snapshot().expect("durable reverse"),
+        after,
+        "the committed reverse replays exactly"
+    );
+}
 #[test]
 fn simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_golden() {
     let first = simulated_place_touch_modify_cancel_bracket_flatten_reverse_kill_scenario();

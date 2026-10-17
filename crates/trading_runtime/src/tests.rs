@@ -2,6 +2,7 @@ use super::*;
 use aeris_instruments::{
     ContractDate, InstrumentDecimal, InstrumentMetadataProvenance, SessionHours,
 };
+use aeris_trading::market::{FeedState, InstrumentTerms, MarketFeedEvent, TradingQuote};
 use std::{fs, path::PathBuf};
 
 #[path = "replay/mod.rs"]
@@ -733,6 +734,87 @@ pub(crate) fn observation(
     }
 }
 
+/// Starts a service on a fixed clock and returns its market-feed inbox; emergency commands
+/// price from the owner's verified quote book, so tests that flatten or reverse must deliver
+/// quotes through the real feed path instead of the direct-observation shortcut.
+pub(crate) fn live_feed_service(
+    directory: &TestDirectory,
+) -> (
+    TradingService,
+    std::sync::Arc<crate::clock::ManualClock>,
+    std::sync::Arc<crate::core::market::feed::MarketFeedInbox>,
+) {
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
+    let mut configuration = config(directory);
+    configuration.clock = clock.clone();
+    let service = start_service_with_config(configuration);
+    let feed = service
+        .attach_market_feed(std::sync::Arc::new(market_feed::RecordedInterest::default()))
+        .expect("feed");
+    (service, clock, feed)
+}
+
+/// Registers the verified route, an open session and the Live feed state for one registered
+/// instrument, mirroring what the market runtime delivers for a subscribed instrument.
+pub(crate) fn bootstrap_live_feed(
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
+    route: aeris_trading::market::MarketRoute,
+) {
+    feed.push(MarketFeedEvent::Terms(InstrumentTerms {
+        route,
+        instrument_class: instrument.contract.instrument_class,
+        price_grid: instrument.contract.price_grid,
+        point_value: instrument.contract.point_value,
+        quantity_increment: instrument.contract.order_quantity_increment,
+        currency: instrument.contract.currency.clone(),
+        expiry: instrument.contract.expiry,
+        first_notice: instrument.contract.first_notice,
+        last_trade: instrument.contract.last_trade,
+        session_hours: instrument.contract.session_hours.clone(),
+        session_generation: 1,
+    }))
+    .expect("terms");
+    feed.push(market_feed::live_session(
+        instrument.instrument_id.clone(),
+        1,
+    ))
+    .expect("session");
+    feed.push(market_feed::feed_state(
+        instrument.instrument_id.clone(),
+        1,
+        FeedState::Live,
+    ))
+    .expect("live");
+}
+
+/// Pushes one Live quote through the feed; the timestamp stays within the freshness window of
+/// the fixed `1_000_000_000_000` clock used by [`live_feed_service`].
+pub(crate) fn push_live_quote(
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
+    sequence: u64,
+    bid: i64,
+    ask: i64,
+    price_scale: u8,
+) {
+    feed.push(MarketFeedEvent::Quote(TradingQuote {
+        instrument_id: instrument.instrument_id.clone(),
+        bid: FixedPoint::try_new(bid, price_scale).expect("bid"),
+        ask: FixedPoint::try_new(ask, price_scale).expect("ask"),
+        bid_size: None,
+        ask_size: None,
+        last: None,
+        provider_id: "fixture".to_string(),
+        provider_generation: 1,
+        source_sequence: Some(sequence),
+        exchange_unix_nanos: None,
+        received_unix_nanos: 1_000_000_000_000
+            + i64::try_from(sequence).expect("sequence") * 1_000_000,
+    }))
+    .expect("quote");
+}
+
 #[test]
 fn snapshot_projects_registered_instruments_with_provider_symbols() {
     let directory = TestDirectory::new("snapshot-instruments");
@@ -921,11 +1003,26 @@ fn practice_accounts_are_user_created_with_durable_opening_equity() {
 #[test]
 fn high_precision_crypto_pnl_updates_live_and_closes_without_overflow() {
     let directory = TestDirectory::new("crypto-pnl");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = live_feed_service(&directory);
     let instrument = high_precision_crypto_instrument();
     service
         .register_instrument(instrument.clone())
         .expect("crypto instrument registers");
+    bootstrap_live_feed(
+        &feed,
+        &instrument,
+        aeris_trading::market::MarketRoute {
+            provider_id: "fixture".into(),
+            instrument_id: instrument.instrument_id.clone(),
+            provider_symbol: "BTC".into(),
+            display_symbol: "BTC".into(),
+            venue_id: "HYPERLIQUID".into(),
+            entitlement_id: None,
+            price_scale: 8,
+            quantity_scale: 8,
+        },
+    );
+    service.status().expect("feed drains");
     let account_id = TradingAccountId::try_new("aeris-sim-1").expect("account");
     let order = PlaceOrder {
         client_order_id: ClientOrderId::try_new("btc-entry").expect("client id"),
@@ -947,23 +1044,26 @@ fn high_precision_crypto_pnl_updates_live_and_closes_without_overflow() {
         },
     };
     service.place_order(order.clone()).expect("entry accepted");
-    let observation = |bid: i64, ask: i64, sequence: u64, time: i64| SimulatedMarketObservation {
-        instrument_id: instrument.instrument_id.clone(),
-        bid: FixedPoint::try_new(bid, 8).expect("bid"),
-        ask: FixedPoint::try_new(ask, 8).expect("ask"),
-        provenance: TradingProvenance {
-            venue_id: "aeris-sim".to_string(),
-            provider_id: "hyperliquid".to_string(),
-            session_generation: 1,
-            source_sequence: sequence,
-            observed_unix_nanos: time,
-        },
-    };
+
+    push_live_quote(
+        &feed,
+        &instrument,
+        2,
+        8_399_900_000_000,
+        8_400_000_000_000,
+        8,
+    );
+    service.status().expect("entry fills");
+    push_live_quote(
+        &feed,
+        &instrument,
+        3,
+        8_410_000_000_000,
+        8_410_100_000_000,
+        8,
+    );
     service
-        .observe_market(observation(8_399_900_000_000, 8_400_000_000_000, 2, 2_000))
-        .expect("entry fills");
-    service
-        .observe_market(observation(8_410_000_000_000, 8_410_100_000_000, 3, 3_000))
+        .status()
         .expect("live mark updates without overflow");
     let open = service.snapshot().expect("open snapshot");
     let position = open
@@ -977,10 +1077,10 @@ fn high_precision_crypto_pnl_updates_live_and_closes_without_overflow() {
     );
 
     service
-        .flatten_account(
-            account_id,
-            observation(8_410_000_000_000, 8_410_100_000_000, 4, 4_000),
-        )
+        .flatten(FlattenScope {
+            account: Some(account_id),
+            instrument: None,
+        })
         .expect("close succeeds without overflow");
     let closed = service.snapshot().expect("closed snapshot");
     let position = closed
@@ -4459,21 +4559,24 @@ fn news_time_restriction_blocks_and_persists_a_hard_lock() {
 #[test]
 fn flatten_closes_positions_and_survives_a_restart() {
     let directory = TestDirectory::new("flatten");
-    let service = start_service(&directory);
+    let (service, clock, feed) = live_feed_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
+    bootstrap_live_feed(&feed, &instrument(), market_feed::route());
+    service.status().expect("feed drains");
     service
         .place_order(market_order("flatten-open", OrderSide::Buy, 1, 1_000))
         .expect("buy accepted");
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("buy fills");
+    push_live_quote(&feed, &instrument(), 2, 9_975, 10_000, 2);
+    service.status().expect("buy fills");
+    push_live_quote(&feed, &instrument(), 3, 10_100, 10_125, 2);
+    service.status().expect("flatten quote");
     let fills = service
-        .flatten_account(
-            TradingAccountId::try_new("aeris-sim-1").expect("account"),
-            observation(10_100, 10_125, 3, 3_000),
-        )
+        .flatten(FlattenScope {
+            account: Some(TradingAccountId::try_new("aeris-sim-1").expect("account")),
+            instrument: None,
+        })
         .expect("flatten succeeds");
     assert_eq!(fills.fills.len(), 1);
     assert_eq!(fills.pending_close_requests.len(), 0);
@@ -4495,7 +4598,9 @@ fn flatten_closes_positions_and_survives_a_restart() {
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
 
-    let restarted = start_service(&directory);
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = TradingService::start(configuration).expect("service reopens");
     let restored = restarted.snapshot().expect("restored snapshot");
     assert_eq!(restored.positions[0].net_quantity.units(), 0);
     assert_eq!(restored.fills.len(), 2);
@@ -4543,30 +4648,27 @@ fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
         observed_unix_nanos: observed,
     };
     let first = service
-        .apply_economic_event_risk(event.clone(), None)
+        .apply_economic_event_risk(event.clone())
         .expect("event rule applies");
     assert_eq!(first.locked_accounts, 1);
     assert_eq!(
         service
-            .apply_economic_event_risk(event, None)
+            .apply_economic_event_risk(event)
             .expect("duplicate is fenced")
             .locked_accounts,
         0
     );
     for index in 0..5 {
         service
-            .apply_economic_event_risk(
-                EconomicEventRiskTrigger {
-                    event_id: format!("retention-event-{index}"),
-                    title: "Scheduled release".to_string(),
-                    source: "Official fixture".to_string(),
-                    importance: EconomicEventRiskImportance::High,
-                    scheduled_unix_nanos: scheduled,
-                    source_release_unix_nanos: observed - 1,
-                    observed_unix_nanos: observed + index,
-                },
-                None,
-            )
+            .apply_economic_event_risk(EconomicEventRiskTrigger {
+                event_id: format!("retention-event-{index}"),
+                title: "Scheduled release".to_string(),
+                source: "Official fixture".to_string(),
+                importance: EconomicEventRiskImportance::High,
+                scheduled_unix_nanos: scheduled,
+                source_release_unix_nanos: observed - 1,
+                observed_unix_nanos: observed + index,
+            })
             .expect("distinct event applies");
     }
     service
@@ -4596,10 +4698,12 @@ fn economic_event_lock_is_profile_driven_durable_and_idempotent() {
 #[test]
 fn global_flatten_closes_every_registered_account() {
     let directory = TestDirectory::new("flatten-all");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = live_feed_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
+    bootstrap_live_feed(&feed, &instrument(), market_feed::route());
+    service.status().expect("feed drains");
     let secondary = TradingAccountId::try_new("aeris-sim-2").expect("secondary account");
     service
         .register_account(TradingAccount {
@@ -4621,16 +4725,14 @@ fn global_flatten_closes_every_registered_account() {
     service
         .place_order(secondary_order)
         .expect("secondary order accepted");
+    push_live_quote(&feed, &instrument(), 3, 9_975, 10_000, 2);
+    service.status().expect("orders fill");
+    assert_eq!(service.snapshot().expect("snapshot").fills.len(), 2);
+    push_live_quote(&feed, &instrument(), 4, 10_100, 10_125, 2);
+    service.status().expect("flatten quote");
     assert_eq!(
         service
-            .observe_market(observation(9_975, 10_000, 3, 2_000))
-            .expect("orders fill")
-            .len(),
-        2
-    );
-    assert_eq!(
-        service
-            .flatten_all(observation(10_100, 10_125, 4, 3_000))
+            .flatten(FlattenScope::default())
             .expect("global flatten succeeds")
             .fills
             .len(),
@@ -4652,20 +4754,23 @@ fn global_flatten_closes_every_registered_account() {
 #[test]
 fn reverse_closes_and_reopens_the_exact_opposite_position() {
     let directory = TestDirectory::new("reverse-position");
-    let service = start_service(&directory);
+    let (service, _clock, feed) = live_feed_service(&directory);
     service
         .register_instrument(instrument())
         .expect("instrument registers");
+    bootstrap_live_feed(&feed, &instrument(), market_feed::route());
+    service.status().expect("feed drains");
     service
         .place_order(market_order("reverse-entry", OrderSide::Buy, 1, 1_000))
         .expect("entry accepts");
-    service
-        .observe_market(observation(9_975, 10_000, 2, 2_000))
-        .expect("entry fills");
+    push_live_quote(&feed, &instrument(), 2, 9_975, 10_000, 2);
+    service.status().expect("entry fills");
+    push_live_quote(&feed, &instrument(), 3, 10_100, 10_125, 2);
+    service.status().expect("reverse quote");
     let fills = service
-        .reverse_position(
+        .reverse_position_at(
             TradingAccountId::try_new("aeris-sim-1").expect("account"),
-            observation(10_100, 10_125, 3, 3_000),
+            instrument().instrument_id,
         )
         .expect("position reverses");
     assert_eq!(fills.fills.len(), 2);
@@ -4677,6 +4782,240 @@ fn reverse_closes_and_reopens_the_exact_opposite_position() {
         .expect("service stops");
 }
 
+#[test]
+fn flatten_scope_isolates_one_account_instrument_pair() {
+    let directory = TestDirectory::new("flatten-scope");
+    let (service, _clock, feed) = live_feed_service(&directory);
+    let first = instrument();
+    let mut second = instrument();
+    second.instrument_id =
+        InstrumentId::try_new("instrument:fixture:CME:CLZ6").expect("second instrument id");
+    service
+        .register_instrument(first.clone())
+        .expect("first instrument registers");
+    service
+        .register_instrument(second.clone())
+        .expect("second instrument registers");
+    let second_route = aeris_trading::market::MarketRoute {
+        provider_id: "fixture".into(),
+        instrument_id: second.instrument_id.clone(),
+        provider_symbol: "CLZ6".into(),
+        display_symbol: "CLZ6".into(),
+        venue_id: "CME".into(),
+        entitlement_id: None,
+        price_scale: 2,
+        quantity_scale: 0,
+    };
+    // Both instruments carry ticket demand, as they would with open charts; otherwise the
+    // interest recompute evicts the idle instrument's quote-book entry on the next command.
+    service
+        .set_ticket_interest(vec![market_feed::route(), second_route.clone()])
+        .expect("ticket interest");
+    bootstrap_live_feed(&feed, &first, market_feed::route());
+    bootstrap_live_feed(&feed, &second, second_route);
+    service.status().expect("feed drains");
+    let secondary = TradingAccountId::try_new("aeris-sim-2").expect("secondary account");
+    service
+        .register_account(TradingAccount {
+            id: secondary.clone(),
+            display_name: "Secondary SIM".to_string(),
+            environment: AccountEnvironment::Simulated,
+            venue_id: "aeris-sim".to_string(),
+            broker_ref: None,
+            currency: "USD".to_string(),
+            currency_scale: 2,
+            starting_equity: None,
+        })
+        .expect("secondary account registers");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    service
+        .place_order(market_order("scope-a-one", OrderSide::Buy, 1, 1_000))
+        .expect("first pair order");
+    let mut other_instrument = market_order("scope-b-one", OrderSide::Buy, 2, 1_001);
+    other_instrument.instrument_id = second.instrument_id.clone();
+    service
+        .place_order(other_instrument)
+        .expect("second instrument order");
+    let mut other_account = market_order("scope-a-two", OrderSide::Buy, 3, 1_002);
+    other_account.account_id = secondary.clone();
+    service
+        .place_order(other_account)
+        .expect("second account order");
+    push_live_quote(&feed, &first, 4, 9_975, 10_000, 2);
+    push_live_quote(&feed, &second, 1, 7_975, 8_000, 2);
+    service.status().expect("entries fill");
+    assert_eq!(service.snapshot().expect("snapshot").fills.len(), 3);
+    push_live_quote(&feed, &first, 5, 10_100, 10_125, 2);
+    service.status().expect("flatten quote");
+
+    let outcome = service
+        .flatten(FlattenScope {
+            account: Some(account.clone()),
+            instrument: Some(first.instrument_id.clone()),
+        })
+        .expect("scoped flatten succeeds");
+    assert_eq!(outcome.fills.len(), 1);
+    assert_eq!(
+        outcome.fills[0].price,
+        FixedPoint::try_new(10_100, 2).expect("bid")
+    );
+    assert_eq!(outcome.unpriced, []);
+    let snapshot = service.snapshot().expect("snapshot");
+    let net = |account_id: &TradingAccountId, instrument_id: &InstrumentId| {
+        snapshot
+            .positions
+            .iter()
+            .find(|position| {
+                position.account_id == *account_id && position.instrument_id == *instrument_id
+            })
+            .map(|position| position.net_quantity.units())
+    };
+    assert_eq!(net(&account, &first.instrument_id), Some(0));
+    assert_eq!(net(&account, &second.instrument_id), Some(1));
+    assert_eq!(net(&secondary, &first.instrument_id), Some(1));
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn flatten_keeps_and_reports_positions_without_a_verified_quote() {
+    let directory = TestDirectory::new("flatten-unpriced");
+    let (service, _clock, feed) = live_feed_service(&directory);
+    let priced = instrument();
+    let mut unquoted = instrument();
+    unquoted.instrument_id =
+        InstrumentId::try_new("instrument:fixture:CME:CLZ6").expect("unquoted instrument id");
+    service
+        .register_instrument(priced.clone())
+        .expect("priced instrument registers");
+    service
+        .register_instrument(unquoted.clone())
+        .expect("unquoted instrument registers");
+    bootstrap_live_feed(&feed, &priced, market_feed::route());
+    service.status().expect("feed drains");
+    service
+        .place_order(market_order("priced-entry", OrderSide::Buy, 1, 1_000))
+        .expect("priced order accepted");
+    push_live_quote(&feed, &priced, 2, 9_975, 10_000, 2);
+    service.status().expect("priced entry fills");
+    // The unquoted instrument only ever sees the direct-observation shortcut: it fills, but
+    // the owner has no verified quote for it, so flatten must report it instead of guessing.
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: {
+                let mut entry = market_order("unpriced-entry", OrderSide::Buy, 3, 1_002);
+                entry.instrument_id = unquoted.instrument_id.clone();
+                entry
+            },
+            template: BracketStrategyTemplate {
+                template_id: "unpriced-bracket".to_string(),
+                revision: 1,
+                name: "Unpriced protection".to_string(),
+                stop_offset_ticks: 8,
+                targets: vec![BracketTarget {
+                    offset_ticks: 8,
+                    quantity_percent: 100,
+                }],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("bracket accepted");
+    service
+        .observe_market(SimulatedMarketObservation {
+            instrument_id: unquoted.instrument_id.clone(),
+            bid: FixedPoint::try_new(7_975, 2).expect("bid"),
+            ask: FixedPoint::try_new(8_000, 2).expect("ask"),
+            provenance: provenance(4, 1_003),
+        })
+        .expect("unquoted entry fills");
+    assert_eq!(service.snapshot().expect("snapshot").fills.len(), 2);
+
+    let outcome = service
+        .flatten(FlattenScope::default())
+        .expect("flatten succeeds with an unpriced report");
+    assert_eq!(outcome.fills.len(), 1);
+    assert_eq!(outcome.unpriced.len(), 1);
+    assert_eq!(outcome.unpriced[0].instrument_id, unquoted.instrument_id);
+    assert_eq!(outcome.unpriced[0].net_quantity.units(), 1);
+    let snapshot = service.snapshot().expect("snapshot");
+    let retained = snapshot
+        .positions
+        .iter()
+        .find(|position| position.instrument_id == unquoted.instrument_id)
+        .expect("unpriced position retained");
+    assert_eq!(retained.net_quantity.units(), 1);
+    assert!(
+        snapshot.orders.iter().any(|order| {
+            order.instrument_id == unquoted.instrument_id && order.status == OrderStatus::Working
+        }),
+        "unpriced position keeps its protection working"
+    );
+    assert!(
+        snapshot
+            .positions
+            .iter()
+            .find(|position| position.instrument_id == priced.instrument_id)
+            .is_some_and(|position| position.net_quantity.units() == 0)
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn reverse_rejected_by_risk_leaves_the_position_untouched() {
+    let directory = TestDirectory::new("reverse-risk");
+    let (service, _clock, feed) = live_feed_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    bootstrap_live_feed(&feed, &instrument(), market_feed::route());
+    service.status().expect("feed drains");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut entry = market_order("reverse-risk-entry", OrderSide::Buy, 1, 1_000);
+    entry.quantity = FixedPoint::try_new(2, 0).expect("quantity");
+    service.place_order(entry).expect("entry accepted");
+    push_live_quote(&feed, &instrument(), 2, 9_975, 10_000, 2);
+    service.status().expect("entry fills");
+    service
+        .register_risk_profile(RiskProfile {
+            account_id: account.clone(),
+            profile_id: "tight-contracts".to_string(),
+            version: 1,
+            session_start_unix_nanos: 1,
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+            daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("daily"),
+            trailing_drawdown: None,
+            trailing_mode: TrailingDrawdownMode::Intraday,
+            max_contracts: FixedPoint::try_new(1, 0).expect("contracts"),
+            consistency_max_single_trade_percent: None,
+            restricted_until_unix_nanos: None,
+            economic_event_rule: None,
+            enabled: true,
+        })
+        .expect("risk profile registers");
+    push_live_quote(&feed, &instrument(), 3, 10_100, 10_125, 2);
+    service.status().expect("reverse quote");
+    let before = service.snapshot().expect("before reverse");
+    let error = service
+        .reverse_position_at(account.clone(), instrument().instrument_id)
+        .unwrap_err();
+    assert!(
+        error.contains("maximum-contract"),
+        "risk rejection names the rule: {error}"
+    );
+    let after = service.snapshot().expect("after rejection");
+    assert_eq!(after.orders, before.orders);
+    assert_eq!(after.fills, before.fills);
+    assert_eq!(after.positions, before.positions);
+    assert_eq!(after.revision, before.revision);
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
 #[test]
 fn invalid_json_never_enters_the_store() {
     let directory = TestDirectory::new("invalid-json");

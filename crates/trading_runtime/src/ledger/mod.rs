@@ -134,8 +134,8 @@ impl TradingCore {
             update.policy_update.discipline_state,
         );
         // One equity sample per fill: the ring updates now, and the sample travels to the
-        // durable history with the committing transaction (quote and placement steps) or a
-        // follow-up flush (emergency close). A speculative plan that rolls back is cleared.
+        // durable history with the committing transaction (quote, placement and emergency
+        // steps). A speculative plan that rolls back is cleared.
         if let Some(sample) = self.record_equity_sample(&fill.account_id, fill.execution_unix_nanos)
         {
             self.pending_equity_samples.push(sample);

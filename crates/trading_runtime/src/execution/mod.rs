@@ -551,7 +551,7 @@ impl TradingCore {
         &mut self,
         account_id: Option<&TradingAccountId>,
     ) -> Result<Vec<Order>, String> {
-        let (cancelled, failure) = self.cancel_open_orders(account_id)?;
+        let (cancelled, failure) = self.cancel_open_orders(account_id, None)?;
         failure.map_or(Ok(cancelled), Err)
     }
 
@@ -561,6 +561,7 @@ impl TradingCore {
     pub(super) fn cancel_open_orders(
         &mut self,
         account_id: Option<&TradingAccountId>,
+        instrument_id: Option<&aeris_instruments::InstrumentId>,
     ) -> Result<(Vec<Order>, Option<String>), String> {
         if let Some(account_id) = account_id {
             self.route(account_id)?;
@@ -571,6 +572,12 @@ impl TradingCore {
         } else {
             self.state.orders.open_orders().collect()
         };
+        let open_orders = open_orders
+            .into_iter()
+            .filter(|order| {
+                instrument_id.is_none_or(|instrument| instrument == &order.instrument_id)
+            })
+            .collect::<Vec<_>>();
         let candidates = open_orders
             .into_iter()
             .filter_map(|order| {

@@ -91,17 +91,6 @@ impl TradingCore {
         Some(sample)
     }
 
-    /// Persists samples whose fill has no committing transaction of its own (the emergency
-    /// close writes its fill directly). A failure loses one telemetry sample, never a close.
-    pub(crate) fn flush_pending_equity_samples(&mut self) {
-        let samples = std::mem::take(&mut self.pending_equity_samples);
-        for sample in samples {
-            if let Err(error) = self.store.put_equity_sample(&sample) {
-                aeris_observability::diagnostic!("equity sample persistence failed: {error}");
-            }
-        }
-    }
-
     /// The 60 s equity timer: a sample only when equity changed since the last one, plus one
     /// sample at each risk session boundary (the UTC day, until durable sessions land) for
     /// accounts carrying a risk profile.

@@ -662,6 +662,32 @@ Status: in progress; M5.1-M5.8 code and tests are complete, M5.9-M5.12 remain op
   - Input finding from the M5.8 property run: the kill switch cancels open group legs without in-session group
     reconciliation, leaving brackets Active with dead legs until startup recovery retires them (BrokenGroup
     notice); M5.9 owns the in-session reconciliation.
+  - Part 1/3: Flatten and reverse are atomic owner steps priced only from the owner's verified quotes.
+    `FlattenScope { account, instrument }` scopes any combination (None = wildcard); one `plan_atomic`
+    computes close fills, scope cancellations and group reconciliation/alignment on a clone and commits it
+    in a single `commit_quote_step`, so a failed commit leaves memory and disk at the last commit (restart
+    retries it). Positions without a current-generation Live quote are reported as typed
+    `FlattenOutcome.unpriced` and keep their protection and orders instead of a fabricated price. Reverse
+    closes then stages one `sim-reverse-*` IOC market order with enforce_risk inside the same commit; a risk
+    rejection leaves the position untouched. The economic-event risk action now flattens/cancels by the
+    profile's scope through the same path, without a desktop quote. Broker flatten closes every position on
+    the flattened instruments, scoped or global. Per-instrument verified observation joins
+    `check_practice_market` and the Live-gated QuoteBook; the route check precedes it so a live account
+    still gets the typed refusal. The obsolete per-step fill/insertion writers
+    (`fill_policy_persistence`, `insert_fill`, `insert_order`, `FillPolicyPersistence`,
+    `flush_pending_equity_samples`) are removed; `commit_quote_step` is the only fill/commit path. Desktop
+    flatten-all and event triggers no longer need an order-book frame; flatten feedback reports unpriced
+    counts.
+  - Part 1 tests: flatten/reverse regressions converted from the test-only observation injection to the
+    production feed path (Terms/session/Live/Quote batches through `apply_market_batch`); new regressions
+    cover account/instrument scope isolation, unpriced-position reporting with protection retained,
+    risk-rejected reverse no-op, and replay crash-during-flatten/reverse-commit atomicity. The v2 simulated
+    golden regenerated intentionally: quote provenance is the replay feed with owner ingress sequences,
+    per-instrument revisions number independently (no failed-commit rewrite attempts), the reverse leg is
+    the `sim-reverse-*` IOC fill at bid, entry fills at touch time, the reversal leaves unrealized PnL 0
+    and the bracket completes. Runtime 260 passed/5 ignored; desktop 449+80; full fmt, strict workspace
+    Clippy, workspace tests and naming passed. Kill-switch outcome/reporting (TR-03), scripted-broker
+    two-symbol parity and TR-04/TR-12 closure remain; M5.9 stays unchecked.
 - [ ] M5.10 risk-session-rollover - Persisted risk session with rollover; bracket legs count as attached stops
 - [ ] M5.11 trading-publication-api - Change-driven, bounded publication with paged history
 - [ ] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
@@ -967,6 +993,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.8 part 1/2 feat(trading): checkpoint retention and checkpoint-based recovery - V26 position/ledger checkpoint and equity tables; startup-plus-hourly retention folds pruned fill prefixes and ledger entries into checkpoints in the deletion transaction, pins open-order and live-group rows, and repair rebuilds checkpointed positions as checkpoint plus retained suffix; `rebuild_position_from_retained_fills` deleted; balances stay checkpoint plus exact entry sums. Runtime 250 passed/5 ignored.
 - 2026-10-17 M5.8 part 3 feat(trading): bound the equity history - one equity sample per simulated fill committed inside the fill's transaction (quote and placement steps pass the planned samples to commit_quote_step; the emergency close flushes a follow-up write), a 60 s owner timer samples only on change plus once per UTC risk-session boundary for profiled accounts, and a 1,440-entry ring per account reloads the newest durable minute samples at open with the first tick delayed one interval so restarts replay unchanged. Retention downsamples minute rows past seven days into last-of-hour rows and drops hourly rows past a year in the same transaction, windows trailing the newest sample so a backward clock cannot mass-expire history. Regressions: per-fill/timer/session/restart sampling, ring bound, downsample collapse and year drop; mark-only/failed-commit atomicity and group-recovery reopen goldens stay green. Runtime 253 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed.
 - 2026-10-17 M5.8 part 4 feat(trading): property-test the trading invariants - 200 seeds x 500 service-level steps assert pooled coverage, fill eligibility, DAY expiry, balance identity and the equity ring bound after every step; each restart adds the durable identity (no orphan legs, checkpoint+suffix positions, checkpoint+entries balance, no stale DAY rows) and notice-free reopen equality. The run caught a pending-bracket cascade defect (held-leg cancel left the entry working); fixed in stage_bracket_termination with a focused regression. TR-06 closes. Runtime 255 passed/5 ignored; full fmt, strict workspace Clippy, workspace tests and naming passed.
+- 2026-10-17 M5.9 part 1/3 feat(trading): price emergency operations from verified runtime quotes - atomic scoped flatten/reverse through one commit_quote_step per action, typed unpriced reporting that keeps protection, sim-reverse IOC staging with enforce_risk, observation-free event risk and scoped/global broker multi-instrument close; legacy per-step fill writers deleted; regressions converted to the real feed path plus scope/unpriced/risk-reject/crash-atomicity coverage; v2 simulated golden regenerated for the new feed provenance, per-instrument revision numbering, sim-reverse leg and completed bracket. Runtime 260 passed/5 ignored; full gate green.
 
 ## 7. Known gaps / deferred
 

@@ -4,9 +4,9 @@ pub(crate) mod owner;
 
 use super::{
     BracketStrategyTemplate, ClientOrderId, CreatePracticeAccount, EconomicEventRiskOutcome,
-    EconomicEventRiskTrigger, FeeSchedule, FixedPoint, FlattenOutcome, ModifyOrder, MovePlannedLeg,
-    Order, PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOco, PlaceOrder,
-    PlaceProtection, PlacementOutcome, PlannedLeg, Reply, RevisionedCancelOrder,
+    EconomicEventRiskTrigger, FeeSchedule, FixedPoint, FlattenOutcome, FlattenScope, ModifyOrder,
+    MovePlannedLeg, Order, PathBuf, PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOco,
+    PlaceOrder, PlaceProtection, PlacementOutcome, PlannedLeg, Reply, RevisionedCancelOrder,
     RevisionedModifyOrder, RiskEvaluation, RiskProfile, SessionPlan, TradeCopierConfig,
     TradingAccount, TradingAccountId, TradingInstrument, TradingServiceStatus, TradingSnapshot,
     UserRecord,
@@ -61,42 +61,13 @@ pub(crate) enum Command {
     LockAccount(TradingAccountId, String, i64, Reply<()>),
     UnlockAccount(TradingAccountId, Reply<()>),
     KillSwitch(Option<TradingAccountId>, String, i64, Reply<usize>),
-    #[cfg(test)]
-    Flatten(
-        TradingAccountId,
-        SimulatedMarketObservation,
-        Reply<FlattenOutcome>,
-    ),
-    #[cfg(test)]
-    Reverse(
-        TradingAccountId,
-        SimulatedMarketObservation,
-        Reply<FlattenOutcome>,
-    ),
-    #[cfg(test)]
-    FlattenAll(SimulatedMarketObservation, Reply<FlattenOutcome>),
-    FlattenAt(
-        TradingAccountId,
-        aeris_instruments::InstrumentId,
-        Reply<FlattenOutcome>,
-    ),
+    Flatten(FlattenScope, Reply<FlattenOutcome>),
     ReverseAt(
         TradingAccountId,
         aeris_instruments::InstrumentId,
         Reply<FlattenOutcome>,
     ),
-    FlattenAllAt(aeris_instruments::InstrumentId, Reply<FlattenOutcome>),
-    #[cfg(test)]
-    ApplyEconomicEventRisk(
-        EconomicEventRiskTrigger,
-        Option<SimulatedMarketObservation>,
-        Reply<EconomicEventRiskOutcome>,
-    ),
-    ApplyEconomicEventRiskAt(
-        EconomicEventRiskTrigger,
-        Option<aeris_instruments::InstrumentId>,
-        Reply<EconomicEventRiskOutcome>,
-    ),
+    ApplyEconomicEventRisk(EconomicEventRiskTrigger, Reply<EconomicEventRiskOutcome>),
     #[cfg(test)]
     Observe(SimulatedMarketObservation, Reply<Vec<Fill>>),
     AttachMarketFeed(Arc<dyn QuoteInterestSink>, Reply<()>),

@@ -98,26 +98,6 @@ impl TradingStore {
         tx.commit().map_err(database_error)
     }
 
-    pub(crate) fn insert_order(
-        &mut self,
-        order: &Order,
-        event: &OrderEvent,
-        next_sequence: u64,
-        bump_revision: bool,
-    ) -> Result<(), String> {
-        let transaction = StepTx::begin(self).map_err(database_error)?;
-        insert_order_row(&transaction, order)?;
-        insert_event_row(&transaction, event)?;
-        update_next_sequence(&transaction, next_sequence)?;
-        if bump_revision {
-            transaction.commit().map_err(database_error)
-        } else {
-            transaction
-                .commit_without_revision()
-                .map_err(database_error)
-        }
-    }
-
     /// Persists a submitted broker order with its broker mapping row; the broker order id
     /// is bound when the venue first reports the order.
     pub(crate) fn insert_broker_order(

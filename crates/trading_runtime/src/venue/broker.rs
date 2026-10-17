@@ -463,19 +463,20 @@ impl TradingCore {
         })
     }
 
-    /// Requests closing every broker position of `account_id` on one instrument and
-    /// returns the positions whose closes were submitted.
-    pub(crate) fn close_broker_positions_on(
+    /// Requests closing every broker position of `account_id`, optionally limited to one
+    /// instrument, and returns the positions whose closes were submitted.
+    pub(crate) fn close_broker_positions(
         &self,
         account_id: &TradingAccountId,
-        instrument_id: &aeris_instruments::InstrumentId,
+        instrument_id: Option<&aeris_instruments::InstrumentId>,
     ) -> Result<Vec<String>, String> {
         let positions: Vec<String> = self
             .state
             .broker_positions
             .values()
             .filter(|position| {
-                position.account_id == *account_id && position.instrument_id == *instrument_id
+                position.account_id == *account_id
+                    && instrument_id.is_none_or(|instrument| instrument == &position.instrument_id)
             })
             .map(|position| position.broker_position_id.clone())
             .collect();
@@ -485,20 +486,21 @@ impl TradingCore {
         Ok(positions)
     }
 
-    /// Flattens one broker account on one instrument: cancels its open orders and
-    /// requests closing its positions there. Closes are attempted even when a cancel
-    /// cannot be requested; what failed is reported in the outcome.
+    /// Flattens one broker account across the scoped instruments: cancels its in-scope open
+    /// orders and requests closing its in-scope positions. Closes are attempted even when a
+    /// cancel cannot be requested; what failed is reported in the outcome.
     pub(crate) fn flatten_broker_account(
         &mut self,
         account_id: &TradingAccountId,
-        instrument_id: &aeris_instruments::InstrumentId,
+        instrument_id: Option<&aeris_instruments::InstrumentId>,
     ) -> Result<FlattenOutcome, String> {
-        let (_, incomplete) = self.cancel_open_orders(Some(account_id))?;
-        let pending_close_requests = self.close_broker_positions_on(account_id, instrument_id)?;
+        let (_, incomplete) = self.cancel_open_orders(Some(account_id), instrument_id)?;
+        let pending_close_requests = self.close_broker_positions(account_id, instrument_id)?;
         Ok(FlattenOutcome {
             fills: Vec::new(),
             pending_close_requests,
             incomplete,
+            unpriced: Vec::new(),
         })
     }
 
@@ -533,7 +535,7 @@ impl TradingCore {
             scale,
         )
         .map_err(|error| error.to_string())?;
-        let outcome = self.flatten_broker_account(account_id, instrument_id)?;
+        let outcome = self.flatten_broker_account(account_id, Some(instrument_id))?;
         let order = PlaceOrder {
             client_order_id: ClientOrderId::try_new(format!(
                 "ct-reverse-{}",

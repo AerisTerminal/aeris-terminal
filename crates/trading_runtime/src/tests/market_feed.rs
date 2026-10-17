@@ -5,7 +5,7 @@ use aeris_trading::market::{
     QuoteInterest, QuoteInterestSink, TradingQuote,
 };
 
-fn route() -> MarketRoute {
+pub(crate) fn route() -> MarketRoute {
     let instrument = instrument();
     MarketRoute {
         provider_id: "fixture".into(),
@@ -19,7 +19,7 @@ fn route() -> MarketRoute {
     }
 }
 
-fn terms() -> InstrumentTerms {
+pub(crate) fn terms() -> InstrumentTerms {
     let instrument = instrument();
     InstrumentTerms {
         route: route(),
@@ -59,7 +59,7 @@ fn forex_weekly_terms() -> InstrumentTerms {
     contract
 }
 
-fn quote(generation: u64, sequence: u64, bid: i64, ask: i64) -> TradingQuote {
+pub(crate) fn quote(generation: u64, sequence: u64, bid: i64, ask: i64) -> TradingQuote {
     TradingQuote {
         instrument_id: route().instrument_id,
         bid: FixedPoint::try_new(bid, 2).unwrap(),
@@ -75,14 +75,16 @@ fn quote(generation: u64, sequence: u64, bid: i64, ask: i64) -> TradingQuote {
     }
 }
 
-fn feed_service(directory: &TestDirectory) -> (TradingService, Arc<crate::clock::ManualClock>) {
+pub(crate) fn feed_service(
+    directory: &TestDirectory,
+) -> (TradingService, Arc<crate::clock::ManualClock>) {
     let clock = Arc::new(crate::clock::ManualClock::new(1_000_000_000_000));
     let mut configuration = config(directory);
     configuration.clock = clock.clone();
     (start_service_with_config(configuration), clock)
 }
 
-fn live_session(id: InstrumentId, generation: u64) -> MarketFeedEvent {
+pub(crate) fn live_session(id: InstrumentId, generation: u64) -> MarketFeedEvent {
     MarketFeedEvent::Session(aeris_trading::market::InstrumentSession {
         instrument_id: id,
         provider_generation: generation,
@@ -651,7 +653,7 @@ fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
     restarted.shutdown(Duration::from_secs(5)).unwrap();
 }
 
-fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {
+pub(crate) fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {
     MarketFeedEvent::Feed {
         instrument_id: id,
         state,
@@ -1804,7 +1806,7 @@ fn closed_session_rejects_practice_order_without_writing_a_row() {
 }
 
 #[derive(Default)]
-struct RecordedInterest(Mutex<Vec<QuoteInterest>>);
+pub(crate) struct RecordedInterest(Mutex<Vec<QuoteInterest>>);
 
 impl QuoteInterestSink for RecordedInterest {
     fn set_interest(&self, interest: QuoteInterest) -> Result<(), MarketFeedError> {

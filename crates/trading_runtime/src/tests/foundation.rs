@@ -147,13 +147,16 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     );
     assert_eq!(
         service
-            .flatten_account(broker.id.clone(), observation(10_000, 10_025, 2, 2_000))
+            .flatten(FlattenScope {
+                account: Some(broker.id.clone()),
+                instrument: None,
+            })
             .unwrap_err(),
         expected
     );
     assert_eq!(
         service
-            .reverse_position(broker.id.clone(), observation(10_000, 10_025, 2, 2_000))
+            .reverse_position_at(broker.id.clone(), instrument().instrument_id)
             .unwrap_err(),
         expected
     );
@@ -172,7 +175,7 @@ fn live_account_rejects_every_trading_command_without_mutation() {
     // it is the only account, so they change nothing.
     assert!(
         service
-            .flatten_all(observation(10_000, 10_025, 2, 2_000))
+            .flatten(FlattenScope::default())
             .expect("flatten all")
             .incomplete
             .is_none()
@@ -235,12 +238,16 @@ fn flatten_outcome_preserves_simulated_fills_with_no_pending_closes() {
     let account = TradingAccountId::try_new("aeris-sim-1").expect("id");
     assert_eq!(
         service
-            .flatten_account(account, observation(10_000, 10_025, 1, 1_000))
+            .flatten(FlattenScope {
+                account: Some(account),
+                instrument: None,
+            })
             .expect("flatten"),
         FlattenOutcome {
             fills: vec![],
             pending_close_requests: vec![],
             incomplete: None,
+            unpriced: vec![],
         }
     );
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
@@ -433,7 +440,7 @@ fn economic_event_flatten_rejects_broker_and_preserves_simulated_rule() {
         observed_unix_nanos: 950_000_000_000,
     };
     let result = service
-        .apply_economic_event_risk(event, Some(observation(10_000, 10_025, 1, 950_000_000_000)))
+        .apply_economic_event_risk(event)
         .expect("simulated rule");
     assert_eq!(result.flattened_accounts, 1);
     service.shutdown(Duration::from_secs(2)).expect("shutdown");

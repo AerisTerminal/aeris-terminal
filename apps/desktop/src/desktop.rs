@@ -2793,7 +2793,10 @@ fn dispatch_chart_close_position(
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_result(aeris_desktop::trading::flatten_feedback(
             "Position closed",
-            service.flatten_account_at(account_id, instrument),
+            service.flatten(aeris_trading_runtime::FlattenScope {
+                account: Some(account_id),
+                instrument: Some(instrument),
+            }),
         ))
     });
     cx.spawn(async move |_, cx| {

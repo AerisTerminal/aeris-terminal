@@ -1,10 +1,12 @@
 use super::{
     ClientOrderId, EconomicEventRiskAction, EconomicEventRiskOutcome, EconomicEventRiskTrigger,
-    Fill, FillId, FillMemoryUpdate, FixedPoint, FlattenOutcome, InstrumentId, Liquidity, Order,
-    OrderId, OrderSide, OrderStatus, OrderType, PlaceOrder, SimulatedMarketObservation,
-    TimeInForce, TradingAccountId, TradingCore, VenueRoute, fill_policy_persistence,
-    flatten_acceptance_event, flatten_fill_event,
+    Fill, FillId, FillMemoryUpdate, FixedPoint, FlattenOutcome, FlattenScope, GroupStatus,
+    InstrumentId, Liquidity, Order, OrderId, OrderSide, OrderStatus, OrderType, PlaceOrder,
+    SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, UnpricedPosition,
+    VenueRoute, flatten_acceptance_event, flatten_fill_event,
 };
+use crate::book::lifecycle::CancellationCause;
+use crate::store::OrderStep;
 
 impl TradingCore {
     pub(super) fn kill_switch(
@@ -41,53 +43,368 @@ impl TradingCore {
         for account in &tradable {
             self.lock_account(account.clone(), reason.to_string(), locked_at_unix_nanos)?;
         }
-        let (cancelled, failures) = self.cancel_open_orders(account_id)?;
+        let (cancelled, failures) = self.cancel_open_orders(account_id, None)?;
         if let Some(failure) = failures {
             return Err(format!("accounts are locked; {failure}"));
         }
         Ok(cancelled.len())
     }
 
-    pub(super) fn flatten_account(
+    /// Runs `plan` on a speculative projection of the state and commits every staged change
+    /// in one transaction. A failed plan or a failed commit leaves memory and disk at the
+    /// last committed state.
+    pub(super) fn plan_atomic<T>(
         &mut self,
-        account_id: &TradingAccountId,
-        observation: &SimulatedMarketObservation,
-    ) -> Result<FlattenOutcome, String> {
-        if !self.state.accounts.contains_key(account_id) {
-            return Err("flatten account is not registered".to_string());
-        }
-        match self.route(account_id)? {
-            VenueRoute::Simulated => {}
-            VenueRoute::CtraderDemo => {
-                return self.flatten_broker_account(account_id, &observation.instrument_id);
+        plan: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.pending_equity_samples.clear();
+        let projection = self.state.clone();
+        let original = std::mem::replace(&mut self.state, projection);
+        self.quote_planning = true;
+        let result = plan(self);
+        self.quote_planning = false;
+        let planned = std::mem::replace(&mut self.state, original);
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.pending_equity_samples.clear();
+                return Err(error);
             }
+        };
+        if let Err(error) =
+            self.store
+                .commit_quote_step(&self.state, &planned, &self.pending_equity_samples)
+        {
+            self.pending_equity_samples.clear();
+            return Err(error);
         }
-        let mut fills = self.observe_market(observation)?;
-        self.cancel_all(Some(account_id))?;
-        fills.extend(self.flatten_positions(account_id, observation)?);
-        Ok(FlattenOutcome {
-            fills,
-            pending_close_requests: Vec::new(),
-            incomplete: None,
-        })
+        self.pending_equity_samples.clear();
+        self.state = planned;
+        self.enforce_memory_retention();
+        Ok(value)
     }
 
+    /// Flattens every in-scope simulated position at the owner's verified quotes, then
+    /// requests the in-scope broker closes. The simulated step commits once; a broker venue
+    /// that cannot be reached is reported without blocking anything else.
+    pub(super) fn flatten_scope(&mut self, scope: &FlattenScope) -> Result<FlattenOutcome, String> {
+        if self.state.accounts.is_empty() {
+            return Err("flatten requires at least one registered account".to_string());
+        }
+        // A targeted command on an unknown or data-only live account is refused before any
+        // change; a global one skips such accounts, which cannot trade, and handles the rest.
+        if let Some(account_id) = &scope.account {
+            self.route(account_id)?;
+        }
+        let mut outcome = FlattenOutcome::default();
+        let simulated = self
+            .state
+            .accounts
+            .keys()
+            .filter(|account| {
+                scope.account.as_ref().is_none_or(|scope| scope == *account)
+                    && matches!(self.route(account), Ok(VenueRoute::Simulated))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !simulated.is_empty() {
+            let (fills, unpriced) = self.plan_atomic(|core| core.stage_simulated_flatten(scope))?;
+            outcome.fills = fills;
+            outcome.unpriced = unpriced;
+        }
+        let broker = self
+            .state
+            .accounts
+            .keys()
+            .filter(|account| {
+                scope.account.as_ref().is_none_or(|scope| scope == *account)
+                    && matches!(self.route(account), Ok(VenueRoute::CtraderDemo))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for account_id in broker {
+            match self.flatten_broker_account(&account_id, scope.instrument.as_ref()) {
+                Ok(closed) => {
+                    outcome
+                        .pending_close_requests
+                        .extend(closed.pending_close_requests);
+                    if let Some(failure) = closed.incomplete {
+                        append_incomplete(&mut outcome.incomplete, failure);
+                    }
+                }
+                Err(error) => append_incomplete(
+                    &mut outcome.incomplete,
+                    format!("cTrader positions were not closed: {error}"),
+                ),
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Reverses one simulated position at the owner's verified quote. The close and the
+    /// admitted opening order commit in one step, so a risk rejection or a failed commit
+    /// leaves the original position untouched.
     pub(super) fn reverse_position(
         &mut self,
         account_id: &TradingAccountId,
-        observation: &SimulatedMarketObservation,
+        instrument_id: &InstrumentId,
     ) -> Result<FlattenOutcome, String> {
+        if !self.state.accounts.contains_key(account_id) {
+            return Err("reverse account is not registered".to_string());
+        }
         match self.route(account_id)? {
             VenueRoute::Simulated => {}
             VenueRoute::CtraderDemo => {
+                let observation = self.market_observation(instrument_id)?;
                 return self.reverse_broker_position(
                     account_id,
-                    &observation.instrument_id,
+                    instrument_id,
                     &observation.provenance,
                 );
             }
         }
-        let key = (account_id.clone(), observation.instrument_id.clone());
+        let observation = self.verified_observation(instrument_id)?;
+        self.plan_atomic(|core| core.stage_reverse(account_id, instrument_id, &observation))
+    }
+
+    /// The owner's own verified quote for an administrative close: a current Live quote
+    /// inside the freshness window on an open session.
+    fn verified_observation(
+        &self,
+        instrument_id: &InstrumentId,
+    ) -> Result<SimulatedMarketObservation, String> {
+        let instrument = self
+            .state
+            .instruments
+            .get(instrument_id)
+            .ok_or_else(|| "flatten instrument is not registered".to_string())?
+            .clone();
+        self.check_practice_market(&instrument)
+            .map_err(|reason| reason.to_string())?;
+        self.quote_book
+            .observation(instrument_id)
+            .ok_or_else(|| "a current live market quote is unavailable".to_string())
+    }
+
+    /// Cancels the scope's working orders and stages one closing fill per priced in-scope
+    /// position on the speculative state. Positions without a verified quote are collected
+    /// in the unpriced report, never silently skipped, and keep their protection.
+    fn stage_simulated_flatten(
+        &mut self,
+        scope: &FlattenScope,
+    ) -> Result<(Vec<Fill>, Vec<UnpricedPosition>), String> {
+        self.stage_scope_cancellations(scope, CancellationCause::Flatten)?;
+        let keys = self
+            .state
+            .positions
+            .iter()
+            .filter(|((account_id, instrument_id), position)| {
+                scope
+                    .account
+                    .as_ref()
+                    .is_none_or(|scope| scope == account_id)
+                    && scope
+                        .instrument
+                        .as_ref()
+                        .is_none_or(|scope| scope == instrument_id)
+                    && position.net_quantity.units() != 0
+                    && matches!(self.route(account_id), Ok(VenueRoute::Simulated))
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut fills = Vec::new();
+        let mut unpriced = Vec::new();
+        let mut priced: Vec<(InstrumentId, SimulatedMarketObservation)> = Vec::new();
+        for key in keys {
+            let Ok(observation) = self.verified_observation(&key.1) else {
+                let position = self
+                    .state
+                    .positions
+                    .get(&key)
+                    .ok_or("flatten position disappeared")?;
+                unpriced.push(UnpricedPosition {
+                    account_id: key.0.clone(),
+                    instrument_id: key.1.clone(),
+                    net_quantity: position.net_quantity,
+                });
+                continue;
+            };
+            if let Some(fill) = self.stage_flatten_fill(&key, &observation)? {
+                fills.push(fill);
+                if !priced.iter().any(|(id, _)| id == &key.1) {
+                    priced.push((key.1.clone(), observation));
+                }
+            }
+        }
+        // Protection of a flattened position retires with the fill, in the same step.
+        for (instrument_id, observation) in priced {
+            let instrument = self
+                .state
+                .instruments
+                .get(&instrument_id)
+                .ok_or_else(|| "flatten instrument is not registered".to_string())?
+                .clone();
+            let instrument_fills = fills
+                .iter()
+                .filter(|fill| fill.instrument_id == instrument_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            self.bump_revision()?;
+            self.reconcile_order_groups(&instrument_fills, &observation, &instrument)?;
+            self.align_position_protection(&instrument_fills, &observation)?;
+        }
+        Ok((fills, unpriced))
+    }
+
+    /// Cancels every working order in the scope that is not an active group's protection
+    /// leg; a pending bracket's entry takes its held legs and group with it. Protection of
+    /// a position that stays open (unpriced) remains working.
+    fn stage_scope_cancellations(
+        &mut self,
+        scope: &FlattenScope,
+        cause: CancellationCause,
+    ) -> Result<(), String> {
+        let protected = self
+            .state
+            .order_groups
+            .values()
+            .filter(|group| group.status == GroupStatus::Active)
+            .flat_map(|group| group.legs.iter().map(|leg| leg.order_id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        let candidates = self
+            .state
+            .orders
+            .open_orders()
+            .filter(|order| {
+                scope
+                    .account
+                    .as_ref()
+                    .is_none_or(|scope| scope == &order.account_id)
+                    && scope
+                        .instrument
+                        .as_ref()
+                        .is_none_or(|scope| scope == &order.instrument_id)
+                    && matches!(self.route(&order.account_id), Ok(VenueRoute::Simulated))
+                    && !protected.contains(&order.id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut step = OrderStep::new(self.state.next_sequence);
+        for order in candidates {
+            if step
+                .updated
+                .iter()
+                .any(|(updated, _)| updated.id == order.id)
+            {
+                continue;
+            }
+            self.stage_cancellation(&mut step, order, true, cause)?;
+        }
+        self.commit_order_step(step, Vec::new())
+    }
+
+    /// Stages one closing fill for a position at the verified quote. The wrapping
+    /// `plan_atomic` commits the order, fill, ledger and equity sample in one transaction.
+    fn stage_flatten_fill(
+        &mut self,
+        key: &(TradingAccountId, InstrumentId),
+        observation: &SimulatedMarketObservation,
+    ) -> Result<Option<Fill>, String> {
+        let Some(current) = self.state.positions.get(key).cloned() else {
+            return Ok(None);
+        };
+        if current.net_quantity.units() == 0 {
+            return Ok(None);
+        }
+        let instrument = self
+            .state
+            .instruments
+            .get(&key.1)
+            .ok_or_else(|| "flatten instrument is not registered".to_string())?
+            .clone();
+        let account = self
+            .state
+            .accounts
+            .get(&key.0)
+            .ok_or_else(|| "flatten account is not registered".to_string())?
+            .clone();
+        let sequence = self.state.next_sequence;
+        let side = if current.net_quantity.units() > 0 {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        let quantity = FixedPoint::try_new(
+            i64::try_from(current.net_quantity.units().unsigned_abs())
+                .map_err(|_| "flatten quantity overflowed".to_string())?,
+            current.net_quantity.scale(),
+        )
+        .map_err(|error| error.to_string())?;
+        let price = if side == OrderSide::Sell {
+            observation.bid
+        } else {
+            observation.ask
+        };
+        let provenance = observation.provenance.clone();
+        let order = flatten_order(
+            &key.0,
+            observation,
+            sequence,
+            side,
+            quantity,
+            self.command_now,
+        )?;
+        let accepted = flatten_acceptance_event(&order, sequence)?;
+        self.state.next_sequence = sequence + 1;
+        self.state.order_events.push_back(accepted);
+        self.state.orders.insert(order.id.clone(), order.clone());
+        let fill = Fill {
+            id: FillId::try_new(format!("sim-flatten-fill-{}", sequence + 1))
+                .map_err(|error| error.to_string())?,
+            order_id: order.id.clone(),
+            account_id: key.0.clone(),
+            instrument_id: key.1.clone(),
+            side,
+            price,
+            quantity,
+            execution_unix_nanos: provenance.observed_unix_nanos,
+            provenance: provenance.clone(),
+        };
+        fill.validate().map_err(|error| error.to_string())?;
+        let event = flatten_fill_event(&order, &fill, sequence + 1, provenance)?;
+        let (position, cost_basis, policy_update) = self.apply_fill(
+            &fill,
+            Some(&current),
+            &account,
+            &instrument,
+            Liquidity::Taker,
+        )?;
+        let filled = crate::book::lifecycle::fill_simulated(order, self.command_now)
+            .map_err(|error| error.to_string())?;
+        self.apply_fill_to_memory(
+            filled,
+            event,
+            &fill,
+            FillMemoryUpdate {
+                position,
+                cost_basis,
+                position_key: key.clone(),
+                policy_update,
+                next_sequence: sequence + 2,
+            },
+        );
+        Ok(Some(fill))
+    }
+
+    /// The reverse is one admitted operation: the position closes, the opposite market
+    /// order is admitted against the post-close state, and both fills commit together.
+    fn stage_reverse(
+        &mut self,
+        account_id: &TradingAccountId,
+        instrument_id: &InstrumentId,
+        observation: &SimulatedMarketObservation,
+    ) -> Result<FlattenOutcome, String> {
+        let key = (account_id.clone(), instrument_id.clone());
         let position = self
             .state
             .positions
@@ -95,6 +412,21 @@ impl TradingCore {
             .filter(|position| position.net_quantity.units() != 0)
             .cloned()
             .ok_or_else(|| "reverse requires an open position".to_string())?;
+        let mut fills = Vec::new();
+        if let Some(fill) = self.stage_flatten_fill(&key, observation)? {
+            fills.push(fill);
+        }
+        let instrument = self
+            .state
+            .instruments
+            .get(instrument_id)
+            .ok_or_else(|| "reverse instrument is not registered".to_string())?
+            .clone();
+        self.bump_revision()?;
+        self.reconcile_order_groups(&fills, observation, &instrument)?;
+        self.align_position_protection(&fills, observation)?;
+        // The opening leg is admitted after the close, so the risk limits evaluate the
+        // position the reverse would leave behind; a rejection abandons the whole step.
         let side = if position.net_quantity.units() > 0 {
             OrderSide::Sell
         } else {
@@ -106,32 +438,50 @@ impl TradingCore {
             position.net_quantity.scale(),
         )
         .map_err(|error| error.to_string())?;
-        let mut outcome = self.flatten_account(account_id, observation)?;
-        let client_order_id =
-            ClientOrderId::try_new(format!("sim-reverse-{}", self.state.next_sequence))
-                .map_err(|error| error.to_string())?;
-        let order = PlaceOrder {
-            client_order_id,
+        let command = PlaceOrder {
+            client_order_id: ClientOrderId::try_new(format!(
+                "sim-reverse-{}",
+                self.state.next_sequence
+            ))
+            .map_err(|error| error.to_string())?,
             account_id: account_id.clone(),
-            instrument_id: observation.instrument_id.clone(),
+            instrument_id: instrument_id.clone(),
             side,
             order_type: OrderType::Market,
-            time_in_force: TimeInForce::Day,
+            time_in_force: TimeInForce::ImmediateOrCancel,
             quantity,
             limit_price: None,
             stop_price: None,
             submitted_unix_nanos: observation.provenance.observed_unix_nanos,
             provenance: observation.provenance.clone(),
         };
-        self.place_order(&order)?;
-        outcome.fills.extend(self.observe_market(observation)?);
-        Ok(outcome)
+        let mut step = OrderStep::new(self.state.next_sequence);
+        let order = self.stage_single_order(&mut step, command, true)?;
+        self.commit_order_step(step, Vec::new())?;
+        let touch = if side == OrderSide::Sell {
+            observation.bid
+        } else {
+            observation.ask
+        };
+        let opening = self.execute_market_fills(
+            vec![(order.id.clone(), touch)],
+            observation,
+            &instrument,
+            true,
+        )?;
+        self.bump_revision()?;
+        self.reconcile_order_groups(&opening, observation, &instrument)?;
+        self.align_position_protection(&opening, observation)?;
+        fills.extend(opening);
+        Ok(FlattenOutcome {
+            fills,
+            ..FlattenOutcome::default()
+        })
     }
 
     pub(super) fn apply_economic_event_risk(
         &mut self,
         event: &EconomicEventRiskTrigger,
-        observation: Option<&SimulatedMarketObservation>,
     ) -> Result<EconomicEventRiskOutcome, String> {
         const EVENT_GRACE_NANOS: i64 = 15 * 60 * 1_000_000_000;
         event.validate()?;
@@ -190,28 +540,14 @@ impl TradingCore {
                     outcome.locked_accounts += 1;
                 }
                 EconomicEventRiskAction::Flatten => {
-                    let observation = observation.ok_or_else(|| {
-                        "economic event flatten requires a current market observation".to_string()
+                    // The owner's verified quotes price every open instrument; positions
+                    // without one are reported rather than blocking the rule.
+                    let flattened = self.flatten_scope(&FlattenScope {
+                        account: Some(profile.account_id.clone()),
+                        instrument: None,
                     })?;
-                    if self
-                        .state
-                        .positions
-                        .iter()
-                        .any(|((account_id, instrument_id), position)| {
-                            account_id == &profile.account_id
-                                && position.net_quantity.units() != 0
-                                && instrument_id != &observation.instrument_id
-                        })
-                    {
-                        return Err(
-                            "economic event flatten requires current observations for every open instrument"
-                                .to_string(),
-                        );
-                    }
-                    outcome.fills.extend(
-                        self.flatten_account(&profile.account_id, observation)?
-                            .fills,
-                    );
+                    outcome.fills.extend(flattened.fills);
+                    outcome.unpriced.extend(flattened.unpriced);
                     outcome.flattened_accounts += 1;
                 }
             }
@@ -225,173 +561,15 @@ impl TradingCore {
         }
         Ok(outcome)
     }
+}
 
-    pub(super) fn flatten_all(
-        &mut self,
-        observation: &SimulatedMarketObservation,
-    ) -> Result<FlattenOutcome, String> {
-        if self.state.accounts.is_empty() {
-            return Err("flatten requires at least one registered account".to_string());
+fn append_incomplete(slot: &mut Option<String>, message: String) {
+    match slot {
+        Some(existing) => {
+            existing.push_str("; ");
+            existing.push_str(&message);
         }
-        let mut fills = self.observe_market(observation)?;
-        // A broker account never blocks flattening the others: what cannot be requested
-        // for it is reported, and everything else still runs.
-        let (_, mut incomplete) = self.cancel_open_orders(None)?;
-        let mut pending_close_requests = Vec::new();
-        let accounts = self.state.accounts.keys().cloned().collect::<Vec<_>>();
-        for account_id in accounts {
-            // Live accounts are data-only and hold nothing Aeris can close.
-            let Ok(route) = self.route(&account_id) else {
-                continue;
-            };
-            match route {
-                VenueRoute::Simulated => {
-                    fills.extend(self.flatten_positions(&account_id, observation)?);
-                }
-                VenueRoute::CtraderDemo => {
-                    match self.close_broker_positions_on(&account_id, &observation.instrument_id) {
-                        Ok(closes) => pending_close_requests.extend(closes),
-                        Err(error) => {
-                            incomplete.get_or_insert(format!(
-                                "cTrader positions were not closed: {error}"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(FlattenOutcome {
-            fills,
-            pending_close_requests,
-            incomplete,
-        })
-    }
-
-    pub(super) fn flatten_positions(
-        &mut self,
-        account_id: &TradingAccountId,
-        observation: &SimulatedMarketObservation,
-    ) -> Result<Vec<Fill>, String> {
-        let position_keys = self
-            .state
-            .positions
-            .keys()
-            .filter(|(candidate, instrument_id)| {
-                candidate == account_id && instrument_id == &observation.instrument_id
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut fills = Vec::new();
-        for key in position_keys {
-            if let Some(fill) = self.flatten_position(account_id, &key, observation)? {
-                fills.push(fill);
-            }
-        }
-        Ok(fills)
-    }
-
-    pub(super) fn flatten_position(
-        &mut self,
-        account_id: &TradingAccountId,
-        key: &(TradingAccountId, InstrumentId),
-        observation: &SimulatedMarketObservation,
-    ) -> Result<Option<Fill>, String> {
-        let Some(current) = self.state.positions.get(key).cloned() else {
-            return Ok(None);
-        };
-        if current.net_quantity.units() == 0 {
-            return Ok(None);
-        }
-        let instrument = self
-            .state
-            .instruments
-            .get(&observation.instrument_id)
-            .ok_or_else(|| "flatten instrument is not registered".to_string())?
-            .clone();
-        let account = self
-            .state
-            .accounts
-            .get(account_id)
-            .ok_or_else(|| "flatten account is not registered".to_string())?
-            .clone();
-        let sequence = self.state.next_sequence;
-        let side = if current.net_quantity.units() > 0 {
-            OrderSide::Sell
-        } else {
-            OrderSide::Buy
-        };
-        let quantity = FixedPoint::try_new(
-            i64::try_from(current.net_quantity.units().unsigned_abs())
-                .map_err(|_| "flatten quantity overflowed".to_string())?,
-            current.net_quantity.scale(),
-        )
-        .map_err(|error| error.to_string())?;
-        let price = if side == OrderSide::Sell {
-            observation.bid
-        } else {
-            observation.ask
-        };
-        let provenance = observation.provenance.clone();
-        let order = flatten_order(
-            account_id,
-            observation,
-            sequence,
-            side,
-            quantity,
-            self.command_now,
-        )?;
-        let accepted = flatten_acceptance_event(&order, sequence)?;
-        self.store
-            .insert_order(&order, &accepted, sequence + 1, false)?;
-        self.state.next_sequence = sequence + 1;
-        self.state.order_events.push_back(accepted);
-        self.state.orders.insert(order.id.clone(), order.clone());
-        let fill = Fill {
-            id: FillId::try_new(format!("sim-flatten-fill-{}", sequence + 1))
-                .map_err(|error| error.to_string())?,
-            order_id: order.id.clone(),
-            account_id: account_id.clone(),
-            instrument_id: observation.instrument_id.clone(),
-            side,
-            price,
-            quantity,
-            execution_unix_nanos: provenance.observed_unix_nanos,
-            provenance: provenance.clone(),
-        };
-        fill.validate().map_err(|error| error.to_string())?;
-        let event = flatten_fill_event(&order, &fill, sequence + 1, provenance)?;
-        let (position, cost_basis, policy_update) = self.apply_fill(
-            &fill,
-            Some(&current),
-            &account,
-            &instrument,
-            Liquidity::Taker,
-        )?;
-        let filled = crate::book::lifecycle::fill_simulated(order, self.command_now)
-            .map_err(|error| error.to_string())?;
-        self.store.insert_fill(
-            &filled,
-            &event,
-            &fill,
-            &position,
-            fill_policy_persistence(&policy_update, cost_basis),
-            sequence + 2,
-        )?;
-        self.apply_fill_to_memory(
-            filled,
-            event,
-            &fill,
-            FillMemoryUpdate {
-                position,
-                cost_basis,
-                position_key: key.clone(),
-                policy_update,
-                next_sequence: sequence + 2,
-            },
-        );
-        // The fill committed above; its equity sample follows in its own small write.
-        self.flush_pending_equity_samples();
-        Ok(Some(fill))
+        None => *slot = Some(message),
     }
 }
 

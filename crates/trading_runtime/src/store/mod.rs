@@ -312,16 +312,6 @@ pub(super) struct BrokerFillRecord<'a> {
     pub realized_pnl: Option<FixedPoint>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct FillPolicyPersistence<'a> {
-    pub rule_state: Option<&'a RiskRuleState>,
-    pub trade_cycle: &'a TradeCycle,
-    pub discipline_state: &'a DisciplineState,
-    pub accounting: FillAccounting,
-    pub ledger_entries: &'a [LedgerEntry],
-    pub cost_basis: Option<CostBasis>,
-}
-
 impl TradingStore {
     #[cfg(test)]
     pub(super) fn crash_during_commit(&self, nth: usize) {
