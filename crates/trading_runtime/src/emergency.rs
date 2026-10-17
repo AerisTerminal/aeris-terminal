@@ -53,7 +53,12 @@ impl TradingCore {
         let mut outcome = self.plan_atomic(|core| {
             let mut staged = EmergencyOutcome::default();
             for account in &tradable {
-                core.lock_account(account.clone(), reason.clone(), locked_at_unix_nanos)?;
+                core.lock_account(
+                    account.clone(),
+                    crate::RiskLockKind::KillSwitch,
+                    reason.clone(),
+                    locked_at_unix_nanos,
+                )?;
                 staged.accounts_locked += 1;
             }
             let planned = core.stage_simulated_flatten(&scope, CancellationCause::KillSwitch)?;
@@ -104,7 +109,12 @@ impl TradingCore {
         };
         let reason = reason.to_string();
         self.plan_atomic(|core| {
-            core.lock_account(account_id.clone(), reason.clone(), locked_at_unix_nanos)?;
+            core.lock_account(
+                account_id.clone(),
+                crate::RiskLockKind::KillSwitch,
+                reason.clone(),
+                locked_at_unix_nanos,
+            )?;
             core.stage_scope_cancellations(&scope, CancellationCause::KillSwitch)?;
             Ok(())
         })?;

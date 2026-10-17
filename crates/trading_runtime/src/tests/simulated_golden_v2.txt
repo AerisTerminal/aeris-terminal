@@ -73,4 +73,4 @@ trade_pnl sim-flatten-fill-21 -1250@2
 trade_pnl sim-flatten-fill-27 -1250@2
 trade_pnl sim-flatten-fill-7 5000@2
 managed_brackets=[BracketView { bracket_id: "bracket-entry", template: BracketStrategyTemplate { template_id: "golden-bracket", revision: 1, name: "Managed bracket", stop_offset_ticks: 8, targets: [BracketTarget { offset_ticks: 8, quantity_percent: 100 }], trailing_stop: None, break_even: None, enabled: true }, entry_client_order_id: ClientOrderId("bracket-entry"), stop_client_order_id: Some(ClientOrderId("bracket-stop-d2131379f897611e")), target_client_order_ids: [ClientOrderId("bracket-target-2bb699108c7b67d7")], status: Completed, entry_price: Some(FixedPoint { units: 10025, scale: 2 }) }]
-risk_locks=[RiskLock { account_id: TradingAccountId("aeris-sim-1"), reason: "golden kill", locked_at_unix_nanos: 14000, profile_id: None, profile_version: None }]
+risk_locks=[RiskLock { account_id: TradingAccountId("aeris-sim-1"), kind: KillSwitch, reason: "golden kill", locked_at_unix_nanos: 14000, profile_id: None, profile_version: None }]

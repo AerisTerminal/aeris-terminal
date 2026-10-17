@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 27;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -339,6 +339,27 @@ pub(super) const MIGRATION_V25: &str = "
 /// in the same transaction that prunes fills and ledger entries, so a crash leaves neither
 /// the checkpoint nor the deletion behind. Chain entry after V25, so a store still gated on
 /// legacy bracket conversion never sees these tables.
+pub(super) const MIGRATION_V27: &str = "
+ CREATE TABLE risk_sessions (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+     boundary TEXT NOT NULL,
+     session_start_unix_nanos INTEGER NOT NULL,
+     session_start_realized_units INTEGER NOT NULL,
+     session_start_realized_scale INTEGER NOT NULL
+ ) STRICT;
+ INSERT INTO risk_sessions(account_id, boundary, session_start_unix_nanos,
+     session_start_realized_units, session_start_realized_scale)
+ SELECT account_id, 'utc_midnight', session_start_unix_nanos,
+     session_start_realized_units, session_start_realized_scale FROM risk_profiles;
+ ALTER TABLE risk_locks ADD COLUMN kind TEXT NOT NULL DEFAULT 'manual';
+ UPDATE risk_locks SET kind = CASE
+     WHEN reason = 'daily loss limit reached' THEN 'daily_loss_limit'
+     WHEN reason = 'intraday trailing drawdown reached' THEN 'trailing_drawdown'
+     WHEN reason = 'end_of_day trailing drawdown reached' THEN 'trailing_drawdown'
+     WHEN reason = 'session plan maximum loss reached' THEN 'session_plan'
+     WHEN reason = 'news/session restriction is active' THEN 'news_restriction'
+     ELSE 'manual' END;";
+
 pub(super) const MIGRATION_V26: &str = "
  CREATE TABLE position_checkpoints (
      account_id TEXT NOT NULL REFERENCES accounts(id),
@@ -498,6 +519,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 25,
         to: 26,
         sql: MIGRATION_V26,
+    },
+    Migration {
+        from: 26,
+        to: 27,
+        sql: MIGRATION_V27,
     },
 ];
 

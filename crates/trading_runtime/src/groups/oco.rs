@@ -28,10 +28,20 @@ impl TradingCore {
             return Err(RejectReason::CapacityExceeded.to_string());
         }
         let sequence = self.state.next_sequence;
-        let (first_order, first_event) =
-            self.prepare_single_order(first.clone(), true, sequence, &[])?;
-        let (second_order, second_event) =
-            self.prepare_single_order(second.clone(), true, sequence + 1, &[])?;
+        let (first_order, first_event) = self.prepare_single_order(
+            first.clone(),
+            true,
+            first.stop_price.is_some(),
+            sequence,
+            &[],
+        )?;
+        let (second_order, second_event) = self.prepare_single_order(
+            second.clone(),
+            true,
+            second.stop_price.is_some(),
+            sequence + 1,
+            &[],
+        )?;
         let group = OrderGroup {
             group_id: format!("oco/{}", first_order.client_order_id.as_str()),
             account_id: first_order.account_id.clone(),

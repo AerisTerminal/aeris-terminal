@@ -31,9 +31,10 @@ use {
 use super::{
     BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, BreakEvenRule,
     DisciplineState, EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskRule,
-    RiskLock, RiskProfile, RiskRuleState, SessionBias, SessionChecklistItem, SessionPlan,
-    SessionPlanLevel, TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
-    TrailingDrawdownMode, TrailingStopRule, UserRecord,
+    RiskLock, RiskLockKind, RiskProfile, RiskRuleState, RiskSession, RiskSessionBoundary,
+    SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel, TradeCopierConfig,
+    TradeCopierTarget, TradingInstrument, TradingRetention, TrailingDrawdownMode, TrailingStopRule,
+    UserRecord,
 };
 use crate::core::OrderGroup;
 use crate::core::ledger::{
@@ -227,6 +228,7 @@ pub(super) struct StoredState {
     pub risk_profiles: BTreeMap<TradingAccountId, RiskProfile>,
     pub risk_locks: BTreeMap<TradingAccountId, RiskLock>,
     pub risk_rule_states: BTreeMap<TradingAccountId, RiskRuleState>,
+    pub risk_sessions: BTreeMap<TradingAccountId, RiskSession>,
     pub session_plans: BTreeMap<TradingAccountId, SessionPlan>,
     pub discipline_states: BTreeMap<TradingAccountId, DisciplineState>,
     pub trade_copiers: BTreeMap<TradingAccountId, TradeCopierConfig>,
@@ -455,6 +457,13 @@ impl TradingStore {
         let risk_profiles = self.load_risk_profiles()?;
         let risk_locks = self.load_risk_locks()?;
         let risk_rule_states = self.load_risk_rule_states()?;
+        // A gated pre-group store stops at V23 and has no risk_sessions table yet; its
+        // sessions are seeded from the profiles once the post-group chain lands.
+        let risk_sessions = if self.risk_sessions_table_present()? {
+            self.load_risk_sessions()?
+        } else {
+            BTreeMap::new()
+        };
         let session_plans = self.load_session_plans()?;
         let discipline_states = self.load_discipline_states()?;
         let trade_copiers = self.load_trade_copiers()?;
@@ -484,6 +493,7 @@ impl TradingStore {
             risk_profiles,
             risk_locks,
             risk_rule_states,
+            risk_sessions,
             session_plans,
             discipline_states,
             trade_copiers,
@@ -731,7 +741,7 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -1307,6 +1317,88 @@ mod tests {
         fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
     }
 
+    #[test]
+    fn v26_risk_state_migrates_to_v27_sessions_and_lock_kinds() {
+        let path = temporary_database("v26-risk-sessions");
+        let connection = Connection::open(&path).expect("fixture");
+        create_schema_at(&connection, 26);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                 VALUES ('a','Practice','simulated','USD',2),
+                        ('b','Discretionary','simulated','USD',2);
+                 INSERT INTO risk_profiles(account_id,profile_id,version,session_start_unix_nanos,
+                     session_start_realized_units,session_start_realized_scale,daily_loss_units,
+                     daily_loss_scale,trailing_units,trailing_scale,trailing_mode,
+                     max_contracts_units,max_contracts_scale,consistency_percent,
+                     restricted_until_unix_nanos,enabled)
+                 VALUES ('a','daily',3,1700000000000000000,0,2,1000,2,NULL,NULL,'intraday',
+                     10,0,NULL,NULL,1);
+                 INSERT INTO risk_locks(account_id,reason,locked_at_unix_nanos,profile_id,
+                     profile_version)
+                 VALUES ('a','daily loss limit reached',
+                     1700000001000000000,'daily',3),
+                        ('b','manually locked',1700000002000000000,NULL,NULL);",
+            )
+            .expect("fixture facts");
+        drop(connection);
+
+        let store = TradingStore::open(&path, TradingRetention::default()).expect("migration");
+        let version: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, SCHEMA_VERSION);
+        let sessions: Vec<(String, String, i64, i64, u8)> = store
+            .connection
+            .prepare(
+                "SELECT account_id,boundary,session_start_unix_nanos,
+                        session_start_realized_units,session_start_realized_scale
+                 FROM risk_sessions ORDER BY account_id",
+            )
+            .expect("sessions")
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .expect("session rows")
+            .map(|row| row.expect("session"))
+            .collect();
+        assert_eq!(
+            sessions,
+            [(
+                "a".into(),
+                "utc_midnight".into(),
+                1_700_000_000_000_000_000,
+                0,
+                2
+            )],
+            "the migration seeds a UTC-midnight session from each legacy profile"
+        );
+        let kinds: Vec<(String, String)> = store
+            .connection
+            .prepare("SELECT account_id,kind FROM risk_locks ORDER BY account_id")
+            .expect("locks")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("lock rows")
+            .map(|row| row.expect("lock"))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("a".into(), "daily_loss_limit".into()),
+                ("b".into(), "manual".into())
+            ],
+            "legacy lock reasons classify into durable kinds"
+        );
+        drop(store);
+        fs::remove_dir_all(path.parent().expect("parent")).expect("fixture cleanup");
+    }
     fn assert_migrated_event_reasons(store: &TradingStore) {
         let restored_reasons: Vec<_> = store
             .load_events()

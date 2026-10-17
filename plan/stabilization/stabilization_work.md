@@ -124,7 +124,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-06 | High | Per-quote durable writes and retention that deletes the ledger | M4.10 (per-quote writes), M5.8 (retention and repair) | closed: checkpoint-fold retention, checkpoint repair and the seeded property identity run |
 | TR-07 | High | Position protection is built from overlapping patch layers | M5.2 (validator), M5.5 (model), M5.6 (cleanup) | closed: one group authority, legacy layers deleted in M5.6 |
 | TR-08 | Medium | Fill model gaps | M5.1 (part), M5.2 (tick checks), M5.3, M5.4 | open |
-| TR-09 | Medium | The risk session never rolls over and no profile is registered | M5.10 (runtime part; desktop UI out of scope) | open |
+| TR-09 | Medium | The risk session never rolls over and no profile is registered | M5.10 (runtime part; desktop UI out of scope) | runtime closed: V27 `risk_sessions` roll at the account boundary on the owner timer with durable baseline, meter reset and daily-lock release; desktop registration UI stays deferred |
 | TR-10 | Medium | Desktop keeps per-pane copies of trading state and resolves intents against them | M6.10 (part), M6.11 | open |
 | TR-11 | Medium | Duplicate PnL trackers and no cash ledger | M4.9 (single PnL path), M5.7 | closed: exact cost basis plus one durable cash ledger with fees |
 | TR-12 | Low | Smaller defects and debt | M4.1, M4.2, M4.5, M4.6, M5.9, M8.10 | open; reverse is one atomic admitted operation since M5.9, rest stays with M8.10 |
@@ -540,7 +540,7 @@ Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VA
 
 ### M5 trading engine
 
-Status: in progress; M5.1-M5.9 code and tests are complete, M5.10-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
+Status: in progress; M5.1-M5.10 code and tests are complete, M5.11-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
 
 - [x] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -725,7 +725,14 @@ Status: in progress; M5.1-M5.9 code and tests are complete, M5.10-M5.12 remain o
     close; TR-12's reverse part closes here, the rest stays with M8.10. The item's GUI
     flatten-all pass (VAL-TRD-064) moves to the milestone GUI/probe pass; M5.9 is otherwise
     complete.
-- [ ] M5.10 risk-session-rollover - Persisted risk session with rollover; bracket legs count as attached stops
+- [x] M5.10 risk-session-rollover - Persisted risk session with rollover; bracket legs count as attached stops
+  - V27 adds `risk_sessions` (seeded per profile from the registration baseline) and `risk_locks.kind`; a manual lock
+    survives rollover while daily-loss and trailing-drawdown locks release. The owner timer rolls the session at the
+    account boundary (UTC midnight by default; 17:00 America/Chicago via `set_risk_session_boundary`), resets the
+    daily meter, persists the rolled row with the realized baseline and writes a boundary equity sample in the same
+    transaction. Bracket entry admission counts the template stop as attached, so the "no attached stop" warning
+    fires only for genuinely stop-less entries. Session-aware realized P&L falls back to the registration baseline
+    for gated pre-group stores. GUI/probe: none beyond the milestone pass; TR-09's desktop registration UI stays deferred.
 - [ ] M5.11 trading-publication-api - Change-driven, bounded publication with paged history
 - [ ] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
 
@@ -1033,6 +1040,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.9 part 1/3 feat(trading): price emergency operations from verified runtime quotes - atomic scoped flatten/reverse through one commit_quote_step per action, typed unpriced reporting that keeps protection, sim-reverse IOC staging with enforce_risk, observation-free event risk and scoped/global broker multi-instrument close; legacy per-step fill writers deleted; regressions converted to the real feed path plus scope/unpriced/risk-reject/crash-atomicity coverage; v2 simulated golden regenerated for the new feed provenance, per-instrument revision numbering, sim-reverse leg and completed bracket. Runtime 260 passed/5 ignored; full gate green.
 - 2026-10-17 M5.9 part 2/3 feat(trading): make the kill switch the full atomic emergency action - one durable step locks the in-scope accounts, cancels non-protective orders with the typed KillSwitch cause and flattens every priced position with group reconciliation; protection is never stripped, unpriced positions keep their stop/target and land in EmergencyOutcome::unpriced; broker cancels/closes stay reported venue requests; event Lock shares lock_and_disarm without flattening; stale CancellationCause dead-code expectation removed. New VAL-TRD-061 four-instrument regression and replay crash-atomicity test; property harness now follows activation-assigned leg prices; v2 golden regenerated for the kill_switch cancel reason and the kill flatten fill. Runtime 262 passed/5 ignored; desktop 449+81; full gate green.
 - 2026-10-17 M5.9 part 3/3 test(trading): close out emergency operations - scripted cTrader two-symbol flatten parity (VAL-TRD-062: close requests for both positions, scoped variant closes one) and the locked-account reverse refusal (VAL-TRD-063). TR-03 and TR-04 closed; TR-12's reverse part closed. M5.9 complete except the milestone GUI flatten-all pass (VAL-TRD-064). Runtime 264 passed/5 ignored; full gate green.
+- 2026-10-18 M5.10 feat(trading): persist risk sessions and roll them at the account boundary - V27 adds `risk_sessions` (seeded per registered profile) and `risk_locks.kind`; the owner timer rolls the session in one transaction (durable row with realized baseline, daily meter reset, daily-loss/trailing-drawdown lock release, boundary equity sample); bracket admission counts the template stop as attached; `set_risk_session_boundary` supports 17:00 America/Chicago via aeris_instruments DST math; session P&L falls back to the registration baseline for gated pre-group stores and pre-V27 locks read as manual. TR-09 runtime part closed. VAL-TRD-065 integration tests cover UTC-midnight and Chicago-close rollover, restart survival and the bracket no-warning path; v26->v27 migration test. Runtime 272 passed/5 ignored; workspace 2317 passed; fmt, strict Clippy and naming_check green.
 
 ## 7. Known gaps / deferred
 

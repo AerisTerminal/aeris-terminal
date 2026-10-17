@@ -60,6 +60,7 @@ pub(crate) enum Command {
     RegisterStrategyTemplate(BracketStrategyTemplate, Reply<()>),
     LockAccount(TradingAccountId, String, i64, Reply<()>),
     UnlockAccount(TradingAccountId, Reply<()>),
+    SetRiskSessionBoundary(TradingAccountId, crate::RiskSessionBoundary, Reply<()>),
     KillSwitch(
         Option<TradingAccountId>,
         String,

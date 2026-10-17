@@ -78,13 +78,15 @@ impl TradingStore {
         for (key, lock) in &after.risk_locks {
             if before.risk_locks.get(key) != Some(lock) {
                 tx.execute(
-                    "INSERT INTO risk_locks(account_id, reason, locked_at_unix_nanos, profile_id,
-                     profile_version) VALUES (?1,?2,?3,?4,?5)
-                     ON CONFLICT(account_id) DO UPDATE SET reason=excluded.reason,
+                    "INSERT INTO risk_locks(account_id, kind, reason, locked_at_unix_nanos,
+                     profile_id, profile_version) VALUES (?1,?2,?3,?4,?5,?6)
+                     ON CONFLICT(account_id) DO UPDATE SET kind=excluded.kind,
+                     reason=excluded.reason,
                      locked_at_unix_nanos=excluded.locked_at_unix_nanos,
                      profile_id=excluded.profile_id, profile_version=excluded.profile_version",
                     params![
                         key.as_str(),
+                        lock.kind.as_str(),
                         lock.reason,
                         lock.locked_at_unix_nanos,
                         lock.profile_id,

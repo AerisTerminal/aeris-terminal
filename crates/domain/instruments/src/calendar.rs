@@ -96,7 +96,10 @@ fn cme_trading_day(timestamp_seconds: i64) -> i64 {
     local_day + i64::from(seconds_of_day >= CME_SESSION_ROLL_SECONDS)
 }
 
-fn chicago_utc_offset_seconds(timestamp_seconds: i64) -> i64 {
+/// The America/Chicago UTC offset in seconds at one instant, from the one IANA-zone/DST
+/// calculation shared by session projection and risk-session boundaries.
+#[must_use]
+pub fn chicago_utc_offset_seconds(timestamp_seconds: i64) -> i64 {
     let utc_day = timestamp_seconds.div_euclid(SECONDS_PER_DAY);
     let (year, _, _) = civil_from_days(utc_day);
     let (daylight_start_day, daylight_end_day) = if year >= 2007 {

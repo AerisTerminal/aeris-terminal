@@ -244,13 +244,7 @@ impl TradingCore {
             position_pnl: self.position_pnl()?,
             account_pnl: self.account_pnl()?,
             ledger_entries: self.state.ledger_entries.clone(),
-            equity_samples: self
-                .state
-                .equity_rings
-                .values()
-                .flatten()
-                .cloned()
-                .collect(),
+            equity_samples: self.equity_sample_rows(),
             fee_schedules: self
                 .state
                 .fee_schedules
@@ -261,6 +255,7 @@ impl TradingCore {
             risk_meters: self.risk_meters()?,
             risk_locks: self.projected_risk_locks(),
             risk_rule_states: self.state.risk_rule_states.values().cloned().collect(),
+            risk_sessions: self.state.risk_sessions.values().cloned().collect(),
             discipline_states: self.state.discipline_states.values().cloned().collect(),
             session_plans: self.state.session_plans.values().cloned().collect(),
             session_adherence_reviews: self.session_adherence_reviews()?,
@@ -280,6 +275,16 @@ impl TradingCore {
             protective_orders: self.protection_order_views(),
             recovery_notices: self.recovery_notices.clone(),
         })
+    }
+
+    /// Every account's in-memory equity ring, flattened into one snapshot history.
+    fn equity_sample_rows(&self) -> Vec<aeris_trading::EquitySample> {
+        self.state
+            .equity_rings
+            .values()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     /// The current balance of one simulated account: the ledger checkpoint plus the exact
@@ -472,6 +477,7 @@ impl TradingCore {
             let profile = self.state.risk_profiles.get(&state.account_id);
             locks.push(RiskLock {
                 account_id: state.account_id.clone(),
+                kind: crate::RiskLockKind::Manual,
                 reason: format!("rapid-loss cooldown active until {until}"),
                 locked_at_unix_nanos: state.last_loss_unix_nanos.unwrap_or(1),
                 profile_id: profile.map(|profile| profile.profile_id.clone()),

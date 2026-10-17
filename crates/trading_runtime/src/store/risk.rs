@@ -139,11 +139,73 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         upsert_risk_rule_state(&transaction, state)?;
+        // The profile's session fields seed the durable risk session only when the account
+        // has none yet; an existing session keeps its baseline across profile revisions.
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO risk_sessions(account_id, boundary,
+                    session_start_unix_nanos, session_start_realized_units,
+                    session_start_realized_scale)
+                 VALUES (?1, 'utc_midnight', ?2, ?3, ?4)",
+                params![
+                    profile.account_id.as_str(),
+                    profile.session_start_unix_nanos,
+                    profile.session_start_realized_pnl.units(),
+                    profile.session_start_realized_pnl.scale(),
+                ],
+            )
+            .map_err(database_error)?;
         transaction
             .execute(
                 "UPDATE trade_cycles SET risk_realized_units=0,peak_quantity_units=0
              WHERE account_id=?1",
                 [profile.account_id.as_str()],
+            )
+            .map_err(database_error)?;
+        StepTx::commit_revision(transaction).map_err(database_error)
+    }
+
+    /// One risk-session rollover in a single transaction: the rolled session row, the
+    /// re-anchored rule state, the released daily locks, and the boundary equity sample.
+    pub(crate) fn roll_risk_session(
+        &mut self,
+        session: &RiskSession,
+        rule_state: Option<&RiskRuleState>,
+        released_locks: &[TradingAccountId],
+        equity_sample: Option<&EquitySample>,
+    ) -> Result<(), String> {
+        session.validate()?;
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        upsert_risk_session(&transaction, session)?;
+        if let Some(state) = rule_state {
+            upsert_risk_rule_state(&transaction, state)?;
+        }
+        for account_id in released_locks {
+            transaction
+                .execute(
+                    "DELETE FROM risk_locks WHERE account_id = ?1",
+                    [account_id.as_str()],
+                )
+                .map_err(database_error)?;
+        }
+        if let Some(sample) = equity_sample {
+            ledger::insert_equity_samples(&transaction, std::slice::from_ref(sample))?;
+        }
+        StepTx::commit_revision(transaction).map_err(database_error)
+    }
+
+    /// Changes one account's durable session boundary; the new boundary applies from the
+    /// next rollover, so the current session's baseline stays intact.
+    pub(crate) fn put_risk_session_boundary(
+        &mut self,
+        account_id: &TradingAccountId,
+        boundary: RiskSessionBoundary,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "UPDATE risk_sessions SET boundary = ?2 WHERE account_id = ?1",
+                params![account_id.as_str(), boundary.as_str()],
             )
             .map_err(database_error)?;
         StepTx::commit_revision(transaction).map_err(database_error)
@@ -182,13 +244,14 @@ impl TradingStore {
         let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
         transaction
             .execute(
-                "INSERT INTO risk_locks(account_id, reason, locked_at_unix_nanos, profile_id,
-                    profile_version) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(account_id) DO UPDATE SET reason=excluded.reason,
+                "INSERT INTO risk_locks(account_id, kind, reason, locked_at_unix_nanos,
+                    profile_id, profile_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(account_id) DO UPDATE SET kind=excluded.kind, reason=excluded.reason,
                     locked_at_unix_nanos=excluded.locked_at_unix_nanos,
                     profile_id=excluded.profile_id, profile_version=excluded.profile_version",
                 params![
                     lock.account_id.as_str(),
+                    lock.kind.as_str(),
                     lock.reason,
                     lock.locked_at_unix_nanos,
                     lock.profile_id,
@@ -323,12 +386,83 @@ impl TradingStore {
     }
 
     pub(super) fn load_risk_locks(&self) -> Result<BTreeMap<TradingAccountId, RiskLock>, String> {
+        // A gated pre-group store still carries the pre-V27 risk_locks shape; its rows read
+        // as manual locks until the finalized migration classifies their reasons.
+        let typed = self.risk_lock_kind_column_present()?;
+        let query = if typed {
+            "SELECT account_id, kind, reason, locked_at_unix_nanos, profile_id,
+                profile_version
+             FROM risk_locks ORDER BY account_id"
+        } else {
+            "SELECT account_id, 'manual', reason, locked_at_unix_nanos, profile_id,
+                profile_version
+             FROM risk_locks ORDER BY account_id"
+        };
+        let mut result = BTreeMap::new();
+        let mut statement = self.connection.prepare(query).map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<u32>>(5)?,
+                ))
+            })
+            .map_err(database_error)?;
+        for row in rows {
+            let (account, kind, reason, locked_at_unix_nanos, profile_id, profile_version) =
+                row.map_err(database_error)?;
+            let account_id =
+                TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
+            let lock = RiskLock {
+                account_id: account_id.clone(),
+                kind: RiskLockKind::parse(&kind)?,
+                reason,
+                locked_at_unix_nanos,
+                profile_id,
+                profile_version,
+            };
+            lock.validate()?;
+            result.insert(account_id, lock);
+        }
+        Ok(result)
+    }
+
+    fn risk_lock_kind_column_present(&self) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('risk_locks')
+                 WHERE name = 'kind')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
+    }
+
+    pub(super) fn risk_sessions_table_present(&self) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'risk_sessions')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
+    }
+
+    pub(super) fn load_risk_sessions(
+        &self,
+    ) -> Result<BTreeMap<TradingAccountId, RiskSession>, String> {
         let mut result = BTreeMap::new();
         let mut statement = self
             .connection
             .prepare(
-                "SELECT account_id, reason, locked_at_unix_nanos, profile_id, profile_version
-                 FROM risk_locks ORDER BY account_id",
+                "SELECT account_id, boundary, session_start_unix_nanos,
+                    session_start_realized_units, session_start_realized_scale
+                 FROM risk_sessions ORDER BY account_id",
             )
             .map_err(database_error)?;
         let rows = statement
@@ -337,25 +471,23 @@ impl TradingStore {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<u32>>(4)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u8>(4)?,
                 ))
             })
             .map_err(database_error)?;
         for row in rows {
-            let (account, reason, locked_at_unix_nanos, profile_id, profile_version) =
+            let (account, boundary, session_start_unix_nanos, baseline_units, baseline_scale) =
                 row.map_err(database_error)?;
-            let account_id =
-                TradingAccountId::try_new(account).map_err(|error| error.to_string())?;
-            let lock = RiskLock {
-                account_id: account_id.clone(),
-                reason,
-                locked_at_unix_nanos,
-                profile_id,
-                profile_version,
+            let session = RiskSession {
+                account_id: TradingAccountId::try_new(account)
+                    .map_err(|error| error.to_string())?,
+                boundary: RiskSessionBoundary::parse(&boundary)?,
+                session_start_unix_nanos,
+                session_start_realized_pnl: fixed(baseline_units, baseline_scale)?,
             };
-            lock.validate()?;
-            result.insert(account_id, lock);
+            session.validate()?;
+            result.insert(session.account_id.clone(), session);
         }
         Ok(result)
     }
@@ -530,6 +662,31 @@ pub(super) fn upsert_risk_rule_state(
                 state.total_winning_pnl.scale(),
                 state.largest_winning_trade_pnl.units(),
                 state.largest_winning_trade_pnl.scale(),
+            ],
+        )
+        .map_err(database_error)?;
+    Ok(())
+}
+
+pub(super) fn upsert_risk_session(
+    connection: &Connection,
+    session: &RiskSession,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO risk_sessions(account_id, boundary, session_start_unix_nanos,
+                session_start_realized_units, session_start_realized_scale)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id) DO UPDATE SET boundary=excluded.boundary,
+                session_start_unix_nanos=excluded.session_start_unix_nanos,
+                session_start_realized_units=excluded.session_start_realized_units,
+                session_start_realized_scale=excluded.session_start_realized_scale",
+            params![
+                session.account_id.as_str(),
+                session.boundary.as_str(),
+                session.session_start_unix_nanos,
+                session.session_start_realized_pnl.units(),
+                session.session_start_realized_pnl.scale(),
             ],
         )
         .map_err(database_error)?;

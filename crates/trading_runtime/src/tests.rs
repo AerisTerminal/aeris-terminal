@@ -1611,7 +1611,10 @@ fn equity_samples_follow_fills_timer_changes_sessions_and_restart() {
     // The ring is rebuilt from the durable history; sampling resumes one interval after
     // open, so the immediate post-restart snapshot replays the samples unchanged.
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
-    let restarted = start_service(&directory);
+    // Reopen on the same clock so no session boundary passes across the restart.
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let restarted = start_service_with_config(configuration);
     let recovered = restarted
         .snapshot()
         .expect("recovered snapshot")
@@ -3258,6 +3261,16 @@ fn a_filled_stop_cancels_the_target_and_a_reversal_cancels_protection() {
         .expect("service stops");
 }
 
+/// The current wall clock in unix nanos for `SystemClock` tests whose risk session must not
+/// cross a rollover boundary mid-test.
+fn current_wall_unix_nanos() -> i64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock follows epoch")
+        .as_nanos();
+    i64::try_from(nanos).expect("wall fits")
+}
+
 #[test]
 fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
     let directory = TestDirectory::new("intraday-drawdown");
@@ -3270,7 +3283,8 @@ fn intraday_trailing_drawdown_tracks_peak_on_every_market_observation() {
             account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
             profile_id: "intraday-100".to_string(),
             version: 1,
-            session_start_unix_nanos: 1,
+            // The session starts now so no session boundary passes during the test.
+            session_start_unix_nanos: current_wall_unix_nanos(),
             session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
             daily_loss_limit: FixedPoint::try_new(100_000, 2).expect("daily loss"),
             trailing_drawdown: Some(FixedPoint::try_new(10_000, 2).expect("drawdown")),
@@ -4274,7 +4288,8 @@ fn v21_reversal_and_scale_out_accounting_agrees_across_views_and_restart() {
             account_id: TradingAccountId::try_new("aeris-sim-1").expect("account"),
             profile_id: "accounting-agreement".to_string(),
             version: 1,
-            session_start_unix_nanos: 1,
+            // The session starts now so no session boundary passes during the test.
+            session_start_unix_nanos: current_wall_unix_nanos(),
             session_start_realized_pnl: price(0),
             daily_loss_limit: price(100_000),
             trailing_drawdown: None,
@@ -5303,6 +5318,475 @@ fn reverse_on_a_locked_account_returns_account_locked_without_a_fill() {
         .expect("service stops");
 }
 
+use crate::clock::Clock as _;
+
+fn rollover_wall_nanos(rfc3339: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .expect("timestamp")
+        .timestamp_nanos_opt()
+        .expect("timestamp in range")
+}
+
+/// Moves the manual clock so the owner timer fires at `tick_wall` and waits out the pass.
+fn tick_timer_at(
+    service: &TradingService,
+    clock: &std::sync::Arc<crate::clock::ManualClock>,
+    tick_wall: i64,
+) {
+    clock.set_wall_unix_nanos(tick_wall - 61_000_000_000);
+    clock.advance(Duration::from_secs(61));
+    service.status().expect("timer tick");
+    service.status().expect("timer barrier");
+}
+
+fn risk_profile_for(account: &TradingAccountId, session_start_unix_nanos: i64) -> RiskProfile {
+    RiskProfile {
+        account_id: account.clone(),
+        profile_id: "daily".to_string(),
+        version: 1,
+        session_start_unix_nanos,
+        session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+        daily_loss_limit: FixedPoint::try_new(1_000, 2).expect("daily limit"),
+        trailing_drawdown: None,
+        trailing_mode: TrailingDrawdownMode::Intraday,
+        max_contracts: FixedPoint::try_new(10, 0).expect("contract limit"),
+        consistency_max_single_trade_percent: None,
+        restricted_until_unix_nanos: None,
+        economic_event_rule: None,
+        enabled: true,
+    }
+}
+
+/// Pushes a Live quote whose receive timestamp matches the manual clock's current wall, so
+/// freshness checks hold at real calendar instants.
+fn push_quote_at_clock(
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
+    clock: &std::sync::Arc<crate::clock::ManualClock>,
+    sequence: u64,
+    bid: i64,
+    ask: i64,
+) {
+    feed.push(MarketFeedEvent::Quote(TradingQuote {
+        instrument_id: instrument.instrument_id.clone(),
+        bid: FixedPoint::try_new(bid, 2).expect("bid"),
+        ask: FixedPoint::try_new(ask, 2).expect("ask"),
+        bid_size: None,
+        ask_size: None,
+        last: None,
+        provider_id: "fixture".to_string(),
+        provider_generation: 1,
+        source_sequence: Some(sequence),
+        exchange_unix_nanos: None,
+        received_unix_nanos: clock.wall_unix_nanos(),
+    }))
+    .expect("quote");
+}
+
+/// Publishes an open week-long session and the Live feed state for the instrument.
+fn open_session_feed(
+    feed: &crate::core::market::feed::MarketFeedInbox,
+    instrument: &TradingInstrument,
+) {
+    feed.push(MarketFeedEvent::Session(
+        aeris_trading::market::InstrumentSession {
+            instrument_id: instrument.instrument_id.clone(),
+            provider_generation: 1,
+            phase: aeris_instruments::SessionPhase::Open,
+            source: aeris_instruments::CalendarSourceKind::ProviderCalendar,
+            session_end_unix_nanos: Some(rollover_wall_nanos("2026-10-23T00:00:00Z")),
+            next_open_unix_nanos: None,
+        },
+    ))
+    .expect("session");
+    feed.push(market_feed::feed_state(
+        instrument.instrument_id.clone(),
+        1,
+        FeedState::Live,
+    ))
+    .expect("live");
+}
+
+/// Drives a $50 losing round trip, registers the UTC-midnight risk profile and locks the
+/// account at its daily loss limit on the next admission.
+fn daily_loss_locked_world(
+    directory: &TestDirectory,
+) -> (
+    TradingService,
+    std::sync::Arc<crate::clock::ManualClock>,
+    std::sync::Arc<crate::core::market::feed::MarketFeedInbox>,
+    TradingAccountId,
+) {
+    let (service, clock, feed) = live_feed_service(directory);
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-16T12:00:00Z"));
+    let instrument = instrument();
+    service
+        .register_instrument(instrument.clone())
+        .expect("instrument registers");
+    feed.push(MarketFeedEvent::Terms(InstrumentTerms {
+        route: market_feed::route(),
+        instrument_class: instrument.contract.instrument_class,
+        price_grid: instrument.contract.price_grid,
+        point_value: instrument.contract.point_value,
+        quantity_increment: instrument.contract.order_quantity_increment,
+        currency: instrument.contract.currency.clone(),
+        expiry: instrument.contract.expiry,
+        first_notice: instrument.contract.first_notice,
+        last_trade: instrument.contract.last_trade,
+        session_hours: instrument.contract.session_hours.clone(),
+        session_generation: 1,
+    }))
+    .expect("terms");
+    open_session_feed(&feed, &instrument);
+    service.status().expect("feed drains");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    service
+        .place_order(market_order(
+            "roll-entry",
+            OrderSide::Buy,
+            1,
+            rollover_wall_nanos("2026-10-16T12:00:01Z"),
+        ))
+        .expect("entry accepted");
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-16T12:00:02Z"));
+    push_quote_at_clock(&feed, &instrument, &clock, 2, 9_975, 10_000);
+    service.status().expect("entry fills");
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-16T12:00:03Z"));
+    push_quote_at_clock(&feed, &instrument, &clock, 3, 9_900, 9_925);
+    service.status().expect("exit quote");
+    service
+        .place_order(market_order(
+            "roll-exit",
+            OrderSide::Sell,
+            1,
+            rollover_wall_nanos("2026-10-16T12:00:04Z"),
+        ))
+        .expect("exit accepted");
+    service.status().expect("exit fills");
+    service
+        .register_risk_profile(risk_profile_for(
+            &account,
+            rollover_wall_nanos("2026-10-16T12:00:00Z"),
+        ))
+        .expect("profile registers");
+    // The next admission observes the realized loss beyond the limit and locks the account.
+    // A flat account with no working orders drops its quote interest, so the session and a
+    // fresh quote are republished first.
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-16T12:00:05Z"));
+    open_session_feed(&feed, &instrument);
+    push_quote_at_clock(&feed, &instrument, &clock, 4, 9_900, 9_925);
+    service.status().expect("live check");
+    let refused = service
+        .place_order(market_order(
+            "roll-blocked",
+            OrderSide::Buy,
+            1,
+            rollover_wall_nanos("2026-10-16T12:00:05Z"),
+        ))
+        .expect_err("the daily loss limit refuses new exposure");
+    assert!(refused.contains("daily loss limit"), "{refused}");
+    (service, clock, feed, account)
+}
+
+#[test]
+fn risk_sessions_roll_over_at_the_utc_midnight_boundary() {
+    // VAL-TRD-065: the default UTC-midnight boundary resets the daily meter, releases the
+    // daily-loss lock and persists the rolled session row with the realized baseline.
+    let directory = TestDirectory::new("risk-session-rollover");
+    let (service, clock, feed, account) = daily_loss_locked_world(&directory);
+    let seeded = service.snapshot().expect("seeded snapshot");
+    assert_eq!(
+        seeded.risk_sessions,
+        [RiskSession {
+            account_id: account.clone(),
+            boundary: RiskSessionBoundary::UtcMidnight,
+            session_start_unix_nanos: rollover_wall_nanos("2026-10-16T12:00:00Z"),
+            session_start_realized_pnl: FixedPoint::try_new(0, 2).expect("baseline"),
+        }]
+    );
+    let locked = service.snapshot().expect("locked snapshot");
+    assert_eq!(locked.risk_locks.len(), 1);
+    assert_eq!(locked.risk_locks[0].kind, RiskLockKind::DailyLossLimit);
+
+    tick_timer_at(
+        &service,
+        &clock,
+        rollover_wall_nanos("2026-10-16T23:59:59Z"),
+    );
+    let unchanged = service.snapshot().expect("same-day snapshot");
+    assert_eq!(
+        unchanged.risk_sessions, seeded.risk_sessions,
+        "no roll before the boundary"
+    );
+    assert_eq!(
+        unchanged.risk_locks, locked.risk_locks,
+        "the daily lock stands until the boundary"
+    );
+
+    tick_timer_at(
+        &service,
+        &clock,
+        rollover_wall_nanos("2026-10-17T00:00:01Z"),
+    );
+    let rolled = service.snapshot().expect("rolled snapshot");
+    assert_eq!(
+        rolled.risk_sessions,
+        [RiskSession {
+            account_id: account.clone(),
+            boundary: RiskSessionBoundary::UtcMidnight,
+            session_start_unix_nanos: rollover_wall_nanos("2026-10-17T00:00:00Z"),
+            session_start_realized_pnl: FixedPoint::try_new(-5_000, 2).expect("rolled baseline"),
+        }],
+        "the rolled session is durable with the realized baseline"
+    );
+    assert!(
+        rolled.risk_locks.is_empty(),
+        "the daily-loss lock released at the boundary"
+    );
+    let meter = &rolled.risk_meters[0];
+    assert_eq!(
+        meter.current_realized_pnl,
+        FixedPoint::try_new(0, 2).expect("zero")
+    );
+    assert_eq!(
+        meter.daily_loss_remaining,
+        FixedPoint::try_new(1_000, 2).expect("limit")
+    );
+    // The account trades again immediately after the roll.
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-17T00:00:02Z"));
+    let instrument = instrument();
+    push_quote_at_clock(&feed, &instrument, &clock, 5, 9_900, 9_925);
+    service.status().expect("post-roll quote");
+    let mut resting = market_order(
+        "post-roll",
+        OrderSide::Buy,
+        1,
+        rollover_wall_nanos("2026-10-17T00:00:02Z"),
+    );
+    resting.order_type = OrderType::Limit;
+    resting.time_in_force = TimeInForce::GoodTillCancelled;
+    resting.limit_price = Some(FixedPoint::try_new(9_800, 2).expect("limit"));
+    let accepted = service.place_order(resting).expect("post-roll admission");
+    service
+        .cancel_order(accepted.client_order_id)
+        .expect("resting order cancels");
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn a_manual_lock_survives_the_session_rollover() {
+    // VAL-TRD-065: only daily-meter locks release at the boundary; a manual lock stands.
+    let directory = TestDirectory::new("risk-session-manual-lock");
+    let (service, clock, _feed, account) = daily_loss_locked_world(&directory);
+    service
+        .unlock_account(account.clone())
+        .expect("daily lock clears");
+    service
+        .lock_account(
+            account.clone(),
+            "manual hold".to_string(),
+            rollover_wall_nanos("2026-10-16T12:00:07Z"),
+        )
+        .expect("manual lock");
+    tick_timer_at(
+        &service,
+        &clock,
+        rollover_wall_nanos("2026-10-18T00:00:01Z"),
+    );
+    let next = service.snapshot().expect("next-day snapshot");
+    assert_eq!(next.risk_locks.len(), 1);
+    assert_eq!(next.risk_locks[0].kind, RiskLockKind::Manual);
+    assert_eq!(
+        next.risk_sessions[0].session_start_unix_nanos,
+        rollover_wall_nanos("2026-10-18T00:00:00Z")
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn risk_sessions_survive_restart_within_a_session_and_roll_across_one() {
+    // VAL-TRD-065: reopening inside the same session changes nothing; reopening after the
+    // boundary passed rolls the session on the first owner tick.
+    let directory = TestDirectory::new("risk-session-restart");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(rollover_wall_nanos(
+        "2026-10-16T12:00:00Z",
+    )));
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let service = start_service_with_config(configuration);
+    service
+        .register_risk_profile(risk_profile_for(
+            &account,
+            rollover_wall_nanos("2026-10-16T12:00:00Z"),
+        ))
+        .expect("profile registers");
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("first stop");
+
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-16T18:00:00Z"));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let reopened = start_service_with_config(configuration);
+    tick_timer_at(
+        &reopened,
+        &clock,
+        rollover_wall_nanos("2026-10-16T18:01:00Z"),
+    );
+    let within = reopened.snapshot().expect("within-session snapshot");
+    assert_eq!(
+        within.risk_sessions[0].session_start_unix_nanos,
+        rollover_wall_nanos("2026-10-16T12:00:00Z"),
+        "a restart inside the session keeps the running session"
+    );
+    reopened
+        .shutdown(Duration::from_secs(2))
+        .expect("second stop");
+
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-17T01:00:00Z"));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let reopened = start_service_with_config(configuration);
+    tick_timer_at(
+        &reopened,
+        &clock,
+        rollover_wall_nanos("2026-10-17T01:01:00Z"),
+    );
+    let across = reopened.snapshot().expect("crossed snapshot");
+    assert_eq!(
+        across.risk_sessions[0].session_start_unix_nanos,
+        rollover_wall_nanos("2026-10-17T00:00:00Z"),
+        "the first tick after a restart across the boundary rolls the session"
+    );
+    reopened
+        .shutdown(Duration::from_secs(2))
+        .expect("final stop");
+}
+
+#[test]
+fn risk_sessions_roll_over_at_the_configured_chicago_close() {
+    // VAL-TRD-065: a futures-style 17:00 America/Chicago boundary rolls at 22:00Z in
+    // daylight time and at 23:00Z in standard time.
+    let directory = TestDirectory::new("risk-session-chicago");
+    let (service, clock, _feed) = live_feed_service(&directory);
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-07-01T12:00:00Z"));
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    service
+        .register_risk_profile(risk_profile_for(
+            &account,
+            rollover_wall_nanos("2026-07-01T12:00:00Z"),
+        ))
+        .expect("profile registers");
+    service
+        .set_risk_session_boundary(account.clone(), RiskSessionBoundary::ChicagoClose)
+        .expect("boundary updates");
+    tick_timer_at(
+        &service,
+        &clock,
+        rollover_wall_nanos("2026-07-01T21:59:59Z"),
+    );
+    assert_eq!(
+        service
+            .snapshot()
+            .expect("pre-close snapshot")
+            .risk_sessions[0]
+            .session_start_unix_nanos,
+        rollover_wall_nanos("2026-07-01T12:00:00Z"),
+        "no roll before the 17:00 CT close"
+    );
+    tick_timer_at(
+        &service,
+        &clock,
+        rollover_wall_nanos("2026-07-01T22:00:01Z"),
+    );
+    assert_eq!(
+        service.snapshot().expect("cdt snapshot").risk_sessions[0].session_start_unix_nanos,
+        rollover_wall_nanos("2026-07-01T22:00:00Z"),
+        "the CDT boundary rolls at 22:00Z"
+    );
+    tick_timer_at(
+        &service,
+        &clock,
+        rollover_wall_nanos("2027-01-15T22:59:59Z"),
+    );
+    assert_eq!(
+        service.snapshot().expect("cst snapshot").risk_sessions[0].session_start_unix_nanos,
+        rollover_wall_nanos("2027-01-14T23:00:00Z"),
+        "the CST boundary rolls at 23:00Z"
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
+#[test]
+fn a_bracket_entry_counts_its_template_stop_as_attached() {
+    // VAL-TRD-065: the no-attached-stop warning fires for a plain entry but never for a
+    // bracket entry, whose template stop is attached by construction.
+    let directory = TestDirectory::new("bracket-stop-warning");
+    let (service, clock, _feed) = live_feed_service(&directory);
+    clock.set_wall_unix_nanos(rollover_wall_nanos("2026-10-16T12:00:00Z"));
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let mut profile = risk_profile_for(&account, rollover_wall_nanos("2026-10-16T00:00:00Z"));
+    profile.daily_loss_limit = FixedPoint::try_new(500_000, 2).expect("daily limit");
+    service
+        .register_risk_profile(profile)
+        .expect("profile registers");
+    service
+        .place_order(market_order(
+            "plain-entry",
+            OrderSide::Buy,
+            1,
+            rollover_wall_nanos("2026-10-16T12:00:01Z"),
+        ))
+        .expect("plain entry accepted");
+    let accepted_detail = |client_order_id: &str| {
+        let snapshot = service.snapshot().expect("snapshot");
+        let order = snapshot
+            .orders
+            .iter()
+            .find(|order| order.client_order_id.as_str() == client_order_id)
+            .expect("order");
+        snapshot
+            .order_events
+            .iter()
+            .find(|event| event.order_id == order.id && event.kind == OrderEventKind::Accepted)
+            .expect("accepted event")
+            .detail
+            .clone()
+    };
+    assert!(
+        accepted_detail("plain-entry").is_some_and(|detail| detail.contains("no attached stop")),
+        "the plain entry carries the warning"
+    );
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: market_order(
+                "bracket-entry",
+                OrderSide::Buy,
+                1,
+                rollover_wall_nanos("2026-10-16T12:00:02Z"),
+            ),
+            template: bracket_template(),
+        })
+        .expect("bracket accepted");
+    assert_eq!(
+        accepted_detail("bracket-entry").as_deref(),
+        Some("accepted by local simulated venue"),
+        "the bracket entry attaches its template stop"
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
 #[test]
 fn invalid_json_never_enters_the_store() {
     let directory = TestDirectory::new("invalid-json");

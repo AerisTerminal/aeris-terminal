@@ -209,7 +209,9 @@ impl TradingCore {
             crate::VenueRoute::CtraderDemo,
             0,
             &[],
-            true,
+            crate::core::admission::AdmissionRisk::Enforced {
+                attached_stop: command.stop_price.is_some(),
+            },
         )?;
         // Every M3.2 check applies to broker orders. The practice rule that the contract
         // currency equal the account currency does not: the broker converts profit and loss

@@ -1,5 +1,7 @@
 use super::*;
-use crate::tests::{TestDirectory, config, instrument, market_order, start_service};
+use crate::tests::{
+    TestDirectory, config, instrument, market_order, start_service, start_service_with_config,
+};
 use crate::{ModifyOrder, PlaceOrder, TradingService, VenueRoute};
 use aeris_trading::{
     AccountEnvironment, ClientOrderId, FixedPoint, Order, OrderSide, OrderStatus, OrderType,
@@ -37,7 +39,11 @@ fn setup(
     aeris_trading::venue_outbox::VenueRequestReceiver,
 ) {
     let directory = TestDirectory::new(label);
-    let service = start_service(&directory);
+    // The scripted venue uses fixture timestamps just after the epoch, so the clock stays
+    // in that world and no risk-session boundary ever passes mid-test.
+    let mut configuration = config(&directory);
+    configuration.clock = std::sync::Arc::new(crate::clock::ManualClock::new(1_000_000));
+    let service = start_service_with_config(configuration);
     service.register_account(broker()).expect("account");
     service
         .register_instrument(instrument())

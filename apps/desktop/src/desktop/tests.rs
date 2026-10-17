@@ -98,6 +98,7 @@ fn selected_account_lock_is_derived_from_the_runtime_meter() {
     state.order_entry.selected_account_id = Some(account.clone());
     state.risk_locks.push(aeris_trading_runtime::RiskLock {
         account_id: account,
+        kind: aeris_trading_runtime::RiskLockKind::Manual,
         reason: "manual test lock".to_string(),
         locked_at_unix_nanos: 1,
         profile_id: None,

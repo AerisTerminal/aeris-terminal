@@ -277,6 +277,19 @@ fn validate_client_id(command: &PlaceOrder, route: VenueRoute) -> Result<(), Rej
 /// The only order-admission boundary for simulated, broker and managed-child
 /// placement. Dynamic rules may persist an account lock or advance discipline
 /// state, exactly as they did before order admission was consolidated.
+/// How admission evaluates account risk for one order.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum AdmissionRisk {
+    /// Protective and managed exits skip rule evaluation.
+    Disabled,
+    /// Full rule evaluation. `attached_stop` counts a managed bracket stop or an explicit
+    /// stop order as the attached protection the no-attached-stop warning looks for.
+    Enforced { attached_stop: bool },
+}
+
+/// The only order-admission boundary for simulated, broker and managed-child
+/// placement. Dynamic rules may persist an account lock or advance discipline
+/// state, exactly as they did before order admission was consolidated.
 pub(crate) fn admit(
     owner: &mut TradingCore,
     instrument: &TradingInstrument,
@@ -284,9 +297,9 @@ pub(crate) fn admit(
     route: VenueRoute,
     additional_open_orders: usize,
     staged_instruments: &[InstrumentId],
-    enforce_risk: bool,
+    risk: AdmissionRisk,
 ) -> Result<Vec<RiskWarning>, String> {
-    if enforce_risk && owner.state.risk_locks.contains_key(&command.account_id) {
+    if risk != AdmissionRisk::Disabled && owner.state.risk_locks.contains_key(&command.account_id) {
         return Err(owner.admission_detail(command, RejectReason::AccountLocked));
     }
     validate_common_order(
@@ -321,11 +334,14 @@ pub(crate) fn admit(
     }
     validate_currency(instrument, &account.currency, route)
         .map_err(|reason| owner.admission_detail(command, reason))?;
-    let mut warnings = if enforce_risk {
-        owner.evaluate_order_risk(command)?.warnings
-    } else {
-        owner.validate_managed_exit(command)?;
-        Vec::new()
+    let mut warnings = match risk {
+        AdmissionRisk::Enforced { attached_stop } => {
+            owner.evaluate_order_risk(command, attached_stop)?.warnings
+        }
+        AdmissionRisk::Disabled => {
+            owner.validate_managed_exit(command)?;
+            Vec::new()
+        }
     };
     warnings.extend(price_grid_warning(instrument));
     Ok(warnings)
@@ -784,9 +800,11 @@ impl TradingCore {
         command: PlaceOrder,
         enforce_risk: bool,
     ) -> Result<Order, String> {
+        let attached_stop = command.stop_price.is_some();
         let (order, event) = self.prepare_single_order(
             command,
             enforce_risk,
+            attached_stop,
             step.next_sequence,
             &step
                 .inserted
@@ -855,7 +873,8 @@ impl TradingCore {
             return Err("protective order role does not match its order type".to_string());
         }
         let sequence = self.state.next_sequence;
-        let (order, mut event) = self.prepare_single_order(command.order, false, sequence, &[])?;
+        let (order, mut event) =
+            self.prepare_single_order(command.order, false, false, sequence, &[])?;
         event.detail = Some(format!(
             "{} standalone {}",
             BracketView::MANAGEMENT_LABEL,
@@ -899,6 +918,7 @@ impl TradingCore {
         &mut self,
         mut command: PlaceOrder,
         enforce_risk: bool,
+        attached_stop: bool,
         sequence: u64,
         staged_instruments: &[InstrumentId],
     ) -> Result<(Order, OrderEvent), String> {
@@ -918,6 +938,11 @@ impl TradingCore {
             .get(&command.instrument_id)
             .ok_or_else(|| "trading instrument is not registered".to_string())?
             .clone();
+        let risk = if enforce_risk {
+            AdmissionRisk::Enforced { attached_stop }
+        } else {
+            AdmissionRisk::Disabled
+        };
         let risk_warnings = admit(
             self,
             &instrument,
@@ -925,7 +950,7 @@ impl TradingCore {
             VenueRoute::Simulated,
             staged_instruments.len(),
             staged_instruments,
-            enforce_risk,
+            risk,
         )?;
         let expires_at_unix_nanos = if command.time_in_force == TimeInForce::Day {
             // Legacy replay fixtures do not install a routed market calendar. Real

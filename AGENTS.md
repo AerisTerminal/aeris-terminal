@@ -126,7 +126,7 @@ violations and missing verification explicitly, and never describe them as satis
   `fs::rename` except at the exact move/build/platform implementation sites allowlisted by
   `tools/naming_check`. Do not add another atomic-file FFI implementation.
 - Trading SQLite persistence is organized under `trading_runtime/src/store/` by table family;
-  `schema.rs` retains the V1–V26 migration sequence. V20 adds nullable verified market routes;
+  `schema.rs` retains the V1–V27 migration sequence. V20 adds nullable verified market routes;
   migrated legacy instruments remain route-less until verified Terms arrive. V21 backfills
   `fill_accounting` and `trade_cycles`; V22 adds lifecycle columns and V23 adds
   `order_groups` and `order_group_legs`. V24 drops the legacy `managed_brackets` and
@@ -146,7 +146,12 @@ violations and missing verification explicitly, and never describe them as satis
   each risk session boundary, and a 1,440-entry in-memory ring per account is rebuilt from
   the durable history at open; retention downsamples minute samples older than seven days
   into last-of-hour rows and drops hourly rows older than a year, with both windows trailing
-  the newest sample so a backward clock correction cannot mass-expire history. Old P&L tables and
+  the newest sample so a backward clock correction cannot mass-expire history. V27 adds
+  `risk_sessions` (seeded per registered risk profile from the registration baseline) and the
+  `risk_locks.kind` column; the owner timer rolls each account's session at its configured
+  boundary (UTC midnight by default, 17:00 America/Chicago for futures) in one transaction that
+  persists the rolled row with the realized baseline, resets the daily meter, releases only
+  daily-meter locks (manual locks survive) and writes the boundary equity sample. Old P&L tables and
   per-fill columns remain unread until their deferred removal migration. Store-open preflight scratch cleanup may
   remove only exact preflight directories containing solely the expected database copy and
   SQLite sidecars; preserve unknown contents and report cleanup failures through observability.

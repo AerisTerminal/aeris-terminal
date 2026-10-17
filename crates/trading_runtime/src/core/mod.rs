@@ -41,10 +41,11 @@ pub use crate::plan::{
     MAXIMUM_ALLOWED_SETUPS, MAXIMUM_CHECKLIST_ITEMS, MAXIMUM_PLAN_LEVELS, SessionAdherenceReview,
     SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,
 };
+pub use crate::risk::session::{RiskSession, RiskSessionBoundary};
 pub use crate::risk::{
     EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskOutcome,
-    EconomicEventRiskRule, EconomicEventRiskTrigger, RiskEvaluation, RiskLock, RiskMeter,
-    RiskProfile, RiskRuleState, TrailingDrawdownMode,
+    EconomicEventRiskRule, EconomicEventRiskTrigger, RiskEvaluation, RiskLock, RiskLockKind,
+    RiskMeter, RiskProfile, RiskRuleState, TrailingDrawdownMode,
 };
 pub use crate::round_trip::{TradeLeg, TradeRoundTrip};
 use crate::service::Command;
@@ -478,6 +479,8 @@ pub struct TradingSnapshot {
     pub risk_meters: Vec<RiskMeter>,
     pub risk_locks: Vec<RiskLock>,
     pub risk_rule_states: Vec<RiskRuleState>,
+    /// The durable risk session of each profiled account, rolled at its session boundary.
+    pub risk_sessions: Vec<RiskSession>,
     pub discipline_states: Vec<DisciplineState>,
     pub session_plans: Vec<SessionPlan>,
     pub session_adherence_reviews: Vec<SessionAdherenceReview>,
@@ -607,8 +610,6 @@ pub(crate) struct TradingCore {
     command_now: i64,
     next_retention_at: i64,
     next_equity_sample_at: i64,
-    /// The last UTC day each account was seen in by the equity timer, for session-end samples.
-    equity_session_days: BTreeMap<TradingAccountId, i64>,
     /// Fill samples waiting for their committing transaction; cleared on every plan outcome.
     pending_equity_samples: Vec<EquitySample>,
     copy_dispatches: std::collections::VecDeque<TradeCopyDispatch>,
@@ -1113,6 +1114,19 @@ impl TradingService {
         self.request(|reply| Command::UnlockAccount(account_id, reply))
     }
 
+    /// Configures the boundary at which the account's risk session rolls over. The new
+    /// boundary applies from the next rollover; the running session keeps its baseline.
+    ///
+    /// # Errors
+    /// Returns an error when the account has no risk session or storage fails.
+    pub fn set_risk_session_boundary(
+        &self,
+        account_id: TradingAccountId,
+        boundary: RiskSessionBoundary,
+    ) -> Result<(), String> {
+        self.request(|reply| Command::SetRiskSessionBoundary(account_id, boundary, reply))
+    }
+
     /// Locks one account or every tradable account, cancels its non-protective working
     /// orders and flattens every priced position at the owner's verified quotes in one
     /// durable step per invocation. Protection of flattened positions retires with the
@@ -1330,7 +1344,6 @@ impl TradingCore {
             next_equity_sample_at: clock
                 .wall_unix_nanos()
                 .saturating_add(ledger::EQUITY_SAMPLE_INTERVAL_NANOS),
-            equity_session_days: BTreeMap::new(),
             pending_equity_samples: Vec::new(),
             clock,
             copy_dispatches: std::collections::VecDeque::new(),
@@ -1570,6 +1583,7 @@ impl TradingCore {
                 respond(&reply, self.register_strategy_template(template));
             }
             Command::LockAccount(..)
+            | Command::SetRiskSessionBoundary(..)
             | Command::UnlockAccount(..)
             | Command::KillSwitch(..)
             | Command::Flatten(..)
@@ -1656,6 +1670,9 @@ impl TradingCore {
         if let Err(error) = self.cancel_due_markets() {
             aeris_observability::diagnostic!("market order timeout persistence failed: {error}");
         }
+        if let Err(error) = self.roll_risk_sessions(self.command_now) {
+            aeris_observability::diagnostic!("risk session rollover persistence failed: {error}");
+        }
         self.request_unrealized_pnl();
         if self.command_now >= self.next_retention_at {
             match self.enforce_retention() {
@@ -1680,10 +1697,19 @@ impl TradingCore {
     fn dispatch_account_command(&mut self, command: Command) {
         match command {
             Command::LockAccount(account_id, reason, locked_at, reply) => {
-                respond(&reply, self.lock_account(account_id, reason, locked_at));
+                respond(
+                    &reply,
+                    self.lock_account(account_id, RiskLockKind::Manual, reason, locked_at),
+                );
             }
             Command::UnlockAccount(account_id, reply) => {
                 respond(&reply, self.unlock_account(&account_id));
+            }
+            Command::SetRiskSessionBoundary(account_id, boundary, reply) => {
+                respond(
+                    &reply,
+                    self.set_risk_session_boundary(&account_id, boundary),
+                );
             }
             Command::KillSwitch(account_id, reason, locked_at, reply) => {
                 respond(
@@ -1719,6 +1745,16 @@ impl TradingCore {
                     .or(self.venue_error.take());
             }
         }
+    }
+
+    fn place_protective_from_market(&mut self, order: PlaceProtection) -> Result<Order, String> {
+        self.market_order(order.order, false)
+            .and_then(|order_command| {
+                self.place_protective_order(PlaceProtection {
+                    order: order_command,
+                    role: order.role,
+                })
+            })
     }
 
     fn dispatch_order_command(&mut self, command: Command) {
@@ -1758,19 +1794,11 @@ impl TradingCore {
                 respond(&reply, self.place_protective_order(order));
             }
             Command::PlaceProtectiveFromMarket(order, reply) => {
-                respond(
-                    &reply,
-                    self.market_order(order.order, false)
-                        .and_then(|order_command| {
-                            self.place_protective_order(PlaceProtection {
-                                order: order_command,
-                                role: order.role,
-                            })
-                        }),
-                );
+                respond(&reply, self.place_protective_from_market(order));
             }
             Command::EvaluateRisk(order, reply) => {
-                respond(&reply, self.evaluate_order_risk(&order));
+                let attached_stop = order.stop_price.is_some();
+                respond(&reply, self.evaluate_order_risk(&order, attached_stop));
             }
             Command::Modify(order, reply) => respond(&reply, self.modify_order(order)),
             Command::ModifyChecked(command, reply) => {

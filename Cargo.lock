@@ -508,6 +508,7 @@ dependencies = [
  "aeris_observability",
  "aeris_platform_sys",
  "aeris_trading",
+ "chrono",
  "rusqlite",
  "serde",
  "serde_json",

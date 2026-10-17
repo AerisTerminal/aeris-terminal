@@ -1,8 +1,8 @@
 use super::{
     BROKER_PNL_UNAVAILABLE, BTreeMap, EconomicEventRiskAction, FAST_STOP_REENTRY_NANOS, FixedPoint,
-    InstrumentId, OrderSide, PlaceOrder, RiskEvaluation, RiskLock, RiskProfile, RiskRuleState,
-    SessionPlan, TradingAccountId, TradingCore, TrailingDrawdownMode, VenueRoute,
-    consistency_projection, subtract_fixed,
+    InstrumentId, OrderSide, PlaceOrder, RiskEvaluation, RiskLock, RiskLockKind, RiskProfile,
+    RiskRuleState, RiskSession, RiskSessionBoundary, SessionPlan, TradingAccountId, TradingCore,
+    TrailingDrawdownMode, VenueRoute, consistency_projection, subtract_fixed,
 };
 use aeris_trading::RiskWarning;
 
@@ -51,6 +51,12 @@ impl TradingCore {
         };
         self.store
             .put_risk_profile_and_state(&profile, &rule_state)?;
+        // Matches the store's INSERT OR IGNORE: the first profile seeds the session, a later
+        // revision keeps the running session and its baseline.
+        self.state
+            .risk_sessions
+            .entry(profile.account_id.clone())
+            .or_insert_with(|| RiskSession::from_profile(&profile));
         self.state
             .risk_rule_states
             .insert(profile.account_id.clone(), rule_state);
@@ -96,6 +102,7 @@ impl TradingCore {
     pub(super) fn lock_account(
         &mut self,
         account_id: TradingAccountId,
+        kind: RiskLockKind,
         reason: String,
         locked_at_unix_nanos: i64,
     ) -> Result<(), String> {
@@ -105,6 +112,7 @@ impl TradingCore {
         let profile = self.state.risk_profiles.get(&account_id);
         let lock = RiskLock {
             account_id: account_id.clone(),
+            kind,
             reason,
             locked_at_unix_nanos,
             profile_id: profile.map(|profile| profile.profile_id.clone()),
@@ -126,6 +134,7 @@ impl TradingCore {
     pub(super) fn evaluate_order_risk(
         &mut self,
         command: &PlaceOrder,
+        attached_stop: bool,
     ) -> Result<RiskEvaluation, String> {
         if self.state.risk_locks.contains_key(&command.account_id) {
             return Err(self.admission_detail(command, aeris_trading::RejectReason::AccountLocked));
@@ -159,7 +168,8 @@ impl TradingCore {
         if projected_contracts > maximum_contracts.units().unsigned_abs() {
             return Err("order exceeds the account maximum-contract rule".to_string());
         }
-        let mut warnings = self.risk_warnings(command, &profile, current_session_pnl)?;
+        let mut warnings =
+            self.risk_warnings(command, &profile, current_session_pnl, attached_stop)?;
         warnings.extend(discipline_warnings);
         Ok(RiskEvaluation {
             warnings,
@@ -191,6 +201,7 @@ impl TradingCore {
         {
             self.lock_account(
                 command.account_id.clone(),
+                RiskLockKind::SessionPlan,
                 "session plan maximum loss reached".to_string(),
                 command.submitted_unix_nanos,
             )?;
@@ -308,6 +319,7 @@ impl TradingCore {
         {
             self.lock_account(
                 command.account_id.clone(),
+                RiskLockKind::NewsRestriction,
                 "news/session restriction is active".to_string(),
                 command.submitted_unix_nanos,
             )?;
@@ -328,6 +340,7 @@ impl TradingCore {
         {
             self.lock_account(
                 command.account_id.clone(),
+                RiskLockKind::DailyLossLimit,
                 "daily loss limit reached".to_string(),
                 command.submitted_unix_nanos,
             )?;
@@ -343,6 +356,7 @@ impl TradingCore {
             if current_session_pnl.units() <= floor.units() {
                 self.lock_account(
                     command.account_id.clone(),
+                    RiskLockKind::TrailingDrawdown,
                     format!(
                         "{} trailing drawdown reached",
                         profile.trailing_mode.as_str()
@@ -449,6 +463,7 @@ impl TradingCore {
         command: &PlaceOrder,
         profile: &RiskProfile,
         current_realized: FixedPoint,
+        attached_stop: bool,
     ) -> Result<Vec<RiskWarning>, String> {
         let mut warnings = Vec::new();
         if current_realized.units() < 0
@@ -457,7 +472,9 @@ impl TradingCore {
         {
             warnings.push(RiskWarning::ApproachingDailyLossLimit);
         }
-        if command.stop_price.is_none() {
+        // A bracket entry's stop leg is attached by its template, and a stop-market entry
+        // carries its own trigger; both count as attached stops for the warning.
+        if !attached_stop && command.stop_price.is_none() {
             warnings.push(RiskWarning::NoAttachedStop);
         }
         if let Some(limit) = profile.consistency_max_single_trade_percent {
@@ -477,16 +494,34 @@ impl TradingCore {
         Ok(warnings)
     }
 
+    /// The account's durable risk session, derived from the registering profile while a
+    /// gated pre-group store still waits for its V27 session rows.
+    fn risk_session_for(&self, profile: &RiskProfile) -> RiskSession {
+        self.state
+            .risk_sessions
+            .get(&profile.account_id)
+            .cloned()
+            .unwrap_or_else(|| RiskSession::from_profile(profile))
+    }
+
     /// Realized P&L since the session start. A broker account sums the realized P&L of its
     /// deals executed since then; its baseline is zero, enforced at registration.
     pub(super) fn realized_since_session(
         &self,
         profile: &RiskProfile,
     ) -> Result<FixedPoint, String> {
+        self.realized_since(profile, &self.risk_session_for(profile))
+    }
+
+    fn realized_since(
+        &self,
+        profile: &RiskProfile,
+        session: &RiskSession,
+    ) -> Result<FixedPoint, String> {
         if self.route(&profile.account_id)? != VenueRoute::Simulated {
             return self.broker_realized_since(
                 &profile.account_id,
-                profile.session_start_unix_nanos,
+                session.session_start_unix_nanos,
                 profile.daily_loss_limit.scale(),
             );
         }
@@ -506,7 +541,7 @@ impl TradingCore {
                     total.checked_add(value).map_err(|error| error.to_string())
                 },
             )?;
-        let baseline = profile
+        let baseline = session
             .session_start_realized_pnl
             .exact_rescale(profile.daily_loss_limit.scale())
             .map_err(|error| error.to_string())?;
@@ -526,8 +561,16 @@ impl TradingCore {
     /// Session P&L: realized since the session start plus open P&L. `None` while a broker
     /// account is unreachable, because its open P&L is then unknown.
     pub(super) fn session_pnl(&self, profile: &RiskProfile) -> Result<Option<FixedPoint>, String> {
+        self.session_pnl_for(profile, &self.risk_session_for(profile))
+    }
+
+    fn session_pnl_for(
+        &self,
+        profile: &RiskProfile,
+        session: &RiskSession,
+    ) -> Result<Option<FixedPoint>, String> {
         let scale = profile.daily_loss_limit.scale();
-        let realized = self.realized_since_session(profile)?;
+        let realized = self.realized_since(profile, session)?;
         if self.route(&profile.account_id)? != VenueRoute::Simulated {
             let Some(unrealized) = self.broker_unrealized(&profile.account_id, scale)? else {
                 return Ok(None);
@@ -623,6 +666,7 @@ impl TradingCore {
             {
                 self.lock_account(
                     profile.account_id.clone(),
+                    RiskLockKind::DailyLossLimit,
                     "daily loss limit reached".to_string(),
                     observed_unix_nanos,
                 )?;
@@ -652,6 +696,7 @@ impl TradingCore {
             if current.units() <= floor.units() {
                 self.lock_account(
                     profile.account_id,
+                    RiskLockKind::TrailingDrawdown,
                     format!(
                         "{} trailing drawdown reached",
                         profile.trailing_mode.as_str()
@@ -676,11 +721,141 @@ impl TradingCore {
             {
                 self.lock_account(
                     plan.account_id,
+                    RiskLockKind::SessionPlan,
                     "session plan maximum loss reached".to_string(),
                     observed_unix_nanos,
                 )?;
             }
         }
         Ok(())
+    }
+
+    /// Changes one account's session boundary. The new boundary applies from the next
+    /// rollover; the current session keeps its start and baseline.
+    pub(super) fn set_risk_session_boundary(
+        &mut self,
+        account_id: &TradingAccountId,
+        boundary: RiskSessionBoundary,
+    ) -> Result<(), String> {
+        if !self.state.risk_sessions.contains_key(account_id) {
+            return Err("risk session is not registered for the account".to_string());
+        }
+        self.store.put_risk_session_boundary(account_id, boundary)?;
+        if let Some(session) = self.state.risk_sessions.get_mut(account_id) {
+            session.boundary = boundary;
+        }
+        self.bump_revision()
+    }
+
+    /// Rolls every due risk session at its boundary: re-baselines the daily meters, resets
+    /// the trailing peak, releases the daily-meter locks, and records the boundary equity
+    /// sample, each account in one durable transaction. Called from the owner timer, so a
+    /// process closed across a boundary rolls at the first tick after restart.
+    pub(super) fn roll_risk_sessions(&mut self, now: i64) -> Result<(), String> {
+        let sessions = self
+            .state
+            .risk_sessions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session in sessions {
+            if session
+                .boundary
+                .next_after(session.session_start_unix_nanos)
+                > now
+            {
+                continue;
+            }
+            let rolled = RiskSession {
+                account_id: session.account_id.clone(),
+                boundary: session.boundary,
+                session_start_unix_nanos: session.boundary.session_start_containing(now),
+                session_start_realized_pnl: self.session_rollover_baseline(&session)?,
+            };
+            let profile = self.state.risk_profiles.get(&session.account_id).cloned();
+            let rule_state = match (
+                &profile,
+                self.state.risk_rule_states.get(&session.account_id),
+            ) {
+                (Some(profile), Some(state)) => {
+                    // A broker account whose open P&L is unknown keeps its previous peak.
+                    let mut reset = state.clone();
+                    if let Some(current) = self.session_pnl_for(profile, &rolled)? {
+                        if current.units() > 0 {
+                            reset.peak_session_pnl = current;
+                        } else {
+                            reset.peak_session_pnl = FixedPoint::try_new(0, current.scale())
+                                .map_err(|error| error.to_string())?;
+                        }
+                    }
+                    Some(reset)
+                }
+                _ => None,
+            };
+            let released = self
+                .state
+                .risk_locks
+                .get(&session.account_id)
+                .filter(|lock| lock.kind.resets_at_session_boundary())
+                .map(|lock| vec![lock.account_id.clone()])
+                .unwrap_or_default();
+            // The boundary equity sample belongs to profiled simulated accounts; it commits
+            // inside the same transaction as the session row.
+            let sample = if profile.is_some()
+                && crate::is_simulated(&self.state.accounts, &session.account_id)
+            {
+                self.account_equity(&session.account_id)
+                    .map(|equity| aeris_trading::EquitySample {
+                        account_id: session.account_id.clone(),
+                        at_unix_nanos: now,
+                        equity,
+                    })
+            } else {
+                None
+            };
+            self.store.roll_risk_session(
+                &rolled,
+                rule_state.as_ref(),
+                &released,
+                sample.as_ref(),
+            )?;
+            self.state
+                .risk_sessions
+                .insert(session.account_id.clone(), rolled);
+            if let Some(state) = rule_state {
+                self.state
+                    .risk_rule_states
+                    .insert(session.account_id.clone(), state);
+            }
+            for account_id in &released {
+                self.state.risk_locks.remove(account_id);
+            }
+            if let Some(sample) = sample {
+                self.push_equity_sample(sample);
+            }
+            self.bump_revision()?;
+        }
+        Ok(())
+    }
+
+    /// The realized-P&L baseline of the next session: the all-time realized total for a
+    /// simulated account, zero for a broker account (its deals measure from the new start).
+    fn session_rollover_baseline(&self, session: &RiskSession) -> Result<FixedPoint, String> {
+        let scale = session.session_start_realized_pnl.scale();
+        let zero = FixedPoint::try_new(0, scale).map_err(|error| error.to_string())?;
+        if self.route(&session.account_id)? != VenueRoute::Simulated {
+            return Ok(zero);
+        }
+        self.state
+            .positions
+            .values()
+            .filter(|position| position.account_id == session.account_id)
+            .map(|position| position.realized_pnl)
+            .try_fold(zero, |total, value| {
+                let value = value
+                    .exact_rescale(scale)
+                    .map_err(|error| error.to_string())?;
+                total.checked_add(value).map_err(|error| error.to_string())
+            })
     }
 }

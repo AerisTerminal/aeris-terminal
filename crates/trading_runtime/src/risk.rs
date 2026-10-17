@@ -1,3 +1,5 @@
+pub mod session;
+
 use aeris_trading::{FixedPoint, TradingAccountId, TradingValidationError};
 
 /// Whether a trailing drawdown is evaluated continuously or only at the session close.
@@ -196,10 +198,60 @@ impl RiskProfile {
     }
 }
 
+/// The rule or action that created a durable risk lock. Locks created by the daily session
+/// meters reset at the account's session boundary; every other lock survives rollover.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RiskLockKind {
+    /// An explicit user or API lock; released only by unlock.
+    #[default]
+    Manual,
+    /// The daily-loss-limit rule; resets at the session boundary.
+    DailyLossLimit,
+    /// The trailing-drawdown rule; resets at the session boundary.
+    TrailingDrawdown,
+    /// The session-plan maximum-loss rule; released only by unlock.
+    SessionPlan,
+    /// A news/session restriction window; released only by unlock.
+    NewsRestriction,
+    /// The kill switch or an economic-event lock; released only by unlock.
+    KillSwitch,
+}
+
+impl RiskLockKind {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::DailyLossLimit => "daily_loss_limit",
+            Self::TrailingDrawdown => "trailing_drawdown",
+            Self::SessionPlan => "session_plan",
+            Self::NewsRestriction => "news_restriction",
+            Self::KillSwitch => "kill_switch",
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "manual" => Ok(Self::Manual),
+            "daily_loss_limit" => Ok(Self::DailyLossLimit),
+            "trailing_drawdown" => Ok(Self::TrailingDrawdown),
+            "session_plan" => Ok(Self::SessionPlan),
+            "news_restriction" => Ok(Self::NewsRestriction),
+            "kill_switch" => Ok(Self::KillSwitch),
+            _ => Err("risk lock kind is invalid".to_string()),
+        }
+    }
+
+    /// Whether the session rollover releases this lock with the daily meters it measured.
+    pub(crate) const fn resets_at_session_boundary(self) -> bool {
+        matches!(self, Self::DailyLossLimit | Self::TrailingDrawdown)
+    }
+}
+
 /// A durable hard lock which rejects every new order for an account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RiskLock {
     pub account_id: TradingAccountId,
+    pub kind: RiskLockKind,
     pub reason: String,
     pub locked_at_unix_nanos: i64,
     pub profile_id: Option<String>,

@@ -1545,6 +1545,7 @@ mod tests {
             risk_meters: Vec::new(),
             risk_locks: Vec::new(),
             risk_rule_states: Vec::new(),
+            risk_sessions: Vec::new(),
             discipline_states: Vec::new(),
             session_plans: Vec::new(),
             session_adherence_reviews: Vec::new(),

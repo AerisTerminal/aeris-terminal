@@ -108,7 +108,7 @@ impl TradingCore {
         }
         let sequence = self.state.next_sequence;
         let (entry, entry_event) =
-            self.prepare_single_order(entry_command.clone(), true, sequence, &[])?;
+            self.prepare_single_order(entry_command.clone(), true, true, sequence, &[])?;
         let base = entry.limit_price.or(entry.stop_price);
         let tick_units = base
             .map(|base| instrument_tick_units(&instrument, base))
