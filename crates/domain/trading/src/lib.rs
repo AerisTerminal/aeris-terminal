@@ -554,10 +554,15 @@ impl Order {
             OrderType::Limit if self.limit_price.is_some() && self.stop_price.is_none() => {}
             OrderType::Stop if self.limit_price.is_none() && self.stop_price.is_some() => {}
             OrderType::StopLimit if self.limit_price.is_some() && self.stop_price.is_some() => {}
+            // Held group legs are priced at activation; a leg cancelled while still held
+            // keeps no price as its terminal fact.
             OrderType::Limit | OrderType::Stop | OrderType::StopLimit
-                if self.status == OrderStatus::Inactive
-                    && self.limit_price.is_none()
-                    && self.stop_price.is_none() => {}
+                if self.limit_price.is_none()
+                    && self.stop_price.is_none()
+                    && (self.status == OrderStatus::Inactive
+                        || (self.status == OrderStatus::Cancelled
+                            && self.filled_quantity.units() == 0
+                            && self.triggered_unix_nanos.is_none())) => {}
             _ => return Err(TradingValidationError::InvalidOrderPrices),
         }
         if self
@@ -622,6 +627,8 @@ pub enum OrderEventReason {
     NoQuote,
     RiskWarning,
     LocalManaged,
+    /// A bracket's entry filled but its protection could not be priced or admitted.
+    ProtectionNotPlaced,
 }
 
 impl OrderEventReason {
@@ -645,6 +652,7 @@ impl OrderEventReason {
             Self::NoQuote => "no_quote",
             Self::RiskWarning => "risk_warning",
             Self::LocalManaged => "local_managed",
+            Self::ProtectionNotPlaced => "protection_not_placed",
         }
     }
 }
@@ -1090,6 +1098,15 @@ mod tests {
         order.order_type = OrderType::Limit;
         assert!(order.validate().is_ok());
         order.status = OrderStatus::Working;
+        assert_eq!(
+            order.validate(),
+            Err(TradingValidationError::InvalidOrderPrices)
+        );
+        // A held leg cancelled before it was ever priced keeps that as its terminal fact.
+        order.status = OrderStatus::Cancelled;
+        order.terminal_unix_nanos = Some(2);
+        assert!(order.validate().is_ok());
+        order.filled_quantity = FixedPoint::try_new(1, 0).unwrap();
         assert_eq!(
             order.validate(),
             Err(TradingValidationError::InvalidOrderPrices)

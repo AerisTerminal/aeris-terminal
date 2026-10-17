@@ -12,13 +12,6 @@ pub(crate) enum LifecycleError {
     InvalidTimestamp,
     RevisionExhausted,
     AlreadyAccepted,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "M5.5 group coverage producer uses this validation"
-        )
-    )]
     InvalidQuantity,
 }
 
@@ -42,18 +35,10 @@ impl std::fmt::Display for LifecycleError {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "M5.5 group modification causes have no producer yet"
-    )
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModificationCause {
     User,
     Management,
-    Coverage,
     LegMoved,
     ParentRepriced,
 }
@@ -63,17 +48,12 @@ impl ModificationCause {
         match self {
             Self::User => OrderEventReason::UserModify,
             Self::Management => OrderEventReason::Management,
-            Self::Coverage => OrderEventReason::Coverage,
             Self::LegMoved => OrderEventReason::LegMoved,
             Self::ParentRepriced => OrderEventReason::ParentRepriced,
         }
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "M5.5 group coverage producer is pending")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ResizeCause {
     CoverageShrink,
@@ -81,10 +61,6 @@ pub(crate) enum ResizeCause {
 }
 
 impl ResizeCause {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M5.5 group coverage producer is pending")
-    )]
     const fn reason(self) -> OrderEventReason {
         match self {
             Self::CoverageShrink => OrderEventReason::CoverageShrink,
@@ -184,10 +160,6 @@ pub(crate) fn modify_with_cause(
 }
 
 /// Activates a held group leg; it cannot fill on the activation quote.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "M5.5 introduces real inactive group legs")
-)]
 pub(crate) fn activate(mut order: Order, owner_unix_nanos: i64) -> Result<Order, LifecycleError> {
     if order.status != OrderStatus::Inactive {
         return Err(LifecycleError::InvalidTransition(order.status));
@@ -198,11 +170,21 @@ pub(crate) fn activate(mut order: Order, owner_unix_nanos: i64) -> Result<Order,
     Ok(order)
 }
 
+/// Reprices a held group leg while it stays inactive; the caller sets the new price first and
+/// validates the result.
+pub(crate) fn reprice_held(
+    mut order: Order,
+    cause: ModificationCause,
+    owner_unix_nanos: i64,
+) -> Result<(Order, OrderEventReason), LifecycleError> {
+    if order.status != OrderStatus::Inactive {
+        return Err(LifecycleError::InvalidTransition(order.status));
+    }
+    advance(&mut order, owner_unix_nanos)?;
+    Ok((order, cause.reason()))
+}
+
 /// Resizes group coverage without changing the order identity or fill history.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "M5.5 introduces group coverage")
-)]
 pub(crate) fn resize(
     mut order: Order,
     quantity: FixedPoint,
@@ -622,7 +604,6 @@ mod tests {
         for cause in [
             ModificationCause::User,
             ModificationCause::Management,
-            ModificationCause::Coverage,
             ModificationCause::LegMoved,
             ModificationCause::ParentRepriced,
         ] {

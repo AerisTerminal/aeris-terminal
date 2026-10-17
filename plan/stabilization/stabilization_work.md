@@ -910,6 +910,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.5 part 7 feat(trading): accept unpriced held bracket children - allow only Inactive legs to await fill-based pricing; migration producer follows.
 - 2026-10-17 M5.5 part 8 fix(trading): enforce order-group member cardinality - require two OCO members and one standalone protection member before the group owner switch; no live group writer changed.
 - 2026-10-17 M5.5 part 9 feat(trading): commit typed group members with order steps - one validated transactional insert seam with cross-scope and last-leg rollback coverage, before the live authority switch.
+- 2026-10-17 M5.5 part 10 feat(trading): switch simulated brackets to group-owned inactive legs - entry, held stop/target orders and the group commit atomically, the entry fill reprices and activates the same order ids, and the legacy snapshot views keep the desktop unchanged; milestone GUI pending.
 
 ## 7. Known gaps / deferred
 

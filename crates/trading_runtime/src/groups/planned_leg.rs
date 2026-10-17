@@ -154,7 +154,8 @@ impl TradingCore {
         })
     }
 
-    /// Every awaiting bracket's planned legs whose entry is still open.
+    /// Every awaiting bracket's planned legs whose entry is still open. Group-owned pending
+    /// brackets project their held legs through the same view until M6.11 replaces it.
     pub(crate) fn planned_bracket_legs(&self) -> Vec<PlannedBracketLeg> {
         self.state
             .managed_brackets
@@ -172,6 +173,7 @@ impl TradingCore {
                 planned_legs(bracket, entry, instrument).ok()
             })
             .flatten()
+            .chain(self.owned_planned_bracket_legs())
             .collect()
     }
 
@@ -179,6 +181,11 @@ impl TradingCore {
         &mut self,
         command: &MovePlannedBracketLeg,
     ) -> Result<PlannedBracketLeg, String> {
+        // Group-owned pending brackets hold real inactive legs; the legacy template rewrite
+        // below serves only pre-switch rows.
+        if let Some(moved) = self.move_owned_leg(command)? {
+            return Ok(moved);
+        }
         let mut found = None;
         for bracket in self
             .state

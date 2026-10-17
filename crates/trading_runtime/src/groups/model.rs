@@ -1,6 +1,6 @@
 use crate::strategy::{BreakEvenRule, MAXIMUM_BRACKET_TARGETS, TrailingStopRule};
 use aeris_instruments::InstrumentId;
-use aeris_trading::{OrderId, TradingAccountId};
+use aeris_trading::{FixedPoint, OrderId, TradingAccountId};
 use std::collections::BTreeSet;
 
 /// A group belongs to one account and instrument; its members remain real orders.
@@ -52,6 +52,9 @@ pub enum LegRole {
 pub struct StopManagement {
     pub trailing: Option<TrailingStopRule>,
     pub break_even: Option<BreakEvenRule>,
+    /// The entry fill price a bracket's trailing and break-even rules anchor to; set by the
+    /// entry fill's quote step and `None` while the group is pending.
+    pub entry_price: Option<FixedPoint>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

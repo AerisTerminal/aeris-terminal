@@ -213,6 +213,9 @@ pub(super) struct StoredState {
     pub strategy_templates: BTreeMap<String, BracketStrategyTemplate>,
     pub managed_brackets: BTreeMap<String, ManagedBracket>,
     pub protective_orders: BTreeMap<ClientOrderId, ProtectiveOrder>,
+    /// Owned order groups. Newly placed brackets live here only; legacy managed rows
+    /// keep their legacy authority until their V19 conversion part.
+    pub order_groups: BTreeMap<String, OrderGroup>,
 }
 
 pub(super) struct TradingStore {
@@ -440,6 +443,7 @@ impl TradingStore {
             strategy_templates,
             managed_brackets,
             protective_orders,
+            order_groups: self.load_order_groups()?,
         })
     }
 }

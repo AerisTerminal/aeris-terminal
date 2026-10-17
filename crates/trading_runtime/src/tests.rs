@@ -1619,51 +1619,23 @@ fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_move
         })
         .expect("bracket accepted");
 
-    let pending = service.snapshot().expect("pending snapshot");
-    let legs = |snapshot: &TradingSnapshot| {
-        snapshot
-            .planned_bracket_legs
-            .iter()
-            .map(|leg| (leg.role, leg.side, leg.order_type, leg.price, leg.quantity))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        legs(&pending),
-        [
-            (
-                ProtectiveOrderRole::StopLoss,
-                OrderSide::Sell,
-                OrderType::Stop,
-                price(9_900),
-                quantity(2),
-            ),
-            (
-                ProtectiveOrderRole::TakeProfit,
-                OrderSide::Sell,
-                OrderType::Limit,
-                price(10_300),
-                quantity(1),
-            ),
-            (
-                ProtectiveOrderRole::TakeProfit,
-                OrderSide::Sell,
-                OrderType::Limit,
-                price(10_500),
-                quantity(1),
-            ),
-        ],
-        "the entry's stop and scale-out targets show before it fills"
-    );
-    let stop_id = pending.planned_bracket_legs[0].client_order_id.clone();
+    let (stop_client, stop_order) = pending_held_stop(&service);
     let move_stop = |units| {
         service.move_planned_bracket_leg(MovePlannedBracketLeg {
-            client_order_id: stop_id.clone(),
+            client_order_id: stop_client.clone(),
             price: price(units),
         })
     };
     assert!(move_stop(10_150).is_err(), "a stop cannot cross its entry");
     assert!(move_stop(9_960).is_err(), "a stop stays on whole ticks");
     assert_eq!(move_stop(9_950).expect("stop moves").price, price(9_950));
+    let after_move = service.snapshot().expect("moved-leg snapshot");
+    assert_leg_event(
+        &after_move,
+        &stop_order,
+        OrderEventKind::Modified,
+        aeris_trading::OrderEventReason::LegMoved,
+    );
 
     service
         .modify_order(ModifyOrder {
@@ -1676,10 +1648,21 @@ fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_move
         })
         .expect("entry moves");
     let moved = service.snapshot().expect("moved snapshot");
+    let moved_legs = held_bracket_legs(&moved);
+    let followed = moved_legs
+        .iter()
+        .find(|(id, _, _, _, _)| *id == stop_client)
+        .expect("held stop follows the entry");
     assert_eq!(
-        moved.planned_bracket_legs[0].price,
-        price(9_975),
+        followed.3,
+        Some(price(9_975)),
         "the legs keep their distance and follow the entry"
+    );
+    assert_leg_event(
+        &moved,
+        &stop_order,
+        OrderEventKind::Modified,
+        aeris_trading::OrderEventReason::ParentRepriced,
     );
     service
         .shutdown(Duration::from_secs(2))
@@ -1687,20 +1670,133 @@ fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_move
 
     let restarted = start_service(&directory);
     let restored = restarted.snapshot().expect("restored snapshot");
-    assert_eq!(restored.planned_bracket_legs, moved.planned_bracket_legs);
+    assert_eq!(
+        held_bracket_legs(&restored),
+        moved_legs,
+        "the held legs survive a restart at their moved prices"
+    );
     restarted
         .observe_market(observation(10_100, 10_125, 3, 3_000))
         .expect("market reaches the entry");
     let armed = restarted.snapshot().expect("armed snapshot");
-    assert_eq!(armed.planned_bracket_legs, []);
+    assert!(
+        armed
+            .orders
+            .iter()
+            .all(|order| order.status != OrderStatus::Inactive),
+        "the entry fill activated every held leg"
+    );
     assert!(armed.orders.iter().any(|order| {
-        order.client_order_id == stop_id
+        order.client_order_id == stop_client
             && order.status.is_open()
             && order.stop_price == Some(price(9_975))
     }));
+    assert_leg_event(
+        &armed,
+        &stop_order,
+        OrderEventKind::Activated,
+        aeris_trading::OrderEventReason::LocalManaged,
+    );
     restarted
         .shutdown(Duration::from_secs(2))
         .expect("service stops");
+}
+
+/// Asserts the pending bracket's held stop and scale-out targets and returns the stop's
+/// client and order ids.
+fn pending_held_stop(service: &TradingService) -> (ClientOrderId, aeris_trading::OrderId) {
+    let pending = service.snapshot().expect("pending snapshot");
+    let pending_legs = held_bracket_legs(&pending);
+    let mut planned_ids = pending
+        .planned_bracket_legs
+        .iter()
+        .map(|leg| leg.client_order_id.as_str().to_string())
+        .collect::<Vec<_>>();
+    planned_ids.sort_unstable();
+    let mut held_ids = pending_legs
+        .iter()
+        .map(|leg| leg.0.as_str().to_string())
+        .collect::<Vec<_>>();
+    held_ids.sort_unstable();
+    assert_eq!(
+        planned_ids, held_ids,
+        "the legacy reader view carries the held legs as the entry's planned legs"
+    );
+    let stop_leg = pending_legs
+        .iter()
+        .find(|(_, _, order_type, _, _)| *order_type == OrderType::Stop)
+        .expect("held stop");
+    assert_eq!(
+        (stop_leg.1, stop_leg.3, stop_leg.4),
+        (OrderSide::Sell, Some(price(9_900)), quantity(2)),
+        "the entry's stop shows before it fills"
+    );
+    let mut targets = pending_legs
+        .iter()
+        .filter(|(_, _, order_type, _, _)| *order_type == OrderType::Limit)
+        .map(|(_, side, _, leg_price, quantity)| (*side, *leg_price, *quantity))
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|(_, leg_price, _)| leg_price.map(FixedPoint::units));
+    assert_eq!(
+        targets,
+        [
+            (OrderSide::Sell, Some(price(10_300)), quantity(1)),
+            (OrderSide::Sell, Some(price(10_500)), quantity(1)),
+        ],
+        "the scale-out targets show before the entry fills"
+    );
+    let stop_client = stop_leg.0.clone();
+    let stop_order = pending
+        .orders
+        .iter()
+        .find(|order| order.client_order_id == stop_client)
+        .expect("held stop order")
+        .id
+        .clone();
+    (stop_client, stop_order)
+}
+
+/// The held legs of pending group-owned brackets: inactive orders keyed by client id.
+fn held_bracket_legs(
+    snapshot: &TradingSnapshot,
+) -> Vec<(
+    ClientOrderId,
+    OrderSide,
+    OrderType,
+    Option<FixedPoint>,
+    FixedPoint,
+)> {
+    let mut legs = snapshot
+        .orders
+        .iter()
+        .filter(|order| order.status == OrderStatus::Inactive)
+        .map(|order| {
+            (
+                order.client_order_id.clone(),
+                order.side,
+                order.order_type,
+                order.limit_price.or(order.stop_price),
+                order.quantity,
+            )
+        })
+        .collect::<Vec<_>>();
+    legs.sort_by_key(|(id, _, _, _, _)| id.as_str().to_string());
+    legs
+}
+
+/// Asserts a leg lifecycle event with the expected kind and reason was recorded.
+fn assert_leg_event(
+    snapshot: &TradingSnapshot,
+    order_id: &aeris_trading::OrderId,
+    kind: OrderEventKind,
+    reason: aeris_trading::OrderEventReason,
+) {
+    assert!(
+        snapshot.order_events.iter().any(|event| {
+            event.order_id == *order_id && event.kind == kind && event.reason == Some(reason)
+        }),
+        "a {kind:?} event with reason {reason:?} was recorded"
+    );
 }
 
 fn fixed_stop_bracket_template() -> BracketStrategyTemplate {

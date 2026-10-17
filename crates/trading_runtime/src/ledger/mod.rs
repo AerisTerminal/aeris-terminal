@@ -3,11 +3,11 @@ pub(crate) use position::{FillAccounting, TradeCycle};
 
 use super::{
     AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate, FixedPoint,
-    MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, Position, PositionPnl, ProtectiveOrderRole,
-    RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter,
-    SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore, TradingSnapshot,
-    consistency_projection, is_simulated, negative_loss, nonnegative_difference, pnl_ticks,
-    remaining_limit, round_trip, subtract_fixed, tick_value,
+    MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order, OrderEvent, Position, PositionPnl,
+    ProtectiveOrderRole, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS,
+    RiskLock, RiskMeter, SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore,
+    TradingSnapshot, consistency_projection, is_simulated, negative_loss, nonnegative_difference,
+    pnl_ticks, remaining_limit, round_trip, subtract_fixed, tick_value,
 };
 
 impl TradingCore {
@@ -205,7 +205,19 @@ impl TradingCore {
             trade_copiers: self.state.trade_copiers.values().cloned().collect(),
             copy_dispatches: self.copy_dispatches.iter().cloned().collect(),
             strategy_templates: self.state.strategy_templates.values().cloned().collect(),
-            managed_brackets: self.state.managed_brackets.values().cloned().collect(),
+            managed_brackets: {
+                // Group-owned brackets project into the legacy reader view until M6.11
+                // replaces it; pending groups carry no child state, activated ones carry
+                // their real child ids and entry price.
+                let mut brackets: Vec<ManagedBracket> =
+                    self.state.managed_brackets.values().cloned().collect();
+                for group in self.state.order_groups.values() {
+                    if group.kind == crate::core::GroupKind::Bracket && !group.legs.is_empty() {
+                        brackets.push(self.managed_bracket_view(group)?);
+                    }
+                }
+                brackets
+            },
             planned_bracket_legs: self.planned_bracket_legs(),
             protective_orders: self.state.protective_orders.values().cloned().collect(),
         })

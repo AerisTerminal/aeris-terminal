@@ -1468,7 +1468,8 @@ fn chart_bracket_uses_verified_grid_without_fixed_tick_and_rests() {
     };
     assert_eq!(bracket.template.stop_offset_ticks, 3);
     assert_eq!(bracket.template.targets[0].offset_ticks, 4);
-    assert_eq!(service.snapshot().unwrap().orders.len(), 1);
+    // The resting entry plus its held stop and target legs are real orders at placement.
+    assert_eq!(service.snapshot().unwrap().orders.len(), 3);
     service.shutdown(Duration::from_secs(2)).unwrap();
 }
 
@@ -1555,7 +1556,9 @@ fn all_practice_entry_shapes_obey_provider_neutral_session_phases() {
             assert_eq!(after.orders, []);
             assert_eq!(after.order_events, []);
         } else {
-            assert_eq!(after.orders.len(), 5);
+            // Four plain orders plus the bracket's entry and its held legs; the one-lot
+            // entry rounds the 50% first target out, leaving a stop and one target.
+            assert_eq!(after.orders.len(), 7);
         }
         service.shutdown(Duration::from_secs(2)).unwrap();
     }
@@ -2375,14 +2378,25 @@ fn quote_interest_tracks_orders_planned_legs_positions_tickets_and_capacity() {
             .iter()
             .filter(|order| order.status.is_open())
             .count(),
-        1
+        3,
+        "the entry and its held stop and target legs are all open orders"
+    );
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .filter(|order| order.status == OrderStatus::Inactive)
+            .count(),
+        2,
+        "the bracket legs wait inactive for the entry fill"
     );
     assert_eq!(
         snapshot.managed_brackets[0].status,
         ManagedBracketStatus::AwaitingEntry
     );
     service.set_ticket_interest(Vec::new()).unwrap();
-    published(vec![route()]); // The planned stop and target have not become orders yet.
+    // The resting entry and its inactive legs keep the instrument's quote lease.
+    published(vec![route()]);
     service
         .cancel_order(ClientOrderId::try_new("interest-bracket").unwrap())
         .unwrap();
@@ -2464,33 +2478,55 @@ fn assert_ticket_interest(service: &TradingService, published: &impl Fn(Vec<Mark
 }
 
 fn assert_group_only_interest(directory: &TestDirectory) {
-    let configuration = config(directory);
-    let (commands, _receiver) = std::sync::mpsc::sync_channel(1);
-    let mut core = TradingCore::open(
-        &configuration.database_path,
-        configuration.retention,
-        configuration.clock,
-        configuration.execution,
-        std::sync::Weak::new(),
-        Arc::new(crate::core::market::feed::MarketFeedInbox::new(
-            commands,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        )),
-    )
-    .unwrap();
-    let group_sink = Arc::new(RecordedInterest::default());
-    core.assert_group_only_interest_for_test(group_sink.clone(), &route());
+    // A real pending group is the only interest source on its instrument: placing it
+    // publishes the route and cancelling its entry releases the lease through the cascade.
+    let (service, _clock) = feed_service(directory);
+    let sink = Arc::new(RecordedInterest::default());
+    let feed = service.attach_market_feed(sink.clone()).unwrap();
+    feed.push(MarketFeedEvent::Terms(terms())).unwrap();
+    feed.push(live_session(route().instrument_id, 1)).unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    service.status().unwrap();
+    let mut entry = market_order("group-only-interest", OrderSide::Buy, 9, 1_000);
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::GoodTillCancelled;
+    entry.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    entry.quantity = FixedPoint::try_new(2, 0).unwrap();
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: super::fixed_stop_bracket_template(),
+        })
+        .unwrap();
+    service.status().unwrap();
+    let snapshot = service.snapshot().unwrap();
     assert_eq!(
-        group_sink
-            .0
+        snapshot
+            .orders
+            .iter()
+            .filter(|order| order.status == OrderStatus::Inactive)
+            .count(),
+        3,
+        "the held stop and both targets are inactive orders"
+    );
+    let sent = || {
+        sink.0
             .lock()
             .unwrap()
-            .iter()
+            .last()
             .map(|item| item.routes.clone())
-            .collect::<Vec<_>>(),
-        vec![vec![route()], vec![]]
-    );
-    drop(core);
+            .unwrap_or_default()
+    };
+    assert_eq!(sent(), vec![route()], "the group alone holds the lease");
+    service
+        .cancel_order(ClientOrderId::try_new("group-only-interest").unwrap())
+        .unwrap();
+    service.status().unwrap();
+    assert_eq!(sent(), Vec::<MarketRoute>::new(), "the cascade releases it");
+    service.shutdown(Duration::from_secs(2)).unwrap();
 }
 
 fn assert_sink_interest_capacity() {

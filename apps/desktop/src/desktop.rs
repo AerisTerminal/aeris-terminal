@@ -1900,6 +1900,14 @@ fn chart_working_orders(
                 && &order.account_id == account_id
                 && order.instrument_id.as_str() == instrument_id
         })
+        // A pending bracket's held legs draw through the planned-leg chain below with their
+        // role and entry; drawing the bare orders here as well would double every leg line.
+        .filter(|order| {
+            !snapshot
+                .planned_bracket_legs
+                .iter()
+                .any(|leg| leg.client_order_id == order.client_order_id)
+        })
         .filter_map(|order| {
             let price = chart_price(order.limit_price.or(order.stop_price))?;
             let id = ChartOrderId::new(order.client_order_id.as_str()).ok()?;

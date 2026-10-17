@@ -1629,7 +1629,7 @@ impl TradingCore {
             }
             Command::PlaceInlineBracket(bracket, reply) => respond(
                 &reply,
-                self.place_bracket_with_template(&bracket.entry, bracket.template),
+                self.place_bracket_with_template(&bracket.entry, &bracket.template),
             ),
             Command::PlaceInlineBracketFromMarket(bracket, reply) => {
                 respond(&reply, self.place_inline_bracket_from_market(bracket));
@@ -1843,6 +1843,11 @@ impl TradingCore {
             self.state
                 .managed_brackets
                 .insert(bracket.bracket_id.clone(), bracket);
+        }
+        for group in step.groups {
+            self.state
+                .order_groups
+                .insert(group.group_id.clone(), group);
         }
         for protective in step.protective {
             self.state

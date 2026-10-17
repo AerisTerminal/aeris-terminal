@@ -415,43 +415,6 @@ impl TradingCore {
     }
 }
 
-#[cfg(test)]
-impl TradingCore {
-    /// Exercise the group branch without another order, position or ticket
-    /// masking it. Normal bracket transitions overlap one of those sources.
-    pub(crate) fn assert_group_only_interest_for_test(
-        &mut self,
-        sink: std::sync::Arc<dyn aeris_trading::market::QuoteInterestSink>,
-        expected: &MarketRoute,
-    ) {
-        assert!(self.state.orders.open_orders().next().is_none());
-        assert!(
-            self.state
-                .positions
-                .values()
-                .all(|position| position.net_quantity.units() == 0)
-        );
-        let group = self
-            .state
-            .managed_brackets
-            .values_mut()
-            .next()
-            .expect("saved bracket");
-        group.status = ManagedBracketStatus::AwaitingEntry;
-        self.interest_sink = Some(sink);
-        self.recompute_quote_interest()
-            .expect("group-only interest");
-        assert_eq!(self.published_interest, vec![expected.clone()]);
-        self.state
-            .managed_brackets
-            .values_mut()
-            .next()
-            .unwrap()
-            .status = ManagedBracketStatus::Cancelled;
-        self.recompute_quote_interest().expect("retired group");
-        assert_eq!(self.published_interest, []);
-    }
-}
 use super::{
     ClientOrderId, Fill, FixedPoint, ObservationCursor, Order, Position,
     SimulatedMarketObservation, TradingCore, TradingInstrument, market_fill_candidates,
@@ -523,6 +486,7 @@ impl TradingCore {
             && planned.orders.iter().eq(self.state.orders.iter())
             && planned.order_events == self.state.order_events
             && planned.managed_brackets == self.state.managed_brackets
+            && planned.order_groups == self.state.order_groups
             && planned.risk_rule_states == self.state.risk_rule_states
             && planned.discipline_states == self.state.discipline_states
             && planned.risk_locks == self.state.risk_locks
@@ -570,6 +534,12 @@ impl TradingCore {
                     bracket.status,
                     super::ManagedBracketStatus::AwaitingEntry
                         | super::ManagedBracketStatus::Active
+                )
+        }) && !self.state.order_groups.values().any(|group| {
+            group.instrument_id == observation.instrument_id
+                && matches!(
+                    group.status,
+                    super::GroupStatus::Pending | super::GroupStatus::Active
                 )
         }) && !self
             .state
@@ -632,6 +602,7 @@ impl TradingCore {
         self.validate_mark_to_market(observation, &instrument)?;
         self.recover_managed_brackets(observation, &instrument)?;
         self.update_managed_stops(observation, &instrument)?;
+        self.update_owned_stops(observation, &instrument)?;
         let mut candidates =
             market_fill_candidates(&self.state.orders, &self.state.accounts, observation);
         let mut stop_limits = self
@@ -702,6 +673,7 @@ impl TradingCore {
             let executed =
                 self.execute_market_fills(vec![(order_id, price)], observation, &instrument)?;
             self.reconcile_managed_brackets(&executed, observation, &instrument)?;
+            self.reconcile_order_groups(&executed, observation, &instrument)?;
             self.align_position_protection(&executed, observation)?;
             fills.extend(executed);
         }

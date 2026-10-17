@@ -305,7 +305,16 @@ fn managed_brackets_trailing_and_break_even_reject_broker_without_state() {
     }
     let snapshot = service.snapshot().expect("snapshot");
     assert_eq!(snapshot.managed_brackets.len(), 3);
-    assert_eq!(snapshot.orders.len(), 3);
+    // Each simulated bracket holds its entry plus a real inactive stop and two targets.
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .filter(|order| order.status == OrderStatus::Inactive)
+            .count(),
+        9
+    );
+    assert_eq!(snapshot.orders.len(), 12);
     assert!(
         snapshot
             .orders

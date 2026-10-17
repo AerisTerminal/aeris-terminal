@@ -1,4 +1,5 @@
 pub mod model;
+pub(super) mod owned;
 pub(super) mod planned_leg;
 pub(super) mod protection;
 
@@ -60,7 +61,7 @@ impl TradingCore {
         bracket: PlaceInlineBracket,
     ) -> Result<BracketPlacement, String> {
         let entry = self.market_resting_bracket_entry(bracket.entry)?;
-        self.place_bracket_with_template(&entry, bracket.template)
+        self.place_bracket_with_template(&entry, &bracket.template)
     }
 
     pub(super) fn place_chart_bracket(
@@ -85,7 +86,7 @@ impl TradingCore {
             bracket.target_price,
             entry.client_order_id.as_str(),
         )?;
-        self.place_bracket_with_template(&entry, template)
+        self.place_bracket_with_template(&entry, &template)
     }
 
     pub(super) fn register_strategy_template(
@@ -127,13 +128,13 @@ impl TradingCore {
             .filter(|template| template.enabled)
             .cloned()
             .ok_or_else(|| "enabled bracket strategy template is not registered".to_string())?;
-        self.place_bracket_with_template(&command.entry, template)
+        self.place_bracket_with_template(&command.entry, &template)
     }
 
     pub(super) fn place_bracket_with_template(
         &mut self,
         entry_command: &PlaceOrder,
-        template: BracketStrategyTemplate,
+        template: &BracketStrategyTemplate,
     ) -> Result<BracketPlacement, String> {
         let resolved = self
             .resolve_order_instruction(entry_command.clone())
@@ -150,7 +151,7 @@ impl TradingCore {
                 instrument,
                 entry_command.side,
                 price,
-                &template,
+                template,
             )
             .map_err(|reason| reason.to_string())?;
         }
@@ -169,34 +170,13 @@ impl TradingCore {
                 &entry_command.account_id,
                 &entry_command.instrument_id,
                 entry_command.quantity,
-                &template,
+                template,
             )?;
             return self
-                .place_broker_bracket(entry_command, &template)
+                .place_broker_bracket(entry_command, template)
                 .map(BracketPlacement::BrokerProtected);
         }
         template.validate()?;
-        let bracket_id = entry_command.client_order_id.as_str().to_string();
-        if let Some(existing) = self.state.managed_brackets.get(&bracket_id) {
-            return Ok(BracketPlacement::Managed(existing.clone()));
-        }
-        let retired = self.retired_managed_bracket()?;
-        let instrument = self
-            .state
-            .instruments
-            .get(&entry_command.instrument_id)
-            .ok_or_else(|| "trading instrument is not registered".to_string())?;
-        allocated_target_quantities(
-            entry_command.quantity,
-            &template.targets,
-            order_increment_units(instrument),
-        )?;
-        self.check_bracket_stop_risk(
-            &entry_command.account_id,
-            &entry_command.instrument_id,
-            entry_command.quantity,
-            &template,
-        )?;
         if self
             .state
             .orders
@@ -207,31 +187,15 @@ impl TradingCore {
                 "entry client identifier already belongs to a non-bracket order".to_string(),
             );
         }
-        let sequence = self.state.next_sequence;
-        let (entry, event) =
-            self.prepare_single_order(entry_command.clone(), true, sequence, &[])?;
-        let bracket = ManagedBracket {
-            bracket_id: bracket_id.clone(),
+        self.check_bracket_stop_risk(
+            &entry_command.account_id,
+            &entry_command.instrument_id,
+            entry_command.quantity,
             template,
-            entry_client_order_id: entry_command.client_order_id.clone(),
-            stop_client_order_id: None,
-            target_client_order_ids: Vec::new(),
-            status: ManagedBracketStatus::AwaitingEntry,
-            entry_price: None,
-        };
-        bracket.validate()?;
-        let instrument = self
-            .state
-            .instruments
-            .get(&entry.instrument_id)
-            .ok_or_else(|| "trading instrument is not registered".to_string())?;
-        planned_leg::planned_legs(&bracket, &entry, instrument)?;
-        let mut step = OrderStep::new(sequence + 1);
-        step.deleted_brackets.extend(retired);
-        step.inserted.push((entry, event));
-        step.brackets.push(bracket.clone());
-        self.commit_order_step(step, Vec::new())?;
-        Ok(BracketPlacement::Managed(bracket))
+        )?;
+        // Simulated brackets placed after the authority switch are owned only by the group
+        // owner; the legacy writer below still serves rows restored from before the switch.
+        self.place_owned_bracket(entry_command, template)
     }
 
     pub(super) fn check_bracket_stop_risk(

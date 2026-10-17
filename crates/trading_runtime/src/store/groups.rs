@@ -1,13 +1,18 @@
 use super::{
     BTreeMap, BracketStrategyTemplate, BracketTarget, BreakEvenRule, ClientOrderId, Connection,
-    FixedPoint, ManagedBracket, ManagedBracketStatus, ProtectiveOrder, ProtectiveOrderRole, StepTx,
-    TradingStore, TrailingStopRule, database_error, fixed, params,
+    FixedPoint, InstrumentId, ManagedBracket, ManagedBracketStatus, ProtectiveOrder,
+    ProtectiveOrderRole, StepTx, TradingAccountId, TradingStore, TrailingStopRule, database_error,
+    fixed, params,
 };
-use crate::core::{GroupKind, GroupStatus, LegRole, OrderGroup};
+use crate::core::{GroupKind, GroupLeg, GroupStatus, LegRole, OrderGroup, StopManagement};
 
-/// Insert a newly owned group after its parent and children, in their shared order step.
-/// Historical groups use the idempotent migration transaction instead.
-pub(super) fn insert_order_group(tx: &StepTx<'_>, group: &OrderGroup) -> Result<(), String> {
+/// Write a newly owned group after its parent and children, in their shared order step, or
+/// replace its row when the group owner advances its status or a leg's offset. Historical
+/// groups use the idempotent migration transaction instead.
+pub(super) fn upsert_order_group(
+    connection: &Connection,
+    group: &OrderGroup,
+) -> Result<(), String> {
     group
         .validate()
         .map_err(|error| format!("invalid order group: {error:?}"))?;
@@ -16,7 +21,7 @@ pub(super) fn insert_order_group(tx: &StepTx<'_>, group: &OrderGroup) -> Result<
         .iter()
         .chain(group.legs.iter().map(|leg| &leg.order_id))
     {
-        let matches_scope: i64 = tx
+        let matches_scope: i64 = connection
             .query_row(
                 "SELECT count(*) FROM orders
                  WHERE id=?1 AND account_id=?2 AND instrument_id=?3",
@@ -48,43 +53,61 @@ pub(super) fn insert_order_group(tx: &StepTx<'_>, group: &OrderGroup) -> Result<
     let management = serde_json::json!({
         "trailing": group.management.trailing,
         "break_even": group.management.break_even,
+        "entry_price": group.management.entry_price.map(|price| serde_json::json!({
+            "units": price.units(),
+            "scale": price.scale(),
+        })),
     });
-    tx.execute(
-        "INSERT INTO order_groups(group_id,account_id,instrument_id,kind,status,
-            entry_order_id,management_json,template_id,template_revision,revision)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        params![
-            group.group_id,
-            group.account_id.as_str(),
-            group.instrument_id.as_str(),
-            kind,
-            status,
-            group.entry.as_ref().map(aeris_trading::OrderId::as_str),
-            management.to_string(),
-            group.template.as_ref().map(|(id, _)| id.as_str()),
-            group.template.as_ref().map(|(_, revision)| revision),
-            group.revision,
-        ],
-    )
-    .map_err(database_error)?;
+    connection
+        .execute(
+            "INSERT INTO order_groups(group_id,account_id,instrument_id,kind,status,
+                entry_order_id,management_json,template_id,template_revision,revision)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(group_id) DO UPDATE SET status=excluded.status,
+                entry_order_id=excluded.entry_order_id,
+                management_json=excluded.management_json,
+                template_id=excluded.template_id,
+                template_revision=excluded.template_revision,
+                revision=excluded.revision",
+            params![
+                group.group_id,
+                group.account_id.as_str(),
+                group.instrument_id.as_str(),
+                kind,
+                status,
+                group.entry.as_ref().map(aeris_trading::OrderId::as_str),
+                management.to_string(),
+                group.template.as_ref().map(|(id, _)| id.as_str()),
+                group.template.as_ref().map(|(_, revision)| revision),
+                group.revision,
+            ],
+        )
+        .map_err(database_error)?;
+    connection
+        .execute(
+            "DELETE FROM order_group_legs WHERE group_id=?1",
+            [&group.group_id],
+        )
+        .map_err(database_error)?;
     for leg in &group.legs {
         let (role, index) = match leg.role {
             LegRole::StopLoss => ("stop_loss", None),
             LegRole::TakeProfit { index } => ("take_profit", Some(index)),
         };
-        tx.execute(
-            "INSERT INTO order_group_legs(group_id,order_id,role,target_index,
-                offset_ticks,allocation_percent) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                group.group_id,
-                leg.order_id.as_str(),
-                role,
-                index,
-                leg.offset_ticks,
-                leg.allocation_percent,
-            ],
-        )
-        .map_err(database_error)?;
+        connection
+            .execute(
+                "INSERT INTO order_group_legs(group_id,order_id,role,target_index,
+                    offset_ticks,allocation_percent) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    group.group_id,
+                    leg.order_id.as_str(),
+                    role,
+                    index,
+                    leg.offset_ticks,
+                    leg.allocation_percent,
+                ],
+            )
+            .map_err(database_error)?;
     }
     Ok(())
 }
@@ -203,6 +226,201 @@ impl TradingStore {
         bracket: &ManagedBracket,
     ) -> Result<(), String> {
         upsert_managed_bracket(&self.connection, bracket)
+    }
+
+    /// Persist a group transition outside an order step (startup alignment). Group-owned
+    /// lifecycle writes ride the quote and order steps instead.
+    pub(crate) fn put_order_group_projection(&self, group: &OrderGroup) -> Result<(), String> {
+        upsert_order_group(&self.connection, group)
+    }
+
+    pub(super) fn load_order_groups(&self) -> Result<BTreeMap<String, OrderGroup>, String> {
+        let mut groups = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT group_id, account_id, instrument_id, kind, status, entry_order_id,
+                    management_json, template_id, template_revision, revision
+                 FROM order_groups ORDER BY group_id",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<u32>>(8)?,
+                    row.get::<_, u32>(9)?,
+                ))
+            })
+            .map_err(database_error)?;
+        let mut leg_statement = self
+            .connection
+            .prepare(
+                "SELECT order_id, role, target_index, offset_ticks, allocation_percent
+                 FROM order_group_legs WHERE group_id=?1
+                 ORDER BY role, target_index",
+            )
+            .map_err(database_error)?;
+        for row in rows {
+            let (
+                group_id,
+                account_id,
+                instrument_id,
+                kind,
+                status,
+                entry_order_id,
+                management,
+                template_id,
+                template_revision,
+                revision,
+            ) = row.map_err(database_error)?;
+            let management: StopManagement = serde_json::from_str::<ManagementJson>(&management)
+                .map_err(|error| {
+                    format!("stored order group management could not be decoded: {error}")
+                })?
+                .decode()?;
+            let kind = match kind.as_str() {
+                "bracket" => GroupKind::Bracket,
+                "oco" => GroupKind::Oco,
+                "protection" => GroupKind::Protection,
+                _ => return Err("stored order group kind is invalid".to_string()),
+            };
+            let status = match status.as_str() {
+                "pending" => GroupStatus::Pending,
+                "active" => GroupStatus::Active,
+                "completed" => GroupStatus::Completed,
+                "cancelled" => GroupStatus::Cancelled,
+                _ => return Err("stored order group status is invalid".to_string()),
+            };
+            let legs = leg_statement
+                .query_map([&group_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<u8>>(2)?,
+                        row.get::<_, Option<u32>>(3)?,
+                        row.get::<_, Option<u8>>(4)?,
+                    ))
+                })
+                .map_err(database_error)?
+                .map(|row| decode_group_leg(row.map_err(database_error)?))
+                .collect::<Result<Vec<_>, String>>()?;
+            let group = build_order_group(
+                StoredGroupRow {
+                    group_id,
+                    account_id,
+                    instrument_id,
+                    kind,
+                    status,
+                    entry_order_id,
+                    management,
+                    template_id,
+                    template_revision,
+                    revision,
+                },
+                legs,
+            )?;
+            groups.insert(group.group_id.clone(), group);
+        }
+        Ok(groups)
+    }
+}
+
+/// Decodes one stored group leg row, rejecting unknown role shapes.
+fn decode_group_leg(
+    row: (String, String, Option<u8>, Option<u32>, Option<u8>),
+) -> Result<GroupLeg, String> {
+    let (order_id, role, target_index, offset_ticks, allocation_percent) = row;
+    let role = match (role.as_str(), target_index) {
+        ("stop_loss", None) => LegRole::StopLoss,
+        ("take_profit", Some(index)) => LegRole::TakeProfit { index },
+        _ => return Err("stored order group leg role is invalid".to_string()),
+    };
+    Ok(GroupLeg {
+        order_id: aeris_trading::OrderId::try_new(order_id).map_err(|error| error.to_string())?,
+        role,
+        offset_ticks,
+        allocation_percent,
+    })
+}
+
+/// One decoded group row, before its legs attach.
+struct StoredGroupRow {
+    group_id: String,
+    account_id: String,
+    instrument_id: String,
+    kind: GroupKind,
+    status: GroupStatus,
+    entry_order_id: Option<String>,
+    management: StopManagement,
+    template_id: Option<String>,
+    template_revision: Option<u32>,
+    revision: u32,
+}
+
+/// Rebuilds one stored group from its decoded row and legs, validating it before it enters
+/// owner memory.
+fn build_order_group(row: StoredGroupRow, legs: Vec<GroupLeg>) -> Result<OrderGroup, String> {
+    let template = match (row.template_id, row.template_revision) {
+        (Some(id), Some(revision)) => Some((id, revision)),
+        (None, None) => None,
+        _ => return Err("stored order group template is incomplete".to_string()),
+    };
+    let group = OrderGroup {
+        group_id: row.group_id,
+        account_id: TradingAccountId::try_new(row.account_id).map_err(|error| error.to_string())?,
+        instrument_id: InstrumentId::try_new(row.instrument_id)
+            .map_err(|error| error.to_string())?,
+        kind: row.kind,
+        status: row.status,
+        entry: row
+            .entry_order_id
+            .map(aeris_trading::OrderId::try_new)
+            .transpose()
+            .map_err(|error| error.to_string())?,
+        legs,
+        management: row.management,
+        template,
+        revision: row.revision,
+    };
+    group
+        .validate()
+        .map_err(|error| format!("stored order group is invalid: {error:?}"))?;
+    Ok(group)
+}
+
+/// Storage form of a group's stop-management rules.
+#[derive(serde::Deserialize)]
+struct ManagementJson {
+    trailing: Option<TrailingStopRule>,
+    break_even: Option<BreakEvenRule>,
+    #[serde(default)]
+    entry_price: Option<EntryPriceJson>,
+}
+
+#[derive(serde::Deserialize)]
+struct EntryPriceJson {
+    units: i64,
+    scale: u8,
+}
+
+impl ManagementJson {
+    fn decode(self) -> Result<StopManagement, String> {
+        Ok(StopManagement {
+            trailing: self.trailing,
+            break_even: self.break_even,
+            entry_price: self
+                .entry_price
+                .map(|price| fixed(price.units, price.scale))
+                .transpose()?,
+        })
     }
 }
 

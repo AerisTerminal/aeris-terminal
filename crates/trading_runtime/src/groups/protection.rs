@@ -60,6 +60,7 @@ impl TradingCore {
             .managed_brackets
             .values()
             .find_map(|bracket| managed_bracket_role(bracket, client_order_id))
+            .or_else(|| self.owned_leg_role(client_order_id))
             .or_else(|| {
                 self.state
                     .protective_orders
@@ -231,19 +232,43 @@ impl TradingCore {
             scale,
         )
         .map_err(|error| error.to_string())?;
-        let resized = Order {
-            quantity,
-            ..order.clone()
+        // A group-owned leg resizes through the coverage lifecycle so the event names the
+        // direction; legacy rows keep their historical event shape until M5.6 removes them.
+        let group_owned = self
+            .state
+            .order_groups
+            .values()
+            .any(|group| group.legs.iter().any(|leg| leg.order_id == order.id));
+        let (resized, kind, reason) = if group_owned {
+            let cause = if quantity.units() > order.quantity.units() {
+                crate::book::lifecycle::ResizeCause::CoverageGrow
+            } else {
+                crate::book::lifecycle::ResizeCause::CoverageShrink
+            };
+            let (resized, reason) =
+                crate::book::lifecycle::resize(order.clone(), quantity, cause, self.command_now)
+                    .map_err(|error| error.to_string())?;
+            (resized, OrderEventKind::Resized, reason)
+        } else {
+            let resized = Order {
+                quantity,
+                ..order.clone()
+            };
+            resized.validate().map_err(|error| error.to_string())?;
+            (
+                resized,
+                OrderEventKind::Modified,
+                aeris_trading::OrderEventReason::LocalManaged,
+            )
         };
-        resized.validate().map_err(|error| error.to_string())?;
         let sequence = self.state.next_sequence;
         let event = OrderEvent {
             id: OrderEventId::try_new(format!("sim-event-{sequence}"))
                 .map_err(|error| error.to_string())?,
             order_id: order.id.clone(),
             sequence,
-            kind: OrderEventKind::Modified,
-            reason: Some(aeris_trading::OrderEventReason::LocalManaged),
+            kind,
+            reason: Some(reason),
             event_unix_nanos,
             detail: Some(format!(
                 "{} protection resized to the position",
@@ -295,6 +320,40 @@ impl TradingCore {
                     self.store.put_managed_bracket_projection(&bracket)?;
                 }
                 self.state.managed_brackets.insert(bracket_id, bracket);
+            }
+        }
+        let finished_groups =
+            self.state
+                .order_groups
+                .iter()
+                .filter(|(_, group)| {
+                    group.status == crate::core::GroupStatus::Active
+                        && group.legs.iter().any(|leg| {
+                            self.state.orders.get(&leg.order_id).is_some_and(|order| {
+                                client_order_ids.contains(&order.client_order_id)
+                            })
+                        })
+                        && group.legs.iter().all(|leg| {
+                            !self
+                                .state
+                                .orders
+                                .get(&leg.order_id)
+                                .is_some_and(|order| order.status.is_open())
+                        })
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+        for group_id in finished_groups {
+            if let Some(mut group) = self.state.order_groups.get(&group_id).cloned() {
+                group.status = crate::core::GroupStatus::Completed;
+                group.revision = group
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| "order group revision overflowed".to_string())?;
+                if !self.quote_planning {
+                    self.store.put_order_group_projection(&group)?;
+                }
+                self.state.order_groups.insert(group_id, group);
             }
         }
         Ok(())

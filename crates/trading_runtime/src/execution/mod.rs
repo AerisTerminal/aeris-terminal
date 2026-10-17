@@ -159,15 +159,22 @@ impl TradingCore {
                 crate::book::lifecycle::CancellationCause::NoQuote => {
                     "no quote within five seconds".to_string()
                 }
+                crate::book::lifecycle::CancellationCause::Cascade => {
+                    "cancelled with its bracket".to_string()
+                }
                 _ => "cancelled by local command".to_string(),
             }),
             provenance,
         };
         event.validate().map_err(|error| error.to_string())?;
         step.next_sequence += 1;
-        let cancelled = if cause == crate::book::lifecycle::CancellationCause::User {
+        let cancelled = if cause == crate::book::lifecycle::CancellationCause::User
+            && order.status != OrderStatus::Inactive
+        {
             crate::book::lifecycle::cancel(order, self.command_now)
         } else {
+            // A user cancel of a held group leg takes the cause path: the plain user guard
+            // refuses inactive orders, but cancel-all must still reach them.
             crate::book::lifecycle::cancel_with_cause(order, cause, self.command_now)
                 .map(|(order, _)| order)
         }
@@ -213,6 +220,60 @@ impl TradingCore {
                     .ok_or_else(|| "managed target disappeared".to_string())?;
                 if target_order.status.is_open() {
                     self.stage_cancellation(step, target_order, false, child_cause)?;
+                }
+            }
+        }
+        // Group-owned brackets: a terminal pending entry (or one of its held legs) cancels the
+        // group and every other held leg; a terminal active stop cancels the open targets.
+        // Cancelling one active target removes only that target.
+        let owned = self.state.order_groups.values().find_map(|group| {
+            if group.kind != super::GroupKind::Bracket {
+                return None;
+            }
+            let leg_terminated = group
+                .legs
+                .iter()
+                .position(|leg| leg.order_id == terminal.id);
+            if group.status == super::GroupStatus::Pending
+                && (group.entry.as_ref() == Some(&terminal.id) || leg_terminated.is_some())
+            {
+                return Some((group.clone(), leg_terminated, false));
+            }
+            if group.status == super::GroupStatus::Active && leg_terminated == Some(0) {
+                return Some((group.clone(), leg_terminated, true));
+            }
+            None
+        });
+        if let Some((mut group, terminated_leg, targets_only)) = owned {
+            group.status = super::GroupStatus::Cancelled;
+            group.revision = group
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "order group revision overflowed".to_string())?;
+            let legs = group.legs.clone();
+            step.groups.push(group);
+            for (index, leg) in legs.iter().enumerate() {
+                if Some(index) == terminated_leg {
+                    continue;
+                }
+                if targets_only && !matches!(leg.role, super::LegRole::TakeProfit { .. }) {
+                    continue;
+                }
+                let Some(order) = self.state.orders.get(&leg.order_id).cloned() else {
+                    continue;
+                };
+                if order.status.is_open()
+                    && !step
+                        .updated
+                        .iter()
+                        .any(|(updated, _)| updated.id == order.id)
+                {
+                    self.stage_cancellation(
+                        step,
+                        order,
+                        false,
+                        crate::book::lifecycle::CancellationCause::Cascade,
+                    )?;
                 }
             }
         }
@@ -445,6 +506,8 @@ impl TradingCore {
         event.validate().map_err(|error| error.to_string())?;
         let mut step = OrderStep::new(sequence + 1);
         step.updated.push((modified.clone(), event));
+        // A pending group bracket's held legs keep their tick offsets and follow the entry.
+        self.stage_owned_leg_reprices(&mut step, &modified)?;
         self.commit_order_step(step, Vec::new())?;
         Ok(modified)
     }

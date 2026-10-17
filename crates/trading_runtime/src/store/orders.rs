@@ -82,7 +82,7 @@ impl TradingStore {
             insert_event_row(&tx, event)?;
         }
         for group in &changes.groups {
-            super::groups::insert_order_group(&tx, group)?;
+            super::groups::upsert_order_group(&tx, group)?;
         }
         for bracket in &changes.brackets {
             super::groups::upsert_managed_bracket(&tx, bracket)?;
@@ -841,6 +841,7 @@ fn parse_event_reason(value: &str) -> Result<OrderEventReason, String> {
         "no_quote" => Ok(OrderEventReason::NoQuote),
         "risk_warning" => Ok(OrderEventReason::RiskWarning),
         "local_managed" => Ok(OrderEventReason::LocalManaged),
+        "protection_not_placed" => Ok(OrderEventReason::ProtectionNotPlaced),
         _ => Err("stored order event reason is invalid".to_string()),
     }
 }
