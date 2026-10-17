@@ -138,7 +138,7 @@ impl TradingCore {
         Ok(cancelled)
     }
 
-    fn stage_cancellation(
+    pub(super) fn stage_cancellation(
         &self,
         step: &mut OrderStep,
         order: Order,
@@ -276,6 +276,22 @@ impl TradingCore {
                     )?;
                 }
             }
+        }
+        // A standalone protection group retires when its only order is terminal; a fill
+        // retires it in the quote path instead.
+        let protection = self.state.order_groups.values().find_map(|group| {
+            (group.kind == super::GroupKind::Protection
+                && group.status == super::GroupStatus::Active
+                && group.legs.iter().any(|leg| leg.order_id == terminal.id))
+            .then(|| group.clone())
+        });
+        if let Some(mut group) = protection {
+            group.status = super::GroupStatus::Cancelled;
+            group.revision = group
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "order group revision overflowed".to_string())?;
+            step.groups.push(group);
         }
         self.stage_oco_retirement(step, terminal)
     }

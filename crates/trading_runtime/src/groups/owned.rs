@@ -39,6 +39,7 @@ enum OwnedFill {
     ActivateBracket,
     SettleBracket,
     SettleOco,
+    RetireProtection,
 }
 
 /// What one held leg of a pending bracket becomes at placement.
@@ -470,6 +471,13 @@ impl TradingCore {
                         && group.legs.iter().any(|leg| leg.order_id == order.id))
                     .then(|| (group.group_id.clone(), OwnedFill::SettleOco));
                 }
+                if group.kind == GroupKind::Protection {
+                    // A migrated standalone protection retires when its order fills.
+                    return (group.status == GroupStatus::Active
+                        && order.status == OrderStatus::Filled
+                        && group.legs.iter().any(|leg| leg.order_id == order.id))
+                    .then(|| (group.group_id.clone(), OwnedFill::RetireProtection));
+                }
                 if group.kind != GroupKind::Bracket {
                     return None;
                 }
@@ -492,6 +500,9 @@ impl TradingCore {
                 }
                 Some((group_id, OwnedFill::SettleOco)) => {
                     self.settle_owned_oco_fill(&group_id, &order)?;
+                }
+                Some((group_id, OwnedFill::RetireProtection)) => {
+                    self.retire_filled_protection(&group_id)?;
                 }
                 None => {}
             }
@@ -742,6 +753,24 @@ impl TradingCore {
             }
             group.status = GroupStatus::Completed;
         }
+        group.revision = group
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "order group revision overflowed".to_string())?;
+        self.state.order_groups.insert(group_id.to_string(), group);
+        self.bump_revision()
+    }
+
+    /// Retires a standalone protection group whose order filled inside the quote's
+    /// speculative state.
+    fn retire_filled_protection(&mut self, group_id: &str) -> Result<(), String> {
+        let mut group = self
+            .state
+            .order_groups
+            .get(group_id)
+            .cloned()
+            .ok_or_else(|| "order group disappeared".to_string())?;
+        group.status = GroupStatus::Completed;
         group.revision = group
             .revision
             .checked_add(1)

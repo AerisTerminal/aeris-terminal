@@ -3,6 +3,7 @@ pub(super) mod oco;
 pub(super) mod owned;
 pub(super) mod planned_leg;
 pub(super) mod protection;
+pub(super) mod recovery;
 
 use super::{
     ArmedBracket, BROKER_PNL_UNAVAILABLE, BracketPlacement, BracketStrategyTemplate, BracketTarget,

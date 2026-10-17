@@ -280,19 +280,17 @@ fn v19_awaiting_brackets_convert_exactly_at_startup() {
     assert_converted_held_legs(&snapshot);
 
     // The unpriceable bracket becomes a cancelled group; its entry keeps working unmanaged.
+    // The fixture keeps no position row, so its recovered protection needs no coverage repair.
     assert_eq!(
-        snapshot.recovery_notices,
-        [RecoveryNotice {
-            kind: RecoveryNoticeKind::UnpriceableBracket,
-            subject: "nogrid-entry".to_string(),
-            detail: snapshot.recovery_notices[0].detail.clone(),
-        }],
+        snapshot.recovery_notices.len(),
+        1,
         "the unpriceable conversion raises one typed notice"
     );
+    let notice = &snapshot.recovery_notices[0];
+    assert_eq!(notice.kind, RecoveryNoticeKind::UnpriceableBracket);
+    assert_eq!(notice.subject, "nogrid-entry");
     assert!(
-        snapshot.recovery_notices[0]
-            .detail
-            .contains("could not be priced"),
+        notice.detail.contains("could not be priced"),
         "the notice explains the repair"
     );
     let nogrid_entry = snapshot

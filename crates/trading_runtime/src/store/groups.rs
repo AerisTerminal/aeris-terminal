@@ -16,25 +16,31 @@ pub(super) fn upsert_order_group(
     group
         .validate()
         .map_err(|error| format!("invalid order group: {error:?}"))?;
-    for order_id in group
-        .entry
-        .iter()
-        .chain(group.legs.iter().map(|leg| &leg.order_id))
-    {
-        let matches_scope: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM orders
-                 WHERE id=?1 AND account_id=?2 AND instrument_id=?3",
-                params![
-                    order_id.as_str(),
-                    group.account_id.as_str(),
-                    group.instrument_id.as_str()
-                ],
-                |row| row.get(0),
-            )
-            .map_err(database_error)?;
-        if matches_scope != 1 {
-            return Err("order group member is missing or belongs to another scope".into());
+    // Member presence is enforced while a group can still drive behavior; a terminal group
+    // is a historical fact and must stay writable after startup recovery retires a group
+    // whose member order was torn away.
+    let enforce_members = matches!(group.status, GroupStatus::Pending | GroupStatus::Active);
+    if enforce_members {
+        for order_id in group
+            .entry
+            .iter()
+            .chain(group.legs.iter().map(|leg| &leg.order_id))
+        {
+            let matches_scope: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM orders
+                     WHERE id=?1 AND account_id=?2 AND instrument_id=?3",
+                    params![
+                        order_id.as_str(),
+                        group.account_id.as_str(),
+                        group.instrument_id.as_str()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(database_error)?;
+            if matches_scope != 1 {
+                return Err("order group member is missing or belongs to another scope".into());
+            }
         }
     }
     let (kind, status) = (

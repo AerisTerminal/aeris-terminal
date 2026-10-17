@@ -74,6 +74,7 @@ pub(crate) fn start_service_with_config(configuration: TradingServiceConfig) -> 
 
 mod foundation;
 mod group_migration;
+mod group_recovery;
 mod market_feed;
 mod oco;
 

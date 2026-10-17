@@ -74,12 +74,11 @@ impl OrderGroup {
         if self.group_id.is_empty() || self.revision == 0 {
             return Err(GroupValidationError::InvalidIdentity);
         }
-        // Historical brackets that never acquired priceable children retain their parent
-        // and terminal group fact rather than fabricating orders during migration.
+        // A terminal group is a historical fact: migration and startup recovery retain the
+        // group, and a bracket's parent, without fabricating replacement orders, so its legs
+        // may be empty even when the kind would otherwise require members.
         if self.legs.is_empty()
-            && self.kind == GroupKind::Bracket
             && matches!(self.status, GroupStatus::Completed | GroupStatus::Cancelled)
-            && self.entry.is_some()
         {
             return Ok(());
         }

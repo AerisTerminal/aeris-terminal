@@ -389,6 +389,13 @@ pub enum RecoveryNoticeKind {
     /// A pre-group awaiting bracket could not be priced from its entry after the upgrade; its
     /// group is cancelled and its entry keeps working unmanaged.
     UnpriceableBracket,
+    /// A recovered group violated its invariants at startup; it was cancelled with its
+    /// remaining open legs.
+    BrokenGroup,
+    /// A group member filled before the last shutdown; the group settled at startup.
+    InterruptedGroupFill,
+    /// Recovered protection no longer matched its position; startup alignment realigned it.
+    CoverageRepair,
 }
 
 /// Bounded immutable projection of current trading state.
@@ -1324,6 +1331,9 @@ impl TradingCore {
         };
         core.repair_loaded_position_projections()
             .map_err(StoreError::Other)?;
+        // Recovered groups are verified before the loaded-state alignment so a coverage
+        // repair is reported instead of happening silently.
+        core.verify_recovered_groups().map_err(StoreError::Other)?;
         core.align_loaded_protection().map_err(StoreError::Other)?;
         // Awaiting brackets convert to group authority only after the legacy alignment saw
         // the stored state exactly as the pre-switch runtime left it.
