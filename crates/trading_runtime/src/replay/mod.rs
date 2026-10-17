@@ -1533,3 +1533,334 @@ fn explicit_oco_wide_quote_cancels_the_sibling_and_replays_identically() {
         "a restart between placement and the wide quote changes nothing"
     );
 }
+
+/// VAL-TRD-047 helpers: the protective quantity of one role on one scope, and the coverage
+/// invariant checked after every step: each role totals exactly |net position| or zero, no
+/// protection guards a flat or wrong-side position, and no group leg is dangling or left
+/// open in a terminal group.
+fn role_coverage(
+    snapshot: &TradingSnapshot,
+    account_id: &TradingAccountId,
+    instrument_id: &InstrumentId,
+    role: ProtectiveOrderRole,
+) -> i64 {
+    snapshot
+        .orders
+        .iter()
+        .filter(|order| {
+            order.status.is_open()
+                && &order.account_id == account_id
+                && &order.instrument_id == instrument_id
+                && snapshot.protective_role(&order.client_order_id) == Some(role)
+        })
+        .map(|order| order.quantity.units().abs())
+        .sum()
+}
+
+fn assert_coverage_invariant(harness: &ReplayHarness, label: &str) {
+    let snapshot = harness.snapshot().expect("snapshot");
+    let mut scopes = std::collections::BTreeSet::new();
+    for order in &snapshot.orders {
+        if order.status.is_open() && snapshot.protective_role(&order.client_order_id).is_some() {
+            scopes.insert((order.account_id.clone(), order.instrument_id.clone()));
+        }
+    }
+    for position in &snapshot.positions {
+        scopes.insert((position.account_id.clone(), position.instrument_id.clone()));
+    }
+    for (account_id, instrument_id) in scopes {
+        let net = snapshot
+            .positions
+            .iter()
+            .find(|position| {
+                position.account_id == account_id && position.instrument_id == instrument_id
+            })
+            .map_or(0, |position| position.net_quantity.units());
+        for role in [
+            ProtectiveOrderRole::StopLoss,
+            ProtectiveOrderRole::TakeProfit,
+        ] {
+            let total = role_coverage(&snapshot, &account_id, &instrument_id, role);
+            assert!(
+                total == 0 || total == net.abs(),
+                "{label}: {role:?} coverage {total} matches neither zero nor |{net}|"
+            );
+        }
+        if net != 0 {
+            for order in &snapshot.orders {
+                if order.status.is_open()
+                    && order.account_id == account_id
+                    && order.instrument_id == instrument_id
+                    && snapshot.protective_role(&order.client_order_id).is_some()
+                {
+                    assert_eq!(
+                        order.side.sign(),
+                        -net.signum(),
+                        "{label}: protective order on the wrong side of its position"
+                    );
+                }
+            }
+        }
+    }
+    let database =
+        rusqlite::Connection::open(&harness.configuration.database_path).expect("coverage reader");
+    let dangling: i64 = database
+        .query_row(
+            "SELECT count(*) FROM order_group_legs l
+             WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.id = l.order_id)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("dangling leg count");
+    let open_in_terminal: i64 = database
+        .query_row(
+            "SELECT count(*) FROM order_group_legs l
+             JOIN order_groups g ON g.group_id = l.group_id
+             JOIN orders o ON o.id = l.order_id
+             WHERE g.status IN ('completed','cancelled')
+               AND o.status IN ('working','inactive')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("orphan leg count");
+    assert_eq!(
+        (dangling, open_in_terminal),
+        (0, 0),
+        "{label}: no dangling legs and no open legs in terminal groups"
+    );
+}
+
+fn two_target_template() -> BracketStrategyTemplate {
+    BracketStrategyTemplate {
+        template_id: "coverage-template".to_string(),
+        revision: 1,
+        name: "Coverage".to_string(),
+        stop_offset_ticks: 8,
+        targets: vec![
+            BracketTarget {
+                offset_ticks: 8,
+                quantity_percent: 50,
+            },
+            BracketTarget {
+                offset_ticks: 16,
+                quantity_percent: 50,
+            },
+        ],
+        trailing_stop: None,
+        break_even: None,
+        enabled: true,
+    }
+}
+
+fn bracket_entry(client_id: &str, quantity: i64, sequence: u64, time: i64) -> PlaceOrder {
+    let mut entry = market_order(client_id, OrderSide::Buy, sequence, time);
+    entry.order_type = OrderType::Limit;
+    entry.time_in_force = TimeInForce::GoodTillCancelled;
+    entry.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
+    entry.limit_price = Some(FixedPoint::try_new(10_000, 2).expect("entry"));
+    entry
+}
+
+fn manual_market(client_id: &str, side: OrderSide, quantity: i64, sequence: u64) -> PlaceOrder {
+    let time = 10_000 + i64::try_from(sequence).expect("bounded replay steps");
+    let mut order = market_order(client_id, side, sequence, time);
+    order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
+    order
+}
+
+fn coverage_totals(
+    harness: &ReplayHarness,
+    account: &TradingAccountId,
+    instrument_id: &InstrumentId,
+) -> (i64, i64) {
+    let snapshot = harness.snapshot().expect("snapshot");
+    (
+        role_coverage(
+            &snapshot,
+            account,
+            instrument_id,
+            ProtectiveOrderRole::StopLoss,
+        ),
+        role_coverage(
+            &snapshot,
+            account,
+            instrument_id,
+            ProtectiveOrderRole::TakeProfit,
+        ),
+    )
+}
+
+/// VAL-TRD-047: the contract's exact walk: long 4 with stop 4 and targets 2+2; a manual
+/// sell of 1 takes both roles to 3; buys of 1 then 2 grow the first-triggering orders so
+/// each role totals 6; a reversal through zero completes every group.
+#[test]
+fn protection_tracks_the_position_through_close_scale_in_and_reversal() {
+    let directory = TestDirectory::new("coverage-walk");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
+    let instrument_id = instrument().instrument_id;
+    let quote = |sequence: u64, time: i64| observation(9_975, 10_000, sequence, time);
+    harness
+        .observe_market(quote(1, 1_000))
+        .expect("fresh quote");
+    harness
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: bracket_entry("coverage-entry", 4, 2, 2_000),
+            template: two_target_template(),
+        })
+        .expect("bracket accepted");
+    assert_eq!(
+        harness
+            .observe_market(quote(3, 3_000))
+            .expect("entry fill")
+            .len(),
+        1
+    );
+    assert_eq!(
+        coverage_totals(&harness, &account, &instrument_id),
+        (4, 4),
+        "stop 4 and targets 2+2 after the fill"
+    );
+    harness
+        .place_order(manual_market("coverage-sell-1", OrderSide::Sell, 1, 4))
+        .expect("manual sell accepted");
+    harness.observe_market(quote(5, 5_000)).expect("sell fills");
+    assert_eq!(
+        coverage_totals(&harness, &account, &instrument_id),
+        (3, 3),
+        "both roles shrink to the position"
+    );
+    for (step, quantity) in [(6_u64, 1_i64), (8, 2)] {
+        harness
+            .place_order(manual_market(
+                &format!("coverage-buy-{step}"),
+                OrderSide::Buy,
+                quantity,
+                step,
+            ))
+            .expect("manual buy accepted");
+        harness
+            .observe_market(quote(
+                step + 1,
+                10_000 + i64::try_from(step).expect("bounded replay steps"),
+            ))
+            .expect("buy fills");
+    }
+    assert_eq!(
+        coverage_totals(&harness, &account, &instrument_id),
+        (6, 6),
+        "both roles grow back to the position"
+    );
+    assert_reversal_completes_every_group(&mut harness, &account, &instrument_id, &quote);
+}
+
+fn assert_reversal_completes_every_group(
+    harness: &mut ReplayHarness,
+    account: &TradingAccountId,
+    instrument_id: &InstrumentId,
+    quote: &dyn Fn(u64, i64) -> SimulatedMarketObservation,
+) {
+    let snapshot = harness.snapshot().expect("snapshot");
+    assert!(
+        snapshot.order_events.iter().any(|event| {
+            event.kind == OrderEventKind::Resized
+                && event.reason == Some(aeris_trading::OrderEventReason::CoverageGrow)
+        }),
+        "scale-in grows protection with a typed event"
+    );
+    harness
+        .place_order(manual_market("coverage-reverse", OrderSide::Sell, 7, 10))
+        .expect("reversal accepted");
+    harness
+        .observe_market(quote(11, 11_000))
+        .expect("reversal fills");
+    assert_eq!(
+        coverage_totals(harness, account, instrument_id),
+        (0, 0),
+        "no protection guards a reversed position"
+    );
+    let database =
+        rusqlite::Connection::open(&harness.configuration.database_path).expect("group reader");
+    let open_groups: i64 = database
+        .query_row(
+            "SELECT count(*) FROM order_groups WHERE status IN ('pending','active')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("open group count");
+    assert_eq!(
+        open_groups, 0,
+        "a reversal through zero completes every group"
+    );
+    drop(database);
+    assert_coverage_invariant(harness, "coverage-walk");
+}
+/// VAL-TRD-047 seeded runs: brackets, manual orders, quotes that cross protection and
+/// restarts in a fixed-seed order; the coverage invariant holds after every step.
+#[test]
+fn seeded_bracket_coverage_property_holds_after_every_step() {
+    for seed in 1..=6 {
+        let directory = TestDirectory::new("coverage-property");
+        let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+        let mut harness = start_golden_service(&directory, clock);
+        let mut random = XorShift(seed);
+        for step in 0..48_usize {
+            let value = random.next();
+            let sequence = (step * 4) as u64 + 1;
+            let time = 10_000 + i64::try_from(step).expect("bounded replay steps");
+            match value % 4 {
+                0 => {
+                    let quantity = i64::try_from(value % 3 + 1).expect("small quantity");
+                    let entry = bracket_entry(
+                        &format!("prop-entry-{seed}-{step}"),
+                        quantity,
+                        sequence,
+                        time,
+                    );
+                    let before = harness.snapshot().expect("before bracket");
+                    // Capacity bounds and risk locks reject some late-run brackets; a
+                    // rejection is a verified no-op, never a partial mutation.
+                    if harness
+                        .place_inline_bracket(PlaceInlineBracket {
+                            entry,
+                            template: two_target_template(),
+                        })
+                        .is_err()
+                    {
+                        assert_eq!(
+                            harness.snapshot().expect("after rejection"),
+                            before,
+                            "seed={seed} step={step}: a rejected bracket changed state"
+                        );
+                    }
+                }
+                1 => {
+                    let bid = 9_700 + i64::try_from(value % 500).expect("bounded bid");
+                    harness
+                        .observe_market(observation(bid, bid + 25, sequence, time))
+                        .unwrap_or_else(|error| panic!("seed={seed} step={step}: {error}"));
+                }
+                2 => {
+                    let side = if value & 2 == 0 {
+                        OrderSide::Buy
+                    } else {
+                        OrderSide::Sell
+                    };
+                    let order =
+                        manual_market(&format!("prop-manual-{seed}-{step}"), side, 1, sequence);
+                    if harness.place_order(order).is_ok() {
+                        let bid = 9_900 + i64::try_from(value % 201).expect("bounded bid");
+                        harness
+                            .observe_market(observation(bid, bid + 25, sequence + 1, time))
+                            .unwrap_or_else(|error| panic!("seed={seed} step={step}: {error}"));
+                    }
+                }
+                _ => harness
+                    .restart()
+                    .unwrap_or_else(|error| panic!("seed={seed} step={step}: {error}")),
+            }
+            assert_coverage_invariant(&harness, &format!("seed={seed} step={step}"));
+        }
+    }
+}
