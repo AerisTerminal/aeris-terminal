@@ -5,6 +5,32 @@ use super::{
     TradingAccountId, TradingCore, TradingInstrument, VenueRoute, is_simulated, planned_leg,
 };
 
+// The simulated venue's execution boundary has only one implementation of each policy:
+// full size and the observed touch. Neither policy models depth or slippage.
+pub(crate) trait Liquidity {
+    fn executable_quantity(&self, requested: FixedPoint) -> FixedPoint;
+}
+
+pub(crate) struct TouchLiquidity;
+
+impl Liquidity for TouchLiquidity {
+    fn executable_quantity(&self, requested: FixedPoint) -> FixedPoint {
+        requested
+    }
+}
+
+pub(crate) trait FillPrice {
+    fn price(&self, touch: FixedPoint) -> FixedPoint;
+}
+
+pub(crate) struct TouchPrice;
+
+impl FillPrice for TouchPrice {
+    fn price(&self, touch: FixedPoint) -> FixedPoint {
+        touch
+    }
+}
+
 impl TradingCore {
     pub(super) fn modify_order_from_market(
         &mut self,
@@ -405,8 +431,8 @@ impl TradingCore {
                 account_id: order.account_id.clone(),
                 instrument_id: order.instrument_id.clone(),
                 side: order.side,
-                price,
-                quantity: order.quantity,
+                price: TouchPrice.price(price),
+                quantity: TouchLiquidity.executable_quantity(order.quantity),
                 execution_unix_nanos: observation.provenance.observed_unix_nanos,
                 provenance: observation.provenance.clone(),
             };
@@ -505,5 +531,18 @@ impl TradingCore {
             changed = true;
         }
         Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+
+    #[test]
+    fn touch_hooks_keep_the_exact_price_and_full_order_quantity() {
+        let touch = FixedPoint::try_new(10_125, 2).expect("touch");
+        let requested = FixedPoint::try_new(3, 0).expect("quantity");
+        assert_eq!(TouchPrice.price(touch), touch);
+        assert_eq!(TouchLiquidity.executable_quantity(requested), requested);
     }
 }

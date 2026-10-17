@@ -82,6 +82,8 @@ violations and missing verification explicitly, and never describe them as satis
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
+- Simulated fill price and quantity policies belong only to `trading_runtime::execution`;
+  the current `TouchPrice` and `TouchLiquidity` implementations use the touch and full order quantity.
 - Broker order submissions and transitions reserve capacity in the bounded venue request queue before
   committing their SQLite facts; the relay sees the request only after a successful commit. A full
   or disconnected queue rejects without a database write or compensating undo.

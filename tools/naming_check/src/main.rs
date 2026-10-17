@@ -2236,10 +2236,14 @@ mod tests {
             "crates/provider_history/src/model.rs::ProviderHistoryAdapter".to_string(),
             // The sole trading owner receives injectable wall and monotonic time.
             "crates/trading_runtime/src/clock.rs::Clock".to_string(),
+            // The simulated venue's explicitly approved, touch-only execution policy hooks.
+            "crates/trading_runtime/src/execution/mod.rs::FillPrice".to_string(),
+            // The same venue fills full quantity without modeling order-book depth.
+            "crates/trading_runtime/src/execution/mod.rs::Liquidity".to_string(),
         ]);
         assert_eq!(
             actual, expected,
-            "production traits require an intentional provider/platform/security boundary"
+            "production traits require an intentional provider/platform/security or execution-policy boundary"
         );
     }
     #[test]
