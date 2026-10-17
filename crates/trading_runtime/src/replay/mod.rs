@@ -82,7 +82,7 @@ impl ReplayHarness {
     fn place_inline_bracket(
         &mut self,
         bracket: PlaceInlineBracket,
-    ) -> Result<BracketPlacement, String> {
+    ) -> Result<PlacementOutcome, String> {
         self.command(|reply| Command::PlaceInlineBracket(bracket, reply))
     }
 
@@ -775,7 +775,7 @@ fn replay_multi_effect_quote_failed_commit_keeps_memory_and_disk_unchanged() {
     assert_eq!(committed.fills.len(), 2);
     assert_eq!(
         committed.managed_brackets[0].status,
-        ManagedBracketStatus::Active
+        BracketViewStatus::Active
     );
     harness.restart().expect("restart after committed quote");
     assert_eq!(harness.snapshot().expect("recovered"), committed);
@@ -819,7 +819,7 @@ fn replay_failed_stop_fill_keeps_target_and_bracket_working_until_replay() {
     let committed = harness.snapshot().expect("after stop");
     assert_eq!(
         committed.managed_brackets[0].status,
-        ManagedBracketStatus::Completed
+        BracketViewStatus::Completed
     );
     assert_eq!(committed.positions[0].net_quantity.units(), 0);
     assert!(
@@ -1669,7 +1669,7 @@ fn role_coverage(
     snapshot: &TradingSnapshot,
     account_id: &TradingAccountId,
     instrument_id: &InstrumentId,
-    role: ProtectiveOrderRole,
+    role: ProtectionRole,
 ) -> i64 {
     snapshot
         .orders
@@ -1703,10 +1703,7 @@ fn assert_coverage_invariant(harness: &ReplayHarness, label: &str) {
                 position.account_id == account_id && position.instrument_id == instrument_id
             })
             .map_or(0, |position| position.net_quantity.units());
-        for role in [
-            ProtectiveOrderRole::StopLoss,
-            ProtectiveOrderRole::TakeProfit,
-        ] {
+        for role in [ProtectionRole::StopLoss, ProtectionRole::TakeProfit] {
             let total = role_coverage(&snapshot, &account_id, &instrument_id, role);
             assert!(
                 total == 0 || total == net.abs(),
@@ -1802,17 +1799,12 @@ fn coverage_totals(
 ) -> (i64, i64) {
     let snapshot = harness.snapshot().expect("snapshot");
     (
+        role_coverage(&snapshot, account, instrument_id, ProtectionRole::StopLoss),
         role_coverage(
             &snapshot,
             account,
             instrument_id,
-            ProtectiveOrderRole::StopLoss,
-        ),
-        role_coverage(
-            &snapshot,
-            account,
-            instrument_id,
-            ProtectiveOrderRole::TakeProfit,
+            ProtectionRole::TakeProfit,
         ),
     )
 }

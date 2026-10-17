@@ -274,9 +274,9 @@ fn start_migrated_protection(label: &str) -> (TestDirectory, TradingService) {
     protective.quantity = quantity(2);
     protective.stop_price = Some(FixedPoint::try_new(9_800, 2).expect("stop"));
     service
-        .place_protective_order(PlaceProtectiveOrder {
+        .place_protective_order(PlaceProtection {
             order: protective,
-            role: ProtectiveOrderRole::StopLoss,
+            role: ProtectionRole::StopLoss,
         })
         .expect("protective stop placed");
     service.shutdown(Duration::from_secs(2)).expect("shutdown");

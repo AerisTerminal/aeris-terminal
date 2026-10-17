@@ -241,7 +241,7 @@ fn assert_converted_held_legs(snapshot: &TradingSnapshot) {
         "the held target keeps the legacy planned price and allocated quantity"
     );
     let mut planned = snapshot
-        .planned_bracket_legs
+        .planned_legs
         .iter()
         .map(|leg| leg.client_order_id.as_str().to_string())
         .collect::<Vec<_>>();
@@ -255,13 +255,13 @@ fn assert_converted_held_legs(snapshot: &TradingSnapshot) {
     assert!(
         snapshot.managed_brackets.iter().any(|bracket| {
             bracket.bracket_id == "awaiting-entry"
-                && bracket.status == ManagedBracketStatus::AwaitingEntry
+                && bracket.status == BracketViewStatus::AwaitingEntry
         }),
         "the converted bracket keeps its legacy reader view"
     );
     assert!(
         snapshot.managed_brackets.iter().any(|bracket| {
-            bracket.bracket_id == "active-entry" && bracket.status == ManagedBracketStatus::Active
+            bracket.bracket_id == "active-entry" && bracket.status == BracketViewStatus::Active
         }),
         "the active legacy bracket stays legacy-owned"
     );
@@ -288,19 +288,14 @@ fn assert_migrated_rows(path: &std::path::Path) {
         ],
         "every fixture row becomes exactly one group"
     );
-    let mut legacy = rows(
+    let legacy_tables = rows(
         &connection,
-        "SELECT bracket_id,status FROM managed_brackets ORDER BY bracket_id",
+        "SELECT name FROM sqlite_master WHERE type='table'
+         AND name IN ('managed_brackets','protective_orders')",
     );
-    legacy.sort();
-    assert_eq!(
-        legacy,
-        [
-            ("active-entry".to_string(), "active".to_string()),
-            ("dead-entry".to_string(), "cancelled".to_string()),
-            ("done-entry".to_string(), "completed".to_string()),
-        ],
-        "only the converted awaiting rows leave the legacy table"
+    assert!(
+        legacy_tables.is_empty(),
+        "every awaiting row converted, so the V24 drop retired the legacy tables"
     );
     assert_eq!(
         rows(

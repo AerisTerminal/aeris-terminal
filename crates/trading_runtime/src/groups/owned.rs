@@ -1,21 +1,22 @@
-//! The group owner for simulated brackets placed after the authority switch. The entry, its
-//! Inactive stop and target orders and the `OrderGroup` row commit in one order step; the
-//! entry fill's quote step reprices and activates those same order ids. Legacy
-//! `managed_brackets` rows stay with the legacy writer until their migration converts them.
+//! The group owner for simulated brackets. The entry, its Inactive stop and target orders and
+//! the `OrderGroup` row commit in one order step; the entry fill's quote step reprices and
+//! activates those same order ids. Position coverage alignment and the reader views derive
+//! from the same group rows; no second protection authority remains.
 
-use super::model::{GroupKind, GroupLeg, GroupStatus, LegRole, OrderGroup};
+use super::model::{
+    GroupKind, GroupLeg, GroupStatus, LegRole, MovePlannedLeg, OrderGroup, PlannedLeg,
+};
 use super::{
-    BracketPlacement, BracketStrategyTemplate, BracketTarget, Fill, FixedPoint, ManagedBracket,
-    ManagedBracketStatus, Order, OrderEvent, OrderEventId, OrderEventKind, OrderSide, OrderStatus,
-    OrderStep, OrderType, PlaceOrder, SimulatedMarketObservation, TimeInForce, TradingCore,
+    BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, Fill, FixedPoint,
+    Order, OrderEvent, OrderEventId, OrderEventKind, OrderSide, OrderStatus, OrderStep, OrderType,
+    PlaceOrder, PlacementOutcome, SimulatedMarketObservation, TimeInForce, TradingCore,
     TradingInstrument, allocated_target_quantities, favorable_tick_distance, instrument_tick_units,
-    managed_child_client_order_id, opposite_side, order_increment_units,
-    planned_leg::MovePlannedBracketLeg, planned_leg::PlannedBracketLeg, shifted_price,
+    managed_child_client_order_id, opposite_side, order_increment_units, shifted_price,
     tighter_stop,
 };
 use crate::book::lifecycle::{self, CancellationCause, ModificationCause};
 use crate::{
-    MAXIMUM_MANAGED_BRACKETS, MAXIMUM_OPEN_ORDERS, ProtectiveOrderRole, RecoveryNotice,
+    MAXIMUM_MANAGED_BRACKETS, MAXIMUM_OPEN_ORDERS, ProtectionRole, ProtectionView, RecoveryNotice,
     RecoveryNoticeKind,
 };
 use aeris_trading::{OrderEventReason, RejectReason};
@@ -58,25 +59,31 @@ impl TradingCore {
         &mut self,
         entry_command: &PlaceOrder,
         template: &BracketStrategyTemplate,
-    ) -> Result<BracketPlacement, String> {
+    ) -> Result<PlacementOutcome, String> {
         let group_id = entry_command.client_order_id.as_str().to_string();
-        if let Some(existing) = self.state.managed_brackets.get(&group_id) {
-            return Ok(BracketPlacement::Managed(existing.clone()));
-        }
         if let Some(group) = self.state.order_groups.get(&group_id).cloned() {
-            return Ok(BracketPlacement::Managed(
+            return Ok(PlacementOutcome::Managed(
                 self.managed_bracket_view(&group)?,
             ));
         }
-        let owned = self
+        let bracket_groups = self
             .state
             .order_groups
             .values()
+            .filter(|group| group.kind == GroupKind::Bracket)
+            .collect::<Vec<_>>();
+        let live = bracket_groups
+            .iter()
             .filter(|group| matches!(group.status, GroupStatus::Pending | GroupStatus::Active))
             .count();
-        let retired = if self.state.managed_brackets.len() + owned >= MAXIMUM_MANAGED_BRACKETS {
+        if live >= MAXIMUM_MANAGED_BRACKETS {
+            return Err("active managed bracket limit reached".to_string());
+        }
+        // Retained terminal groups stay bounded the way terminal legacy brackets did: the
+        // oldest one leaves when the total reaches the cap.
+        let retired = if bracket_groups.len() >= MAXIMUM_MANAGED_BRACKETS {
             Some(
-                self.retired_managed_bracket()?
+                self.retired_owned_group()
                     .ok_or_else(|| "active managed bracket limit reached".to_string())?,
             )
         } else {
@@ -137,11 +144,11 @@ impl TradingCore {
             .validate()
             .map_err(|error| format!("invalid order group: {error:?}"))?;
         let mut step = OrderStep::new(prepared.next_sequence);
-        step.deleted_brackets.extend(retired);
+        step.deleted_groups.extend(retired);
         step.inserted = inserted;
         step.groups.push(group.clone());
         self.commit_order_step(step, Vec::new())?;
-        Ok(BracketPlacement::Managed(
+        Ok(PlacementOutcome::Managed(
             self.managed_bracket_view(
                 self.state
                     .order_groups
@@ -154,31 +161,33 @@ impl TradingCore {
     /// Converts each legacy awaiting bracket into group authority once, at startup: a
     /// priceable row becomes a pending group whose held legs carry exactly the prices the
     /// legacy planned-leg projection showed, and an unpriceable row becomes a cancelled
-    /// group with a recovery notice while its entry keeps working unmanaged. Each bracket
-    /// converts in one order step, so a failed commit leaves the legacy row for the next
-    /// start.
-    pub(crate) fn convert_awaiting_brackets(&mut self) -> Result<(), String> {
-        let awaiting = self
-            .state
-            .managed_brackets
-            .values()
-            .filter(|bracket| bracket.status == ManagedBracketStatus::AwaitingEntry)
-            .cloned()
-            .collect::<Vec<_>>();
-        for bracket in awaiting {
+    /// group with a recovery notice while its entry keeps working unmanaged. A row whose
+    /// entry can no longer fill becomes a cancelled group without inventing protection. Each
+    /// bracket converts in one order step, so a failed commit retries at the next start; the
+    /// V24 table drop lands only once every row converted.
+    pub(crate) fn convert_awaiting_brackets(
+        &mut self,
+        legacy: Vec<BracketView>,
+    ) -> Result<(), String> {
+        for bracket in legacy {
             self.convert_awaiting_bracket(&bracket)?;
         }
         Ok(())
     }
 
-    fn convert_awaiting_bracket(&mut self, bracket: &ManagedBracket) -> Result<(), String> {
+    fn convert_awaiting_bracket(&mut self, bracket: &BracketView) -> Result<(), String> {
+        if self.state.order_groups.contains_key(&bracket.bracket_id) {
+            // Converted by an earlier start whose table drop did not commit.
+            return Ok(());
+        }
         let entry = self
             .order_by_client_id(&bracket.entry_client_order_id)?
             .clone();
         if !entry.status.is_open() {
-            // The legacy reconciler retires a stale bracket on the next quote; converting it
-            // here would invent protection for an entry that can no longer fill.
-            return Ok(());
+            let group = Self::converted_group(bracket, &entry, GroupStatus::Cancelled, Vec::new())?;
+            let mut step = OrderStep::new(self.state.next_sequence);
+            step.groups.push(group);
+            return self.commit_order_step(step, Vec::new());
         }
         let instrument = self
             .state
@@ -197,7 +206,7 @@ impl TradingCore {
             }),
             None => Err("the bracket's entry has no resting price".to_string()),
         };
-        let (mut step, notice) = match priced {
+        let (step, notice) = match priced {
             Ok((base, tick_units, target_quantities)) => {
                 let prepared = self.prepare_owned_legs(
                     &entry,
@@ -230,7 +239,6 @@ impl TradingCore {
                 (step, Some(notice))
             }
         };
-        step.deleted_brackets.push(bracket.bracket_id.clone());
         self.commit_order_step(step, Vec::new())?;
         if let Some(notice) = notice {
             self.recovery_notices.push(notice);
@@ -240,7 +248,7 @@ impl TradingCore {
 
     /// The group a converted legacy bracket becomes, keeping its identity and template.
     fn converted_group(
-        bracket: &ManagedBracket,
+        bracket: &BracketView,
         entry: &Order,
         status: GroupStatus,
         legs: Vec<GroupLeg>,
@@ -298,7 +306,7 @@ impl TradingCore {
                 order_type: OrderType::Stop,
                 price: leg_price(template.stop_offset_ticks, -entry.side.sign())?,
                 quantity: entry.quantity,
-                detail: format!("{} protective stop", ManagedBracket::MANAGEMENT_LABEL),
+                detail: format!("{} protective stop", BracketView::MANAGEMENT_LABEL),
             },
             next,
         )?;
@@ -326,7 +334,7 @@ impl TradingCore {
                     quantity: *quantity,
                     detail: format!(
                         "{} scale-out target {}",
-                        ManagedBracket::MANAGEMENT_LABEL,
+                        BracketView::MANAGEMENT_LABEL,
                         leg_index + 1
                     ),
                 },
@@ -430,21 +438,24 @@ impl TradingCore {
         Ok((order, event))
     }
 
-    /// The protective role a leg of an active group gives its order. Pending legs are held, not
-    /// protection, so coverage alignment never touches them.
+    /// The protective role a leg of an active bracket or standalone protection gives its
+    /// order. Pending legs are held, not protection, so coverage alignment never touches them.
     pub(crate) fn owned_leg_role(
         &self,
         client_order_id: &aeris_trading::ClientOrderId,
-    ) -> Option<ProtectiveOrderRole> {
+    ) -> Option<ProtectionRole> {
         let order = self.state.orders.by_client(client_order_id)?;
         self.state
             .order_groups
             .values()
-            .filter(|group| group.kind == GroupKind::Bracket && group.status == GroupStatus::Active)
+            .filter(|group| {
+                matches!(group.kind, GroupKind::Bracket | GroupKind::Protection)
+                    && group.status == GroupStatus::Active
+            })
             .find_map(|group| group.legs.iter().find(|leg| leg.order_id == order.id))
             .map(|leg| match leg.role {
-                LegRole::StopLoss => ProtectiveOrderRole::StopLoss,
-                LegRole::TakeProfit { .. } => ProtectiveOrderRole::TakeProfit,
+                LegRole::StopLoss => ProtectionRole::StopLoss,
+                LegRole::TakeProfit { .. } => ProtectionRole::TakeProfit,
             })
     }
 
@@ -692,7 +703,7 @@ impl TradingCore {
             observation.provenance.observed_unix_nanos,
             format!(
                 "{} bracket protection was not placed: {reason}",
-                ManagedBracket::MANAGEMENT_LABEL
+                BracketView::MANAGEMENT_LABEL
             ),
             observation.provenance.clone(),
         )?;
@@ -947,7 +958,7 @@ impl TradingCore {
                 OrderEventKind::Modified,
                 Some(reason),
                 observation.provenance.observed_unix_nanos,
-                format!("{} stop management", ManagedBracket::MANAGEMENT_LABEL),
+                format!("{} stop management", BracketView::MANAGEMENT_LABEL),
                 observation.provenance.clone(),
             )?;
             self.state.orders.insert(repriced.id.clone(), repriced);
@@ -956,13 +967,22 @@ impl TradingCore {
         Ok(())
     }
 
+    /// Moves one held leg of a pending bracket from its chart command; the group's held legs
+    /// are the only stored form of a pending entry's protection.
+    pub(crate) fn move_planned_leg(
+        &mut self,
+        command: &MovePlannedLeg,
+    ) -> Result<PlannedLeg, String> {
+        self.move_owned_leg(command)?
+            .ok_or_else(|| "the order is not a planned leg of a pending bracket".to_string())
+    }
+
     /// Moves a held leg of a pending bracket, keeping the move as the leg's new tick offset
-    /// from the entry. Returns `None` when the order is not a group leg, so the caller falls
-    /// through to the legacy planned-leg writer for pre-switch brackets.
+    /// from the entry. Returns `None` when the order is not a group leg.
     pub(super) fn move_owned_leg(
         &mut self,
-        command: &MovePlannedBracketLeg,
-    ) -> Result<Option<PlannedBracketLeg>, String> {
+        command: &MovePlannedLeg,
+    ) -> Result<Option<PlannedLeg>, String> {
         let Some(order) = self
             .state
             .orders
@@ -1037,15 +1057,15 @@ impl TradingCore {
         step.updated.push((moved.clone(), event));
         step.groups.push(group.clone());
         self.commit_order_step(step, Vec::new())?;
-        Ok(Some(PlannedBracketLeg {
+        Ok(Some(PlannedLeg {
             bracket_id: group.group_id.clone(),
             entry_client_order_id: entry.client_order_id.clone(),
             account_id: entry.account_id.clone(),
             instrument_id: entry.instrument_id.clone(),
             client_order_id: moved.client_order_id.clone(),
             role: match role {
-                LegRole::StopLoss => ProtectiveOrderRole::StopLoss,
-                LegRole::TakeProfit { .. } => ProtectiveOrderRole::TakeProfit,
+                LegRole::StopLoss => ProtectionRole::StopLoss,
+                LegRole::TakeProfit { .. } => ProtectionRole::TakeProfit,
             },
             side: moved.side,
             order_type: moved.order_type,
@@ -1190,10 +1210,10 @@ impl TradingCore {
 
     /// The held legs of every pending group-owned bracket, projected as planned legs for the
     /// legacy reader view until M6.11 replaces it. A leg keeps its real order's identity, so a
-    /// chart move on the line reaches `move_planned_bracket_leg` and the armed order keeps the
+    /// chart move on the line reaches `move_planned_leg` and the armed order keeps the
     /// line. Legs without a price yet, such as a market entry's, stay hidden until activation,
     /// exactly like a legacy bracket whose legs cannot be priced.
-    pub(crate) fn owned_planned_bracket_legs(&self) -> Vec<PlannedBracketLeg> {
+    pub(crate) fn owned_planned_legs(&self) -> Vec<PlannedLeg> {
         let mut planned = Vec::new();
         for group in self.state.order_groups.values() {
             if group.kind != GroupKind::Bracket || group.status != GroupStatus::Pending {
@@ -1219,15 +1239,15 @@ impl TradingCore {
                 let Some(price) = order.limit_price.or(order.stop_price) else {
                     continue;
                 };
-                planned.push(PlannedBracketLeg {
+                planned.push(PlannedLeg {
                     bracket_id: group.group_id.clone(),
                     entry_client_order_id: entry.client_order_id.clone(),
                     account_id: order.account_id.clone(),
                     instrument_id: order.instrument_id.clone(),
                     client_order_id: order.client_order_id.clone(),
                     role: match leg.role {
-                        LegRole::StopLoss => ProtectiveOrderRole::StopLoss,
-                        LegRole::TakeProfit { .. } => ProtectiveOrderRole::TakeProfit,
+                        LegRole::StopLoss => ProtectionRole::StopLoss,
+                        LegRole::TakeProfit { .. } => ProtectionRole::TakeProfit,
                     },
                     side: order.side,
                     order_type: order.order_type,
@@ -1242,10 +1262,7 @@ impl TradingCore {
     /// The legacy reader view of a group-owned bracket, served until M6.11 replaces the
     /// snapshot: a pending group projects as an awaiting bracket without child state, an
     /// activated one carries its real child ids and entry price.
-    pub(crate) fn managed_bracket_view(
-        &self,
-        group: &OrderGroup,
-    ) -> Result<ManagedBracket, String> {
+    pub(crate) fn managed_bracket_view(&self, group: &OrderGroup) -> Result<BracketView, String> {
         let entry_order = self
             .state
             .orders
@@ -1275,17 +1292,17 @@ impl TradingCore {
         } else {
             (None, Vec::new())
         };
-        let bracket = ManagedBracket {
+        let bracket = BracketView {
             bracket_id: group.group_id.clone(),
             template: self.group_template_view(group),
             entry_client_order_id: entry_order.client_order_id.clone(),
             stop_client_order_id,
             target_client_order_ids,
             status: match group.status {
-                GroupStatus::Pending => ManagedBracketStatus::AwaitingEntry,
-                GroupStatus::Active => ManagedBracketStatus::Active,
-                GroupStatus::Completed => ManagedBracketStatus::Completed,
-                GroupStatus::Cancelled => ManagedBracketStatus::Cancelled,
+                GroupStatus::Pending => BracketViewStatus::AwaitingEntry,
+                GroupStatus::Active => BracketViewStatus::Active,
+                GroupStatus::Completed => BracketViewStatus::Completed,
+                GroupStatus::Cancelled => BracketViewStatus::Cancelled,
             },
             entry_price: group.management.entry_price,
         };
@@ -1328,5 +1345,327 @@ impl TradingCore {
             break_even: group.management.break_even,
             enabled: true,
         }
+    }
+
+    /// How much of an entry fill is still open in the entry's direction: all of it when it
+    /// opened or added to a position, the remainder when it reversed one, and nothing when it
+    /// only reduced or closed an opposite position.
+    pub(super) fn opened_exposure(
+        &self,
+        entry_order: &Order,
+        entry_fill: &Fill,
+    ) -> Result<FixedPoint, String> {
+        let scale = entry_fill.quantity.scale();
+        let net = self
+            .state
+            .positions
+            .get(&(
+                entry_order.account_id.clone(),
+                entry_order.instrument_id.clone(),
+            ))
+            .map_or(Ok(0), |position| {
+                position
+                    .net_quantity
+                    .exact_rescale(scale)
+                    .map(FixedPoint::units)
+                    .map_err(|error| error.to_string())
+            })?;
+        let open_in_entry_direction = net
+            .checked_mul(entry_order.side.sign())
+            .ok_or_else(|| "position quantity overflowed".to_string())?
+            .max(0);
+        FixedPoint::try_new(
+            open_in_entry_direction.min(entry_fill.quantity.units()),
+            scale,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// The oldest terminal bracket group, evicted so retained group history stays bounded.
+    fn retired_owned_group(&self) -> Option<String> {
+        self.state
+            .order_groups
+            .values()
+            .filter(|group| {
+                group.kind == GroupKind::Bracket
+                    && matches!(
+                        group.status,
+                        GroupStatus::Completed | GroupStatus::Cancelled
+                    )
+            })
+            .min_by_key(|group| {
+                group
+                    .entry
+                    .as_ref()
+                    .and_then(|id| self.state.orders.get(id))
+                    .map_or(i64::MIN, |order| order.submitted_unix_nanos)
+            })
+            .map(|group| group.group_id.clone())
+    }
+
+    /// The role a standalone protection group recorded for an order, live or historical.
+    pub(crate) fn protection_leg_role(
+        &self,
+        client_order_id: &aeris_trading::ClientOrderId,
+    ) -> Option<ProtectionRole> {
+        let order = self.state.orders.by_client(client_order_id)?;
+        self.state
+            .order_groups
+            .values()
+            .filter(|group| group.kind == GroupKind::Protection)
+            .find_map(|group| group.legs.iter().find(|leg| leg.order_id == order.id))
+            .map(|leg| match leg.role {
+                LegRole::StopLoss => ProtectionRole::StopLoss,
+                LegRole::TakeProfit { .. } => ProtectionRole::TakeProfit,
+            })
+    }
+
+    /// Standalone protections project from their groups for the snapshot reader view.
+    pub(crate) fn protection_order_views(&self) -> Vec<ProtectionView> {
+        let mut views = Vec::new();
+        for group in self.state.order_groups.values() {
+            if group.kind != GroupKind::Protection {
+                continue;
+            }
+            for leg in &group.legs {
+                let Some(order) = self.state.orders.get(&leg.order_id) else {
+                    continue;
+                };
+                views.push(ProtectionView {
+                    client_order_id: order.client_order_id.clone(),
+                    role: match leg.role {
+                        LegRole::StopLoss => ProtectionRole::StopLoss,
+                        LegRole::TakeProfit { .. } => ProtectionRole::TakeProfit,
+                    },
+                });
+            }
+        }
+        views.sort_by(|left, right| left.client_order_id.cmp(&right.client_order_id));
+        views
+    }
+
+    /// Fits the protection of every position the fills touched to that position.
+    pub(crate) fn align_position_protection(
+        &mut self,
+        fills: &[Fill],
+        observation: &SimulatedMarketObservation,
+    ) -> Result<(), String> {
+        let touched = fills
+            .iter()
+            .map(|fill| (fill.account_id.clone(), fill.instrument_id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        for (account_id, instrument_id) in touched {
+            self.align_protection(
+                &account_id,
+                &instrument_id,
+                observation.provenance.observed_unix_nanos,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Fits the open protection of one position to it: orders that no longer protect the
+    /// position leave, and each role's remaining orders cover exactly the net quantity, so
+    /// protection never opens a position of its own.
+    pub(crate) fn align_protection(
+        &mut self,
+        account_id: &aeris_trading::TradingAccountId,
+        instrument_id: &aeris_instruments::InstrumentId,
+        event_unix_nanos: i64,
+    ) -> Result<(), String> {
+        let net = self
+            .state
+            .positions
+            .get(&(account_id.clone(), instrument_id.clone()))
+            .map(|position| position.net_quantity)
+            .filter(|net| net.units() != 0);
+        // A sell protects a long position and a buy a short one.
+        let (protecting, stale): (Vec<_>, Vec<_>) = self
+            .protection_orders(account_id, instrument_id)
+            .into_iter()
+            .partition(|(order, _)| {
+                net.is_some_and(|net| order.side.sign() == -net.units().signum())
+            });
+        self.cancel_protection(
+            &stale
+                .into_iter()
+                .map(|(order, _)| order.client_order_id)
+                .collect::<Vec<_>>(),
+        )?;
+        let Some(net) = net else {
+            return Ok(());
+        };
+        for role in [ProtectionRole::StopLoss, ProtectionRole::TakeProfit] {
+            let orders = protecting
+                .iter()
+                .filter(|(_, order_role)| *order_role == role)
+                .map(|(order, _)| order.clone())
+                .collect();
+            self.fit_protection(orders, role, net, event_unix_nanos)?;
+        }
+        Ok(())
+    }
+
+    fn protection_orders(
+        &self,
+        account_id: &aeris_trading::TradingAccountId,
+        instrument_id: &aeris_instruments::InstrumentId,
+    ) -> Vec<(Order, ProtectionRole)> {
+        self.state
+            .orders
+            .values()
+            .filter(|order| {
+                order.status.is_open()
+                    && &order.account_id == account_id
+                    && &order.instrument_id == instrument_id
+            })
+            .filter_map(|order| {
+                self.owned_leg_role(&order.client_order_id)
+                    .map(|role| (order.clone(), role))
+            })
+            .collect()
+    }
+
+    /// Makes the orders of one role cover the position exactly. Growth goes to the order that
+    /// triggers first, the one the position reports; a shrink is taken from the orders that
+    /// trigger last.
+    fn fit_protection(
+        &mut self,
+        mut orders: Vec<Order>,
+        role: ProtectionRole,
+        net: FixedPoint,
+        event_unix_nanos: i64,
+    ) -> Result<(), String> {
+        let Some(scale) = orders.first().map(|order| order.quantity.scale()) else {
+            return Ok(());
+        };
+        orders.sort_by_key(|order| super::protection_trigger(order, role).map(|(key, _)| key));
+        let units = |quantity: FixedPoint| {
+            quantity
+                .exact_rescale(scale)
+                .map(|quantity| quantity.units().unsigned_abs())
+                .map_err(|error| error.to_string())
+        };
+        let wanted = units(net)?;
+        let covered = orders.iter().try_fold(0_u64, |total, order| {
+            total
+                .checked_add(units(order.quantity)?)
+                .ok_or_else(|| "protection quantity overflowed".to_string())
+        })?;
+        if covered < wanted {
+            let first = &orders[0];
+            let grown = units(first.quantity)? + (wanted - covered);
+            return self.resize_protection(first, grown, scale, event_unix_nanos);
+        }
+        let mut excess = covered - wanted;
+        let mut cancelled = Vec::new();
+        for order in orders.iter().rev() {
+            if excess == 0 {
+                break;
+            }
+            let quantity = units(order.quantity)?;
+            if quantity <= excess {
+                cancelled.push(order.client_order_id.clone());
+                excess -= quantity;
+            } else {
+                self.resize_protection(order, quantity - excess, scale, event_unix_nanos)?;
+                excess = 0;
+            }
+        }
+        self.cancel_protection(&cancelled)
+    }
+
+    /// Resizes one group-owned protective order through the coverage lifecycle so the event
+    /// names the direction.
+    fn resize_protection(
+        &mut self,
+        order: &Order,
+        units: u64,
+        scale: u8,
+        event_unix_nanos: i64,
+    ) -> Result<(), String> {
+        let quantity = FixedPoint::try_new(
+            i64::try_from(units).map_err(|_| "protection quantity overflowed".to_string())?,
+            scale,
+        )
+        .map_err(|error| error.to_string())?;
+        let cause = if quantity.units() > order.quantity.units() {
+            lifecycle::ResizeCause::CoverageGrow
+        } else {
+            lifecycle::ResizeCause::CoverageShrink
+        };
+        let (resized, reason) = lifecycle::resize(order.clone(), quantity, cause, self.command_now)
+            .map_err(|error| error.to_string())?;
+        let sequence = self.state.next_sequence;
+        let event = OrderEvent {
+            id: OrderEventId::try_new(format!("sim-event-{sequence}"))
+                .map_err(|error| error.to_string())?,
+            order_id: order.id.clone(),
+            sequence,
+            kind: OrderEventKind::Resized,
+            reason: Some(reason),
+            event_unix_nanos,
+            detail: Some(format!(
+                "{} protection resized to the position",
+                BracketView::MANAGEMENT_LABEL
+            )),
+            provenance: order.provenance.clone(),
+        };
+        event.validate().map_err(|error| error.to_string())?;
+        if !self.quote_planning {
+            self.store.modify_order(&resized, &event, sequence + 1)?;
+        }
+        self.state.next_sequence = sequence + 1;
+        self.state.order_events.push_back(event);
+        self.state.orders.insert(resized.id.clone(), resized);
+        self.bump_revision()
+    }
+
+    /// Cancels protective orders and completes any active group left with nothing open.
+    fn cancel_protection(
+        &mut self,
+        client_order_ids: &[aeris_trading::ClientOrderId],
+    ) -> Result<(), String> {
+        if client_order_ids.is_empty() {
+            return Ok(());
+        }
+        for client_order_id in client_order_ids {
+            self.cancel_order_internal(client_order_id, false)?;
+        }
+        let finished_groups =
+            self.state
+                .order_groups
+                .iter()
+                .filter(|(_, group)| {
+                    group.status == GroupStatus::Active
+                        && group.legs.iter().any(|leg| {
+                            self.state.orders.get(&leg.order_id).is_some_and(|order| {
+                                client_order_ids.contains(&order.client_order_id)
+                            })
+                        })
+                        && group.legs.iter().all(|leg| {
+                            !self
+                                .state
+                                .orders
+                                .get(&leg.order_id)
+                                .is_some_and(|order| order.status.is_open())
+                        })
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+        for group_id in finished_groups {
+            if let Some(mut group) = self.state.order_groups.get(&group_id).cloned() {
+                group.status = GroupStatus::Completed;
+                group.revision = group
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| "order group revision overflowed".to_string())?;
+                if !self.quote_planning {
+                    self.store.put_order_group_projection(&group)?;
+                }
+                self.state.order_groups.insert(group_id, group);
+            }
+        }
+        Ok(())
     }
 }

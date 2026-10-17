@@ -1,5 +1,6 @@
-//! Startup conversion of legacy protection facts. Until the M5.5 owner switch,
-//! legacy rows remain authoritative; these rows are a durable migration projection.
+//! Startup conversion of legacy protection facts into order groups. The legacy
+//! `managed_brackets` and `protective_orders` tables are read here for the last time; the
+//! V24 migration drops them once the runtime converted every awaiting bracket.
 
 use super::{StepTx, TradingStore, database_error};
 
@@ -16,6 +17,10 @@ const COMPLETE_LINKED_CHILDREN: &str = "b.stop_client_order_id IS NOT NULL
 
 impl TradingStore {
     pub(super) fn backfill_groups(&self) -> Result<(), String> {
+        if !self.legacy_protection_tables_present()? {
+            // The V24 drop already retired the legacy tables.
+            return Ok(());
+        }
         let tx = StepTx::begin_shared(&self.connection).map_err(database_error)?;
         Self::project_protection_groups(&tx)?;
         Self::project_terminal_brackets(&tx)?;
@@ -619,34 +624,13 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        for attempt in 0..2 {
-            let store = TradingStore::open(&path, TradingRetention::default()).unwrap();
-            assert_active_group(&store);
-            assert_eq!(
-                store
-                    .connection
-                    .query_row("SELECT count(*) FROM managed_brackets", [], |r| r
-                        .get::<_, i64>(0))
-                    .unwrap(),
-                1
-            );
-            if attempt == 0 {
-                let backups: Vec<_> = fs::read_dir(path.parent().unwrap().join("backups"))
-                    .unwrap()
-                    .map(|r| r.unwrap().path())
-                    .collect();
-                assert!(backups.iter().any(|p| {
-                    p.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .starts_with("trading-v19-")
-                }));
-            }
-        }
+        assert_reopen_keeps_group_and_drops_legacy(&path);
+        // An external group edit survives the reopen: the dropped legacy tables no longer
+        // feed a backfill that could resurrect the migrated row.
         let connection = Connection::open(&path).unwrap();
         connection
             .execute(
-                "UPDATE managed_brackets SET status='completed' WHERE bracket_id='entry-client'",
+                "UPDATE order_groups SET status='completed' WHERE group_id='entry-client'",
                 [],
             )
             .unwrap();
@@ -678,6 +662,39 @@ mod tests {
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
+    /// Two reopens keep the projected group, retire the legacy tables at the first open and
+    /// take the V19 backup exactly once.
+    fn assert_reopen_keeps_group_and_drops_legacy(path: &std::path::Path) {
+        for attempt in 0..2 {
+            let store = TradingStore::open(path, TradingRetention::default()).unwrap();
+            assert_active_group(&store);
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE type='table'
+                         AND name IN ('managed_brackets','protective_orders')",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0,
+                "no awaiting row remains, so the V24 drop retired the legacy tables"
+            );
+            if attempt == 0 {
+                let backups: Vec<_> = fs::read_dir(path.parent().unwrap().join("backups"))
+                    .unwrap()
+                    .map(|r| r.unwrap().path())
+                    .collect();
+                assert!(backups.iter().any(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("trading-v19-")
+                }));
+            }
+        }
+    }
     fn assert_active_group(store: &TradingStore) {
         let group: (String, String, String, i64, String) = store
             .connection

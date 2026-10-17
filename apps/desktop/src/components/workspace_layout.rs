@@ -841,7 +841,7 @@ fn apply_trading_snapshot(
     let accounts = snapshot.accounts;
     let account_pnl = snapshot.account_pnl;
     state.trading_pnl.orders = snapshot.orders;
-    state.trading_pnl.planned_bracket_legs = snapshot.planned_bracket_legs;
+    state.trading_pnl.planned_legs = snapshot.planned_legs;
     state.trading_pnl.positions = snapshot.position_pnl;
     state.trading_pnl.broker_positions = snapshot.broker_positions;
     state.trading_pnl.connected_broker_accounts = snapshot.connected_broker_accounts;

@@ -45,8 +45,8 @@ impl TradingStore {
     /// All the facts produced by one simulated order command are committed together.
     pub(crate) fn commit_order_step(&mut self, changes: &super::OrderStep) -> Result<(), String> {
         let tx = StepTx::begin(self).map_err(database_error)?;
-        for id in &changes.deleted_brackets {
-            tx.execute("DELETE FROM managed_brackets WHERE bracket_id = ?1", [id])
+        for group_id in &changes.deleted_groups {
+            tx.execute("DELETE FROM order_groups WHERE group_id = ?1", [group_id])
                 .map_err(database_error)?;
         }
         for (order, event) in &changes.inserted {
@@ -83,19 +83,6 @@ impl TradingStore {
         }
         for group in &changes.groups {
             super::groups::upsert_order_group(&tx, group)?;
-        }
-        for bracket in &changes.brackets {
-            super::groups::upsert_managed_bracket(&tx, bracket)?;
-        }
-        for protective in &changes.protective {
-            tx.execute(
-                "INSERT INTO protective_orders(client_order_id, role) VALUES (?1, ?2)",
-                params![
-                    protective.client_order_id.as_str(),
-                    protective.role.as_str()
-                ],
-            )
-            .map_err(database_error)?;
         }
         update_next_sequence(&tx, changes.next_sequence)?;
         // Preserve the existing revision sequence for bulk cancellations while

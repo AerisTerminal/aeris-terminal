@@ -1165,7 +1165,7 @@ fn a_broker_bracket_sends_server_protection_at_the_template_distances() {
             template,
         })
         .expect("bracket");
-    let crate::BracketPlacement::BrokerProtected(order) = placement else {
+    let crate::PlacementOutcome::BrokerProtected(order) = placement else {
         panic!("a broker bracket is held by the broker");
     };
     assert_eq!(order.status, OrderStatus::Pending);

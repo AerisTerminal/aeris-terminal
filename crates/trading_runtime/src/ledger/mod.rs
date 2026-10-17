@@ -3,11 +3,11 @@ pub(crate) use position::{FillAccounting, TradeCycle};
 
 use super::{
     AccountPnl, DisciplineState, Fill, FillMemoryUpdate, FillPolicyUpdate, FixedPoint,
-    MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order, OrderEvent, Position, PositionPnl,
-    ProtectiveOrderRole, RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS,
-    RiskLock, RiskMeter, SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore,
-    TradingSnapshot, consistency_projection, is_simulated, negative_loss, nonnegative_difference,
-    pnl_ticks, remaining_limit, round_trip, subtract_fixed, tick_value,
+    MAXIMUM_SNAPSHOT_ITEMS, Order, OrderEvent, Position, PositionPnl, ProtectionRole,
+    RAPID_LOSS_COOLDOWN_NANOS, RAPID_LOSS_THRESHOLD, RAPID_LOSS_WINDOW_NANOS, RiskLock, RiskMeter,
+    SessionAdherenceReview, TradeRoundTrip, TradingAccount, TradingCore, TradingSnapshot,
+    consistency_projection, is_simulated, negative_loss, nonnegative_difference, pnl_ticks,
+    remaining_limit, round_trip, subtract_fixed, tick_value,
 };
 
 impl TradingCore {
@@ -57,7 +57,7 @@ impl TradingCore {
 
     pub(super) fn is_stop_fill(&self, fill: &Fill) -> bool {
         self.state.orders.get(&fill.order_id).is_some_and(|order| {
-            self.protection_role(&order.client_order_id) == Some(ProtectiveOrderRole::StopLoss)
+            self.owned_leg_role(&order.client_order_id) == Some(ProtectionRole::StopLoss)
         })
     }
 
@@ -136,7 +136,6 @@ impl TradingCore {
             || self.state.orders.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.positions.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.broker_positions.len() > MAXIMUM_SNAPSHOT_ITEMS
-            || self.state.protective_orders.len() > MAXIMUM_SNAPSHOT_ITEMS
         {
             return Err("trading snapshot item limit exceeded".to_string());
         }
@@ -205,21 +204,17 @@ impl TradingCore {
             trade_copiers: self.state.trade_copiers.values().cloned().collect(),
             copy_dispatches: self.copy_dispatches.iter().cloned().collect(),
             strategy_templates: self.state.strategy_templates.values().cloned().collect(),
-            managed_brackets: {
-                // Group-owned brackets project into the legacy reader view until M6.11
-                // replaces it; pending groups carry no child state, activated ones carry
-                // their real child ids and entry price.
-                let mut brackets: Vec<ManagedBracket> =
-                    self.state.managed_brackets.values().cloned().collect();
-                for group in self.state.order_groups.values() {
-                    if group.kind == crate::core::GroupKind::Bracket && !group.legs.is_empty() {
-                        brackets.push(self.managed_bracket_view(group)?);
-                    }
-                }
-                brackets
-            },
-            planned_bracket_legs: self.planned_bracket_legs(),
-            protective_orders: self.state.protective_orders.values().cloned().collect(),
+            managed_brackets: self
+                .state
+                .order_groups
+                .values()
+                .filter(|group| {
+                    group.kind == crate::core::GroupKind::Bracket && !group.legs.is_empty()
+                })
+                .map(|group| self.managed_bracket_view(group))
+                .collect::<Result<Vec<_>, _>>()?,
+            planned_legs: self.owned_planned_legs(),
+            protective_orders: self.protection_order_views(),
             recovery_notices: self.recovery_notices.clone(),
         })
     }

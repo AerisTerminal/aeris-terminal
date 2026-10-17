@@ -914,7 +914,7 @@ struct TradingPnlState {
     current: Option<aeris_trading::AccountPnl>,
     accounts: Vec<aeris_trading::TradingAccount>,
     orders: Vec<aeris_trading::Order>,
-    planned_bracket_legs: Vec<aeris_trading_runtime::PlannedBracketLeg>,
+    planned_legs: Vec<aeris_trading_runtime::PlannedLeg>,
     positions: Vec<aeris_trading_runtime::PositionPnl>,
     /// Broker positions, per broker position id, with the broker's own unrealized P&L in
     /// the account's deposit currency.
@@ -1088,7 +1088,7 @@ impl Default for TradingPnlState {
             current: None,
             accounts: Vec::new(),
             orders: Vec::new(),
-            planned_bracket_legs: Vec::new(),
+            planned_legs: Vec::new(),
             positions: Vec::new(),
             broker_positions: Vec::new(),
             connected_broker_accounts: std::collections::BTreeSet::new(),
@@ -1904,7 +1904,7 @@ fn chart_working_orders(
         // role and entry; drawing the bare orders here as well would double every leg line.
         .filter(|order| {
             !snapshot
-                .planned_bracket_legs
+                .planned_legs
                 .iter()
                 .any(|leg| leg.client_order_id == order.client_order_id)
         })
@@ -1938,24 +1938,20 @@ fn chart_working_orders(
                 annotations: semantics.annotations,
             })
         })
-        .chain(chart_planned_bracket_legs(
-            snapshot,
-            account_id,
-            instrument_id,
-        ))
+        .chain(chart_planned_legs(snapshot, account_id, instrument_id))
         .collect()
 }
 
 /// A pending bracket's stop and targets, drawn as its entry's legs so the entry shows the
 /// protection it carries and each leg can be dragged before the entry fills. A leg keeps the
 /// identity of the order it becomes, so arming leaves the line in place.
-fn chart_planned_bracket_legs<'a>(
+fn chart_planned_legs<'a>(
     snapshot: &'a aeris_trading_runtime::TradingSnapshot,
     account_id: &'a aeris_trading::TradingAccountId,
     instrument_id: &'a str,
 ) -> impl Iterator<Item = ChartWorkingOrder> + 'a {
     snapshot
-        .planned_bracket_legs
+        .planned_legs
         .iter()
         .filter(move |leg| {
             &leg.account_id == account_id && leg.instrument_id.as_str() == instrument_id
@@ -1971,12 +1967,8 @@ fn chart_planned_bracket_legs<'a>(
                 side: chart_order_side(leg.side),
                 kind: chart_order_kind(leg.order_type),
                 role: match leg.role {
-                    aeris_trading_runtime::ProtectiveOrderRole::StopLoss => {
-                        ChartOrderRole::StopLoss
-                    }
-                    aeris_trading_runtime::ProtectiveOrderRole::TakeProfit => {
-                        ChartOrderRole::TakeProfit
-                    }
+                    aeris_trading_runtime::ProtectionRole::StopLoss => ChartOrderRole::StopLoss,
+                    aeris_trading_runtime::ProtectionRole::TakeProfit => ChartOrderRole::TakeProfit,
                 },
                 status: ChartOrderStatus::Working,
                 price,
@@ -2018,8 +2010,8 @@ fn chart_order_semantics(
     });
     let protective_role = snapshot.protective_role(&order.client_order_id);
     let role = match protective_role {
-        Some(aeris_trading_runtime::ProtectiveOrderRole::StopLoss) => ChartOrderRole::StopLoss,
-        Some(aeris_trading_runtime::ProtectiveOrderRole::TakeProfit) => ChartOrderRole::TakeProfit,
+        Some(aeris_trading_runtime::ProtectionRole::StopLoss) => ChartOrderRole::StopLoss,
+        Some(aeris_trading_runtime::ProtectionRole::TakeProfit) => ChartOrderRole::TakeProfit,
         None => ChartOrderRole::Working,
     };
     let bracket_id =
@@ -2066,7 +2058,7 @@ fn chart_order_semantics(
 
 fn managed_trigger_prices(
     snapshot: &aeris_trading_runtime::TradingSnapshot,
-    bracket: &aeris_trading_runtime::ManagedBracket,
+    bracket: &aeris_trading_runtime::BracketView,
     price_increment: Option<f64>,
 ) -> (Option<f64>, Option<f64>) {
     let entry_price = bracket
@@ -2631,16 +2623,17 @@ fn dispatch_chart_create_protection(
         }
     };
     let role = if intent.action == ChartTradingIntentAction::CreateStopLoss {
-        aeris_trading_runtime::ProtectiveOrderRole::StopLoss
+        aeris_trading_runtime::ProtectionRole::StopLoss
     } else {
-        aeris_trading_runtime::ProtectiveOrderRole::TakeProfit
+        aeris_trading_runtime::ProtectionRole::TakeProfit
     };
-    let task = cx.background_executor().spawn(async move {
-        let result = service.place_protective_order_from_market(
-            aeris_trading_runtime::PlaceProtectiveOrder { order, role },
-        );
-        aeris_desktop::trading::record_outcome(result, "Practice protective order placed")
-    });
+    let task =
+        cx.background_executor().spawn(async move {
+            let result = service.place_protective_order_from_market(
+                aeris_trading_runtime::PlaceProtection { order, role },
+            );
+            aeris_desktop::trading::record_outcome(result, "Practice protective order placed")
+        });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
         chart.update(cx, |chart, _| {
@@ -2890,11 +2883,11 @@ fn dispatch_chart_trading_intent(
 fn chart_intent_planned_leg<'a>(
     intent: &ChartTradingIntent,
     app: &'a WorkspaceSurface,
-) -> Option<&'a aeris_trading_runtime::PlannedBracketLeg> {
+) -> Option<&'a aeris_trading_runtime::PlannedLeg> {
     let order_id = intent.order_id.as_ref()?;
     let selected_account = app.trading_pnl.order_entry.selected_account_id.as_ref()?;
     let product = app.product.as_ref()?;
-    app.trading_pnl.planned_bracket_legs.iter().find(|leg| {
+    app.trading_pnl.planned_legs.iter().find(|leg| {
         leg.client_order_id.as_str() == order_id.as_str()
             && &leg.account_id == selected_account
             && leg.instrument_id.as_str() == product.instrument_id
@@ -2933,7 +2926,7 @@ fn dispatch_chart_move_planned_leg(
     };
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_outcome(
-            service.move_planned_bracket_leg(aeris_trading_runtime::MovePlannedBracketLeg {
+            service.move_planned_leg(aeris_trading_runtime::MovePlannedLeg {
                 client_order_id,
                 price,
             }),

@@ -1298,10 +1298,10 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
             template: bracket_template(),
         })
         .expect("bracket accepted");
-    let BracketPlacement::Managed(awaiting) = awaiting else {
+    let PlacementOutcome::Managed(awaiting) = awaiting else {
         panic!("a simulated bracket is managed locally");
     };
-    assert_eq!(awaiting.status, ManagedBracketStatus::AwaitingEntry);
+    assert_eq!(awaiting.status, BracketViewStatus::AwaitingEntry);
     assert!(awaiting.stop_client_order_id.is_none());
 
     service
@@ -1309,9 +1309,9 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
         .expect("entry fills");
     let active = service.snapshot().expect("active snapshot");
     let bracket = &active.managed_brackets[0];
-    assert_eq!(bracket.status, ManagedBracketStatus::Active);
+    assert_eq!(bracket.status, BracketViewStatus::Active);
     assert_eq!(bracket.target_client_order_ids.len(), 2);
-    assert_eq!(ManagedBracket::MANAGEMENT_LABEL, "LOCAL-MANAGED");
+    assert_eq!(BracketView::MANAGEMENT_LABEL, "LOCAL-MANAGED");
     let working = active
         .orders
         .iter()
@@ -1370,7 +1370,7 @@ fn managed_bracket_activates_after_entry_and_oco_survives_restart() {
     );
     assert_eq!(
         complete.managed_brackets[0].status,
-        ManagedBracketStatus::Completed
+        BracketViewStatus::Completed
     );
     assert!(complete.orders.iter().all(|order| !order.status.is_open()));
     assert_eq!(complete.positions[0].net_quantity.units(), 0);
@@ -1409,7 +1409,7 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
     let resting = service.snapshot().expect("resting snapshot");
     assert_eq!(
         resting.managed_brackets[0].status,
-        ManagedBracketStatus::AwaitingEntry
+        BracketViewStatus::AwaitingEntry
     );
     assert!(resting.fills.is_empty(), "the entry waits for its price");
 
@@ -1417,10 +1417,7 @@ fn stop_entry_bracket_rests_above_the_market_and_arms_at_its_entry() {
         .observe_market(observation(10_075, 10_100, 3, 3_000))
         .expect("market reaches the entry");
     let armed = service.snapshot().expect("armed snapshot");
-    assert_eq!(
-        armed.managed_brackets[0].status,
-        ManagedBracketStatus::Active
-    );
+    assert_eq!(armed.managed_brackets[0].status, BracketViewStatus::Active);
     assert_eq!(
         armed.fills[0].price,
         FixedPoint::try_new(10_100, 2).expect("fill")
@@ -1605,7 +1602,7 @@ fn point_value_scales_exact_marks_and_closed_trade_pnl() {
 }
 
 #[test]
-fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_moved() {
+fn a_pending_bracket_carries_its_held_legs_and_arms_them_where_they_were_moved() {
     let directory = TestDirectory::new("planned-bracket-legs");
     let service = start_service(&directory);
     service
@@ -1624,7 +1621,7 @@ fn a_pending_bracket_carries_its_planned_legs_and_arms_them_where_they_were_move
 
     let (stop_client, stop_order) = pending_held_stop(&service);
     let move_stop = |units| {
-        service.move_planned_bracket_leg(MovePlannedBracketLeg {
+        service.move_planned_leg(MovePlannedLeg {
             client_order_id: stop_client.clone(),
             price: price(units),
         })
@@ -1711,7 +1708,7 @@ fn pending_held_stop(service: &TradingService) -> (ClientOrderId, aeris_trading:
     let pending = service.snapshot().expect("pending snapshot");
     let pending_legs = held_bracket_legs(&pending);
     let mut planned_ids = pending
-        .planned_bracket_legs
+        .planned_legs
         .iter()
         .map(|leg| leg.client_order_id.as_str().to_string())
         .collect::<Vec<_>>();
@@ -1851,7 +1848,7 @@ fn bracket_children_wait_for_next_quote_and_stop_cancels_targets() {
     assert_eq!(settled.positions[0].net_quantity.units(), 0);
     assert_eq!(
         settled.managed_brackets[0].status,
-        ManagedBracketStatus::Completed
+        BracketViewStatus::Completed
     );
     assert!(settled.orders.iter().all(|order| !order.status.is_open()));
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
@@ -1901,7 +1898,7 @@ fn place_managed_bracket(service: &TradingService, entry: PlaceOrder) {
             template: fixed_stop_bracket_template(),
         })
         .expect("bracket accepted");
-    assert!(matches!(placement, BracketPlacement::Managed(_)));
+    assert!(matches!(placement, PlacementOutcome::Managed(_)));
 }
 
 fn quantity(units: i64) -> FixedPoint {
@@ -1934,10 +1931,7 @@ fn bracket_entry_that_reverses_a_position_protects_only_the_reversed_exposure() 
         armed.positions[0].net_quantity,
         FixedPoint::try_new(-2, 0).expect("short")
     );
-    assert_eq!(
-        armed.managed_brackets[0].status,
-        ManagedBracketStatus::Active
-    );
+    assert_eq!(armed.managed_brackets[0].status, BracketViewStatus::Active);
     let working = armed
         .orders
         .iter()
@@ -1975,7 +1969,7 @@ fn bracket_entry_that_reverses_a_position_protects_only_the_reversed_exposure() 
     assert_eq!(stopped.positions[0].net_quantity.units(), 0);
     assert_eq!(
         stopped.managed_brackets[0].status,
-        ManagedBracketStatus::Completed
+        BracketViewStatus::Completed
     );
     assert!(stopped.orders.iter().all(|order| !order.status.is_open()));
 }
@@ -2005,7 +1999,7 @@ fn bracket_entry_that_only_reduces_a_position_completes_without_children() {
     assert_eq!(reduced.market_observation_error, None);
     assert_eq!(reduced.positions[0].net_quantity, quantity(1));
     let bracket = &reduced.managed_brackets[0];
-    assert_eq!(bracket.status, ManagedBracketStatus::Completed);
+    assert_eq!(bracket.status, BracketViewStatus::Completed);
     assert_eq!(bracket.stop_client_order_id, None);
     assert_eq!(bracket.target_client_order_ids, []);
     assert!(reduced.orders.iter().all(|order| !order.status.is_open()));
@@ -2031,7 +2025,7 @@ fn bracket_that_cannot_be_armed_is_rejected_once_and_other_orders_still_fill() {
     assert_eq!(rejected.positions[0].net_quantity, quantity(1));
     assert_eq!(
         rejected.managed_brackets[0].status,
-        ManagedBracketStatus::Cancelled
+        BracketViewStatus::Cancelled
     );
     let entry = rejected
         .orders
@@ -2142,9 +2136,9 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
     protective.quantity = FixedPoint::try_new(2, 0).expect("quantity");
     protective.stop_price = Some(FixedPoint::try_new(9_800, 2).expect("stop"));
     service
-        .place_protective_order(PlaceProtectiveOrder {
+        .place_protective_order(PlaceProtection {
             order: protective,
-            role: ProtectiveOrderRole::StopLoss,
+            role: ProtectionRole::StopLoss,
         })
         .expect("reduce-only protection remains available");
     let locked = service
@@ -2158,18 +2152,18 @@ fn protective_orders_reduce_locked_positions_without_reopening_risk() {
     oversized.stop_price = Some(FixedPoint::try_new(9_700, 2).expect("stop"));
     assert!(
         service
-            .place_protective_order(PlaceProtectiveOrder {
+            .place_protective_order(PlaceProtection {
                 order: oversized,
-                role: ProtectiveOrderRole::StopLoss,
+                role: ProtectionRole::StopLoss,
             })
             .expect_err("oversized protection rejected")
             .contains("must reduce")
     );
     assert_eq!(
         service.snapshot().expect("snapshot").protective_orders,
-        vec![ProtectiveOrder {
+        vec![ProtectionView {
             client_order_id: ClientOrderId::try_new("protective-stop").expect("client id"),
-            role: ProtectiveOrderRole::StopLoss,
+            role: ProtectionRole::StopLoss,
         }]
     );
     service
@@ -2207,22 +2201,22 @@ fn position_protection_reports_the_stop_and_target_that_trigger_first() {
         order.quantity = FixedPoint::try_new(1, 0).expect("quantity");
         let price = Some(FixedPoint::try_new(price_units, 2).expect("price"));
         match role {
-            ProtectiveOrderRole::StopLoss => {
+            ProtectionRole::StopLoss => {
                 order.order_type = OrderType::Stop;
                 order.stop_price = price;
             }
-            ProtectiveOrderRole::TakeProfit => {
+            ProtectionRole::TakeProfit => {
                 order.order_type = OrderType::Limit;
                 order.limit_price = price;
             }
         }
         service
-            .place_protective_order(PlaceProtectiveOrder { order, role })
+            .place_protective_order(PlaceProtection { order, role })
             .expect("protection accepted");
     };
-    protect("stop", 3, ProtectiveOrderRole::StopLoss, 9_800);
-    protect("far-target", 4, ProtectiveOrderRole::TakeProfit, 10_300);
-    protect("near-target", 5, ProtectiveOrderRole::TakeProfit, 10_200);
+    protect("stop", 3, ProtectionRole::StopLoss, 9_800);
+    protect("far-target", 4, ProtectionRole::TakeProfit, 10_300);
+    protect("near-target", 5, ProtectionRole::TakeProfit, 10_200);
 
     let snapshot = service.snapshot().expect("snapshot");
     let account = TradingAccountId::try_new("aeris-sim-1").expect("account");
@@ -2256,13 +2250,13 @@ fn protected_long(service: &TradingService, quantity: i64) {
         .observe_market(observation(9_975, 10_000, 2, 2_000))
         .expect("entry fills");
     for (client_id, role, price) in [
-        ("stop", ProtectiveOrderRole::StopLoss, 9_800),
-        ("target", ProtectiveOrderRole::TakeProfit, 10_300),
+        ("stop", ProtectionRole::StopLoss, 9_800),
+        ("target", ProtectionRole::TakeProfit, 10_300),
     ] {
         let mut order = market_order(client_id, OrderSide::Sell, 3, 3_000);
         order.quantity = FixedPoint::try_new(quantity, 0).expect("quantity");
         let price = Some(FixedPoint::try_new(price, 2).expect("price"));
-        if role == ProtectiveOrderRole::StopLoss {
+        if role == ProtectionRole::StopLoss {
             order.order_type = OrderType::Stop;
             order.stop_price = price;
         } else {
@@ -2270,7 +2264,7 @@ fn protected_long(service: &TradingService, quantity: i64) {
             order.limit_price = price;
         }
         service
-            .place_protective_order(PlaceProtectiveOrder { order, role })
+            .place_protective_order(PlaceProtection { order, role })
             .expect("protection accepted");
     }
 }
@@ -4160,9 +4154,9 @@ fn cancelling_a_protective_stop_leaves_it_cancelled() {
     stop.order_type = OrderType::Stop;
     stop.stop_price = Some(FixedPoint::try_new(499_000, 2).expect("stop"));
     service
-        .place_protective_order(PlaceProtectiveOrder {
+        .place_protective_order(PlaceProtection {
             order: stop,
-            role: ProtectiveOrderRole::StopLoss,
+            role: ProtectionRole::StopLoss,
         })
         .expect("protective stop");
     service

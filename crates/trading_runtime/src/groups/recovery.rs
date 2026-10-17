@@ -9,7 +9,7 @@
 use super::model::{GroupKind, GroupLeg, GroupStatus, OrderGroup};
 use super::{Order, OrderStatus, OrderStep, TradingCore};
 use crate::book::lifecycle::CancellationCause;
-use crate::{ProtectiveOrderRole, RecoveryNotice, RecoveryNoticeKind};
+use crate::{ProtectionRole, RecoveryNotice, RecoveryNoticeKind, VenueRoute};
 use aeris_instruments::InstrumentId;
 use aeris_trading::TradingAccountId;
 
@@ -241,30 +241,38 @@ impl TradingCore {
         Ok(())
     }
 
-    /// Reports each position with active group protection whose per-role coverage no longer
-    /// equals the position size or zero. The loaded-state alignment that runs next repairs
-    /// the sizes; the notice names the first active group on the position.
+    /// Fits every practice position's protection back to it, finishing a resize a stop or a
+    /// shutdown interrupted. A realigned scope is reported once, naming its first active
+    /// group; a scope without a position keeps its historical orders untouched.
     fn verify_recovered_coverage(&mut self) -> Result<(), String> {
-        let mut positions: Vec<(TradingAccountId, InstrumentId, String)> = Vec::new();
-        for group in self.state.order_groups.values() {
-            if group.status != GroupStatus::Active
-                || matches!(group.kind, GroupKind::Oco)
-                || positions.iter().any(|(account, instrument, _)| {
-                    *account == group.account_id && *instrument == group.instrument_id
-                })
-            {
-                continue;
-            }
-            positions.push((
-                group.account_id.clone(),
-                group.instrument_id.clone(),
-                group.group_id.clone(),
-            ));
-        }
-        for (account_id, instrument_id, subject) in positions {
+        let scopes = self
+            .state
+            .positions
+            .keys()
+            .filter(|(account_id, _)| {
+                self.route(account_id)
+                    .is_ok_and(|route| route == VenueRoute::Simulated)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for (account_id, instrument_id) in scopes {
             if !self.coverage_mismatch(&account_id, &instrument_id)? {
                 continue;
             }
+            let subject = self
+                .state
+                .order_groups
+                .values()
+                .filter(|group| {
+                    group.status == GroupStatus::Active
+                        && !matches!(group.kind, GroupKind::Oco)
+                        && group.account_id == account_id
+                        && group.instrument_id == instrument_id
+                })
+                .map(|group| group.group_id.clone())
+                .min()
+                .unwrap_or_else(|| instrument_id.as_str().to_string());
+            self.align_protection(&account_id, &instrument_id, self.command_now)?;
             self.recovery_notices.push(RecoveryNotice {
                 kind: RecoveryNoticeKind::CoverageRepair,
                 subject,
@@ -277,10 +285,10 @@ impl TradingCore {
         Ok(())
     }
 
-    /// Whether the open protective orders of one position fail the coverage invariant the
-    /// loaded-state alignment enforces: for each role, the total quantity must equal the net
-    /// position or be zero, and no protective order may point the wrong way. A scope without
-    /// a position is outside the alignment's scope and is not reported.
+    /// Whether the open protective orders of one position fail the coverage invariant: for
+    /// each role, the total quantity must equal the net position or be zero, and no
+    /// protective order may point the wrong way. A scope without a position is not repaired
+    /// or reported.
     fn coverage_mismatch(
         &self,
         account_id: &TradingAccountId,
@@ -303,7 +311,7 @@ impl TradingCore {
             {
                 continue;
             }
-            let Some(role) = self.protection_role(&order.client_order_id) else {
+            let Some(role) = self.owned_leg_role(&order.client_order_id) else {
                 continue;
             };
             if order.side.sign() != -net.units().signum() {
@@ -316,8 +324,8 @@ impl TradingCore {
                 .units()
                 .unsigned_abs();
             let total = match role {
-                ProtectiveOrderRole::StopLoss => &mut totals[0],
-                ProtectiveOrderRole::TakeProfit => &mut totals[1],
+                ProtectionRole::StopLoss => &mut totals[0],
+                ProtectionRole::TakeProfit => &mut totals[1],
             };
             *total = total
                 .checked_add(units)

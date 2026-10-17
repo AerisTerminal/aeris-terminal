@@ -1549,7 +1549,7 @@ mod tests {
             copy_dispatches: Vec::new(),
             strategy_templates: Vec::new(),
             managed_brackets: Vec::new(),
-            planned_bracket_legs: Vec::new(),
+            planned_legs: Vec::new(),
             protective_orders: Vec::new(),
         }
     }

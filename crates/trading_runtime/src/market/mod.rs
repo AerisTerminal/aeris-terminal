@@ -3,7 +3,7 @@ pub(crate) mod gating;
 #[cfg(test)]
 mod placement_atomicity_tests;
 
-use super::{Command, ManagedBracketStatus, respond};
+use super::{Command, respond};
 use aeris_instruments::{ContractMetadata, InstrumentId, InstrumentMetadataProvenance, PriceGrid};
 use aeris_trading::AccountEnvironment;
 use aeris_trading::market::{
@@ -286,23 +286,22 @@ impl TradingCore {
                 ids.insert(position.instrument_id.clone());
             }
         }
-        for group in self.state.managed_brackets.values() {
-            if !matches!(
-                group.status,
-                ManagedBracketStatus::AwaitingEntry | ManagedBracketStatus::Active
-            ) {
+        for group in self.state.order_groups.values() {
+            if group.kind != crate::core::GroupKind::Bracket
+                || !matches!(
+                    group.status,
+                    crate::core::GroupStatus::Pending | crate::core::GroupStatus::Active
+                )
+            {
                 continue;
             }
-            let Some(entry) = self.state.orders.by_client(&group.entry_client_order_id) else {
-                continue;
-            };
             if self
                 .state
                 .accounts
-                .get(&entry.account_id)
+                .get(&group.account_id)
                 .is_some_and(|account| account.environment == AccountEnvironment::Simulated)
             {
-                ids.insert(entry.instrument_id.clone());
+                ids.insert(group.instrument_id.clone());
             }
         }
         ids
@@ -485,7 +484,6 @@ impl TradingCore {
             && planned.revision == self.state.revision
             && planned.orders.iter().eq(self.state.orders.iter())
             && planned.order_events == self.state.order_events
-            && planned.managed_brackets == self.state.managed_brackets
             && planned.order_groups == self.state.order_groups
             && planned.risk_rule_states == self.state.risk_rule_states
             && planned.discipline_states == self.state.discipline_states
@@ -525,17 +523,8 @@ impl TradingCore {
             return Err("market observation scale does not match the instrument".to_string());
         }
         self.validate_mark_to_market(observation, instrument)?;
-        Ok(!self.state.managed_brackets.values().any(|bracket| {
-            self.state
-                .orders
-                .by_client(&bracket.entry_client_order_id)
-                .is_some_and(|order| order.instrument_id == observation.instrument_id)
-                && matches!(
-                    bracket.status,
-                    super::ManagedBracketStatus::AwaitingEntry
-                        | super::ManagedBracketStatus::Active
-                )
-        }) && !self.state.order_groups.values().any(|group| {
+        // Group-owned brackets (pending or active) keep the full planner on this instrument.
+        Ok(!self.state.order_groups.values().any(|group| {
             group.instrument_id == observation.instrument_id
                 && matches!(
                     group.status,
@@ -600,8 +589,6 @@ impl TradingCore {
         // legacy/cache projection must never allow a durable fill to commit and only then turn the
         // command into an error; that produces invisible exposure and encourages repeated clicks.
         self.validate_mark_to_market(observation, &instrument)?;
-        self.recover_managed_brackets(observation, &instrument)?;
-        self.update_managed_stops(observation, &instrument)?;
         self.update_owned_stops(observation, &instrument)?;
         let mut candidates =
             market_fill_candidates(&self.state.orders, &self.state.accounts, observation);
@@ -672,7 +659,6 @@ impl TradingCore {
             };
             let executed =
                 self.execute_market_fills(vec![(order_id, price)], observation, &instrument)?;
-            self.reconcile_managed_brackets(&executed, observation, &instrument)?;
             self.reconcile_order_groups(&executed, observation, &instrument)?;
             self.align_position_protection(&executed, observation)?;
             fills.extend(executed);

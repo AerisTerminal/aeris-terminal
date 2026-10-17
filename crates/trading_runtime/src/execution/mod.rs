@@ -1,8 +1,8 @@
 use super::{
-    ClientOrderId, Fill, FillId, FillMemoryUpdate, FixedPoint, ManagedBracketStatus, ModifyOrder,
-    Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType,
+    ClientOrderId, Fill, FillId, FillMemoryUpdate, FixedPoint, ModifyOrder, Order, OrderEvent,
+    OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType,
     RevisionedCancelOrder, RevisionedModifyOrder, SimulatedMarketObservation, TimeInForce,
-    TradingAccountId, TradingCore, TradingInstrument, VenueRoute, is_simulated, planned_leg,
+    TradingAccountId, TradingCore, TradingInstrument, VenueRoute, is_simulated,
 };
 
 // The simulated venue's execution boundary has only one implementation of each policy:
@@ -181,11 +181,7 @@ impl TradingCore {
         .map_err(|error| error.to_string())?;
         step.updated.push((cancelled.clone(), event));
         if reconcile_bracket {
-            self.stage_bracket_termination(
-                step,
-                &cancelled,
-                crate::book::lifecycle::CancellationCause::User,
-            )?;
+            self.stage_bracket_termination(step, &cancelled)?;
         }
         Ok(cancelled)
     }
@@ -194,35 +190,7 @@ impl TradingCore {
         &self,
         step: &mut OrderStep,
         terminal: &Order,
-        child_cause: crate::book::lifecycle::CancellationCause,
     ) -> Result<(), String> {
-        let affected = self.state.managed_brackets.iter().find_map(|(_, bracket)| {
-            let entry = bracket.status == ManagedBracketStatus::AwaitingEntry
-                && bracket.entry_client_order_id == terminal.client_order_id;
-            let stop_terminated = bracket.status == ManagedBracketStatus::Active
-                && bracket.stop_client_order_id.as_ref() == Some(&terminal.client_order_id);
-            (entry || stop_terminated).then(|| {
-                (
-                    bracket.clone(),
-                    stop_terminated.then(|| bracket.target_client_order_ids.clone()),
-                )
-            })
-        });
-        if let Some((mut bracket, targets)) = affected {
-            bracket.status = ManagedBracketStatus::Cancelled;
-            step.brackets.push(bracket);
-            for target in targets.into_iter().flatten() {
-                let target_order = self
-                    .state
-                    .orders
-                    .by_client(&target)
-                    .cloned()
-                    .ok_or_else(|| "managed target disappeared".to_string())?;
-                if target_order.status.is_open() {
-                    self.stage_cancellation(step, target_order, false, child_cause)?;
-                }
-            }
-        }
         // Group-owned brackets: a terminal pending entry (or one of its held legs) cancels the
         // group and every other held leg; a terminal active stop cancels the open targets.
         // Cancelling one active target removes only that target.
@@ -453,11 +421,7 @@ impl TradingCore {
             event.validate().map_err(|error| error.to_string())?;
             step.next_sequence += 1;
             step.updated.push((expired.clone(), event));
-            self.stage_bracket_termination(
-                &mut step,
-                &expired,
-                crate::book::lifecycle::CancellationCause::Cascade,
-            )?;
+            self.stage_bracket_termination(&mut step, &expired)?;
         }
         self.commit_order_step(step, Vec::new())
     }
@@ -542,10 +506,6 @@ impl TradingCore {
         let modified = crate::book::lifecycle::modify(modified, self.command_now)
             .map_err(|error| error.to_string())?;
         modified.validate().map_err(|error| error.to_string())?;
-        // A pending bracket's legs keep their distances and follow the entry.
-        if let Some(bracket) = self.awaiting_bracket(&order.client_order_id) {
-            planned_leg::planned_legs(bracket, &modified, instrument)?;
-        }
         let sequence = self.state.next_sequence;
         let event = OrderEvent {
             id: OrderEventId::try_new(format!("sim-event-{sequence}"))

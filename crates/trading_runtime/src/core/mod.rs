@@ -23,7 +23,6 @@ pub(crate) mod market;
 mod risk_owner;
 #[cfg(test)]
 pub(crate) use groups::chart_bracket_template;
-use groups::{planned_leg, protection};
 #[path = "../venue/broker.rs"]
 mod broker;
 
@@ -52,9 +51,9 @@ use crate::service::Command;
 use crate::store::{FillPolicyPersistence, OrderStep, StoredState, TradingStore};
 pub use crate::store::{SCHEMA_VERSION, StoreError};
 pub use crate::strategy::{
-    BracketStrategyTemplate, BracketTarget, BreakEvenRule, MAXIMUM_BRACKET_TARGETS,
-    MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES, ManagedBracket, ManagedBracketStatus,
-    ProtectiveOrder, ProtectiveOrderRole, TrailingStopRule,
+    BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, BreakEvenRule,
+    MAXIMUM_BRACKET_TARGETS, MAXIMUM_MANAGED_BRACKETS, MAXIMUM_STRATEGY_TEMPLATES, ProtectionRole,
+    ProtectionView, TrailingStopRule,
 };
 use crate::venue::VenueInbox;
 use aeris_instruments::{ContractMetadata, InstrumentId};
@@ -66,7 +65,7 @@ use aeris_trading::{
     RiskWarning, TimeInForce, TradingAccount, TradingAccountId, TradingProvenance,
     project_unrealized_pnl,
 };
-pub use groups::planned_leg::{MovePlannedBracketLeg, PlannedBracketLeg};
+pub use groups::model::{MovePlannedLeg, PlannedLeg};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -121,15 +120,15 @@ impl VenueRoute {
 
 /// How a bracket was placed.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BracketPlacement {
+pub enum PlacementOutcome {
     /// Simulated accounts: the owner manages the stop and target child orders locally.
-    Managed(ManagedBracket),
+    Managed(BracketView),
     /// Broker accounts: the entry order carries server-side stop-loss and take-profit, which
     /// the broker holds and enforces.
     BrokerProtected(Order),
 }
 
-impl BracketPlacement {
+impl PlacementOutcome {
     #[must_use]
     pub const fn entry_client_order_id(&self) -> &ClientOrderId {
         match self {
@@ -256,9 +255,9 @@ pub struct PlaceOco {
 
 /// One standalone reduce-only protection command from a chart or order surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlaceProtectiveOrder {
+pub struct PlaceProtection {
     pub order: PlaceOrder,
-    pub role: ProtectiveOrderRole,
+    pub role: ProtectionRole,
 }
 
 /// Modification of one working order without changing its stable client identity.
@@ -435,10 +434,10 @@ pub struct TradingSnapshot {
     pub trade_copiers: Vec<TradeCopierConfig>,
     pub copy_dispatches: Vec<TradeCopyDispatch>,
     pub strategy_templates: Vec<BracketStrategyTemplate>,
-    pub managed_brackets: Vec<ManagedBracket>,
+    pub managed_brackets: Vec<BracketView>,
     /// The stop and targets each awaiting bracket places once its working entry fills.
-    pub planned_bracket_legs: Vec<PlannedBracketLeg>,
-    pub protective_orders: Vec<ProtectiveOrder>,
+    pub planned_legs: Vec<PlannedLeg>,
+    pub protective_orders: Vec<ProtectionView>,
     /// Startup repairs this process performed, raised once at the start that repaired them.
     pub recovery_notices: Vec<RecoveryNotice>,
 }
@@ -454,10 +453,10 @@ impl TradingSnapshot {
     /// The protective role of an order: a managed bracket's stop or target, or a standalone
     /// stop loss or take profit.
     #[must_use]
-    pub fn protective_role(&self, client_order_id: &ClientOrderId) -> Option<ProtectiveOrderRole> {
+    pub fn protective_role(&self, client_order_id: &ClientOrderId) -> Option<ProtectionRole> {
         self.managed_brackets
             .iter()
-            .find_map(|bracket| protection::managed_bracket_role(bracket, client_order_id))
+            .find_map(|bracket| groups::managed_bracket_role(bracket, client_order_id))
             .or_else(|| {
                 self.protective_orders
                     .iter()
@@ -484,12 +483,12 @@ impl TradingSnapshot {
             let Some(role) = self.protective_role(&order.client_order_id) else {
                 continue;
             };
-            let Some((key, price)) = protection::protection_trigger(order, role) else {
+            let Some((key, price)) = groups::protection_trigger(order, role) else {
                 continue;
             };
             let slot = match role {
-                ProtectiveOrderRole::StopLoss => &mut stop_loss,
-                ProtectiveOrderRole::TakeProfit => &mut take_profit,
+                ProtectionRole::StopLoss => &mut stop_loss,
+                ProtectionRole::TakeProfit => &mut take_profit,
             };
             if slot.is_none_or(|(first, _)| key < first) {
                 *slot = Some((key, price));
@@ -773,7 +772,7 @@ impl TradingService {
     pub fn place_bracket_from_market(
         &self,
         bracket: PlaceBracket,
-    ) -> Result<BracketPlacement, String> {
+    ) -> Result<PlacementOutcome, String> {
         self.request(|reply| Command::PlaceBracketFromMarket(bracket, reply))
     }
 
@@ -784,7 +783,7 @@ impl TradingService {
     pub fn place_inline_bracket_from_market(
         &self,
         bracket: PlaceInlineBracket,
-    ) -> Result<BracketPlacement, String> {
+    ) -> Result<PlacementOutcome, String> {
         self.request(|reply| Command::PlaceInlineBracketFromMarket(bracket, reply))
     }
     /// Places chart-authored bracket levels using verified instrument terms and the owner quote.
@@ -794,7 +793,7 @@ impl TradingService {
     pub fn place_chart_bracket_from_market(
         &self,
         bracket: PlaceChartBracket,
-    ) -> Result<BracketPlacement, String> {
+    ) -> Result<PlacementOutcome, String> {
         self.request(|reply| Command::PlaceChartBracketFromMarket(bracket, reply))
     }
 
@@ -804,7 +803,7 @@ impl TradingService {
     /// Returns an error for an unavailable quote or invalid protection.
     pub fn place_protective_order_from_market(
         &self,
-        order: PlaceProtectiveOrder,
+        order: PlaceProtection,
     ) -> Result<Order, String> {
         self.request(|reply| Command::PlaceProtectiveFromMarket(order, reply))
     }
@@ -837,7 +836,7 @@ impl TradingService {
     ///
     /// # Errors
     /// Returns an error when the template, entry, allocation, risk, or persistence is invalid.
-    pub fn place_bracket(&self, bracket: PlaceBracket) -> Result<BracketPlacement, String> {
+    pub fn place_bracket(&self, bracket: PlaceBracket) -> Result<PlacementOutcome, String> {
         self.request(|reply| Command::PlaceBracket(bracket, reply))
     }
 
@@ -858,7 +857,7 @@ impl TradingService {
     pub fn place_inline_bracket(
         &self,
         bracket: PlaceInlineBracket,
-    ) -> Result<BracketPlacement, String> {
+    ) -> Result<PlacementOutcome, String> {
         self.request(|reply| Command::PlaceInlineBracket(bracket, reply))
     }
 
@@ -866,7 +865,7 @@ impl TradingService {
     ///
     /// # Errors
     /// Returns an error unless the order strictly reduces a canonical open position.
-    pub fn place_protective_order(&self, order: PlaceProtectiveOrder) -> Result<Order, String> {
+    pub fn place_protective_order(&self, order: PlaceProtection) -> Result<Order, String> {
         self.request(|reply| Command::PlaceProtective(order, reply))
     }
 
@@ -919,10 +918,7 @@ impl TradingService {
     /// # Errors
     /// Returns an error when the order is not a planned leg, the price is on the wrong side of
     /// the entry or off the tick grid, the stop would breach a risk limit, or storage fails.
-    pub fn move_planned_bracket_leg(
-        &self,
-        command: MovePlannedBracketLeg,
-    ) -> Result<PlannedBracketLeg, String> {
+    pub fn move_planned_leg(&self, command: MovePlannedLeg) -> Result<PlannedLeg, String> {
         self.request(|reply| Command::MovePlannedLeg(command, reply))
     }
 
@@ -1298,6 +1294,11 @@ impl TradingCore {
         venue_inbox: Weak<VenueInbox>,
         market_feed: Arc<MarketFeedInbox>,
     ) -> Result<Self, StoreError> {
+        // Awaiting legacy brackets load before the state so their conversion can run at this
+        // start; the legacy tables drop once every row converted.
+        let legacy_awaiting = store
+            .load_legacy_awaiting_brackets()
+            .map_err(StoreError::Other)?;
         let state = store.load_state().map_err(StoreError::Other)?;
         let recovery_quote_floor = clock.wall_unix_nanos();
         let mut core = Self {
@@ -1331,13 +1332,24 @@ impl TradingCore {
         };
         core.repair_loaded_position_projections()
             .map_err(StoreError::Other)?;
-        // Recovered groups are verified before the loaded-state alignment so a coverage
-        // repair is reported instead of happening silently.
+        // Recovered groups are verified and their protection coverage repaired before any
+        // quote or command arrives.
         core.verify_recovered_groups().map_err(StoreError::Other)?;
-        core.align_loaded_protection().map_err(StoreError::Other)?;
-        // Awaiting brackets convert to group authority only after the legacy alignment saw
-        // the stored state exactly as the pre-switch runtime left it.
-        core.convert_awaiting_brackets()
+        let legacy_ids = legacy_awaiting
+            .iter()
+            .map(|bracket| bracket.bracket_id.clone())
+            .collect::<Vec<_>>();
+        core.convert_awaiting_brackets(legacy_awaiting)
+            .map_err(StoreError::Other)?;
+        let converted = legacy_ids
+            .into_iter()
+            .filter(|bracket_id| core.state.order_groups.contains_key(bracket_id))
+            .collect::<Vec<_>>();
+        core.store
+            .delete_legacy_brackets(&converted)
+            .map_err(StoreError::Other)?;
+        core.store
+            .finalize_group_migration()
             .map_err(StoreError::Other)?;
         core.recover_day_deadlines().map_err(StoreError::Other)?;
         // Expire durable DAY deadlines before the service acknowledges startup
@@ -1717,7 +1729,7 @@ impl TradingCore {
                     &reply,
                     self.market_order(order.order, false)
                         .and_then(|order_command| {
-                            self.place_protective_order(PlaceProtectiveOrder {
+                            self.place_protective_order(PlaceProtection {
                                 order: order_command,
                                 role: order.role,
                             })
@@ -1741,7 +1753,7 @@ impl TradingCore {
                 );
             }
             Command::MovePlannedLeg(command, reply) => {
-                respond(&reply, self.move_planned_bracket_leg(&command));
+                respond(&reply, self.move_planned_leg(&command));
             }
             Command::Cancel(client_order_id, reply) => {
                 respond(&reply, self.cancel_order(&client_order_id));
@@ -1892,8 +1904,7 @@ impl TradingCore {
         if step.inserted.is_empty()
             && step.updated.is_empty()
             && step.groups.is_empty()
-            && step.brackets.is_empty()
-            && step.deleted_brackets.is_empty()
+            && step.deleted_groups.is_empty()
         {
             return Ok(());
         }
@@ -1908,23 +1919,13 @@ impl TradingCore {
             self.store.commit_order_step(&step)?;
         }
         self.state.next_sequence = step.next_sequence;
-        for id in step.deleted_brackets {
-            self.state.managed_brackets.remove(&id);
-        }
-        for bracket in step.brackets {
-            self.state
-                .managed_brackets
-                .insert(bracket.bracket_id.clone(), bracket);
+        for group_id in step.deleted_groups {
+            self.state.order_groups.remove(&group_id);
         }
         for group in step.groups {
             self.state
                 .order_groups
                 .insert(group.group_id.clone(), group);
-        }
-        for protective in step.protective {
-            self.state
-                .protective_orders
-                .insert(protective.client_order_id.clone(), protective);
         }
         for (order, event) in step.inserted.into_iter().chain(step.updated) {
             self.state.orders.insert(order.id.clone(), order);
@@ -1961,9 +1962,7 @@ impl TradingCore {
             else {
                 break;
             };
-            if let Some(order) = self.state.orders.remove(&retired) {
-                self.state.protective_orders.remove(&order.client_order_id);
-            }
+            self.state.orders.remove(&retired);
         }
     }
 }
@@ -2503,13 +2502,6 @@ pub(crate) fn multiply_quantity(
     .map_err(|error| error.to_string())?
     .exact_rescale(quantity.scale())
     .map_err(|error| format!("trade copier multiplier is inexact: {error}"))
-}
-
-/// A bracket whose entry filled, with its child orders prepared but not yet stored.
-pub(crate) struct ArmedBracket {
-    bracket: ManagedBracket,
-    children: Vec<(Order, OrderEvent)>,
-    next_sequence: u64,
 }
 
 /// The smallest orderable quantity step of an instrument, in quantity-scale units.

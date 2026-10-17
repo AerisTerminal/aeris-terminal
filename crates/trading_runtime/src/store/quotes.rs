@@ -2,7 +2,7 @@
 //! The owner computes `after` on private speculative state before calling this function.
 
 use super::fills::{insert_fill_accounting, upsert_trade_cycle};
-use super::groups::{upsert_managed_bracket, upsert_order_group};
+use super::groups::upsert_order_group;
 use super::{
     FixedPoint, StepTx, StoredState, TradingStore, database_error, encode_provenance,
     insert_event_row, insert_order_row, params, update_next_sequence, upsert_discipline_state,
@@ -58,11 +58,6 @@ impl TradingStore {
                     ],
                 )
                 .map_err(database_error)?;
-            }
-        }
-        for (id, bracket) in &after.managed_brackets {
-            if before.managed_brackets.get(id) != Some(bracket) {
-                upsert_managed_bracket(&tx, bracket)?;
             }
         }
         // Groups transition inside the same transaction as the fills that caused them

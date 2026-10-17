@@ -1,6 +1,6 @@
-use crate::strategy::{BreakEvenRule, MAXIMUM_BRACKET_TARGETS, TrailingStopRule};
+use crate::strategy::{BreakEvenRule, MAXIMUM_BRACKET_TARGETS, ProtectionRole, TrailingStopRule};
 use aeris_instruments::InstrumentId;
-use aeris_trading::{FixedPoint, OrderId, TradingAccountId};
+use aeris_trading::{ClientOrderId, FixedPoint, OrderId, OrderSide, OrderType, TradingAccountId};
 use std::collections::BTreeSet;
 
 /// A group belongs to one account and instrument; its members remain real orders.
@@ -141,6 +141,32 @@ impl OrderGroup {
         }
         Ok(())
     }
+}
+
+/// One stop or target of a pending bracket, at the price it takes if the entry fills at its
+/// resting price. A chart shows and moves a pending entry's protection through this view; the
+/// group's held legs are the only stored form of that protection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedLeg {
+    pub bracket_id: String,
+    pub entry_client_order_id: ClientOrderId,
+    pub account_id: TradingAccountId,
+    pub instrument_id: InstrumentId,
+    /// The identity the leg's order takes once the entry fills.
+    pub client_order_id: ClientOrderId,
+    pub role: ProtectionRole,
+    pub side: OrderSide,
+    pub order_type: OrderType,
+    pub price: FixedPoint,
+    pub quantity: FixedPoint,
+}
+
+/// Moves one held leg of a pending bracket; its new price becomes the leg's tick distance
+/// from the entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MovePlannedLeg {
+    pub client_order_id: ClientOrderId,
+    pub price: FixedPoint,
 }
 
 #[cfg(test)]

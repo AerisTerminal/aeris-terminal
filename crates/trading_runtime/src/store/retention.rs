@@ -39,18 +39,10 @@ impl TradingStore {
     pub(crate) fn delete_practice_account(
         &mut self,
         account_id: &TradingAccountId,
-        managed_bracket_ids: &[String],
     ) -> Result<(), String> {
         let transaction = self.connection.transaction().map_err(database_error)?;
-        for bracket_id in managed_bracket_ids {
-            transaction
-                .execute(
-                    "DELETE FROM managed_brackets WHERE bracket_id = ?1",
-                    [bracket_id],
-                )
-                .map_err(database_error)?;
-        }
         for statement in [
+            "DELETE FROM order_groups WHERE account_id = ?1",
             "DELETE FROM trade_copier_targets WHERE source_account_id = ?1 OR target_account_id = ?1",
             "DELETE FROM economic_event_risk_actions WHERE account_id = ?1",
             "DELETE FROM discipline_states WHERE account_id = ?1",
@@ -61,9 +53,6 @@ impl TradingStore {
             "DELETE FROM risk_rule_states WHERE account_id = ?1",
             "DELETE FROM risk_locks WHERE account_id = ?1",
             "DELETE FROM risk_profiles WHERE account_id = ?1",
-            "DELETE FROM protective_orders WHERE client_order_id IN (
-                SELECT client_order_id FROM orders WHERE account_id = ?1
-             )",
             "DELETE FROM order_events WHERE order_id IN (
                 SELECT id FROM orders WHERE account_id = ?1
              )",

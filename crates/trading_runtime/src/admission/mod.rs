@@ -1,11 +1,11 @@
 use super::{
-    AccountEnvironment, BracketStrategyTemplate, CreatePracticeAccount, DEMO_VENUE_UNAVAILABLE,
-    FixedPoint, InstrumentId, MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS, ManagedBracket, Order,
-    OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType,
-    PlaceOrder, PlaceProtectiveOrder, ProtectiveOrder, ProtectiveOrderRole, TradeCopyDispatch,
-    TradingAccount, TradingAccountId, TradingCore, TradingInstrument, VenueRequestReceiver,
-    VenueRoute, instrument_tick_units, mirrored_client_order_id, multiply_quantity,
-    order_acceptance_detail, shifted_price, venue,
+    AccountEnvironment, BracketStrategyTemplate, BracketView, CreatePracticeAccount,
+    DEMO_VENUE_UNAVAILABLE, FixedPoint, InstrumentId, MAXIMUM_OPEN_ORDERS, MAXIMUM_SNAPSHOT_ITEMS,
+    Order, OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderStatus, OrderStep, OrderType,
+    PlaceOrder, PlaceProtection, ProtectionRole, TradeCopyDispatch, TradingAccount,
+    TradingAccountId, TradingCore, TradingInstrument, VenueRequestReceiver, VenueRoute,
+    instrument_tick_units, mirrored_client_order_id, multiply_quantity, order_acceptance_detail,
+    shifted_price, venue,
 };
 use aeris_instruments::PriceGrid;
 use aeris_trading::{OrderSide, RejectReason, RiskWarning, TimeInForce};
@@ -479,15 +479,13 @@ impl TradingCore {
         account_id: &TradingAccountId,
     ) -> Result<TradingAccount, String> {
         let account = self.deletable_practice_account(account_id)?;
-        let (account_order_ids, account_client_order_ids, managed_bracket_ids) =
+        let (account_order_ids, account_client_order_ids) =
             self.practice_account_order_identity(account_id);
-        self.store
-            .delete_practice_account(account_id, &managed_bracket_ids)?;
+        self.store.delete_practice_account(account_id)?;
         self.purge_practice_account_state(
             account_id,
             &account_order_ids,
             &account_client_order_ids,
-            &managed_bracket_ids,
         );
         self.bump_revision()?;
         Ok(account)
@@ -515,7 +513,6 @@ impl TradingCore {
     ) -> (
         std::collections::BTreeSet<String>,
         std::collections::BTreeSet<String>,
-        Vec<String>,
     ) {
         let account_order_ids = self
             .state
@@ -531,28 +528,7 @@ impl TradingCore {
             .filter(|order| &order.account_id == account_id)
             .map(|order| order.client_order_id.as_str().to_string())
             .collect::<std::collections::BTreeSet<_>>();
-        let managed_bracket_ids = self
-            .state
-            .managed_brackets
-            .values()
-            .filter(|bracket| {
-                account_client_order_ids.contains(bracket.entry_client_order_id.as_str())
-                    || bracket
-                        .stop_client_order_id
-                        .as_ref()
-                        .is_some_and(|id| account_client_order_ids.contains(id.as_str()))
-                    || bracket
-                        .target_client_order_ids
-                        .iter()
-                        .any(|id| account_client_order_ids.contains(id.as_str()))
-            })
-            .map(|bracket| bracket.bracket_id.clone())
-            .collect::<Vec<_>>();
-        (
-            account_order_ids,
-            account_client_order_ids,
-            managed_bracket_ids,
-        )
+        (account_order_ids, account_client_order_ids)
     }
 
     pub(super) fn purge_practice_account_state(
@@ -560,7 +536,6 @@ impl TradingCore {
         account_id: &TradingAccountId,
         account_order_ids: &std::collections::BTreeSet<String>,
         account_client_order_ids: &std::collections::BTreeSet<String>,
-        managed_bracket_ids: &[String],
     ) {
         self.state.accounts.remove(account_id);
         self.state.orders.remove_account(account_id);
@@ -590,14 +565,9 @@ impl TradingCore {
             .retain(|(stored_account, _), _| stored_account != account_id);
         self.state.session_plans.remove(account_id);
         self.state.discipline_states.remove(account_id);
-        self.state.managed_brackets.retain(|bracket_id, _| {
-            !managed_bracket_ids
-                .iter()
-                .any(|deleted| deleted == bracket_id)
-        });
-        self.state.protective_orders.retain(|client_order_id, _| {
-            !account_client_order_ids.contains(client_order_id.as_str())
-        });
+        self.state
+            .order_groups
+            .retain(|_, group| &group.account_id != account_id);
         self.state.trade_copiers.remove(account_id);
         for config in self.state.trade_copiers.values_mut() {
             config
@@ -747,7 +717,7 @@ impl TradingCore {
                 let fills =
                     self.execute_market_fills(vec![(id, price)], &observation, &instrument)?;
                 self.bump_revision()?;
-                self.reconcile_managed_brackets(&fills, &observation, &instrument)?;
+                self.reconcile_order_groups(&fills, &observation, &instrument)?;
                 self.align_position_protection(&fills, &observation)?;
                 self.update_mark_to_market(&observation, &instrument)?;
                 self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
@@ -826,7 +796,7 @@ impl TradingCore {
 
     pub(super) fn place_protective_order(
         &mut self,
-        command: PlaceProtectiveOrder,
+        command: PlaceProtection,
     ) -> Result<Order, String> {
         if self.route(&command.order.account_id)? != VenueRoute::Simulated {
             return Err("managed protective orders are unavailable for broker accounts".into());
@@ -835,18 +805,16 @@ impl TradingCore {
             let existing = existing_client_order(existing, &command.order)
                 .map_err(|error| error.to_string())?;
             let role_matches = self
-                .state
-                .protective_orders
-                .get(&command.order.client_order_id)
-                .is_some_and(|protective| protective.role == command.role);
+                .protection_leg_role(&command.order.client_order_id)
+                .is_some_and(|role| role == command.role);
             return role_matches.then_some(existing).ok_or_else(|| {
                 "protective client identifier has conflicting semantics".to_string()
             });
         }
         let shape_matches = matches!(
             (command.role, command.order.order_type),
-            (ProtectiveOrderRole::StopLoss, OrderType::Stop)
-                | (ProtectiveOrderRole::TakeProfit, OrderType::Limit)
+            (ProtectionRole::StopLoss, OrderType::Stop)
+                | (ProtectionRole::TakeProfit, OrderType::Limit)
         );
         if !shape_matches {
             return Err("protective order role does not match its order type".to_string());
@@ -855,18 +823,39 @@ impl TradingCore {
         let (order, mut event) = self.prepare_single_order(command.order, false, sequence, &[])?;
         event.detail = Some(format!(
             "{} standalone {}",
-            ManagedBracket::MANAGEMENT_LABEL,
+            BracketView::MANAGEMENT_LABEL,
             command.role.as_str()
         ));
         event.reason = Some(aeris_trading::OrderEventReason::LocalManaged);
         event.validate().map_err(|error| error.to_string())?;
-        let protective = ProtectiveOrder {
-            client_order_id: order.client_order_id.clone(),
-            role: command.role,
+        // Standalone protection is a one-leg group, the same shape the V23 migration gave
+        // historical protective orders.
+        let group = crate::core::OrderGroup {
+            group_id: format!("protection/{}", order.id.as_str()),
+            account_id: order.account_id.clone(),
+            instrument_id: order.instrument_id.clone(),
+            kind: crate::core::GroupKind::Protection,
+            status: crate::core::GroupStatus::Active,
+            entry: None,
+            legs: vec![crate::core::GroupLeg {
+                order_id: order.id.clone(),
+                role: match command.role {
+                    ProtectionRole::StopLoss => crate::core::LegRole::StopLoss,
+                    ProtectionRole::TakeProfit => crate::core::LegRole::TakeProfit { index: 0 },
+                },
+                offset_ticks: None,
+                allocation_percent: None,
+            }],
+            management: crate::core::StopManagement::default(),
+            template: None,
+            revision: 1,
         };
+        group
+            .validate()
+            .map_err(|error| format!("invalid order group: {error:?}"))?;
         let mut step = OrderStep::new(sequence + 1);
         step.inserted.push((order.clone(), event));
-        step.protective.push(protective);
+        step.groups.push(group);
         self.commit_order_step(step, Vec::new())?;
         Ok(order)
     }

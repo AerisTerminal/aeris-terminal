@@ -21,5 +21,5 @@ position aeris-sim-1 instrument:fixture:CME:ESZ6 0@0 - -12500@2 0@2 3000
 pnl aeris-sim-1 USD -12500@2 0@2 4987500@2
 fill_pnl sim-fill-8 -12500@2
 trade_pnl sim-fill-8 -12500@2
-managed_brackets=[ManagedBracket { bracket_id: "stop-entry", template: BracketStrategyTemplate { template_id: "stop-golden", revision: 1, name: "Managed bracket", stop_offset_ticks: 8, targets: [BracketTarget { offset_ticks: 8, quantity_percent: 100 }], trailing_stop: None, break_even: None, enabled: true }, entry_client_order_id: ClientOrderId("stop-entry"), stop_client_order_id: Some(ClientOrderId("bracket-stop-7b4343c53b7101fc")), target_client_order_ids: [ClientOrderId("bracket-target-59a79a05dfc0002d")], status: Completed, entry_price: Some(FixedPoint { units: 10000, scale: 2 }) }]
+managed_brackets=[BracketView { bracket_id: "stop-entry", template: BracketStrategyTemplate { template_id: "stop-golden", revision: 1, name: "Managed bracket", stop_offset_ticks: 8, targets: [BracketTarget { offset_ticks: 8, quantity_percent: 100 }], trailing_stop: None, break_even: None, enabled: true }, entry_client_order_id: ClientOrderId("stop-entry"), stop_client_order_id: Some(ClientOrderId("bracket-stop-7b4343c53b7101fc")), target_client_order_ids: [ClientOrderId("bracket-target-59a79a05dfc0002d")], status: Completed, entry_price: Some(FixedPoint { units: 10000, scale: 2 }) }]
 risk_locks=[]

@@ -26,11 +26,7 @@ pub(crate) use core::REPLY_CAPACITY;
 pub(crate) use core::chart_bracket_template;
 pub use core::market::feed::MarketFeedInbox;
 pub use core::*;
-pub(crate) use core::{
-    DEMO_VENUE_UNAVAILABLE, Reply, TradingCore, UNREALIZED_PNL_INTERVAL,
-    allocated_target_quantities, instrument_tick_units, managed_child_client_order_id,
-    opposite_side, order_increment_units, shifted_price,
-};
+pub(crate) use core::{DEMO_VENUE_UNAVAILABLE, Reply, TradingCore, UNREALIZED_PNL_INTERVAL};
 pub(crate) use service::Command;
 pub(crate) use std::path::PathBuf;
 #[cfg(test)]

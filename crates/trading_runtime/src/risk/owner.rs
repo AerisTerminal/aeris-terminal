@@ -405,7 +405,7 @@ impl TradingCore {
         for order in self.state.orders.open_orders().filter(|order| {
             &order.account_id == account_id
                 && order.status.is_open()
-                && self.protection_role(&order.client_order_id).is_none()
+                && self.owned_leg_role(&order.client_order_id).is_none()
         }) {
             let quantity = order
                 .quantity

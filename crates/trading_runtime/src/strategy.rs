@@ -41,7 +41,7 @@ pub struct BracketStrategyTemplate {
 
 /// Lifecycle of one locally managed bracket instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManagedBracketStatus {
+pub enum BracketViewStatus {
     AwaitingEntry,
     Active,
     Completed,
@@ -50,45 +50,28 @@ pub enum ManagedBracketStatus {
 
 /// Semantic role of a standalone reduce-only protection order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProtectiveOrderRole {
+pub enum ProtectionRole {
     StopLoss,
     TakeProfit,
 }
 
-impl ProtectiveOrderRole {
+impl ProtectionRole {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::StopLoss => "stop_loss",
             Self::TakeProfit => "take_profit",
         }
     }
-
-    pub(super) fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "stop_loss" => Ok(Self::StopLoss),
-            "take_profit" => Ok(Self::TakeProfit),
-            _ => Err("protective order role is invalid".to_string()),
-        }
-    }
 }
 
 /// Durable semantic metadata for one standalone protective order.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProtectiveOrder {
+pub struct ProtectionView {
     pub client_order_id: ClientOrderId,
-    pub role: ProtectiveOrderRole,
+    pub role: ProtectionRole,
 }
 
-impl ManagedBracketStatus {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::AwaitingEntry => "awaiting_entry",
-            Self::Active => "active",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
+impl BracketViewStatus {
     pub(super) fn parse(value: &str) -> Result<Self, String> {
         match value {
             "awaiting_entry" => Ok(Self::AwaitingEntry),
@@ -102,17 +85,17 @@ impl ManagedBracketStatus {
 
 /// Durable state for one bracket whose child orders are owned by the trading runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedBracket {
+pub struct BracketView {
     pub bracket_id: String,
     pub template: BracketStrategyTemplate,
     pub entry_client_order_id: ClientOrderId,
     pub stop_client_order_id: Option<ClientOrderId>,
     pub target_client_order_ids: Vec<ClientOrderId>,
-    pub status: ManagedBracketStatus,
+    pub status: BracketViewStatus,
     pub entry_price: Option<FixedPoint>,
 }
 
-impl ManagedBracket {
+impl BracketView {
     /// Makes locally managed behavior explicit to presentation and audit surfaces.
     pub const MANAGEMENT_LABEL: &'static str = BracketStrategyTemplate::MANAGEMENT_LABEL;
 
@@ -125,14 +108,14 @@ impl ManagedBracket {
             return Err("managed bracket target count exceeds the limit".to_string());
         }
         match self.status {
-            ManagedBracketStatus::AwaitingEntry
+            BracketViewStatus::AwaitingEntry
                 if self.stop_client_order_id.is_some()
                     || !self.target_client_order_ids.is_empty()
                     || self.entry_price.is_some() =>
             {
                 Err("awaiting bracket cannot contain active child state".to_string())
             }
-            ManagedBracketStatus::Active
+            BracketViewStatus::Active
                 if self.stop_client_order_id.is_none()
                     || self.target_client_order_ids.is_empty()
                     || self.entry_price.is_none() =>

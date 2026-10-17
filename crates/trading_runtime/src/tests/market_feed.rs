@@ -1463,7 +1463,7 @@ fn chart_bracket_uses_verified_grid_without_fixed_tick_and_rests() {
             target_price: FixedPoint::try_new(10_003, 2).unwrap(),
         })
         .expect("chart bracket accepts significant-figure grid");
-    let BracketPlacement::Managed(bracket) = placed else {
+    let PlacementOutcome::Managed(bracket) = placed else {
         panic!("expected managed bracket");
     };
     assert_eq!(bracket.template.stop_offset_ticks, 3);
@@ -2308,7 +2308,7 @@ fn ticket_interest_is_bounded_and_unchanged_sets_are_not_republished() {
 }
 
 #[test]
-fn quote_interest_tracks_orders_planned_legs_positions_tickets_and_capacity() {
+fn quote_interest_tracks_orders_held_legs_positions_tickets_and_capacity() {
     let directory = TestDirectory::new("complete-interest-lifecycle");
     let (service, _clock) = feed_service(&directory);
     let sink = Arc::new(RecordedInterest::default());
@@ -2370,7 +2370,7 @@ fn quote_interest_tracks_orders_planned_legs_positions_tickets_and_capacity() {
             target_price: FixedPoint::try_new(10_000, 2).unwrap(),
         })
         .unwrap();
-    assert!(matches!(bracket, BracketPlacement::Managed(_)));
+    assert!(matches!(bracket, PlacementOutcome::Managed(_)));
     let snapshot = service.snapshot().unwrap();
     assert_eq!(
         snapshot
@@ -2392,7 +2392,7 @@ fn quote_interest_tracks_orders_planned_legs_positions_tickets_and_capacity() {
     );
     assert_eq!(
         snapshot.managed_brackets[0].status,
-        ManagedBracketStatus::AwaitingEntry
+        BracketViewStatus::AwaitingEntry
     );
     service.set_ticket_interest(Vec::new()).unwrap();
     // The resting entry and its inactive legs keep the instrument's quote lease.
@@ -2402,7 +2402,7 @@ fn quote_interest_tracks_orders_planned_legs_positions_tickets_and_capacity() {
         .unwrap();
     assert_eq!(
         service.snapshot().unwrap().managed_brackets[0].status,
-        ManagedBracketStatus::Cancelled
+        BracketViewStatus::Cancelled
     );
     published(vec![]);
 

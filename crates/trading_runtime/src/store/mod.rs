@@ -28,11 +28,10 @@ use {
 };
 
 use super::{
-    BracketStrategyTemplate, BracketTarget, BreakEvenRule, DisciplineState,
-    EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskRule, ManagedBracket,
-    ManagedBracketStatus, ProtectiveOrder, ProtectiveOrderRole, RiskLock, RiskProfile,
-    RiskRuleState, SessionBias, SessionChecklistItem, SessionPlan, SessionPlanLevel,
-    TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
+    BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, BreakEvenRule,
+    DisciplineState, EconomicEventRiskAction, EconomicEventRiskImportance, EconomicEventRiskRule,
+    RiskLock, RiskProfile, RiskRuleState, SessionBias, SessionChecklistItem, SessionPlan,
+    SessionPlanLevel, TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
     TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
 use crate::core::OrderGroup;
@@ -211,10 +210,7 @@ pub(super) struct StoredState {
     pub discipline_states: BTreeMap<TradingAccountId, DisciplineState>,
     pub trade_copiers: BTreeMap<TradingAccountId, TradeCopierConfig>,
     pub strategy_templates: BTreeMap<String, BracketStrategyTemplate>,
-    pub managed_brackets: BTreeMap<String, ManagedBracket>,
-    pub protective_orders: BTreeMap<ClientOrderId, ProtectiveOrder>,
-    /// Owned order groups. Newly placed brackets live here only; legacy managed rows
-    /// keep their legacy authority until their V19 conversion part.
+    /// Owned order groups: brackets, OCO pairs and standalone protections.
     pub order_groups: BTreeMap<String, OrderGroup>,
 }
 
@@ -228,9 +224,7 @@ pub(crate) struct OrderStep {
     pub inserted: Vec<(Order, OrderEvent)>,
     pub updated: Vec<(Order, OrderEvent)>,
     pub groups: Vec<OrderGroup>,
-    pub brackets: Vec<ManagedBracket>,
-    pub deleted_brackets: Vec<String>,
-    pub protective: Vec<ProtectiveOrder>,
+    pub deleted_groups: Vec<String>,
     pub next_sequence: u64,
 }
 
@@ -240,9 +234,7 @@ impl OrderStep {
             inserted: Vec::new(),
             updated: Vec::new(),
             groups: Vec::new(),
-            brackets: Vec::new(),
-            deleted_brackets: Vec::new(),
-            protective: Vec::new(),
+            deleted_groups: Vec::new(),
             next_sequence,
         }
     }
@@ -364,6 +356,11 @@ impl TradingStore {
         };
         store.migrate(existed)?;
         store.backfill_groups().map_err(StoreError::Other)?;
+        // A store without unconverted awaiting brackets drops the pre-group tables at once;
+        // otherwise the runtime conversion in core open finalizes the drop.
+        store
+            .finalize_group_migration()
+            .map_err(StoreError::Other)?;
         store
             .ensure_default_strategy_templates()
             .map_err(StoreError::Other)?;
@@ -416,8 +413,6 @@ impl TradingStore {
         let discipline_states = self.load_discipline_states()?;
         let trade_copiers = self.load_trade_copiers()?;
         let strategy_templates = self.load_strategy_templates()?;
-        let managed_brackets = self.load_managed_brackets()?;
-        let protective_orders = self.load_protective_orders()?;
         Ok(StoredState {
             revision,
             next_sequence,
@@ -441,8 +436,6 @@ impl TradingStore {
             discipline_states,
             trade_copiers,
             strategy_templates,
-            managed_brackets,
-            protective_orders,
             order_groups: self.load_order_groups()?,
         })
     }
@@ -610,8 +603,9 @@ mod tests {
 
     #[test]
     fn migrations_are_contiguous_and_every_historical_version_reaches_head() {
-        assert_eq!(MIGRATIONS.len(), SCHEMA_VERSION as usize);
-        for (expected, migration) in (0..SCHEMA_VERSION).zip(MIGRATIONS) {
+        // The V24 table drop is not a chain entry: it lands through the gated finalize.
+        assert_eq!(MIGRATIONS.len() + 1, SCHEMA_VERSION as usize);
+        for (expected, migration) in (0..SCHEMA_VERSION - 1).zip(MIGRATIONS) {
             assert_eq!(migration.from, expected);
             assert_eq!(migration.to, expected + 1);
         }
@@ -623,6 +617,9 @@ mod tests {
                 retention: TradingRetention::default(),
             };
             store.migrate(false).expect("historical schema migrates");
+            store
+                .finalize_group_migration()
+                .expect("group migration finalizes");
             let actual: u32 = store
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -658,7 +655,12 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("group schema");
-        assert_eq!(SCHEMA_VERSION, 23);
+        assert_eq!(SCHEMA_VERSION, 24);
+        let version: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("chain version");
+        assert_eq!(version, 23, "the chain stops before the gated V24 drop");
         for table in [
             "orders",
             "managed_brackets",
@@ -695,6 +697,37 @@ mod tests {
                 )
                 .is_err(),
             "a leg must reference a real order"
+        );
+        // The unconverted awaiting row gates the V24 drop; once it is gone the legacy
+        // tables retire and the schema reaches head.
+        store.finalize_group_migration().expect("gated finalize");
+        let gated: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("gated version");
+        assert_eq!(gated, 23, "an awaiting legacy row blocks the drop");
+        store
+            .connection
+            .execute(
+                "DELETE FROM managed_brackets WHERE bracket_id = 'client'",
+                [],
+            )
+            .expect("converted row leaves");
+        store
+            .finalize_group_migration()
+            .expect("finalize drops the legacy tables");
+        let head: u32 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("head version");
+        assert_eq!(head, SCHEMA_VERSION);
+        assert!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM managed_brackets", [], |row| row
+                    .get::<_, i64>(0))
+                .is_err(),
+            "the legacy table is dropped"
         );
     }
     #[test]
@@ -1478,6 +1511,9 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("schema five migration");
+        store
+            .finalize_group_migration()
+            .expect("group migration finalizes");
 
         let version = store
             .connection
@@ -1569,6 +1605,9 @@ mod tests {
             retention: TradingRetention::default(),
         };
         store.migrate(false).expect("v18 and v19 migrations");
+        store
+            .finalize_group_migration()
+            .expect("group migration finalizes");
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))

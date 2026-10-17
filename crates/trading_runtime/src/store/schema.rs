@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 23;
+pub const SCHEMA_VERSION: u32 = 24;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -302,6 +302,12 @@ pub(super) const MIGRATION_V23: &str = "
      CHECK ((role = 'stop_loss' AND target_index IS NULL)
          OR (role = 'take_profit' AND target_index IS NOT NULL))
  ) STRICT;";
+
+/// The group owner replaced the legacy protection tables; they drop once the group backfill
+/// ran and no awaiting legacy bracket still waits for the runtime conversion.
+pub(super) const MIGRATION_V24: &str = "
+ DROP TABLE managed_brackets;
+ DROP TABLE protective_orders;";
 
 pub(super) struct Migration {
     pub(super) from: u32,
@@ -677,7 +683,10 @@ impl TradingStore {
         if back_up_existing_database && version < SCHEMA_VERSION {
             self.back_up_before_migration(version)?;
         }
-        while version < SCHEMA_VERSION {
+        // The V24 drop is not in this chain: it lands only after the group backfill and the
+        // runtime conversion of awaiting brackets, via the finalize step below.
+        let chain_target = MIGRATIONS.last().map_or(0, |migration| migration.to);
+        while version < chain_target {
             let migration = MIGRATIONS
                 .iter()
                 .find(|migration| migration.from == version)
@@ -691,6 +700,27 @@ impl TradingStore {
             version = migration.to;
         }
         Ok(())
+    }
+
+    /// Drops the pre-group protection tables once no awaiting legacy bracket still waits for
+    /// the runtime conversion, committing schema version 24. Idempotent: a store whose
+    /// tables already dropped returns without writing.
+    pub(crate) fn finalize_group_migration(&mut self) -> Result<(), String> {
+        if !self.legacy_protection_tables_present()? {
+            return Ok(());
+        }
+        let awaiting = self
+            .connection
+            .query_row(
+                "SELECT count(*) FROM managed_brackets WHERE status = 'awaiting_entry'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(super::database_error)?;
+        if awaiting != 0 {
+            return Ok(());
+        }
+        self.apply_migration(SCHEMA_VERSION, MIGRATION_V24)
     }
 
     pub(super) fn back_up_before_migration(&self, old_version: u32) -> Result<(), StoreError> {

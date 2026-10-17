@@ -1,8 +1,7 @@
 use super::{
-    BTreeMap, BracketStrategyTemplate, BracketTarget, BreakEvenRule, ClientOrderId, Connection,
-    FixedPoint, InstrumentId, ManagedBracket, ManagedBracketStatus, ProtectiveOrder,
-    ProtectiveOrderRole, StepTx, TradingAccountId, TradingStore, TrailingStopRule, database_error,
-    fixed, params,
+    BTreeMap, BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus,
+    BreakEvenRule, ClientOrderId, Connection, InstrumentId, StepTx, TradingAccountId, TradingStore,
+    TrailingStopRule, database_error, fixed, params,
 };
 use crate::core::{GroupKind, GroupLeg, GroupStatus, LegRole, OrderGroup, StopManagement};
 
@@ -219,19 +218,6 @@ impl TradingStore {
             )
             .map_err(database_error)?;
         Ok(())
-    }
-
-    pub(crate) fn put_managed_bracket(&self, bracket: &ManagedBracket) -> Result<(), String> {
-        let transaction = StepTx::begin_shared(&self.connection).map_err(database_error)?;
-        upsert_managed_bracket(&transaction, bracket)?;
-        transaction.commit().map_err(database_error)
-    }
-
-    pub(crate) fn put_managed_bracket_projection(
-        &self,
-        bracket: &ManagedBracket,
-    ) -> Result<(), String> {
-        upsert_managed_bracket(&self.connection, bracket)
     }
 
     /// Persist a group transition outside an order step (startup alignment). Group-owned
@@ -507,15 +493,49 @@ impl TradingStore {
         Ok(result)
     }
 
-    pub(super) fn load_managed_brackets(&self) -> Result<BTreeMap<String, ManagedBracket>, String> {
-        let mut result = BTreeMap::new();
+    /// Both pre-group protection tables still exist, so the group backfill and the awaiting
+    /// conversion can read them.
+    pub(super) fn legacy_protection_tables_present(&self) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT count(*) = 2 FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('managed_brackets', 'protective_orders')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
+    }
+
+    /// Removes legacy bracket rows whose group conversion committed; a no-op once the V24
+    /// drop retired the tables.
+    pub(crate) fn delete_legacy_brackets(&self, bracket_ids: &[String]) -> Result<(), String> {
+        if bracket_ids.is_empty() || !self.legacy_protection_tables_present()? {
+            return Ok(());
+        }
+        for bracket_id in bracket_ids {
+            self.connection
+                .execute(
+                    "DELETE FROM managed_brackets WHERE bracket_id = ?1",
+                    [bracket_id],
+                )
+                .map_err(database_error)?;
+        }
+        Ok(())
+    }
+
+    /// Awaiting legacy brackets not yet converted to groups; empty once the V24 drop landed.
+    pub(crate) fn load_legacy_awaiting_brackets(&self) -> Result<Vec<BracketView>, String> {
+        if !self.legacy_protection_tables_present()? {
+            return Ok(Vec::new());
+        }
+        let mut result = Vec::new();
         let mut statement = self
             .connection
             .prepare(
                 "SELECT bracket_id, template_json, entry_client_order_id,
                     stop_client_order_id, target_client_order_ids_json, status,
                     entry_price_units, entry_price_scale
-                 FROM managed_brackets ORDER BY bracket_id",
+                 FROM managed_brackets WHERE status = 'awaiting_entry' ORDER BY bracket_id",
             )
             .map_err(database_error)?;
         let rows = statement
@@ -563,7 +583,7 @@ impl TradingStore {
             if entry_price_units.is_some() != entry_price_scale.is_some() {
                 return Err("stored managed bracket entry price is incomplete".to_string());
             }
-            let bracket = ManagedBracket {
+            let bracket = BracketView {
                 bracket_id: bracket_id.clone(),
                 template,
                 entry_client_order_id: ClientOrderId::try_new(entry_client_order_id)
@@ -573,85 +593,14 @@ impl TradingStore {
                     .transpose()
                     .map_err(|error| error.to_string())?,
                 target_client_order_ids,
-                status: ManagedBracketStatus::parse(&status)?,
+                status: BracketViewStatus::parse(&status)?,
                 entry_price,
             };
             bracket.validate()?;
-            result.insert(bracket_id, bracket);
+            result.push(bracket);
         }
         Ok(result)
     }
-
-    pub(super) fn load_protective_orders(
-        &self,
-    ) -> Result<BTreeMap<ClientOrderId, ProtectiveOrder>, String> {
-        let mut result = BTreeMap::new();
-        let mut statement = self
-            .connection
-            .prepare("SELECT client_order_id, role FROM protective_orders ORDER BY client_order_id")
-            .map_err(database_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(database_error)?;
-        for row in rows {
-            let (client_order_id, role) = row.map_err(database_error)?;
-            let client_order_id =
-                ClientOrderId::try_new(client_order_id).map_err(|error| error.to_string())?;
-            result.insert(
-                client_order_id.clone(),
-                ProtectiveOrder {
-                    client_order_id,
-                    role: ProtectiveOrderRole::parse(&role)?,
-                },
-            );
-        }
-        Ok(result)
-    }
-}
-
-pub(super) fn upsert_managed_bracket(
-    connection: &Connection,
-    bracket: &ManagedBracket,
-) -> Result<(), String> {
-    bracket.validate()?;
-    let target_client_order_ids = bracket
-        .target_client_order_ids
-        .iter()
-        .map(ClientOrderId::as_str)
-        .collect::<Vec<_>>();
-    let target_client_order_ids = serde_json::to_string(&target_client_order_ids)
-        .map_err(|error| format!("managed bracket targets could not be encoded: {error}"))?;
-    let template = serde_json::to_string(&bracket.template)
-        .map_err(|error| format!("managed bracket template could not be encoded: {error}"))?;
-    connection
-        .execute(
-            "INSERT INTO managed_brackets(bracket_id, template_json,
-                entry_client_order_id, stop_client_order_id, target_client_order_ids_json,
-                status, entry_price_units, entry_price_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(bracket_id) DO UPDATE SET template_json=excluded.template_json,
-                stop_client_order_id=excluded.stop_client_order_id,
-                target_client_order_ids_json=excluded.target_client_order_ids_json,
-                status=excluded.status, entry_price_units=excluded.entry_price_units,
-                entry_price_scale=excluded.entry_price_scale",
-            params![
-                bracket.bracket_id,
-                template,
-                bracket.entry_client_order_id.as_str(),
-                bracket
-                    .stop_client_order_id
-                    .as_ref()
-                    .map(ClientOrderId::as_str),
-                target_client_order_ids,
-                bracket.status.as_str(),
-                bracket.entry_price.map(FixedPoint::units),
-                bracket.entry_price.map(FixedPoint::scale),
-            ],
-        )
-        .map_err(database_error)?;
-    Ok(())
 }
 
 #[cfg(test)]
