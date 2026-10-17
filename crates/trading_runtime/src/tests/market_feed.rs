@@ -470,6 +470,99 @@ fn route_less_legacy_day_waits_for_verified_terms_before_expiring() {
 }
 
 #[test]
+fn failed_multi_day_backfill_rolls_back_every_deadline_and_retries_on_restart() {
+    let directory = TestDirectory::new("day-multi-backfill-atomic");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    let mut continuous = terms();
+    continuous.route.venue_id = "HYPERLIQUID".into();
+    continuous.session_hours.clear();
+    feed.push(MarketFeedEvent::Terms(continuous)).unwrap();
+    feed.push(MarketFeedEvent::Session(
+        aeris_trading::market::InstrumentSession {
+            instrument_id: route().instrument_id,
+            provider_generation: 1,
+            phase: SessionPhase::AlwaysOpen,
+            source: CalendarSourceKind::AlwaysOpen,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        },
+    ))
+    .unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    service.status().unwrap();
+    let mut request = market_order("day-batch-one", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::Day;
+    let first = service.place_order(request.clone()).unwrap();
+    request.client_order_id = ClientOrderId::try_new("day-batch-two").unwrap();
+    let second = service.place_order(request).unwrap();
+    let deadline = first.expires_at_unix_nanos.unwrap();
+    assert_eq!(second.expires_at_unix_nanos, Some(deadline));
+    service.shutdown(Duration::from_secs(5)).unwrap();
+
+    let mut configuration = config(&directory);
+    let connection = rusqlite::Connection::open(&configuration.database_path).unwrap();
+    connection
+        .execute(
+            "UPDATE orders SET expires_at_unix_nanos = NULL WHERE id IN (?1, ?2)",
+            [first.id.as_str(), second.id.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_second_day BEFORE UPDATE OF expires_at_unix_nanos ON orders
+             WHEN NEW.id = '{}' BEGIN SELECT RAISE(ABORT, 'injected backfill failure'); END;",
+            second.id.as_str()
+        ))
+        .unwrap();
+    drop(connection);
+    clock.set_wall_unix_nanos(deadline + 1);
+    configuration.clock = clock.clone();
+    assert!(
+        TradingService::start(configuration).is_err(),
+        "startup must refuse a partially backfilled DAY set"
+    );
+    let connection = rusqlite::Connection::open(config(&directory).database_path).unwrap();
+    for id in [&first.id, &second.id] {
+        let (deadline, status): (Option<i64>, String) = connection
+            .query_row(
+                "SELECT expires_at_unix_nanos, status FROM orders WHERE id = ?1",
+                [id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(deadline, None);
+        assert_eq!(status, "working");
+    }
+    connection
+        .execute_batch("DROP TRIGGER fail_second_day")
+        .unwrap();
+    drop(connection);
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let recovered = start_service_with_config(configuration);
+    for id in [&first.id, &second.id] {
+        let snapshot = recovered.snapshot().unwrap();
+        let order = snapshot
+            .orders
+            .iter()
+            .find(|order| &order.id == id)
+            .unwrap();
+        assert_eq!(order.status, OrderStatus::Expired);
+        assert_eq!(order.expires_at_unix_nanos, Some(deadline));
+        assert_eq!(order.terminal_unix_nanos, Some(deadline));
+    }
+    recovered.shutdown(Duration::from_secs(5)).unwrap();
+}
+
+#[test]
 fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
     const ACCEPTED: i64 = 1_793_806_200_000_000_000; // Wednesday 2026-11-04 15:30 UTC
     const CLOSE: i64 = 1_794_002_400_000_000_000; // Friday 17:00 New York, EST
