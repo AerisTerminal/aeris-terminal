@@ -75,6 +75,7 @@ pub(crate) fn start_service_with_config(configuration: TradingServiceConfig) -> 
 mod foundation;
 mod group_migration;
 mod market_feed;
+mod oco;
 
 #[test]
 fn simulated_currency_mismatch_is_typed_before_an_order_fact() {

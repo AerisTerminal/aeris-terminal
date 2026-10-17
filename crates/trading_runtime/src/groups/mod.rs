@@ -1,4 +1,5 @@
 pub mod model;
+pub(super) mod oco;
 pub(super) mod owned;
 pub(super) mod planned_leg;
 pub(super) mod protection;
@@ -8,9 +9,9 @@ use super::{
     ClientOrderId, Fill, FixedPoint, InstrumentId, MAXIMUM_MANAGED_BRACKETS,
     MAXIMUM_STRATEGY_TEMPLATES, ManagedBracket, ManagedBracketStatus, ModifyOrder, Order,
     OrderEvent, OrderEventId, OrderEventKind, OrderSide, OrderStatus, OrderStep, OrderType,
-    PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOrder, SimulatedMarketObservation,
-    TimeInForce, TradingAccountId, TradingCore, TradingInstrument, VenueRoute,
-    allocated_target_quantities, favorable_tick_distance, instrument_tick_units,
+    PlaceBracket, PlaceChartBracket, PlaceInlineBracket, PlaceOco, PlaceOrder,
+    SimulatedMarketObservation, TimeInForce, TradingAccountId, TradingCore, TradingInstrument,
+    VenueRoute, allocated_target_quantities, favorable_tick_distance, instrument_tick_units,
     managed_child_client_order_id, negative_loss, nonnegative_difference, opposite_side,
     order_increment_units, remaining_limit, scale_currency_by_quantity_and_ticks, shifted_price,
     subtract_fixed, tick_value, tighter_stop,

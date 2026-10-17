@@ -97,6 +97,9 @@ impl ReplayHarness {
         self.command(|reply| Command::Modify(order, reply))
     }
 
+    fn place_oco(&mut self, pair: PlaceOco) -> Result<[Order; 2], String> {
+        self.command(|reply| Command::PlaceOco(pair, reply))
+    }
     fn cancel_order(&mut self, id: ClientOrderId) -> Result<Order, String> {
         self.command(|reply| Command::Cancel(id, reply))
     }
@@ -1429,4 +1432,104 @@ fn replay_seed_and_scenario_are_byte_deterministic() {
     let first = failure();
     assert!(first.contains(&format!("seed={seed} step=7")));
     assert_eq!(first, failure(), "rerunning seed reproduces failure");
+}
+
+/// VAL-TRD-042: an explicit OCO pair under one wide quote that satisfies both members fills
+/// exactly one and cancels the sibling in the same step; 100 runs and a restart replay
+/// produce the identical transcript.
+fn oco_wide_quote_transcript(restart_before_quote: bool) -> String {
+    let directory = TestDirectory::new("oco-wide-quote");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock);
+    harness
+        .observe_market(observation(9_950, 10_000, 1, 1_000))
+        .expect("fresh quote");
+    let mut buy = market_order("oco-buy", OrderSide::Buy, 2, 2_000);
+    buy.order_type = OrderType::Stop;
+    buy.time_in_force = TimeInForce::GoodTillCancelled;
+    buy.stop_price = Some(FixedPoint::try_new(10_100, 2).expect("stop"));
+    let mut sell = market_order("oco-sell", OrderSide::Sell, 3, 3_000);
+    sell.order_type = OrderType::Stop;
+    sell.time_in_force = TimeInForce::GoodTillCancelled;
+    sell.stop_price = Some(FixedPoint::try_new(9_900, 2).expect("stop"));
+    harness
+        .place_oco(PlaceOco {
+            first: buy,
+            second: sell,
+        })
+        .expect("oco pair accepted");
+    if restart_before_quote {
+        harness.restart().expect("restart before the wide quote");
+    }
+    let fills = harness
+        .observe_market(observation(9_890, 10_110, 4, 4_000))
+        .expect("wide quote");
+    assert_eq!(
+        fills.len(),
+        1,
+        "exactly one OCO member fills on the wide quote"
+    );
+    let snapshot = harness.snapshot().expect("snapshot");
+    let member = |client: &str| {
+        snapshot
+            .orders
+            .iter()
+            .find(|order| order.client_order_id.as_str() == client)
+            .expect("oco member")
+    };
+    let (buy_status, sell_status) = (member("oco-buy").status, member("oco-sell").status);
+    assert!(
+        matches!(
+            (buy_status, sell_status),
+            (OrderStatus::Filled, OrderStatus::Cancelled)
+                | (OrderStatus::Cancelled, OrderStatus::Filled)
+        ),
+        "one member fills and its sibling is cancelled: {buy_status:?}/{sell_status:?}"
+    );
+    let sibling = if buy_status == OrderStatus::Cancelled {
+        member("oco-buy")
+    } else {
+        member("oco-sell")
+    };
+    // The cancel already shows in the snapshot returned by the same observe_market call,
+    // so the sibling never survives into a later quote update.
+    assert!(
+        snapshot.order_events.iter().any(|event| {
+            event.order_id == sibling.id
+                && event.kind == OrderEventKind::Cancelled
+                && event.reason == Some(aeris_trading::OrderEventReason::Cascade)
+        }),
+        "the sibling is cancelled with Cascade in the same quote step"
+    );
+    let database =
+        rusqlite::Connection::open(&harness.configuration.database_path).expect("group reader");
+    let status: String = database
+        .query_row(
+            "SELECT status FROM order_groups WHERE kind='oco'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("oco group row");
+    assert_eq!(status, "completed", "the filled member completes its group");
+    drop(database);
+    drop(snapshot);
+    harness.restart().expect("restart replay");
+    harness.transcript()
+}
+
+#[test]
+fn explicit_oco_wide_quote_cancels_the_sibling_and_replays_identically() {
+    let expected = oco_wide_quote_transcript(false);
+    for run in 0..100 {
+        assert_eq!(
+            oco_wide_quote_transcript(false),
+            expected,
+            "OCO run {run} diverged from the first transcript"
+        );
+    }
+    assert_eq!(
+        oco_wide_quote_transcript(true),
+        expected,
+        "a restart between placement and the wide quote changes nothing"
+    );
 }

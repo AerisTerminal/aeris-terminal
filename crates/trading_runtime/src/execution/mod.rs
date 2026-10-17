@@ -277,6 +277,45 @@ impl TradingCore {
                 }
             }
         }
+        self.stage_oco_retirement(step, terminal)
+    }
+
+    /// Explicit OCO pairs cancel siblings only on a fill; an externally terminated member
+    /// leaves its sibling working, and the group retires once no member remains open.
+    fn stage_oco_retirement(&self, step: &mut OrderStep, terminal: &Order) -> Result<(), String> {
+        let Some(mut group) = self
+            .state
+            .order_groups
+            .values()
+            .find(|group| {
+                group.kind == super::GroupKind::Oco
+                    && group.status == super::GroupStatus::Active
+                    && group.legs.iter().any(|leg| leg.order_id == terminal.id)
+            })
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let any_open = group.legs.iter().any(|leg| {
+            leg.order_id != terminal.id
+                && self
+                    .state
+                    .orders
+                    .get(&leg.order_id)
+                    .is_some_and(|order| order.status.is_open())
+                && !step
+                    .updated
+                    .iter()
+                    .any(|(updated, _)| updated.id == leg.order_id)
+        });
+        if !any_open {
+            group.status = super::GroupStatus::Cancelled;
+            group.revision = group
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "order group revision overflowed".to_string())?;
+            step.groups.push(group);
+        }
         Ok(())
     }
 

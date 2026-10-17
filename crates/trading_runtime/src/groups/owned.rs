@@ -34,6 +34,13 @@ struct OwnedLegs {
     next_sequence: u64,
 }
 
+/// How one fill moves the group that owns the filled order.
+enum OwnedFill {
+    ActivateBracket,
+    SettleBracket,
+    SettleOco,
+}
+
 /// What one held leg of a pending bracket becomes at placement.
 struct HeldLeg {
     client_order_id: aeris_trading::ClientOrderId,
@@ -440,8 +447,9 @@ impl TradingCore {
             })
     }
 
-    /// Group reactions to fills inside the quote's speculative state: a pending bracket's entry
-    /// fill activates its legs, an active bracket's leg fill settles its siblings.
+    /// Group reactions to fills inside the quote's speculative state: a pending bracket's
+    /// entry fill activates its legs, an active bracket's leg fill settles its siblings, and
+    /// an OCO member's full fill cancels its siblings before any later candidate fills.
     pub(crate) fn reconcile_order_groups(
         &mut self,
         fills: &[Fill],
@@ -453,24 +461,38 @@ impl TradingCore {
                 continue;
             };
             let action = self.state.order_groups.values().find_map(|group| {
+                if group.kind == GroupKind::Oco {
+                    // An explicit OCO member's full fill cancels its siblings before any
+                    // later fill candidate of this quote is evaluated; a partial fill
+                    // leaves the pair working.
+                    return (group.status == GroupStatus::Active
+                        && order.status == OrderStatus::Filled
+                        && group.legs.iter().any(|leg| leg.order_id == order.id))
+                    .then(|| (group.group_id.clone(), OwnedFill::SettleOco));
+                }
                 if group.kind != GroupKind::Bracket {
                     return None;
                 }
                 if group.status == GroupStatus::Pending && group.entry.as_ref() == Some(&order.id) {
-                    Some((group.group_id.clone(), true))
+                    Some((group.group_id.clone(), OwnedFill::ActivateBracket))
                 } else if group.status == GroupStatus::Active
                     && group.legs.iter().any(|leg| leg.order_id == order.id)
                 {
-                    Some((group.group_id.clone(), false))
+                    Some((group.group_id.clone(), OwnedFill::SettleBracket))
                 } else {
                     None
                 }
             });
             match action {
-                Some((group_id, true)) => {
+                Some((group_id, OwnedFill::ActivateBracket)) => {
                     self.activate_owned_bracket(&group_id, fill, observation, instrument)?;
                 }
-                Some((group_id, false)) => self.settle_owned_leg_fill(&group_id, &order)?,
+                Some((group_id, OwnedFill::SettleBracket)) => {
+                    self.settle_owned_leg_fill(&group_id, &order)?;
+                }
+                Some((group_id, OwnedFill::SettleOco)) => {
+                    self.settle_owned_oco_fill(&group_id, &order)?;
+                }
                 None => {}
             }
         }
@@ -758,7 +780,7 @@ impl TradingCore {
     }
 
     /// Cancels a held or working group leg inside the quote's speculative state.
-    fn cancel_owned_leg(&mut self, order: &Order, detail: String) -> Result<(), String> {
+    pub(super) fn cancel_owned_leg(&mut self, order: &Order, detail: String) -> Result<(), String> {
         let (cancelled, reason) = lifecycle::cancel_with_cause(
             order.clone(),
             CancellationCause::Cascade,

@@ -912,6 +912,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.5 part 9 feat(trading): commit typed group members with order steps - one validated transactional insert seam with cross-scope and last-leg rollback coverage, before the live authority switch.
 - 2026-10-17 M5.5 part 10 feat(trading): switch simulated brackets to group-owned inactive legs - entry, held stop/target orders and the group commit atomically, the entry fill reprices and activates the same order ids, and the legacy snapshot views keep the desktop unchanged; milestone GUI pending.
 - 2026-10-17 M5.5 part 11 feat(trading): convert awaiting brackets to group authority at startup - legacy awaiting-entry rows become pending groups with real inactive legs at their exact planned prices, unpriceable rows become cancelled groups with a typed recovery notice, and a failed conversion rolls back and retries on the next start.
+- 2026-10-17 M5.5 part 12 feat(trading): place explicit OCO pairs under group authority - both members rest as one active group in a single order step, a member's full fill cancels its siblings inside the same quote step, a manual member cancel leaves the sibling working, and the wide-quote transcript is identical across 100 runs and a restart replay (VAL-TRD-042).
 
 ## 7. Known gaps / deferred
 

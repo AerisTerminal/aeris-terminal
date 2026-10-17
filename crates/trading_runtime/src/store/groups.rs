@@ -265,7 +265,7 @@ impl TradingStore {
             .prepare(
                 "SELECT order_id, role, target_index, offset_ticks, allocation_percent
                  FROM order_group_legs WHERE group_id=?1
-                 ORDER BY role, target_index",
+                 ORDER BY role, target_index, order_id",
             )
             .map_err(database_error)?;
         for row in rows {

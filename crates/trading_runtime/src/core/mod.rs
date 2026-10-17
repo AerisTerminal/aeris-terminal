@@ -245,6 +245,15 @@ pub struct PlaceChartBracket {
     pub target_price: FixedPoint,
 }
 
+/// Entry command for one explicit one-cancels-the-other pair of simulated orders; both
+/// members commit with their group in a single order step, and a member's full fill cancels
+/// its siblings inside the quote step that filled it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlaceOco {
+    pub first: PlaceOrder,
+    pub second: PlaceOrder,
+}
+
 /// One standalone reduce-only protection command from a chart or order surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlaceProtectiveOrder {
@@ -823,6 +832,16 @@ impl TradingService {
     /// Returns an error when the template, entry, allocation, risk, or persistence is invalid.
     pub fn place_bracket(&self, bracket: PlaceBracket) -> Result<BracketPlacement, String> {
         self.request(|reply| Command::PlaceBracket(bracket, reply))
+    }
+
+    /// Submits an explicit one-cancels-the-other pair on the simulated venue, both members
+    /// resting until one fills and cancels the other.
+    ///
+    /// # Errors
+    /// Returns an error when the members differ in scope, admission rejects either member,
+    /// capacity is exhausted, or persistence fails.
+    pub fn place_oco(&self, pair: PlaceOco) -> Result<[Order; 2], String> {
+        self.request(|reply| Command::PlaceOco(pair, reply))
     }
 
     /// Submits a chart-authored bracket with exact, inline tick offsets.
@@ -1422,6 +1441,7 @@ impl TradingCore {
             Command::Observe(..) => self.dispatch_market_command(command),
             Command::Place(..)
             | Command::PlaceFromMarket(..)
+            | Command::PlaceOco(..)
             | Command::PlaceBracket(..)
             | Command::PlaceBracketFromMarket(..)
             | Command::PlaceInlineBracket(..)
@@ -1657,6 +1677,7 @@ impl TradingCore {
                 );
             }
             Command::PlaceBracket(bracket, reply) => respond(&reply, self.place_bracket(&bracket)),
+            Command::PlaceOco(pair, reply) => respond(&reply, self.place_owned_oco(&pair)),
             Command::PlaceBracketFromMarket(bracket, reply) => {
                 respond(
                     &reply,
