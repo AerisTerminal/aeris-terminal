@@ -78,6 +78,10 @@ violations and missing verification explicitly, and never describe them as satis
 - Simulated order admission and fills use the trading owner's verified session and current-generation Live quote.
   Crypto quotes may be at most 10 seconds old and other classes at most 60 seconds old by default;
   owner-local `eligible_after` fences resting orders after acceptance and across process restarts.
+- Recurring contract-hour session projection lives in `aeris_instruments::calendar::weekly_hours`;
+  market status and trading DAY recovery use that one IANA-zone/DST calculation. A historical
+  DAY deadline is derived only from a verified route and the acceptance-time open session;
+  unresolved legacy rows stay non-executable rather than receiving a guessed deadline.
 - The trading service has one named owner thread whose loop is in `service/owner.rs`; it waits for bounded commands
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by

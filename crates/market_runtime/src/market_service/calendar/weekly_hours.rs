@@ -7,34 +7,31 @@
 use aeris_contracts::{
     MarketSessionPhase, MarketSessionSource, MarketSessionStatus, ProviderSessionHours,
 };
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, TimeDelta, TimeZone};
-use chrono_tz::Tz;
+use aeris_instruments::calendar::weekly_hours::{self as projection, WeeklyPhase, WeeklySegment};
 
-/// Days searched either side of now. A merged session may run up to a week, so
-/// eight days always reach both the start of the current session and the next open.
-const SEARCH_DAYS: i64 = 8;
-const SECONDS_PER_DAY: u32 = 86_400;
+struct ProviderSegment<'a>(&'a ProviderSessionHours);
+
+impl WeeklySegment for ProviderSegment<'_> {
+    fn weekday(&self) -> u32 {
+        self.0.weekday
+    }
+    fn open_seconds(&self) -> u32 {
+        self.0.open_seconds
+    }
+    fn close_seconds(&self) -> u32 {
+        self.0.close_seconds
+    }
+    fn timezone(&self) -> &str {
+        &self.0.timezone
+    }
+}
 
 /// Trading-day roll within a continuous weekly session. Adjacent published
 /// segments are merged for open/closed status, but a daily candle must still
 /// roll at the contract's local opening time on every trading day.
 pub(super) fn daily_open(hours: &[ProviderSessionHours], at_unix_nanos: i64) -> Option<i64> {
-    let first = hours.first()?;
-    let zone: Tz = first.timezone.parse().ok()?;
-    let roll = hours
-        .iter()
-        .filter(|segment| segment.open_seconds > 0 && segment.open_seconds < SECONDS_PER_DAY)
-        .map(|segment| segment.open_seconds)
-        .min()
-        .unwrap_or(0);
-    let at = DateTime::from_timestamp_nanos(at_unix_nanos);
-    let today = at.with_timezone(&zone).date_naive();
-    let candidate = local_instant(zone, today, roll)?;
-    if candidate <= at_unix_nanos {
-        Some(candidate)
-    } else {
-        local_instant(zone, today.pred_opt()?, roll)
-    }
+    let segments = hours.iter().map(ProviderSegment).collect::<Vec<_>>();
+    projection::daily_open(&segments, at_unix_nanos)
 }
 
 /// Returns the session status the weekly `hours` imply at `now_unix_nanos`, or
@@ -44,104 +41,26 @@ pub(super) fn weekly_hours_status(
     hours: &[ProviderSessionHours],
     now_unix_nanos: i64,
 ) -> Option<MarketSessionStatus> {
-    if hours.is_empty() {
-        return None;
-    }
-    let status = |phase, start, end, next_open| MarketSessionStatus {
+    let segments = hours.iter().map(ProviderSegment).collect::<Vec<_>>();
+    let status = projection::weekly_status(&segments, now_unix_nanos)?;
+    Some(MarketSessionStatus {
         instrument_id: instrument_id.into(),
-        phase,
+        phase: match status.phase {
+            WeeklyPhase::Open => MarketSessionPhase::Regular,
+            WeeklyPhase::Closed => MarketSessionPhase::Closed,
+            WeeklyPhase::AlwaysOpen => MarketSessionPhase::AlwaysOpen,
+        },
         source: MarketSessionSource::ProviderHours,
-        session_start_unix_nanos: start,
-        session_end_unix_nanos: end,
-        next_open_unix_nanos: next_open,
-    };
-    if covers_every_day(hours) {
-        return Some(status(MarketSessionPhase::AlwaysOpen, None, None, None));
-    }
-    let sessions = dated_sessions(hours, now_unix_nanos)?;
-    let next_open = sessions
-        .iter()
-        .map(|(start, _)| *start)
-        .find(|start| *start > now_unix_nanos);
-    if let Some((start, end)) = sessions
-        .iter()
-        .find(|(start, end)| (*start..*end).contains(&now_unix_nanos))
-    {
-        return Some(status(
-            MarketSessionPhase::Regular,
-            Some(*start),
-            Some(*end),
-            next_open,
-        ));
-    }
-    let (start, end) = sessions.iter().find(|(start, _)| *start > now_unix_nanos)?;
-    Some(status(
-        MarketSessionPhase::Closed,
-        Some(*start),
-        Some(*end),
-        next_open,
-    ))
-}
-
-fn covers_every_day(hours: &[ProviderSessionHours]) -> bool {
-    (1..=7).all(|weekday| {
-        hours.iter().any(|segment| {
-            segment.weekday == weekday
-                && segment.open_seconds == 0
-                && segment.close_seconds == SECONDS_PER_DAY
-        })
+        session_start_unix_nanos: status.start,
+        session_end_unix_nanos: status.end,
+        next_open_unix_nanos: status.next_open,
     })
-}
-
-/// Places every segment on the dates around now and merges sessions that touch,
-/// so a week of back-to-back days reads as one session from open to close.
-fn dated_sessions(hours: &[ProviderSessionHours], now_unix_nanos: i64) -> Option<Vec<(i64, i64)>> {
-    let now = DateTime::from_timestamp_nanos(now_unix_nanos);
-    let mut sessions = Vec::new();
-    for segment in hours {
-        let zone: Tz = segment.timezone.parse().ok()?;
-        let today = now.with_timezone(&zone).date_naive();
-        for offset in -SEARCH_DAYS..=SEARCH_DAYS {
-            let date = today.checked_add_signed(TimeDelta::days(offset))?;
-            if date.weekday().number_from_monday() != segment.weekday {
-                continue;
-            }
-            let start = local_instant(zone, date, segment.open_seconds)?;
-            let end = local_instant(zone, date, segment.close_seconds)?;
-            if start < end {
-                sessions.push((start, end));
-            }
-        }
-    }
-    sessions.sort_unstable();
-    let mut merged: Vec<(i64, i64)> = Vec::with_capacity(sessions.len());
-    for (start, end) in sessions {
-        match merged.last_mut() {
-            Some(last) if start <= last.1 => last.1 = last.1.max(end),
-            _ => merged.push((start, end)),
-        }
-    }
-    Some(merged)
-}
-
-/// The instant `seconds` after local midnight on `date`. A wall time skipped by a
-/// daylight-saving change resolves to the hour after it, as clocks do.
-fn local_instant(zone: Tz, date: NaiveDate, seconds: u32) -> Option<i64> {
-    let local = date
-        .and_time(NaiveTime::MIN)
-        .checked_add_signed(TimeDelta::seconds(i64::from(seconds)))?;
-    zone.from_local_datetime(&local)
-        .earliest()
-        .or_else(|| {
-            zone.from_local_datetime(&(local + TimeDelta::hours(1)))
-                .earliest()
-        })?
-        .timestamp_nanos_opt()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
 
     const NANOS: i64 = 1_000_000_000;
 

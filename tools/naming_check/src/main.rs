@@ -2013,7 +2013,12 @@ mod tests {
             "crates/market_engine/Cargo.toml",
             &["aeris_instruments", "aeris_market_data"],
         );
-        assert_dependencies_are("crates/domain/instruments/Cargo.toml", &[]);
+        // The shared weekly-hours calendar needs the already-pinned IANA zone
+        // database for DST-correct market status and trading DAY recovery.
+        assert_dependencies_are(
+            "crates/domain/instruments/Cargo.toml",
+            &["chrono", "chrono-tz"],
+        );
         assert_dependencies_are("crates/domain/market_data/Cargo.toml", &[]);
     }
 
@@ -2218,6 +2223,9 @@ mod tests {
             "apps/desktop/src/desktop.rs::AccountRefreshExitClaim".to_string(),
             "crates/context_runtime/src/lib.rs::ContextCredentialStore".to_string(),
             "crates/context_runtime/src/lib.rs::ContextFetcher".to_string(),
+            // The single recurring-session projection accepts domain and provider wire segments
+            // without importing the provider-owned contracts into the leaf instrument crate.
+            "crates/domain/instruments/src/calendar/weekly_hours.rs::WeeklySegment".to_string(),
             // Trading publishes bounded quote interest without depending on market_runtime.
             "crates/domain/trading/src/market.rs::QuoteInterestSink".to_string(),
             "crates/market_runtime/src/market_service/ctrader.rs::CtraderMarketLink".to_string(),

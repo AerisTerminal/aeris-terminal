@@ -36,6 +36,29 @@ fn terms() -> InstrumentTerms {
     }
 }
 
+fn forex_weekly_terms() -> InstrumentTerms {
+    let mut contract = terms();
+    contract.session_hours = [
+        (7, 17 * 3_600, 86_400),
+        (1, 0, 86_400),
+        (2, 0, 86_400),
+        (3, 0, 86_400),
+        (4, 0, 86_400),
+        (5, 0, 17 * 3_600),
+    ]
+    .into_iter()
+    .map(
+        |(weekday, open_seconds, close_seconds)| aeris_instruments::SessionHours {
+            weekday,
+            open_seconds,
+            close_seconds,
+            timezone: "America/New_York".into(),
+        },
+    )
+    .collect();
+    contract
+}
+
 fn quote(generation: u64, sequence: u64, bid: i64, ask: i64) -> TradingQuote {
     TradingQuote {
         instrument_id: route().instrument_id,
@@ -367,6 +390,94 @@ fn migrated_always_open_day_recovers_acceptance_midnight_before_first_command() 
     assert_eq!(order.status, OrderStatus::Expired);
     assert_eq!(order.terminal_unix_nanos, Some(acceptance_midnight));
     recovered.shutdown(Duration::from_secs(5)).unwrap();
+}
+
+#[test]
+fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
+    const ACCEPTED: i64 = 1_793_806_200_000_000_000; // Wednesday 2026-11-04 15:30 UTC
+    const CLOSE: i64 = 1_794_002_400_000_000_000; // Friday 17:00 New York, EST
+    let directory = TestDirectory::new("day-migrated-weekly-dst");
+    let clock = Arc::new(crate::clock::ManualClock::new(ACCEPTED));
+    let mut configuration = config(&directory);
+    configuration.clock = clock.clone();
+    let service = start_service_with_config(configuration);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Terms(forex_weekly_terms()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Session(
+        aeris_trading::market::InstrumentSession {
+            instrument_id: route().instrument_id,
+            provider_generation: 1,
+            phase: SessionPhase::Open,
+            source: CalendarSourceKind::ContractHours,
+            session_end_unix_nanos: Some(CLOSE),
+            next_open_unix_nanos: None,
+        },
+    ))
+    .unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    let mut initial_quote = quote(1, 1, 10_000, 10_025);
+    initial_quote.received_unix_nanos = ACCEPTED + 1_000_000;
+    feed.push(MarketFeedEvent::Quote(initial_quote)).unwrap();
+    service.status().unwrap();
+    let mut day = market_order("migrated-weekly", OrderSide::Buy, 1, ACCEPTED);
+    day.order_type = OrderType::Limit;
+    day.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    day.time_in_force = TimeInForce::Day;
+    let placed = service.place_order(day.clone()).unwrap();
+    assert_eq!(placed.expires_at_unix_nanos, Some(CLOSE));
+    day.client_order_id = ClientOrderId::try_new("weekly-gtc").unwrap();
+    day.time_in_force = TimeInForce::GoodTillCancelled;
+    let gtc = service.place_order(day).unwrap();
+    service.shutdown(Duration::from_secs(5)).unwrap();
+    let mut configuration = config(&directory);
+    rusqlite::Connection::open(&configuration.database_path)
+        .unwrap()
+        .execute(
+            "UPDATE orders SET expires_at_unix_nanos = NULL WHERE id = ?1",
+            [placed.id.as_str()],
+        )
+        .unwrap();
+    clock.set_wall_unix_nanos(CLOSE + 1);
+    configuration.clock = clock.clone();
+    let restarted = start_service_with_config(configuration);
+    let snapshot = restarted.snapshot().unwrap();
+    let restored = snapshot
+        .orders
+        .iter()
+        .find(|order| order.id == placed.id)
+        .unwrap();
+    assert_eq!(restored.expires_at_unix_nanos, Some(CLOSE));
+    assert_eq!(restored.status, OrderStatus::Expired);
+    assert_eq!(restored.terminal_unix_nanos, Some(CLOSE));
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .find(|order| order.id == gtc.id)
+            .unwrap()
+            .status,
+        OrderStatus::Working
+    );
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
+    clock.set_wall_unix_nanos(CLOSE + 7 * 86_400_000_000_000);
+    let mut configuration = config(&directory);
+    configuration.clock = clock;
+    let restarted = start_service_with_config(configuration);
+    let snapshot = restarted.snapshot().unwrap();
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .find(|order| order.id == gtc.id)
+            .unwrap()
+            .status,
+        OrderStatus::Working
+    );
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
 }
 
 fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {

@@ -321,6 +321,10 @@ dependencies = [
 [[package]]
 name = "aeris_instruments"
 version = "0.2.3"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+]
 
 [[package]]
 name = "aeris_market_data"

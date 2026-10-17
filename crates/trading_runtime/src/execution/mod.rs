@@ -245,35 +245,43 @@ impl TradingCore {
             .min()
     }
 
-    /// The persisted verified route identifies an always-open calendar even
-    /// before the market feed has attached. Other legacy DAY rows stay fenced
-    /// until their acceptance session can be established without a guess.
-    pub(crate) fn recover_continuous_day_deadlines(&mut self) -> Result<(), String> {
+    /// Recover the acceptance-time close from persisted verified route and
+    /// recurring hours, before the live feed attaches. Unverified legacy DAY
+    /// rows stay fenced rather than receiving a guessed deadline.
+    pub(crate) fn recover_day_deadlines(&mut self) -> Result<(), String> {
         let recovered = self
             .state
             .orders
             .open_orders()
-            .filter(|order| {
-                order.time_in_force == TimeInForce::Day
-                    && order.expires_at_unix_nanos.is_none()
-                    && is_simulated(&self.state.accounts, &order.account_id)
-                    && self
-                        .state
-                        .instruments
-                        .get(&order.instrument_id)
-                        .is_some_and(|instrument| instrument.contract.session_hours.is_empty())
-                    && self
-                        .state
-                        .market_routes
-                        .get(&order.instrument_id)
-                        .is_some_and(|route| {
-                            aeris_instruments::calendar::classify_venue(&route.venue_id)
-                                == Some(aeris_instruments::calendar::Venue::Continuous)
-                        })
-            })
             .filter_map(|order| {
-                crate::market::feed::next_utc_midnight(order.accepted_unix_nanos)
-                    .map(|deadline| (order.id.clone(), deadline))
+                if order.time_in_force != TimeInForce::Day
+                    || order.expires_at_unix_nanos.is_some()
+                    || !is_simulated(&self.state.accounts, &order.account_id)
+                {
+                    return None;
+                }
+                let instrument = self.state.instruments.get(&order.instrument_id)?;
+                let route = self.state.market_routes.get(&order.instrument_id)?;
+                let deadline = if instrument.contract.session_hours.is_empty() {
+                    (aeris_instruments::calendar::classify_venue(&route.venue_id)
+                        == Some(aeris_instruments::calendar::Venue::Continuous))
+                    .then(|| crate::market::feed::next_utc_midnight(order.accepted_unix_nanos))
+                    .flatten()?
+                } else {
+                    use aeris_instruments::calendar::weekly_hours::{WeeklyPhase, weekly_status};
+                    let status = weekly_status(
+                        &instrument.contract.session_hours,
+                        order.accepted_unix_nanos,
+                    )?;
+                    match status.phase {
+                        WeeklyPhase::Open => status.end?,
+                        WeeklyPhase::AlwaysOpen => {
+                            crate::market::feed::next_utc_midnight(order.accepted_unix_nanos)?
+                        }
+                        WeeklyPhase::Closed => return None,
+                    }
+                };
+                Some((order.id.clone(), deadline))
             })
             .collect::<Vec<_>>();
         if recovered.is_empty() {

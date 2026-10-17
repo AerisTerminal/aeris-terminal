@@ -1,4 +1,5 @@
 const SECONDS_PER_DAY: i64 = 86_400;
+pub mod weekly_hours;
 const CME_SESSION_ROLL_SECONDS: i64 = 17 * 60 * 60;
 
 /// Exchange family normalized from a provider's venue code.
@@ -251,5 +252,71 @@ mod tests {
     #[test]
     fn unsupported_venues_do_not_receive_a_guessed_calendar() {
         assert_eq!(ExchangeCalendar::for_code("UNKNOWN"), None);
+    }
+
+    #[test]
+    fn weekly_acceptance_session_ends_at_historical_dst_close() {
+        use super::weekly_hours::{WeeklyPhase, weekly_status};
+        use crate::SessionHours;
+        let hours = [
+            (7, 17 * 3_600, 86_400),
+            (1, 0, 86_400),
+            (2, 0, 86_400),
+            (3, 0, 86_400),
+            (4, 0, 86_400),
+            (5, 0, 17 * 3_600),
+        ]
+        .map(|(weekday, open_seconds, close_seconds)| SessionHours {
+            weekday,
+            open_seconds,
+            close_seconds,
+            timezone: "America/New_York".into(),
+        });
+        let accepted = chrono::DateTime::parse_from_rfc3339("2026-11-04T15:30:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-11-06T22:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let status = weekly_status(&hours, accepted).unwrap();
+        assert_eq!(status.phase, WeeklyPhase::Open);
+        assert_eq!(status.end, Some(expected));
+    }
+
+    #[test]
+    fn weekly_overnight_segment_ends_the_following_local_day() {
+        use super::weekly_hours::{WeeklyPhase, weekly_status};
+        use crate::SessionHours;
+        let hours = [SessionHours {
+            weekday: 1,
+            open_seconds: 18 * 3_600,
+            close_seconds: 17 * 3_600,
+            timezone: "America/Chicago".into(),
+        }];
+        let instant = chrono::DateTime::parse_from_rfc3339("2026-11-03T01:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let end = chrono::DateTime::parse_from_rfc3339("2026-11-03T23:00:00Z")
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let status = weekly_status(&hours, instant).unwrap();
+        assert_eq!(status.phase, WeeklyPhase::Open);
+        assert_eq!(status.end, Some(end));
+        assert_eq!(
+            weekly_status(
+                &hours,
+                chrono::DateTime::parse_from_rfc3339("2026-11-04T01:00:00Z")
+                    .unwrap()
+                    .timestamp_nanos_opt()
+                    .unwrap()
+            )
+            .unwrap()
+            .phase,
+            WeeklyPhase::Closed
+        );
     }
 }

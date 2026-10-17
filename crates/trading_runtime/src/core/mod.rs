@@ -1266,8 +1266,7 @@ impl TradingCore {
         core.repair_loaded_position_projections()
             .map_err(StoreError::Other)?;
         core.align_loaded_protection().map_err(StoreError::Other)?;
-        core.recover_continuous_day_deadlines()
-            .map_err(StoreError::Other)?;
+        core.recover_day_deadlines().map_err(StoreError::Other)?;
         // Expire durable DAY deadlines before the service acknowledges startup
         // or accepts a quote. A failed transaction leaves recovery retryable.
         core.expire_due_day_orders().map_err(StoreError::Other)?;
