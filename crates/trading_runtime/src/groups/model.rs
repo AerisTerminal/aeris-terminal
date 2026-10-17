@@ -95,7 +95,13 @@ impl OrderGroup {
             return Err(GroupValidationError::InvalidMembership);
         }
         if self.kind != GroupKind::Bracket {
-            if self.entry.is_some()
+            let wrong_member_count = match self.kind {
+                GroupKind::Oco => self.legs.len() < 2,
+                GroupKind::Protection => self.legs.len() != 1,
+                GroupKind::Bracket => false,
+            };
+            if wrong_member_count
+                || self.entry.is_some()
                 || self.template.is_some()
                 || self.management != StopManagement::default()
                 || self
@@ -219,12 +225,51 @@ mod tests {
         });
         assert_eq!(group.validate(), Ok(()));
         group.kind = GroupKind::Protection;
+        assert_eq!(
+            group.validate(),
+            Err(GroupValidationError::InvalidMembership),
+            "a standalone protective group has exactly one order"
+        );
+        group.legs.truncate(1);
         assert_eq!(group.validate(), Ok(()));
         group.entry = Some(id("parent"));
         assert_eq!(
             group.validate(),
             Err(GroupValidationError::InvalidMembership)
         );
+    }
+
+    #[test]
+    fn oco_requires_two_distinct_orders_and_protection_requires_one() {
+        let mut group = bracket();
+        group.kind = GroupKind::Oco;
+        group.entry = None;
+        group.template = None;
+        group.legs.clear();
+        group.legs.push(GroupLeg {
+            order_id: id("first"),
+            role: LegRole::StopLoss,
+            offset_ticks: None,
+            allocation_percent: None,
+        });
+        assert_eq!(
+            group.validate(),
+            Err(GroupValidationError::InvalidMembership)
+        );
+        group.legs.push(GroupLeg {
+            order_id: id("second"),
+            role: LegRole::TakeProfit { index: 0 },
+            offset_ticks: None,
+            allocation_percent: None,
+        });
+        assert_eq!(group.validate(), Ok(()));
+        group.kind = GroupKind::Protection;
+        assert_eq!(
+            group.validate(),
+            Err(GroupValidationError::InvalidMembership)
+        );
+        group.legs.truncate(1);
+        assert_eq!(group.validate(), Ok(()));
     }
 
     #[test]
