@@ -35,6 +35,7 @@ use super::{
     TradeCopierConfig, TradeCopierTarget, TradingInstrument, TradingRetention,
     TrailingDrawdownMode, TrailingStopRule, UserRecord,
 };
+use crate::core::OrderGroup;
 use crate::core::ledger::{FillAccounting, TradeCycle};
 use aeris_instruments::{
     ContractDate, ContractMetadata, InstrumentClass, InstrumentDecimal, InstrumentId,
@@ -223,6 +224,7 @@ pub(super) struct TradingStore {
 pub(crate) struct OrderStep {
     pub inserted: Vec<(Order, OrderEvent)>,
     pub updated: Vec<(Order, OrderEvent)>,
+    pub groups: Vec<OrderGroup>,
     pub brackets: Vec<ManagedBracket>,
     pub deleted_brackets: Vec<String>,
     pub protective: Vec<ProtectiveOrder>,
@@ -234,6 +236,7 @@ impl OrderStep {
         Self {
             inserted: Vec::new(),
             updated: Vec::new(),
+            groups: Vec::new(),
             brackets: Vec::new(),
             deleted_brackets: Vec::new(),
             protective: Vec::new(),

@@ -1819,6 +1819,7 @@ impl TradingCore {
     ) -> Result<(), String> {
         if step.inserted.is_empty()
             && step.updated.is_empty()
+            && step.groups.is_empty()
             && step.brackets.is_empty()
             && step.deleted_brackets.is_empty()
         {

@@ -3,6 +3,91 @@ use super::{
     FixedPoint, ManagedBracket, ManagedBracketStatus, ProtectiveOrder, ProtectiveOrderRole, StepTx,
     TradingStore, TrailingStopRule, database_error, fixed, params,
 };
+use crate::core::{GroupKind, GroupStatus, LegRole, OrderGroup};
+
+/// Insert a newly owned group after its parent and children, in their shared order step.
+/// Historical groups use the idempotent migration transaction instead.
+pub(super) fn insert_order_group(tx: &StepTx<'_>, group: &OrderGroup) -> Result<(), String> {
+    group
+        .validate()
+        .map_err(|error| format!("invalid order group: {error:?}"))?;
+    for order_id in group
+        .entry
+        .iter()
+        .chain(group.legs.iter().map(|leg| &leg.order_id))
+    {
+        let matches_scope: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM orders
+                 WHERE id=?1 AND account_id=?2 AND instrument_id=?3",
+                params![
+                    order_id.as_str(),
+                    group.account_id.as_str(),
+                    group.instrument_id.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        if matches_scope != 1 {
+            return Err("order group member is missing or belongs to another scope".into());
+        }
+    }
+    let (kind, status) = (
+        match group.kind {
+            GroupKind::Bracket => "bracket",
+            GroupKind::Oco => "oco",
+            GroupKind::Protection => "protection",
+        },
+        match group.status {
+            GroupStatus::Pending => "pending",
+            GroupStatus::Active => "active",
+            GroupStatus::Completed => "completed",
+            GroupStatus::Cancelled => "cancelled",
+        },
+    );
+    let management = serde_json::json!({
+        "trailing": group.management.trailing,
+        "break_even": group.management.break_even,
+    });
+    tx.execute(
+        "INSERT INTO order_groups(group_id,account_id,instrument_id,kind,status,
+            entry_order_id,management_json,template_id,template_revision,revision)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            group.group_id,
+            group.account_id.as_str(),
+            group.instrument_id.as_str(),
+            kind,
+            status,
+            group.entry.as_ref().map(aeris_trading::OrderId::as_str),
+            management.to_string(),
+            group.template.as_ref().map(|(id, _)| id.as_str()),
+            group.template.as_ref().map(|(_, revision)| revision),
+            group.revision,
+        ],
+    )
+    .map_err(database_error)?;
+    for leg in &group.legs {
+        let (role, index) = match leg.role {
+            LegRole::StopLoss => ("stop_loss", None),
+            LegRole::TakeProfit { index } => ("take_profit", Some(index)),
+        };
+        tx.execute(
+            "INSERT INTO order_group_legs(group_id,order_id,role,target_index,
+                offset_ticks,allocation_percent) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                group.group_id,
+                leg.order_id.as_str(),
+                role,
+                index,
+                leg.offset_ticks,
+                leg.allocation_percent,
+            ],
+        )
+        .map_err(database_error)?;
+    }
+    Ok(())
+}
 
 impl TradingStore {
     pub(super) fn ensure_default_strategy_templates(&self) -> Result<(), String> {
@@ -343,4 +428,165 @@ pub(super) fn upsert_managed_bracket(
         )
         .map_err(database_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod group_step_tests {
+    use super::*;
+    use crate::core::{
+        GroupKind, GroupLeg, GroupStatus, LegRole, OrderGroup, StopManagement, TradingRetention,
+    };
+    use crate::store::OrderStep;
+    use aeris_instruments::InstrumentId;
+    use aeris_trading::{OrderId, TradingAccountId};
+
+    #[test]
+    fn group_step_rolls_back_on_last_leg_and_retries_without_orphan_members() {
+        let connection = Connection::open_in_memory().unwrap();
+        super::super::tests::create_schema_at(&connection, 23);
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+             INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
+             VALUES ('sim','Sanitized','simulated','USD',2,'aeris-sim');
+             INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+             VALUES ('BTC-USDC',2,0,'{}');
+             INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                 time_in_force,quantity_units,quantity_scale,filled_units,filled_scale,
+                 status,submitted_unix_nanos,provenance_json)
+             VALUES ('entry','entry-client','sim','BTC-USDC','buy','limit','gtc',
+                     1,0,0,0,'working',1,'{}'),
+                    ('stop','stop-client','sim','BTC-USDC','sell','stop','gtc',
+                     1,0,0,0,'inactive',1,'{}'),
+                    ('target','target-client','sim','BTC-USDC','sell','limit','gtc',
+                     1,0,0,0,'inactive',1,'{}');
+             CREATE TRIGGER fail_last_leg BEFORE INSERT ON order_group_legs
+             WHEN NEW.order_id='target' BEGIN SELECT RAISE(ABORT,'last leg failure'); END;",
+            )
+            .unwrap();
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        let mut step = OrderStep::new(1);
+        step.groups.push(OrderGroup {
+            group_id: "entry-client".into(),
+            account_id: TradingAccountId::try_new("sim").unwrap(),
+            instrument_id: InstrumentId::try_new("BTC-USDC").unwrap(),
+            kind: GroupKind::Bracket,
+            status: GroupStatus::Pending,
+            entry: Some(OrderId::try_new("entry").unwrap()),
+            legs: vec![
+                GroupLeg {
+                    order_id: OrderId::try_new("stop").unwrap(),
+                    role: LegRole::StopLoss,
+                    offset_ticks: Some(8),
+                    allocation_percent: None,
+                },
+                GroupLeg {
+                    order_id: OrderId::try_new("target").unwrap(),
+                    role: LegRole::TakeProfit { index: 0 },
+                    offset_ticks: Some(8),
+                    allocation_percent: Some(100),
+                },
+            ],
+            management: StopManagement::default(),
+            template: Some(("managed-bracket".into(), 1)),
+            revision: 1,
+        });
+        let before = store.revision().unwrap();
+        assert!(store.commit_order_step(&step).is_err());
+        for table in ["order_groups", "order_group_legs"] {
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "{table} must roll back"
+            );
+        }
+        assert_eq!(store.revision().unwrap(), before);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_last_leg")
+            .unwrap();
+        store.commit_order_step(&step).unwrap();
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM order_group_legs WHERE group_id='entry-client'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn group_step_rejects_a_member_from_another_account() {
+        let connection = Connection::open_in_memory().unwrap();
+        super::super::tests::create_schema_at(&connection, 23);
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+             INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
+             VALUES ('sim','Sanitized','simulated','USD',2,'aeris-sim'),
+                    ('other','Other','simulated','USD',2,'aeris-sim');
+             INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+             VALUES ('BTC-USDC',2,0,'{}');
+             INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                 time_in_force,quantity_units,quantity_scale,filled_units,filled_scale,
+                 status,submitted_unix_nanos,provenance_json)
+             VALUES ('entry','entry-client','sim','BTC-USDC','buy','limit','gtc',
+                     1,0,0,0,'working',1,'{}'),
+                    ('stop','stop-client','sim','BTC-USDC','sell','stop','gtc',
+                     1,0,0,0,'inactive',1,'{}'),
+                    ('target','target-client','other','BTC-USDC','sell','limit','gtc',
+                     1,0,0,0,'inactive',1,'{}');",
+            )
+            .unwrap();
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        let mut step = OrderStep::new(1);
+        step.groups.push(OrderGroup {
+            group_id: "cross-account".into(),
+            account_id: TradingAccountId::try_new("sim").unwrap(),
+            instrument_id: InstrumentId::try_new("BTC-USDC").unwrap(),
+            kind: GroupKind::Bracket,
+            status: GroupStatus::Pending,
+            entry: Some(OrderId::try_new("entry").unwrap()),
+            legs: vec![
+                GroupLeg {
+                    order_id: OrderId::try_new("stop").unwrap(),
+                    role: LegRole::StopLoss,
+                    offset_ticks: Some(8),
+                    allocation_percent: None,
+                },
+                GroupLeg {
+                    order_id: OrderId::try_new("target").unwrap(),
+                    role: LegRole::TakeProfit { index: 0 },
+                    offset_ticks: Some(8),
+                    allocation_percent: Some(100),
+                },
+            ],
+            management: StopManagement::default(),
+            template: Some(("managed-bracket".into(), 1)),
+            revision: 1,
+        });
+        assert!(store.commit_order_step(&step).is_err());
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM order_groups", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
 }

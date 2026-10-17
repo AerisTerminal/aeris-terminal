@@ -81,6 +81,9 @@ impl TradingStore {
             .map_err(database_error)?;
             insert_event_row(&tx, event)?;
         }
+        for group in &changes.groups {
+            super::groups::insert_order_group(&tx, group)?;
+        }
         for bracket in &changes.brackets {
             super::groups::upsert_managed_bracket(&tx, bracket)?;
         }
