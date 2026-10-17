@@ -2022,11 +2022,55 @@ pub(crate) fn market_fill_candidates(
     accounts: &BTreeMap<TradingAccountId, TradingAccount>,
     observation: &SimulatedMarketObservation,
 ) -> Vec<(OrderId, FixedPoint)> {
-    orders
+    let mut candidates = orders
         .executable_for(&observation.instrument_id)
         .filter(|order| is_simulated(accounts, &order.account_id))
         .filter_map(|order| touch_price(order, observation).map(|price| (order.id.clone(), price)))
-        .collect()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left_id, _), (right_id, _)| {
+        let left = &orders[left_id];
+        let right = &orders[right_id];
+        let priority = |order: &Order| match order.order_type {
+            OrderType::Market => (0, 0),
+            OrderType::Stop | OrderType::StopLimit if order.triggered_unix_nanos.is_none() => {
+                let price = order.stop_price.map_or(0, FixedPoint::units);
+                (
+                    1,
+                    if order.side == OrderSide::Buy {
+                        price
+                    } else {
+                        -price
+                    },
+                )
+            }
+            _ => {
+                let price = order.limit_price.map_or(0, FixedPoint::units);
+                (
+                    2,
+                    if order.side == OrderSide::Buy {
+                        -price
+                    } else {
+                        price
+                    },
+                )
+            }
+        };
+        priority(left)
+            .cmp(&priority(right))
+            .then_with(|| left.accepted_unix_nanos.cmp(&right.accepted_unix_nanos))
+            .then_with(|| {
+                let sequence = |order: &Order| {
+                    order
+                        .id
+                        .as_str()
+                        .strip_prefix("sim-order-")
+                        .and_then(|number| number.parse::<u64>().ok())
+                };
+                sequence(left).cmp(&sequence(right))
+            })
+            .then_with(|| left_id.cmp(right_id))
+    });
+    candidates
 }
 
 pub(crate) fn next_position(

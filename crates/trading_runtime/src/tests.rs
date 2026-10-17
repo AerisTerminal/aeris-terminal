@@ -1484,6 +1484,68 @@ fn resting_buy_and_sell_limits_fill_at_their_limit_not_the_better_touch() {
 }
 
 #[test]
+fn crossed_limits_execute_by_price_then_acceptance_sequence() {
+    let directory = TestDirectory::new("limit-priority");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut placed = Vec::new();
+    for (id, limit) in [
+        ("low-first", 9_900),
+        ("high-second", 10_000),
+        ("high-third", 10_000),
+    ] {
+        let mut request = market_order(id, OrderSide::Buy, 1, 1_000);
+        request.order_type = OrderType::Limit;
+        request.time_in_force = TimeInForce::GoodTillCancelled;
+        request.limit_price = Some(price(limit));
+        placed.push(service.place_order(request).expect("limit"));
+    }
+    let fills = service
+        .observe_market(observation(9_775, 9_800, 2, 2_000))
+        .expect("quote crosses all three");
+    assert_eq!(
+        fills.iter().map(|fill| &fill.order_id).collect::<Vec<_>>(),
+        vec![&placed[1].id, &placed[2].id, &placed[0].id]
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
+fn crossed_stops_precede_limits_in_trigger_price_order() {
+    let directory = TestDirectory::new("stop-priority");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut placed = Vec::new();
+    for (id, kind, level) in [
+        ("limit-first", OrderType::Limit, 10_500),
+        ("high-stop", OrderType::Stop, 10_200),
+        ("low-stop", OrderType::Stop, 10_100),
+    ] {
+        let mut request = market_order(id, OrderSide::Buy, 1, 1_000);
+        request.order_type = kind;
+        request.time_in_force = TimeInForce::GoodTillCancelled;
+        match kind {
+            OrderType::Limit => request.limit_price = Some(price(level)),
+            OrderType::Stop => request.stop_price = Some(price(level)),
+            _ => unreachable!("fixture"),
+        }
+        placed.push(service.place_order(request).expect("order"));
+    }
+    let fills = service
+        .observe_market(observation(10_275, 10_300, 2, 2_000))
+        .expect("quote crosses all three");
+    assert_eq!(
+        fills.iter().map(|fill| &fill.order_id).collect::<Vec<_>>(),
+        vec![&placed[2].id, &placed[1].id, &placed[0].id]
+    );
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn point_value_scales_exact_marks_and_closed_trade_pnl() {
     for (label, point_value, expected_mark, expected_realized) in
         [("future", 50, 5_000, 12_500), ("crypto", 1, 100, 250)]
