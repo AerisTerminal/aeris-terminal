@@ -209,6 +209,13 @@ impl TradingCore {
             self.quote_book
                 .set_generation_floor(&id, terms.session_generation);
         }
+        // Legacy route-less DAY rows were fenced at startup. Verified Terms
+        // establish the missing calendar provenance before any later quote can
+        // execute them. Deadline backfill and expiry remain durable owner steps.
+        self.recover_day_deadlines()
+            .map_err(MarketConsumerError::Persistence)?;
+        self.expire_due_day_orders()
+            .map_err(MarketConsumerError::Persistence)?;
         self.bump_revision()
             .map_err(MarketConsumerError::Persistence)
     }

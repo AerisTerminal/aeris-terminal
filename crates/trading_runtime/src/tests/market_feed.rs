@@ -393,6 +393,83 @@ fn migrated_always_open_day_recovers_acceptance_midnight_before_first_command() 
 }
 
 #[test]
+fn route_less_legacy_day_waits_for_verified_terms_before_expiring() {
+    let directory = TestDirectory::new("day-route-less-late-terms");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    let mut continuous = terms();
+    continuous.route.venue_id = "HYPERLIQUID".into();
+    continuous.session_hours.clear();
+    feed.push(MarketFeedEvent::Terms(continuous.clone()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Session(
+        aeris_trading::market::InstrumentSession {
+            instrument_id: route().instrument_id,
+            provider_generation: 1,
+            phase: SessionPhase::AlwaysOpen,
+            source: CalendarSourceKind::AlwaysOpen,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        },
+    ))
+    .unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    service.status().unwrap();
+    let mut request = market_order("late-terms-day", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::Day;
+    let placed = service.place_order(request).unwrap();
+    let deadline = placed.expires_at_unix_nanos.unwrap();
+    service.shutdown(Duration::from_secs(5)).unwrap();
+
+    let mut configuration = config(&directory);
+    let connection = rusqlite::Connection::open(&configuration.database_path).unwrap();
+    connection
+        .execute(
+            "UPDATE orders SET expires_at_unix_nanos = NULL WHERE id = ?1",
+            [placed.id.as_str()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE instruments SET market_route_json = NULL WHERE id = ?1",
+            [route().instrument_id.as_str()],
+        )
+        .unwrap();
+    clock.set_wall_unix_nanos(deadline + 1);
+    configuration.clock = clock;
+    let restarted = start_service_with_config(configuration);
+    let before = restarted.snapshot().unwrap();
+    let unresolved = before
+        .orders
+        .iter()
+        .find(|order| order.id == placed.id)
+        .unwrap();
+    assert_eq!(unresolved.status, OrderStatus::Working);
+    assert_eq!(unresolved.expires_at_unix_nanos, None);
+    let feed = restarted
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    feed.push(MarketFeedEvent::Terms(continuous)).unwrap();
+    let after = restarted.snapshot().unwrap();
+    let recovered = after
+        .orders
+        .iter()
+        .find(|order| order.id == placed.id)
+        .unwrap();
+    assert_eq!(recovered.status, OrderStatus::Expired);
+    assert_eq!(recovered.expires_at_unix_nanos, Some(deadline));
+    assert_eq!(recovered.terminal_unix_nanos, Some(deadline));
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
+}
+
+#[test]
 fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
     const ACCEPTED: i64 = 1_793_806_200_000_000_000; // Wednesday 2026-11-04 15:30 UTC
     const CLOSE: i64 = 1_794_002_400_000_000_000; // Friday 17:00 New York, EST
@@ -463,7 +540,8 @@ fn migrated_calendared_day_recovers_acceptance_session_not_restart_session() {
         OrderStatus::Working
     );
     restarted.shutdown(Duration::from_secs(5)).unwrap();
-    clock.set_wall_unix_nanos(CLOSE + 7 * 86_400_000_000_000);
+    // Friday closes on Nov 6, 13 and 20 all pass across the two restarts.
+    clock.set_wall_unix_nanos(CLOSE + 14 * 86_400_000_000_000);
     let mut configuration = config(&directory);
     configuration.clock = clock;
     let restarted = start_service_with_config(configuration);
