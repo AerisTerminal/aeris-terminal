@@ -1,6 +1,6 @@
 use super::*;
 
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 pub(super) const INITIAL_SCHEMA: &str = "CREATE TABLE metadata (
      key TEXT PRIMARY KEY,
      value INTEGER NOT NULL
@@ -273,6 +273,36 @@ pub(super) const MIGRATION_V22: &str = "
      WHEN kind='accepted' AND detail LIKE 'LOCAL-MANAGED%' THEN 'local_managed'
      ELSE NULL END;";
 
+/// Group rows are introduced before the owner switches away from the legacy writer.
+/// Existing managed rows remain authoritative until the idempotent group backfill
+/// creates their real member orders and switches the owner in a later M5.5 part.
+pub(super) const MIGRATION_V23: &str = "
+ CREATE TABLE order_groups (
+     group_id TEXT PRIMARY KEY,
+     account_id TEXT NOT NULL REFERENCES accounts(id),
+     instrument_id TEXT NOT NULL REFERENCES instruments(id),
+     kind TEXT NOT NULL CHECK(kind IN ('bracket','oco','protection')),
+     status TEXT NOT NULL CHECK(status IN ('pending','active','completed','cancelled')),
+     entry_order_id TEXT REFERENCES orders(id),
+     management_json TEXT NOT NULL,
+     template_id TEXT,
+     template_revision INTEGER,
+     revision INTEGER NOT NULL CHECK(revision > 0),
+     CHECK ((template_id IS NULL) = (template_revision IS NULL))
+ ) STRICT;
+ CREATE INDEX order_groups_scope ON order_groups(account_id,instrument_id,status);
+ CREATE TABLE order_group_legs (
+     group_id TEXT NOT NULL REFERENCES order_groups(group_id) ON DELETE CASCADE,
+     order_id TEXT NOT NULL UNIQUE REFERENCES orders(id),
+     role TEXT NOT NULL CHECK(role IN ('stop_loss','take_profit')),
+     target_index INTEGER,
+     offset_ticks INTEGER CHECK(offset_ticks > 0),
+     allocation_percent INTEGER CHECK(allocation_percent BETWEEN 1 AND 100),
+     PRIMARY KEY(group_id,order_id),
+     CHECK ((role = 'stop_loss' AND target_index IS NULL)
+         OR (role = 'take_profit' AND target_index IS NOT NULL))
+ ) STRICT;";
+
 pub(super) struct Migration {
     pub(super) from: u32,
     pub(super) to: u32,
@@ -389,6 +419,11 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         from: 21,
         to: 22,
         sql: MIGRATION_V22,
+    },
+    Migration {
+        from: 22,
+        to: 23,
+        sql: MIGRATION_V23,
     },
 ];
 

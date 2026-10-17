@@ -71,6 +71,15 @@ impl OrderGroup {
         if self.group_id.is_empty() || self.revision == 0 {
             return Err(GroupValidationError::InvalidIdentity);
         }
+        // Historical brackets that never acquired priceable children retain their parent
+        // and terminal group fact rather than fabricating orders during migration.
+        if self.legs.is_empty()
+            && self.kind == GroupKind::Bracket
+            && matches!(self.status, GroupStatus::Completed | GroupStatus::Cancelled)
+            && self.entry.is_some()
+        {
+            return Ok(());
+        }
         if self.legs.is_empty() || self.legs.len() > 1 + MAXIMUM_BRACKET_TARGETS {
             return Err(GroupValidationError::InvalidMembership);
         }
@@ -212,6 +221,19 @@ mod tests {
         group.kind = GroupKind::Protection;
         assert_eq!(group.validate(), Ok(()));
         group.entry = Some(id("parent"));
+        assert_eq!(
+            group.validate(),
+            Err(GroupValidationError::InvalidMembership)
+        );
+    }
+
+    #[test]
+    fn legacy_unpriceable_bracket_may_be_terminal_without_children() {
+        let mut group = bracket();
+        group.status = GroupStatus::Cancelled;
+        group.legs.clear();
+        assert_eq!(group.validate(), Ok(()));
+        group.status = GroupStatus::Pending;
         assert_eq!(
             group.validate(),
             Err(GroupValidationError::InvalidMembership)

@@ -619,6 +619,73 @@ mod tests {
             assert_eq!(actual, SCHEMA_VERSION, "starting at v{version}");
         }
     }
+
+    #[test]
+    fn v22_group_schema_migration_preserves_existing_order_and_legacy_bracket() {
+        let connection = Connection::open_in_memory().expect("fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("foreign keys");
+        create_schema_at(&connection, 22);
+        connection
+            .execute_batch(
+                "INSERT INTO accounts(id,display_name,environment,currency,currency_scale)
+                    VALUES ('a','Practice','simulated','USD',2);
+                 INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+                    VALUES ('i',2,0,'{}');
+                 INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,
+                    order_type,time_in_force,quantity_units,quantity_scale,status,
+                    submitted_unix_nanos,provenance_json)
+                    VALUES ('entry','client','a','i','buy','limit','gtc',1,0,'working',1,'{}');
+                 INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
+                    target_client_order_ids_json,status)
+                    VALUES ('client','{}','client','[]','awaiting_entry');",
+            )
+            .expect("previous schema facts");
+        let mut store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        store.migrate(false).expect("group schema");
+        assert_eq!(SCHEMA_VERSION, 23);
+        for table in [
+            "orders",
+            "managed_brackets",
+            "order_groups",
+            "order_group_legs",
+        ] {
+            let count: i64 = store
+                .connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("table exists");
+            assert_eq!(
+                count,
+                i64::from(matches!(table, "orders" | "managed_brackets"))
+            );
+        }
+        store
+            .connection
+            .execute(
+                "INSERT INTO order_groups(group_id,account_id,instrument_id,kind,status,
+                    entry_order_id,management_json,revision)
+                 VALUES ('client','a','i','bracket','pending','entry','{}',1)",
+                [],
+            )
+            .expect("group references an existing entry");
+        assert!(
+            store
+                .connection
+                .execute(
+                    "INSERT INTO order_group_legs(group_id,order_id,role)
+                     VALUES ('client','missing','stop_loss')",
+                    [],
+                )
+                .is_err(),
+            "a leg must reference a real order"
+        );
+    }
     #[test]
     fn v19_instrument_fixture_keeps_terms_without_inventing_a_market_route() {
         let connection = Connection::open_in_memory().expect("fixture");
@@ -760,12 +827,12 @@ mod tests {
             .expect("fixture facts");
         drop(connection);
 
-        let store = TradingStore::open(&path, TradingRetention::default()).expect("V22 migration");
+        let store = TradingStore::open(&path, TradingRetention::default()).expect("migration");
         let version: u32 = store
             .connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, SCHEMA_VERSION);
         let (revision, accepted, updated, terminal): (u32, i64, i64, Option<i64>) = store
             .connection
             .query_row(
