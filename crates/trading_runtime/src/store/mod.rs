@@ -364,6 +364,9 @@ impl TradingStore {
             .backfill_terminal_brackets()
             .map_err(StoreError::Other)?;
         store
+            .backfill_active_brackets()
+            .map_err(StoreError::Other)?;
+        store
             .ensure_default_strategy_templates()
             .map_err(StoreError::Other)?;
         Ok(store)
