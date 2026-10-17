@@ -357,15 +357,7 @@ impl TradingStore {
             retention,
         };
         store.migrate(existed)?;
-        store
-            .backfill_protection_groups()
-            .map_err(StoreError::Other)?;
-        store
-            .backfill_terminal_brackets()
-            .map_err(StoreError::Other)?;
-        store
-            .backfill_active_brackets()
-            .map_err(StoreError::Other)?;
+        store.backfill_groups().map_err(StoreError::Other)?;
         store
             .ensure_default_strategy_templates()
             .map_err(StoreError::Other)?;

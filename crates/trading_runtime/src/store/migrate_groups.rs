@@ -15,8 +15,15 @@ const COMPLETE_LINKED_CHILDREN: &str = "b.stop_client_order_id IS NOT NULL
         = json_array_length(b.target_client_order_ids_json)";
 
 impl TradingStore {
-    pub(super) fn backfill_protection_groups(&self) -> Result<(), String> {
+    pub(super) fn backfill_groups(&self) -> Result<(), String> {
         let tx = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+        Self::project_protection_groups(&tx)?;
+        Self::project_terminal_brackets(&tx)?;
+        Self::project_active_brackets(&tx)?;
+        tx.commit_without_revision().map_err(database_error)
+    }
+
+    fn project_protection_groups(tx: &StepTx<'_>) -> Result<(), String> {
         tx.execute(
             "INSERT INTO order_groups(group_id, account_id, instrument_id, kind, status,
                 entry_order_id, management_json, template_id, template_revision, revision)
@@ -55,13 +62,12 @@ impl TradingStore {
             [],
         )
         .map_err(database_error)?;
-        tx.commit_without_revision().map_err(database_error)
+        Ok(())
     }
 
     /// Terminal brackets cannot execute again. Preserve their original orders and link
     /// retained children only when the complete legacy child set is still present.
-    pub(super) fn backfill_terminal_brackets(&self) -> Result<(), String> {
-        let tx = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+    fn project_terminal_brackets(tx: &StepTx<'_>) -> Result<(), String> {
         tx.execute(
             "INSERT INTO order_groups(group_id,account_id,instrument_id,kind,status,
                 entry_order_id,management_json,template_id,template_revision,revision)
@@ -141,13 +147,12 @@ impl TradingStore {
             [],
         )
         .map_err(database_error)?;
-        tx.commit_without_revision().map_err(database_error)
+        Ok(())
     }
 
     /// Project complete active historical brackets without changing the legacy
     /// writer's ownership of any order, quantity or bracket transition.
-    pub(super) fn backfill_active_brackets(&self) -> Result<(), String> {
-        let tx = StepTx::begin_shared(&self.connection).map_err(database_error)?;
+    fn project_active_brackets(tx: &StepTx<'_>) -> Result<(), String> {
         let complete = COMPLETE_LINKED_CHILDREN;
         tx.execute(
             &format!(
@@ -214,7 +219,7 @@ impl TradingStore {
             [],
         )
         .map_err(database_error)?;
-        tx.commit_without_revision().map_err(database_error)
+        Ok(())
     }
 }
 
@@ -257,7 +262,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        store.backfill_protection_groups().unwrap();
+        store.backfill_groups().unwrap();
         let actual: (String, String, String, String, String) = store
             .connection
             .query_row(
@@ -278,7 +283,7 @@ mod tests {
             )
         );
         let before = store.write_count();
-        store.backfill_protection_groups().unwrap();
+        store.backfill_groups().unwrap();
         assert_eq!(store.write_count(), before);
         assert_eq!(
             store
@@ -320,7 +325,7 @@ mod tests {
             connection,
             retention: TradingRetention::default(),
         };
-        assert!(store.backfill_protection_groups().is_err());
+        assert!(store.backfill_groups().is_err());
         let group_count: i64 = store
             .connection
             .query_row("SELECT count(*) FROM order_groups", [], |r| r.get(0))
@@ -329,6 +334,90 @@ mod tests {
             group_count, 1,
             "failed backfill rolls back newly projected rows"
         );
+    }
+
+    #[test]
+    fn failed_last_bracket_leg_rolls_back_all_historical_groups() {
+        let connection = Connection::open_in_memory().unwrap();
+        super::super::tests::create_schema_at(&connection, 23);
+        connection.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
+             VALUES ('sim','Sanitized','simulated','USD',2,'aeris-sim');
+             INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
+             VALUES ('BTC-USDC',2,0,'{}');
+             INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
+                 time_in_force,quantity_units,quantity_scale,filled_units,filled_scale,
+                 status,submitted_unix_nanos,provenance_json)
+             VALUES ('protect','protect-client','sim','BTC-USDC','sell','stop','gtc',
+                     1,0,0,0,'working',1,'{}'),
+                    ('entry','entry-client','sim','BTC-USDC','buy','limit','gtc',
+                     1,0,1,0,'filled',1,'{}'),
+                    ('stop','stop-client','sim','BTC-USDC','sell','stop','gtc',
+                     1,0,0,0,'working',2,'{}'),
+                    ('target','target-client','sim','BTC-USDC','sell','limit','gtc',
+                     1,0,0,0,'working',2,'{}');
+             INSERT INTO protective_orders(client_order_id,role)
+             VALUES ('protect-client','stop_loss');
+             CREATE TRIGGER fail_last_group_leg BEFORE INSERT ON order_group_legs
+             WHEN NEW.order_id='target' BEGIN SELECT RAISE(ABORT,'injected last leg failure'); END;"
+        ).unwrap();
+        let template = serde_json::json!({
+            "template_id":"historical","revision":1,"name":"Historical",
+            "stop_offset_ticks":8,
+            "targets":[{"offset_ticks":8,"quantity_percent":100}],
+            "trailing_stop":null,"break_even":null,"enabled":true
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
+                stop_client_order_id,target_client_order_ids_json,status)
+             VALUES ('entry-client',?1,'entry-client','stop-client',
+                '[\"target-client\"]','active')",
+                [&template],
+            )
+            .unwrap();
+        let store = TradingStore {
+            connection,
+            retention: TradingRetention::default(),
+        };
+        assert!(store.backfill_groups().is_err());
+        for table in ["order_groups", "order_group_legs"] {
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0,
+                "{table} must roll back"
+            );
+        }
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_last_group_leg")
+            .unwrap();
+        store.backfill_groups().unwrap();
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM order_groups", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT count(*) FROM order_group_legs", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        let before = store.write_count();
+        store.backfill_groups().unwrap();
+        assert_eq!(store.write_count(), before);
     }
 
     #[test]
@@ -429,7 +518,7 @@ mod tests {
             connection,
             retention: TradingRetention::default(),
         };
-        store.backfill_terminal_brackets().unwrap();
+        store.backfill_groups().unwrap();
         let facts: (String, String, String, i64) = store
             .connection
             .query_row(
@@ -469,7 +558,7 @@ mod tests {
         );
         assert_incomplete_terminal_bracket(&store, &template);
         let before = store.write_count();
-        store.backfill_terminal_brackets().unwrap();
+        store.backfill_groups().unwrap();
         assert_eq!(store.write_count(), before);
         assert_eq!(
             store
@@ -690,7 +779,7 @@ mod tests {
                 [&template],
             )
             .unwrap();
-        store.backfill_terminal_brackets().unwrap();
+        store.backfill_groups().unwrap();
         let incomplete: (String, i64) = store
             .connection
             .query_row(
