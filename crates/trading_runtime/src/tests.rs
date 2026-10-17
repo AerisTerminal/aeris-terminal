@@ -1650,6 +1650,59 @@ fn fixed_stop_bracket_template() -> BracketStrategyTemplate {
 }
 
 #[test]
+fn bracket_children_wait_for_next_quote_and_stop_cancels_targets() {
+    let directory = TestDirectory::new("wide-quote-bracket");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument");
+    let mut entry = market_order("wide-entry", OrderSide::Buy, 1, 1_000);
+    entry.quantity = quantity(2);
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: fixed_stop_bracket_template(),
+        })
+        .expect("bracket");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000))
+        .expect("entry fills and arms exits");
+    let armed = service.snapshot().expect("armed");
+    assert_eq!(armed.fills.len(), 1);
+    assert_eq!(
+        armed
+            .orders
+            .iter()
+            .filter(|order| order.status.is_open())
+            .count(),
+        3
+    );
+
+    let fills = service
+        .observe_market(observation(9_775, 10_225, 3, 3_000))
+        .expect("wide quote");
+    assert_eq!(
+        fills.len(),
+        1,
+        "a sibling must not execute from a stale candidate"
+    );
+    let settled = service.snapshot().expect("settled");
+    assert_eq!(settled.positions[0].net_quantity.units(), 0);
+    assert_eq!(
+        settled.managed_brackets[0].status,
+        ManagedBracketStatus::Completed
+    );
+    assert!(settled.orders.iter().all(|order| !order.status.is_open()));
+    service.shutdown(Duration::from_secs(2)).expect("shutdown");
+    let reopened = start_service(&directory);
+    let restored = reopened.snapshot().expect("restored");
+    assert_eq!(restored.orders, settled.orders);
+    assert_eq!(restored.fills, settled.fills);
+    assert_eq!(restored.managed_brackets, settled.managed_brackets);
+    reopened.shutdown(Duration::from_secs(2)).expect("shutdown");
+}
+
+#[test]
 fn bracket_off_grid_child_refuses_entry_without_writing_facts() {
     let directory = TestDirectory::new("bracket-grid-preflight");
     let service = start_service(&directory);

@@ -646,12 +646,42 @@ impl TradingCore {
             .iter()
             .map(|(order_id, _)| order_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        let fills = self.execute_market_fills(candidates, observation, &instrument)?;
-        if triggered || !fills.is_empty() {
+        if triggered || !candidates.is_empty() {
             self.bump_revision()?;
         }
-        self.reconcile_managed_brackets(&fills, observation, &instrument)?;
-        self.align_position_protection(&fills, observation)?;
+        let mut fills = Vec::with_capacity(candidates.len());
+        let candidates = candidates
+            .into_iter()
+            .filter_map(|(id, price)| {
+                self.state
+                    .orders
+                    .get(&id)
+                    .map(|order| (id, price, order.revision))
+            })
+            .collect::<Vec<_>>();
+        for (order_id, original_price, revision) in candidates {
+            // A preceding fill may complete a group and cancel this order. Re-read both
+            // membership and price after its reactions, never execute a stale candidate.
+            let Some(order) = self.state.orders.get(&order_id) else {
+                continue;
+            };
+            if !order.status.is_executable() || !self.quote_order_eligible(order, observation) {
+                continue;
+            }
+            let price = if order.revision == revision {
+                Some(original_price)
+            } else {
+                super::touch_price(order, observation)
+            };
+            let Some(price) = price else {
+                continue;
+            };
+            let executed =
+                self.execute_market_fills(vec![(order_id, price)], observation, &instrument)?;
+            self.reconcile_managed_brackets(&executed, observation, &instrument)?;
+            self.align_position_protection(&executed, observation)?;
+            fills.extend(executed);
+        }
         self.update_mark_to_market(observation, &instrument)?;
         self.evaluate_live_risk(observation.provenance.observed_unix_nanos)?;
         self.cancel_unfilled_immediate_orders(observation, &candidate_ids)?;
