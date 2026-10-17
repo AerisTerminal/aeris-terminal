@@ -16,6 +16,13 @@ use std::{
 };
 
 const CONTROL_CAPACITY: usize = 1_024;
+const DAY_NANOS: i64 = 86_400_000_000_000;
+
+pub(crate) fn next_utc_midnight(now: i64) -> Option<i64> {
+    now.checked_div_euclid(DAY_NANOS)
+        .and_then(|day| day.checked_add(1))
+        .and_then(|day| day.checked_mul(DAY_NANOS))
+}
 
 #[derive(Default)]
 pub(crate) struct QuoteBook {
@@ -33,6 +40,24 @@ struct QuoteEntry {
 }
 
 impl QuoteBook {
+    pub(crate) fn day_deadline(&self, id: &InstrumentId, now: i64) -> Result<i64, RejectReason> {
+        let session = self
+            .entries
+            .get(id)
+            .and_then(|entry| entry.session.as_ref())
+            .ok_or(RejectReason::SessionUnknown)?;
+        let deadline = if session.phase == aeris_instruments::SessionPhase::AlwaysOpen {
+            next_utc_midnight(now).ok_or(RejectReason::SessionUnknown)?
+        } else {
+            session
+                .session_end_unix_nanos
+                .ok_or(RejectReason::SessionUnknown)?
+        };
+        (deadline > now)
+            .then_some(deadline)
+            .ok_or(RejectReason::SessionUnknown)
+    }
+
     pub(crate) fn check_session(&self, id: &InstrumentId, now: i64) -> Result<(), RejectReason> {
         let session = self
             .entries
@@ -203,6 +228,43 @@ impl QuoteBook {
 
     pub(crate) fn retain(&mut self, instruments: &BTreeSet<InstrumentId>) {
         self.entries.retain(|id, _| instruments.contains(id));
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use aeris_instruments::{CalendarSourceKind, SessionPhase};
+
+    #[test]
+    fn always_open_deadline_is_next_utc_midnight_at_noon_and_one_second_before() {
+        let id = InstrumentId::try_new("BTC-USDC".to_string()).unwrap();
+        let mut book = QuoteBook::default();
+        let midnight = 1_760_313_600_000_000_000_i64; // 2025-10-13T00:00:00Z
+        book.entries.insert(
+            id.clone(),
+            QuoteEntry {
+                generation: 1,
+                session: Some(InstrumentSession {
+                    instrument_id: id.clone(),
+                    provider_generation: 1,
+                    phase: SessionPhase::AlwaysOpen,
+                    source: CalendarSourceKind::ProviderCalendar,
+                    session_end_unix_nanos: None,
+                    next_open_unix_nanos: None,
+                }),
+                ..QuoteEntry::default()
+            },
+        );
+        assert_eq!(
+            book.day_deadline(&id, midnight - 1_000_000_000),
+            Ok(midnight)
+        );
+        assert_eq!(
+            book.day_deadline(&id, midnight - 12 * 3_600_000_000_000),
+            Ok(midnight)
+        );
+        assert_eq!(book.day_deadline(&id, midnight), Ok(midnight + DAY_NANOS));
     }
 }
 

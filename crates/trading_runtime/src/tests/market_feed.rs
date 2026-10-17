@@ -70,6 +70,43 @@ fn live_session(id: InstrumentId, generation: u64) -> MarketFeedEvent {
     })
 }
 
+#[test]
+fn day_acceptance_fixes_session_deadline_and_restores_it() {
+    let directory = TestDirectory::new("day-acceptance-deadline");
+    let (service, _clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .expect("feed");
+    feed.push(MarketFeedEvent::Terms(terms())).expect("terms");
+    feed.push(live_session(route().instrument_id, 1))
+        .expect("session");
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .expect("live");
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .expect("quote");
+    service.status().expect("drain");
+    let mut request = market_order("day-session", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::Day;
+    let day = service.place_order(request).expect("day accepted");
+    assert_eq!(day.status, OrderStatus::Working);
+    assert_eq!(day.expires_at_unix_nanos, Some(2_000_000_000_000));
+    let mut gtc = market_order("gtc-session", OrderSide::Buy, 1, 1_000_000_000_000);
+    gtc.order_type = OrderType::Limit;
+    gtc.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    gtc.time_in_force = TimeInForce::GoodTillCancelled;
+    assert_eq!(
+        service.place_order(gtc).unwrap().expires_at_unix_nanos,
+        None
+    );
+    let before = service.snapshot().unwrap();
+    service.shutdown(Duration::from_secs(5)).unwrap();
+    let restarted = TradingService::start(config(&directory)).unwrap();
+    assert_eq!(restarted.snapshot().unwrap().orders, before.orders);
+    restarted.shutdown(Duration::from_secs(5)).unwrap();
+}
+
 fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {
     MarketFeedEvent::Feed {
         instrument_id: id,

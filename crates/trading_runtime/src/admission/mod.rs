@@ -903,6 +903,35 @@ impl TradingCore {
             staged_instruments,
             enforce_risk,
         )?;
+        let expires_at_unix_nanos = if command.time_in_force == TimeInForce::Day {
+            // Legacy replay fixtures do not install a routed market calendar. Real
+            // admission always requires the owner session supplied by the feed.
+            #[cfg(test)]
+            let legacy_deadline = if self
+                .state
+                .market_routes
+                .contains_key(&command.instrument_id)
+            {
+                None
+            } else {
+                crate::market::feed::next_utc_midnight(self.command_now)
+            };
+            #[cfg(not(test))]
+            let legacy_deadline: Option<i64> = None;
+            Some(
+                legacy_deadline
+                    .map_or_else(
+                        || {
+                            self.quote_book
+                                .day_deadline(&command.instrument_id, self.command_now)
+                        },
+                        Ok,
+                    )
+                    .map_err(|reason| reason.to_string())?,
+            )
+        } else {
+            None
+        };
         let order = Order {
             id: OrderId::try_new(format!("sim-order-{sequence}"))
                 .map_err(|error| error.to_string())?,
@@ -924,7 +953,7 @@ impl TradingCore {
             updated_unix_nanos: 0,
             eligible_after_unix_nanos: 0,
             triggered_unix_nanos: None,
-            expires_at_unix_nanos: None,
+            expires_at_unix_nanos,
             terminal_unix_nanos: None,
             provenance: command.provenance.clone(),
         };
