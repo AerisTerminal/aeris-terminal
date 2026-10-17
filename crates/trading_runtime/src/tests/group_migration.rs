@@ -131,6 +131,52 @@ fn write_v19_bracket_fixture(path: &std::path::Path, only_awaiting: bool) {
         .expect("fixture rows");
 }
 
+/// The pre-migration backup keeps the schema and rows the fixture started with.
+fn assert_v19_backup(directory: &TestDirectory) {
+    let backups = std::fs::read_dir(directory.0.join("backups"))
+        .expect("backup directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("trading-v19-") && name.ends_with(".sqlite3"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1, "exactly one V19 backup is written");
+    let connection = Connection::open(&backups[0]).expect("backup database");
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("backup version");
+    assert_eq!(version, 19, "the backup keeps the pre-migration schema");
+    let group_tables: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master
+             WHERE name IN ('order_groups','order_group_legs')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("backup tables");
+    assert_eq!(group_tables, 0, "the backup predates the group tables");
+    for (table, expected) in [
+        ("orders", 9_i64),
+        ("managed_brackets", 5),
+        ("protective_orders", 1),
+        ("instruments", 2),
+        ("accounts", 1),
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("backup rows");
+        assert_eq!(
+            count, expected,
+            "the backup keeps the original {table} rows"
+        );
+    }
+}
+
 fn rows(connection: &Connection, sql: &str) -> Vec<(String, String)> {
     connection
         .prepare(sql)
@@ -305,6 +351,7 @@ fn v19_awaiting_brackets_convert_exactly_at_startup() {
     );
     service.shutdown(Duration::from_secs(2)).expect("shutdown");
 
+    assert_v19_backup(&directory);
     assert_migrated_rows(&path);
 
     // Reopening the migrated database changes nothing and raises no further notice: the

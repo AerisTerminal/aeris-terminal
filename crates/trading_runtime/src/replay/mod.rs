@@ -609,6 +609,133 @@ fn replay_crypto_stop_restart_accounting_golden() {
     );
 }
 
+/// A restart must reproduce the durable facts exactly and raise no new recovery notice.
+fn assert_restart_preserves(before: &TradingSnapshot, after: &TradingSnapshot) {
+    assert_eq!(
+        (
+            &after.orders,
+            &after.order_events,
+            &after.fills,
+            &after.positions,
+            after.revision,
+            &after.recovery_notices,
+        ),
+        (
+            &before.orders,
+            &before.order_events,
+            &before.fills,
+            &before.positions,
+            before.revision,
+            &before.recovery_notices,
+        ),
+        "a restart reproduces the durable facts"
+    );
+}
+
+/// The durable group status of one bracket in the replay store.
+fn assert_group_status(harness: &ReplayHarness, group_id: &str, expected: &str) {
+    let database =
+        rusqlite::Connection::open(&harness.configuration.database_path).expect("group reader");
+    let status: String = database
+        .query_row(
+            "SELECT status FROM order_groups WHERE group_id=?1",
+            [group_id],
+            |row| row.get(0),
+        )
+        .expect("group row");
+    assert_eq!(status, expected);
+}
+
+/// An active bracket survives a clean restart: the recovered stop fills on the first
+/// eligible post-restart quote, cascades its targets and completes the group, and a second
+/// restart replays the facts identically.
+fn bracket_stop_after_restart_scenario() -> String {
+    let directory = TestDirectory::new("bracket-stop-restart-golden");
+    let clock = std::sync::Arc::new(crate::clock::ManualClock::new(5_000));
+    let mut harness = start_golden_service(&directory, clock.clone());
+    let mut trace = String::new();
+    harness
+        .observe_market(observation(9_975, 10_000, 1, 1_000))
+        .expect("fresh quote");
+    let mut entry = market_order("golden-bracket", OrderSide::Buy, 2, 2_000);
+    entry.quantity = quantity(2);
+    harness
+        .place_inline_bracket(PlaceInlineBracket {
+            entry,
+            template: BracketStrategyTemplate {
+                template_id: "golden-bracket".into(),
+                revision: 1,
+                name: "Golden stop and targets".to_string(),
+                stop_offset_ticks: 8,
+                targets: vec![
+                    BracketTarget {
+                        offset_ticks: 8,
+                        quantity_percent: 50,
+                    },
+                    BracketTarget {
+                        offset_ticks: 16,
+                        quantity_percent: 50,
+                    },
+                ],
+                trailing_stop: None,
+                break_even: None,
+                enabled: true,
+            },
+        })
+        .expect("bracket placed");
+    let entry_fills = harness
+        .observe_market(observation(9_975, 10_000, 3, 3_000))
+        .expect("entry fills");
+    assert_eq!(entry_fills.len(), 1, "the market entry fills at the ask");
+    assert_group_status(&harness, "golden-bracket", "active");
+    record("bracket active after entry fill", &harness, &mut trace);
+
+    let before_restart = harness.snapshot().expect("before restart");
+    harness.restart().expect("restart with an active bracket");
+    assert_restart_preserves(&before_restart, &harness.snapshot().expect("recovered"));
+    record("restart preserves the active bracket", &harness, &mut trace);
+
+    // The first post-restart quote fills the recovered stop at the bid and
+    // cascades both targets in the same step.
+    let exit_fills = harness
+        .observe_market(observation(9_750, 9_775, 4, 4_000))
+        .expect("stop fills after restart");
+    assert_eq!(exit_fills.len(), 1, "the recovered stop fills");
+    assert_eq!(
+        exit_fills[0].price,
+        FixedPoint::try_new(9_750, 2).expect("bid")
+    );
+    let flat = harness.snapshot().expect("flat snapshot");
+    assert_eq!(flat.positions[0].net_quantity.units(), 0);
+    assert!(
+        !flat.orders.iter().any(|order| order.status.is_open()),
+        "no leg survives the stop"
+    );
+    assert_group_status(&harness, "golden-bracket", "completed");
+    record(
+        "stop fills after restart and the group completes",
+        &harness,
+        &mut trace,
+    );
+
+    let committed = harness.snapshot().expect("before second restart");
+    harness.restart().expect("second restart");
+    assert_restart_preserves(&committed, &harness.snapshot().expect("second recovery"));
+    record("second restart preserves facts", &harness, &mut trace);
+    format!("{trace}\n{}", harness.transcript())
+}
+
+#[test]
+fn replay_bracket_stop_after_restart_golden() {
+    let first = bracket_stop_after_restart_scenario();
+    assert_eq!(first, bracket_stop_after_restart_scenario());
+    assert_eq!(
+        first.trim_end(),
+        include_str!("../tests/replay_bracket_stop_after_restart_golden_v2.txt")
+            .replace("\r\n", "\n")
+            .trim_end()
+    );
+}
 #[test]
 fn replay_multi_effect_quote_failed_commit_keeps_memory_and_disk_unchanged() {
     let directory = TestDirectory::new("multi-effect-quote-failure");

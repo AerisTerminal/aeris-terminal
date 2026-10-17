@@ -2913,6 +2913,114 @@ fn filled_stop_produces_a_fast_reentry_warning() {
         .expect("service stops");
 }
 
+#[test]
+fn management_moves_the_stop_only_at_one_tick_or_more() {
+    let directory = TestDirectory::new("management-sub-tick");
+    let service = start_service(&directory);
+    service
+        .register_instrument(instrument())
+        .expect("instrument registers");
+    // One trailing rule: activate 12 ticks above the entry, then trail 6 ticks behind.
+    let template = BracketStrategyTemplate {
+        template_id: "managed-sub-tick".to_string(),
+        revision: 1,
+        name: "Managed single target".to_string(),
+        stop_offset_ticks: 8,
+        targets: vec![BracketTarget {
+            offset_ticks: 100,
+            quantity_percent: 100,
+        }],
+        trailing_stop: Some(TrailingStopRule {
+            activation_ticks: 12,
+            distance_ticks: 6,
+        }),
+        break_even: None,
+        enabled: true,
+    };
+    let entry_client = ClientOrderId::try_new("managed-entry").expect("client id");
+    service
+        .place_inline_bracket(PlaceInlineBracket {
+            entry: market_order("managed-entry", OrderSide::Buy, 1, 1_000_000_000),
+            template,
+        })
+        .expect("bracket accepted");
+    service
+        .observe_market(observation(9_975, 10_000, 2, 2_000_000_000))
+        .expect("entry fills at 100.00; stop starts at 98.00");
+    let stop_client = managed_child_client_order_id(&entry_client, "stop", 0).expect("stop id");
+    let stop_price = |service: &TradingService| {
+        service
+            .snapshot()
+            .expect("snapshot")
+            .orders
+            .into_iter()
+            .find(|order| order.client_order_id == stop_client)
+            .expect("stop order")
+            .stop_price
+    };
+    // A 13-tick run activates the trail: the stop moves to bid - 6 ticks = 101.75.
+    service
+        .observe_market(observation(10_325, 10_350, 3, 3_000_000_000))
+        .expect("trailing activates");
+    assert_eq!(
+        stop_price(&service),
+        FixedPoint::try_new(10_175, 2).ok(),
+        "the trail tightens the stop to 101.75"
+    );
+
+    // A sub-tick further move (0.05 of a 0.25 tick) writes no event and no transaction.
+    let settled = service.snapshot().expect("settled snapshot");
+    service
+        .observe_market(observation(10_330, 10_355, 4, 4_000_000_000))
+        .expect("sub-tick quote");
+    let after_sub_tick = service.snapshot().expect("sub-tick snapshot");
+    assert_eq!(
+        (
+            after_sub_tick.revision,
+            after_sub_tick.order_events.len(),
+            stop_price(&service),
+        ),
+        (
+            settled.revision,
+            settled.order_events.len(),
+            FixedPoint::try_new(10_175, 2).ok(),
+        ),
+        "a sub-tick move produces no event and no transaction"
+    );
+
+    // A full further tick tightens the stop again with a management event.
+    service
+        .observe_market(observation(10_350, 10_375, 5, 5_000_000_000))
+        .expect("one-tick quote");
+    let after_tick = service.snapshot().expect("one-tick snapshot");
+    assert_eq!(
+        stop_price(&service),
+        FixedPoint::try_new(10_200, 2).ok(),
+        "the trail follows a full tick"
+    );
+    let stop_id = after_tick
+        .orders
+        .iter()
+        .find(|order| order.client_order_id == stop_client)
+        .expect("stop order")
+        .id
+        .clone();
+    assert_eq!(
+        after_tick.order_events.len(),
+        settled.order_events.len() + 1,
+        "exactly one management event is written"
+    );
+    assert_leg_event(
+        &after_tick,
+        &stop_id,
+        OrderEventKind::Modified,
+        aeris_trading::OrderEventReason::Management,
+    );
+    service
+        .shutdown(Duration::from_secs(2))
+        .expect("service stops");
+}
+
 fn replace_risk_policy_mid_trade(service: &TradingService) {
     service
         .register_risk_profile(RiskProfile {

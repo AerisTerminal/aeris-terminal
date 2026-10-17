@@ -1145,7 +1145,7 @@ fn day_pending_orders_rest_good_till_cancelled_and_market_orders_fill_or_cancel(
 
 #[test]
 fn a_broker_bracket_sends_server_protection_at_the_template_distances() {
-    let (_directory, service, receiver) = setup("venue-bracket");
+    let (directory, service, receiver) = setup("venue-bracket");
     let template = crate::BracketStrategyTemplate {
         template_id: "broker-bracket".into(),
         revision: 1,
@@ -1181,6 +1181,12 @@ fn a_broker_bracket_sends_server_protection_at_the_template_distances() {
         )
     );
     assert_eq!(service.snapshot().expect("snapshot").managed_brackets, []);
+    // Broker brackets stay server-side: the local group authority never records them.
+    let database = rusqlite::Connection::open(&config(&directory).database_path).expect("database");
+    let groups: i64 = database
+        .query_row("SELECT count(*) FROM order_groups", [], |row| row.get(0))
+        .expect("group count");
+    assert_eq!(groups, 0, "a broker bracket creates no order-group rows");
 }
 
 fn risk_profile(daily_loss_limit: i64, max_contracts: i64) -> crate::RiskProfile {

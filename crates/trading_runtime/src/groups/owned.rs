@@ -848,9 +848,10 @@ impl TradingCore {
         };
         let favorable_ticks =
             favorable_tick_distance(entry_price, favorable_price, entry.side, tick_units)?;
-        let mut next_stop = stop
+        let current_stop = stop
             .stop_price
             .ok_or_else(|| "order group stop price is missing".to_string())?;
+        let mut next_stop = current_stop;
         if let Some(rule) = group.management.break_even
             && favorable_ticks >= i64::from(rule.activation_ticks)
         {
@@ -873,7 +874,10 @@ impl TradingCore {
             )?;
             next_stop = tighter_stop(next_stop, price, entry.side);
         }
-        Ok((Some(next_stop) != stop.stop_price).then_some(next_stop))
+        // Management writes only real moves: a candidate that tightens the stop by less
+        // than one tick produces no event and no transaction.
+        let moved = next_stop.units().abs_diff(current_stop.units());
+        Ok((moved >= tick_units.unsigned_abs()).then_some(next_stop))
     }
 
     /// Moves an active group bracket's stop with its trailing and break-even rules, writing a
