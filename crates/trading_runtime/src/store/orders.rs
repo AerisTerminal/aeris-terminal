@@ -17,6 +17,31 @@ const LOAD_ORDERS_SQL: &str = "SELECT id, client_order_id, account_id, instrumen
     FROM orders ORDER BY submitted_unix_nanos";
 
 impl TradingStore {
+    /// Backfill only verified continuous-market DAY deadlines, atomically.
+    pub(crate) fn backfill_day_deadlines(
+        &mut self,
+        deadlines: &[(OrderId, i64)],
+    ) -> Result<(), String> {
+        if deadlines.is_empty() {
+            return Ok(());
+        }
+        let tx = StepTx::begin(self).map_err(database_error)?;
+        for (id, deadline) in deadlines {
+            let changed = tx
+                .execute(
+                    "UPDATE orders SET expires_at_unix_nanos = ?1
+                     WHERE id = ?2 AND expires_at_unix_nanos IS NULL
+                       AND time_in_force = 'day' AND status IN ('working', 'partially_filled', 'inactive')",
+                    params![deadline, id.as_str()],
+                )
+                .map_err(database_error)?;
+            if changed != 1 {
+                return Err("DAY deadline recovery found a changed order".into());
+            }
+        }
+        tx.commit().map_err(database_error)
+    }
+
     /// All the facts produced by one simulated order command are committed together.
     pub(crate) fn commit_order_step(&mut self, changes: &super::OrderStep) -> Result<(), String> {
         let tx = StepTx::begin(self).map_err(database_error)?;

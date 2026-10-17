@@ -245,6 +245,51 @@ impl TradingCore {
             .min()
     }
 
+    /// The persisted verified route identifies an always-open calendar even
+    /// before the market feed has attached. Other legacy DAY rows stay fenced
+    /// until their acceptance session can be established without a guess.
+    pub(crate) fn recover_continuous_day_deadlines(&mut self) -> Result<(), String> {
+        let recovered = self
+            .state
+            .orders
+            .open_orders()
+            .filter(|order| {
+                order.time_in_force == TimeInForce::Day
+                    && order.expires_at_unix_nanos.is_none()
+                    && is_simulated(&self.state.accounts, &order.account_id)
+                    && self
+                        .state
+                        .instruments
+                        .get(&order.instrument_id)
+                        .is_some_and(|instrument| instrument.contract.session_hours.is_empty())
+                    && self
+                        .state
+                        .market_routes
+                        .get(&order.instrument_id)
+                        .is_some_and(|route| {
+                            aeris_instruments::calendar::classify_venue(&route.venue_id)
+                                == Some(aeris_instruments::calendar::Venue::Continuous)
+                        })
+            })
+            .filter_map(|order| {
+                crate::market::feed::next_utc_midnight(order.accepted_unix_nanos)
+                    .map(|deadline| (order.id.clone(), deadline))
+            })
+            .collect::<Vec<_>>();
+        if recovered.is_empty() {
+            return Ok(());
+        }
+        self.store.backfill_day_deadlines(&recovered)?;
+        for (id, deadline) in recovered {
+            if let Some(mut order) = self.state.orders.get(&id).cloned() {
+                order.expires_at_unix_nanos = Some(deadline);
+                self.state.orders.insert(id, order);
+            }
+        }
+        self.state.revision = self.store.revision()?;
+        Ok(())
+    }
+
     pub(crate) fn expire_due_day_orders(&mut self) -> Result<(), String> {
         let due = self
             .state

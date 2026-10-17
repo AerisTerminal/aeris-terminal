@@ -310,6 +310,65 @@ fn migrated_day_without_deadline_cannot_fill_before_calendar_recovery() {
     }
 }
 
+#[test]
+fn migrated_always_open_day_recovers_acceptance_midnight_before_first_command() {
+    let directory = TestDirectory::new("day-migrated-continuous");
+    let (service, clock) = feed_service(&directory);
+    let feed = service
+        .attach_market_feed(Arc::new(RecordedInterest::default()))
+        .unwrap();
+    let mut continuous = terms();
+    continuous.route.venue_id = "HYPERLIQUID".into();
+    continuous.instrument_class = aeris_instruments::InstrumentClass::CryptoPerpetual;
+    continuous.session_hours.clear();
+    feed.push(MarketFeedEvent::Terms(continuous)).unwrap();
+    feed.push(MarketFeedEvent::Session(
+        aeris_trading::market::InstrumentSession {
+            instrument_id: route().instrument_id,
+            provider_generation: 1,
+            phase: SessionPhase::AlwaysOpen,
+            source: CalendarSourceKind::AlwaysOpen,
+            session_end_unix_nanos: None,
+            next_open_unix_nanos: None,
+        },
+    ))
+    .unwrap();
+    feed.push(feed_state(route().instrument_id, 1, FeedState::Live))
+        .unwrap();
+    feed.push(MarketFeedEvent::Quote(quote(1, 1, 10_000, 10_025)))
+        .unwrap();
+    service.status().unwrap();
+    let mut request = market_order("migrated-continuous", OrderSide::Buy, 1, 1_000_000_000_000);
+    request.order_type = OrderType::Limit;
+    request.limit_price = Some(FixedPoint::try_new(9_900, 2).unwrap());
+    request.time_in_force = TimeInForce::Day;
+    let working = service.place_order(request).unwrap();
+    let acceptance_midnight = working.expires_at_unix_nanos.unwrap();
+    service.shutdown(Duration::from_secs(5)).unwrap();
+
+    let mut configuration = config(&directory);
+    rusqlite::Connection::open(&configuration.database_path)
+        .unwrap()
+        .execute(
+            "UPDATE orders SET expires_at_unix_nanos = NULL WHERE id = ?1",
+            [working.id.as_str()],
+        )
+        .unwrap();
+    clock.set_wall_unix_nanos(acceptance_midnight + 1);
+    configuration.clock = clock;
+    let recovered = start_service_with_config(configuration);
+    let snapshot = recovered.snapshot().unwrap();
+    let order = snapshot
+        .orders
+        .iter()
+        .find(|order| order.id == working.id)
+        .unwrap();
+    assert_eq!(order.expires_at_unix_nanos, Some(acceptance_midnight));
+    assert_eq!(order.status, OrderStatus::Expired);
+    assert_eq!(order.terminal_unix_nanos, Some(acceptance_midnight));
+    recovered.shutdown(Duration::from_secs(5)).unwrap();
+}
+
 fn feed_state(id: InstrumentId, generation: u64, state: FeedState) -> MarketFeedEvent {
     MarketFeedEvent::Feed {
         instrument_id: id,
