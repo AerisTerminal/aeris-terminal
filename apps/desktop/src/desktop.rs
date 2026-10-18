@@ -910,6 +910,14 @@ struct WorkspaceSurface {
     live_evidence_publications: u16,
 }
 
+/// Pane-originated notice changes are delivered to the window's single toast owner.
+enum PaneNoticeEvent {
+    Post(notification_center::UserNotice),
+    Clear(notification_center::NoticeKey),
+}
+
+impl gpui::EventEmitter<PaneNoticeEvent> for WorkspaceSurface {}
+
 struct ContextCredentialDialogState {
     inputs: Vec<(ContextSource, Entity<InputState>)>,
 }

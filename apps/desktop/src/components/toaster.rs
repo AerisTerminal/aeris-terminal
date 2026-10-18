@@ -333,6 +333,11 @@ pub(super) struct Toaster {
 }
 
 impl Toaster {
+    #[cfg(test)]
+    pub(super) fn notices(&self) -> &[UserNotice] {
+        self.notices.notices()
+    }
+
     /// A keyed notice has one presentation card even if the failure repeats. The center is the
     /// owner of its lifetime and bound; the toast is only the animated visible projection.
     pub(super) fn post_notice(&mut self, stack: ToastStack, notice: UserNotice, now: Instant) {
@@ -843,6 +848,15 @@ impl Toaster {
 
     /// Drops the toasts of panes that no longer exist.
     fn retain_stacks(&mut self, live: impl Fn(ToastStack) -> bool) {
+        let retired_keys: Vec<_> = self
+            .toasts
+            .iter()
+            .filter(|toast| !live(toast.stack))
+            .filter_map(|toast| toast.notice_key.clone())
+            .collect();
+        for key in retired_keys {
+            self.notices.clear(&key);
+        }
         self.toasts.retain(|toast| live(toast.stack));
         self.dismissed_status.retain(|stack, _| live(*stack));
         if self.hovered.is_some_and(|stack| !live(stack)) {
@@ -1836,9 +1850,26 @@ mod tests {
         let mut toaster = Toaster::default();
         toast(&mut toaster, stack(1), start);
         toast(&mut toaster, stack(2), start);
+        toaster.post_notice(
+            stack(1),
+            notification_center::UserNotice {
+                key: notification_center::NoticeKey {
+                    scope: 1,
+                    kind: "order_book_demand",
+                },
+                severity: notification_center::NoticeSeverity::Warning,
+                tone: notification_center::NoticeTone::Warning,
+                source: notification_center::NoticeSource::Workspace,
+                title: "Order book unavailable",
+                detail: "Try again later".into(),
+                lifetime: notification_center::NoticeLifetime::UntilCleared,
+            },
+            start,
+        );
         toaster.set_hovered(stack(1), true, start);
         toaster.retain_stacks(|stack_id| stack_id == stack(2));
         assert_eq!(toaster.toasts.len(), 1);
+        assert_eq!(toaster.notices.notices(), []);
         assert_eq!(toaster.hovered, None);
     }
 

@@ -112,6 +112,7 @@ impl TerminalApp {
                 ConsumerResourceClass::Background
             };
             for pane in &workspace.panes {
+                Self::wire_pane_notices(&pane.surface, cx);
                 pane.surface.update(cx, |surface, _| {
                     surface.set_market_message_wake(market_frame_wake.callback());
                     surface.set_market_resource_class(resource_class);
@@ -125,6 +126,21 @@ impl TerminalApp {
                 .detach();
             }
         }
+    }
+
+    fn wire_pane_notices(surface: &Entity<WorkspaceSurface>, cx: &mut Context<Self>) {
+        cx.subscribe(surface, |app, surface, event: &PaneNoticeEvent, cx| {
+            let now = Instant::now();
+            match event {
+                PaneNoticeEvent::Post(notice) => {
+                    app.toaster
+                        .post_notice(toaster::ToastStack::of(&surface), notice.clone(), now);
+                }
+                PaneNoticeEvent::Clear(key) => app.toaster.clear_notice(key, now),
+            }
+            cx.notify();
+        })
+        .detach();
     }
 
     fn start_workspace_layout_persistence(
@@ -2758,6 +2774,7 @@ impl TerminalApp {
             window,
             cx,
         );
+        Self::wire_pane_notices(&surface, cx);
         surface.update(cx, |workspace, workspace_cx| {
             workspace.apply_theme(&self.theme, workspace_cx);
             workspace.set_market_message_wake(self.market_frame_wake.callback());
@@ -2859,6 +2876,7 @@ impl TerminalApp {
             window,
             cx,
         );
+        Self::wire_pane_notices(&surface, cx);
         surface.update(cx, |surface, surface_cx| {
             surface.apply_theme(&self.theme, surface_cx);
             surface.set_market_resource_class(ConsumerResourceClass::Foreground);

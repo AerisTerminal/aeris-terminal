@@ -11,16 +11,37 @@ use std::sync::{atomic::AtomicU64, mpsc};
 
 struct PaneHarness {
     pane: Entity<WorkspaceSurface>,
+    window: Entity<PaneWindow>,
     market: FixtureMarketWorker,
     publications: MarketWorkerSender,
-    _commands: mpsc::Receiver<MarketWorkerCommand>,
+    commands: Option<mpsc::Receiver<MarketWorkerCommand>>,
 }
 
-struct PaneWindow(Entity<WorkspaceSurface>);
+struct PaneWindow {
+    pane: Entity<WorkspaceSurface>,
+    toaster: Toaster,
+}
+
+impl toaster::ToastHost for PaneWindow {
+    fn toaster_mut(&mut self) -> &mut Toaster {
+        &mut self.toaster
+    }
+}
 
 impl Render for PaneWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().children(self.0.read(cx).chart.clone())
+        div()
+            .relative()
+            .size_full()
+            .children(self.pane.read(cx).chart.clone())
+            .children(toaster::toast_stack(&toaster::ToastLayer {
+                host: &cx.entity(),
+                toaster: &self.toaster,
+                stack: toaster::ToastStack::of(&self.pane),
+                price_axis_width: 64.0,
+                theme: &AerisTheme::dark(),
+                now: Instant::now(),
+            }))
     }
 }
 
@@ -58,15 +79,35 @@ impl PaneHarness {
                 cx,
             );
             cx.observe(&pane, |_, _, cx| cx.notify()).detach();
-            PaneWindow(pane)
+            cx.subscribe(
+                &pane,
+                |window: &mut PaneWindow, pane, event: &PaneNoticeEvent, cx| {
+                    let now = Instant::now();
+                    match event {
+                        PaneNoticeEvent::Post(notice) => window.toaster.post_notice(
+                            toaster::ToastStack::of(&pane),
+                            notice.clone(),
+                            now,
+                        ),
+                        PaneNoticeEvent::Clear(key) => window.toaster.clear_notice(key, now),
+                    }
+                    cx.notify();
+                },
+            )
+            .detach();
+            PaneWindow {
+                pane,
+                toaster: Toaster::default(),
+            }
         });
-        let pane = cx.read(|cx| view.read(cx).0.clone());
+        let pane = cx.read(|cx| view.read(cx).pane.clone());
         (
             Self {
                 pane,
+                window: view,
                 market: FixtureMarketWorker::try_new().expect("fixture market"),
                 publications,
-                _commands: requests,
+                commands: Some(requests),
             },
             cx,
         )
@@ -99,6 +140,29 @@ impl PaneHarness {
             assert_eq!(pane.poll_market_worker(cx), 1);
         });
     }
+}
+
+#[gpui::test]
+fn pane_harness_disconnected_order_book_request_renders_one_notice(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    drop(harness.commands.take());
+    harness.pane.update(cx, |pane, cx| {
+        pane.set_side_panel_visible(SidePanel::OrderBook, true, cx);
+        pane.set_side_panel_visible(SidePanel::OrderBook, false, cx);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let window = harness.window.read(cx);
+        let notices = window.toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "Order book unavailable");
+        assert_eq!(notices[0].key.scope, harness.pane.entity_id().as_u64());
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "failure rendered as a toast card"
+    );
 }
 
 #[gpui::test]

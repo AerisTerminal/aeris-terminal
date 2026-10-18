@@ -5316,7 +5316,27 @@ impl WorkspaceSurface {
             } else {
                 self.menu_state.order_book_column_open = false;
             }
-            let _ = self.market_worker.try_set_order_book_visible(visible);
+            let key = notification_center::NoticeKey {
+                scope: cx.entity_id().as_u64(),
+                kind: "order_book_demand",
+            };
+            if self
+                .market_worker
+                .try_set_order_book_visible(visible)
+                .is_err()
+            {
+                cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+                    key,
+                    severity: notification_center::NoticeSeverity::Warning,
+                    tone: notification_center::NoticeTone::Warning,
+                    source: notification_center::NoticeSource::Workspace,
+                    title: "Order book unavailable",
+                    detail: "The order book request could not be sent. Try again later.".into(),
+                    lifetime: notification_center::NoticeLifetime::UntilCleared,
+                }));
+            } else {
+                cx.emit(PaneNoticeEvent::Clear(key));
+            }
         }
         self.chart_persistence_dirty = true;
         cx.notify();
