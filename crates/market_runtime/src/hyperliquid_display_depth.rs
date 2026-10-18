@@ -425,7 +425,9 @@ mod tests {
     fn idle_stop_parks_the_worker_instead_of_ending_it() {
         let stop = Arc::new(AtomicBool::new(false));
         let (events, _events_received) = sync_channel(8);
-        let (controls, control_receiver) = sync_channel(1);
+        // A zero-capacity channel acknowledges each control when the worker
+        // receives it, instead of guessing from a sleep under parallel load.
+        let (controls, control_receiver) = sync_channel(0);
         let wake = crate::market_service::ProviderCoordinatorWake::for_tests();
         let worker_stop = Arc::clone(&stop);
         let worker = std::thread::Builder::new()
@@ -440,21 +442,14 @@ mod tests {
                 );
             })
             .expect("worker spawns");
-        // Let the worker reach its idle branch, then deliver one idle stop.
-        std::thread::sleep(Duration::from_millis(1_200));
-        controls
-            .send(HyperliquidDisplayDepthControl::Stop)
-            .expect("idle stop is delivered");
-        std::thread::sleep(Duration::from_millis(1_200));
-        // The worker must still own its control channel: an idle stop parks
-        // the socket without ending the thread a later demand still needs.
-        controls
-            .try_send(HyperliquidDisplayDepthControl::Stop)
-            .expect("worker stays alive across an idle stop");
+        // Even when the first control is drained on startup, a later one
+        // reaches the parked receive. Both must leave that receive alive.
+        for _ in 0..3 {
+            controls
+                .send(HyperliquidDisplayDepthControl::Stop)
+                .expect("worker stays alive across idle stops");
+        }
         stop.store(true, Ordering::Release);
-        controls
-            .send(HyperliquidDisplayDepthControl::Stop)
-            .expect("stop wakes the parked worker");
         worker.join().expect("worker exits cleanly");
     }
     #[test]

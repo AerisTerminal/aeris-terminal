@@ -931,6 +931,7 @@ fn run_endurance_frame(
 fn collect_endurance_with_checkpoints(
     duration: Duration,
     checkpoint_interval: Duration,
+    minimum_frames: u64,
     mut checkpoint: impl FnMut(&DesktopEnduranceEvidence) -> Result<(), Box<dyn Error>>,
 ) -> Result<DesktopEnduranceEvidence, Box<dyn Error>> {
     validate_endurance_duration(duration)?;
@@ -950,7 +951,10 @@ fn collect_endurance_with_checkpoints(
     let mut counters = EnduranceCounters::default();
     let mut gate = FramePollGate::default();
 
-    while Instant::now() < deadline {
+    // A short fixture run must complete its asserted number of frames even
+    // when the process is descheduled for its entire wall-clock window.
+    // Production endurance runs pass zero and remain strictly time-bounded.
+    while Instant::now() < deadline || counters.frame_cycles < minimum_frames {
         let frame_started = Instant::now();
         run_endurance_frame(&sender, &receiver, &snapshot, &mut gate, &mut counters)?;
 
@@ -1015,7 +1019,7 @@ fn collect_endurance_with_checkpoints(
 
 #[cfg(test)]
 fn collect_endurance(duration: Duration) -> Result<DesktopEnduranceEvidence, Box<dyn Error>> {
-    collect_endurance_with_checkpoints(duration, ENDURANCE_CHECKPOINT_INTERVAL, |_| Ok(()))
+    collect_endurance_with_checkpoints(duration, ENDURANCE_CHECKPOINT_INTERVAL, 2, |_| Ok(()))
 }
 
 #[cfg(feature = "diagnostics")]
@@ -1040,6 +1044,7 @@ pub(crate) fn run_endurance(report_path: &Path, duration: Duration) -> Result<()
     let report = collect_endurance_with_checkpoints(
         duration,
         ENDURANCE_CHECKPOINT_INTERVAL,
+        0,
         |checkpoint| write_endurance_evidence_atomically(report_path, checkpoint),
     )?;
     write_endurance_evidence_atomically(report_path, &report)?;
@@ -1470,11 +1475,15 @@ mod tests {
         write_endurance_evidence_atomically(&report_path, &initial)
             .expect("initial checkpoint is written");
 
-        let result =
-            collect_endurance_with_checkpoints(window, Duration::from_millis(20), |checkpoint| {
+        let result = collect_endurance_with_checkpoints(
+            window,
+            Duration::from_millis(20),
+            0,
+            |checkpoint| {
                 write_endurance_evidence_atomically(&report_path, checkpoint)?;
                 Err("simulated interruption after checkpoint".into())
-            });
+            },
+        );
         assert!(result.is_err());
         let persisted: serde_json::Value = serde_json::from_slice(
             &std::fs::read(&report_path).expect("checkpoint remains readable"),
