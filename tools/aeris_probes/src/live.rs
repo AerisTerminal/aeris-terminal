@@ -12,7 +12,9 @@ use aeris_market_runtime::{
 };
 use serde_json::{Value, json};
 
-use crate::{Evidence, ProbeError, ProbeResult, cli::Options, market, utc_now};
+use aeris_probes::{Evidence, ProbeError, ProbeResult, market, utc_now};
+
+use crate::cli::Options;
 
 const CLIENT: u64 = 77;
 const CONSUMER: u64 = 78;
@@ -99,7 +101,9 @@ impl Observation {
             {
                 let snapshot = &publication.snapshot;
                 if snapshot.bars.len() > MAXIMUM_PROBE_BARS {
-                    return Err(ProbeError::Invariant("snapshot exceeds probe bar capacity"));
+                    return Err(ProbeError::Invariant(
+                        "snapshot exceeds probe bar capacity".to_string(),
+                    ));
                 }
                 self.bars = snapshot.bars.to_vec();
                 self.forming = snapshot.forming;
@@ -122,7 +126,7 @@ impl Observation {
                     SeriesTailOperation::Append => {
                         if self.bars.len() >= MAXIMUM_PROBE_BARS {
                             return Err(ProbeError::Invariant(
-                                "live tail exceeds probe bar capacity",
+                                "live tail exceeds probe bar capacity".to_string(),
                             ));
                         }
                         if self.bars.last().is_none_or(|bar| {
@@ -200,7 +204,7 @@ impl Observation {
             }
         }
         Err(ProbeError::Invariant(
-            "timed out waiting for a live market observation",
+            "timed out waiting for a live market observation".to_string(),
         ))
     }
 }
@@ -374,7 +378,7 @@ fn quote_lease(
     let selected = state
         .selected
         .as_ref()
-        .ok_or(ProbeError::Invariant("catalog missing"))?;
+        .ok_or_else(|| ProbeError::Invariant("catalog missing".to_string()))?;
     let key = InstrumentStreamKey {
         provider: selected.instrument.provider.clone(),
         instrument: InstrumentId::try_new(selected.instrument.instrument_id.clone())
@@ -443,12 +447,12 @@ fn page_history(
     let first = state
         .bars
         .first()
-        .ok_or(ProbeError::Invariant("no history"))?
+        .ok_or_else(|| ProbeError::Invariant("no history".to_string()))?
         .exchange_timestamp_unix_nanos;
     let last = state
         .bars
         .last()
-        .ok_or(ProbeError::Invariant("no history"))?
+        .ok_or_else(|| ProbeError::Invariant("no history".to_string()))?
         .exchange_timestamp_unix_nanos;
     let viewport = Viewport::try_new(first - 400 * 60_000_000_000, last)
         .map_err(|error| ProbeError::Runtime(error.to_string()))?;

@@ -1397,6 +1397,7 @@ impl TradingCore {
             .load_legacy_awaiting_brackets()
             .map_err(StoreError::Other)?;
         let state = store.load_state().map_err(StoreError::Other)?;
+        let interest_revision = store.interest_revision().map_err(StoreError::Other)?;
         let recovery_quote_floor = clock.wall_unix_nanos();
         let mut core = Self {
             store,
@@ -1422,7 +1423,7 @@ impl TradingCore {
             interest_sink: None,
             ticket_interest: BTreeMap::new(),
             published_interest: Vec::new(),
-            interest_revision: 0,
+            interest_revision,
             observation_cursors: BTreeMap::new(),
             recovery_quote_floor,
             execution,

@@ -540,7 +540,7 @@ Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VA
 
 ### M5 trading engine
 
-Status: in progress; M5.1-M5.11 code and tests are complete, M5.12 remains open. The milestone GUI/probe pass remains outstanding.
+Status: M5.1-M5.12 code and tests are complete. The milestone GUI/probe pass remains outstanding (the cTrader demo probe run also waits on explicit maintainer approval).
 
 - [x] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -747,7 +747,22 @@ Status: in progress; M5.1-M5.11 code and tests are complete, M5.12 remains open.
     machine: working-set build at 50,100 stored orders (50,000 terminal + 100 open + 601 fills) 3.44 ms; the cold-load
     snapshot path succeeds. VAL-TRD-066/067 covered by the seven `tests/publication.rs` tests; the >10,000-order GUI
     pass (VAL-TRD-068) stays with the milestone GUI pass; TR-05's runtime part closes here.
-- [ ] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
+- [x] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
+  - `tools/aeris_probes` gains `paper_trading_probe` and `ctrader_demo_probe` bins on a shared envelope lib. The paper
+    probe wires the real market-runtime-to-trading feed on a validation root, registers a practice account (with a fee
+    schedule or `--no-fees`), and exercises a market buy, resting limit, stop-limit, inline bracket, IOC, DAY expiry and
+    a stale-quote rejection, then restarts the trading owner on the same database, checks field-identical durable state
+    and quote resume without UI, flattens all and proves the ledger identity. Both live runs passed all 20 checks
+    (fees run: fill at recorded ask with 0 ms quote age, restart digest differences [], ledger 9,999,778 =
+    10,000,000 - 220 - 2; no-fees run: fees 0, balance == deposit). Roots kept for the post-run database assertions:
+    `%LOCALAPPDATA%\Temp\aeris_validation\m512-paper` and `m512-paper-nofees`.
+  - The probe exposed and fixed three production defects: catalog installs now re-arm the demand flush for waiting
+    trading leases (install_provider_instrument), the quote-interest revision is durable in the store metadata so an
+    owner restart resumes above the coordinator fence, and a provider reconnect republishes trading sessions before
+    Feed::Live. Each fix carries a regression test.
+  - The cTrader demo probe is implemented (session/venue/reconcile checks, live-account refusal, account masking to
+    the last two digits, far-limit place-and-cancel) but its run stays blocked until the maintainer approves it with
+    the desktop closed; it was never executed here.
 
 ### M6 desktop bridge
 
@@ -1055,6 +1070,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.9 part 3/3 test(trading): close out emergency operations - scripted cTrader two-symbol flatten parity (VAL-TRD-062: close requests for both positions, scoped variant closes one) and the locked-account reverse refusal (VAL-TRD-063). TR-03 and TR-04 closed; TR-12's reverse part closed. M5.9 complete except the milestone GUI flatten-all pass (VAL-TRD-064). Runtime 264 passed/5 ignored; full gate green.
 - 2026-10-18 M5.10 feat(trading): persist risk sessions and roll them at the account boundary - V27 adds `risk_sessions` (seeded per registered profile) and `risk_locks.kind`; the owner timer rolls the session in one transaction (durable row with realized baseline, daily meter reset, daily-loss/trailing-drawdown lock release, boundary equity sample); bracket admission counts the template stop as attached; `set_risk_session_boundary` supports 17:00 America/Chicago via aeris_instruments DST math; session P&L falls back to the registration baseline for gated pre-group stores and pre-V27 locks read as manual. TR-09 runtime part closed. VAL-TRD-065 integration tests cover UTC-midnight and Chicago-close rollover, restart survival and the bracket no-warning path; v26->v27 migration test. Runtime 272 passed/5 ignored; workspace 2317 passed; fmt, strict Clippy and naming_check green.
 - 2026-10-18 M5.11 feat(trading): publish bounded working-set changes with paged history - subscribe/TradingSubscription with an 8-subscriber cap, a 1,024-event per-subscriber slot and lagged resync; mark coalescing at one publication per 100 ms with trailing flush; idle runtimes publish nothing; paged order history (500-row pages, exact-once keyset order) on a read-only reader thread; snapshot 10,000-order hard-fail removed. Working-set build measured 3.44 ms at 50,100 stored orders. VAL-TRD-066/067 integration tests green; TR-05 runtime part closed. Runtime 280 passed/5 ignored; workspace 2324 passed; fmt, strict Clippy and naming_check green.
+- 2026-10-18 M5.12 feat(probes): add live paper-trading and cTrader demo probes - paper_trading_probe runs the full practice lifecycle on the public Hyperliquid feed with restart and ledger identity (both fee and no-fee runs pass all 20 checks); the run surfaced three production defects now fixed with regression tests (catalog install re-arms trading demand, durable quote-interest revision, reconnect session republish). ctrader_demo_probe implemented but not run (maintainer approval gate). Workspace 2332 passed; fmt, strict Clippy and naming_check green.
 
 ## 7. Known gaps / deferred
 

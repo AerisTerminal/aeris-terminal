@@ -6,9 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "aeris_probes"
+path = "src/lib.rs"
+
 [[bin]]
 name = "market_lifecycle_probe"
 path = "src/main.rs"
+
+[[bin]]
+name = "paper_trading_probe"
+path = "src/bin/paper_trading_probe/main.rs"
+
+[[bin]]
+name = "ctrader_demo_probe"
+path = "src/bin/ctrader_demo_probe.rs"
 
 [dependencies]
 aeris_market_runtime = { path = "../../crates/market_runtime", features = ["probe"] }
@@ -16,6 +28,9 @@ aeris_market_engine = { path = "../../crates/market_engine" }
 aeris_market_data = { path = "../../crates/domain/market_data" }
 aeris_instruments = { path = "../../crates/domain/instruments" }
 aeris_platform_runtime = { path = "../../crates/platform_runtime" }
+aeris_contracts = { path = "../../crates/contracts" }
+aeris_trading = { path = "../../crates/domain/trading" }
+aeris_trading_runtime = { path = "../../crates/trading_runtime" }
 chrono.workspace = true
 serde_json.workspace = true
 

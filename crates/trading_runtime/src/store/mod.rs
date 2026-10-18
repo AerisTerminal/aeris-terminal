@@ -63,7 +63,7 @@ use aeris_trading::{
     OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, Position, TimeInForce,
     TradingAccount, TradingAccountId, TradingProvenance,
 };
-use rusqlite::{Connection, OpenFlags, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -527,6 +527,33 @@ impl TradingStore {
 
     pub(super) fn revision(&self) -> Result<u64, String> {
         self.metadata("revision")
+    }
+
+    /// The durable quote-interest publication counter. A trading-owner restart inside a
+    /// live market runtime must resume above the coordinator's monotonic revision fence,
+    /// so the counter outlives the owner like `venue_generation` does.
+    pub(crate) fn interest_revision(&self) -> Result<u64, String> {
+        self.connection
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'interest_revision'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .map(sqlite_u64)
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    pub(crate) fn set_interest_revision(&self, revision: u64) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('interest_revision', ?1)",
+                [sqlite_i64(revision)?],
+            )
+            .map_err(database_error)?;
+        Ok(())
     }
 }
 

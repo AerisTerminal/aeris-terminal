@@ -1833,6 +1833,25 @@ impl Coordinator<'_> {
         }
     }
 
+    /// Republishes the per-generation trading session contract for one provider's leased
+    /// instruments. A provider session replacement clears the trading owner's
+    /// per-generation state, so `Connected` must restore sessions before the `Feed::Live`
+    /// publication resumes quotes; otherwise every later order reads a missing session.
+    pub(super) fn republish_trading_sessions(&self, provider: &str) {
+        if !self.trading_feed.attached() {
+            return;
+        }
+        let keys = self
+            .engine
+            .instrument_subscriptions()
+            .map(|(key, _)| key)
+            .filter(|key| key.provider == provider)
+            .collect::<Vec<_>>();
+        for key in &keys {
+            self.publish_trading_session(key);
+        }
+    }
+
     fn replace_price_alerts(
         &mut self,
         consumer_id: ConsumerId,
@@ -2921,6 +2940,49 @@ mod tests {
     }
 
     #[test]
+    fn trading_feed_reconnect_republishes_sessions_with_new_generation() {
+        let mut coordinator = coordinator();
+        coordinator.trading_feed.attach();
+        let instrument = hyperliquid_instrument();
+        coordinator.catalog.insert(
+            (
+                instrument.provider.clone(),
+                instrument.instrument_id.clone(),
+            ),
+            instrument.clone(),
+        );
+        let key = super::super::InstrumentStreamKey {
+            provider: instrument.provider.clone(),
+            instrument: aeris_instruments::InstrumentId::try_new(instrument.instrument_id).unwrap(),
+            entitlement: Some(instrument.entitlement_id.clone()),
+        };
+        let _lease = coordinator
+            .engine
+            .acquire_instrument_lease(&key, StreamRequirements::NONE.with(MarketStream::Quotes))
+            .unwrap();
+        for generation in [2, 3] {
+            coordinator
+                .engine
+                .begin_provider_session(
+                    &instrument.provider,
+                    ProviderGeneration(nonzero(generation)),
+                )
+                .unwrap();
+            coordinator.republish_trading_sessions(&instrument.provider);
+            match coordinator.trading_feed.receive(Duration::ZERO) {
+                Some(aeris_trading::market::MarketFeedEvent::Session(session)) => {
+                    assert_eq!(session.provider_generation, generation);
+                }
+                other => panic!("expected a Session republish, got {other:?}"),
+            }
+            assert!(
+                coordinator.trading_feed.receive(Duration::ZERO).is_none(),
+                "only the leased instrument's session is republished"
+            );
+        }
+    }
+
+    #[test]
     fn trading_feed_chart_quote_stream_emits_without_a_separate_instrument_lease() {
         let mut coordinator = coordinator();
         coordinator.trading_feed.attach();
@@ -3103,6 +3165,42 @@ mod tests {
         assert!(
             live,
             "a post-attachment quote lease needs its live feed state"
+        );
+    }
+
+    #[test]
+    fn trading_route_resolution_rearms_quote_demand_flush() {
+        let mut coordinator = coordinator();
+        let instrument = hyperliquid_instrument();
+        coordinator.trading_feed.attach();
+        let route = aeris_trading::market::MarketRoute {
+            provider_id: instrument.provider.clone(),
+            instrument_id: aeris_instruments::InstrumentId::try_new(
+                instrument.instrument_id.clone(),
+            )
+            .unwrap(),
+            provider_symbol: instrument.provider_symbol.clone(),
+            display_symbol: instrument.display_symbol.clone(),
+            venue_id: instrument.venue_id.clone(),
+            entitlement_id: Some(instrument.entitlement_id.clone()),
+            price_scale: u8::try_from(instrument.price_scale).unwrap(),
+            quantity_scale: u8::try_from(instrument.quantity_scale).unwrap(),
+        };
+        coordinator
+            .install_trading_interest(&aeris_trading::market::QuoteInterest {
+                revision: 1,
+                routes: vec![route],
+            })
+            .unwrap();
+        // The flush that ran while the route was unresolved found empty wire
+        // demand and cleared the session's dirty flag.
+        coordinator.session_mut("hyperliquid").demand_dirty = false;
+        coordinator
+            .install_provider_instrument(&instrument)
+            .unwrap();
+        assert!(
+            coordinator.session("hyperliquid").demand_dirty,
+            "a catalog install that unblocks a leased route must re-arm the demand flush"
         );
     }
 

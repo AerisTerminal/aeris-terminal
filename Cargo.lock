@@ -418,11 +418,14 @@ dependencies = [
 name = "aeris_probes"
 version = "0.2.3"
 dependencies = [
+ "aeris_contracts",
  "aeris_instruments",
  "aeris_market_data",
  "aeris_market_engine",
  "aeris_market_runtime",
  "aeris_platform_runtime",
+ "aeris_trading",
+ "aeris_trading_runtime",
  "chrono",
  "serde_json",
 ]

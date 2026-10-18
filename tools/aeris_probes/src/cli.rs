@@ -1,5 +1,5 @@
 use std::{
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -47,31 +47,7 @@ impl Options {
     }
 
     fn validate_paths(root: &Path, out: &Path) -> Result<(), &'static str> {
-        if !root.is_absolute()
-            || !out.is_absolute()
-            || root
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
-            || out
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
-        {
-            return Err("probe paths must be absolute without parent traversal");
-        }
-        let allowed = std::env::temp_dir().join("aeris_validation");
-        if !root.starts_with(&allowed)
-            || out.parent() != Some(root)
-            || out == root
-            || out.extension().is_none_or(|extension| extension != "json")
-        {
-            return Err("probe root and JSON output must be inside the isolated validation folder");
-        }
-        if let Ok(canonical) = std::fs::canonicalize(root)
-            && !canonical.starts_with(&allowed)
-        {
-            return Err("probe root resolves outside the isolated validation folder");
-        }
-        Ok(())
+        aeris_probes::validate_paths(root, out)
     }
 }
 

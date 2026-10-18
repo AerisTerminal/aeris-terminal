@@ -756,6 +756,15 @@ impl Coordinator<'_> {
             .or_insert(instrument.session_generation);
         self.catalog.insert(key, instrument.clone());
         self.calendar.resolve(instrument, None);
+        // A chart-free instrument lease (for example trading ticket interest) is
+        // installed before its route resolves, so a demand flush while the catalog
+        // entry was missing cleared the session's dirty flag. This install unblocks
+        // that demand; mark the session dirty so the active turn pushes it.
+        if self.engine.instrument_subscriptions().any(|(stream, _)| {
+            stream.provider == provider && stream.instrument.as_str() == instrument.instrument_id
+        }) {
+            self.session_mut(&provider).demand_dirty = true;
+        }
         if self.trading_feed.attached()
             && let Ok(terms) = super::instrument_terms_from_install(instrument)
         {

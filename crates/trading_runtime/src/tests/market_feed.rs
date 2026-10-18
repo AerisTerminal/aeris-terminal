@@ -1805,6 +1805,45 @@ fn closed_session_rejects_practice_order_without_writing_a_row() {
     service.shutdown(Duration::from_secs(2)).unwrap();
 }
 
+#[test]
+fn interest_revision_survives_owner_restart() {
+    let directory = TestDirectory::new("interest-revision-restart");
+    let configuration = config(&directory);
+    let open = || {
+        let (commands, _receiver) = mpsc::sync_channel(1);
+        let feed = Arc::new(crate::core::market::feed::MarketFeedInbox::new(
+            commands,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        crate::TradingCore::open(
+            &configuration.database_path,
+            configuration.retention,
+            configuration.clock.clone(),
+            configuration.execution,
+            std::sync::Weak::new(),
+            feed,
+        )
+        .unwrap()
+    };
+    let publish = |owner: &mut crate::TradingCore, sink: &Arc<RecordedInterest>| {
+        let (reply, response) = mpsc::sync_channel(1);
+        owner.dispatch_market_command(Command::AttachMarketFeed(sink.clone(), reply));
+        response.recv().unwrap().unwrap();
+        owner.replace_ticket_interest(vec![route()]).unwrap();
+        owner.recompute_quote_interest().unwrap();
+        sink.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|interest| interest.revision)
+            .collect::<Vec<_>>()
+    };
+    let first = publish(&mut open(), &Arc::new(RecordedInterest::default()));
+    assert_eq!(first, vec![1]);
+    let second = publish(&mut open(), &Arc::new(RecordedInterest::default()));
+    assert_eq!(second, vec![2]);
+}
+
 #[derive(Default)]
 pub(crate) struct RecordedInterest(Mutex<Vec<QuoteInterest>>);
 

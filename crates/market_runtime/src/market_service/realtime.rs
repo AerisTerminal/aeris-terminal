@@ -1408,6 +1408,9 @@ impl Coordinator<'_> {
             self.publish_catalog_ready(provider);
         }
         self.mark_lifecycle_online(provider, generation, descriptor.capabilities.live_model);
+        // The trading owner clears per-instrument state on a generation bump; restore its
+        // session contract before the trailing Feed::Live resumes quote flow.
+        self.republish_trading_sessions(provider);
     }
 
     fn request_provider_trade_recovery(

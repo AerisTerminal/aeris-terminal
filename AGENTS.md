@@ -189,6 +189,12 @@ the check.
 - Live market probes run only from `tools/aeris_probes` on an isolated validation root with an
   exclusive instance lock. The optional `probe` feature's bounded Hyperliquid fault control
   interrupts only its WebSocket; never use a process-wide proxy that blocks catalog HTTP.
+  `paper_trading_probe` exercises the practice trading lifecycle on the public Hyperliquid feed;
+  `ctrader_demo_probe` is demo-only, requires `--validation-allow-stored-ctrader`, masks account
+  numbers, refuses live accounts, and runs only with explicit maintainer approval.
+- The trading owner's quote-interest revision is durable store metadata: the market coordinator
+  fences stale revisions for its whole lifetime, so a trading-owner restart must resume above the
+  fence, and a provider reconnect republishes trading sessions before its `Feed::Live`.
 - Coordinator-owned watchdog, history retry and trade-handoff timestamps use the injected
   `market_service::clock::Clock`; direct system time belongs only in `SystemClock`.
 - Provider reconnect scheduling uses the bounded `market_service::reconnect::Backoff` policy;

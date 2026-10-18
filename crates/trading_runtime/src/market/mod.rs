@@ -345,6 +345,11 @@ impl TradingCore {
             .interest_revision
             .checked_add(1)
             .ok_or(MarketConsumerError::RevisionExhausted)?;
+        // The coordinator fences stale revisions for its whole lifetime; persist the
+        // counter before publishing so a trading-owner restart resumes above the fence.
+        self.store
+            .set_interest_revision(revision)
+            .map_err(MarketConsumerError::Persistence)?;
         sink.set_interest(QuoteInterest {
             revision,
             routes: routes.clone(),
