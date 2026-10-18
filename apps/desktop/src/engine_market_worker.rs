@@ -3,6 +3,7 @@
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
+use aeris_trading_runtime::clock::Clock;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
@@ -11,7 +12,6 @@ use std::{
         mpsc,
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use aeris_application::{
@@ -274,6 +274,7 @@ fn start() -> Result<
         MarketService::start()?,
         vec![(DEFAULT_WORKSPACE_ID, product)],
         crate::desktop::tests::test_trading_service(),
+        Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
     )?;
     let (startup, worker) = workers
         .pop()
@@ -284,16 +285,18 @@ fn start() -> Result<
 pub(super) fn start_multi_chart(
     market: &MarketService,
     trading: aeris_trading_runtime::TradingService,
+    clock: Arc<dyn Clock>,
 ) -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
     let mnq = default_product("MNQ");
     let es = default_product("ES");
-    let (workers, _factory) = start_group(market.clone(), vec![(1, mnq), (2, es)], trading)?;
+    let (workers, _factory) = start_group(market.clone(), vec![(1, mnq), (2, es)], trading, clock)?;
     Ok(workers)
 }
 
 pub(super) fn start_rithmic_catalog(
     market: &MarketService,
     trading: aeris_trading_runtime::TradingService,
+    clock: Arc<dyn Clock>,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let client_id = random_order_book_identity()?;
     let consumer_id = random_order_book_identity()?;
@@ -309,7 +312,14 @@ pub(super) fn start_rithmic_catalog(
     );
     pane.startup = MarketWorkerStartup::Rithmic;
     endpoint.role = EndpointRole::RithmicCatalog;
-    spawn_group(market.clone(), client_id, vec![endpoint], None, trading)?;
+    spawn_group(
+        market.clone(),
+        client_id,
+        vec![endpoint],
+        None,
+        trading,
+        clock,
+    )?;
     Ok((pane.startup, pane.worker))
 }
 
@@ -317,6 +327,7 @@ pub(super) fn start_workspace_tabs(
     market: &MarketService,
     workspace: &WorkspaceState,
     trading: aeris_trading_runtime::TradingService,
+    clock: Arc<dyn Clock>,
 ) -> Result<WorkspaceMarketGroup, String> {
     let client_id = random_order_book_identity()?;
     let mut initial = Vec::new();
@@ -346,6 +357,7 @@ pub(super) fn start_workspace_tabs(
         endpoints,
         Some(addition_rx),
         trading,
+        clock,
     )?;
     Ok(WorkspaceMarketGroup {
         initial,
@@ -514,6 +526,7 @@ fn start_group(
     market: MarketService,
     configurations: Vec<(u64, InstallProviderInstrument)>,
     trading: aeris_trading_runtime::TradingService,
+    clock: Arc<dyn Clock>,
 ) -> Result<
     (
         Vec<(MarketWorkerStartup, MarketDataWorker)>,
@@ -552,6 +565,7 @@ fn start_group(
         endpoints,
         Some(addition_rx),
         trading,
+        clock,
     )?;
     Ok((
         workers,
@@ -675,6 +689,7 @@ fn spawn_group(
     mut endpoints: Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
     trading: aeris_trading_runtime::TradingService,
+    clock: Arc<dyn Clock>,
 ) -> Result<(), String> {
     // One presentation worker drains all runtime-owned consumer outboxes for this
     // workspace group. Tab selection and layout edits only change endpoint
@@ -682,8 +697,14 @@ fn spawn_group(
     thread::Builder::new()
         .name("aeris-engine-market-client".to_string())
         .spawn(move || {
-            if let Err(error) = run_workers(&market, client_id, &mut endpoints, additions, &trading)
-            {
+            if let Err(error) = run_workers(
+                &market,
+                client_id,
+                &mut endpoints,
+                additions,
+                &trading,
+                clock.as_ref(),
+            ) {
                 for record in &endpoints {
                     let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
                         state: ChartState::Error,
@@ -718,6 +739,7 @@ struct PushedEventContext<'a> {
     active_generation: u64,
     realtime: bool,
     instrument: &'a InstallProviderInstrument,
+    received_unix_nanos: i64,
 }
 
 fn worker_identity(provider: &str) -> (&'static str, &'static str) {
@@ -806,14 +828,6 @@ const fn failure_stage_label(stage: FailureStage) -> &'static str {
         FailureStage::ChartInstall => "chart install",
         FailureStage::ProviderRealtime => "provider realtime",
     }
-}
-
-fn now_unix_nanos() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-        .unwrap_or(i64::MAX)
 }
 
 fn random_order_book_identity() -> Result<u64, String> {
@@ -1299,7 +1313,8 @@ mod tests {
             4,
             false,
         );
-        let snapshot = replay_runtime_snapshot(&publication, None).expect("snapshot converts");
+        let snapshot =
+            replay_runtime_snapshot(&publication, None, 1_000_000_000).expect("snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 2);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.evidence().session_generation, 8);
@@ -1311,36 +1326,47 @@ mod tests {
             1_700_000_000_123_456_789
         );
         assert_eq!(snapshot.bars()[0].provenance().producer, "aeris_engine");
+        assert_eq!(
+            snapshot.bars()[0].provenance().publication_time_unix_nanos,
+            1_000_000_000
+        );
     }
 
     #[test]
     fn runtime_live_update_preserves_one_tail_without_rebuilding_history() {
-        let update = replay_runtime_tail_update(&runtime_update(
-            1,
-            2,
-            series_key(
-                products().first().expect("BTC product"),
-                ChartInterval::Minute1,
-            )
-            .expect("series"),
-            7,
-            MarketBar {
-                source_sequence: 3,
-                exchange_timestamp_seconds: 120,
-                exchange_timestamp_unix_nanos: 120_000_000_000,
-                open: 100,
-                high: 120,
-                low: 90,
-                close: 115,
-                volume: 9,
-            },
-            true,
-            8,
-            SeriesTailOperation::Append,
-        ))
+        let update = replay_runtime_tail_update(
+            &runtime_update(
+                1,
+                2,
+                series_key(
+                    products().first().expect("BTC product"),
+                    ChartInterval::Minute1,
+                )
+                .expect("series"),
+                7,
+                MarketBar {
+                    source_sequence: 3,
+                    exchange_timestamp_seconds: 120,
+                    exchange_timestamp_unix_nanos: 120_000_000_000,
+                    open: 100,
+                    high: 120,
+                    low: 90,
+                    close: 115,
+                    volume: 9,
+                },
+                true,
+                8,
+                SeriesTailOperation::Append,
+            ),
+            1_000_000_000,
+        )
         .expect("tail converts");
         assert_eq!(update.item().value().source_sequence, 3);
         assert_eq!(update.item().value().close, 115);
+        assert_eq!(
+            update.item().provenance().publication_time_unix_nanos,
+            1_000_000_000
+        );
         assert_eq!(update.publication_generation(), 8);
         assert!(update.forming());
     }
@@ -1541,6 +1567,7 @@ mod tests {
             active_generation: 1,
             realtime: true,
             instrument: &default_product("MNQ"),
+            received_unix_nanos: 1_000_000_000,
         };
 
         assert_eq!(
@@ -1615,7 +1642,7 @@ mod tests {
         ));
 
         assert!(
-            complete_pending_recovery(&snapshot, &product, &mut record.endpoint)
+            complete_pending_recovery(&snapshot, &product, &mut record.endpoint, 1_000_000_000)
                 .expect("pushed recovery completes")
         );
         assert!(record.endpoint.pending_recovery.is_none());
@@ -1664,7 +1691,7 @@ mod tests {
         ));
 
         assert!(
-            !complete_pending_recovery(&snapshot, &product, &mut record.endpoint)
+            !complete_pending_recovery(&snapshot, &product, &mut record.endpoint, 1_000_000_000)
                 .expect("new snapshot is not consumed by old recovery")
         );
         let (messages, disconnected) = pane.worker.drain_messages();
@@ -1789,6 +1816,7 @@ mod tests {
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_product("MNQ"),
+                    received_unix_nanos: 1_000_000_000,
                 },
                 &mut live,
                 &sender,
@@ -1822,6 +1850,7 @@ mod tests {
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_product("MNQ"),
+                    received_unix_nanos: 1_000_000_000,
                 },
                 &mut live,
                 &sender,
@@ -1865,6 +1894,7 @@ mod tests {
             active_generation: 1,
             realtime: true,
             instrument: &product,
+            received_unix_nanos: 1_000_000_000,
         };
 
         assert_eq!(
@@ -2023,6 +2053,7 @@ mod tests {
                 active_generation: 7,
                 realtime: true,
                 instrument: &product,
+                received_unix_nanos: 1_000_000_000,
             },
             &mut live,
             &sender,
@@ -2085,6 +2116,7 @@ mod tests {
                 active_generation: 7,
                 realtime: true,
                 instrument: &product,
+                received_unix_nanos: 1_000_000_000,
             },
             &mut live,
             &sender,
@@ -2249,6 +2281,7 @@ mod tests {
                 active_generation: 7,
                 realtime: true,
                 instrument: &default_product("MNQ"),
+                received_unix_nanos: 1_000_000_000,
             },
             &mut live,
             &sender,
@@ -2269,6 +2302,7 @@ mod tests {
                 active_generation: 7,
                 realtime: true,
                 instrument: &default_product("MNQ"),
+                received_unix_nanos: 1_000_000_000,
             },
             &mut live,
             &sender,
@@ -2315,6 +2349,7 @@ mod tests {
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_product("MNQ"),
+                    received_unix_nanos: 1_000_000_000,
                 },
                 &mut live,
                 &sender,
@@ -2330,6 +2365,7 @@ mod tests {
                     active_generation: 1,
                     realtime: true,
                     instrument: &default_product("MNQ"),
+                    received_unix_nanos: 1_000_000_000,
                 },
                 &mut live,
                 &sender,
@@ -2448,7 +2484,7 @@ mod tests {
         let event = MarketRuntimeEvent::DemandError(error.clone());
 
         assert!(
-            !complete_pending_recovery(&event, &product, &mut record.endpoint)
+            !complete_pending_recovery(&event, &product, &mut record.endpoint, 1_000_000_000)
                 .expect("older-history error is not a recovery outcome"),
             "an older-history failure cannot fail the current-series recovery"
         );
@@ -2524,6 +2560,7 @@ mod tests {
                 active_generation: 1,
                 realtime: true,
                 instrument: &product,
+                received_unix_nanos: 1_000_000_000,
             },
             &mut live,
             &sender,
@@ -2590,6 +2627,7 @@ mod tests {
             active_generation: 2,
             realtime: true,
             instrument: &product,
+            received_unix_nanos: 1_000_000_000,
         };
         let mut live = false;
         assert_eq!(
@@ -2775,8 +2813,8 @@ mod tests {
             1,
             false,
         );
-        let snapshot =
-            replay_runtime_snapshot(&publication, Some(&product)).expect("cTrader converts");
+        let snapshot = replay_runtime_snapshot(&publication, Some(&product), 1_000_000_000)
+            .expect("cTrader converts");
         assert_eq!(snapshot.instrument().trading_currency, "USD");
         assert_eq!(snapshot.instrument().symbol, "EURUSD");
         assert_eq!(snapshot.instrument().venue_id, "cTrader Demo");
@@ -2870,7 +2908,8 @@ mod tests {
             1,
             false,
         );
-        let snapshot = replay_runtime_snapshot(&publication, None).expect("HL snapshot converts");
+        let snapshot = replay_runtime_snapshot(&publication, None, 1_000_000_000)
+            .expect("HL snapshot converts");
         assert_eq!(snapshot.instrument().precision.price_scale(), 8);
         assert_eq!(snapshot.instrument().precision.quantity_scale(), 8);
         assert_eq!(snapshot.instrument().symbol, "BTC");
@@ -2899,7 +2938,8 @@ mod tests {
             1,
             false,
         );
-        let replay = replay_runtime_snapshot(&snapshot, None).expect("HL snapshot converts");
+        let replay =
+            replay_runtime_snapshot(&snapshot, None, 1_000_000_000).expect("HL snapshot converts");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
 
         send_publication(&sender, ReplayStreamUpdate::Snapshot(replay), "hyperliquid")

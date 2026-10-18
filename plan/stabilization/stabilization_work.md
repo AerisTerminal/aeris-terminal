@@ -829,6 +829,13 @@ Status: pending
     and remaining desktop wall-clock presentation paths require the next
     clock-routing part; FixtureMarket/PaneHarness and VAL-DSK-001/002
     closeout remain. M6.1 stays unchecked.
+  - Part 9: market-worker session status, selection outcomes, chart snapshots,
+    live tails and recovery snapshots now use the clock supplied by the same
+    `DesktopServices` instance as their trading commands. The worker no longer
+    reads the process wall clock. A ManualClock session regression covers two
+    different session dates; conversion regressions check the publication
+    provenance timestamp. Other desktop wall-clock presentation helpers and
+    FixtureMarket/PaneHarness remain for later parts. M6.1 stays unchecked.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
@@ -1140,6 +1147,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.1 Part 5 refactor(desktop): replaced the global trading feedback mailbox with one cloneable handle per DesktopServices composition; all command and pane status paths use it. Independent-desktop feedback and naming guard regressions added; removed the unused repricing helper. Full workspace fmt/check/strict Clippy/tests/naming passed (one short-endurance parallel timing failure on the first test run; isolated retry and complete rerun passed). Persistence, clock and PaneHarness remain.
 - 2026-10-18 M6.1 Part 6 refactor(desktop): routed chart-chrome and workspace persistence through per-desktop paths and save receipts; removed the global chart-chrome locks and workspace path lookup. Two-composition file-backed isolation and naming-check guard tests added; full workspace fmt/check/strict Clippy/tests/naming_check passed. Clock, short-endurance child-process isolation and PaneHarness remain; M6.1 is open.
 - 2026-10-18 M6.1 Part 7 test(desktop): isolated the short-endurance RSS assertions in a child process without changing any assertions or production behavior. Focused regression and full workspace fmt/check/strict Clippy/tests/naming_check passed; clock and PaneHarness remain.
+- 2026-10-18 M6.1 Part 9 refactor(desktop): routed session status, selected-instrument status and market snapshot/tail/recovery provenance timestamps through the injected desktop clock; removed the market-worker direct system-time helper. ManualClock session and provenance regressions pass; full workspace fmt/check/strict Clippy/tests/naming_check green. Other desktop presentation wall-clock helpers and PaneHarness remain; M6.1 is open.
 
 ## 7. Known gaps / deferred
 

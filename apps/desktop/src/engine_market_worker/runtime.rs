@@ -10,6 +10,7 @@ use super::{
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_observability::diagnostic;
 use aeris_trading::market::MarketRoute;
+use aeris_trading_runtime::clock::Clock;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ pub(super) fn run_workers(
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
     trading: &aeris_trading_runtime::TradingService,
+    clock: &dyn Clock,
 ) -> Result<(), String> {
     for record in endpoints.iter() {
         let _ = record
@@ -32,7 +34,7 @@ pub(super) fn run_workers(
     }
     market.attach(client_id)?;
     let owns_ticket_interest = additions.is_some();
-    let result = run_attached_workers(market, client_id, endpoints, additions, trading);
+    let result = run_attached_workers(market, client_id, endpoints, additions, trading, clock);
     if owns_ticket_interest && let Err(error) = trading.set_ticket_interest(Vec::new()) {
         diagnostic!("Aeris ticket quote interest could not be released: {error}");
     }
@@ -51,6 +53,7 @@ fn run_attached_workers(
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
     trading: &aeris_trading_runtime::TradingService,
+    clock: &dyn Clock,
 ) -> Result<(), String> {
     for record in endpoints.iter_mut() {
         initialize_record(market, client_id, record)?;
@@ -109,12 +112,12 @@ fn run_attached_workers(
             ticket_interest_dirty = false;
         }
         let session_tick_due = Instant::now() >= next_session_status_at;
-        publish_session_statuses(market, endpoints, session_tick_due);
+        publish_session_statuses(market, endpoints, session_tick_due, clock);
         if session_tick_due {
             next_session_status_at = Instant::now() + Duration::from_secs(60);
         }
         ticket_interest_dirty |=
-            drain_market_events(market, client_id, endpoints, next_session_status_at)?;
+            drain_market_events(market, client_id, endpoints, next_session_status_at, clock)?;
         if owns_ticket_interest && ticket_interest_dirty {
             update_ticket_interest(endpoints, &mut ticket_routes, trading);
             ticket_interest_dirty = false;
@@ -128,6 +131,7 @@ fn drain_market_events(
     client_id: u64,
     endpoints: &mut [EndpointRecord],
     next_session_status_at: Instant,
+    clock: &dyn Clock,
 ) -> Result<bool, String> {
     let consumer_budgets = endpoints
         .iter()
@@ -153,7 +157,7 @@ fn drain_market_events(
     let empty = events.is_empty();
     let mut changed = false;
     for event in events {
-        match apply_received_event(market, client_id, event, endpoints) {
+        match apply_received_event(market, client_id, event, endpoints, clock) {
             Ok(selection_changed) => changed |= selection_changed,
             Err(error) => {
                 report_runtime_failure(endpoints, &error);
@@ -211,6 +215,7 @@ fn publish_session_statuses(
     market: &MarketService,
     endpoints: &mut [EndpointRecord],
     tick_due: bool,
+    clock: &dyn Clock,
 ) {
     let revision = market.market_session_revision();
     let mut now = None;
@@ -227,7 +232,7 @@ fn publish_session_statuses(
         {
             continue;
         }
-        let now = *now.get_or_insert_with(super::now_unix_nanos);
+        let now = *now.get_or_insert_with(|| clock.wall_unix_nanos());
         let status = market.market_session_status(&record.product, now);
         if let Err(error) = record
             .endpoint
@@ -328,6 +333,7 @@ fn apply_received_event(
     _client_id: u64,
     (consumer_id, event): (u64, aeris_market_runtime::MarketConsumerEvent),
     endpoints: &mut [EndpointRecord],
+    clock: &dyn Clock,
 ) -> Result<bool, String> {
     let event = event.value;
     if consumer_id == 0 {
@@ -376,7 +382,7 @@ fn apply_received_event(
             if let ProviderCatalogEvent::SelectionInstalled { instrument, .. } = &event
                 && record.role != EndpointRole::MarketScreen
             {
-                let status = market.market_session_status(instrument, super::now_unix_nanos());
+                let status = market.market_session_status(instrument, clock.wall_unix_nanos());
                 endpoint
                     .messages
                     .send(MarketWorkerMessage::MarketSessionStatus(status))
@@ -399,7 +405,7 @@ fn apply_received_event(
     {
         return Err("engine provider state identity mismatched".to_string());
     }
-    if complete_pending_recovery(&event, &record.product, endpoint)? {
+    if complete_pending_recovery(&event, &record.product, endpoint, clock.wall_unix_nanos())? {
         return Ok(false);
     }
     let result = apply_pushed_event(
@@ -409,6 +415,7 @@ fn apply_received_event(
             active_generation: endpoint.active_generation,
             realtime: true,
             instrument: &record.product,
+            received_unix_nanos: clock.wall_unix_nanos(),
         },
         &mut endpoint.live,
         &endpoint.messages,
@@ -528,6 +535,48 @@ pub(super) fn retire_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_trading_runtime::clock::ManualClock;
+
+    #[test]
+    fn market_session_publications_follow_each_desktop_clock() {
+        let market = MarketService::start().expect("market runtime");
+        let product = super::super::default_product("ES");
+        let first_time = 1_781_568_000_000_000_000;
+        let second_time = first_time + 5 * 24 * 60 * 60 * 1_000_000_000;
+        let clock = ManualClock::new(first_time);
+        let (mut pane, record) = super::super::worker_endpoint(
+            1,
+            2,
+            product.clone(),
+            3,
+            super::super::ChartInterval::Minute1,
+            None,
+            1,
+        );
+        let mut records = vec![record];
+        publish_session_statuses(&market, &mut records, true, &clock);
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        let first = messages.into_iter().next().expect("first session status");
+        let MarketWorkerMessage::MarketSessionStatus(first) = first else {
+            panic!("expected first session status");
+        };
+        assert_eq!(first, market.market_session_status(&product, first_time));
+
+        clock.set_wall_unix_nanos(second_time);
+        publish_session_statuses(&market, &mut records, true, &clock);
+        let (messages, disconnected) = pane.worker.drain_messages();
+        assert!(!disconnected);
+        let second = messages.into_iter().next().expect("second session status");
+        let MarketWorkerMessage::MarketSessionStatus(second) = second else {
+            panic!("expected second session status");
+        };
+        assert_eq!(second, market.market_session_status(&product, second_time));
+        assert_ne!(
+            first, second,
+            "different sessions must follow the injected clock"
+        );
+    }
 
     #[test]
     fn ordered_command_batch_coalesces_only_adjoining_latest_values() {

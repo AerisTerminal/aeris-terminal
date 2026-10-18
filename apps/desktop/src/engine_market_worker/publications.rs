@@ -140,6 +140,7 @@ pub(super) fn apply_pushed_event(
         active_generation,
         realtime,
         instrument,
+        received_unix_nanos,
     } = context;
     match event {
         MarketRuntimeEvent::SeriesSnapshot(snapshot) => apply_realtime_snapshot(
@@ -147,11 +148,16 @@ pub(super) fn apply_pushed_event(
             consumer_id,
             active_generation,
             instrument,
+            received_unix_nanos,
             messages,
         ),
-        MarketRuntimeEvent::SeriesUpdate(update) => {
-            apply_realtime_update(&update, consumer_id, active_generation, messages)
-        }
+        MarketRuntimeEvent::SeriesUpdate(update) => apply_realtime_update(
+            &update,
+            consumer_id,
+            active_generation,
+            received_unix_nanos,
+            messages,
+        ),
         MarketRuntimeEvent::ProviderState(state) => {
             apply_provider_state(&state, instrument.provider.as_str(), realtime, messages)?;
             Ok(())
@@ -236,6 +242,7 @@ fn apply_realtime_snapshot(
     consumer_id: u64,
     active_generation: u64,
     instrument: &InstallProviderInstrument,
+    received_unix_nanos: i64,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     if snapshot.consumer_id.0.get() != consumer_id {
@@ -248,7 +255,7 @@ fn apply_realtime_snapshot(
     )? {
         return Ok(());
     }
-    let replay = replay_runtime_snapshot(snapshot, Some(instrument))?;
+    let replay = replay_runtime_snapshot(snapshot, Some(instrument), received_unix_nanos)?;
     let provider = snapshot.snapshot.series.provider_id.as_str();
     send_publication(messages, ReplayStreamUpdate::Snapshot(replay), provider)
 }
@@ -257,6 +264,7 @@ fn apply_realtime_update(
     update: &MarketSeriesUpdate,
     consumer_id: u64,
     active_generation: u64,
+    received_unix_nanos: i64,
     messages: &MarketWorkerSender,
 ) -> Result<(), String> {
     if update.consumer_id.0.get() != consumer_id {
@@ -269,7 +277,7 @@ fn apply_realtime_update(
     )? {
         return Ok(());
     }
-    let tail = replay_runtime_tail_update(update)?;
+    let tail = replay_runtime_tail_update(update, received_unix_nanos)?;
     let provider = update.series.provider_id.as_str();
     send_publication(messages, ReplayStreamUpdate::Tail(tail), provider)
 }
@@ -454,6 +462,7 @@ pub(super) fn complete_pending_recovery(
     event: &MarketRuntimeEvent,
     product: &InstallProviderInstrument,
     endpoint: &mut WorkerEndpoint,
+    received_unix_nanos: i64,
 ) -> Result<bool, String> {
     let Some(command) = endpoint.pending_recovery else {
         return Ok(false);
@@ -464,7 +473,7 @@ pub(super) fn complete_pending_recovery(
                 && snapshot.generation.0.get() == endpoint.active_generation
                 && snapshot.snapshot.provider_generation.0.get() >= product.session_generation =>
         {
-            let replay = replay_runtime_snapshot(snapshot, Some(product))?;
+            let replay = replay_runtime_snapshot(snapshot, Some(product), received_unix_nanos)?;
             let generation = runtime_generation_from_snapshot(snapshot, &replay)?;
             endpoint.pending_recovery = None;
             let (subscription_id, worker_label) = worker_identity(product.provider.as_str());

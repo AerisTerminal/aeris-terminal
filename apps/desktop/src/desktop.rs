@@ -5592,6 +5592,7 @@ fn configured_market_workers(
                     vec![engine_market_worker::start_rithmic_catalog(
                         &services.market,
                         services.trading.clone(),
+                        Arc::clone(&services.clock),
                     )?],
                     Vec::new(),
                     lifecycle,
@@ -5607,6 +5608,7 @@ fn configured_market_workers(
                     engine_market_worker::start_multi_chart(
                         &services.market,
                         services.trading.clone(),
+                        Arc::clone(&services.clock),
                     )?,
                     Vec::new(),
                     lifecycle,
@@ -5623,6 +5625,7 @@ fn configured_market_workers(
                     &services.market,
                     &lifecycle.workspace,
                     services.trading.clone(),
+                    Arc::clone(&services.clock),
                 )?;
                 let workspace_notice = group.restore_notices.join("\n");
                 workspace_factory = Some(group.factory);
@@ -5642,6 +5645,7 @@ fn configured_market_workers(
                 &services.market,
                 &lifecycle.workspace,
                 services.trading.clone(),
+                Arc::clone(&services.clock),
             )?;
             let workspace_notice = group.restore_notices.join("\n");
             workspace_factory = Some(group.factory);

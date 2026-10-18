@@ -5,14 +5,14 @@ use super::{
     InstallProviderInstrument, InstrumentId, InstrumentLifecycle, InstrumentPrecision,
     InstrumentRevision, MarketBar, MarketEventProvenance, MarketOrderBookSnapshot,
     MarketSeriesSnapshot, MarketSeriesUpdate, Provenanced, ReplayProvenance, ReplaySnapshot,
-    ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation, now_unix_nanos,
-    provider_display_name,
+    ReplayTailOperation, ReplayTailUpdate, SeriesTailOperation, provider_display_name,
 };
 use aeris_terminal_ui::{OrderBookFrame, OrderBookSelection, project_order_book};
 
 pub(crate) fn replay_runtime_snapshot(
     publication: &MarketSeriesSnapshot,
     installed: Option<&InstallProviderInstrument>,
+    received: i64,
 ) -> Result<ReplaySnapshot, String> {
     let snapshot = publication.snapshot.as_ref();
     let series = &snapshot.series;
@@ -38,7 +38,6 @@ pub(crate) fn replay_runtime_snapshot(
         contract: None,
     };
     let definition = replay_bar_definition(series)?;
-    let received = now_unix_nanos();
     let bars = snapshot
         .bars
         .iter()
@@ -89,6 +88,7 @@ pub(crate) fn runtime_generation_from_snapshot(
 
 pub(crate) fn replay_runtime_tail_update(
     update: &MarketSeriesUpdate,
+    received: i64,
 ) -> Result<ReplayTailUpdate, String> {
     let item = provenanced_runtime_bar(
         &update.series,
@@ -96,7 +96,7 @@ pub(crate) fn replay_runtime_tail_update(
         update.consumer_id.0.get(),
         update.generation.0.get(),
         &update.bar,
-        now_unix_nanos(),
+        received,
     );
     let operation = match update.operation {
         SeriesTailOperation::Revise => ReplayTailOperation::Revise,
