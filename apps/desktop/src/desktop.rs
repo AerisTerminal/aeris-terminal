@@ -48,6 +48,8 @@ mod market_screener;
 mod market_screener_view;
 #[path = "native_ui/mod.rs"]
 mod native_ui;
+#[path = "desktop/notification_center.rs"]
+mod notification_center;
 #[path = "components/order_book_panel.rs"]
 mod order_book_panel;
 #[path = "components/order_quantity.rs"]

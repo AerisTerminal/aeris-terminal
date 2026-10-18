@@ -853,6 +853,16 @@ Status: pending
     outside M6.1's injected presentation/command clock boundary; dormant
     lifecycle hardening remains M8 work.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
+  - Part 1: added the bounded 32-key notice owner and wired the existing toast cards to its
+    keyed projections. Repeated update and chart-preference save failures replace their visible
+    notice rather than stacking; successful asynchronous preference saves clear the persistent
+    failure, and timed notices leave the owner when their toast expires. Logging includes only
+    static titles and severity, not raw errors or detail. Six deterministic notification/toaster
+    tests cover replacement, eviction priority, persistent-key bound, targeted clearing,
+    secret-bearing error exclusion, and rendered-card deduplication; an additional test covers
+    successful-save clearing. The full fmt/check/strict Clippy/tests/naming_check gate passed
+    with serialized Cargo compilation. M6.2 stays unchecked: pane strings, four PaneHarness
+    error injections, complete source/action variants and remaining discard/unwrap cleanup follow.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1166,6 +1176,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.1 Part 9 refactor(desktop): routed session status, selected-instrument status and market snapshot/tail/recovery provenance timestamps through the injected desktop clock; removed the market-worker direct system-time helper. ManualClock session and provenance regressions pass; full workspace fmt/check/strict Clippy/tests/naming_check green. Other desktop presentation wall-clock helpers and PaneHarness remain; M6.1 is open.
 - 2026-10-18 M6.1 Part 10 refactor(desktop): routed UI header/countdown, fill toast, context calendar, time-zone badge and provider notice timestamps through the injected desktop clock, removing their direct wall-time helpers. ManualClock calendar regression and full workspace fmt/check/strict Clippy/tests/naming_check pass. PaneHarness and VAL-DSK-001/002 closeout remain; M6.1 is open.
 - 2026-10-18 M6.1 Part 11 test(desktop): gated disconnected fixture now drives a GPUI pane through the bounded mailbox; the smoke checks snapshot-to-chart, explicit readiness and render. Default desktop build, full fmt/check/strict Clippy/tests/naming_check and fixture naming positive/negative regressions pass; VAL-DSK-001/002 close and M6.1 is checked. Startup quarantine file naming and dormant account/update lifecycle wall-time internals are not desktop command/presentation clock consumers; M8 owns dormant lifecycle hardening.
+- 2026-10-18 M6.2 Part 1 feat(desktop): added the bounded keyed notice owner and toast projection, safe static-title diagnostics, async chart-preference failure/clear behavior and update failure notices. Notification/toaster regression tests and the full workspace fmt/check/strict Clippy/tests/naming_check gate pass with serialized Cargo compilation; M6.2 remains open for pane notices, source/action expansion and discarded-result cleanup.
 
 ## 7. Known gaps / deferred
 

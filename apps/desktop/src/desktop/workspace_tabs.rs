@@ -1730,20 +1730,57 @@ impl TerminalApp {
 
     pub(super) fn retry_update_check(&mut self, cx: &mut Context<Self>) {
         if let Some(updater) = self.updater.as_mut()
-            && let Err(error) = updater.request_check()
+            && let Err(_error) = updater.request_check()
         {
-            diagnostic!("Aeris update check degraded: {error}");
+            diagnostic!("Aeris update check degraded");
+            self.post_workspace_notice(
+                "update_check",
+                "Update check unavailable",
+                notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
+                cx,
+            );
         }
         cx.notify();
     }
 
     pub(super) fn restart_to_update(&mut self, cx: &mut Context<Self>) {
         if let Some(updater) = self.updater.as_mut()
-            && let Err(error) = updater.request_restart()
+            && let Err(_error) = updater.request_restart()
         {
-            diagnostic!("Aeris update restart degraded: {error}");
+            diagnostic!("Aeris update restart degraded");
+            self.post_workspace_notice(
+                "update_restart",
+                "Update restart unavailable",
+                notification_center::NoticeLifetime::UntilDismissed,
+                cx,
+            );
         }
         cx.notify();
+    }
+
+    fn post_workspace_notice(
+        &mut self,
+        kind: &'static str,
+        title: &'static str,
+        lifetime: notification_center::NoticeLifetime,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(host) = toast_host(&self.workspaces[self.active]) {
+            self.toaster.post_notice(
+                host,
+                notification_center::UserNotice {
+                    key: notification_center::NoticeKey { scope: 0, kind },
+                    severity: notification_center::NoticeSeverity::Warning,
+                    tone: notification_center::NoticeTone::Warning,
+                    source: notification_center::NoticeSource::Workspace,
+                    title,
+                    detail: "Please try again later.".into(),
+                    lifetime,
+                },
+                Instant::now(),
+            );
+            cx.notify();
+        }
     }
 
     fn cancel_update_restart_after_persistence_failure(&mut self, error: String, _cx: &App) {
@@ -2270,18 +2307,58 @@ impl TerminalApp {
         let preferences = self.chart_chrome;
         let persistence = self.lifecycle.persistence().clone();
         match persistence.request_chart_chrome_preferences_save(preferences) {
-            Ok(true) => cx
-                .background_executor()
-                .spawn(async move {
-                    if let Err(error) = persistence.run_chart_chrome_preferences_save_worker() {
-                        diagnostic!("Aeris chart chrome could not be saved: {error}");
+            Ok(true) => {
+                let save = cx
+                    .background_executor()
+                    .spawn(async move { persistence.run_chart_chrome_preferences_save_worker() });
+                cx.spawn(async move |terminal, cx| {
+                    let result = save.await;
+                    if let Err(error) = terminal.update(cx, |terminal, cx| {
+                        match result {
+                            Ok(()) => terminal.toaster.clear_notice(
+                                &notification_center::NoticeKey {
+                                    scope: 0,
+                                    kind: "chart_chrome_save",
+                                },
+                                Instant::now(),
+                            ),
+                            Err(_error) => terminal.post_chart_chrome_save_notice(cx),
+                        }
+                        cx.notify();
+                    }) {
+                        diagnostic!(
+                            "Chart preference save result could not reach the desktop: {error}"
+                        );
                     }
                 })
-                .detach(),
-            Ok(false) => {}
-            Err(error) => {
-                diagnostic!("Aeris chart chrome could not be saved: {error}");
+                .detach();
             }
+            Ok(false) => {}
+            Err(_error) => {
+                self.post_chart_chrome_save_notice(cx);
+            }
+        }
+    }
+
+    fn post_chart_chrome_save_notice(&mut self, cx: &mut Context<Self>) {
+        if let Some(host) = toast_host(&self.workspaces[self.active]) {
+            self.toaster.post_notice(
+                host,
+                notification_center::UserNotice {
+                    key: notification_center::NoticeKey {
+                        scope: 0,
+                        kind: "chart_chrome_save",
+                    },
+                    severity: notification_center::NoticeSeverity::Error,
+                    tone: notification_center::NoticeTone::Loss,
+                    source: notification_center::NoticeSource::Persistence,
+                    title: "Chart preferences could not be saved",
+                    detail: "Your latest chart preferences may not survive a restart.".into(),
+                    lifetime: notification_center::NoticeLifetime::UntilCleared,
+                },
+                Instant::now(),
+            );
+            cx.notify();
         }
     }
 

@@ -15,6 +15,9 @@
 //! the trading owner stays authoritative for fills, and this module only remembers which fills
 //! it has already announced.
 
+use super::notification_center::{
+    NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, UserNotice,
+};
 use super::*;
 use gpui::{DispatchPhase, EntityId, MouseMoveEvent, MouseUpEvent};
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,6 +174,7 @@ impl From<ChartNoticeTone> for ToastTone {
 enum ToastKind {
     Fill,
     PriceAlert,
+    Notice,
     /// A chart condition, by its label. It has no timer: it leaves when the condition clears.
     ChartStatus(&'static str),
 }
@@ -220,6 +224,7 @@ enum ExitPath {
 /// What a new toast says and how long it stays; `None` keeps it until it is dismissed.
 struct ToastContent {
     kind: ToastKind,
+    notice_key: Option<NoticeKey>,
     tone: ToastTone,
     title: SharedString,
     description: Option<SharedString>,
@@ -229,6 +234,7 @@ struct ToastContent {
 #[derive(Clone, Debug)]
 struct Toast {
     id: u64,
+    notice_key: Option<NoticeKey>,
     stack: ToastStack,
     kind: ToastKind,
     tone: ToastTone,
@@ -312,6 +318,7 @@ impl FillWatch {
 #[derive(Debug, Default)]
 pub(super) struct Toaster {
     toasts: Vec<Toast>,
+    notices: NotificationCenter,
     next_id: u64,
     hovered: Option<ToastStack>,
     swipe: Option<Swipe>,
@@ -326,6 +333,73 @@ pub(super) struct Toaster {
 }
 
 impl Toaster {
+    /// A keyed notice has one presentation card even if the failure repeats. The center is the
+    /// owner of its lifetime and bound; the toast is only the animated visible projection.
+    pub(super) fn post_notice(&mut self, stack: ToastStack, notice: UserNotice, now: Instant) {
+        let key = notice.key.clone();
+        let evicted = self.notices.post(notice);
+        if let Some(evicted) = evicted {
+            self.remove_notice_toast(&evicted, now);
+        }
+        let Some(notice) = self.notices.notices().iter().find(|item| item.key == key) else {
+            return;
+        };
+        let tone = match notice.tone {
+            NoticeTone::Warning => ToastTone::Warning,
+            NoticeTone::Loss => ToastTone::Loss,
+        };
+        let title = notice.title.into();
+        let description = Some(notice.detail.clone().into());
+        let lifetime = match notice.lifetime {
+            NoticeLifetime::Timed(duration) => Some(duration),
+            NoticeLifetime::UntilCleared | NoticeLifetime::UntilDismissed => None,
+        };
+        if let Some(toast) = self
+            .toasts
+            .iter_mut()
+            .find(|toast| toast.notice_key.as_ref() == Some(&key) && toast.is_live())
+        {
+            toast.tone = tone;
+            toast.title = title;
+            toast.description = description;
+            toast.timer = lifetime.map(|remaining| ToastTimer {
+                remaining,
+                running_since: None,
+            });
+            self.sync_timers(now);
+            return;
+        }
+        self.push(
+            stack,
+            ToastContent {
+                kind: ToastKind::Notice,
+                notice_key: Some(key),
+                tone,
+                title,
+                description,
+                lifetime,
+            },
+            now,
+        );
+    }
+
+    fn remove_notice_toast(&mut self, key: &NoticeKey, now: Instant) {
+        if let Some(index) = self
+            .toasts
+            .iter()
+            .position(|toast| toast.notice_key.as_ref() == Some(key) && toast.is_live())
+        {
+            self.begin_exit(index, ExitPath::Lift, now);
+        }
+    }
+
+    pub(super) fn clear_notice(&mut self, key: &NoticeKey, now: Instant) {
+        if self.notices.clear(key) {
+            self.remove_notice_toast(key, now);
+            self.relayout(now);
+        }
+    }
+
     fn motion_duration(&self, duration: Duration) -> Duration {
         if self.reduce_motion {
             Duration::ZERO
@@ -356,6 +430,7 @@ impl Toaster {
     fn push(&mut self, stack: ToastStack, content: ToastContent, now: Instant) -> u64 {
         let ToastContent {
             kind,
+            notice_key,
             tone,
             title,
             description,
@@ -366,6 +441,7 @@ impl Toaster {
         // A new toast enters from one toast-height above its place, transparent.
         self.toasts.push(Toast {
             id,
+            notice_key,
             stack,
             kind,
             tone,
@@ -462,8 +538,12 @@ impl Toaster {
     /// it changes.
     fn dismiss(&mut self, index: usize, path: ExitPath, now: Instant) {
         let toast = &self.toasts[index];
+        let notice_key = toast.notice_key.clone();
         if let ToastKind::ChartStatus(label) = toast.kind {
             self.dismissed_status.insert(toast.stack, label);
+        }
+        if let Some(key) = notice_key {
+            self.notices.clear(&key);
         }
         self.begin_exit(index, path, now);
     }
@@ -682,6 +762,7 @@ impl Toaster {
             stack,
             ToastContent {
                 kind: ToastKind::ChartStatus(notice.label),
+                notice_key: None,
                 tone: notice.tone.into(),
                 title: SharedString::new_static(notice.label),
                 description: notice.detail.map(SharedString::from),
@@ -730,6 +811,7 @@ impl Toaster {
             stack,
             ToastContent {
                 kind: ToastKind::Fill,
+                notice_key: None,
                 tone,
                 title: title.into(),
                 description: Some(description.into()),
@@ -749,6 +831,7 @@ impl Toaster {
             stack,
             ToastContent {
                 kind: ToastKind::PriceAlert,
+                notice_key: None,
                 tone: ToastTone::Warning,
                 title: announcement.title.into(),
                 description: Some(announcement.description.into()),
@@ -791,6 +874,9 @@ impl Toaster {
             changed = true;
         }
         for index in self.sync_timers(now) {
+            if let Some(key) = &self.toasts[index].notice_key {
+                self.notices.clear(key);
+            }
             changed |= self.begin_exit(index, ExitPath::Lift, now);
         }
         let exit = self.motion_duration(EXIT_DURATION);
@@ -1301,6 +1387,57 @@ mod tests {
         )
     }
 
+    #[test]
+    fn notification_toaster_renders_one_card_for_repeated_failure() {
+        let mut toaster = Toaster::default();
+        let now = Instant::now();
+        let notice = notification_center::UserNotice {
+            key: notification_center::NoticeKey {
+                scope: 0,
+                kind: "save",
+            },
+            severity: notification_center::NoticeSeverity::Error,
+            tone: notification_center::NoticeTone::Loss,
+            source: notification_center::NoticeSource::Persistence,
+            title: "Preferences unavailable",
+            detail: "Try again".into(),
+            lifetime: notification_center::NoticeLifetime::UntilDismissed,
+        };
+        toaster.post_notice(stack(1), notice.clone(), now);
+        toaster.post_notice(stack(1), notice, now);
+        assert_eq!(toaster.notices.notices().len(), 1);
+        assert_eq!(toaster.live_indices(stack(1)).len(), 1);
+        assert_eq!(toaster.toasts[0].title.as_ref(), "Preferences unavailable");
+        toaster.dismiss(0, ExitPath::Lift, now);
+        assert_eq!(toaster.notices.notices(), []);
+    }
+
+    #[test]
+    fn notification_success_clears_persistent_save_failure() {
+        let mut toaster = Toaster::default();
+        let now = Instant::now();
+        let key = notification_center::NoticeKey {
+            scope: 0,
+            kind: "chart_chrome_save",
+        };
+        toaster.post_notice(
+            stack(1),
+            notification_center::UserNotice {
+                key: key.clone(),
+                severity: notification_center::NoticeSeverity::Error,
+                tone: notification_center::NoticeTone::Loss,
+                source: notification_center::NoticeSource::Persistence,
+                title: "Chart preferences could not be saved",
+                detail: "Your latest chart preferences may not survive a restart.".into(),
+                lifetime: notification_center::NoticeLifetime::UntilCleared,
+            },
+            now,
+        );
+        toaster.clear_notice(&key, now);
+        assert_eq!(toaster.notices.notices(), []);
+        assert_eq!(toaster.live_indices(stack(1)).len(), 0);
+    }
+
     fn frame(toaster: &Toaster, id: u64, now: Instant) -> ToastFrame {
         toaster.toasts[toaster.index_of(id).expect("toast")].frame(now)
     }
@@ -1324,7 +1461,7 @@ mod tests {
                     toast.description.as_ref().map(ToString::to_string),
                     toast.is_live(),
                 )),
-                ToastKind::Fill | ToastKind::PriceAlert => None,
+                ToastKind::Fill | ToastKind::PriceAlert | ToastKind::Notice => None,
             })
             .collect()
     }
