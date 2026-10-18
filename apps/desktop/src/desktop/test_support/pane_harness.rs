@@ -119,6 +119,7 @@ impl PaneHarness {
             .detach();
             pane.update(cx, |pane, cx| {
                 pane.emit_initial_price_alert_restore_notice(cx);
+                pane.emit_initial_chart_failure_notice(cx);
             });
             PaneWindow {
                 pane,
@@ -712,6 +713,54 @@ fn pane_harness_removed_volume_settings_renders_once_and_readd_clears(cx: &mut T
     });
     cx.run_until_parked();
     cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_chart_failure_renders_one_redacted_notice_then_snapshot_clears(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    for _ in 0..2 {
+        harness
+            .publications
+            .send(MarketWorkerMessage::State {
+                state: ChartState::Error,
+                message: "private-credential-sentinel".into(),
+            })
+            .expect("bounded fixture mailbox accepts failure");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.chart_failure, Some(ChartFailure::Market));
+        let notice = workspace_layout::pane_chart_notice(pane, cx).expect("error status");
+        assert_eq!(
+            notice.detail.as_deref(),
+            Some(ChartFailure::Market.detail())
+        );
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Chart unavailable");
+        assert!(
+            !toaster.notices()[0]
+                .detail
+                .contains("private-credential-sentinel")
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(cx.debug_bounds("toast").is_some(), "chart failure rendered");
+    harness.publish_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(harness.pane.read(cx).chart_failure, None);
+        assert_eq!(harness.window.read(cx).toaster.notices(), []);
+    });
 }
 
 #[gpui::test]

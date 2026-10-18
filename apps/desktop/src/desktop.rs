@@ -641,14 +641,6 @@ fn stable_connection_message(state: FeedConnectionState, incoming: String) -> St
     }
 }
 
-fn stopped_worker_chart_detail(chart_state: ChartState, existing: &str, fallback: &str) -> String {
-    if chart_state == ChartState::Error && !existing.trim().is_empty() {
-        existing.to_string()
-    } else {
-        fallback.to_string()
-    }
-}
-
 const DEFAULT_RITHMIC_LISTING_QUERY: &str = "MNQ";
 
 fn provider_presentation(
@@ -828,7 +820,7 @@ struct WorkspaceSurface {
     menu_state: WorkspaceMenuState,
     scrolls: WorkspaceScrollHandles,
     chart_state: ChartState,
-    chart_state_message: String,
+    chart_failure: Option<ChartFailure>,
     theme: AerisTheme,
     replay_label: String,
     worker_label: String,
@@ -3601,23 +3593,54 @@ fn bounded_status_detail(detail: &str, generic_label: &str) -> Option<String> {
     Some(bounded)
 }
 
-fn chart_status_detail<'a>(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChartFailure {
+    Startup,
+    UnsupportedProvider,
+    Market,
+}
+
+impl ChartFailure {
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::Startup => "Market connection could not be initialized.",
+            Self::UnsupportedProvider => {
+                "This restored market provider is unavailable. Choose another market."
+            }
+            Self::Market => "Market chart could not be loaded. Try again.",
+        }
+    }
+}
+
+fn chart_status_detail(
     chart_state: ChartState,
     connection_state: FeedConnectionState,
-    chart_message: &'a str,
-    connection_message: Option<&'a str>,
-) -> &'a str {
-    // A chart error names its own cause; connection progress text would hide why the chart
-    // failed. A stopped connection is the exception: that error is the connection's.
-    let chart_failed =
-        chart_state == ChartState::Error && connection_state != FeedConnectionState::Stopped;
-    if !chart_failed
-        && chart_state != ChartState::Ready
-        && connection_state != FeedConnectionState::Streaming
+    failure: Option<ChartFailure>,
+    pending_interval: Option<ChartInterval>,
+) -> String {
+    if chart_state == ChartState::Error
+        && let Some(failure) = failure
     {
-        connection_message.unwrap_or(chart_message)
-    } else {
-        chart_message
+        return failure.detail().to_string();
+    }
+    match connection_state {
+        FeedConnectionState::Stopped => "Market worker stopped.".to_string(),
+        FeedConnectionState::Disconnected => "Market data offline.".to_string(),
+        FeedConnectionState::Discovering => "Connecting to market data.".to_string(),
+        FeedConnectionState::Authenticating => "Authenticating market data.".to_string(),
+        FeedConnectionState::Recovering => "Reconnecting market data.".to_string(),
+        FeedConnectionState::Streaming => match chart_state {
+            ChartState::Loading => pending_interval.map_or_else(
+                || "Waiting for a covering market snapshot.".to_string(),
+                |interval| format!("Loading {} history.", interval.label()),
+            ),
+            ChartState::Stale | ChartState::Recovering => {
+                "Waiting for a covering market snapshot.".to_string()
+            }
+            ChartState::AwaitingData => "Waiting for market data.".to_string(),
+            ChartState::Error => "Market chart could not be loaded. Try again.".to_string(),
+            ChartState::Ready => String::new(),
+        },
     }
 }
 
@@ -3697,7 +3720,7 @@ impl HeaderControls {
 struct TerminalStartupState {
     chart: Option<Entity<AerisChartView>>,
     chart_state: ChartState,
-    chart_state_message: String,
+    chart_failure: Option<ChartFailure>,
     replay_label: String,
     worker_label: String,
     subscription_id: String,
@@ -3719,7 +3742,7 @@ fn terminal_startup_state(
                 return TerminalStartupState {
                     chart: None,
                     chart_state: ChartState::Error,
-                    chart_state_message: message.clone(),
+                    chart_failure: Some(ChartFailure::Startup),
                     replay_label: message.clone(),
                     worker_label: "Market worker".to_string(),
                     subscription_id: "Unavailable".to_string(),
@@ -3735,7 +3758,7 @@ fn terminal_startup_state(
             TerminalStartupState {
                 chart: Some(cx.new(move |_| AerisChartView::empty())),
                 chart_state: ChartState::Loading,
-                chart_state_message: message.clone(),
+                chart_failure: None,
                 replay_label: profile.clone(),
                 worker_label: "Rithmic market worker".to_string(),
                 subscription_id: "Loading chart".to_string(),
@@ -3747,14 +3770,11 @@ fn terminal_startup_state(
         }
         MarketWorkerStartup::Loading(startup) => {
             let Some(provider) = known_terminal_provider(startup.product.provider.as_str()) else {
-                let message = format!(
-                    "{} charts are not available in this version. Choose another market.",
-                    startup.product.provider
-                );
+                let message = ChartFailure::UnsupportedProvider.detail().to_string();
                 return TerminalStartupState {
                     chart: None,
                     chart_state: ChartState::Error,
-                    chart_state_message: message.clone(),
+                    chart_failure: Some(ChartFailure::UnsupportedProvider),
                     replay_label: message.clone(),
                     worker_label: startup.worker_label,
                     subscription_id: startup.subscription_id,
@@ -3767,7 +3787,7 @@ fn terminal_startup_state(
             TerminalStartupState {
                 chart: None,
                 chart_state: ChartState::Loading,
-                chart_state_message: "waiting for a covering market snapshot".to_string(),
+                chart_failure: None,
                 replay_label: "waiting for a covering market snapshot".to_string(),
                 worker_label: startup.worker_label,
                 subscription_id: startup.subscription_id,

@@ -152,7 +152,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         menu_state: WorkspaceMenuState::default(),
         scrolls: WorkspaceScrollHandles::default(),
         chart_state: init.startup.chart_state,
-        chart_state_message: init.startup.chart_state_message,
+        chart_failure: init.startup.chart_failure,
         theme: init.theme,
         replay_label: init.startup.replay_label,
         worker_label: init.startup.worker_label,
@@ -2385,7 +2385,7 @@ impl WorkspaceSurface {
             self.rithmic_pending_sequence = Some(sequence);
             self.rithmic_switch = RithmicSwitchState::Pending;
             self.chart_state = ChartState::Loading;
-            self.chart_state_message = format!("Loading {} history", interval.label());
+            self.clear_chart_failure(cx);
             self.series_message = format!("Switching to {}", interval.label());
             cx.notify();
             true
@@ -2436,7 +2436,7 @@ impl WorkspaceSurface {
         self.rithmic_pending_sequence = Some(sequence);
         self.rithmic_switch = RithmicSwitchState::Pending;
         self.chart_state = ChartState::Loading;
-        self.chart_state_message = format!("Loading {} market history", instrument.display_symbol);
+        self.clear_chart_failure(cx);
         self.series_message = format!("Switching to {}", instrument.display_symbol);
         cx.notify();
         true
@@ -3358,7 +3358,7 @@ impl WorkspaceSurface {
             cx.notify();
         } else if next_state == ChartState::Ready {
             self.chart_state = ChartState::Ready;
-            self.chart_state_message = "market snapshot is current".to_string();
+            self.clear_chart_failure(cx);
             if super::provider_presentation(self.provider).is_some() {
                 self.market_state.symbol_selection_pending = false;
             }
@@ -3465,14 +3465,14 @@ impl WorkspaceSurface {
         }
     }
 
-    fn mark_market_stream_invalid(&mut self, message: &str, cx: &mut Context<Self>) {
+    fn mark_market_stream_invalid(&mut self, cx: &mut Context<Self>) {
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
                 chart.mark_replay_stream_invalid();
                 chart_cx.notify();
             });
         }
-        diagnostic!("market worker invalidated the stream: {message}");
+        diagnostic!("market worker invalidated the stream");
     }
 
     /// Reports whether an engine selection handoff must keep the chart covered.
@@ -3488,22 +3488,33 @@ impl WorkspaceSurface {
             && switch_requires_chart_cover(self.chart.is_some(), self.rithmic_switch)
     }
 
-    fn set_chart_state(&mut self, state: ChartState, message: String, cx: &mut Context<Self>) {
+    fn set_chart_state(&mut self, state: ChartState, _message: String, cx: &mut Context<Self>) {
         if matches!(state, ChartState::Stale | ChartState::Recovering) {
-            self.mark_market_stream_invalid(&message, cx);
+            self.mark_market_stream_invalid(cx);
         }
-        if state == ChartState::Error
-            && (self.chart_state != ChartState::Error || self.chart_state_message != message)
-        {
-            let symbol = self
-                .product
-                .as_ref()
-                .map_or("no market", |product| product.instrument_id.as_str());
-            diagnostic!("Aeris chart unavailable for {symbol}: {message}");
+        if state == ChartState::Error {
+            self.chart_failure = Some(ChartFailure::Market);
+            Self::post_chart_failure(ChartFailure::Market, cx);
+        } else if matches!(state, ChartState::Ready | ChartState::AwaitingData) {
+            self.clear_chart_failure(cx);
         }
         self.chart_state = state;
-        self.chart_state_message = message;
         cx.notify();
+    }
+
+    fn post_chart_failure(failure: ChartFailure, cx: &mut Context<Self>) {
+        Self::post_indicator_failure("chart_state", "Chart unavailable", failure.detail(), cx);
+    }
+
+    fn clear_chart_failure(&mut self, cx: &mut Context<Self>) {
+        self.chart_failure = None;
+        Self::clear_indicator_failure("chart_state", cx);
+    }
+
+    pub(super) fn emit_initial_chart_failure_notice(&mut self, cx: &mut Context<Self>) {
+        if let Some(failure) = self.chart_failure {
+            Self::post_chart_failure(failure, cx);
+        }
     }
 
     fn dispatch_recovery(&mut self, cx: &mut Context<Self>) {
@@ -4114,7 +4125,7 @@ impl WorkspaceSurface {
             self.rithmic_pending_sequence = None;
             self.market_state.symbol_selection_pending = false;
             if swapping {
-                self.restore_rithmic_selection_after_failure(&message, cx);
+                self.restore_rithmic_selection_after_failure(cx);
             } else {
                 self.rithmic_previous_selection = None;
             }
@@ -4292,7 +4303,7 @@ impl WorkspaceSurface {
     /// The chart on screen is still the previous series, so restoring means
     /// re-stating its demand and reporting an actionable error over it — never
     /// leaving the trader on a surface with no data and no way back.
-    fn restore_rithmic_selection_after_failure(&mut self, detail: &str, cx: &mut Context<Self>) {
+    fn restore_rithmic_selection_after_failure(&mut self, cx: &mut Context<Self>) {
         let Some((product, interval)) = self.rithmic_previous_selection.take() else {
             return;
         };
@@ -4315,7 +4326,7 @@ impl WorkspaceSurface {
             self.rithmic_pending_interval = Some(interval);
             self.rithmic_switch = RithmicSwitchState::Pending;
         }
-        self.series_message = format!("{detail} — showing {}", interval.label());
+        self.series_message = format!("Market selection failed — showing {}", interval.label());
         cx.notify();
     }
 
@@ -4342,27 +4353,12 @@ impl WorkspaceSurface {
         for message in messages {
             self.apply_market_worker_message(message, cx);
         }
-        if super::provider_presentation(self.provider).is_some()
-            && disconnected
-            && !matches!(self.connection_state, Some(FeedConnectionState::Stopped))
-        {
-            let display = terminal_provider_display(self.provider);
-            let fallback = format!("{display} market worker stopped");
-            let detail =
-                stopped_worker_chart_detail(self.chart_state, &self.chart_state_message, &fallback);
-            self.apply_connection_state(FeedConnectionState::Stopped, fallback, cx);
-            if self.chart_state == ChartState::Error && self.chart_state_message != detail {
-                self.chart_state_message = detail;
-                cx.notify();
-            }
-        } else if disconnected && self.chart_state != ChartState::Error {
+        if disconnected && !matches!(self.connection_state, Some(FeedConnectionState::Stopped)) {
             let message = format!(
                 "{} market worker stopped",
                 terminal_provider_display(self.provider)
             );
-            self.connection_state = Some(FeedConnectionState::Stopped);
-            self.connection_message = Some(message.clone());
-            self.set_chart_state(ChartState::Error, message, cx);
+            self.apply_connection_state(FeedConnectionState::Stopped, message, cx);
         }
         self.dispatch_recovery(cx);
         self.dispatch_retained_symbol_search(cx);
@@ -4376,8 +4372,6 @@ impl WorkspaceSurface {
                     reconciled_bridge_state(self.chart_state, metrics.recovery_pending);
                 if reconciled != self.chart_state {
                     self.chart_state = reconciled;
-                    self.chart_state_message =
-                        "chart validation requires a correlated covering snapshot".to_string();
                     cx.notify();
                 }
                 bridge_status(metrics)
@@ -4422,7 +4416,14 @@ impl WorkspaceSurface {
             .is_some_and(|chart| chart.read(cx).has_market_data());
         if let Some(chart_state) = presentation.chart_state(retained_market_data) {
             self.chart_state = chart_state;
-            self.chart_state_message.clone_from(&message);
+            if chart_state == ChartState::Error && self.chart_failure.is_none() {
+                Self::post_indicator_failure(
+                    "chart_state",
+                    "Chart unavailable",
+                    "Market worker stopped.",
+                    cx,
+                );
+            }
         }
         self.connection_state = Some(state);
         // Depth follows the same honesty rule as the empty panel: a fresh

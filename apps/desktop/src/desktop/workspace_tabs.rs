@@ -143,6 +143,7 @@ impl TerminalApp {
         .detach();
         surface.update(cx, |surface, cx| {
             surface.emit_initial_price_alert_restore_notice(cx);
+            surface.emit_initial_chart_failure_notice(cx);
         });
     }
 

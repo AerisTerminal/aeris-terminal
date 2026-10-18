@@ -66,9 +66,10 @@ pub(super) fn pane_chart_notice(
         chart_status_detail(
             chart_state,
             connection_state,
-            &surface.chart_state_message,
-            surface.connection_message.as_deref(),
-        ),
+            surface.chart_failure,
+            surface.rithmic_pending_interval,
+        )
+        .as_str(),
     )
 }
 

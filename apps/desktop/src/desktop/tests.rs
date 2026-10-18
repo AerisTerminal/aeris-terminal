@@ -3,8 +3,8 @@
 use super::{
     CHART_CONTEXT_MENU_ROW_HEIGHT, CHART_CONTEXT_MENU_WIDTH, CHROME_MENU_LIST_HEIGHT,
     CHROME_MENU_MAX_HEIGHT, CHROME_MENU_SEARCH_HEIGHT, CHROME_MENU_WIDTH, CaptionPlatform,
-    CaptionPointerOwner, ChartNoticePlacement, ChartNoticeTone, ChartState, ChromeOverlayPhase,
-    ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
+    CaptionPointerOwner, ChartFailure, ChartNoticePlacement, ChartNoticeTone, ChartState,
+    ChromeOverlayPhase, ConsumerResourceClass, HeaderControls, InputEvent, InstrumentMenuEntry,
     InstrumentMenuSelection, MarketSummaryEntry, OVERLAY_EDGE_MARGIN, PRICE_AXIS_MENU_GAP,
     PriceAxisMenuFlyout, PriceAxisMenuRow, ProviderCatalogCommand, ProviderConnectionPresentation,
     RithmicSwitchState, SidePanel, SidePanelVisibility, SymbolInputAction, SymbolSelectionTarget,
@@ -25,8 +25,8 @@ use super::{
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
     ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
     series_selector_label, should_finish_chrome_overlay_close, stabilized_connection_state,
-    stable_connection_message, stopped_worker_chart_detail, switch_requires_chart_cover,
-    symbol_input_action, symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+    stable_connection_message, switch_requires_chart_cover, symbol_input_action,
+    symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
     timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
     timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
     timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
@@ -712,10 +712,9 @@ mod timeframe_input {
             let surface = surface.read(cx);
             // Never silently presented as another provider's market.
             assert_eq!(surface.chart_state, ChartState::Error);
-            assert!(
-                surface
-                    .chart_state_message
-                    .contains("retired charts are not available")
+            assert_eq!(
+                surface.chart_failure,
+                Some(ChartFailure::UnsupportedProvider)
             );
             assert!(surface.product.is_none());
         });
@@ -2650,20 +2649,17 @@ fn old_ready_cannot_cancel_a_pending_symbol_or_timeframe_switch() {
 #[test]
 fn worker_stop_preserves_a_concrete_startup_error() {
     assert_eq!(
-        stopped_worker_chart_detail(
+        chart_status_detail(
             ChartState::Error,
-            "provider instrument selection is stale",
-            "Hyperliquid market worker stopped",
+            FeedConnectionState::Stopped,
+            Some(ChartFailure::UnsupportedProvider),
+            None,
         ),
-        "provider instrument selection is stale"
+        ChartFailure::UnsupportedProvider.detail()
     );
     assert_eq!(
-        stopped_worker_chart_detail(
-            ChartState::Loading,
-            "Loading Hyperliquid history",
-            "Hyperliquid market worker stopped",
-        ),
-        "Hyperliquid market worker stopped"
+        chart_status_detail(ChartState::Error, FeedConnectionState::Stopped, None, None),
+        "Market worker stopped."
     );
 }
 
@@ -3481,38 +3477,42 @@ fn chart_detail_prefers_connection_context_until_streaming() {
         chart_status_detail(
             ChartState::Loading,
             FeedConnectionState::Authenticating,
-            "waiting for chart",
-            Some("Rithmic Test agreements require attention"),
+            None,
+            None,
         ),
-        "Rithmic Test agreements require attention"
+        "Authenticating market data."
     );
     assert_eq!(
         chart_status_detail(
             ChartState::Recovering,
             FeedConnectionState::Streaming,
-            "history is covering a gap",
-            Some("feed is streaming"),
+            None,
+            None,
         ),
-        "history is covering a gap"
+        "Waiting for a covering market snapshot."
     );
     assert_eq!(
         chart_status_detail(
             ChartState::Error,
             FeedConnectionState::Discovering,
-            "Provider startup catalog refresh was rejected",
-            Some("Connecting to market data"),
+            Some(ChartFailure::Market),
+            None,
         ),
-        "Provider startup catalog refresh was rejected",
+        ChartFailure::Market.detail(),
         "a chart error is not hidden behind connection progress"
     );
     assert_eq!(
+        chart_status_detail(ChartState::Error, FeedConnectionState::Stopped, None, None,),
+        "Market worker stopped."
+    );
+    assert_eq!(
         chart_status_detail(
-            ChartState::Error,
-            FeedConnectionState::Stopped,
-            "Loading tastytrade history",
-            Some("tastytrade market worker stopped"),
+            ChartState::Loading,
+            FeedConnectionState::Streaming,
+            None,
+            Some(ChartInterval::Minute5)
         ),
-        "tastytrade market worker stopped"
+        "Loading 5m history."
     );
 }
 
