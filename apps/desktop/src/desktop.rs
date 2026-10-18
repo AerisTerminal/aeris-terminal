@@ -3207,6 +3207,7 @@ struct HeaderState {
     indicator_input: Entity<InputState>,
     time_zone_id: String,
     time_zone_clock: String,
+    now_unix_nanos: i64,
     account_label: Option<String>,
     indicator_message: Option<String>,
     series_message: String,

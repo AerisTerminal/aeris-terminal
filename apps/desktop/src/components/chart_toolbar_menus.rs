@@ -645,11 +645,11 @@ pub(super) fn time_zone_overlay_content(
     let colors = theme.colors;
     let matches = app_state.time_zone_matches(cx);
     let selected = app_state.chart_time_zone_id();
-    let utc_seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-        .unwrap_or(0);
+    let utc_seconds = app_state
+        .lifecycle
+        .clock()
+        .wall_unix_nanos()
+        .div_euclid(1_000_000_000);
     let rows = matches.into_iter().enumerate().map(|(index, time_zone)| {
         let row_app = app.clone();
         let display_name = time_zone.replace('_', " ");

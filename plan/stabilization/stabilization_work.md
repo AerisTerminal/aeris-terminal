@@ -836,6 +836,14 @@ Status: pending
     different session dates; conversion regressions check the publication
     provenance timestamp. Other desktop wall-clock presentation helpers and
     FixtureMarket/PaneHarness remain for later parts. M6.1 stays unchecked.
+  - Part 10: header session countdowns, fill toasts, economic-calendar rows,
+    chart time-zone badges and provider copyright years receive the desktop
+    clock through their owning app/pane state rather than reading process wall
+    time in the rendering components. A ManualClock calendar regression checks
+    visibility across the release window. Startup quarantine file naming,
+    dormant account/update internals and diagnostics remain outside this
+    presentation change; FixtureMarket/PaneHarness and VAL-DSK-001/002 closeout
+    remain. M6.1 stays unchecked.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
@@ -1148,6 +1156,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.1 Part 6 refactor(desktop): routed chart-chrome and workspace persistence through per-desktop paths and save receipts; removed the global chart-chrome locks and workspace path lookup. Two-composition file-backed isolation and naming-check guard tests added; full workspace fmt/check/strict Clippy/tests/naming_check passed. Clock, short-endurance child-process isolation and PaneHarness remain; M6.1 is open.
 - 2026-10-18 M6.1 Part 7 test(desktop): isolated the short-endurance RSS assertions in a child process without changing any assertions or production behavior. Focused regression and full workspace fmt/check/strict Clippy/tests/naming_check passed; clock and PaneHarness remain.
 - 2026-10-18 M6.1 Part 9 refactor(desktop): routed session status, selected-instrument status and market snapshot/tail/recovery provenance timestamps through the injected desktop clock; removed the market-worker direct system-time helper. ManualClock session and provenance regressions pass; full workspace fmt/check/strict Clippy/tests/naming_check green. Other desktop presentation wall-clock helpers and PaneHarness remain; M6.1 is open.
+- 2026-10-18 M6.1 Part 10 refactor(desktop): routed UI header/countdown, fill toast, context calendar, time-zone badge and provider notice timestamps through the injected desktop clock, removing their direct wall-time helpers. ManualClock calendar regression and full workspace fmt/check/strict Clippy/tests/naming_check pass. PaneHarness and VAL-DSK-001/002 closeout remain; M6.1 is open.
 
 ## 7. Known gaps / deferred
 

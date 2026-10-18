@@ -591,6 +591,11 @@ fn workspace_context_panel(
             height: surface.context_panel_height,
             snapshot: &surface.context_snapshot,
             tab: surface.context_panel_tab,
+            now_unix_seconds: surface
+                .lifecycle
+                .clock()
+                .wall_unix_nanos()
+                .div_euclid(1_000_000_000),
             scroll: surface.scrolls.context.clone(),
             credential_dialog: surface.context_credential_dialog.as_ref(),
             credential_message: surface.context_credential_message.as_deref(),

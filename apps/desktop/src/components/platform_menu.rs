@@ -151,6 +151,7 @@ pub(super) struct PlatformMenuContent<'a> {
     pub(super) window_frame: chart_chrome::WindowFrame,
     /// Rithmic's notices appear under About only while a Rithmic session is held.
     pub(super) rithmic_notices: bool,
+    pub(super) now_unix_seconds: i64,
 }
 
 /// The platform menu anchored under the avatar's click point. Every section
@@ -168,6 +169,7 @@ pub(super) fn platform_menu_layer(
         update,
         window_frame,
         rithmic_notices,
+        now_unix_seconds,
     } = content;
     let header = identity_header(account, theme);
     let actions = account_actions(account);
@@ -250,6 +252,7 @@ pub(super) fn platform_menu_layer(
         .child(about_section(
             details,
             rithmic_notices,
+            now_unix_seconds,
             &about_update_view(update, theme),
             &run_update,
             theme,
@@ -750,6 +753,7 @@ fn about_details(
 fn about_section(
     details: Vec<(&'static str, String)>,
     rithmic_notices: bool,
+    now_unix_seconds: i64,
     update: &UpdateView,
     on_update: &UpdateActivate,
     theme: &AerisTheme,
@@ -806,7 +810,7 @@ fn about_section(
                 )
         }))
         .when(rithmic_notices, |about| {
-            about.child(provider_notices(current_utc_year(), theme))
+            about.child(provider_notices(utc_year(now_unix_seconds), theme))
         })
         .child(update_row(update, on_update, theme))
 }
@@ -861,15 +865,6 @@ fn provider_notices(year: i64, theme: &AerisTheme) -> impl IntoElement {
                 })
                 .child(POWERED_BY_OMNE_NOTICE),
         )
-}
-
-fn current_utc_year() -> i64 {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|now| i64::try_from(now.as_secs()).ok())
-        .unwrap_or(0);
-    utc_year(seconds)
 }
 
 /// Gregorian year of a Unix timestamp (Hinnant's days-to-civil algorithm).
@@ -1016,6 +1011,7 @@ mod tests {
                     about_section(
                         about_details(&account, None),
                         false,
+                        1_780_000_000,
                         &about_update_view(None, &theme),
                         &ignore_update,
                         &theme,
@@ -1026,6 +1022,7 @@ mod tests {
                     about_section(
                         about_details(&account, None),
                         true,
+                        1_780_000_000,
                         &about_update_view(None, &theme),
                         &ignore_update,
                         &theme,

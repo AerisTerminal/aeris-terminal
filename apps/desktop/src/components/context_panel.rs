@@ -13,7 +13,6 @@ use aeris_context_runtime::{
 use aeris_design_system::platform_date_label;
 use chrono::{Datelike as _, NaiveDate, TimeZone, Timelike as _, Utc};
 use gpui::{AppContext as _, Div, prelude::FluentBuilder as _};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONTEXT_PANEL_HEADER_HEIGHT: f32 = 30.0;
 const CONTEXT_PANEL_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
@@ -33,6 +32,7 @@ pub(super) struct ContextPanelState<'a> {
     pub(super) height: f32,
     pub(super) snapshot: &'a ContextSnapshot,
     pub(super) tab: ContextPanelTab,
+    pub(super) now_unix_seconds: i64,
     pub(super) scroll: ScrollHandle,
     pub(super) credential_dialog: Option<&'a ContextCredentialDialogState>,
     pub(super) credential_message: Option<&'a str>,
@@ -46,13 +46,14 @@ pub(super) fn context_panel(state: ContextPanelState<'_>) -> impl IntoElement + 
         height,
         snapshot,
         tab,
+        now_unix_seconds,
         scroll,
         credential_dialog,
         credential_message,
         risk_message,
         theme,
     } = state;
-    let rows = context_rows(snapshot, tab, theme);
+    let rows = context_rows(snapshot, tab, now_unix_seconds, theme);
     let close_app = app.clone();
     let credentials_app = app.clone();
     let tabs = ContextPanelTab::ALL
@@ -252,9 +253,16 @@ fn context_tab(
         .child(candidate.label())
 }
 
-fn context_rows(snapshot: &ContextSnapshot, tab: ContextPanelTab, theme: &AerisTheme) -> Vec<Div> {
+fn context_rows(
+    snapshot: &ContextSnapshot,
+    tab: ContextPanelTab,
+    now_unix_seconds: i64,
+    theme: &AerisTheme,
+) -> Vec<Div> {
     let mut rows = match tab {
-        ContextPanelTab::Calendar => calendar_rows(&snapshot.economic_events, theme),
+        ContextPanelTab::Calendar => {
+            calendar_rows(&snapshot.economic_events, now_unix_seconds, theme)
+        }
         ContextPanelTab::Energy => energy_rows(&snapshot.energy, &snapshot.weather, theme),
         ContextPanelTab::Commitments => cot_rows(&snapshot.commitments, theme),
         ContextPanelTab::Agriculture => metric_rows(&snapshot.agriculture, theme),
@@ -266,8 +274,7 @@ fn context_rows(snapshot: &ContextSnapshot, tab: ContextPanelTab, theme: &AerisT
     rows
 }
 
-fn calendar_rows(events: &[EconomicEvent], theme: &AerisTheme) -> Vec<Div> {
-    let now = now_unix_seconds();
+fn calendar_rows(events: &[EconomicEvent], now: i64, theme: &AerisTheme) -> Vec<Div> {
     events
         .iter()
         .filter(|event| event.scheduled_unix_seconds >= now.saturating_sub(86_400))
@@ -536,17 +543,46 @@ fn countdown(event_unix_seconds: i64, now_unix_seconds: i64) -> String {
     }
 }
 
-fn now_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-        .unwrap_or(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_trading_runtime::clock::{Clock, ManualClock};
+
+    #[test]
+    fn calendar_rows_follow_injected_desktop_time() {
+        let clock = ManualClock::new(1_000_000_000_000);
+        let event = EconomicEvent {
+            id: "release".into(),
+            title: "Public release".into(),
+            scheduled_unix_seconds: 1_000,
+            importance: aeris_context_runtime::EventImportance::Low,
+            provenance: ContextProvenance {
+                source: ContextSource::Bls,
+                source_url: String::new(),
+                release_unix_seconds: 1_000,
+                fetched_unix_seconds: 1_000,
+            },
+        };
+        let theme = AerisTheme::dark();
+        assert_eq!(
+            calendar_rows(
+                std::slice::from_ref(&event),
+                clock.wall_unix_nanos().div_euclid(1_000_000_000),
+                &theme
+            )
+            .len(),
+            1
+        );
+        clock.set_wall_unix_nanos(90_000_000_000_000);
+        assert!(
+            calendar_rows(
+                &[event],
+                clock.wall_unix_nanos().div_euclid(1_000_000_000),
+                &theme
+            )
+            .is_empty()
+        );
+    }
 
     #[test]
     fn fixed_context_values_preserve_scale() {

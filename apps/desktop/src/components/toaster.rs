@@ -1176,7 +1176,7 @@ impl TerminalApp {
         if self.toaster.announce_fills(
             snapshot,
             host,
-            terminal_chrome::current_unix_nanos(),
+            self.lifecycle.clock().wall_unix_nanos(),
             Instant::now(),
         ) {
             cx.notify();

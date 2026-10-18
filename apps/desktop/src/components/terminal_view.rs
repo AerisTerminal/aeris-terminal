@@ -21,6 +21,7 @@ fn active_header_state(
         indicator_input: workspace.indicator_input.clone(),
         time_zone_id: workspace.chart_time_zone_id().to_string(),
         time_zone_clock: workspace.chart_time_zone_clock(),
+        now_unix_nanos: workspace.lifecycle.clock().wall_unix_nanos(),
         account_label: workspace
             .trading_pnl
             .order_entry

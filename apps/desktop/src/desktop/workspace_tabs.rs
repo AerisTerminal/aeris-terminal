@@ -1912,6 +1912,11 @@ impl TerminalApp {
                 update: self.update_presentation(),
                 window_frame: self.chart_chrome.window_frame,
                 rithmic_notices: self.holds_rithmic_session(cx),
+                now_unix_seconds: self
+                    .lifecycle
+                    .clock()
+                    .wall_unix_nanos()
+                    .div_euclid(1_000_000_000),
             },
             &self.theme,
         ))

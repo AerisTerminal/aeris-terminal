@@ -474,7 +474,7 @@ fn header_connection_presentation(state: &HeaderState) -> ConnectionPresentation
         state.connection_state == FeedConnectionState::Streaming,
         state.market_session.as_ref(),
         &state.time_zone_id,
-        current_unix_nanos(),
+        state.now_unix_nanos,
     )
 }
 
@@ -1500,14 +1500,6 @@ fn market_tooltip_rows(
     };
     rows.extend(countdown);
     rows
-}
-
-pub(super) fn current_unix_nanos() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-        .unwrap_or(0)
 }
 
 /// Whole minutes until `target`, rounded up so "0m" only appears once the boundary passes.
