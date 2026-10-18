@@ -426,25 +426,22 @@ impl TerminalApp {
             }
         }
         let brokers = brokers.to_vec();
+        let market = self.lifecycle.market().clone();
         let work = cx.background_executor().spawn({
             let brokers = brokers.clone();
             async move {
-                let market = engine_market_worker::shared_market_runtime();
                 brokers
                     .into_iter()
-                    .map(|broker| {
-                        let market = market.as_ref().map_err(Clone::clone)?;
-                        match operation {
-                            HostedBrokerOperation::Checking => market
-                                .provider_connected(broker.id())
-                                .map(|connected| (connected, None)),
-                            HostedBrokerOperation::Connecting => market
-                                .connect_provider(broker.id())
-                                .map(|message| (true, Some(message))),
-                            HostedBrokerOperation::Disconnecting => market
-                                .disconnect_provider(broker.id())
-                                .map(|message| (false, Some(message))),
-                        }
+                    .map(|broker| match operation {
+                        HostedBrokerOperation::Checking => market
+                            .provider_connected(broker.id())
+                            .map(|connected| (connected, None)),
+                        HostedBrokerOperation::Connecting => market
+                            .connect_provider(broker.id())
+                            .map(|message| (true, Some(message))),
+                        HostedBrokerOperation::Disconnecting => market
+                            .disconnect_provider(broker.id())
+                            .map(|message| (false, Some(message))),
                     })
                     .collect::<Vec<_>>()
             }

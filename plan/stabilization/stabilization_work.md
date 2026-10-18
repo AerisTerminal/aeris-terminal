@@ -786,6 +786,15 @@ Status: pending
     independently allocated in the deterministic account test. The full workspace gate
     passed. Market, feedback, persistence, clock and PaneHarness remain for later parts;
     M6.1 stays unchecked.
+  - Part 4: the composition root constructs the market owner once and injects it through
+    `DesktopServices` into workspace market workers, their bounded factory and wake callbacks,
+    provider login/actions, trading feed attachment and lifecycle shutdown. Removed the market
+    `OnceLock` and lazy global lookups; a naming rule guards the instance boundary with positive
+    and negative tests. An independent-consumer test attaches the same ID to two separate
+    desktop market owners. Feedback, persistence, clock and PaneHarness remain; M6.1 stays unchecked.
+    The full gate exposed the existing burst-conformance process-RSS race for a third time;
+    its unchanged memory and delivery assertions now execute in an isolated test child, so
+    concurrently allocating GPUI tests cannot be charged to the fixture's working set.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place

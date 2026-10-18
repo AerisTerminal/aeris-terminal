@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -55,20 +55,6 @@ const HYPERLIQUID_SUBSCRIPTION_ID: &str = "desktop_runtime_hyperliquid_bars";
 const HYPERLIQUID_WORKER_LABEL: &str = "Hyperliquid market runtime";
 const WORKSPACE_ADDITION_CAPACITY: usize = super::local_state::MAXIMUM_WATCHLIST_ENTRIES
     + super::MAXIMUM_OPEN_WORKSPACES * (super::CHART_PANE_CAPACITY + 1);
-
-static MARKET_RUNTIME: OnceLock<Result<MarketService, String>> = OnceLock::new();
-
-pub(crate) fn shared_market_runtime() -> Result<MarketService, String> {
-    MARKET_RUNTIME.get_or_init(MarketService::start).clone()
-}
-
-/// Returns the shared runtime only if something already started it, so quit
-/// never starts provider sessions just to stop them.
-pub(crate) fn started_market_runtime() -> Option<MarketService> {
-    MARKET_RUNTIME
-        .get()
-        .and_then(|runtime| runtime.as_ref().ok().cloned())
-}
 
 /// The streams a chart demands from `provider`, limited to the ones that
 /// provider publishes; the runtime rejects demand for any other stream.
@@ -136,6 +122,7 @@ pub(super) struct WorkspaceMarketGroup {
 
 #[derive(Clone)]
 pub(super) struct WorkspaceMarketFactory {
+    market: MarketService,
     additions: mpsc::SyncSender<EndpointRecord>,
     next_workspace_id: Arc<AtomicU64>,
     next_pane_id: Arc<AtomicU64>,
@@ -224,14 +211,14 @@ impl WorkspaceMarketFactory {
     ) -> Result<WorkspaceMarketPane, String> {
         let pane_id = allocate_pane_id(&self.next_pane_id)?;
         let consumer_id = allocate_consumer_id(&self.next_consumer_id)?;
-        let (worker, mut endpoint) = worker_endpoint(
+        let (worker, mut endpoint) = worker_endpoint_for_market(
+            &self.market,
             workspace_id,
             pane_id,
             product,
             consumer_id,
             interval,
-            None,
-            INITIAL_GENERATION,
+            (None, INITIAL_GENERATION),
         );
         endpoint.endpoint.resource_class = resource_class;
         endpoint.role = role;
@@ -246,7 +233,7 @@ impl WorkspaceMarketFactory {
                     "the market workspace runtime is unavailable".to_string()
                 }
             })?;
-        wake_market_bridges();
+        self.market.wake_bridges();
         Ok(worker)
     }
 }
@@ -284,6 +271,7 @@ fn start() -> Result<
 > {
     let product = default_hyperliquid_product();
     let (mut workers, factory) = start_group(
+        MarketService::start()?,
         vec![(DEFAULT_WORKSPACE_ID, product)],
         crate::desktop::tests::test_trading_service(),
     )?;
@@ -294,36 +282,39 @@ fn start() -> Result<
 }
 
 pub(super) fn start_multi_chart(
+    market: &MarketService,
     trading: aeris_trading_runtime::TradingService,
 ) -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
     let mnq = default_product("MNQ");
     let es = default_product("ES");
-    let (workers, _factory) = start_group(vec![(1, mnq), (2, es)], trading)?;
+    let (workers, _factory) = start_group(market.clone(), vec![(1, mnq), (2, es)], trading)?;
     Ok(workers)
 }
 
 pub(super) fn start_rithmic_catalog(
+    market: &MarketService,
     trading: aeris_trading_runtime::TradingService,
 ) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let client_id = random_order_book_identity()?;
     let consumer_id = random_order_book_identity()?;
     let pane_id = random_order_book_identity()?;
-    let (mut pane, mut endpoint) = worker_endpoint(
+    let (mut pane, mut endpoint) = worker_endpoint_for_market(
+        market,
         DEFAULT_WORKSPACE_ID,
         pane_id,
         default_product("MNQ"),
         consumer_id,
         ChartInterval::Minute1,
-        None,
-        0,
+        (None, 0),
     );
     pane.startup = MarketWorkerStartup::Rithmic;
     endpoint.role = EndpointRole::RithmicCatalog;
-    spawn_group(client_id, vec![endpoint], None, trading)?;
+    spawn_group(market.clone(), client_id, vec![endpoint], None, trading)?;
     Ok((pane.startup, pane.worker))
 }
 
 pub(super) fn start_workspace_tabs(
+    market: &MarketService,
     workspace: &WorkspaceState,
     trading: aeris_trading_runtime::TradingService,
 ) -> Result<WorkspaceMarketGroup, String> {
@@ -336,23 +327,30 @@ pub(super) fn start_workspace_tabs(
     }
     let restore_notices = plan.notices.clone();
     for pane in plan.panes {
-        let (worker, endpoint) = worker_endpoint(
+        let (worker, endpoint) = worker_endpoint_for_market(
+            market,
             pane.workspace_id,
             pane.pane_id,
             pane.instrument,
             pane.consumer_id,
             pane.interval,
-            pane.restored_viewport,
-            pane.generation,
+            (pane.restored_viewport, pane.generation),
         );
         initial.push(worker);
         endpoints.push(endpoint);
     }
     let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
-    spawn_group(client_id, endpoints, Some(addition_rx), trading)?;
+    spawn_group(
+        market.clone(),
+        client_id,
+        endpoints,
+        Some(addition_rx),
+        trading,
+    )?;
     Ok(WorkspaceMarketGroup {
         initial,
         factory: WorkspaceMarketFactory {
+            market: market.clone(),
             additions: addition_tx,
             next_workspace_id: Arc::new(AtomicU64::new(
                 plan.maximum_workspace_id.saturating_add(1),
@@ -513,6 +511,7 @@ struct WorkerEndpoint {
 }
 
 fn start_group(
+    market: MarketService,
     configurations: Vec<(u64, InstallProviderInstrument)>,
     trading: aeris_trading_runtime::TradingService,
 ) -> Result<
@@ -534,23 +533,30 @@ fn start_group(
         maximum_workspace_id = maximum_workspace_id.max(workspace_id);
         maximum_pane_id = maximum_pane_id.max(pane_id);
         maximum_consumer_id = maximum_consumer_id.max(consumer_id);
-        let (worker, endpoint) = worker_endpoint(
+        let (worker, endpoint) = worker_endpoint_for_market(
+            &market,
             workspace_id,
             pane_id,
             product,
             consumer_id,
             ChartInterval::Minute1,
-            None,
-            INITIAL_GENERATION,
+            (None, INITIAL_GENERATION),
         );
         workers.push((worker.startup, worker.worker));
         endpoints.push(endpoint);
     }
     let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
-    spawn_group(client_id, endpoints, Some(addition_rx), trading)?;
+    spawn_group(
+        market.clone(),
+        client_id,
+        endpoints,
+        Some(addition_rx),
+        trading,
+    )?;
     Ok((
         workers,
         WorkspaceMarketFactory {
+            market,
             additions: addition_tx,
             next_workspace_id: Arc::new(AtomicU64::new(maximum_workspace_id.saturating_add(1))),
             next_pane_id: Arc::new(AtomicU64::new(maximum_pane_id.saturating_add(1))),
@@ -559,14 +565,35 @@ fn start_group(
     ))
 }
 
-fn worker_endpoint(
+fn worker_endpoint_for_market(
+    market: &MarketService,
     workspace_id: u64,
     pane_id: u64,
     product: InstallProviderInstrument,
     consumer_id: u64,
     interval: ChartInterval,
-    restored_viewport: Option<(i64, i64)>,
-    initial_generation: u64,
+    selection: (Option<(i64, i64)>, u64),
+) -> (WorkspaceMarketPane, EndpointRecord) {
+    let wake_market = market.clone();
+    worker_endpoint_with_wake(
+        Arc::new(move || wake_market.wake_bridges()),
+        workspace_id,
+        pane_id,
+        product,
+        consumer_id,
+        interval,
+        selection,
+    )
+}
+
+fn worker_endpoint_with_wake(
+    wake: Arc<dyn Fn() + Send + Sync>,
+    workspace_id: u64,
+    pane_id: u64,
+    product: InstallProviderInstrument,
+    consumer_id: u64,
+    interval: ChartInterval,
+    (restored_viewport, initial_generation): (Option<(i64, i64)>, u64),
 ) -> (WorkspaceMarketPane, EndpointRecord) {
     let (subscription_id, worker_label) = worker_identity(product.provider.as_str());
     let startup = MarketWorkerStartup::Loading(Box::new(
@@ -595,7 +622,7 @@ fn worker_endpoint(
             None,
             Some(Arc::clone(&selection_sequence)),
         )
-        .with_command_wake(Arc::new(wake_market_bridges)),
+        .with_command_wake(wake),
     };
     let endpoint = EndpointRecord {
         workspace_id,
@@ -621,7 +648,29 @@ fn worker_endpoint(
     (worker, endpoint)
 }
 
+#[cfg(test)]
+fn worker_endpoint(
+    workspace_id: u64,
+    pane_id: u64,
+    product: InstallProviderInstrument,
+    consumer_id: u64,
+    interval: ChartInterval,
+    restored_viewport: Option<(i64, i64)>,
+    initial_generation: u64,
+) -> (WorkspaceMarketPane, EndpointRecord) {
+    worker_endpoint_with_wake(
+        Arc::new(|| {}),
+        workspace_id,
+        pane_id,
+        product,
+        consumer_id,
+        interval,
+        (restored_viewport, initial_generation),
+    )
+}
+
 fn spawn_group(
+    market: MarketService,
     client_id: u64,
     mut endpoints: Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
@@ -633,7 +682,8 @@ fn spawn_group(
     thread::Builder::new()
         .name("aeris-engine-market-client".to_string())
         .spawn(move || {
-            if let Err(error) = run_workers(client_id, &mut endpoints, additions, &trading) {
+            if let Err(error) = run_workers(&market, client_id, &mut endpoints, additions, &trading)
+            {
                 for record in &endpoints {
                     let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
                         state: ChartState::Error,
@@ -647,12 +697,6 @@ fn spawn_group(
         })
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-fn wake_market_bridges() {
-    if let Some(market) = started_market_runtime() {
-        market.wake_bridges();
-    }
 }
 
 /// User-visible provider name for worker status and error messages.

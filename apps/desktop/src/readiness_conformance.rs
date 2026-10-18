@@ -1328,6 +1328,28 @@ mod tests {
 
     #[test]
     fn burst_delivery_is_bounded_and_backpressured() {
+        // The working-set bound samples process RSS. Other GPUI tests allocate
+        // concurrently in this test binary, so run the same assertions in an
+        // isolated child rather than attributing their memory to this fixture.
+        if std::env::var_os("AERIS_BURST_ISOLATED_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "desktop::readiness_conformance::tests::burst_delivery_is_bounded_and_backpressured",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("AERIS_BURST_ISOLATED_CHILD", "1")
+                .output()
+                .expect("isolated burst test starts");
+            assert!(
+                output.status.success(),
+                "isolated burst test failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let evidence = collect_evidence().expect("burst evidence passes");
         assert!(evidence.mailbox_high_water_items <= evidence.mailbox_capacity);
         assert_eq!(evidence.delivered_updates, BURST_UPDATES);

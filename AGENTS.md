@@ -88,6 +88,8 @@ violations and missing verification explicitly, and never describe them as satis
   process-wide `TRADING_SERVICE` or `trading::handle()`/`trading::install()` lookup.
 - Desktop account clients and refresh quiesce use the instance's `DesktopServices` account
   owner; no process-wide `DesktopAccount::shared()` or account-service singleton lookup.
+- Desktop market consumers, bridge wakes and shutdown use the instance's `DesktopServices` market
+  owner; no process-wide market runtime or `shared_market_runtime()` lookup.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

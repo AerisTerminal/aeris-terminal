@@ -57,6 +57,7 @@ impl DesktopLifecycle {
             terminals: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
             services: aeris_desktop::services::DesktopServices::new(
+                aeris_market_runtime::MarketService::start().expect("test market owner"),
                 super::tests::test_trading_service(),
                 aeris_account_runtime::AccountService::new(
                     aeris_account_runtime::AccountServiceConfig::from_environment(),
@@ -75,6 +76,10 @@ impl DesktopLifecycle {
 
     pub(super) fn trading(&self) -> &aeris_trading_runtime::TradingService {
         &self.services.trading
+    }
+
+    pub(super) fn market(&self) -> &aeris_market_runtime::MarketService {
+        &self.services.market
     }
 
     pub(super) fn account(&self) -> Option<&aeris_desktop::account::DesktopAccount> {
@@ -133,7 +138,7 @@ impl DesktopLifecycle {
             .collect::<Vec<_>>();
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
         let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
-        let market = engine_market_worker::started_market_runtime();
+        let market = self.services.market.clone();
         let trading = self.services.trading.clone();
         let context = self.context.clone();
         let instance_lock = self.instance_lock.clone();
@@ -170,9 +175,7 @@ impl DesktopLifecycle {
             }
             // Provider sessions log out only through the runtime shutdown;
             // process exit alone drops the plant sockets without a logout.
-            if let Some(market) = market
-                && let Err(error) = market.shutdown(Duration::from_secs(2))
-            {
+            if let Err(error) = market.shutdown(Duration::from_secs(2)) {
                 failure = Some(error);
             }
             if let Err(error) = trading.shutdown(Duration::from_secs(2)) {

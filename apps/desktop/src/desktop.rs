@@ -5493,6 +5493,7 @@ fn configured_market_workers(
                 let lifecycle = configure_desktop_state();
                 (
                     vec![engine_market_worker::start_rithmic_catalog(
+                        &services.market,
                         services.trading.clone(),
                     )?],
                     Vec::new(),
@@ -5506,7 +5507,10 @@ fn configured_market_workers(
                 }
                 let lifecycle = configure_desktop_state();
                 (
-                    engine_market_worker::start_multi_chart(services.trading.clone())?,
+                    engine_market_worker::start_multi_chart(
+                        &services.market,
+                        services.trading.clone(),
+                    )?,
                     Vec::new(),
                     lifecycle,
                     String::new(),
@@ -5519,6 +5523,7 @@ fn configured_market_workers(
                 let lifecycle = configure_desktop_state();
                 layout = DesktopLayout::WorkspaceTabs;
                 let group = engine_market_worker::start_workspace_tabs(
+                    &services.market,
                     &lifecycle.workspace,
                     services.trading.clone(),
                 )?;
@@ -5537,6 +5542,7 @@ fn configured_market_workers(
             let lifecycle = configure_desktop_state();
             layout = DesktopLayout::WorkspaceTabs;
             let group = engine_market_worker::start_workspace_tabs(
+                &services.market,
                 &lifecycle.workspace,
                 services.trading.clone(),
             )?;
@@ -5649,8 +5655,17 @@ pub(super) fn run(
             fatal_startup(&account_service, "The context service could not start.");
         }
     };
+    let market = match aeris_market_runtime::MarketService::start() {
+        Ok(market) => market,
+        Err(error) => {
+            diagnostic!("Aeris market owner could not start: {error}");
+            let _ = context.shutdown(Duration::from_secs(2));
+            let _ = trading.shutdown(Duration::from_secs(2));
+            fatal_startup(&account_service, "The market service could not start.");
+        }
+    };
     let mut services =
-        aeris_desktop::services::DesktopServices::new(trading.clone(), account_service);
+        aeris_desktop::services::DesktopServices::new(market, trading.clone(), account_service);
     if let Err(error) = services.start_account() {
         diagnostic!("Aeris account session could not start: {error}");
         fatal_startup(
@@ -5675,18 +5690,7 @@ pub(super) fn run(
             );
         }
     };
-    let market = match engine_market_worker::shared_market_runtime() {
-        Ok(market) => market,
-        Err(error) => {
-            diagnostic!("Aeris practice market calendar could not start: {error}");
-            let _ = context.shutdown(Duration::from_secs(2));
-            let _ = trading.shutdown(Duration::from_secs(2));
-            fatal_startup(
-                &services.account_service,
-                "The practice market calendar could not start.",
-            );
-        }
-    };
+    let market = services.market.clone();
     // cTrader demo trading is optional: without it the desktop still runs, and broker
     // orders report the venue as unavailable.
     if let Err(error) = attach_ctrader_venue(&trading, &market) {

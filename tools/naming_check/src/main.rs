@@ -41,6 +41,18 @@ fn has_process_global_desktop_account(source: &str) -> bool {
     .iter()
     .any(|forbidden| production.contains(forbidden))
 }
+
+fn has_process_global_desktop_market(source: &str) -> bool {
+    let production = production_source_prefix(source);
+    [
+        "static MARKET_RUNTIME",
+        "shared_market_runtime(",
+        "started_market_runtime(",
+        "static MARKET_SERVICE",
+    ]
+    .iter()
+    .any(|forbidden| production.contains(forbidden))
+}
 const MARKET_CHARACTERIZATION_TESTS: &[&str] = &[
     "characterization_reseed_during_live_flow_keeps_one_forming_bar_and_contiguous_history",
     "characterization_outbox_overflow_emits_covering_snapshot",
@@ -278,6 +290,7 @@ fn inspect_desktop_boundaries(
                 || violates_fixture_market_boundary(&relative_path, &source)
                 || has_process_global_desktop_trading(&source)
                 || has_process_global_desktop_account(&source)
+                || has_process_global_desktop_market(&source)
             {
                 violations.push(relative);
             }
@@ -4119,7 +4132,7 @@ jobs:
         }
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(desktop.contains("start_trading_service"));
-        assert!(desktop.contains("DesktopServices::new(trading.clone(), account_service)"));
+        assert!(desktop.contains("DesktopServices::new(market, trading.clone(), account_service)"));
         assert!(
             manifest("apps/desktop/src/desktop/lifecycle.rs")
                 .contains("trading.shutdown(Duration::from_secs(2))")
@@ -4187,6 +4200,37 @@ jobs:
             assert!(
                 !super::has_process_global_desktop_account(&source),
                 "{} bypasses injected desktop account",
+                relative_string(&path)
+            );
+        }
+    }
+
+    #[test]
+    fn injected_desktop_market_accepts_instance_owner_and_test_only_global() {
+        assert!(!super::has_process_global_desktop_market(
+            "fn app(services: &DesktopServices) { services.market.wake_bridges(); }\n\
+             #[cfg(test)] mod tests { static MARKET_RUNTIME: u8 = 0; }\n"
+        ));
+    }
+
+    #[test]
+    fn injected_desktop_market_rejects_global_owner_after_test_module() {
+        assert!(super::has_process_global_desktop_market(
+            "#[cfg(test)] mod tests { fn hidden() {} }\n\
+             fn after() { shared_market_runtime(); }\n"
+        ));
+        assert!(super::has_process_global_desktop_market(
+            "static MARKET_RUNTIME: OnceLock<MarketService> = OnceLock::new();"
+        ));
+    }
+
+    #[test]
+    fn desktop_market_has_no_process_global_lookup() {
+        for path in production_sources_under("apps/desktop/src") {
+            let source = fs::read_to_string(&path).expect("desktop source");
+            assert!(
+                !super::has_process_global_desktop_market(&source),
+                "{} bypasses injected desktop market",
                 relative_string(&path)
             );
         }

@@ -231,10 +231,10 @@ impl TerminalApp {
             return;
         }
         let server = dialog.server;
-        let work = cx.background_executor().spawn(async move {
-            engine_market_worker::shared_market_runtime()
-                .and_then(|market| market.discover_rithmic_systems(server))
-        });
+        let market = self.lifecycle.market().clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { market.discover_rithmic_systems(server) });
         self.rithmic_login.discovery = Some(cx.spawn(async move |terminal, cx| {
             let result = work.await;
             let _ = terminal.update(cx, |terminal, cx| {
@@ -316,8 +316,8 @@ impl TerminalApp {
             view.message = None;
             view.failed = false;
         }
+        let market = self.lifecycle.market().clone();
         let work = cx.background_executor().spawn(async move {
-            let market = engine_market_worker::shared_market_runtime()?;
             match (operation, login) {
                 (RithmicLoginOperation::Checking, _) => market.saved_rithmic_login(),
                 (RithmicLoginOperation::Forgetting, _) => {

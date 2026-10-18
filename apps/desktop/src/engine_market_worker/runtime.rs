@@ -5,7 +5,7 @@ use super::{
     MarketService, MarketWorkerCommand, MarketWorkerMessage, PushedEventContext, WorkerEndpoint,
     apply_pushed_event, classify_provider_catalog_event, complete_pending_recovery,
     initialize_catalog_endpoint, initialize_endpoint, initialize_market_screen_endpoint, mpsc,
-    process_command, shared_market_runtime,
+    process_command,
 };
 use aeris_desktop::market_worker::ProviderCatalogEvent;
 use aeris_observability::diagnostic;
@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 pub(super) fn run_workers(
+    market: &MarketService,
     client_id: u64,
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
@@ -29,10 +30,9 @@ pub(super) fn run_workers(
                 transport_rtt_nanos: None,
             });
     }
-    let market = shared_market_runtime()?;
     market.attach(client_id)?;
     let owns_ticket_interest = additions.is_some();
-    let result = run_attached_workers(&market, client_id, endpoints, additions, trading);
+    let result = run_attached_workers(market, client_id, endpoints, additions, trading);
     if owns_ticket_interest && let Err(error) = trading.set_ticket_interest(Vec::new()) {
         diagnostic!("Aeris ticket quote interest could not be released: {error}");
     }
