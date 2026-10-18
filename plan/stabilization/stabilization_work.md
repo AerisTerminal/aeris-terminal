@@ -769,7 +769,7 @@ Status: M5.1-M5.12 code and tests are complete; the in-scope M5 milestone GUI/pr
 
 Status: pending
 
-- [ ] M6.1 desktop-services-test-support - Inject `DesktopServices`; move `FixtureMarketWorker` to test support
+- [x] M6.1 desktop-services-test-support - Inject `DesktopServices`; move `FixtureMarketWorker` to test support
   - Part 1: move the disconnected replay worker to cfg-gated `desktop/test_support/`, preserve its
     diagnostics-only conformance command and test clients, and enforce the boundary in naming_check.
   - Part 2: construct `DesktopServices` with the trading handle at startup; pass it through the
@@ -844,6 +844,14 @@ Status: pending
     dormant account/update internals and diagnostics remain outside this
     presentation change; FixtureMarket/PaneHarness and VAL-DSK-001/002 closeout
     remain. M6.1 stays unchecked.
+  - Part 11: test-only `PaneHarness` drives an actual GPUI workspace pane from
+    the gated disconnected `FixtureMarketWorker` through the bounded market
+    mailbox, including snapshot, readiness and chart rendering. No provider
+    session is opened by the fixture. The default-features desktop build and
+    full workspace gate passed; VAL-DSK-001/002 are closed. Startup corruption
+    quarantine filenames and dormant account/update lifecycle timestamps are
+    outside M6.1's injected presentation/command clock boundary; dormant
+    lifecycle hardening remains M8 work.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
@@ -1157,6 +1165,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.1 Part 7 test(desktop): isolated the short-endurance RSS assertions in a child process without changing any assertions or production behavior. Focused regression and full workspace fmt/check/strict Clippy/tests/naming_check passed; clock and PaneHarness remain.
 - 2026-10-18 M6.1 Part 9 refactor(desktop): routed session status, selected-instrument status and market snapshot/tail/recovery provenance timestamps through the injected desktop clock; removed the market-worker direct system-time helper. ManualClock session and provenance regressions pass; full workspace fmt/check/strict Clippy/tests/naming_check green. Other desktop presentation wall-clock helpers and PaneHarness remain; M6.1 is open.
 - 2026-10-18 M6.1 Part 10 refactor(desktop): routed UI header/countdown, fill toast, context calendar, time-zone badge and provider notice timestamps through the injected desktop clock, removing their direct wall-time helpers. ManualClock calendar regression and full workspace fmt/check/strict Clippy/tests/naming_check pass. PaneHarness and VAL-DSK-001/002 closeout remain; M6.1 is open.
+- 2026-10-18 M6.1 Part 11 test(desktop): gated disconnected fixture now drives a GPUI pane through the bounded mailbox; the smoke checks snapshot-to-chart, explicit readiness and render. Default desktop build, full fmt/check/strict Clippy/tests/naming_check and fixture naming positive/negative regressions pass; VAL-DSK-001/002 close and M6.1 is checked. Startup quarantine file naming and dormant account/update lifecycle wall-time internals are not desktop command/presentation clock consumers; M8 owns dormant lifecycle hardening.
 
 ## 7. Known gaps / deferred
 

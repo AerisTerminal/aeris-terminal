@@ -6106,5 +6106,9 @@ fn bind_desktop_keys(cx: &mut App) -> Result<(), String> {
 mod tests;
 
 #[cfg(test)]
+#[path = "desktop/test_support/pane_harness.rs"]
+mod pane_harness;
+
+#[cfg(test)]
 #[path = "http_wiring_tests.rs"]
 mod http_wiring_tests;
