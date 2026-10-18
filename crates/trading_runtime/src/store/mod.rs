@@ -14,6 +14,7 @@ mod user_records;
 use export::write_atomic;
 #[cfg(test)]
 use orders::decode_contract;
+pub(crate) use orders::order_history_page;
 pub use schema::SCHEMA_VERSION;
 pub(crate) use schema::preflight_existing_database;
 #[cfg(test)]
@@ -27,6 +28,17 @@ use {
     risk::{upsert_discipline_state, upsert_risk_rule_state},
     schema::sweep_stale_preflight_directories,
 };
+
+/// A read-only connection for the paged history reader. It carries no write capability: any
+/// write attempt on it fails with a SQLite authorization error.
+pub(crate) fn open_read_only(path: &Path) -> Result<Connection, String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("trading database could not be opened read-only: {error}"))?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(5_000))
+        .map_err(|error| format!("trading database busy timeout failed: {error}"))?;
+    Ok(connection)
+}
 
 use super::{
     BracketStrategyTemplate, BracketTarget, BracketView, BracketViewStatus, BreakEvenRule,

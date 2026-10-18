@@ -1,10 +1,11 @@
 use super::{
-    BTreeMap, ClientOrderId, ContractDate, ContractMetadata, FixedPoint, InstrumentClass,
-    InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance, Order, OrderEvent, OrderEventId,
-    OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType, PriceGrid, SessionHours, StepTx,
-    TimeInForce, TradingAccountId, TradingInstrument, TradingProvenance, TradingStore, Transaction,
-    Value, VecDeque, database_error, fixed, json, json_i64, json_string, json_u64, optional_fixed,
-    params, split_optional, sqlite_i64, sqlite_u64,
+    BTreeMap, ClientOrderId, Connection, ContractDate, ContractMetadata, FixedPoint,
+    InstrumentClass, InstrumentDecimal, InstrumentId, InstrumentMetadataProvenance, Order,
+    OrderEvent, OrderEventId, OrderEventKind, OrderId, OrderSide, OrderStatus, OrderType,
+    PriceGrid, SessionHours, StepTx, TimeInForce, TradingAccountId, TradingInstrument,
+    TradingProvenance, TradingStore, Transaction, Value, VecDeque, database_error, fixed, json,
+    json_i64, json_string, json_u64, optional_fixed, params, split_optional, sqlite_i64,
+    sqlite_u64,
 };
 use aeris_trading::OrderEventReason;
 
@@ -15,6 +16,174 @@ const LOAD_ORDERS_SQL: &str = "SELECT id, client_order_id, account_id, instrumen
     accepted_unix_nanos, updated_unix_nanos, eligible_after_unix_nanos,
     triggered_unix_nanos, expires_at_unix_nanos
     FROM orders ORDER BY submitted_unix_nanos";
+
+/// The decoded column tuple of one `orders` row, in `LOAD_ORDERS_SQL` column order.
+#[allow(clippy::type_complexity)]
+type OrderColumns = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    u8,
+    Option<i64>,
+    Option<u8>,
+    Option<i64>,
+    Option<u8>,
+    String,
+    i64,
+    String,
+    i64,
+    u8,
+    Option<i64>,
+    u32,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+fn order_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrderColumns> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, String>(4)?,
+        row.get::<_, String>(5)?,
+        row.get::<_, String>(6)?,
+        row.get::<_, i64>(7)?,
+        row.get::<_, u8>(8)?,
+        row.get::<_, Option<i64>>(9)?,
+        row.get::<_, Option<u8>>(10)?,
+        row.get::<_, Option<i64>>(11)?,
+        row.get::<_, Option<u8>>(12)?,
+        row.get::<_, String>(13)?,
+        row.get::<_, i64>(14)?,
+        row.get::<_, String>(15)?,
+        row.get::<_, i64>(16)?,
+        row.get::<_, u8>(17)?,
+        row.get::<_, Option<i64>>(18)?,
+        row.get::<_, u32>(19)?,
+        row.get::<_, Option<i64>>(20)?,
+        row.get::<_, Option<i64>>(21)?,
+        row.get::<_, Option<i64>>(22)?,
+        row.get::<_, Option<i64>>(23)?,
+        row.get::<_, Option<i64>>(24)?,
+    ))
+}
+
+fn decode_order_columns(columns: OrderColumns) -> Result<Order, String> {
+    let (
+        id,
+        client,
+        account,
+        instrument,
+        side,
+        order_type,
+        tif,
+        quantity_units,
+        quantity_scale,
+        limit_units,
+        limit_scale,
+        stop_units,
+        stop_scale,
+        status,
+        submitted,
+        provenance,
+        filled_units,
+        filled_scale,
+        terminal_unix_nanos,
+        revision,
+        accepted_unix_nanos,
+        updated_unix_nanos,
+        eligible_after_unix_nanos,
+        triggered_unix_nanos,
+        expires_at_unix_nanos,
+    ) = columns;
+    let order = Order {
+        id: OrderId::try_new(id).map_err(|error| error.to_string())?,
+        client_order_id: ClientOrderId::try_new(client).map_err(|error| error.to_string())?,
+        account_id: TradingAccountId::try_new(account).map_err(|error| error.to_string())?,
+        instrument_id: InstrumentId::try_new(instrument).map_err(|error| error.to_string())?,
+        side: parse_side(&side)?,
+        order_type: parse_order_type(&order_type)?,
+        time_in_force: parse_time_in_force(&tif)?,
+        quantity: fixed(quantity_units, quantity_scale)?,
+        filled_quantity: fixed(filled_units, filled_scale)?,
+        limit_price: optional_fixed(limit_units, limit_scale)?,
+        stop_price: optional_fixed(stop_units, stop_scale)?,
+        status: parse_status(&status)?,
+        submitted_unix_nanos: submitted,
+        revision,
+        // Early V22 builds wrote this nullable column only at migration.
+        accepted_unix_nanos: accepted_unix_nanos.unwrap_or(submitted),
+        updated_unix_nanos: updated_unix_nanos
+            .or(accepted_unix_nanos)
+            .unwrap_or(submitted),
+        eligible_after_unix_nanos: eligible_after_unix_nanos.unwrap_or(submitted),
+        triggered_unix_nanos,
+        expires_at_unix_nanos,
+        terminal_unix_nanos,
+        provenance: decode_provenance(&provenance)?,
+    };
+    order.validate().map_err(|error| error.to_string())?;
+    Ok(order)
+}
+
+/// One page of the durable order history for the read-only history reader. Keyset-scans by
+/// rowid (insertion order) so paging returns every order exactly once in order; one lookahead
+/// row decides whether another page exists.
+pub(crate) fn order_history_page(
+    connection: &Connection,
+    query: &crate::HistoryQuery,
+) -> Result<crate::HistoryPage, String> {
+    let limit = query
+        .limit
+        .unwrap_or(crate::MAXIMUM_HISTORY_PAGE)
+        .clamp(1, crate::MAXIMUM_HISTORY_PAGE);
+    let after = query.after.map_or(0, |cursor| cursor.0);
+    let account = query.account_id.as_ref().map(TradingAccountId::as_str);
+    let fetch = i64::try_from(limit + 1).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, client_order_id, account_id, instrument_id, side,
+                order_type, time_in_force, quantity_units, quantity_scale, limit_units, limit_scale,
+                stop_units, stop_scale, status, submitted_unix_nanos, provenance_json,
+                filled_units, filled_scale, terminal_unix_nanos, revision,
+                accepted_unix_nanos, updated_unix_nanos, eligible_after_unix_nanos,
+                triggered_unix_nanos, expires_at_unix_nanos, rowid
+             FROM orders
+             WHERE (?1 IS NULL OR account_id = ?1) AND rowid > ?2
+             ORDER BY rowid LIMIT ?3",
+        )
+        .map_err(database_error)?;
+    let rows = statement
+        .query_map(params![account, after, fetch], |row| {
+            Ok((order_columns(row)?, row.get::<_, i64>(25)?))
+        })
+        .map_err(database_error)?;
+    let mut fetched = Vec::new();
+    for row in rows {
+        fetched.push(row.map_err(database_error)?);
+    }
+    let has_more = fetched.len() > limit;
+    fetched.truncate(limit);
+    let mut orders = Vec::with_capacity(fetched.len());
+    let mut last = after;
+    for (columns, rowid) in fetched {
+        orders.push(decode_order_columns(columns)?);
+        last = rowid;
+    }
+    Ok(crate::HistoryPage {
+        orders,
+        next: has_more.then_some(crate::HistoryCursor(last)),
+    })
+}
 
 impl TradingStore {
     /// Backfill only verified continuous-market DAY deadlines, atomically.
@@ -307,96 +476,11 @@ impl TradingStore {
             .prepare(LOAD_ORDERS_SQL)
             .map_err(database_error)?;
         let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, u8>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
-                    row.get::<_, Option<u8>>(10)?,
-                    row.get::<_, Option<i64>>(11)?,
-                    row.get::<_, Option<u8>>(12)?,
-                    row.get::<_, String>(13)?,
-                    row.get::<_, i64>(14)?,
-                    row.get::<_, String>(15)?,
-                    row.get::<_, i64>(16)?,
-                    row.get::<_, u8>(17)?,
-                    row.get::<_, Option<i64>>(18)?,
-                    row.get::<_, u32>(19)?,
-                    row.get::<_, Option<i64>>(20)?,
-                    row.get::<_, Option<i64>>(21)?,
-                    row.get::<_, Option<i64>>(22)?,
-                    row.get::<_, Option<i64>>(23)?,
-                    row.get::<_, Option<i64>>(24)?,
-                ))
-            })
+            .query_map([], order_columns)
             .map_err(database_error)?;
         for row in rows {
-            let (
-                id,
-                client,
-                account,
-                instrument,
-                side,
-                order_type,
-                tif,
-                quantity_units,
-                quantity_scale,
-                limit_units,
-                limit_scale,
-                stop_units,
-                stop_scale,
-                status,
-                submitted,
-                provenance,
-                filled_units,
-                filled_scale,
-                terminal_unix_nanos,
-                revision,
-                accepted_unix_nanos,
-                updated_unix_nanos,
-                eligible_after_unix_nanos,
-                triggered_unix_nanos,
-                expires_at_unix_nanos,
-            ) = row.map_err(database_error)?;
-            let id = OrderId::try_new(id).map_err(|error| error.to_string())?;
-            let order = Order {
-                id: id.clone(),
-                client_order_id: ClientOrderId::try_new(client)
-                    .map_err(|error| error.to_string())?,
-                account_id: TradingAccountId::try_new(account)
-                    .map_err(|error| error.to_string())?,
-                instrument_id: InstrumentId::try_new(instrument)
-                    .map_err(|error| error.to_string())?,
-                side: parse_side(&side)?,
-                order_type: parse_order_type(&order_type)?,
-                time_in_force: parse_time_in_force(&tif)?,
-                quantity: fixed(quantity_units, quantity_scale)?,
-                filled_quantity: fixed(filled_units, filled_scale)?,
-                limit_price: optional_fixed(limit_units, limit_scale)?,
-                stop_price: optional_fixed(stop_units, stop_scale)?,
-                status: parse_status(&status)?,
-                submitted_unix_nanos: submitted,
-                revision,
-                // Early V22 builds wrote this nullable column only at migration.
-                accepted_unix_nanos: accepted_unix_nanos.unwrap_or(submitted),
-                updated_unix_nanos: updated_unix_nanos
-                    .or(accepted_unix_nanos)
-                    .unwrap_or(submitted),
-                eligible_after_unix_nanos: eligible_after_unix_nanos.unwrap_or(submitted),
-                triggered_unix_nanos,
-                expires_at_unix_nanos,
-                terminal_unix_nanos,
-                provenance: decode_provenance(&provenance)?,
-            };
-            order.validate().map_err(|error| error.to_string())?;
-            output.insert(id, order);
+            let order = decode_order_columns(row.map_err(database_error)?)?;
+            output.insert(order.id.clone(), order);
         }
         Ok(output)
     }

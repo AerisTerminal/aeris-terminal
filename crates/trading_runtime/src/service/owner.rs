@@ -2,6 +2,7 @@
 
 use super::Command;
 use crate::core::RETENTION_INTERVAL;
+use crate::publication::TradingEventCause;
 use crate::{EQUITY_SAMPLE_INTERVAL, TradingCore, UNREALIZED_PNL_INTERVAL};
 use std::sync::mpsc::{self, Receiver};
 
@@ -35,11 +36,16 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
                 next_equity = now + EQUITY_SAMPLE_INTERVAL;
             }
         }
-        let deadline = if core.wants_unrealized_pnl() {
+        // Publishes the timer's changes and any coalesced mark flush that fell due.
+        core.publish_changes(TradingEventCause::Timer);
+        let mut deadline = if core.wants_unrealized_pnl() {
             next_refresh.min(next_retention).min(next_equity)
         } else {
             next_retention.min(next_equity)
         };
+        if let Some(flush) = core.next_publication_flush() {
+            deadline = deadline.min(flush);
+        }
         let wait = deadline.saturating_sub(core.clock.monotonic());
         let wait = core
             .next_order_deadline_unix_nanos()
@@ -72,9 +78,23 @@ pub(crate) fn run(core: &mut TradingCore, commands: &Receiver<Command>) {
             .is_some_and(|deadline| command_now >= deadline)
         {
             core.on_timer(command_now);
+            core.publish_changes(TradingEventCause::Timer);
         }
+        let cause = publication_cause(&command);
         if !core.handle(command, command_now) {
             break;
         }
+        core.publish_changes(cause);
+    }
+}
+
+/// The publication cause of one command: feed drains are market-driven, everything else is a
+/// client command. Read-only commands (status, snapshot) publish nothing when state is unchanged.
+fn publication_cause(command: &Command) -> TradingEventCause {
+    match command {
+        Command::DrainMarketFeed => TradingEventCause::Market,
+        #[cfg(test)]
+        Command::Observe(..) => TradingEventCause::Market,
+        _ => TradingEventCause::Command,
     }
 }

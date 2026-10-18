@@ -161,6 +161,14 @@ violations and missing verification explicitly, and never describe them as satis
   ledger entries (a crash leaves neither), never deletes rows referenced by an open order or a
   live order group, and deletes at most 5,000 rows from each table per run. Commands, quotes
   and store open never perform retention.
+- Trading consumers subscribe through `TradingService::subscribe` instead of polling snapshots:
+  the owner publishes a typed `TradingEvent` carrying the bounded `WorkingSet` after every
+  revision-changing step, coalesces quote-only mark changes to one publication per 100 ms with
+  a trailing flush, and stays silent while idle. At most eight live subscriptions exist, each
+  with a 1,024-event slot that overflows into a `lagged` resync with a fresh working set; paged
+  order history is served by the `aeris-trading-history` thread on a read-only SQLite
+  connection with 500-row keyset pages. The compatibility `snapshot()` view is not bounded by
+  stored-order count; retention bounds the live set.
 - Validation runs use `platform_runtime::data_root` isolation and an exclusive per-root instance
   lock. They must not overlap the production data root, probe production vault entries, migrate
   legacy state, write installed-app identity, promote launchers, or run updates. Only the explicit

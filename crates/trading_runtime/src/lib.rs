@@ -3,6 +3,7 @@ pub mod clock;
 mod copier;
 mod core;
 mod discipline;
+mod history;
 mod plan;
 mod risk;
 mod round_trip;
@@ -30,6 +31,7 @@ pub use core::*;
 pub(crate) use core::{
     DEMO_VENUE_UNAVAILABLE, EQUITY_SAMPLE_INTERVAL, Reply, TradingCore, UNREALIZED_PNL_INTERVAL,
 };
+pub use history::{HistoryCursor, HistoryPage, HistoryQuery, MAXIMUM_HISTORY_PAGE};
 pub(crate) use service::Command;
 pub(crate) use std::path::PathBuf;
 #[cfg(test)]

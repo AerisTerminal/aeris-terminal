@@ -79,6 +79,7 @@ mod group_recovery;
 mod market_feed;
 mod oco;
 mod property;
+mod publication;
 
 #[test]
 fn simulated_currency_mismatch_is_typed_before_an_order_fact() {

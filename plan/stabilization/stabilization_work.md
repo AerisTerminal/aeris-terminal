@@ -120,7 +120,7 @@ UI = 03_desktop_ui, PL = 04_platform_infra, LC/AC = 07_platform_design). Status 
 | TR-02 | High | Closed-market and stale-quote protection exists only for tastytrade | M4.8 (groundwork M3.7) | provider-neutral session, feed-generation and per-class age gates in trading owner; GUI resting-order check outstanding |
 | TR-03 | High | The kill switch strips protection and leaves positions open | M5.9 | closed: one atomic step locks, cancels non-protective orders with the kill-switch cause and flattens priced positions; unpriced positions keep protection and are reported |
 | TR-04 | High | Flatten, flatten-all and event flatten only cover the observed instrument | M5.9 | closed: FlattenScope covers every account/instrument from owner quotes; event flatten needs no observation; broker closes cover every instrument |
-| TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | open; runtime lookup scans removed in M4.4 |
+| TR-05 | High | Snapshot polling cost and the 10,000-order snapshot failure | M4.4 (runtime lookups), M5.11 (runtime), M6.10 (desktop) | runtime closed: bounded change-driven publication, paged history and the snapshot guard fix landed in M5.11; desktop snapshot consumers remain with M6.10 |
 | TR-06 | High | Per-quote durable writes and retention that deletes the ledger | M4.10 (per-quote writes), M5.8 (retention and repair) | closed: checkpoint-fold retention, checkpoint repair and the seeded property identity run |
 | TR-07 | High | Position protection is built from overlapping patch layers | M5.2 (validator), M5.5 (model), M5.6 (cleanup) | closed: one group authority, legacy layers deleted in M5.6 |
 | TR-08 | Medium | Fill model gaps | M5.1 (part), M5.2 (tick checks), M5.3, M5.4 | open |
@@ -540,7 +540,7 @@ Status: validated (2026-10-16) at `3529116c`; scrutiny and user-testing pass, VA
 
 ### M5 trading engine
 
-Status: in progress; M5.1-M5.10 code and tests are complete, M5.11-M5.12 remain open. The milestone GUI/probe pass remains outstanding.
+Status: in progress; M5.1-M5.11 code and tests are complete, M5.12 remains open. The milestone GUI/probe pass remains outstanding.
 
 - [x] M5.1 order-lifecycle-typed-events - Complete order state machine, revisions and typed reasons (V22)
   - Part 1: Client order id retries use one instruction comparison for simulated, broker, and standalone protective routes. A matching retry returns the existing order without a fact or revision; changed price, side, size or TIF returns `ClientIdReused`, including after restart. No order lifecycle or schema changes yet; V22 and transition ownership are next.
@@ -733,7 +733,20 @@ Status: in progress; M5.1-M5.10 code and tests are complete, M5.11-M5.12 remain 
     transaction. Bracket entry admission counts the template stop as attached, so the "no attached stop" warning
     fires only for genuinely stop-less entries. Session-aware realized P&L falls back to the registration baseline
     for gated pre-group stores. GUI/probe: none beyond the milestone pass; TR-09's desktop registration UI stays deferred.
-- [ ] M5.11 trading-publication-api - Change-driven, bounded publication with paged history
+- [x] M5.11 trading-publication-api - Change-driven, bounded publication with paged history
+  - `TradingService::subscribe` returns a bounded `TradingSubscription` (at most 8 live subscribers, pruned on drop) whose
+    per-subscriber slot holds at most 1,024 typed `TradingEvent`s; each event carries the exact bounded `WorkingSet`
+    (open orders including inactive held legs, active groups, open positions, the newest 500 fills, position/account P&L,
+    risk locks and recovery notices). The owner publishes after every revision-changing step and coalesces quote-only mark
+    changes to at most one publication per 100 ms with a trailing flush; an idle runtime publishes nothing. A subscriber
+    that overflows its queue resynchronizes with a fresh `lagged` working set and drops the stale queued events.
+  - Paged order history (`HistoryQuery`, at most 500 rows per page, keyset pagination returning every order exactly once
+    in insertion order) is served by a dedicated `aeris-trading-history` reader thread holding a `SQLITE_OPEN_READ_ONLY`
+    connection opened after the owner has created the store; writes on it fail by construction. The compatibility
+    snapshot no longer hard-fails past 10,000 stored orders (retention already bounds the live set). Measured on this
+    machine: working-set build at 50,100 stored orders (50,000 terminal + 100 open + 601 fills) 3.44 ms; the cold-load
+    snapshot path succeeds. VAL-TRD-066/067 covered by the seven `tests/publication.rs` tests; the >10,000-order GUI
+    pass (VAL-TRD-068) stays with the milestone GUI pass; TR-05's runtime part closes here.
 - [ ] M5.12 paper-trading-live-probes - Live paper-trading probe on Hyperliquid with restart, plus cTrader demo regression
 
 ### M6 desktop bridge
@@ -1041,6 +1054,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-17 M5.9 part 2/3 feat(trading): make the kill switch the full atomic emergency action - one durable step locks the in-scope accounts, cancels non-protective orders with the typed KillSwitch cause and flattens every priced position with group reconciliation; protection is never stripped, unpriced positions keep their stop/target and land in EmergencyOutcome::unpriced; broker cancels/closes stay reported venue requests; event Lock shares lock_and_disarm without flattening; stale CancellationCause dead-code expectation removed. New VAL-TRD-061 four-instrument regression and replay crash-atomicity test; property harness now follows activation-assigned leg prices; v2 golden regenerated for the kill_switch cancel reason and the kill flatten fill. Runtime 262 passed/5 ignored; desktop 449+81; full gate green.
 - 2026-10-17 M5.9 part 3/3 test(trading): close out emergency operations - scripted cTrader two-symbol flatten parity (VAL-TRD-062: close requests for both positions, scoped variant closes one) and the locked-account reverse refusal (VAL-TRD-063). TR-03 and TR-04 closed; TR-12's reverse part closed. M5.9 complete except the milestone GUI flatten-all pass (VAL-TRD-064). Runtime 264 passed/5 ignored; full gate green.
 - 2026-10-18 M5.10 feat(trading): persist risk sessions and roll them at the account boundary - V27 adds `risk_sessions` (seeded per registered profile) and `risk_locks.kind`; the owner timer rolls the session in one transaction (durable row with realized baseline, daily meter reset, daily-loss/trailing-drawdown lock release, boundary equity sample); bracket admission counts the template stop as attached; `set_risk_session_boundary` supports 17:00 America/Chicago via aeris_instruments DST math; session P&L falls back to the registration baseline for gated pre-group stores and pre-V27 locks read as manual. TR-09 runtime part closed. VAL-TRD-065 integration tests cover UTC-midnight and Chicago-close rollover, restart survival and the bracket no-warning path; v26->v27 migration test. Runtime 272 passed/5 ignored; workspace 2317 passed; fmt, strict Clippy and naming_check green.
+- 2026-10-18 M5.11 feat(trading): publish bounded working-set changes with paged history - subscribe/TradingSubscription with an 8-subscriber cap, a 1,024-event per-subscriber slot and lagged resync; mark coalescing at one publication per 100 ms with trailing flush; idle runtimes publish nothing; paged order history (500-row pages, exact-once keyset order) on a read-only reader thread; snapshot 10,000-order hard-fail removed. Working-set build measured 3.44 ms at 50,100 stored orders. VAL-TRD-066/067 integration tests green; TR-05 runtime part closed. Runtime 280 passed/5 ignored; workspace 2324 passed; fmt, strict Clippy and naming_check green.
 
 ## 7. Known gaps / deferred
 

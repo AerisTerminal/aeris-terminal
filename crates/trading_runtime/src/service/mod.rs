@@ -22,6 +22,9 @@ use std::sync::mpsc::SyncSender;
 
 pub(crate) enum Command {
     Status(Reply<TradingServiceStatus>),
+    Subscribe(Reply<(u64, Arc<crate::core::publication::SubscriberSlot>)>),
+    Unsubscribe(u64),
+    WorkingSet(Reply<crate::core::publication::WorkingSet>),
     RegisterAccount(TradingAccount, Reply<()>),
     CreatePracticeAccount(CreatePracticeAccount, Reply<TradingAccount>),
     DeletePracticeAccount(TradingAccountId, Reply<TradingAccount>),

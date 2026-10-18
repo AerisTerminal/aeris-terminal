@@ -806,6 +806,11 @@ impl TradingCore {
                 positions_changed = true;
             }
         }
+        if positions_changed {
+            // Quote-only marks never touch the durable revision; subscribers see them through
+            // this in-memory stamp, coalesced by the publication window.
+            self.mark_revision = self.mark_revision.saturating_add(1);
+        }
         Ok(positions_changed)
     }
 }

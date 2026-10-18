@@ -180,9 +180,11 @@ impl TradingCore {
     }
 
     pub(crate) fn snapshot(&self) -> Result<TradingSnapshot, String> {
+        // Orders are absent from this guard: retention.maximum_orders already bounds them
+        // (250,000), and the compatibility snapshot must still succeed beyond 10,000 orders
+        // (M5.11). New subscribers should use the bounded working set instead.
         if self.state.accounts.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.instruments.len() > MAXIMUM_SNAPSHOT_ITEMS
-            || self.state.orders.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.positions.len() > MAXIMUM_SNAPSHOT_ITEMS
             || self.state.broker_positions.len() > MAXIMUM_SNAPSHOT_ITEMS
         {

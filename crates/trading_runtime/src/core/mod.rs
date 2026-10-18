@@ -19,6 +19,8 @@ pub use groups::model::{
 pub(crate) mod ledger;
 #[path = "../market/mod.rs"]
 pub(crate) mod market;
+#[path = "../publication.rs"]
+pub mod publication;
 #[path = "../risk/owner.rs"]
 mod risk_owner;
 #[cfg(test)]
@@ -67,6 +69,11 @@ use aeris_trading::{
     TradingAccount, TradingAccountId, TradingProvenance, project_unrealized_pnl,
 };
 pub use groups::model::{MovePlannedLeg, PlannedLeg};
+pub use publication::{
+    MARK_PUBLICATION_INTERVAL, MAXIMUM_SUBSCRIPTIONS, SUBSCRIPTION_QUEUE_CAPACITY,
+    SubscriptionUpdate, TradingEvent, TradingEventCause, TradingSubscription,
+    WORKING_SET_FILL_LIMIT, WorkingSet,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -600,6 +607,9 @@ pub(crate) struct TradingRuntime {
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     market_feed: Arc<MarketFeedInbox>,
     pub(crate) venue_inbox: Arc<VenueInbox>,
+    /// The paged order-history reader on its own read-only connection; `None` for the
+    /// in-memory store of tests, which has no second connection.
+    history_reader: Mutex<Option<crate::history::HistoryReader>>,
 }
 
 pub(crate) struct TradingCore {
@@ -634,9 +644,15 @@ pub(crate) struct TradingCore {
     /// Broker accounts the current venue generation has announced; the rest are not
     /// reachable now.
     connected_broker_accounts: BTreeSet<TradingAccountId>,
-    /// Startup repairs (legacy awaiting-bracket conversion, group verification) raised by
-    /// this process until M5.11 publishes them as typed events.
+    /// Startup repairs (legacy awaiting-bracket conversion, group verification) published to
+    /// every subscriber's initial working set until M6.10 consumes them as typed events.
     recovery_notices: Vec<RecoveryNotice>,
+    /// Bounded change-driven subscribers of the working set (M5.11).
+    subscribers: BTreeMap<u64, Arc<publication::SubscriberSlot>>,
+    next_subscriber_id: u64,
+    /// In-memory stamp bumped by quote-only mark changes; revision-changing steps subsume it.
+    mark_revision: u64,
+    publication: publication::PublicationState,
     #[cfg(test)]
     timer_calls: usize,
 }
@@ -685,6 +701,7 @@ impl TradingService {
         let (commands, receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (started_tx, started_rx) = mpsc::sync_channel(REPLY_CAPACITY);
         let database_path = config.database_path;
+        let history_path = crate::history::history_database_path(&database_path);
         let clock = config.clock;
         let stopping = Arc::new(AtomicBool::new(false));
         let market_feed = Arc::new(MarketFeedInbox::new(
@@ -720,6 +737,13 @@ impl TradingService {
         started_rx
             .recv()
             .map_err(|_| "trading owner stopped during startup".to_string())??;
+        // The history reader serves paged queries on its own read-only connection, off the
+        // owner thread. It opens after the owner has created/migrated the database file; a
+        // failure fails the service start (the owner handle drops and stops).
+        let history_reader = history_path
+            .map(|path| crate::history::HistoryReader::start(&path))
+            .transpose()
+            .map_err(StoreError::Other)?;
         Ok(Self {
             commands,
             runtime: Arc::new(TradingRuntime {
@@ -727,8 +751,43 @@ impl TradingService {
                 worker: Mutex::new(Some(worker)),
                 market_feed,
                 venue_inbox,
+                history_reader: Mutex::new(history_reader),
             }),
         })
+    }
+
+    /// Subscribes to change-driven working-set publications; at most
+    /// [`MAXIMUM_SUBSCRIPTIONS`] are open at once. The first received event is the complete
+    /// current working set.
+    ///
+    /// # Errors
+    /// Returns an error when the subscription limit is reached or the owner is unavailable.
+    pub fn subscribe(&self) -> Result<TradingSubscription, String> {
+        let (id, slot) = self.request(Command::Subscribe)?;
+        Ok(TradingSubscription {
+            id,
+            slot,
+            commands: self.commands.clone(),
+            stopping: Arc::clone(&self.runtime.stopping),
+        })
+    }
+
+    /// Reads one page of durable order history through the read-only reader thread. Pages hold
+    /// at most [`crate::MAXIMUM_HISTORY_PAGE`] rows.
+    ///
+    /// # Errors
+    /// Returns an error when the store is in-memory (no reader), the reader queue is full, or
+    /// the read fails.
+    pub fn history(&self, query: crate::HistoryQuery) -> Result<crate::HistoryPage, String> {
+        let reader = self
+            .runtime
+            .history_reader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reader
+            .as_ref()
+            .ok_or_else(|| "order history requires a file-backed store".to_string())?
+            .query(query)
     }
 
     /// Returns a bounded health snapshot.
@@ -1258,9 +1317,16 @@ impl TradingService {
                 if worker.is_some_and(|worker| worker.join().is_err()) {
                     return Err("trading owner panicked during shutdown".to_string());
                 }
-                return reply_rx
+                let result = reply_rx
                     .recv()
                     .map_err(|_| "trading owner stopped before checkpointing".to_string())?;
+                // The owner has stopped; the history reader's thread stops with it.
+                self.runtime
+                    .history_reader
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                return result;
             }
             let elapsed = clock::Clock::monotonic(&shutdown_clock);
             if elapsed >= timeout {
@@ -1365,6 +1431,10 @@ impl TradingCore {
             venue_ingestion: 0,
             connected_broker_accounts: BTreeSet::new(),
             recovery_notices: Vec::new(),
+            subscribers: BTreeMap::new(),
+            next_subscriber_id: 0,
+            mark_revision: 0,
+            publication: publication::PublicationState::default(),
             #[cfg(test)]
             timer_calls: 0,
         };
@@ -1527,6 +1597,9 @@ impl TradingCore {
         self.command_now = self.command_now.max(now);
         match command {
             Command::Status(reply) => respond(&reply, Ok(self.status())),
+            Command::Subscribe(reply) => respond(&reply, self.subscribe()),
+            Command::Unsubscribe(id) => self.unsubscribe(id),
+            Command::WorkingSet(reply) => respond(&reply, self.current_working_set()),
             Command::RegisterAccount(account, reply) => {
                 respond(&reply, self.register_account(account));
             }
