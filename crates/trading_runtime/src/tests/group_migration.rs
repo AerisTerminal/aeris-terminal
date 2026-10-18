@@ -50,28 +50,50 @@ fn template_json(id: &str, stop_ticks: u32, target_ticks: u32) -> String {
 /// bracket, an active bracket, a completed bracket, a cancelled bracket and a standalone
 /// protective order.
 fn write_v19_bracket_fixture(path: &std::path::Path, only_awaiting: bool) {
-    write_v19_priced_fixture(
-        path,
-        only_awaiting,
-        "BTC-USDC",
-        10_000,
-        9_800,
-        10_200,
-        9_900,
-    );
+    write_v19_priced_fixture(path, only_awaiting, &UNIT_SHAPE);
 }
 
-/// The same fixture with a caller-chosen instrument and prices (scale 2), so desktop
-/// validation can seed a chartable live instrument with prices near the current market.
-fn write_v19_priced_fixture(
-    path: &std::path::Path,
-    only_awaiting: bool,
-    instrument: &str,
+/// Prices and scales for a V19 fixture variant. The unit shape mirrors the original ES-style
+/// fixture; the desktop variant uses the live instrument's real scale so its rows obey the
+/// runtime invariant that orders and quotes share the instrument's price scale.
+struct V19FixtureShape {
+    instrument: &'static str,
+    price_scale: i32,
+    quantity_scale: i32,
+    two_quantity: i64,
+    one_quantity: i64,
     entry: i64,
     stop: i64,
     target: i64,
     protect: i64,
-) {
+}
+
+const UNIT_SHAPE: V19FixtureShape = V19FixtureShape {
+    instrument: "BTC-USDC",
+    price_scale: 2,
+    quantity_scale: 0,
+    two_quantity: 2,
+    one_quantity: 1,
+    entry: 10_000,
+    stop: 9_800,
+    target: 10_200,
+    protect: 9_900,
+};
+
+/// The same fixture with a caller-chosen shape, so desktop validation can seed a chartable
+/// live instrument with prices near the current market.
+fn write_v19_priced_fixture(path: &std::path::Path, only_awaiting: bool, shape: &V19FixtureShape) {
+    let V19FixtureShape {
+        instrument,
+        price_scale,
+        quantity_scale,
+        two_quantity,
+        one_quantity,
+        entry,
+        stop,
+        target,
+        protect,
+    } = *shape;
     let connection = Connection::open(path).expect("fixture database");
     crate::store::create_schema_at(&connection, 19);
     let priced = contract_json(
@@ -88,12 +110,12 @@ fn write_v19_priced_fixture(
         "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
          VALUES ('sim','SIM • Legacy','simulated','USD',2,'aeris-sim');
          INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
-         VALUES ('{instrument}',2,0,'{priced}');
+         VALUES ('{instrument}',{price_scale},{quantity_scale},'{priced}');
          INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
              time_in_force,quantity_units,quantity_scale,filled_units,filled_scale,
              limit_units,limit_scale,status,submitted_unix_nanos,provenance_json)
          VALUES ('ord-awaiting','awaiting-entry','sim','{instrument}','buy','limit','gtc',
-                 2,0,0,0,{entry},2,'working',1,'{provenance}');
+                 {two_quantity},{quantity_scale},0,{quantity_scale},{entry},{price_scale},'working',1,'{provenance}');
          INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
              stop_client_order_id,target_client_order_ids_json,status)
          VALUES ('awaiting-entry','{awaiting_template}','awaiting-entry',NULL,'[]','awaiting_entry');"
@@ -122,26 +144,26 @@ fn write_v19_priced_fixture(
                  limit_units,limit_scale,stop_units,stop_scale,status,submitted_unix_nanos,
                  provenance_json)
              VALUES ('ord-active-entry','active-entry','sim','{instrument}','buy','limit','gtc',
-                     2,0,2,0,{entry},2,NULL,NULL,'filled',1,'{provenance}'),
+                     {two_quantity},{quantity_scale},{two_quantity},{quantity_scale},{entry},{price_scale},NULL,NULL,'filled',1,'{provenance}'),
                     ('ord-active-stop','active-stop','sim','{instrument}','sell','stop','gtc',
-                     2,0,0,0,NULL,NULL,{stop},2,'working',2,'{provenance}'),
+                     {two_quantity},{quantity_scale},0,{quantity_scale},NULL,NULL,{stop},{price_scale},'working',2,'{provenance}'),
                     ('ord-active-target','active-target','sim','{instrument}','sell','limit','gtc',
-                     2,0,0,0,{target},2,NULL,NULL,'working',2,'{provenance}'),
+                     {two_quantity},{quantity_scale},0,{quantity_scale},{target},{price_scale},NULL,NULL,'working',2,'{provenance}'),
                     ('ord-done-entry','done-entry','sim','{instrument}','buy','limit','gtc',
-                     1,0,1,0,{entry},2,NULL,NULL,'filled',1,'{provenance}'),
+                     {one_quantity},{quantity_scale},{one_quantity},{quantity_scale},{entry},{price_scale},NULL,NULL,'filled',1,'{provenance}'),
                     ('ord-done-stop','done-stop','sim','{instrument}','sell','stop','gtc',
-                     1,0,1,0,NULL,NULL,{stop},2,'filled',2,'{provenance}'),
+                     {one_quantity},{quantity_scale},{one_quantity},{quantity_scale},NULL,NULL,{stop},{price_scale},'filled',2,'{provenance}'),
                     ('ord-dead-entry','dead-entry','sim','{instrument}','buy','limit','gtc',
-                     1,0,0,0,{entry},2,NULL,NULL,'cancelled',1,'{provenance}'),
+                     {one_quantity},{quantity_scale},0,{quantity_scale},{entry},{price_scale},NULL,NULL,'cancelled',1,'{provenance}'),
                     ('ord-protect','protect-client','sim','{instrument}','sell','stop','gtc',
-                     1,0,0,0,NULL,NULL,{protect},2,'working',1,'{provenance}');
+                     {one_quantity},{quantity_scale},0,{quantity_scale},NULL,NULL,{protect},{price_scale},'working',1,'{provenance}');
              INSERT INTO protective_orders(client_order_id,role)
              VALUES ('protect-client','stop_loss');
              INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
                  stop_client_order_id,target_client_order_ids_json,status,
                  entry_price_units,entry_price_scale)
              VALUES ('active-entry','{active_template}','active-entry','active-stop','[\"active-target\"]','active',
-                     {entry},2);
+                     {entry},{price_scale});
              INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
                  stop_client_order_id,target_client_order_ids_json,status)
              VALUES ('done-entry','{done_template}','done-entry','done-stop','[]','completed'),
@@ -166,17 +188,23 @@ fn generate_v19_bracket_fixture_for_validation() {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("fixture parent");
     }
-    write_v19_priced_fixture(
-        &path,
-        false,
-        "hyperliquid:perp:BTC",
-        8_150_000,
-        8_120_000,
-        8_210_000,
-        8_130_000,
-    );
+    write_v19_priced_fixture(&path, false, &CHART_SHAPE);
     println!("generated V19 bracket fixture at {}", path.display());
 }
+
+/// Desktop-validation shape: the live BTC perpetual at its real scale 8, prices near the
+/// October 2026 range so the migrated legs land inside the default chart viewport.
+const CHART_SHAPE: V19FixtureShape = V19FixtureShape {
+    instrument: "hyperliquid:perp:BTC",
+    price_scale: 8,
+    quantity_scale: 8,
+    two_quantity: 20_000_000,
+    one_quantity: 10_000_000,
+    entry: 8_150_000_000_000,
+    stop: 8_120_000_000_000,
+    target: 8_210_000_000_000,
+    protect: 8_130_000_000_000,
+};
 
 /// The pre-migration backup keeps the schema and rows the fixture started with.
 fn assert_v19_backup(directory: &TestDirectory) {
