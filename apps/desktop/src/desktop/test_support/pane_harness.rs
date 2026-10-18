@@ -47,6 +47,13 @@ impl Render for PaneWindow {
 
 impl PaneHarness {
     fn open(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
+        Self::open_with_restore(WorkspaceSurfaceRestore::default(), cx)
+    }
+
+    fn open_with_restore(
+        restore: WorkspaceSurfaceRestore,
+        cx: &mut TestAppContext,
+    ) -> (Self, &mut VisualTestContext) {
         let product = local_state::default_workspace().watchlist_entries[0]
             .instrument
             .clone()
@@ -74,7 +81,7 @@ impl PaneHarness {
                 worker,
                 &DesktopLifecycle::new_for_test(),
                 chart_chrome::ChartChromePreferences::default(),
-                WorkspaceSurfaceRestore::default(),
+                restore,
                 window,
                 cx,
             );
@@ -140,6 +147,50 @@ impl PaneHarness {
             assert_eq!(pane.poll_market_worker(cx), 1);
         });
     }
+}
+
+#[gpui::test]
+fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mut TestAppContext) {
+    let restore = WorkspaceSurfaceRestore {
+        chart: Some(WorkspaceChartState {
+            time_zone: "Invalid/Restored_Zone".into(),
+            ..WorkspaceChartState::default()
+        }),
+        ..WorkspaceSurfaceRestore::default()
+    };
+    let (mut harness, cx) = PaneHarness::open_with_restore(restore, cx);
+    harness.publish_snapshot(12, cx);
+    // A replacement covering snapshot recreates the chart and re-applies the surface zone.
+    harness.pane.update(cx, |pane, _| {
+        pane.rithmic_switch = RithmicSwitchState::Swapping;
+    });
+    harness.publish_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(
+            toaster.notices()[0].title,
+            "Chart settings could not be restored"
+        );
+        assert_eq!(
+            toaster.notices()[0].key.scope,
+            harness.pane.entity_id().as_u64()
+        );
+        assert!(
+            !toaster.notices()[0]
+                .detail
+                .contains("Invalid/Restored_Zone")
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "restore failure rendered a card"
+    );
 }
 
 #[gpui::test]

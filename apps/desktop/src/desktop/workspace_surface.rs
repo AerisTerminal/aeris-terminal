@@ -1813,7 +1813,7 @@ impl WorkspaceSurface {
         state: &WorkspaceChartState,
         drawings: Option<&WorkspaceInstrumentDrawingsState>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let indicators = state
             .indicators
             .iter()
@@ -1858,32 +1858,30 @@ impl WorkspaceSurface {
         };
         let legend = restored_chart_legend(state.legend);
         chart.update(cx, |chart, _| {
-            let _ = chart.set_legend_options(legend);
-            if let Err(error) = chart.set_time_zone(time_zone) {
-                diagnostic!("Aeris persisted chart time zone could not be restored: {error}");
-            }
+            chart.set_legend_options(legend);
+            let mut failed = false;
+            failed |= chart.set_time_zone(time_zone).is_err();
             if let Some(order_flow) = order_flow {
-                let _ = chart.set_order_flow_settings(order_flow);
+                failed |= chart.set_order_flow_settings(order_flow).is_err();
             }
             if let Some(chart_type) = chart_type {
                 chart.set_chart_type(chart_type);
             }
             if let Some(appearance) = &appearance {
-                let _ = chart.set_appearance_settings(appearance);
+                chart.set_appearance_settings(appearance);
             }
-            if let Err(error) = chart.restore_indicator_states(&indicators) {
-                diagnostic!("Aeris persisted indicators could not be restored: {error}");
-            }
+            failed |= chart.restore_indicator_states(&indicators).is_err();
             if let Some(drawings) = drawings {
                 import_drawings(chart, drawings);
             }
             if let Some(price_axis) = price_axis {
-                let _ = chart.restore_price_axis_menu_state(price_axis);
+                chart.restore_price_axis_menu_state(price_axis);
             }
             if let Some(mode) = crosshair_mode {
-                let _ = chart.set_crosshair_mode(mode);
+                chart.set_crosshair_mode(mode);
             }
-        });
+            failed
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2162,13 +2160,13 @@ impl WorkspaceSurface {
 
     /// Restored and retained snapshots can predate the trader's latest choice, so the
     /// surface-owned zone is applied last to every chart this pane creates.
-    fn apply_surface_time_zone(&self, chart: &Entity<AerisChartView>, cx: &mut Context<Self>) {
+    fn apply_surface_time_zone(
+        &self,
+        chart: &Entity<AerisChartView>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let time_zone = self.chart_time_zone.clone();
-        chart.update(cx, |chart, _| {
-            if let Err(error) = chart.set_time_zone(&time_zone) {
-                diagnostic!("Aeris chart time zone could not be applied: {error}");
-            }
-        });
+        chart.update(cx, |chart, _| chart.set_time_zone(&time_zone).is_err())
     }
 
     /// The selected chart time zone, owned by the surface so it reads correctly before the
@@ -3142,6 +3140,7 @@ impl WorkspaceSurface {
             .retained_chart_presentation
             .drawings
             .begin_chart(self.product.as_ref());
+        let mut restore_failed = false;
         if let Some(restored) = self.restored_chart_state.take() {
             let drawings = drawings.or_else(|| {
                 chart_drawings::legacy_pane_drawings(
@@ -3150,9 +3149,10 @@ impl WorkspaceSurface {
                     self.product.as_ref(),
                 )
             });
-            Self::apply_restored_chart_state(&chart, &restored, drawings.as_ref(), cx);
+            restore_failed =
+                Self::apply_restored_chart_state(&chart, &restored, drawings.as_ref(), cx);
         } else if let Some(state) = &self.retained_chart_presentation.chart_state {
-            Self::apply_restored_chart_state(&chart, state, drawings.as_ref(), cx);
+            restore_failed = Self::apply_restored_chart_state(&chart, state, drawings.as_ref(), cx);
         } else {
             self.apply_retained_indicators_to_chart(&chart, cx);
             if let Some(drawings) = drawings {
@@ -3160,12 +3160,31 @@ impl WorkspaceSurface {
             }
         }
         let extend_order_lines_left = self.chart_trading_visibility.extend_order_lines_left;
-        chart.update(cx, |chart, _| {
-            if let Err(error) = chart.set_order_lines_extend_left(extend_order_lines_left) {
-                diagnostic!("Aeris chart order-line extension could not be applied: {error}");
-            }
+        restore_failed |= chart.update(cx, |chart, _| {
+            chart
+                .set_order_lines_extend_left(extend_order_lines_left)
+                .is_err()
         });
-        self.apply_surface_time_zone(&chart, cx);
+        restore_failed |= self.apply_surface_time_zone(&chart, cx);
+        let key = notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind: "chart_restore",
+        };
+        if restore_failed {
+            cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+                key,
+                severity: notification_center::NoticeSeverity::Warning,
+                tone: notification_center::NoticeTone::Warning,
+                source: notification_center::NoticeSource::Workspace,
+                title: "Chart settings could not be restored",
+                detail:
+                    "Some saved chart settings could not be applied. Review this chart's settings."
+                        .into(),
+                lifetime: notification_center::NoticeLifetime::UntilCleared,
+            }));
+        } else {
+            cx.emit(PaneNoticeEvent::Clear(key));
+        }
         self.apply_market_session_to_chart(&chart, cx);
         self.apply_provider_trade_prints(&chart, cx);
         replace_chart_price_alert_lines(
