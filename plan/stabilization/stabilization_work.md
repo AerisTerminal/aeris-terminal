@@ -811,8 +811,13 @@ Status: pending
     path lookup; kept existing file format, backup fallback, generation checks and
     bounded off-thread saves. File-backed two-owner tests and a naming guard cover
     isolation; full workspace fmt/check/strict Clippy/tests/naming_check passed.
-    Clock injection, short-endurance test isolation and PaneHarness remain;
+    Clock injection and PaneHarness remain;
     M6.1 stays unchecked.
+  - Part 7: run the short-endurance regression's unchanged frame, continuity,
+    mailbox, memory and clean-stop assertions in an isolated test child, so
+    unrelated parallel GPUI allocations cannot be charged to its process RSS.
+    Production endurance and its wall-clock bound are unchanged. Clock
+    injection and PaneHarness remain; M6.1 stays unchecked.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
@@ -1123,6 +1128,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.1 Part 2 refactor(desktop): injected the trading owner through `DesktopServices` into the lifecycle, panes, UI command paths and market ticket-interest client; removed `TRADING_SERVICE` and its process-wide install/lookup. A two-composition regression proves trading account changes do not cross between owners; naming_check rejects reintroduced globals with positive/negative source examples, and AGENTS.md records the restriction. Full workspace fmt/check/strict Clippy/tests/naming_check green (the first test run exposed a stale naming_check source pin; its replacement and full rerun passed). M6.1 remains open for account/market/feedback/persistence/clock injection and PaneHarness.
 - 2026-10-18 M6.1 Part 5 refactor(desktop): replaced the global trading feedback mailbox with one cloneable handle per DesktopServices composition; all command and pane status paths use it. Independent-desktop feedback and naming guard regressions added; removed the unused repricing helper. Full workspace fmt/check/strict Clippy/tests/naming passed (one short-endurance parallel timing failure on the first test run; isolated retry and complete rerun passed). Persistence, clock and PaneHarness remain.
 - 2026-10-18 M6.1 Part 6 refactor(desktop): routed chart-chrome and workspace persistence through per-desktop paths and save receipts; removed the global chart-chrome locks and workspace path lookup. Two-composition file-backed isolation and naming-check guard tests added; full workspace fmt/check/strict Clippy/tests/naming_check passed. Clock, short-endurance child-process isolation and PaneHarness remain; M6.1 is open.
+- 2026-10-18 M6.1 Part 7 test(desktop): isolated the short-endurance RSS assertions in a child process without changing any assertions or production behavior. Focused regression and full workspace fmt/check/strict Clippy/tests/naming_check passed; clock and PaneHarness remain.
 
 ## 7. Known gaps / deferred
 

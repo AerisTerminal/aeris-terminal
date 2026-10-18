@@ -1445,6 +1445,27 @@ mod tests {
 
     #[test]
     fn short_endurance_preserves_continuity_and_bounds() {
+        // Process RSS is shared with unrelated parallel desktop tests. Keep
+        // the exact endurance assertions below in a child with its own RSS.
+        if std::env::var_os("AERIS_ENDURANCE_ISOLATED_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "desktop::readiness_conformance::tests::short_endurance_preserves_continuity_and_bounds",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("AERIS_ENDURANCE_ISOLATED_CHILD", "1")
+                .output()
+                .expect("isolated endurance test starts");
+            assert!(
+                output.status.success(),
+                "isolated endurance test failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         // The window carries scheduling margin: an 80 ms window managed a
         // single frame on a loaded shared macOS runner, which is runner
         // starvation rather than a broken loop. The continuity and bounds
