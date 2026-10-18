@@ -392,8 +392,11 @@ impl TerminalApp {
         input.update(cx, |input, input_cx| input.focus(window, input_cx));
         let terminal = cx.entity().downgrade();
         let submit = window.subscribe(&input, cx, move |_, event: &InputEvent, _, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                let _ = terminal.update(cx, Self::save_drawing_template);
+            if matches!(event, InputEvent::PressEnter { .. })
+                && let Err(error) = terminal.update(cx, Self::save_drawing_template)
+                && terminal.upgrade().is_some()
+            {
+                diagnostic!("Live workspace could not save drawing template: {error}");
             }
         });
         let toolbar = &mut self.drawing_context_toolbar;

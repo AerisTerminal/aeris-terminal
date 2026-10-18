@@ -84,11 +84,14 @@ impl TerminalApp {
                 return;
             }
             cx.background_executor().timer(LEAVE_DURATION).await;
-            let _ = terminal.update(cx, |terminal, terminal_cx| {
+            if let Err(error) = terminal.update(cx, |terminal, terminal_cx| {
                 if terminal.fullscreen_hint.finish(generation) {
                     terminal_cx.notify();
                 }
-            });
+            }) && terminal.upgrade().is_some()
+            {
+                diagnostic!("Live workspace fullscreen hint could not finish: {error}");
+            }
         })
         .detach();
     }

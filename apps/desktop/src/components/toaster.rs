@@ -1398,10 +1398,13 @@ impl TerminalApp {
                 cx.background_executor()
                     .timer(deadline.saturating_duration_since(Instant::now()))
                     .await;
-                let _ = terminal.update(cx, |terminal, terminal_cx| {
+                if let Err(error) = terminal.update(cx, |terminal, terminal_cx| {
                     terminal.toaster.wake_fired(deadline);
                     terminal_cx.notify();
-                });
+                }) && terminal.upgrade().is_some()
+                {
+                    diagnostic!("Live workspace toaster timer could not update: {error}");
+                }
             })
             .detach();
         }

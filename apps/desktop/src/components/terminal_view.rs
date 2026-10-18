@@ -448,34 +448,44 @@ impl TerminalApp {
         });
         self.broker_connection_task = Some(cx.spawn_in(window, async move |terminal, cx| {
             let results = work.await;
-            let _ = cx.update(|window, cx| {
-                terminal.update(cx, |terminal, cx| {
-                    let mut connected_now = None;
-                    for (broker, result) in brokers.into_iter().zip(results) {
-                        if operation == HostedBrokerOperation::Connecting && result.is_ok() {
-                            connected_now = Some(broker);
-                        }
-                        apply_broker_result(
-                            terminal.data_connections.brokers.get_mut(broker),
-                            operation,
-                            result,
-                        );
-                    }
-                    terminal.broker_connection_task = None;
-                    if let Some(broker) = connected_now {
-                        // A new connection goes straight to choosing one of its markets.
-                        terminal.active_surface().update(cx, |surface, surface_cx| {
-                            surface.choose_symbol_provider(broker.provider(), window, surface_cx);
-                            surface.open_chrome_overlay(
-                                ChromeOverlay::Instrument,
-                                window,
-                                surface_cx,
+            if let Err(error) = cx
+                .update(|window, cx| {
+                    terminal.update(cx, |terminal, cx| {
+                        let mut connected_now = None;
+                        for (broker, result) in brokers.into_iter().zip(results) {
+                            if operation == HostedBrokerOperation::Connecting && result.is_ok() {
+                                connected_now = Some(broker);
+                            }
+                            apply_broker_result(
+                                terminal.data_connections.brokers.get_mut(broker),
+                                operation,
+                                result,
                             );
-                        });
-                    }
-                    cx.notify();
+                        }
+                        terminal.broker_connection_task = None;
+                        if let Some(broker) = connected_now {
+                            // A new connection goes straight to choosing one of its markets.
+                            terminal.active_surface().update(cx, |surface, surface_cx| {
+                                surface.choose_symbol_provider(
+                                    broker.provider(),
+                                    window,
+                                    surface_cx,
+                                );
+                                surface.open_chrome_overlay(
+                                    ChromeOverlay::Instrument,
+                                    window,
+                                    surface_cx,
+                                );
+                            });
+                        }
+                        cx.notify();
+                    })
                 })
-            });
+                .and_then(|result| result)
+                && terminal.upgrade().is_some()
+            {
+                diagnostic!("Live workspace could not receive broker connection result: {error}");
+            }
         }));
         cx.notify();
     }

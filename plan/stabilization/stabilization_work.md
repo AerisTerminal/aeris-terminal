@@ -982,6 +982,20 @@ Status: pending
     M6.2 remains unchecked: GPUI owner-update discards, account profile refresh,
     market bridge feedback sends, other shutdown/diagnostic discards, connection
     and series feedback, deferred source/actions and unwrap cleanup remain.
+  - Part 15: pane and workspace async callbacks now inspect GPUI weak-owner
+    updates: a released owner is an expected cancellation, while a still-live
+    owner whose update fails is diagnosed. This covers chrome/flyout/copy
+    timers, broker and provider connection results, context key saves, trading
+    refresh, toaster wake, drawing input/template submission and the fullscreen
+    hint without blocking the UI or adding state. The remaining `chart.update`
+    discards in trading projection consume chart-setter change booleans, not
+    weak-owner update errors. Audited `terminal_view` and `command_registry`:
+    their only production `expect`s assert constant startup layout and
+    compile-time registry completeness (the registry test checks all IDs);
+    neither has an optional failure to propagate without weakening its
+    invariant. M6.2 remains unchecked for profile refresh, market bridge and
+    shutdown discards, connection/series feedback, deferred source/actions and
+    other unwrap cleanup.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1309,6 +1323,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 12 fix(desktop): deferred fallible empty-chart startup setters until after pane notice subscription; their real errors post the same sanitized chart-restore key as snapshot chart restore, with no duplicate state. PaneHarness exercises actual Rithmic startup creation, initial failure, repeated keyed one-card rendering and corrected-zone replacement snapshot clearing. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for connection/series feedback, source/action variants and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 13 fix(desktop): classified existing pane notices by pane and provider selection by the registered provider ID; added one real Retry action for chart-preference save failure through the existing toaster to TerminalApp's async save. Rendered click, keyed replacement, pane source and provider-selection tests passed; full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for Trading(RequestId), OpenFolder/ConnectProvider prerequisites, connection/series feedback and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 14 fix(desktop): handled saturated pane resource-class demand with one keyed notice and successful clear, distinguished detached shutdown and market worker full-queue retirement, and documented/diagnosed pending search, automatic study removal and empty-chart precision outcomes. PaneHarness and worker retirement regressions plus full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for GPUI owner-update, profile refresh, market bridge and shutdown discards, other source/actions, connection/series feedback and unwrap cleanup.
+- 2026-10-18 M6.2 Part 15 fix(desktop): handled weak-owner update outcomes for pane/workspace callbacks without duplicate state: released owners cancel quietly, live update failures reach diagnostics. Preserved the tested constant-layout and complete-command-registry startup invariants instead of arbitrary fallbacks. Focused timer-fence tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for profile refresh, market bridge and shutdown discards, connection/series feedback, deferred source/actions and other unwrap cleanup.
 
 ## 7. Known gaps / deferred
 

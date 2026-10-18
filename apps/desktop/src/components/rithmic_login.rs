@@ -237,10 +237,13 @@ impl TerminalApp {
             .spawn(async move { market.discover_rithmic_systems(server) });
         self.rithmic_login.discovery = Some(cx.spawn(async move |terminal, cx| {
             let result = work.await;
-            let _ = terminal.update(cx, |terminal, cx| {
+            if let Err(error) = terminal.update(cx, |terminal, cx| {
                 terminal.rithmic_login.discovery = None;
                 terminal.apply_rithmic_systems(server, result, cx);
-            });
+            }) && terminal.upgrade().is_some()
+            {
+                diagnostic!("Live workspace could not receive provider system discovery: {error}");
+            }
         }));
     }
 
@@ -343,12 +346,18 @@ impl TerminalApp {
         });
         self.rithmic_login.operation = Some(cx.spawn_in(window, async move |terminal, cx| {
             let result = work.await;
-            let _ = cx.update(|window, cx| {
-                terminal.update(cx, |terminal, cx| {
-                    terminal.rithmic_login.operation = None;
-                    terminal.finish_rithmic_login_operation(operation, result, window, cx);
+            if let Err(error) = cx
+                .update(|window, cx| {
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.rithmic_login.operation = None;
+                        terminal.finish_rithmic_login_operation(operation, result, window, cx);
+                    })
                 })
-            });
+                .and_then(|result| result)
+                && terminal.upgrade().is_some()
+            {
+                diagnostic!("Live workspace could not receive provider login result: {error}");
+            }
         }));
         cx.notify();
     }

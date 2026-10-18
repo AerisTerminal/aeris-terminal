@@ -2066,7 +2066,7 @@ impl TerminalApp {
                 self.chart_context_menu = Some(menu.clone());
                 cx.spawn_in(window, async move |terminal, cx| {
                     let copied = copied.await;
-                    let _ = terminal.update_in(cx, |terminal, window, terminal_cx| {
+                    if let Err(error) = terminal.update_in(cx, |terminal, window, terminal_cx| {
                         let still_open = terminal.chart_context_menu.as_ref().is_some_and(|open| {
                             open.workspace_id == menu.workspace_id
                                 && open.pane_id == menu.pane_id
@@ -2080,7 +2080,10 @@ impl TerminalApp {
                         } else {
                             terminal.close_chart_context_menu(terminal_cx);
                         }
-                    });
+                    }) && terminal.upgrade().is_some()
+                    {
+                        diagnostic!("Live workspace could not receive chart copy result: {error}");
+                    }
                 })
                 .detach();
             }
@@ -2146,14 +2149,17 @@ impl TerminalApp {
             cx.background_executor()
                 .timer(CHART_COPY_FEEDBACK_DURATION)
                 .await;
-            let _ = terminal.update_in(cx, |terminal, _, terminal_cx| {
+            if let Err(error) = terminal.update_in(cx, |terminal, _, terminal_cx| {
                 if Self::chart_context_copy_feedback_is_current(
                     terminal.chart_context_menu.as_ref(),
                     generation,
                 ) {
                     terminal.close_chart_context_menu(terminal_cx);
                 }
-            });
+            }) && terminal.upgrade().is_some()
+            {
+                diagnostic!("Live workspace chart copy feedback could not close: {error}");
+            }
         })
         .detach();
     }

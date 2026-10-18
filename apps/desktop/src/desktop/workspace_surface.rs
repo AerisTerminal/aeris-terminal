@@ -2110,13 +2110,16 @@ impl WorkspaceSurface {
             cx.background_executor()
                 .timer(Duration::from_millis(120))
                 .await;
-            let _ = app.update_in(cx, |app, _, app_cx| {
+            if let Err(error) = app.update_in(cx, |app, _, app_cx| {
                 if app.chrome_overlay == Some(ChromeOverlay::Timeframe)
                     && app.timeframe_flyout_close_token == token
                 {
                     app.close_timeframe_flyout(app_cx);
                 }
-            });
+            }) && app.upgrade().is_some()
+            {
+                diagnostic!("Live pane timeframe flyout close could not reach its window: {error}");
+            }
         })
         .detach();
     }
@@ -2874,7 +2877,7 @@ impl WorkspaceSurface {
             cx.background_executor()
                 .timer(CHROME_OVERLAY_EXIT_DURATION)
                 .await;
-            let _ = app.update_in(cx, |app, _, app_cx| {
+            if let Err(error) = app.update_in(cx, |app, _, app_cx| {
                 if should_finish_chrome_overlay_close(
                     app.chrome_overlay_phase,
                     app.chrome_overlay_generation,
@@ -2888,7 +2891,10 @@ impl WorkspaceSurface {
                     app.chrome_overlay_phase = ChromeOverlayPhase::Opening;
                     app_cx.notify();
                 }
-            });
+            }) && app.upgrade().is_some()
+            {
+                diagnostic!("Live pane chrome close could not reach its window: {error}");
+            }
         })
         .detach();
         cx.notify();
@@ -5656,13 +5662,16 @@ impl WorkspaceSurface {
         });
         cx.spawn(async move |surface, cx| {
             let result = save.await;
-            let _ = surface.update(cx, |surface, surface_cx| {
+            if let Err(error) = surface.update(cx, |surface, surface_cx| {
                 surface.context_credential_message = Some(match result {
                     Ok(()) => "Keys saved; source refreshes were scheduled.".to_string(),
                     Err(error) => format!("Keys could not be saved: {error}"),
                 });
                 surface_cx.notify();
-            });
+            }) && surface.upgrade().is_some()
+            {
+                diagnostic!("Live pane could not receive context credential save result: {error}");
+            }
         })
         .detach();
         cx.notify();

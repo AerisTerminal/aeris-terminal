@@ -750,13 +750,16 @@ fn refresh_trading_pnl(
         .spawn(async move { service.snapshot() });
     cx.spawn(async move |terminal, cx| {
         let result = snapshot.await;
-        if let Ok(snapshot) = &result {
-            let _ = terminal.update(cx, |terminal, terminal_cx| {
+        if let Ok(snapshot) = &result
+            && let Err(error) = terminal.update(cx, |terminal, terminal_cx| {
                 if terminal.bottom_panel.apply_snapshot(snapshot) {
                     terminal_cx.notify();
                 }
                 terminal.announce_fills(snapshot, terminal_cx);
-            });
+            })
+            && terminal.upgrade().is_some()
+        {
+            diagnostic!("Live workspace could not receive trading snapshot: {error}");
         }
         let feedback = feedback.latest();
         for surface in panes.iter().filter(|surface| *surface != &active) {
@@ -806,10 +809,13 @@ fn schedule_trading_refresh(cx: &mut Context<WorkspaceSurface>) {
         .timer(std::time::Duration::from_millis(250));
     cx.spawn(async move |state, cx| {
         refresh.await;
-        let _ = state.update(cx, |state, cx| {
+        if let Err(error) = state.update(cx, |state, cx| {
             state.trading_pnl.next_refresh = std::time::Instant::now();
             cx.notify();
-        });
+        }) && state.upgrade().is_some()
+        {
+            diagnostic!("Live pane trading refresh timer could not update: {error}");
+        }
     })
     .detach();
 }

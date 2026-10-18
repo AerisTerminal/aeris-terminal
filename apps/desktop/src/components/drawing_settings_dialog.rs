@@ -334,9 +334,12 @@ fn watch_input(
 ) -> gpui::Subscription {
     let surface = cx.entity().downgrade();
     window.subscribe(input, cx, move |_, event: &InputEvent, _, cx| {
-        let _ = surface.update(cx, |surface, surface_cx| {
+        if let Err(error) = surface.update(cx, |surface, surface_cx| {
             surface.drawing_settings_input_event(&target, event, surface_cx);
-        });
+        }) && surface.upgrade().is_some()
+        {
+            diagnostic!("Live pane could not receive drawing settings input: {error}");
+        }
     })
 }
 
@@ -370,9 +373,12 @@ fn text_body_input(
                     input.set_value(text.clone(), window, input_cx);
                 });
             }
-            let _ = surface.update(cx, |surface, surface_cx| {
+            if let Err(error) = surface.update(cx, |surface, surface_cx| {
                 surface.set_drawing_settings_value("text", Value::String(text), surface_cx);
-            });
+            }) && surface.upgrade().is_some()
+            {
+                diagnostic!("Live pane could not receive drawing text input: {error}");
+            }
         },
     ));
     input
