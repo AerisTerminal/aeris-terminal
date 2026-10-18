@@ -190,9 +190,10 @@ impl WorkspaceSurface {
             },
             severity: notification_center::NoticeSeverity::Warning,
             tone: notification_center::NoticeTone::Warning,
-            source: notification_center::NoticeSource::Workspace,
+            source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
             title: "Price alert could not be changed",
             detail: detail.into(),
+            action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
         }));
         cx.notify();
@@ -217,9 +218,10 @@ impl WorkspaceSurface {
                 key,
                 severity: notification_center::NoticeSeverity::Error,
                 tone: notification_center::NoticeTone::Loss,
-                source: notification_center::NoticeSource::Workspace,
+                source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
                 title: "Price alerts unavailable",
                 detail: "Live alert monitoring could not be updated. Try again later.".into(),
+                action: None,
                 lifetime: notification_center::NoticeLifetime::UntilCleared,
             }));
         }

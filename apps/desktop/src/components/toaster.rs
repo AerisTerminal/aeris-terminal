@@ -16,7 +16,8 @@
 //! it has already announced.
 
 use super::notification_center::{
-    NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, UserNotice,
+    NoticeAction, NoticeKey, NoticeLifetime, NoticeTone, NotificationCenter, RetryTarget,
+    UserNotice,
 };
 use super::*;
 use gpui::{DispatchPhase, EntityId, MouseMoveEvent, MouseUpEvent};
@@ -411,6 +412,14 @@ impl Toaster {
             self.remove_notice_toast(key, now);
             self.relayout(now);
         }
+    }
+
+    fn notice_action(&self, key: &NoticeKey) -> Option<NoticeAction> {
+        self.notices
+            .notices()
+            .iter()
+            .find(|notice| &notice.key == key)
+            .and_then(|notice| notice.action)
     }
 
     fn motion_duration(&self, duration: Duration) -> Duration {
@@ -1007,6 +1016,9 @@ fn fill_notice_text(
 /// The view that owns the toaster its stacks render and update.
 pub(super) trait ToastHost: 'static {
     fn toaster_mut(&mut self) -> &mut Toaster;
+    fn activate_notice_action(&mut self, action: NoticeAction, cx: &mut Context<Self>)
+    where
+        Self: Sized;
 }
 
 fn tone_icon(tone: ToastTone, theme: &AerisTheme) -> (HugeIcon, ThemeColor) {
@@ -1035,6 +1047,7 @@ fn toast_body(
     tone: ToastTone,
     title: SharedString,
     description: Option<SharedString>,
+    action: Option<AnyElement>,
     theme: &AerisTheme,
 ) -> Div {
     let colors = theme.colors;
@@ -1073,6 +1086,7 @@ fn toast_body(
                         .child(description)
                 })),
         )
+        .children(action)
 }
 
 /// A chart condition shown in the middle of a chart, drawn like a toast.
@@ -1083,6 +1097,7 @@ pub(super) fn chart_status_card(notice: ChartSurfaceNotice, theme: &AerisTheme) 
             notice.tone.into(),
             SharedString::new_static(notice.label),
             notice.detail.map(SharedString::from),
+            None,
             theme,
         ))
         .child(popover_highlight(theme, toast_radius()))
@@ -1113,7 +1128,13 @@ pub(super) fn toast_stack<H: ToastHost>(layer: &ToastLayer<'_, H>) -> Option<Any
         .toasts
         .iter()
         .filter(|toast| toast.stack == stack)
-        .map(|toast| toast_card(host, toast, theme, now))
+        .map(|toast| {
+            let action = toast
+                .notice_key
+                .as_ref()
+                .and_then(|key| toaster.notice_action(key));
+            toast_card(host, toast, action, theme, now)
+        })
         .collect();
     if cards.is_empty() {
         return None;
@@ -1149,6 +1170,7 @@ pub(super) fn toast_stack<H: ToastHost>(layer: &ToastLayer<'_, H>) -> Option<Any
 fn toast_card<H: ToastHost>(
     host: &Entity<H>,
     toast: &Toast,
+    action: Option<NoticeAction>,
     theme: &AerisTheme,
     now: Instant,
 ) -> AnyElement {
@@ -1161,6 +1183,8 @@ fn toast_card<H: ToastHost>(
     let measure_host = host.clone();
     let press_host = host.clone();
     let release_host = host.clone();
+    let action_host = host.clone();
+    let action_key = toast.notice_key.clone();
     toast_surface(theme)
         .on_children_prepainted(move |bounds, _, cx| {
             let Some(content) = bounds.first() else {
@@ -1216,6 +1240,30 @@ fn toast_card<H: ToastHost>(
                 toast.tone,
                 toast.title.clone(),
                 toast.description.clone(),
+                action.map(|action| {
+                    div()
+                        .id(("toast_action", id))
+                        .debug_selector(|| "toast_action".into())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            Button::new(("toast_notice_action", id), theme)
+                                .variant(ButtonVariant::Secondary)
+                                .button_size(ButtonSize::Sm)
+                                .label(action.label())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    let Some(key) = action_key.as_ref() else {
+                                        return;
+                                    };
+                                    action_host.update(cx, |host, host_cx| {
+                                        if host.toaster_mut().notice_action(key) == Some(action) {
+                                            host.activate_notice_action(action, host_cx);
+                                        }
+                                    });
+                                }),
+                        )
+                        .into_any_element()
+                }),
                 theme,
             )
             .absolute()
@@ -1271,6 +1319,14 @@ fn swipe_capture<H: ToastHost>(host: Entity<H>) -> impl IntoElement {
 impl ToastHost for TerminalApp {
     fn toaster_mut(&mut self) -> &mut Toaster {
         &mut self.toaster
+    }
+
+    fn activate_notice_action(&mut self, action: NoticeAction, cx: &mut Context<Self>) {
+        match action {
+            NoticeAction::Retry(RetryTarget::ChartChromePreferences) => {
+                self.save_chart_chrome_preferences(cx);
+            }
+        }
     }
 }
 
@@ -1423,6 +1479,7 @@ mod tests {
             source: notification_center::NoticeSource::Persistence,
             title: "Preferences unavailable",
             detail: "Try again".into(),
+            action: None,
             lifetime: notification_center::NoticeLifetime::UntilDismissed,
         };
         toaster.post_notice(stack(1), notice.clone(), now);
@@ -1451,6 +1508,7 @@ mod tests {
                 source: notification_center::NoticeSource::Persistence,
                 title: "Chart preferences could not be saved",
                 detail: "Your latest chart preferences may not survive a restart.".into(),
+                action: Some(NoticeAction::Retry(RetryTarget::ChartChromePreferences)),
                 lifetime: notification_center::NoticeLifetime::UntilCleared,
             },
             now,
@@ -1867,9 +1925,10 @@ mod tests {
                 },
                 severity: notification_center::NoticeSeverity::Warning,
                 tone: notification_center::NoticeTone::Warning,
-                source: notification_center::NoticeSource::Workspace,
+                source: notification_center::NoticeSource::Pane(1),
                 title: "Order book unavailable",
                 detail: "Try again later".into(),
+                action: None,
                 lifetime: notification_center::NoticeLifetime::UntilCleared,
             },
             start,
@@ -1895,11 +1954,16 @@ mod tests {
 
     struct StackHarness {
         toaster: Toaster,
+        actions: Vec<NoticeAction>,
     }
 
     impl ToastHost for StackHarness {
         fn toaster_mut(&mut self) -> &mut Toaster {
             &mut self.toaster
+        }
+
+        fn activate_notice_action(&mut self, action: NoticeAction, _: &mut Context<Self>) {
+            self.actions.push(action);
         }
     }
 
@@ -1926,8 +1990,55 @@ mod tests {
             let mut toaster = Toaster::default();
             toaster.tick(Instant::now(), true, true);
             toast(&mut toaster, stack(1), Instant::now());
-            StackHarness { toaster }
+            StackHarness {
+                toaster,
+                actions: Vec::new(),
+            }
         })
+    }
+
+    #[gpui::test]
+    fn retry_button_dispatches_without_dismissing_the_notice(cx: &mut TestAppContext) {
+        let (view, cx) = harness(cx);
+        let key = notification_center::NoticeKey {
+            scope: 0,
+            kind: "chart_chrome_save",
+        };
+        let action = NoticeAction::Retry(RetryTarget::ChartChromePreferences);
+        view.update(cx, |host, cx| {
+            host.toaster.post_notice(
+                stack(1),
+                notification_center::UserNotice {
+                    key: key.clone(),
+                    severity: notification_center::NoticeSeverity::Error,
+                    tone: notification_center::NoticeTone::Loss,
+                    source: notification_center::NoticeSource::Persistence,
+                    title: "Chart preferences could not be saved",
+                    detail: "Your preferences may not survive a restart.".into(),
+                    action: Some(action),
+                    lifetime: notification_center::NoticeLifetime::UntilCleared,
+                },
+                Instant::now(),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let button = cx
+            .debug_bounds("toast_action")
+            .expect("rendered retry action");
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.run_until_parked();
+        view.read_with(cx, |host, _| {
+            assert_eq!(host.actions, [action]);
+            assert_eq!(host.toaster.notices().len(), 1, "retry awaits its result");
+            assert_eq!(host.toaster.live_notice_cards(stack(1)), 1);
+        });
+        view.update(cx, |host, cx| {
+            host.toaster.clear_notice(&key, Instant::now());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("toast_action").is_none());
     }
 
     #[gpui::test]

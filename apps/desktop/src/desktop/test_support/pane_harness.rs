@@ -26,6 +26,14 @@ impl toaster::ToastHost for PaneWindow {
     fn toaster_mut(&mut self) -> &mut Toaster {
         &mut self.toaster
     }
+
+    fn activate_notice_action(
+        &mut self,
+        _: notification_center::NoticeAction,
+        _: &mut Context<Self>,
+    ) {
+        panic!("pane notices have no action controls");
+    }
 }
 
 impl Render for PaneWindow {
@@ -487,6 +495,10 @@ fn pane_harness_disconnected_order_book_request_renders_one_notice(cx: &mut Test
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].title, "Order book unavailable");
         assert_eq!(notices[0].key.scope, harness.pane.entity_id().as_u64());
+        assert_eq!(
+            notices[0].source,
+            notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
+        );
     });
     assert!(
         cx.debug_bounds("toast").is_some(),

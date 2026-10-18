@@ -2261,9 +2261,10 @@ impl WorkspaceSurface {
             },
             severity: notification_center::NoticeSeverity::Warning,
             tone: notification_center::NoticeTone::Warning,
-            source: notification_center::NoticeSource::Workspace,
+            source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
             title,
             detail: detail.into(),
+            action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
         }));
         cx.notify();
@@ -2621,7 +2622,7 @@ impl WorkspaceSurface {
                 };
                 if self.market_worker.try_select_catalog(request).is_err() {
                     self.symbol_browser.reject_selection(selection.generation);
-                    Self::post_symbol_selection_notice(
+                    self.post_symbol_selection_notice(
                         "Market selection could not be scheduled. Try again.",
                         cx,
                     );
@@ -2645,7 +2646,7 @@ impl WorkspaceSurface {
             };
             if self.market_worker.try_select_provider(request).is_err() {
                 self.symbol_browser.reject_selection(selection.generation);
-                Self::post_symbol_selection_notice(
+                self.post_symbol_selection_notice(
                     "Market selection could not be scheduled. Try again.",
                     cx,
                 );
@@ -4243,7 +4244,7 @@ impl WorkspaceSurface {
         {
             self.market_state.symbol_selection_pending = false;
             self.pending_symbol_selection_target = None;
-            Self::post_symbol_selection_notice("Market selection failed. Try again.", cx);
+            self.post_symbol_selection_notice("Market selection failed. Try again.", cx);
             cx.notify();
         }
     }
@@ -5110,14 +5111,15 @@ impl WorkspaceSurface {
             },
             severity: notification_center::NoticeSeverity::Warning,
             tone: notification_center::NoticeTone::Warning,
-            source: notification_center::NoticeSource::Workspace,
+            source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
             title: "Symbol search unavailable",
             detail: detail.into(),
+            action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
         }));
     }
 
-    fn post_symbol_selection_notice(detail: &str, cx: &mut Context<Self>) {
+    fn post_symbol_selection_notice(&self, detail: &str, cx: &mut Context<Self>) {
         cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
             key: notification_center::NoticeKey {
                 scope: cx.entity_id().as_u64(),
@@ -5125,9 +5127,12 @@ impl WorkspaceSurface {
             },
             severity: notification_center::NoticeSeverity::Warning,
             tone: notification_center::NoticeTone::Warning,
-            source: notification_center::NoticeSource::Workspace,
+            source: notification_center::NoticeSource::Provider(super::terminal_provider_id(
+                self.symbol_provider,
+            )),
             title: "Market selection unavailable",
             detail: detail.into(),
+            action: None,
             lifetime: notification_center::NoticeLifetime::UntilCleared,
         }));
     }
@@ -5418,7 +5423,7 @@ impl WorkspaceSurface {
         self.market_state.symbol_selection_pending = false;
         if selection {
             let detail = catalog_rejection_message(rejection.reason, command, self.provider);
-            Self::post_symbol_selection_notice(&detail, cx);
+            self.post_symbol_selection_notice(&detail, cx);
         } else {
             Self::post_symbol_search_notice(
                 "The market search could not complete. Try again later.",
@@ -5484,9 +5489,10 @@ impl WorkspaceSurface {
                     key,
                     severity: notification_center::NoticeSeverity::Warning,
                     tone: notification_center::NoticeTone::Warning,
-                    source: notification_center::NoticeSource::Workspace,
+                    source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
                     title: "Order book unavailable",
                     detail: "The order book request could not be sent. Try again later.".into(),
+                    action: None,
                     lifetime: notification_center::NoticeLifetime::UntilCleared,
                 }));
             } else {

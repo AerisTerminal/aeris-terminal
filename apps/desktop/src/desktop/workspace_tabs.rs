@@ -1796,6 +1796,7 @@ impl TerminalApp {
                     source: notification_center::NoticeSource::Workspace,
                     title,
                     detail: "Please try again later.".into(),
+                    action: None,
                     lifetime,
                 },
                 Instant::now(),
@@ -2375,6 +2376,9 @@ impl TerminalApp {
                     source: notification_center::NoticeSource::Persistence,
                     title: "Chart preferences could not be saved",
                     detail: "Your latest chart preferences may not survive a restart.".into(),
+                    action: Some(notification_center::NoticeAction::Retry(
+                        notification_center::RetryTarget::ChartChromePreferences,
+                    )),
                     lifetime: notification_center::NoticeLifetime::UntilCleared,
                 },
                 Instant::now(),

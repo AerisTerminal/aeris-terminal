@@ -952,6 +952,19 @@ Status: pending
     no target series yet, so it is not reported as an error. M6.2 stays unchecked:
     connection/series feedback, source/action variants and discarded-result/unwrap
     cleanup remain.
+  - Part 13: existing pane-owned notices now carry their pane source, provider
+    selection failures carry the selected browser provider's registered ID,
+    and workspace/persistence notices retain their existing source. A typed
+    `Retry(ChartChromePreferences)` action is attached only to the durable
+    preference-save failure; the toaster renders a real Retry button and the
+    TerminalApp owner requeues its existing asynchronous save. Button activation
+    rechecks the live keyed notice, does not dismiss it prematurely, and success
+    still clears the key. Rendered click, bounded keyed replacement, pane-source
+    and selection regressions cover this increment. M6.2 stays unchecked:
+    Trading(RequestId) awaits a real request-scoped notice, OpenFolder needs a
+    safe platform opener, and ConnectProvider requires M6.9 descriptor-driven
+    login rather than another provider switch; connection/series feedback and
+    discarded-result/unwrap cleanup also remain.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1277,6 +1290,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 10 fix(desktop): removed per-pane indicator error string and its header/menu rendering; study, settings, order-flow, drawing and unsupported-zone failures now post static sanitized pane notices, with category-scoped success clearing and sanitized dialog-local runtime feedback. PaneHarness verifies repeated study/volume/zone failure rendering and recovery. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for startup setters, chart-state presentation, source/action variants and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 11 fix(desktop): removed per-pane chart-state message storage; chart status derives from typed chart/connection state, pending timeframe and sanitized failure cause, retaining distinct unsupported-restore and worker-stop status. Runtime failures post one pane-keyed notice and successful coverage clears it; PaneHarness exercises redaction, rendered one-card deduplication and recovery. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for startup chart setters, other pane feedback, source/action variants and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 12 fix(desktop): deferred fallible empty-chart startup setters until after pane notice subscription; their real errors post the same sanitized chart-restore key as snapshot chart restore, with no duplicate state. PaneHarness exercises actual Rithmic startup creation, initial failure, repeated keyed one-card rendering and corrected-zone replacement snapshot clearing. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for connection/series feedback, source/action variants and discarded-result/unwrap cleanup.
+- 2026-10-18 M6.2 Part 13 fix(desktop): classified existing pane notices by pane and provider selection by the registered provider ID; added one real Retry action for chart-preference save failure through the existing toaster to TerminalApp's async save. Rendered click, keyed replacement, pane source and provider-selection tests passed; full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for Trading(RequestId), OpenFolder/ConnectProvider prerequisites, connection/series feedback and discarded-result/unwrap cleanup.
 
 ## 7. Known gaps / deferred
 

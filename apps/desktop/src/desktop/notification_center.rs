@@ -24,8 +24,28 @@ pub(super) enum NoticeTone {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum NoticeSource {
+    Pane(u64),
     Workspace,
     Persistence,
+    Provider(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RetryTarget {
+    ChartChromePreferences,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NoticeAction {
+    Retry(RetryTarget),
+}
+
+impl NoticeAction {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Retry(_) => "Retry",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +64,7 @@ pub(super) struct UserNotice {
     pub title: &'static str,
     /// A public, deliberately composed explanation, never a raw error or credential.
     pub detail: String,
+    pub action: Option<NoticeAction>,
     pub lifetime: NoticeLifetime,
 }
 
@@ -105,6 +126,7 @@ mod tests {
             source: NoticeSource::Persistence,
             title: "Market unavailable",
             detail: "Try again later".into(),
+            action: None,
             lifetime,
         }
     }
@@ -112,11 +134,14 @@ mod tests {
     #[test]
     fn notification_existing_key_replaces_in_place() {
         let mut center = NotificationCenter::default();
-        center.post(notice(1, NoticeLifetime::UntilCleared));
+        let mut actionable = notice(1, NoticeLifetime::UntilCleared);
+        actionable.action = Some(NoticeAction::Retry(RetryTarget::ChartChromePreferences));
+        center.post(actionable);
         let mut changed = notice(1, NoticeLifetime::UntilCleared);
         changed.detail = "Connection restored".into();
         center.post(changed.clone());
         assert_eq!(center.notices(), &[changed]);
+        assert_eq!(center.notices()[0].action, None);
     }
 
     #[test]
