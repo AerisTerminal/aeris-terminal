@@ -62,6 +62,15 @@ impl PaneHarness {
         fill_command_queue: bool,
         cx: &mut TestAppContext,
     ) -> (Self, &mut VisualTestContext) {
+        Self::open_with_startup(restore, fill_command_queue, false, cx)
+    }
+
+    fn open_with_startup(
+        restore: WorkspaceSurfaceRestore,
+        fill_command_queue: bool,
+        rithmic_startup: bool,
+        cx: &mut TestAppContext,
+    ) -> (Self, &mut VisualTestContext) {
         let product = local_state::default_workspace().watchlist_entries[0]
             .instrument
             .clone()
@@ -85,14 +94,19 @@ impl PaneHarness {
         }
         let (view, cx) = cx.add_window_view(move |window, cx| {
             gpui_base::init(cx);
-            let pane = workspace_surface_entity(
+            let startup = if rithmic_startup {
+                MarketWorkerStartup::Rithmic
+            } else {
                 MarketWorkerStartup::Loading(Box::new(EngineWorkerStartup {
                     product,
                     interval: ChartInterval::Minute1,
                     restored_viewport: None,
                     subscription_id: "desktop_fixture_market_bars".into(),
                     worker_label: "disconnected fixture".into(),
-                })),
+                }))
+            };
+            let pane = workspace_surface_entity(
+                startup,
                 worker,
                 &DesktopLifecycle::new_for_test(),
                 chart_chrome::ChartChromePreferences::default(),
@@ -120,6 +134,7 @@ impl PaneHarness {
             pane.update(cx, |pane, cx| {
                 pane.emit_initial_price_alert_restore_notice(cx);
                 pane.emit_initial_chart_failure_notice(cx);
+                pane.apply_initial_chart_settings(cx);
             });
             PaneWindow {
                 pane,
@@ -210,6 +225,61 @@ fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mu
         cx.debug_bounds("toast").is_some(),
         "restore failure rendered a card"
     );
+}
+
+#[gpui::test]
+fn pane_harness_startup_chart_setter_failure_dedupes_and_snapshot_recovery_clears(
+    cx: &mut TestAppContext,
+) {
+    let private_zone = "private-credential-sentinel/Zone";
+    let restore = WorkspaceSurfaceRestore {
+        chart: Some(WorkspaceChartState {
+            time_zone: private_zone.into(),
+            ..WorkspaceChartState::default()
+        }),
+        ..WorkspaceSurfaceRestore::default()
+    };
+    let (mut harness, cx) = PaneHarness::open_with_startup(restore, false, true, cx);
+    cx.read(|cx| {
+        assert!(
+            harness.pane.read(cx).chart.is_some(),
+            "startup chart exists"
+        );
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(harness.window.read(cx).toaster.notices().len(), 1);
+    });
+    harness.pane.update(cx, |pane, cx| {
+        pane.apply_initial_chart_settings(cx);
+        pane.rithmic_switch = RithmicSwitchState::Swapping;
+    });
+    harness.publish_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(
+            toaster.notices()[0].title,
+            "Chart settings could not be restored"
+        );
+        assert!(!toaster.notices()[0].detail.contains(private_zone));
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "startup failure rendered"
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.set_chart_time_zone("Etc/UTC", cx));
+        pane.rithmic_switch = RithmicSwitchState::Swapping;
+    });
+    harness.publish_snapshot(12, cx);
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
 }
 
 #[gpui::test]

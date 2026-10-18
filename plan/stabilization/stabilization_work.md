@@ -941,6 +941,17 @@ Status: pending
     a redacted rendered card, one-card deduplication and snapshot recovery.
     M6.2 stays unchecked: startup chart setters, remaining connection/series
     feedback, source/action variants and discarded-result/unwrap cleanup remain.
+  - Part 12: moved empty-chart startup time-zone and order-line setters to the
+    post-subscription pane initialization; their actual `Result` errors join
+    the existing sanitized `chart_restore` notice, without retaining a second
+    failure flag. A covering snapshot with successful restored settings clears
+    that key. PaneHarness creates the real Rithmic startup chart with an invalid
+    persisted zone, checks initial rendered notice, repeated failure deduplication
+    and a corrected-zone replacement snapshot clearing it. A setter's `Ok(false)`
+    is unchanged, not a failure; the startup price-axis action's `false` means
+    no target series yet, so it is not reported as an error. M6.2 stays unchecked:
+    connection/series feedback, source/action variants and discarded-result/unwrap
+    cleanup remain.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1265,6 +1276,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 9 fix(desktop): replaced per-pane symbol status string with fenced browser/chart projection and routed search validation/dispatch and selection failures through sanitized keyed pane notices. PaneHarness verifies repeated failures, no credential-bearing detail, rendered cards and accepted completion/commit clearing; focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after a cold aws-lc-sys MSVC transient retry. M6.2 remains open for startup setters, indicator/chart-state strings, source/action variants and discarded-result cleanup.
 - 2026-10-18 M6.2 Part 10 fix(desktop): removed per-pane indicator error string and its header/menu rendering; study, settings, order-flow, drawing and unsupported-zone failures now post static sanitized pane notices, with category-scoped success clearing and sanitized dialog-local runtime feedback. PaneHarness verifies repeated study/volume/zone failure rendering and recovery. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for startup setters, chart-state presentation, source/action variants and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 11 fix(desktop): removed per-pane chart-state message storage; chart status derives from typed chart/connection state, pending timeframe and sanitized failure cause, retaining distinct unsupported-restore and worker-stop status. Runtime failures post one pane-keyed notice and successful coverage clears it; PaneHarness exercises redaction, rendered one-card deduplication and recovery. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for startup chart setters, other pane feedback, source/action variants and discarded-result/unwrap cleanup.
+- 2026-10-18 M6.2 Part 12 fix(desktop): deferred fallible empty-chart startup setters until after pane notice subscription; their real errors post the same sanitized chart-restore key as snapshot chart restore, with no duplicate state. PaneHarness exercises actual Rithmic startup creation, initial failure, repeated keyed one-card rendering and corrected-zone replacement snapshot clearing. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for connection/series feedback, source/action variants and discarded-result/unwrap cleanup.
 
 ## 7. Known gaps / deferred
 

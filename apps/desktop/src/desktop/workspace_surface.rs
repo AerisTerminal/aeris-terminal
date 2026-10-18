@@ -1925,19 +1925,6 @@ impl WorkspaceSurface {
         let chart_time_zone = restored_chart_time_zone(restored_chart_state.as_ref());
         let chart_trading_visibility =
             restored_chart_trading_visibility(restored_chart_state.as_ref());
-        if let Some(chart) = startup_state.chart.as_ref() {
-            // A chart created at startup never takes the restored-state path.
-            let time_zone = chart_time_zone.clone();
-            let extend_order_lines_left = chart_trading_visibility.extend_order_lines_left;
-            chart.update(cx, |chart, _| {
-                if let Err(error) = chart.set_time_zone(&time_zone) {
-                    diagnostic!("Aeris chart time zone could not be applied: {error}");
-                }
-                if let Err(error) = chart.set_order_lines_extend_left(extend_order_lines_left) {
-                    diagnostic!("Aeris chart order-line extension could not be applied: {error}");
-                }
-            });
-        }
         workspace_surface_from_initialization(WorkspaceSurfaceInitialization {
             startup: startup_state,
             market_worker,
@@ -1978,6 +1965,36 @@ impl WorkspaceSurface {
             chrome_focus: cx.focus_handle().tab_stop(true),
             theme,
         })
+    }
+
+    /// The empty startup chart is created before the pane notice subscription exists. Apply
+    /// its fallible settings only once that subscription is wired; later snapshot charts use
+    /// `install_snapshot_chart` and its existing chart-restore notice.
+    pub(super) fn apply_initial_chart_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(chart) = self.chart.as_ref() else {
+            return;
+        };
+        let failed = chart.update(cx, |chart, _| {
+            let time_zone_failed = chart.set_time_zone(&self.chart_time_zone).is_err();
+            let order_lines_failed = chart
+                .set_order_lines_extend_left(self.chart_trading_visibility.extend_order_lines_left)
+                .is_err();
+            time_zone_failed || order_lines_failed
+        });
+        if failed {
+            Self::post_chart_restore_failure(cx);
+        } else {
+            Self::clear_indicator_failure("chart_restore", cx);
+        }
+    }
+
+    fn post_chart_restore_failure(cx: &mut Context<Self>) {
+        Self::post_indicator_failure(
+            "chart_restore",
+            "Chart settings could not be restored",
+            "Some saved chart settings could not be applied. Review this chart's settings.",
+            cx,
+        );
     }
 
     pub(super) fn retire_market_worker(&mut self, cx: &App) {
@@ -3213,24 +3230,10 @@ impl WorkspaceSurface {
                 .is_err()
         });
         restore_failed |= self.apply_surface_time_zone(&chart, cx);
-        let key = notification_center::NoticeKey {
-            scope: cx.entity_id().as_u64(),
-            kind: "chart_restore",
-        };
         if restore_failed {
-            cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
-                key,
-                severity: notification_center::NoticeSeverity::Warning,
-                tone: notification_center::NoticeTone::Warning,
-                source: notification_center::NoticeSource::Workspace,
-                title: "Chart settings could not be restored",
-                detail:
-                    "Some saved chart settings could not be applied. Review this chart's settings."
-                        .into(),
-                lifetime: notification_center::NoticeLifetime::UntilCleared,
-            }));
+            Self::post_chart_restore_failure(cx);
         } else {
-            cx.emit(PaneNoticeEvent::Clear(key));
+            Self::clear_indicator_failure("chart_restore", cx);
         }
         self.apply_market_session_to_chart(&chart, cx);
         self.apply_provider_trade_prints(&chart, cx);
