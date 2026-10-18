@@ -268,6 +268,10 @@ impl RithmicSymbolBrowser {
         self.pending_search_id.is_some()
     }
 
+    pub(crate) const fn has_completed_search(&self) -> bool {
+        self.completed_search_id.is_some()
+    }
+
     pub(crate) fn selected(&self) -> Option<&RithmicSymbolSelection> {
         self.selected.as_ref()
     }

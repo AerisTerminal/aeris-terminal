@@ -242,6 +242,10 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
     cx.run_until_parked();
     cx.read(|cx| {
         let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(
+            harness.pane.read(cx).symbol_selector_status(),
+            "Waiting to search the latest query"
+        );
         assert_eq!(toaster.notices().len(), 1);
         assert_eq!(toaster.notices()[0].title, "Symbol search unavailable");
         assert!(!toaster.notices()[0].detail.contains(credential));
@@ -280,12 +284,120 @@ fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
     cx.run_until_parked();
     cx.read(|cx| {
         let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(
+            harness.pane.read(cx).symbol_selector_status(),
+            "No matching markets · try another search"
+        );
         assert_eq!(toaster.notices(), []);
         assert_eq!(
             toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
             0
         );
     });
+}
+
+#[gpui::test]
+fn pane_harness_rejected_symbol_selection_redacts_detail_and_commit_clears(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = PaneHarness::open(cx);
+    let commands = harness.commands.as_ref().expect("command receiver");
+    while commands.try_recv().is_ok() {}
+    let instrument = local_state::default_workspace().watchlist_entries[0]
+        .instrument
+        .clone()
+        .expect("fixture product");
+    harness.pane.update(cx, |pane, _| {
+        let request = pane
+            .symbol_browser
+            .begin_search("BTC")
+            .expect("valid query");
+        assert!(pane.symbol_browser.apply_results(
+            request.request_id,
+            vec![ProviderInstrumentSummary {
+                symbol: "BTC".into(),
+                display_symbol: "BTC".into(),
+                exchange: "TEST".into(),
+                ..ProviderInstrumentSummary::default()
+            }],
+        ));
+        assert_eq!(
+            pane.symbol_selector_status(),
+            "1 matching markets · search to find more"
+        );
+    });
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            assert!(pane.select_instrument(
+                InstrumentMenuSelection(0),
+                SymbolSelectionTarget::Chart,
+                cx,
+            ));
+            assert_eq!(pane.symbol_selector_status(), "Selecting market");
+        });
+        let MarketWorkerCommand::SelectCatalog(request) =
+            commands.try_recv().expect("selection dispatched")
+        else {
+            panic!("expected catalog selection");
+        };
+        harness
+            .publications
+            .send(MarketWorkerMessage::CatalogSwitchFailed {
+                sequence: request.sequence,
+                browser_generation: request.browser_generation,
+                detail: "private-credential-sentinel".into(),
+            })
+            .expect("fixture failure enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Market selection unavailable");
+        assert!(
+            !toaster.notices()[0]
+                .detail
+                .contains("private-credential-sentinel")
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "selection failure rendered"
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_instrument(
+            InstrumentMenuSelection(0),
+            SymbolSelectionTarget::Chart,
+            cx,
+        ));
+    });
+    let MarketWorkerCommand::SelectCatalog(request) = commands
+        .try_recv()
+        .expect("replacement selection dispatched")
+    else {
+        panic!("expected catalog selection");
+    };
+    harness
+        .publications
+        .send(MarketWorkerMessage::CatalogSwitchCommitted {
+            sequence: request.sequence,
+            browser_generation: request.browser_generation,
+            instrument,
+            interval: ChartInterval::Minute1,
+        })
+        .expect("fixture commit enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
 }
 
 #[gpui::test]

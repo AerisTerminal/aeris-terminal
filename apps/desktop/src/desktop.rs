@@ -846,7 +846,6 @@ struct WorkspaceSurface {
     order_price: Entity<InputState>,
     chart_trading_visibility: ChartTradingVisibilitySettings,
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
-    symbol_message: String,
     market_state: WorkspaceMarketState,
     symbol_selection_target: SymbolSelectionTarget,
     pending_symbol_selection_target: Option<SymbolSelectionTarget>,
@@ -3800,14 +3799,6 @@ fn provider_connection_message(provider: TerminalProvider) -> String {
             format!("Connecting to {display_name} public markets")
         }
     }
-}
-
-fn initial_symbol_message(provider: TerminalProvider) -> String {
-    provider_presentation(provider)
-        .map_or("Search provider markets", |descriptor| {
-            descriptor.search_hint
-        })
-        .to_string()
 }
 
 fn initialize_chart_chrome(

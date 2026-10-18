@@ -225,7 +225,7 @@ pub(super) fn chrome_overlay_content(
             extent,
             &InstrumentSelectorState {
                 label: terminal_instrument_label(app_state),
-                message: app_state.symbol_message.clone(),
+                message: app_state.symbol_selector_status(),
                 instruments: app_state.instrument_entries(cx),
                 input: app_state.symbol_input.clone(),
                 availability: InstrumentSelectorAvailability {

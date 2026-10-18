@@ -913,6 +913,16 @@ Status: pending
     rendered-card deduplication and successful clearing. M6.2 remains unchecked:
     startup chart setters, other pane strings, source/action variants and
     discarded-result/unwrap cleanup remain.
+  - Part 9: deleted the pane's `symbol_message`. The instrument menu derives
+    normal searching, queued, result-count, no-match, selection and ready labels
+    from its fenced symbol browser and current chart selection, without storing
+    another status string. Invalid search, unavailable dispatch, catalog rejection
+    and failed selection post sanitized pane-keyed notices; accepted results and
+    committed selections clear their respective failures. PaneHarness verifies
+    repeated search/selection failure deduplication, redaction, rendered cards,
+    derived statuses and subsequent clearing. No chart-integration identifier
+    needed removal. M6.2 stays unchecked: startup chart setters, indicator and
+    chart-state strings, source/action variants and discarded-result cleanup follow.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1234,6 +1244,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 6 fix(desktop): routed fallible snapshot chart restore setters and the surface time-zone apply to a single sanitized pane notice, with a repeated invalid persisted-zone setter regression rendered by PaneHarness. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. Startup chart setters and other M6.2 notice/discard work remain open.
 - 2026-10-18 M6.2 Part 7 fix(desktop): routed bounded-queue and catalog-rejected symbol searches to the one pane notice bridge with sanitized detail; an accepted search completion clears the notice. PaneHarness exercises full command queue, repeat deduplication, rendered card and completion clearing. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for startup setters, pane strings, source/action expansion and discarded-result cleanup.
 - 2026-10-18 M6.2 Part 8 fix(desktop): removed per-pane price-alert message and inline dialog errors; restore, user action and processing failures use sanitized pane notices with scoped success clearing. PaneHarness covers queued restore failure, repeated delete failure and rendered-card clearing. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 stays open for startup setters, remaining pane strings, source/action variants and discarded-result cleanup.
+- 2026-10-18 M6.2 Part 9 fix(desktop): replaced per-pane symbol status string with fenced browser/chart projection and routed search validation/dispatch and selection failures through sanitized keyed pane notices. PaneHarness verifies repeated failures, no credential-bearing detail, rendered cards and accepted completion/commit clearing; focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after a cold aws-lc-sys MSVC transient retry. M6.2 remains open for startup setters, indicator/chart-state strings, source/action variants and discarded-result cleanup.
 
 ## 7. Known gaps / deferred
 
