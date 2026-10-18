@@ -78,6 +78,10 @@ impl DesktopLifecycle {
         &self.services.trading
     }
 
+    pub(super) fn trading_feedback(&self) -> &aeris_desktop::trading::TradingFeedback {
+        &self.services.trading_feedback
+    }
+
     pub(super) fn market(&self) -> &aeris_market_runtime::MarketService {
         &self.services.market
     }

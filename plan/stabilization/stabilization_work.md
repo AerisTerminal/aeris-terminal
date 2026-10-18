@@ -795,6 +795,15 @@ Status: pending
     The full gate exposed the existing burst-conformance process-RSS race for a third time;
     its unchanged memory and delivery assertions now execute in an isolated test child, so
     concurrently allocating GPUI tests cannot be charged to the fixture's working set.
+  - Part 5: trading command feedback is a per-instance handle created by `DesktopServices`.
+    Command dispatch, chart intents, hotkeys, ticket actions, account controls and the pane
+    status reader share that handle; the process-global mailbox and latest-feedback lookup
+    are deleted, along with an unused repricing helper. A two-desktop test proves independent
+    revisions and shared pane visibility; naming_check accepts injected/test-only examples
+    but rejects production globals. Full workspace fmt/check/strict Clippy/tests/naming_check
+    passed (the first full test run hit a known short-endurance parallel timing failure;
+    its isolated retry and the complete rerun passed). Persistence, clock and PaneHarness
+    remain; M6.1 stays unchecked.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
@@ -1103,6 +1112,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6 preflight test(desktop): stabilize the two parallel-run timing regressions observed at M5 close. The display-depth idle-stop test uses a zero-capacity control-channel rendezvous instead of fixed sleeps to prove repeated stops leave the worker alive. The short desktop endurance test always performs its two asserted frames even if descheduled for its 320 ms sampling window; production endurance still stops at its requested wall-clock duration. Both focused regressions and the default-parallel workspace test suite passed; full workspace fmt, check, strict Clippy and naming gates passed. No M6.1 checkbox is claimed by this prerequisite repair.
 - 2026-10-18 M6.1 Part 1 test(desktop): extracted `FixtureMarketWorker` from the default market mailbox into cfg-gated desktop test support; deterministic fixture publication and naming_check positive/negative tests protect the boundary. M6.1 remains open for services injection and PaneHarness.
 - 2026-10-18 M6.1 Part 2 refactor(desktop): injected the trading owner through `DesktopServices` into the lifecycle, panes, UI command paths and market ticket-interest client; removed `TRADING_SERVICE` and its process-wide install/lookup. A two-composition regression proves trading account changes do not cross between owners; naming_check rejects reintroduced globals with positive/negative source examples, and AGENTS.md records the restriction. Full workspace fmt/check/strict Clippy/tests/naming_check green (the first test run exposed a stale naming_check source pin; its replacement and full rerun passed). M6.1 remains open for account/market/feedback/persistence/clock injection and PaneHarness.
+- 2026-10-18 M6.1 Part 5 refactor(desktop): replaced the global trading feedback mailbox with one cloneable handle per DesktopServices composition; all command and pane status paths use it. Independent-desktop feedback and naming guard regressions added; removed the unused repricing helper. Full workspace fmt/check/strict Clippy/tests/naming passed (one short-endurance parallel timing failure on the first test run; isolated retry and complete rerun passed). Persistence, clock and PaneHarness remain.
 
 ## 7. Known gaps / deferred
 

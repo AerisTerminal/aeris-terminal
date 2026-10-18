@@ -346,7 +346,16 @@ fn trade_bar_order_button(
             .on_click(move |_, _, cx| {
                 if let Some(frame) = frame.as_ref() {
                     let service = surface.read(cx).lifecycle.trading().clone();
-                    dispatch_market(&service, frame, account.clone(), quantity, side, cx);
+                    let feedback = surface.read(cx).lifecycle.trading_feedback().clone();
+                    dispatch_market(
+                        &service,
+                        &feedback,
+                        frame,
+                        account.clone(),
+                        quantity,
+                        side,
+                        cx,
+                    );
                 }
             }),
     )

@@ -25,6 +25,8 @@ fn has_process_global_desktop_trading(source: &str) -> bool {
         "static TRADING_SERVICE",
         "trading::handle()",
         "trading::install(",
+        "static TRADING_FEEDBACK",
+        "trading::latest_feedback()",
     ]
     .iter()
     .any(|forbidden| production.contains(forbidden))
@@ -4159,6 +4161,25 @@ jobs:
         ));
         assert!(super::has_process_global_desktop_trading(
             "static TRADING_SERVICE: OnceLock<TradingService> = OnceLock::new();"
+        ));
+    }
+
+    #[test]
+    fn injected_desktop_feedback_accepts_instance_status_and_test_only_global() {
+        assert!(!super::has_process_global_desktop_trading(
+            "fn status(services: &DesktopServices) { services.trading_feedback.latest(); }\n\
+             #[cfg(test)] mod tests { static TRADING_FEEDBACK: u8 = 0; }\n"
+        ));
+    }
+
+    #[test]
+    fn injected_desktop_feedback_rejects_process_global_after_test_module() {
+        assert!(super::has_process_global_desktop_trading(
+            "#[cfg(test)] mod tests { fn hidden() {} }\n\
+             fn after() { aeris_desktop::trading::latest_feedback(); }\n"
+        ));
+        assert!(super::has_process_global_desktop_trading(
+            "static TRADING_FEEDBACK: OnceLock<Mutex<TradingFeedbackState>> = OnceLock::new();"
         ));
     }
 

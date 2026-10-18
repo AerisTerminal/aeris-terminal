@@ -150,11 +150,14 @@ impl TerminalApp {
             }
         }
         self.save_chart_chrome_preferences(cx);
-        aeris_desktop::trading::record_notice(Ok(if mode.one_click() {
-            "One-click trading on: shortcuts send without confirmation".to_string()
-        } else {
-            "One-click trading off: shortcuts ask for confirmation".to_string()
-        }));
+        aeris_desktop::trading::record_notice(
+            self.lifecycle.trading_feedback(),
+            Ok(if mode.one_click() {
+                "One-click trading on: shortcuts send without confirmation".to_string()
+            } else {
+                "One-click trading off: shortcuts ask for confirmation".to_string()
+            }),
+        );
         cx.notify();
     }
 
@@ -175,7 +178,10 @@ impl TerminalApp {
         let message = match self.trading_hotkey_summary(hotkey, cx) {
             Ok(message) => message,
             Err(reason) => {
-                aeris_desktop::trading::record_notice(Err(reason));
+                aeris_desktop::trading::record_notice(
+                    self.lifecycle.trading_feedback(),
+                    Err(reason),
+                );
                 cx.notify();
                 return true;
             }
@@ -205,7 +211,10 @@ impl TerminalApp {
                 cx,
             ),
             Err(reason) => {
-                aeris_desktop::trading::record_notice(Err(reason));
+                aeris_desktop::trading::record_notice(
+                    self.lifecycle.trading_feedback(),
+                    Err(reason),
+                );
                 cx.notify();
             }
         }
@@ -319,7 +328,10 @@ impl TerminalApp {
                     placed
                 });
                 if let Err(reason) = placed {
-                    aeris_desktop::trading::record_notice(Err(reason));
+                    aeris_desktop::trading::record_notice(
+                        self.lifecycle.trading_feedback(),
+                        Err(reason),
+                    );
                 }
             }
         }
@@ -339,6 +351,7 @@ impl TerminalApp {
                     self.trading_order_entry(cx);
                 aeris_desktop::trading::dispatch_simulated_order(
                     self.lifecycle.trading(),
+                    self.lifecycle.trading_feedback(),
                     &frame,
                     side,
                     aeris_desktop::trading::SimulatedOrderSelection {
@@ -352,12 +365,17 @@ impl TerminalApp {
                 );
             }
             TradingHotkey::CancelAll => {
-                aeris_desktop::trading::cancel_simulated_accounts(self.lifecycle.trading(), cx);
+                aeris_desktop::trading::cancel_simulated_accounts(
+                    self.lifecycle.trading(),
+                    self.lifecycle.trading_feedback(),
+                    cx,
+                );
             }
             TradingHotkey::FlattenAccount => {
                 if let Some(frame) = self.trading_order_frame(cx) {
                     aeris_desktop::trading::flatten_simulated_account_for(
                         self.lifecycle.trading(),
+                        self.lifecycle.trading_feedback(),
                         &frame,
                         self.trading_order_entry(cx).0,
                         cx,
@@ -365,7 +383,11 @@ impl TerminalApp {
                 }
             }
             TradingHotkey::KillSwitch => {
-                aeris_desktop::trading::kill_simulated_accounts(self.lifecycle.trading(), cx);
+                aeris_desktop::trading::kill_simulated_accounts(
+                    self.lifecycle.trading(),
+                    self.lifecycle.trading_feedback(),
+                    cx,
+                );
             }
         }
     }

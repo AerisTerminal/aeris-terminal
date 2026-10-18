@@ -740,6 +740,7 @@ fn refresh_trading_pnl(
         return;
     }
     let service = active.read(cx).lifecycle.trading().clone();
+    let feedback = active.read(cx).lifecycle.trading_feedback().clone();
     active.update(cx, |state, _| {
         state.trading_pnl.refresh_pending = true;
         state.trading_pnl.next_refresh = now + std::time::Duration::from_millis(250);
@@ -757,7 +758,7 @@ fn refresh_trading_pnl(
                 terminal.announce_fills(snapshot, terminal_cx);
             });
         }
-        let feedback = aeris_desktop::trading::latest_feedback();
+        let feedback = feedback.latest();
         for surface in panes.iter().filter(|surface| *surface != &active) {
             surface.update(cx, |state, state_cx| {
                 apply_trading_refresh(state, &result, feedback.as_ref(), state_cx);

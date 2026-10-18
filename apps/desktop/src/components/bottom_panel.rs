@@ -487,15 +487,19 @@ impl TerminalApp {
         if let Some(frame) = frame {
             aeris_desktop::trading::flatten_simulated_account_for(
                 self.lifecycle.trading(),
+                self.lifecycle.trading_feedback(),
                 &frame,
                 Some(account_key),
                 cx,
             );
         } else {
-            aeris_desktop::trading::record_notice(Err(format!(
-                "Open a {} chart with a live quote to close this practice position",
-                self.bottom_panel.history.symbol(instrument_id)
-            )));
+            aeris_desktop::trading::record_notice(
+                self.lifecycle.trading_feedback(),
+                Err(format!(
+                    "Open a {} chart with a live quote to close this practice position",
+                    self.bottom_panel.history.symbol(instrument_id)
+                )),
+            );
         }
         cx.notify();
     }
@@ -1200,8 +1204,10 @@ fn position_close_button(
             let terminal = terminal.clone();
             button.disabled(!connected).on_click(move |_, _, cx| {
                 let service = terminal.read(cx).lifecycle.trading().clone();
+                let feedback = terminal.read(cx).lifecycle.trading_feedback().clone();
                 aeris_desktop::trading::close_broker_position(
                     &service,
+                    &feedback,
                     account_key.clone(),
                     broker_position_id.clone(),
                     cx,

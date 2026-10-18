@@ -88,9 +88,10 @@ fn market_action_rows(state: &TradingOrderControlsState<'_>, ready: bool) -> [Di
                 state,
                 ready,
                 aeris_trading::OrderSide::Buy,
-                move |service, frame, account, quantity, cx| {
+                move |service, feedback, frame, account, quantity, cx| {
                     dispatch_market(
                         service,
+                        feedback,
                         frame,
                         account,
                         quantity,
@@ -105,9 +106,10 @@ fn market_action_rows(state: &TradingOrderControlsState<'_>, ready: bool) -> [Di
                 state,
                 ready,
                 aeris_trading::OrderSide::Sell,
-                move |service, frame, account, quantity, cx| {
+                move |service, feedback, frame, account, quantity, cx| {
                     dispatch_market(
                         service,
+                        feedback,
                         frame,
                         account,
                         quantity,
@@ -123,9 +125,10 @@ fn market_action_rows(state: &TradingOrderControlsState<'_>, ready: bool) -> [Di
                 "Join Bid",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_bid.is_some()),
-                move |service, frame, account, quantity, cx| {
+                move |service, feedback, frame, account, quantity, cx| {
                     dispatch_join(
                         service,
+                        feedback,
                         frame,
                         account,
                         quantity,
@@ -139,9 +142,10 @@ fn market_action_rows(state: &TradingOrderControlsState<'_>, ready: bool) -> [Di
                 "Join Ask",
                 state,
                 ready && state.frame.is_some_and(|frame| frame.best_ask.is_some()),
-                move |service, frame, account, quantity, cx| {
+                move |service, feedback, frame, account, quantity, cx| {
                     dispatch_join(
                         service,
+                        feedback,
                         frame,
                         account,
                         quantity,
@@ -319,6 +323,7 @@ fn frame_action(
     state: &TradingOrderControlsState<'_>,
     action: impl Fn(
         &aeris_trading_runtime::TradingService,
+        &aeris_desktop::trading::TradingFeedback,
         &aeris_market_data::OrderBookFrame,
         Option<String>,
         u64,
@@ -336,7 +341,8 @@ fn frame_action(
     move |_, _, cx| {
         if let Some(frame) = frame.as_ref() {
             let service = app.read(cx).lifecycle.trading().clone();
-            action(&service, frame, account.clone(), quantity, cx);
+            let feedback = app.read(cx).lifecycle.trading_feedback().clone();
+            action(&service, &feedback, frame, account.clone(), quantity, cx);
         }
     }
 }
@@ -348,6 +354,7 @@ fn order_button(
     enabled: bool,
     action: impl Fn(
         &aeris_trading_runtime::TradingService,
+        &aeris_desktop::trading::TradingFeedback,
         &aeris_market_data::OrderBookFrame,
         Option<String>,
         u64,
@@ -375,6 +382,7 @@ fn trade_order_button(
     side: aeris_trading::OrderSide,
     action: impl Fn(
         &aeris_trading_runtime::TradingService,
+        &aeris_desktop::trading::TradingFeedback,
         &aeris_market_data::OrderBookFrame,
         Option<String>,
         u64,
@@ -391,6 +399,7 @@ fn trade_order_button(
 
 pub(super) fn dispatch_market(
     service: &aeris_trading_runtime::TradingService,
+    feedback: &aeris_desktop::trading::TradingFeedback,
     frame: &aeris_market_data::OrderBookFrame,
     account: Option<String>,
     quantity: u64,
@@ -399,6 +408,7 @@ pub(super) fn dispatch_market(
 ) {
     aeris_desktop::trading::dispatch_simulated_selected_order(
         service,
+        feedback,
         frame,
         side,
         aeris_desktop::trading::SimulatedOrderSelection {
@@ -414,6 +424,7 @@ pub(super) fn dispatch_market(
 
 fn dispatch_join(
     service: &aeris_trading_runtime::TradingService,
+    feedback: &aeris_desktop::trading::TradingFeedback,
     frame: &aeris_market_data::OrderBookFrame,
     account: Option<String>,
     quantity: u64,
@@ -427,6 +438,7 @@ fn dispatch_join(
     if let Some(price_units) = price_units {
         aeris_desktop::trading::dispatch_simulated_order_at_price(
             service,
+            feedback,
             frame,
             aeris_desktop::trading::SimulatedPricedOrder {
                 side,
@@ -496,19 +508,23 @@ fn priced_order_button(
         label,
         state,
         enabled,
-        move |service, frame, account, quantity, cx| {
+        move |service, feedback, frame, account, quantity, cx| {
             let text = price.read(cx).value();
             let Some(price_units) = scale
                 .filter(|scale| *scale == u32::from(frame.price_scale))
                 .and_then(|scale| parse_ticket_price(text.as_ref(), scale))
             else {
-                aeris_desktop::trading::record_notice(Err(
-                    "Enter a valid order price at the instrument's price precision".to_string(),
-                ));
+                aeris_desktop::trading::record_notice(
+                    feedback,
+                    Err(
+                        "Enter a valid order price at the instrument's price precision".to_string(),
+                    ),
+                );
                 return;
             };
             aeris_desktop::trading::dispatch_simulated_order_at_price(
                 service,
+                feedback,
                 frame,
                 aeris_desktop::trading::SimulatedPricedOrder {
                     side,
@@ -531,8 +547,10 @@ fn position_actions(state: &TradingOrderControlsState<'_>, enabled: bool) -> Div
             "Close Position",
             state,
             enabled,
-            |service, frame, account, _, cx| {
-                aeris_desktop::trading::flatten_simulated_account_for(service, frame, account, cx);
+            |service, feedback, frame, account, _, cx| {
+                aeris_desktop::trading::flatten_simulated_account_for(
+                    service, feedback, frame, account, cx,
+                );
             },
         ),
         order_button(
@@ -540,8 +558,10 @@ fn position_actions(state: &TradingOrderControlsState<'_>, enabled: bool) -> Div
             "Reverse",
             state,
             enabled,
-            |service, frame, account, _, cx| {
-                aeris_desktop::trading::reverse_simulated_position(service, frame, account, cx);
+            |service, feedback, frame, account, _, cx| {
+                aeris_desktop::trading::reverse_simulated_position(
+                    service, feedback, frame, account, cx,
+                );
             },
         ),
     )
@@ -562,15 +582,21 @@ fn global_actions(state: &TradingOrderControlsState<'_>) -> Div {
             .disabled(!cancel_enabled)
             .on_click(move |_, _, cx| {
                 let service = cancel_app.read(cx).lifecycle.trading().clone();
-                aeris_desktop::trading::cancel_simulated_account(&service, account.clone(), cx);
+                let feedback = cancel_app.read(cx).lifecycle.trading_feedback().clone();
+                aeris_desktop::trading::cancel_simulated_account(
+                    &service,
+                    &feedback,
+                    account.clone(),
+                    cx,
+                );
             }),
         order_button(
             "trading_flatten_all",
             "Flatten All",
             state,
             !state.accounts.is_empty(),
-            |service, _, _, _, cx| {
-                aeris_desktop::trading::flatten_simulated_accounts(service, cx);
+            |service, feedback, _, _, _, cx| {
+                aeris_desktop::trading::flatten_simulated_accounts(service, feedback, cx);
             },
         ),
     )

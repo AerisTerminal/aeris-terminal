@@ -2473,9 +2473,14 @@ fn reject_chart_intent(
     chart: &Entity<AerisChartView>,
     sequence: u32,
     reason: ChartIntentRejection,
+    feedback: &aeris_desktop::trading::TradingFeedback,
     cx: &mut Context<WorkspaceSurface>,
 ) {
-    aeris_desktop::trading::record_outcome(Err::<(), _>(reason.message().to_string()), "");
+    aeris_desktop::trading::record_outcome(
+        feedback,
+        Err::<(), _>(reason.message().to_string()),
+        "",
+    );
     chart.update(cx, |chart, _| {
         chart.resolve_trading_intent(sequence, false);
     });
@@ -2487,10 +2492,12 @@ fn dispatch_chart_cancel(
     client_order_id: aeris_trading::ClientOrderId,
     expected_revision: u32,
     service: aeris_trading_runtime::TradingService,
+    feedback: aeris_desktop::trading::TradingFeedback,
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_outcome(
+            &feedback,
             service
                 .cancel_order_checked(aeris_trading_runtime::RevisionedCancelOrder {
                     client_order_id,
@@ -2519,9 +2526,10 @@ fn dispatch_chart_place_bracket(
     match chart_bracket_from_intent(intent, app, cx) {
         Ok(command) => {
             let service = app.lifecycle.trading().clone();
+            let feedback = app.lifecycle.trading_feedback().clone();
             let task = cx.background_executor().spawn(async move {
                 let result = service.place_chart_bracket_from_market(command);
-                aeris_desktop::trading::record_outcome(result, "Bracket placed")
+                aeris_desktop::trading::record_outcome(&feedback, result, "Bracket placed")
             });
             cx.spawn(async move |_, cx| {
                 let accepted = task.await;
@@ -2531,7 +2539,13 @@ fn dispatch_chart_place_bracket(
             })
             .detach();
         }
-        Err(reason) => reject_chart_intent(&chart, sequence, reason, cx),
+        Err(reason) => reject_chart_intent(
+            &chart,
+            sequence,
+            reason,
+            app.lifecycle.trading_feedback(),
+            cx,
+        ),
     }
 }
 
@@ -2608,7 +2622,13 @@ fn dispatch_chart_create_protection(
     let (order, service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
-            reject_chart_intent(&chart, sequence, reason, cx);
+            reject_chart_intent(
+                &chart,
+                sequence,
+                reason,
+                app.lifecycle.trading_feedback(),
+                cx,
+            );
             return;
         }
     };
@@ -2617,12 +2637,17 @@ fn dispatch_chart_create_protection(
     } else {
         aeris_trading_runtime::ProtectionRole::TakeProfit
     };
+    let feedback = app.lifecycle.trading_feedback().clone();
     let task =
         cx.background_executor().spawn(async move {
             let result = service.place_protective_order_from_market(
                 aeris_trading_runtime::PlaceProtection { order, role },
             );
-            aeris_desktop::trading::record_outcome(result, "Practice protective order placed")
+            aeris_desktop::trading::record_outcome(
+                &feedback,
+                result,
+                "Practice protective order placed",
+            )
         });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
@@ -2647,12 +2672,20 @@ fn dispatch_chart_modify(
     let (command, service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
-            reject_chart_intent(&chart, sequence, reason, cx);
+            reject_chart_intent(
+                &chart,
+                sequence,
+                reason,
+                app.lifecycle.trading_feedback(),
+                cx,
+            );
             return;
         }
     };
+    let feedback = app.lifecycle.trading_feedback().clone();
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_outcome(
+            &feedback,
             service
                 .modify_order_from_market_checked(aeris_trading_runtime::RevisionedModifyOrder {
                     order: command,
@@ -2770,18 +2803,28 @@ fn dispatch_chart_close_position(
     let ((account_id, instrument), service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
-            reject_chart_intent(&chart, sequence, reason, cx);
+            reject_chart_intent(
+                &chart,
+                sequence,
+                reason,
+                app.lifecycle.trading_feedback(),
+                cx,
+            );
             return;
         }
     };
+    let feedback = app.lifecycle.trading_feedback().clone();
     let task = cx.background_executor().spawn(async move {
-        aeris_desktop::trading::record_result(aeris_desktop::trading::flatten_feedback(
-            "Position closed",
-            service.flatten(aeris_trading_runtime::FlattenScope {
-                account: Some(account_id),
-                instrument: Some(instrument),
-            }),
-        ))
+        aeris_desktop::trading::record_result(
+            &feedback,
+            aeris_desktop::trading::flatten_feedback(
+                "Position closed",
+                service.flatten(aeris_trading_runtime::FlattenScope {
+                    account: Some(account_id),
+                    instrument: Some(instrument),
+                }),
+            ),
+        )
     });
     cx.spawn(async move |_, cx| {
         let accepted = task.await;
@@ -2801,7 +2844,13 @@ fn dispatch_chart_trading_intent(
     let sequence = intent.sequence;
     let action = intent.action;
     if !chart_intent_has_confirmation_evidence(intent) {
-        reject_chart_intent(&chart, sequence, ChartIntentRejection::Incomplete, cx);
+        reject_chart_intent(
+            &chart,
+            sequence,
+            ChartIntentRejection::Incomplete,
+            app.lifecycle.trading_feedback(),
+            cx,
+        );
         return;
     }
     if selected_account_lock_reason(&app.trading_pnl).is_some()
@@ -2810,7 +2859,13 @@ fn dispatch_chart_trading_intent(
             ChartTradingIntentAction::CancelOrder | ChartTradingIntentAction::ClosePosition
         )
     {
-        reject_chart_intent(&chart, sequence, ChartIntentRejection::AccountLocked, cx);
+        reject_chart_intent(
+            &chart,
+            sequence,
+            ChartIntentRejection::AccountLocked,
+            app.lifecycle.trading_feedback(),
+            cx,
+        );
         return;
     }
     if action == ChartTradingIntentAction::ClosePosition {
@@ -2832,14 +2887,26 @@ fn dispatch_chart_trading_intent(
         if action == ChartTradingIntentAction::ModifyOrder {
             dispatch_chart_move_planned_leg(chart, intent, leg.client_order_id.clone(), app, cx);
         } else {
-            reject_chart_intent(&chart, sequence, ChartIntentRejection::PlannedLegKept, cx);
+            reject_chart_intent(
+                &chart,
+                sequence,
+                ChartIntentRejection::PlannedLegKept,
+                app.lifecycle.trading_feedback(),
+                cx,
+            );
         }
         return;
     }
     let order = match chart_intent_order(intent, app) {
         Ok(order) => order,
         Err(reason) => {
-            reject_chart_intent(&chart, sequence, reason, cx);
+            reject_chart_intent(
+                &chart,
+                sequence,
+                reason,
+                app.lifecycle.trading_feedback(),
+                cx,
+            );
             return;
         }
     };
@@ -2854,6 +2921,7 @@ fn dispatch_chart_trading_intent(
         order.client_order_id.clone(),
         order.revision,
         service,
+        app.lifecycle.trading_feedback().clone(),
         cx,
     );
 }
@@ -2895,12 +2963,20 @@ fn dispatch_chart_move_planned_leg(
     let (price, service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
-            reject_chart_intent(&chart, sequence, reason, cx);
+            reject_chart_intent(
+                &chart,
+                sequence,
+                reason,
+                app.lifecycle.trading_feedback(),
+                cx,
+            );
             return;
         }
     };
+    let feedback = app.lifecycle.trading_feedback().clone();
     let task = cx.background_executor().spawn(async move {
         aeris_desktop::trading::record_outcome(
+            &feedback,
             service.move_planned_leg(aeris_trading_runtime::MovePlannedLeg {
                 client_order_id,
                 price,
@@ -4648,8 +4724,14 @@ fn subscribe_order_book_trading(
                 let (side, order_type) =
                     ladder_click_order(event.side, aeris_trading::OrderType::Market);
                 let service = click_workspace.read(cx).lifecycle.trading().clone();
+                let feedback = click_workspace
+                    .read(cx)
+                    .lifecycle
+                    .trading_feedback()
+                    .clone();
                 aeris_desktop::trading::dispatch_simulated_order_at_price(
                     &service,
+                    &feedback,
                     &frame,
                     aeris_desktop::trading::SimulatedPricedOrder {
                         side,
@@ -4666,6 +4748,15 @@ fn subscribe_order_book_trading(
             },
         )
         .detach();
+    subscribe_order_book_trading_drop(workspace, order_book, window, cx);
+}
+
+fn subscribe_order_book_trading_drop(
+    workspace: &Entity<WorkspaceSurface>,
+    order_book: &Entity<ReadOnlyOrderBookView>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let drop_workspace = workspace.clone();
     let drop_order_book = order_book.clone();
     window
@@ -4707,8 +4798,10 @@ fn subscribe_order_book_trading(
                     return;
                 };
                 let service = drop_workspace.read(cx).lifecycle.trading().clone();
+                let feedback = drop_workspace.read(cx).lifecycle.trading_feedback().clone();
                 aeris_desktop::trading::modify_simulated_order_at_price(
                     &service,
+                    &feedback,
                     aeris_desktop::trading::SimulatedOrderModification {
                         client_order_id: order.client_order_id,
                         expected_revision: order.revision,

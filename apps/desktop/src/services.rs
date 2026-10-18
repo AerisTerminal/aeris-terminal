@@ -1,6 +1,7 @@
 //! Per-desktop runtime handles supplied by the composition root.
 
 use crate::account::DesktopAccount;
+use crate::trading::TradingFeedback;
 use aeris_account_runtime::AccountService;
 use aeris_market_runtime::MarketService;
 use aeris_trading_runtime::TradingService;
@@ -11,6 +12,7 @@ use aeris_trading_runtime::TradingService;
 pub struct DesktopServices {
     pub market: MarketService,
     pub trading: TradingService,
+    pub trading_feedback: TradingFeedback,
     pub account_service: AccountService,
     pub account: Option<DesktopAccount>,
 }
@@ -25,6 +27,7 @@ impl DesktopServices {
         Self {
             market,
             trading,
+            trading_feedback: TradingFeedback::default(),
             account_service,
             account: None,
         }
@@ -92,6 +95,54 @@ mod tests {
                 .accounts
                 .iter()
                 .any(|account| account.id == created.id)
+        );
+    }
+
+    #[test]
+    fn desktop_services_isolate_command_feedback_and_share_it_with_their_panes() {
+        let first = services();
+        let second = services();
+        let pane = first.trading_feedback.clone();
+        assert!(first.trading_feedback.latest().is_none());
+        assert!(second.trading_feedback.latest().is_none());
+
+        assert!(crate::trading::record_result(&pane, Ok("Accepted".into())));
+        assert_eq!(
+            first
+                .trading_feedback
+                .latest()
+                .expect("first status")
+                .revision,
+            1
+        );
+        assert_eq!(
+            first
+                .trading_feedback
+                .latest()
+                .expect("pane status")
+                .message,
+            "Accepted"
+        );
+        assert!(second.trading_feedback.latest().is_none());
+        assert!(!crate::trading::record_result(
+            &second.trading_feedback,
+            Err("Refused".into())
+        ));
+        assert_eq!(
+            second
+                .trading_feedback
+                .latest()
+                .expect("second status")
+                .revision,
+            1
+        );
+        assert_eq!(
+            first
+                .trading_feedback
+                .latest()
+                .expect("first unchanged")
+                .revision,
+            1
         );
     }
 

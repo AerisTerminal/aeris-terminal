@@ -86,6 +86,9 @@ violations and missing verification explicitly, and never describe them as satis
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
 - Desktop trading command handles come from the instance's `DesktopServices`, not a
   process-wide `TRADING_SERVICE` or `trading::handle()`/`trading::install()` lookup.
+- Desktop trading command feedback belongs to the instance's `DesktopServices`; command
+  writers and pane readers use its shared handle, never a process-global
+  `TRADING_FEEDBACK` or `trading::latest_feedback()` lookup.
 - Desktop account clients and refresh quiesce use the instance's `DesktopServices` account
   owner; no process-wide `DesktopAccount::shared()` or account-service singleton lookup.
 - Desktop market consumers, bridge wakes and shutdown use the instance's `DesktopServices` market
