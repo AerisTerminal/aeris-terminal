@@ -194,6 +194,83 @@ fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mu
 }
 
 #[gpui::test]
+fn pane_harness_full_symbol_search_queue_renders_once_and_completion_clears(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = PaneHarness::open(cx);
+    let commands = harness.commands.as_ref().expect("command receiver");
+    while commands.try_recv().is_ok() {}
+    harness.pane.update(cx, |pane, _| {
+        for _ in 0..8 {
+            pane.market_worker
+                .try_set_order_book_visible(true)
+                .expect("fill bounded command queue");
+        }
+    });
+    let credential = "private-credential-sentinel";
+    cx.update(|window, cx| {
+        let input = harness
+            .pane
+            .read(cx)
+            .symbol_input
+            .clone()
+            .expect("symbol input");
+        input.update(cx, |input, cx| input.set_value(credential, window, cx));
+        harness.pane.update(cx, |pane, cx| {
+            assert!(!pane.search_symbol_input(cx));
+            assert!(!pane.search_symbol_input(cx));
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Symbol search unavailable");
+        assert!(!toaster.notices()[0].detail.contains(credential));
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "search failure rendered a card"
+    );
+
+    while commands.try_recv().is_ok() {}
+    harness.pane.update(cx, |pane, cx| {
+        pane.poll_market_worker(cx);
+    });
+    let MarketWorkerCommand::ProviderSearch(request) =
+        commands.try_recv().expect("retained search dispatched")
+    else {
+        panic!("expected provider search");
+    };
+    harness
+        .publications
+        .send(MarketWorkerMessage::ProviderCatalog(
+            ProviderCatalogEvent::SearchCompleted(ProviderInstrumentSearchResult {
+                provider: request.provider,
+                search_generation: request.search_generation,
+                ..ProviderInstrumentSearchResult::default()
+            }),
+        ))
+        .expect("fixture search completion enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices(), []);
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            0
+        );
+    });
+}
+
+#[gpui::test]
 fn pane_harness_disconnected_order_book_request_renders_one_notice(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);

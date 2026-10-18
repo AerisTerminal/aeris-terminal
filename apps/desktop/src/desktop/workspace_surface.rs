@@ -5030,6 +5030,21 @@ impl WorkspaceSurface {
         let _ = self.search_symbol_query(default_listing_query(self.symbol_provider), cx);
     }
 
+    fn post_symbol_search_notice(cx: &mut Context<Self>) {
+        cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+            key: notification_center::NoticeKey {
+                scope: cx.entity_id().as_u64(),
+                kind: "symbol_search",
+            },
+            severity: notification_center::NoticeSeverity::Warning,
+            tone: notification_center::NoticeTone::Warning,
+            source: notification_center::NoticeSource::Workspace,
+            title: "Symbol search unavailable",
+            detail: "The market search could not complete. Try again later.".into(),
+            lifetime: notification_center::NoticeLifetime::UntilCleared,
+        }));
+    }
+
     fn search_symbol_query(&mut self, query: &str, cx: &mut Context<Self>) -> bool {
         if self.symbol_browser.search_pending() {
             match self.symbol_browser.retain_latest_search(query) {
@@ -5088,6 +5103,7 @@ impl WorkspaceSurface {
             self.symbol_browser.reject_search(request_id);
             let _ = self.symbol_browser.retain_latest_search(&retained_query);
             self.symbol_message = "Symbol search is busy; try again".to_string();
+            Self::post_symbol_search_notice(cx);
             false
         };
         cx.notify();
@@ -5221,6 +5237,10 @@ impl WorkspaceSurface {
         else {
             return;
         };
+        cx.emit(PaneNoticeEvent::Clear(notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind: "symbol_search",
+        }));
         let display = terminal_provider_display(self.symbol_provider);
         self.symbol_message = format!("{count} {display} markets · search to find more");
         if self.symbol_browser.has_retained_search() {
@@ -5287,6 +5307,9 @@ impl WorkspaceSurface {
         self.market_state.symbol_selection_pending = false;
         let reason = rejection.reason;
         self.symbol_message = catalog_rejection_message(reason, command, self.provider);
+        if !selection {
+            Self::post_symbol_search_notice(cx);
+        }
         self.dispatch_retained_symbol_search(cx);
     }
 

@@ -897,6 +897,13 @@ Status: pending
     presentation state was added. M6.2 stays unchecked: startup chart setter
     failures, symbol search, remaining injected failures, source/action variants
     and discarded-result/unwrap cleanup follow; M6.4 still owns PanePresentation.
+  - Part 7: failed symbol-search dispatch and current-generation catalog search
+    rejection post the same pane-keyed sanitized notice to TerminalApp; an accepted
+    search completion clears it. PaneHarness fills the real bounded command queue,
+    repeats a credential-shaped query without leaking it to notice detail, renders
+    exactly one card, then drains the queue and confirms completion clears the card.
+    M6.2 stays unchecked: startup chart setters, broader pane-string consolidation,
+    source/action variants and discarded-result/unwrap cleanup follow.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1216,6 +1223,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 4 fix(desktop): routed order-book demand failure/clear events from each pane to the single TerminalApp toaster with pane-scoped deduplication and retired-pane cleanup; injected disconnected command delivery in PaneHarness and asserted the rendered notice. Full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after a cold aws-lc-sys MSVC LNK1114 retry. M6.2 stays open for the remaining pane error sources, injected failures and discarded-result cleanup.
 - 2026-10-18 M6.2 Part 5 fix(desktop): sent sanitized price-alert processing failure/success controls through the bounded market mailbox to the pane notice bridge; repeated failures render one card and successful processing clears it in PaneHarness. Focused regression and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for restore setters, symbol search, source/action variants, remaining injected failures and discarded-result cleanup.
 - 2026-10-18 M6.2 Part 6 fix(desktop): routed fallible snapshot chart restore setters and the surface time-zone apply to a single sanitized pane notice, with a repeated invalid persisted-zone setter regression rendered by PaneHarness. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. Startup chart setters and other M6.2 notice/discard work remain open.
+- 2026-10-18 M6.2 Part 7 fix(desktop): routed bounded-queue and catalog-rejected symbol searches to the one pane notice bridge with sanitized detail; an accepted search completion clears the notice. PaneHarness exercises full command queue, repeat deduplication, rendered card and completion clearing. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for startup setters, pane strings, source/action expansion and discarded-result cleanup.
 
 ## 7. Known gaps / deferred
 
