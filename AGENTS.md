@@ -84,6 +84,8 @@ violations and missing verification explicitly, and never describe them as satis
   unresolved legacy rows stay non-executable rather than receiving a guessed deadline.
 - The trading service has one named owner thread whose loop is in `service/owner.rs`; it waits for bounded commands
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
+- Desktop trading command handles come from the instance's `DesktopServices`, not a
+  process-wide `TRADING_SERVICE` or `trading::handle()`/`trading::install()` lookup.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

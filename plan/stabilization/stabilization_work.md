@@ -772,6 +772,12 @@ Status: pending
 - [ ] M6.1 desktop-services-test-support - Inject `DesktopServices`; move `FixtureMarketWorker` to test support
   - Part 1: move the disconnected replay worker to cfg-gated `desktop/test_support/`, preserve its
     diagnostics-only conformance command and test clients, and enforce the boundary in naming_check.
+  - Part 2: construct `DesktopServices` with the trading handle at startup; pass it through the
+    lifecycle, workspace panes, UI actions and market client's ticket-interest worker. Delete the
+    process-global trading service and its `handle()`/`install()` lookup, guarded by naming_check
+    positive and negative examples. Independent in-memory desktop compositions retain separate
+    trading owners. The feedback mailbox, account gate,
+    market factory, persistence, clock and PaneHarness remain for subsequent M6.1 parts.
     The global trading, account and market handles and `PaneHarness` remain for subsequent parts.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
@@ -1080,6 +1086,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M5 milestone closeout test(trading): correct the VAL-TRD-068 generated desktop load fixture to use the real `hyperliquid:perp:BTC` instrument and scale-8 BTC quantity/prices; retain the existing ESZ6 load-test shape for 50,100-order tests. A new file-backed restart test checks its BTC position and working limit. Fresh-root SQLite inspection confirmed schema 27, 10,001 terminal rows, one working BTC limit and one open BTC position; isolated release GPUI capture showed balance USD 100,000 and long 0.10 BTC at 81,500 within 0.86 s of the workspace window, and history showed 300 trades. Full workspace check, fmt, strict Clippy, naming and tests passed; first two full test attempts encountered unrelated intermittent market idle-stop and desktop burst timing failures, each passed alone and the final full run passed. Working-order panel row and fractional minimum ticket input are explicitly M6 follow-ups, not M5 passes; cTrader demo probe remains approval-gated separately.
 - 2026-10-18 M6 preflight test(desktop): stabilize the two parallel-run timing regressions observed at M5 close. The display-depth idle-stop test uses a zero-capacity control-channel rendezvous instead of fixed sleeps to prove repeated stops leave the worker alive. The short desktop endurance test always performs its two asserted frames even if descheduled for its 320 ms sampling window; production endurance still stops at its requested wall-clock duration. Both focused regressions and the default-parallel workspace test suite passed; full workspace fmt, check, strict Clippy and naming gates passed. No M6.1 checkbox is claimed by this prerequisite repair.
 - 2026-10-18 M6.1 Part 1 test(desktop): extracted `FixtureMarketWorker` from the default market mailbox into cfg-gated desktop test support; deterministic fixture publication and naming_check positive/negative tests protect the boundary. M6.1 remains open for services injection and PaneHarness.
+- 2026-10-18 M6.1 Part 2 refactor(desktop): injected the trading owner through `DesktopServices` into the lifecycle, panes, UI command paths and market ticket-interest client; removed `TRADING_SERVICE` and its process-wide install/lookup. A two-composition regression proves trading account changes do not cross between owners; naming_check rejects reintroduced globals with positive/negative source examples, and AGENTS.md records the restriction. Full workspace fmt/check/strict Clippy/tests/naming_check green (the first test run exposed a stale naming_check source pin; its replacement and full rerun passed). M6.1 remains open for account/market/feedback/persistence/clock injection and PaneHarness.
 
 ## 7. Known gaps / deferred
 

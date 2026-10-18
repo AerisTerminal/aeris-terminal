@@ -18,6 +18,17 @@ const SKIPPED_DIRECTORIES: &[&str] = &[
     "tmp",
 ];
 const REPOSITORY_MARKDOWN_FILES: &[&str] = &["AGENTS.md", "CSS.md"];
+
+fn has_process_global_desktop_trading(source: &str) -> bool {
+    let production = production_source_prefix(source);
+    [
+        "static TRADING_SERVICE",
+        "trading::handle()",
+        "trading::install(",
+    ]
+    .iter()
+    .any(|forbidden| production.contains(forbidden))
+}
 const MARKET_CHARACTERIZATION_TESTS: &[&str] = &[
     "characterization_reseed_during_live_flow_keeps_one_forming_bar_and_contiguous_history",
     "characterization_outbox_overflow_emits_covering_snapshot",
@@ -135,7 +146,7 @@ fn main() -> ExitCode {
         }
     }
     if let Err(error) =
-        inspect_desktop_quote_boundary(&root, &root.join("apps/desktop/src"), &mut violations)
+        inspect_desktop_boundaries(&root, &root.join("apps/desktop/src"), &mut violations)
     {
         eprintln!("failed to inspect desktop quote boundary: {error}");
         return ExitCode::FAILURE;
@@ -238,7 +249,7 @@ fn violates_fixture_market_boundary(path: &str, source: &str) -> bool {
         && production_source_prefix(source).contains("FixtureMarketWorker")
 }
 
-fn inspect_desktop_quote_boundary(
+fn inspect_desktop_boundaries(
     root: &Path,
     directory: &Path,
     violations: &mut Vec<PathBuf>,
@@ -246,13 +257,14 @@ fn inspect_desktop_quote_boundary(
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         if path.is_dir() {
-            inspect_desktop_quote_boundary(root, &path, violations)?;
+            inspect_desktop_boundaries(root, &path, violations)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             let relative = relative_to(root, &path);
             let relative_path = relative.to_string_lossy().replace('\\', "/");
             let source = fs::read_to_string(&path)?;
             if violates_desktop_quote_boundary(&relative_path, &source)
                 || violates_fixture_market_boundary(&relative_path, &source)
+                || has_process_global_desktop_trading(&source)
             {
                 violations.push(relative);
             }
@@ -4094,7 +4106,7 @@ jobs:
         }
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(desktop.contains("start_trading_service"));
-        assert!(desktop.contains("aeris_desktop::trading::install"));
+        assert!(desktop.contains("DesktopServices::new(trading.clone())"));
         assert!(
             manifest("apps/desktop/src/desktop/lifecycle.rs")
                 .contains("trading.shutdown(Duration::from_secs(2))")
@@ -4103,6 +4115,37 @@ jobs:
             manifest("AGENTS.md")
                 .contains("`trading_runtime` is the single in-process owner of broker accounts")
         );
+    }
+
+    #[test]
+    fn injected_desktop_trading_accepts_instance_handles_and_test_only_globals() {
+        assert!(!super::has_process_global_desktop_trading(
+            "fn app(services: &DesktopServices) { services.trading.status(); }\n\
+             #[cfg(test)] mod tests { static TRADING_SERVICE: u8 = 0; }\n"
+        ));
+    }
+
+    #[test]
+    fn injected_desktop_trading_rejects_global_handles_after_test_modules() {
+        assert!(super::has_process_global_desktop_trading(
+            "fn before() {}\n#[cfg(test)] mod tests { fn hidden() {} }\n\
+             fn after() { aeris_desktop::trading::handle(); }\n"
+        ));
+        assert!(super::has_process_global_desktop_trading(
+            "static TRADING_SERVICE: OnceLock<TradingService> = OnceLock::new();"
+        ));
+    }
+
+    #[test]
+    fn desktop_trading_service_has_no_process_global_lookup() {
+        for path in production_sources_under("apps/desktop/src") {
+            let source = fs::read_to_string(&path).expect("desktop source");
+            assert!(
+                !super::has_process_global_desktop_trading(&source),
+                "{} bypasses injected desktop trading",
+                relative_string(&path)
+            );
+        }
     }
     #[test]
     fn trading_core_owner_shell_has_one_command_and_deadline_boundary() {

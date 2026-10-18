@@ -525,9 +525,7 @@ impl TerminalApp {
             EVENT_GRACE_NANOS,
             MAXIMUM_EVENTS_PER_CHECK,
         );
-        let Some(service) = aeris_desktop::trading::handle() else {
-            return;
-        };
+        let service = self.lifecycle.trading().clone();
         for (key, _) in &due {
             self.event_risk_dispatches
                 .insert(key.clone(), observed_unix_nanos);

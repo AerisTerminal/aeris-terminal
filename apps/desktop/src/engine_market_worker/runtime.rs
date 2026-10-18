@@ -17,6 +17,7 @@ pub(super) fn run_workers(
     client_id: u64,
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
+    trading: &aeris_trading_runtime::TradingService,
 ) -> Result<(), String> {
     for record in endpoints.iter() {
         let _ = record
@@ -31,11 +32,8 @@ pub(super) fn run_workers(
     let market = shared_market_runtime()?;
     market.attach(client_id)?;
     let owns_ticket_interest = additions.is_some();
-    let result = run_attached_workers(&market, client_id, endpoints, additions);
-    if owns_ticket_interest
-        && let Some(trading) = aeris_desktop::trading::handle()
-        && let Err(error) = trading.set_ticket_interest(Vec::new())
-    {
+    let result = run_attached_workers(&market, client_id, endpoints, additions, trading);
+    if owns_ticket_interest && let Err(error) = trading.set_ticket_interest(Vec::new()) {
         diagnostic!("Aeris ticket quote interest could not be released: {error}");
     }
     for record in endpoints.iter_mut().filter(|record| record.endpoint.active) {
@@ -52,6 +50,7 @@ fn run_attached_workers(
     client_id: u64,
     endpoints: &mut Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
+    trading: &aeris_trading_runtime::TradingService,
 ) -> Result<(), String> {
     for record in endpoints.iter_mut() {
         initialize_record(market, client_id, record)?;
@@ -106,7 +105,7 @@ fn run_attached_workers(
         }
         endpoints.retain(|record| record.endpoint.active);
         if owns_ticket_interest && ticket_interest_dirty {
-            update_ticket_interest(endpoints, &mut ticket_routes);
+            update_ticket_interest(endpoints, &mut ticket_routes, trading);
             ticket_interest_dirty = false;
         }
         let session_tick_due = Instant::now() >= next_session_status_at;
@@ -117,7 +116,7 @@ fn run_attached_workers(
         ticket_interest_dirty |=
             drain_market_events(market, client_id, endpoints, next_session_status_at)?;
         if owns_ticket_interest && ticket_interest_dirty {
-            update_ticket_interest(endpoints, &mut ticket_routes);
+            update_ticket_interest(endpoints, &mut ticket_routes, trading);
             ticket_interest_dirty = false;
         }
     }
@@ -171,7 +170,11 @@ fn drain_market_events(
     Ok(changed)
 }
 
-fn update_ticket_interest(endpoints: &[EndpointRecord], published: &mut Vec<MarketRoute>) {
+fn update_ticket_interest(
+    endpoints: &[EndpointRecord],
+    published: &mut Vec<MarketRoute>,
+    trading: &aeris_trading_runtime::TradingService,
+) {
     let mut routes = BTreeMap::new();
     for record in endpoints
         .iter()
@@ -195,9 +198,6 @@ fn update_ticket_interest(endpoints: &[EndpointRecord], published: &mut Vec<Mark
     if *published == desired {
         return;
     }
-    let Some(trading) = aeris_desktop::trading::handle() else {
-        return;
-    };
     if let Err(error) = trading.set_ticket_interest(desired.clone()) {
         diagnostic!("Aeris ticket quote interest could not be updated: {error}");
     } else {

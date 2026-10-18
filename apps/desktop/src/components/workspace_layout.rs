@@ -739,9 +739,7 @@ fn refresh_trading_pnl(
     if !trading_pnl_refresh_due(&active, cx, now) {
         return;
     }
-    let Some(service) = aeris_desktop::trading::handle() else {
-        return;
-    };
+    let service = active.read(cx).lifecycle.trading().clone();
     active.update(cx, |state, _| {
         state.trading_pnl.refresh_pending = true;
         state.trading_pnl.next_refresh = now + std::time::Duration::from_millis(250);

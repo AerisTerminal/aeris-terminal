@@ -3,6 +3,7 @@
 pub mod account;
 pub mod command_registry;
 pub mod market_worker;
+pub mod services;
 pub mod trading;
 
 #[cfg(any(test, feature = "diagnostics"))]

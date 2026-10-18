@@ -338,26 +338,35 @@ impl TerminalApp {
                 let (account_id, quantity, order_type, time_in_force) =
                     self.trading_order_entry(cx);
                 aeris_desktop::trading::dispatch_simulated_order(
+                    self.lifecycle.trading(),
                     &frame,
                     side,
-                    account_id,
-                    quantity,
-                    order_type,
-                    time_in_force,
+                    aeris_desktop::trading::SimulatedOrderSelection {
+                        account_key: account_id,
+                        quantity,
+                        order_type,
+                        time_in_force,
+                        template_id: None,
+                    },
                     cx,
                 );
             }
-            TradingHotkey::CancelAll => aeris_desktop::trading::cancel_simulated_accounts(cx),
+            TradingHotkey::CancelAll => {
+                aeris_desktop::trading::cancel_simulated_accounts(self.lifecycle.trading(), cx);
+            }
             TradingHotkey::FlattenAccount => {
                 if let Some(frame) = self.trading_order_frame(cx) {
                     aeris_desktop::trading::flatten_simulated_account_for(
+                        self.lifecycle.trading(),
                         &frame,
                         self.trading_order_entry(cx).0,
                         cx,
                     );
                 }
             }
-            TradingHotkey::KillSwitch => aeris_desktop::trading::kill_simulated_accounts(cx),
+            TradingHotkey::KillSwitch => {
+                aeris_desktop::trading::kill_simulated_accounts(self.lifecycle.trading(), cx);
+            }
         }
     }
 

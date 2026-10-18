@@ -592,11 +592,12 @@ fn delete_account_dialog(
             });
         },
         move |_, cx| {
+            let service = confirm.read(cx).lifecycle.trading().clone();
             confirm.update(cx, |surface, surface_cx| {
                 surface.trading_pnl.account_delete_confirmation = None;
                 surface_cx.notify();
             });
-            aeris_desktop::trading::delete_practice_account(account_key.clone(), cx);
+            aeris_desktop::trading::delete_practice_account(&service, account_key.clone(), cx);
         },
     )
     .message(format!(
@@ -650,11 +651,12 @@ fn create_account_dialog(
         move |_, cx| {
             let name = name.read(cx).value().to_string();
             let equity = equity.read(cx).value().to_string();
+            let service = create.read(cx).lifecycle.trading().clone();
             create.update(cx, |surface, surface_cx| {
                 surface.trading_pnl.account_creator = None;
                 surface_cx.notify();
             });
-            aeris_desktop::trading::create_practice_account(name, &equity, cx);
+            aeris_desktop::trading::create_practice_account(&service, name, &equity, cx);
         },
     )
     .confirm_label("Create account")

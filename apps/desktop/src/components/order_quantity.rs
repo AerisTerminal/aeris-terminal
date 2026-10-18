@@ -282,6 +282,7 @@ impl Render for ChartTradeBar {
         let ready =
             frame.is_some() && account.is_some() && selected_account_lock_reason(trading).is_none();
         let order = MarketOrderTarget {
+            surface: surface.clone(),
             frame,
             account,
             quantity: trading.order_entry.quantity,
@@ -317,6 +318,7 @@ impl Render for ChartTradeBar {
 
 /// What a bar order sends, captured at render like the order ticket's buttons.
 struct MarketOrderTarget {
+    surface: Entity<WorkspaceSurface>,
     frame: Option<aeris_market_data::OrderBookFrame>,
     account: Option<String>,
     quantity: u64,
@@ -331,6 +333,7 @@ fn trade_bar_order_button(
     theme: &AerisTheme,
 ) -> impl IntoElement + use<> {
     let frame = order.frame.clone();
+    let surface = order.surface.clone();
     let account = order.account.clone();
     let quantity = order.quantity;
     div().w(px(TRADE_BAR_BUTTON_WIDTH)).child(
@@ -342,7 +345,8 @@ fn trade_bar_order_button(
             .disabled(!order.ready)
             .on_click(move |_, _, cx| {
                 if let Some(frame) = frame.as_ref() {
-                    dispatch_market(frame, account.clone(), quantity, side, cx);
+                    let service = surface.read(cx).lifecycle.trading().clone();
+                    dispatch_market(&service, frame, account.clone(), quantity, side, cx);
                 }
             }),
     )

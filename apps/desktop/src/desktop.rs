@@ -2349,7 +2349,6 @@ enum ChartIntentRejection {
     InvalidQuantity,
     PlannedLegKept,
     Unsupported,
-    TradingUnavailable,
 }
 
 impl ChartIntentRejection {
@@ -2367,7 +2366,6 @@ impl ChartIntentRejection {
                 "A pending bracket keeps its stop and target. Drag them, or cancel the entry."
             }
             Self::Unsupported => "That chart action isn't available for this order.",
-            Self::TradingUnavailable => "Practice trading isn't available right now.",
         }
     }
 }
@@ -2517,15 +2515,7 @@ fn dispatch_chart_place_bracket(
     let sequence = intent.sequence;
     match chart_bracket_from_intent(intent, app, cx) {
         Ok(command) => {
-            let Some(service) = aeris_desktop::trading::handle() else {
-                reject_chart_intent(
-                    &chart,
-                    sequence,
-                    ChartIntentRejection::TradingUnavailable,
-                    cx,
-                );
-                return;
-            };
+            let service = app.lifecycle.trading().clone();
             let task = cx.background_executor().spawn(async move {
                 let result = service.place_chart_bracket_from_market(command);
                 aeris_desktop::trading::record_outcome(result, "Bracket placed")
@@ -2610,11 +2600,8 @@ fn dispatch_chart_create_protection(
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let sequence = intent.sequence;
-    let prepared = chart_protection_from_intent(intent, app, cx).and_then(|prepared| {
-        aeris_desktop::trading::handle()
-            .map(|service| (prepared, service))
-            .ok_or(ChartIntentRejection::TradingUnavailable)
-    });
+    let prepared = chart_protection_from_intent(intent, app, cx)
+        .map(|prepared| (prepared, app.lifecycle.trading().clone()));
     let (order, service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
@@ -2652,11 +2639,8 @@ fn dispatch_chart_modify(
 ) {
     let sequence = intent.sequence;
     let order_revision = order.revision;
-    let prepared = chart_modify_from_intent(intent, order, app, cx).and_then(|command| {
-        aeris_desktop::trading::handle()
-            .map(|service| (command, service))
-            .ok_or(ChartIntentRejection::TradingUnavailable)
-    });
+    let prepared = chart_modify_from_intent(intent, order, app, cx)
+        .map(|command| (command, app.lifecycle.trading().clone()));
     let (command, service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
@@ -2778,11 +2762,8 @@ fn dispatch_chart_close_position(
     cx: &mut Context<WorkspaceSurface>,
 ) {
     let sequence = intent.sequence;
-    let prepared = chart_close_position_from_intent(intent, app, cx).and_then(|prepared| {
-        aeris_desktop::trading::handle()
-            .map(|service| (prepared, service))
-            .ok_or(ChartIntentRejection::TradingUnavailable)
-    });
+    let prepared = chart_close_position_from_intent(intent, app, cx)
+        .map(|prepared| (prepared, app.lifecycle.trading().clone()));
     let ((account_id, instrument), service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
@@ -2863,15 +2844,7 @@ fn dispatch_chart_trading_intent(
         dispatch_chart_modify(chart, intent, order, app, cx);
         return;
     }
-    let Some(service) = aeris_desktop::trading::handle() else {
-        reject_chart_intent(
-            &chart,
-            sequence,
-            ChartIntentRejection::TradingUnavailable,
-            cx,
-        );
-        return;
-    };
+    let service = app.lifecycle.trading().clone();
     dispatch_chart_cancel(
         chart,
         sequence,
@@ -2915,11 +2888,7 @@ fn dispatch_chart_move_planned_leg(
                 .and_then(|price| chart_price_fixed_point(price, product.price_scale))
                 .ok_or(ChartIntentRejection::InvalidPrice)
         })
-        .and_then(|price| {
-            aeris_desktop::trading::handle()
-                .map(|service| (price, service))
-                .ok_or(ChartIntentRejection::TradingUnavailable)
-        });
+        .map(|price| (price, app.lifecycle.trading().clone()));
     let (price, service) = match prepared {
         Ok(prepared) => prepared,
         Err(reason) => {
@@ -4668,7 +4637,9 @@ fn subscribe_order_book_trading(
                 };
                 let (side, order_type) =
                     ladder_click_order(event.side, aeris_trading::OrderType::Market);
+                let service = click_workspace.read(cx).lifecycle.trading().clone();
                 aeris_desktop::trading::dispatch_simulated_order_at_price(
+                    &service,
                     &frame,
                     aeris_desktop::trading::SimulatedPricedOrder {
                         side,
@@ -4725,13 +4696,17 @@ fn subscribe_order_book_trading(
                 else {
                     return;
                 };
+                let service = drop_workspace.read(cx).lifecycle.trading().clone();
                 aeris_desktop::trading::modify_simulated_order_at_price(
-                    order.client_order_id,
-                    order.revision,
-                    order.order_type,
-                    order.time_in_force,
+                    &service,
+                    aeris_desktop::trading::SimulatedOrderModification {
+                        client_order_id: order.client_order_id,
+                        expected_revision: order.revision,
+                        order_type: order.order_type,
+                        time_in_force: order.time_in_force,
+                        price: target_price,
+                    },
                     &frame,
-                    target_price,
                     cx,
                 );
             },
@@ -5482,6 +5457,7 @@ fn configure_desktop_state() -> ConfiguredLifecycle {
 
 fn configured_market_workers(
     command_arguments: Vec<std::ffi::OsString>,
+    services: &aeris_desktop::services::DesktopServices,
 ) -> Result<Option<ConfiguredDesktop>, String> {
     let mut arguments = command_arguments.into_iter();
     let command = arguments.next();
@@ -5506,7 +5482,9 @@ fn configured_market_workers(
                 }
                 let lifecycle = configure_desktop_state();
                 (
-                    vec![engine_market_worker::start_rithmic_catalog()?],
+                    vec![engine_market_worker::start_rithmic_catalog(
+                        services.trading.clone(),
+                    )?],
                     Vec::new(),
                     lifecycle,
                     String::new(),
@@ -5518,7 +5496,7 @@ fn configured_market_workers(
                 }
                 let lifecycle = configure_desktop_state();
                 (
-                    engine_market_worker::start_multi_chart()?,
+                    engine_market_worker::start_multi_chart(services.trading.clone())?,
                     Vec::new(),
                     lifecycle,
                     String::new(),
@@ -5530,7 +5508,10 @@ fn configured_market_workers(
                 }
                 let lifecycle = configure_desktop_state();
                 layout = DesktopLayout::WorkspaceTabs;
-                let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
+                let group = engine_market_worker::start_workspace_tabs(
+                    &lifecycle.workspace,
+                    services.trading.clone(),
+                )?;
                 let workspace_notice = group.restore_notices.join("\n");
                 workspace_factory = Some(group.factory);
                 (Vec::new(), group.initial, lifecycle, workspace_notice)
@@ -5545,7 +5526,10 @@ fn configured_market_workers(
             // mounts the persistence owner used for subsequent durable changes.
             let lifecycle = configure_desktop_state();
             layout = DesktopLayout::WorkspaceTabs;
-            let group = engine_market_worker::start_workspace_tabs(&lifecycle.workspace)?;
+            let group = engine_market_worker::start_workspace_tabs(
+                &lifecycle.workspace,
+                services.trading.clone(),
+            )?;
             let workspace_notice = group.restore_notices.join("\n");
             workspace_factory = Some(group.factory);
             (Vec::new(), group.initial, lifecycle, workspace_notice)
@@ -5652,12 +5636,8 @@ pub(super) fn run(
             fatal_startup("The context service could not start.");
         }
     };
-    if let Err(error) = aeris_desktop::trading::install(trading.clone()) {
-        diagnostic!("Aeris trading owner could not be installed: {error}");
-        let _ = trading.shutdown(Duration::from_secs(2));
-        fatal_startup("The trading service could not be installed.");
-    }
-    let configured = match configured_market_workers(command_arguments) {
+    let services = aeris_desktop::services::DesktopServices::new(trading.clone());
+    let configured = match configured_market_workers(command_arguments, &services) {
         Ok(Some(configured)) => configured,
         Ok(None) => {
             let _ = context.shutdown(Duration::from_secs(2));
@@ -5689,7 +5669,7 @@ pub(super) fn run(
         diagnostic!("Aeris trading market feed could not attach: {error}");
         fatal_startup("The trading market feed could not start.");
     }
-    let lifecycle = DesktopLifecycle::new(trading, context, instance_lock);
+    let lifecycle = DesktopLifecycle::new(services, context, instance_lock);
     #[cfg(debug_assertions)]
     if force_diagnostics_panic {
         panic_after_stores_open();

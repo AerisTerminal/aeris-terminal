@@ -283,21 +283,28 @@ fn start() -> Result<
     String,
 > {
     let product = default_hyperliquid_product();
-    let (mut workers, factory) = start_group(vec![(DEFAULT_WORKSPACE_ID, product)])?;
+    let (mut workers, factory) = start_group(
+        vec![(DEFAULT_WORKSPACE_ID, product)],
+        crate::desktop::tests::test_trading_service(),
+    )?;
     let (startup, worker) = workers
         .pop()
         .ok_or_else(|| "Hyperliquid engine worker group is empty".to_string())?;
     Ok((startup, worker, factory))
 }
 
-pub(super) fn start_multi_chart() -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
+pub(super) fn start_multi_chart(
+    trading: aeris_trading_runtime::TradingService,
+) -> Result<Vec<(MarketWorkerStartup, MarketDataWorker)>, String> {
     let mnq = default_product("MNQ");
     let es = default_product("ES");
-    let (workers, _factory) = start_group(vec![(1, mnq), (2, es)])?;
+    let (workers, _factory) = start_group(vec![(1, mnq), (2, es)], trading)?;
     Ok(workers)
 }
 
-pub(super) fn start_rithmic_catalog() -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
+pub(super) fn start_rithmic_catalog(
+    trading: aeris_trading_runtime::TradingService,
+) -> Result<(MarketWorkerStartup, MarketDataWorker), String> {
     let client_id = random_order_book_identity()?;
     let consumer_id = random_order_book_identity()?;
     let pane_id = random_order_book_identity()?;
@@ -312,12 +319,13 @@ pub(super) fn start_rithmic_catalog() -> Result<(MarketWorkerStartup, MarketData
     );
     pane.startup = MarketWorkerStartup::Rithmic;
     endpoint.role = EndpointRole::RithmicCatalog;
-    spawn_group(client_id, vec![endpoint], None)?;
+    spawn_group(client_id, vec![endpoint], None, trading)?;
     Ok((pane.startup, pane.worker))
 }
 
 pub(super) fn start_workspace_tabs(
     workspace: &WorkspaceState,
+    trading: aeris_trading_runtime::TradingService,
 ) -> Result<WorkspaceMarketGroup, String> {
     let client_id = random_order_book_identity()?;
     let mut initial = Vec::new();
@@ -341,7 +349,7 @@ pub(super) fn start_workspace_tabs(
         endpoints.push(endpoint);
     }
     let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
-    spawn_group(client_id, endpoints, Some(addition_rx))?;
+    spawn_group(client_id, endpoints, Some(addition_rx), trading)?;
     Ok(WorkspaceMarketGroup {
         initial,
         factory: WorkspaceMarketFactory {
@@ -506,6 +514,7 @@ struct WorkerEndpoint {
 
 fn start_group(
     configurations: Vec<(u64, InstallProviderInstrument)>,
+    trading: aeris_trading_runtime::TradingService,
 ) -> Result<
     (
         Vec<(MarketWorkerStartup, MarketDataWorker)>,
@@ -538,7 +547,7 @@ fn start_group(
         endpoints.push(endpoint);
     }
     let (addition_tx, addition_rx) = mpsc::sync_channel(WORKSPACE_ADDITION_CAPACITY);
-    spawn_group(client_id, endpoints, Some(addition_rx))?;
+    spawn_group(client_id, endpoints, Some(addition_rx), trading)?;
     Ok((
         workers,
         WorkspaceMarketFactory {
@@ -616,6 +625,7 @@ fn spawn_group(
     client_id: u64,
     mut endpoints: Vec<EndpointRecord>,
     additions: Option<mpsc::Receiver<EndpointRecord>>,
+    trading: aeris_trading_runtime::TradingService,
 ) -> Result<(), String> {
     // One presentation worker drains all runtime-owned consumer outboxes for this
     // workspace group. Tab selection and layout edits only change endpoint
@@ -623,7 +633,7 @@ fn spawn_group(
     thread::Builder::new()
         .name("aeris-engine-market-client".to_string())
         .spawn(move || {
-            if let Err(error) = run_workers(client_id, &mut endpoints, additions) {
+            if let Err(error) = run_workers(client_id, &mut endpoints, additions, &trading) {
                 for record in &endpoints {
                     let _ = record.endpoint.messages.send(MarketWorkerMessage::State {
                         state: ChartState::Error,

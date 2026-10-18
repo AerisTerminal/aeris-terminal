@@ -26,7 +26,7 @@ pub(super) struct DesktopLifecycle {
     workspace_persistence: Rc<RefCell<Vec<WorkspaceLayoutShutdownWait>>>,
     terminals: Rc<RefCell<Vec<WeakEntity<WorkspaceSurface>>>>,
     shutdown_started: Rc<Cell<bool>>,
-    trading: aeris_trading_runtime::TradingService,
+    services: aeris_desktop::services::DesktopServices,
     context: Option<aeris_context_runtime::ContextService>,
     instance_lock: Option<Arc<aeris_platform_runtime::InstanceLock>>,
 }
@@ -34,7 +34,7 @@ pub(super) struct DesktopLifecycle {
 impl DesktopLifecycle {
     #[must_use]
     pub(super) fn new(
-        trading: aeris_trading_runtime::TradingService,
+        services: aeris_desktop::services::DesktopServices,
         context: aeris_context_runtime::ContextService,
         instance_lock: aeris_platform_runtime::InstanceLock,
     ) -> Self {
@@ -43,7 +43,7 @@ impl DesktopLifecycle {
             workspace_persistence: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
-            trading,
+            services,
             context: Some(context),
             instance_lock: Some(Arc::new(instance_lock)),
         }
@@ -56,7 +56,9 @@ impl DesktopLifecycle {
             workspace_persistence: Rc::new(RefCell::new(Vec::new())),
             terminals: Rc::new(RefCell::new(Vec::new())),
             shutdown_started: Rc::new(Cell::new(false)),
-            trading: super::tests::test_trading_service(),
+            services: aeris_desktop::services::DesktopServices::new(
+                super::tests::test_trading_service(),
+            ),
             context: None,
             instance_lock: None,
         }
@@ -66,6 +68,10 @@ impl DesktopLifecycle {
         self.context
             .as_ref()
             .map(aeris_context_runtime::ContextService::view)
+    }
+
+    pub(super) fn trading(&self) -> &aeris_trading_runtime::TradingService {
+        &self.services.trading
     }
 
     pub(super) fn context_service(&self) -> Option<aeris_context_runtime::ContextService> {
@@ -117,7 +123,7 @@ impl DesktopLifecycle {
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
         let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
         let market = engine_market_worker::started_market_runtime();
-        let trading = self.trading.clone();
+        let trading = self.services.trading.clone();
         let context = self.context.clone();
         let instance_lock = self.instance_lock.clone();
         Some(cx.background_executor().spawn(async move {
