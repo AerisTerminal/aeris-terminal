@@ -104,9 +104,12 @@ pub(crate) fn run(
         if demand.books.is_empty() {
             match controls.recv_timeout(IDLE_POLL_INTERVAL) {
                 Ok(HyperliquidDisplayDepthControl::Subscribe(next)) => demand = next,
+                // An idle stop parks the worker; the thread stays alive so a
+                // later demand still finds it. Only runtime shutdown or a
+                // coordinator-less control channel may end the worker.
                 Ok(HyperliquidDisplayDepthControl::Stop)
-                | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
             continue;
         }
@@ -416,7 +419,44 @@ fn next_pending_coin<T>(pending: &BTreeMap<String, T>, last: Option<&str>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::sync_channel;
 
+    #[test]
+    fn idle_stop_parks_the_worker_instead_of_ending_it() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (events, _events_received) = sync_channel(8);
+        let (controls, control_receiver) = sync_channel(1);
+        let wake = crate::market_service::ProviderCoordinatorWake::for_tests();
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::Builder::new()
+            .name("display-depth-idle-test".to_string())
+            .spawn(move || {
+                run(
+                    &control_receiver,
+                    &events,
+                    &worker_stop,
+                    &wake,
+                    Duration::ZERO,
+                );
+            })
+            .expect("worker spawns");
+        // Let the worker reach its idle branch, then deliver one idle stop.
+        std::thread::sleep(Duration::from_millis(1_200));
+        controls
+            .send(HyperliquidDisplayDepthControl::Stop)
+            .expect("idle stop is delivered");
+        std::thread::sleep(Duration::from_millis(1_200));
+        // The worker must still own its control channel: an idle stop parks
+        // the socket without ending the thread a later demand still needs.
+        controls
+            .try_send(HyperliquidDisplayDepthControl::Stop)
+            .expect("worker stays alive across an idle stop");
+        stop.store(true, Ordering::Release);
+        controls
+            .send(HyperliquidDisplayDepthControl::Stop)
+            .expect("stop wakes the parked worker");
+        worker.join().expect("worker exits cleanly");
+    }
     #[test]
     fn pending_books_rotate_past_continuously_updated_first_instrument() {
         let pending = BTreeMap::from([("BTC".into(), 1u8), ("ETH".into(), 2u8)]);

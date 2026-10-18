@@ -2702,6 +2702,18 @@ impl Coordinator<'_> {
             return;
         }
         if !self.ensure_provider_connection(super::HYPERLIQUID_DESCRIPTOR.id) {
+            if self
+                .provider_registry
+                .is_failed(super::HYPERLIQUID_DESCRIPTOR.id)
+            {
+                // A terminal provider session can never deliver this demand,
+                // and every selection has already published its rejection.
+                // Clearing the dirty flag stops the coordinator from
+                // re-flushing the same undeliverable demand every turn.
+                let session = self.session_mut(super::HYPERLIQUID_DESCRIPTOR.id);
+                session.demand_dirty = false;
+                session.engaged = false;
+            }
             return;
         }
         let raw = self

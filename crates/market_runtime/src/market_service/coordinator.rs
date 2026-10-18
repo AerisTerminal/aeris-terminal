@@ -6563,6 +6563,53 @@ mod tests {
     }
 
     #[test]
+    fn failed_hyperliquid_demand_flush_retires_instead_of_re_flushing() {
+        let mut coordinator = coordinator();
+        let (controls, pending_controls) = std::sync::mpsc::sync_channel(4);
+        let (display_controls, _display_receiver) = std::sync::mpsc::sync_channel(4);
+        let (history, _history_receiver) = std::sync::mpsc::sync_channel(4);
+        let history = Box::leak(Box::new(history));
+        coordinator
+            .provider_registry
+            .register_control("hyperliquid");
+        coordinator.providers.records.insert(
+            "hyperliquid",
+            ProviderDispatchRecord {
+                descriptor: super::super::HYPERLIQUID_DESCRIPTOR,
+                history,
+                lifecycle: None,
+                ctrader: None,
+                hyperliquid: None,
+                tastytrade: None,
+                rithmic: None,
+                catalog: None,
+            },
+        );
+        coordinator.provider_registry.register(
+            "hyperliquid",
+            Box::new(super::super::provider_session::HyperliquidSession {
+                controls,
+                display_controls,
+                history: history.clone(),
+            }),
+            super::super::HYPERLIQUID_DESCRIPTOR.capabilities.reconnect,
+            coordinator.clock.as_ref(),
+        );
+        // A worker that dies mid-session leaves the provider terminal.
+        drop(pending_controls);
+        assert!(!coordinator.ensure_provider_connection("hyperliquid"));
+        // The demand flush must retire the dirty demand instead of
+        // re-flushing the undeliverable set every coordinator turn.
+        let session = coordinator.session_mut("hyperliquid");
+        session.demand_dirty = true;
+        session.engaged = true;
+        coordinator.flush_hyperliquid_demand();
+        let session = coordinator.session("hyperliquid");
+        assert!(!session.demand_dirty);
+        assert!(!session.engaged);
+    }
+
+    #[test]
     fn coordinator_drains_quote_guard_releases_before_waiting() {
         let mut coordinator = coordinator();
         coordinator

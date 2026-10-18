@@ -19,6 +19,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, TrySendError},
     },
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -55,6 +56,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_millis(2);
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const MESSAGE_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Retry bound for an epoch-lifecycle emission against a full event queue.
+/// The coordinator drains continuously, so a delivery still missing this
+/// far past due means the worker cannot help the coordinator observe it.
+const LIFECYCLE_EMIT_BACKPRESSURE: Duration = Duration::from_secs(2);
+/// Poll interval between epoch-lifecycle emission retries.
+const LIFECYCLE_EMIT_POLL: Duration = Duration::from_millis(20);
 const CATALOG_REFRESH_INTERVAL: Duration = Duration::from_mins(5);
 const CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAXIMUM_DECODE_FAILURES_PER_CONNECTION: u32 = 100;
@@ -576,7 +583,7 @@ pub(crate) fn run(
         };
         let generation = sink.epoch.get().get();
         ws_generation.store(generation, Ordering::Release);
-        if emit(
+        if emit_lifecycle(
             events,
             HyperliquidRealtimeEvent::Connecting(generation),
             stop,
@@ -584,9 +591,6 @@ pub(crate) fn run(
             sink,
         ) {
             return;
-        }
-        if wake.overflowed("hyperliquid", generation) {
-            continue;
         }
         let connection = connect_market_socket(
             stop,
@@ -638,7 +642,7 @@ pub(crate) fn run(
                 }
             }
         }
-        if emit(
+        if emit_lifecycle(
             events,
             HyperliquidRealtimeEvent::Disconnected(generation),
             stop,
@@ -724,6 +728,47 @@ fn emit(
             false
         }
         Err(TrySendError::Disconnected(_)) => true,
+    }
+}
+
+/// Emits one epoch-lifecycle event that the coordinator must observe.
+///
+/// `Connecting` opens a reserved epoch and `Disconnected` advances its
+/// retry ladder; dropping either would strand the reserved epoch forever,
+/// because the coordinator never re-sends the `Connect` control for it.
+/// A full event queue retries under bounded backpressure until the
+/// coordinator drains it. Cancellation, a coordinator-less channel, or a
+/// queue still full past the bound gives up on the one event; the worker
+/// itself continues serving.
+fn emit_lifecycle(
+    events: &SyncSender<Fenced<ProviderTag, HyperliquidRealtimeEvent>>,
+    event: HyperliquidRealtimeEvent,
+    stop: &AtomicBool,
+    wake: &ProviderCoordinatorWake,
+    sink: ProviderEventSink,
+) -> bool {
+    let generation = event.generation();
+    let deadline = Instant::now() + LIFECYCLE_EMIT_BACKPRESSURE;
+    let mut pending = event;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return true;
+        }
+        match events.try_send(sink.stamp(pending)) {
+            Ok(()) => {
+                wake.notify();
+                return false;
+            }
+            Err(TrySendError::Full(undelivered)) => {
+                wake.report_overflow("hyperliquid", generation);
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                pending = undelivered.value;
+                thread::sleep(LIFECYCLE_EMIT_POLL);
+            }
+            Err(TrySendError::Disconnected(_)) => return true,
+        }
     }
 }
 
@@ -1585,6 +1630,72 @@ mod tests {
         format!(
             r#"{{"channel":"trades","data":[{{"coin":"{coin}","px":"10","sz":"1","side":"B","time":{time},"tid":{tid},"hash":"0xabc","users":["0xbuyer","0xseller"]}}]}}"#
         )
+    }
+
+    #[test]
+    fn lifecycle_emission_retries_until_the_coordinator_drains() {
+        let (events, received) = std::sync::mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let wake = ProviderCoordinatorWake::for_tests();
+        let sink = ProviderEventSink {
+            epoch: aeris_market_engine::fence::EpochSequence::<ProviderTag>::default().next(),
+        };
+        // Fill the queue so the lifecycle emission must retry under
+        // backpressure instead of dropping the epoch-opening event.
+        events
+            .send(sink.stamp(HyperliquidRealtimeEvent::Connected(7)))
+            .expect("filler is queued");
+        let (delivered, delivered_received) = std::sync::mpsc::sync_channel(1);
+        let emitter_stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let emitted = !emit_lifecycle(
+                &events,
+                HyperliquidRealtimeEvent::Connecting(9),
+                &emitter_stop,
+                &wake,
+                sink,
+            );
+            delivered.send(emitted).expect("emission result reported");
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            delivered_received.try_recv().is_err(),
+            "emission must wait for queue space"
+        );
+        received
+            .try_recv()
+            .expect("filler is still queued while backpressured");
+        assert!(
+            delivered_received
+                .recv_timeout(Duration::from_secs(2))
+                .expect("bounded retry delivers once the queue drains"),
+            "connecting event is delivered, not dropped"
+        );
+        match received.try_recv() {
+            Ok(fenced) => assert!(matches!(
+                fenced.value,
+                HyperliquidRealtimeEvent::Connecting(9)
+            )),
+            Err(error) => panic!("connecting event missing after delivery: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_emission_ends_when_the_coordinator_channel_is_gone() {
+        let (events, received) = std::sync::mpsc::sync_channel(1);
+        drop(received);
+        let stop = Arc::new(AtomicBool::new(false));
+        let wake = ProviderCoordinatorWake::for_tests();
+        let sink = ProviderEventSink {
+            epoch: aeris_market_engine::fence::EpochSequence::<ProviderTag>::default().next(),
+        };
+        assert!(emit_lifecycle(
+            &events,
+            HyperliquidRealtimeEvent::Connecting(1),
+            &stop,
+            &wake,
+            sink,
+        ));
     }
 
     #[test]
