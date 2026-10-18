@@ -93,6 +93,9 @@ violations and missing verification explicitly, and never describe them as satis
   owner; no process-wide `DesktopAccount::shared()` or account-service singleton lookup.
 - Desktop market consumers, bridge wakes and shutdown use the instance's `DesktopServices` market
   owner; no process-wide market runtime or `shared_market_runtime()` lookup.
+- Desktop workspace and chart-chrome persistence paths and chart-chrome save receipts come from
+  the instance's `DesktopServices` persistence owner. No process-global chart-chrome save state
+  or implicit process-wide workspace path lookup may return.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

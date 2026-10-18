@@ -4986,11 +4986,12 @@ impl WorkspaceSurface {
     /// Queues the durable chrome preferences off the UI thread; the save worker coalesces.
     fn save_chart_chrome_preferences(&self, cx: &mut Context<Self>) {
         let preferences = self.chart_chrome;
-        match chart_chrome::request_chart_chrome_preferences_save(preferences) {
+        let persistence = self.lifecycle.persistence().clone();
+        match persistence.request_chart_chrome_preferences_save(preferences) {
             Ok(true) => cx
                 .background_executor()
                 .spawn(async move {
-                    if let Err(error) = chart_chrome::run_chart_chrome_preferences_save_worker() {
+                    if let Err(error) = persistence.run_chart_chrome_preferences_save_worker() {
                         diagnostic!("Aeris chart chrome could not be saved: {error}");
                     }
                 })

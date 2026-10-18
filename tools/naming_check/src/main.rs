@@ -55,6 +55,19 @@ fn has_process_global_desktop_market(source: &str) -> bool {
     .iter()
     .any(|forbidden| production.contains(forbidden))
 }
+
+fn has_process_global_desktop_persistence(source: &str) -> bool {
+    let production = production_source_prefix(source);
+    [
+        "static CHART_CHROME_FILE_LOCK",
+        "static CHART_CHROME_SAVE_STATE",
+        "chart_chrome::chart_chrome_state_path(",
+        "chart_chrome::load_chart_chrome_preferences(",
+        "local_state::load_workspace()",
+    ]
+    .iter()
+    .any(|forbidden| production.contains(forbidden))
+}
 const MARKET_CHARACTERIZATION_TESTS: &[&str] = &[
     "characterization_reseed_during_live_flow_keeps_one_forming_bar_and_contiguous_history",
     "characterization_outbox_overflow_emits_covering_snapshot",
@@ -293,6 +306,7 @@ fn inspect_desktop_boundaries(
                 || has_process_global_desktop_trading(&source)
                 || has_process_global_desktop_account(&source)
                 || has_process_global_desktop_market(&source)
+                || has_process_global_desktop_persistence(&source)
             {
                 violations.push(relative);
             }
@@ -4134,7 +4148,6 @@ jobs:
         }
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(desktop.contains("start_trading_service"));
-        assert!(desktop.contains("DesktopServices::new(market, trading.clone(), account_service)"));
         assert!(
             manifest("apps/desktop/src/desktop/lifecycle.rs")
                 .contains("trading.shutdown(Duration::from_secs(2))")
@@ -4252,6 +4265,42 @@ jobs:
             assert!(
                 !super::has_process_global_desktop_market(&source),
                 "{} bypasses injected desktop market",
+                relative_string(&path)
+            );
+        }
+    }
+
+    #[test]
+    fn injected_desktop_persistence_accepts_instance_owner_and_test_globals() {
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        assert!(desktop.contains("DesktopServices::new("));
+        assert!(
+            desktop.contains("trading.clone(),\n        account_service,\n        persistence,")
+        );
+        assert!(!super::has_process_global_desktop_persistence(
+            "fn save(services: &DesktopServices) { services.persistence.chart_chrome_path(); }\n\
+             #[cfg(test)] mod tests { static CHART_CHROME_SAVE_STATE: u8 = 0; }\n"
+        ));
+    }
+
+    #[test]
+    fn injected_desktop_persistence_rejects_global_after_test_module() {
+        assert!(super::has_process_global_desktop_persistence(
+            "#[cfg(test)] mod tests { fn hidden() {} }\n\
+             static CHART_CHROME_FILE_LOCK: Mutex<()> = Mutex::new(());\n"
+        ));
+        assert!(super::has_process_global_desktop_persistence(
+            "fn load() { local_state::load_workspace(); }"
+        ));
+    }
+
+    #[test]
+    fn desktop_persistence_has_no_process_global_lookup() {
+        for path in production_sources_under("apps/desktop/src") {
+            let source = fs::read_to_string(&path).expect("desktop source");
+            assert!(
+                !super::has_process_global_desktop_persistence(&source),
+                "{} bypasses injected desktop persistence",
                 relative_string(&path)
             );
         }

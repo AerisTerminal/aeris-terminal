@@ -62,6 +62,10 @@ impl DesktopLifecycle {
                 aeris_account_runtime::AccountService::new(
                     aeris_account_runtime::AccountServiceConfig::from_environment(),
                 ),
+                aeris_desktop::chart_chrome::DesktopPersistence::new(
+                    std::env::temp_dir()
+                        .join(format!("aeris-desktop-lifecycle-{}", std::process::id())),
+                ),
             ),
             context: None,
             instance_lock: None,
@@ -92,6 +96,10 @@ impl DesktopLifecycle {
 
     pub(super) fn account_service(&self) -> &aeris_account_runtime::AccountService {
         &self.services.account_service
+    }
+
+    pub(super) fn persistence(&self) -> &aeris_desktop::chart_chrome::DesktopPersistence {
+        &self.services.persistence
     }
 
     pub(super) fn context_service(&self) -> Option<aeris_context_runtime::ContextService> {
@@ -141,7 +149,8 @@ impl DesktopLifecycle {
             .drain(..)
             .collect::<Vec<_>>();
         let retirements = self.retirements.borrow_mut().drain(..).collect::<Vec<_>>();
-        let chart_chrome_persistence = chart_chrome::chart_chrome_shutdown_wait();
+        let persistence = self.services.persistence.clone();
+        let chart_chrome_persistence = persistence.chart_chrome_shutdown_wait();
         let market = self.services.market.clone();
         let trading = self.services.trading.clone();
         let context = self.context.clone();
@@ -161,7 +170,7 @@ impl DesktopLifecycle {
             }
             match chart_chrome_persistence.wait(Duration::from_secs(2)) {
                 Ok(generation)
-                    if chart_chrome::chart_chrome_shutdown_generation_is_current(generation) => {}
+                    if persistence.chart_chrome_shutdown_generation_is_current(generation) => {}
                 Ok(_) => {
                     failure = Some(
                         "chart preferences changed while desktop shutdown was preparing"

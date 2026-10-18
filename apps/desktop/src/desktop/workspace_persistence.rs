@@ -100,7 +100,11 @@ pub(super) struct WorkspaceLayoutPersistence {
 }
 
 impl WorkspaceLayoutPersistence {
-    pub(super) fn new(workspace_revision: u64, layout_generation: u64) -> Result<Self, String> {
+    pub(super) fn new(
+        workspace_revision: u64,
+        layout_generation: u64,
+        persistence: &aeris_desktop::chart_chrome::DesktopPersistence,
+    ) -> Result<Self, String> {
         let latest = Arc::new(Mutex::new(None));
         let (wake_tx, wake_rx) = mpsc::sync_channel(1);
         let result = Arc::new(Mutex::new(None));
@@ -109,6 +113,7 @@ impl WorkspaceLayoutPersistence {
         let worker_latest = Arc::clone(&latest);
         let worker_result = Arc::clone(&result);
         let worker_durability = Arc::clone(&durability);
+        let worker_persistence = persistence.clone();
         std::thread::Builder::new()
             .name("aeris-workspace-layout-client".to_string())
             .spawn(move || {
@@ -117,6 +122,7 @@ impl WorkspaceLayoutPersistence {
                     &wake_rx,
                     &worker_result,
                     &worker_durability,
+                    &worker_persistence,
                 );
             })
             .map_err(|_| "workspace layout client could not start".to_string())?;
@@ -264,6 +270,7 @@ fn run_workspace_layout_persistence(
     wake: &Receiver<()>,
     result: &Mutex<Option<WorkspaceLayoutCompletion>>,
     durability: &Mutex<Option<WorkspaceLayoutDurability>>,
+    persistence: &aeris_desktop::chart_chrome::DesktopPersistence,
 ) {
     while wake.recv().is_ok() {
         while wake.recv_timeout(Duration::from_millis(100)).is_ok() {}
@@ -275,7 +282,8 @@ fn run_workspace_layout_persistence(
             continue;
         };
         let request_generation = request.layout_generation;
-        let mut current = local_state::load_workspace();
+        let path = persistence.workspace_path();
+        let mut current = local_state::load_workspace(&path);
         current.workspace_revision = current.workspace_revision.saturating_add(1);
         current.layout_generation = request
             .layout_generation
@@ -296,7 +304,7 @@ fn run_workspace_layout_persistence(
             .collect();
         current.watchlist_entries = request.watchlist_entries;
         current.drawing_templates = request.drawing_templates;
-        let completed = local_state::save_workspace(&current).map(|()| current);
+        let completed = local_state::save_workspace(&current, &path).map(|()| current);
         *durability
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WorkspaceLayoutDurability {

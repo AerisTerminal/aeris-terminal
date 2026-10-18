@@ -10,8 +10,6 @@ mod assets;
 mod big_trades_dialog;
 #[path = "components/bottom_panel.rs"]
 mod bottom_panel;
-#[path = "chart_chrome.rs"]
-mod chart_chrome;
 #[path = "components/chart_context_menus.rs"]
 mod chart_context_menus;
 #[path = "components/chart_surface.rs"]
@@ -136,6 +134,7 @@ use aeris_design_system::{
     AerisTheme, BRAND_FONT_BYTES, PLATFORM_FONT_BYTES, RadiusToken, ThemeColor, ThemeMode,
     TypographyRole,
 };
+use aeris_desktop::chart_chrome;
 use aeris_desktop::market_worker::{
     ChartState, MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure,
     MarketWorkerBootstrap, MarketWorkerMessage, MarketWorkerPublication, MarketWorkerRetirement,
@@ -4016,7 +4015,10 @@ fn run_desktop_readiness_command(
     if arguments.next().is_some() {
         return Err(usage.to_string());
     }
-    let workspace = local_state::load_workspace_for_readiness()
+    let persistence = aeris_desktop::chart_chrome::DesktopPersistence::new(
+        aeris_platform_runtime::native_data_root().map_err(|error| error.to_string())?,
+    );
+    let workspace = local_state::load_workspace_for_readiness(&persistence.workspace_path())
         .map_err(|error| format!("candidate workspace restore failed: {error}"))?;
     validate_workspace_boot_for_readiness(&workspace)?;
     let account_service = aeris_account_runtime::AccountService::new(
@@ -5553,8 +5555,10 @@ struct ConfiguredLifecycle {
     workspace: WorkspaceState,
 }
 
-fn configure_desktop_state() -> ConfiguredLifecycle {
-    let workspace = local_state::load_workspace();
+fn configure_desktop_state(
+    services: &aeris_desktop::services::DesktopServices,
+) -> ConfiguredLifecycle {
+    let workspace = local_state::load_workspace(&services.persistence.workspace_path());
     ConfiguredLifecycle { workspace }
 }
 
@@ -5583,7 +5587,7 @@ fn configured_market_workers(
                     diagnostic!("usage: aeris_desktop --rithmic");
                     exit_after_account_refresh_quiesce(&services.account_service, 2);
                 }
-                let lifecycle = configure_desktop_state();
+                let lifecycle = configure_desktop_state(services);
                 (
                     vec![engine_market_worker::start_rithmic_catalog(
                         &services.market,
@@ -5598,7 +5602,7 @@ fn configured_market_workers(
                     diagnostic!("usage: aeris_desktop --multi-chart");
                     exit_after_account_refresh_quiesce(&services.account_service, 2);
                 }
-                let lifecycle = configure_desktop_state();
+                let lifecycle = configure_desktop_state(services);
                 (
                     engine_market_worker::start_multi_chart(
                         &services.market,
@@ -5613,7 +5617,7 @@ fn configured_market_workers(
                     diagnostic!("usage: aeris_desktop --workspace-tabs");
                     exit_after_account_refresh_quiesce(&services.account_service, 2);
                 }
-                let lifecycle = configure_desktop_state();
+                let lifecycle = configure_desktop_state(services);
                 layout = DesktopLayout::WorkspaceTabs;
                 let group = engine_market_worker::start_workspace_tabs(
                     &services.market,
@@ -5632,7 +5636,7 @@ fn configured_market_workers(
             // single-chart/window bootstrap. Starting through the workspace group
             // restores pane identity, symbol, interval, viewport and layout and
             // mounts the persistence owner used for subsequent durable changes.
-            let lifecycle = configure_desktop_state();
+            let lifecycle = configure_desktop_state(services);
             layout = DesktopLayout::WorkspaceTabs;
             let group = engine_market_worker::start_workspace_tabs(
                 &services.market,
@@ -5649,7 +5653,7 @@ fn configured_market_workers(
         restored_workspace: lifecycle.workspace.clone(),
         workspace_factory,
         layout,
-        chart_chrome: chart_chrome::load_chart_chrome_preferences(),
+        chart_chrome: services.persistence.load_chart_chrome_preferences(),
         workspace_notice: (!workspace_notice.is_empty()).then_some(workspace_notice),
     }))
 }
@@ -5698,6 +5702,19 @@ fn dispatch_desktop_readiness(arguments: &mut Vec<std::ffi::OsString>) -> bool {
         std::process::exit(1);
     }
     true
+}
+
+fn start_desktop_persistence(
+    account_service: &aeris_account_runtime::AccountService,
+) -> chart_chrome::DesktopPersistence {
+    let root = aeris_platform_runtime::native_data_root().unwrap_or_else(|error| {
+        diagnostic!("Aeris desktop persistence root could not resolve: {error}");
+        fatal_startup(
+            account_service,
+            "The desktop data folder could not be opened.",
+        );
+    });
+    chart_chrome::DesktopPersistence::new(root)
 }
 
 pub(super) fn run(
@@ -5757,8 +5774,13 @@ pub(super) fn run(
             fatal_startup(&account_service, "The market service could not start.");
         }
     };
-    let mut services =
-        aeris_desktop::services::DesktopServices::new(market, trading.clone(), account_service);
+    let persistence = start_desktop_persistence(&account_service);
+    let mut services = aeris_desktop::services::DesktopServices::new(
+        market,
+        trading.clone(),
+        account_service,
+        persistence,
+    );
     if let Err(error) = services.start_account() {
         diagnostic!("Aeris account session could not start: {error}");
         fatal_startup(
@@ -5783,13 +5805,12 @@ pub(super) fn run(
             );
         }
     };
-    let market = services.market.clone();
     // cTrader demo trading is optional: without it the desktop still runs, and broker
     // orders report the venue as unavailable.
-    if let Err(error) = attach_ctrader_venue(&trading, &market) {
+    if let Err(error) = attach_ctrader_venue(&trading, &services.market) {
         diagnostic!("Aeris cTrader trading venue could not be attached: {error}");
     }
-    if let Err(error) = attach_trading_market_feed(&trading, &market) {
+    if let Err(error) = attach_trading_market_feed(&trading, &services.market) {
         diagnostic!("Aeris trading market feed could not attach: {error}");
         fatal_startup(
             &services.account_service,

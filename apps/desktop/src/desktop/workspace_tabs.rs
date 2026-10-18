@@ -127,12 +127,32 @@ impl TerminalApp {
         }
     }
 
+    fn start_workspace_layout_persistence(
+        init: &TerminalShellInit,
+        lifecycle: &DesktopLifecycle,
+    ) -> Option<WorkspaceLayoutPersistence> {
+        (init.workspace_shell == WorkspaceShellKind::Tabs)
+            .then(|| {
+                WorkspaceLayoutPersistence::new(
+                    init.workspace_revision,
+                    init.layout_generation,
+                    lifecycle.persistence(),
+                )
+            })
+            .transpose()
+            .unwrap_or_else(|error| {
+                diagnostic!("Aeris workspace persistence could not start: {error}");
+                None
+            })
+    }
+
     pub(super) fn new(
         init: TerminalShellInit,
         lifecycle: DesktopLifecycle,
         command_palette_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let workspace_persistence = Self::start_workspace_layout_persistence(&init, &lifecycle);
         let mut workspaces = init.workspaces;
         let market_frame_wake = UiWake::default();
         lifecycle.set_context_publication_wake(market_frame_wake.callback());
@@ -146,15 +166,6 @@ impl TerminalApp {
         Self::wire_restored_surfaces(&workspaces, active, &market_frame_wake, cx);
         let persisted_watchlist = init.watchlist_entries.clone();
         let watchlist = restore_watchlist(init.watchlist_entries);
-        let workspace_persistence = (init.workspace_shell == WorkspaceShellKind::Tabs)
-            .then(|| {
-                WorkspaceLayoutPersistence::new(init.workspace_revision, init.layout_generation)
-            })
-            .transpose()
-            .unwrap_or_else(|error| {
-                diagnostic!("Aeris workspace persistence could not start: {error}");
-                None
-            });
         let persisted_layout = workspace_layout_tabs(&workspaces, cx);
         let persisted_active_workspace_id = workspaces[active].id;
         Self {
@@ -1794,7 +1805,7 @@ impl TerminalApp {
             .workspace_persistence
             .as_ref()
             .map(WorkspaceLayoutPersistence::shutdown_wait);
-        let chart_chrome_wait = chart_chrome::chart_chrome_shutdown_wait();
+        let chart_chrome_wait = self.lifecycle.persistence().chart_chrome_shutdown_wait();
         let account_refresh = self.lifecycle.account_service().begin_refresh_quiesce();
         let account = self.lifecycle.account().cloned();
 
@@ -1826,10 +1837,10 @@ impl TerminalApp {
                                     persistence.shutdown_generation_is_current(generation)
                                 })
                         });
-                        let chart_chrome_current =
-                            chart_chrome::chart_chrome_shutdown_generation_is_current(
-                                chart_chrome_generation,
-                            );
+                        let chart_chrome_current = terminal
+                            .lifecycle
+                            .persistence()
+                            .chart_chrome_shutdown_generation_is_current(chart_chrome_generation);
                         if workspace_current && chart_chrome_current {
                             terminal.commit_update_restart_after_persistence(
                                 account_refresh,
@@ -2252,11 +2263,12 @@ impl TerminalApp {
         self.chart_chrome.chart_type = active.chart_type(cx);
         self.chart_chrome.symbol_search_categories = active.chart_chrome.symbol_search_categories;
         let preferences = self.chart_chrome;
-        match chart_chrome::request_chart_chrome_preferences_save(preferences) {
+        let persistence = self.lifecycle.persistence().clone();
+        match persistence.request_chart_chrome_preferences_save(preferences) {
             Ok(true) => cx
                 .background_executor()
                 .spawn(async move {
-                    if let Err(error) = chart_chrome::run_chart_chrome_preferences_save_worker() {
+                    if let Err(error) = persistence.run_chart_chrome_preferences_save_worker() {
                         diagnostic!("Aeris chart chrome could not be saved: {error}");
                     }
                 })

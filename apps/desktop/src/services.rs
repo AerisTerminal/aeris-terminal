@@ -1,6 +1,7 @@
 //! Per-desktop runtime handles supplied by the composition root.
 
 use crate::account::DesktopAccount;
+use crate::chart_chrome::DesktopPersistence;
 use crate::trading::TradingFeedback;
 use aeris_account_runtime::AccountService;
 use aeris_market_runtime::MarketService;
@@ -15,6 +16,7 @@ pub struct DesktopServices {
     pub trading_feedback: TradingFeedback,
     pub account_service: AccountService,
     pub account: Option<DesktopAccount>,
+    pub persistence: DesktopPersistence,
 }
 
 impl DesktopServices {
@@ -23,6 +25,7 @@ impl DesktopServices {
         market: MarketService,
         trading: TradingService,
         account_service: AccountService,
+        persistence: DesktopPersistence,
     ) -> Self {
         Self {
             market,
@@ -30,6 +33,7 @@ impl DesktopServices {
             trading_feedback: TradingFeedback::default(),
             account_service,
             account: None,
+            persistence,
         }
     }
 
@@ -64,6 +68,9 @@ mod tests {
             MarketService::start().expect("independent market owner"),
             trading(),
             AccountService::new(aeris_account_runtime::AccountServiceConfig::from_environment()),
+            DesktopPersistence::new(
+                std::env::temp_dir().join(format!("aeris-desktop-services-{}", std::process::id())),
+            ),
         )
     }
 

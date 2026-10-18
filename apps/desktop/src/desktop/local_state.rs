@@ -14,6 +14,7 @@ use aeris_contracts::{
 use aeris_market_data::ChartInterval;
 use prost::Message as _;
 
+#[cfg(test)]
 const WORKSPACE_FILE: &str = "workspace-state.pb";
 const LEGACY_WORKSPACE_FILE: &str = "workspace-state.frame";
 const LEGACY_WORKSPACE_PROTOCOL_VERSION: u32 = 21;
@@ -42,8 +43,8 @@ mod legacy_workspace_envelope {
     }
 }
 
-pub(super) fn load_workspace() -> WorkspaceState {
-    load_workspace_result().unwrap_or_else(|error| {
+pub(super) fn load_workspace(path: &Path) -> WorkspaceState {
+    load_workspace_result(path).unwrap_or_else(|error| {
         diagnostic!("Aeris workspace restore skipped: {error}");
         default_workspace()
     })
@@ -54,9 +55,8 @@ pub(super) fn load_workspace() -> WorkspaceState {
 /// Unlike normal interactive startup this path is fallible and deliberately
 /// does not migrate or rewrite legacy persistence. A candidate must prove it
 /// can read the user's current state before it can pass activation health.
-pub(super) fn load_workspace_for_readiness() -> Result<WorkspaceState, String> {
-    let path = workspace_path()?;
-    if let Some(workspace) = load_recoverable_workspace_from_path(&path)? {
+pub(super) fn load_workspace_for_readiness(path: &Path) -> Result<WorkspaceState, String> {
+    if let Some(workspace) = load_recoverable_workspace_from_path(path)? {
         return Ok(workspace);
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
@@ -67,9 +67,8 @@ pub(super) fn load_workspace_for_readiness() -> Result<WorkspaceState, String> {
     }
 }
 
-fn load_workspace_result() -> Result<WorkspaceState, String> {
-    let path = workspace_path()?;
-    if let Some(workspace) = load_recoverable_workspace_from_path(&path)? {
+fn load_workspace_result(path: &Path) -> Result<WorkspaceState, String> {
+    if let Some(workspace) = load_recoverable_workspace_from_path(path)? {
         return Ok(workspace);
     }
     let legacy = path.with_file_name(LEGACY_WORKSPACE_FILE);
@@ -77,7 +76,7 @@ fn load_workspace_result() -> Result<WorkspaceState, String> {
         return Ok(default_workspace());
     }
     let workspace = load_legacy_workspace_from_path(&legacy)?;
-    match save_workspace_to_path(&workspace, &path) {
+    match save_workspace_to_path(&workspace, path) {
         Ok(()) => {
             if let Err(error) = fs::remove_file(&legacy)
                 && error.kind() != std::io::ErrorKind::NotFound
@@ -161,9 +160,8 @@ fn load_legacy_workspace_from_path(path: &Path) -> Result<WorkspaceState, String
     }
 }
 
-pub(super) fn save_workspace(workspace: &WorkspaceState) -> Result<(), String> {
-    let path = workspace_path()?;
-    save_workspace_to_path(workspace, &path)
+pub(super) fn save_workspace(workspace: &WorkspaceState, path: &Path) -> Result<(), String> {
+    save_workspace_to_path(workspace, path)
 }
 
 fn save_workspace_to_path(workspace: &WorkspaceState, path: &Path) -> Result<(), String> {
@@ -193,11 +191,6 @@ pub(super) fn save_workspace_fixture(
     save_workspace_to_path(workspace, path)
 }
 
-fn workspace_path() -> Result<PathBuf, String> {
-    aeris_platform_runtime::native_data_root()
-        .map(|root| root.join(WORKSPACE_FILE))
-        .map_err(|error| error.to_string())
-}
 pub(super) fn default_workspace() -> WorkspaceState {
     let instrument = InstallProviderInstrument {
         provider: "hyperliquid".to_string(),
@@ -674,6 +667,26 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique).join(WORKSPACE_FILE)
+    }
+
+    #[test]
+    fn injected_workspace_paths_isolate_two_desktop_compositions() {
+        let first = temporary_workspace_path();
+        let second = temporary_workspace_path();
+        let first_owner = aeris_desktop::chart_chrome::DesktopPersistence::new(
+            first.parent().expect("first root").to_path_buf(),
+        );
+        let second_owner = aeris_desktop::chart_chrome::DesktopPersistence::new(
+            second.parent().expect("second root").to_path_buf(),
+        );
+        let first_path = first_owner.workspace_path();
+        let second_path = second_owner.workspace_path();
+        assert_ne!(first_path, second_path);
+        let revision = workspace_with_revision(41);
+        save_workspace(&revision, &first_path).expect("first workspace saved");
+        assert_eq!(load_workspace(&first_path).workspace_revision, 41);
+        assert_ne!(load_workspace(&second_path).workspace_revision, 41);
+        std::fs::remove_dir_all(first.parent().expect("first root")).expect("fixture root removed");
     }
 
     fn workspace_with_revision(revision: u64) -> WorkspaceState {

@@ -455,13 +455,88 @@ impl Default for ChartChromePreferences {
     }
 }
 
-static CHART_CHROME_FILE_LOCK: Mutex<()> = Mutex::new(());
-static CHART_CHROME_SAVE_STATE: Mutex<ChartChromeSaveState> = Mutex::new(ChartChromeSaveState {
-    worker_active: false,
-    latest: None,
-    latest_requested_generation: 0,
-    completed: None,
-});
+/// Per-desktop durable state. Clones share one bounded saver.
+#[derive(Clone)]
+pub struct DesktopPersistence {
+    inner: std::sync::Arc<DesktopPersistenceInner>,
+}
+
+struct DesktopPersistenceInner {
+    root: PathBuf,
+    save_state: Mutex<ChartChromeSaveState>,
+}
+
+impl DesktopPersistence {
+    #[must_use]
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            inner: std::sync::Arc::new(DesktopPersistenceInner {
+                root,
+                save_state: Mutex::new(ChartChromeSaveState::default()),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn workspace_path(&self) -> PathBuf {
+        self.inner.root.join("workspace-state.pb")
+    }
+
+    #[must_use]
+    pub fn chart_chrome_path(&self) -> PathBuf {
+        self.inner.root.join("desktop").join("chart-chrome")
+    }
+
+    #[must_use]
+    pub fn load_chart_chrome_preferences(&self) -> ChartChromePreferences {
+        load_chart_chrome_preferences_from(&self.chart_chrome_path())
+    }
+
+    /// Queues the latest preferences without writing on the UI thread.
+    ///
+    /// # Errors
+    /// Returns an error if the save state is poisoned or its generation is exhausted.
+    pub fn request_chart_chrome_preferences_save(
+        &self,
+        preferences: ChartChromePreferences,
+    ) -> Result<bool, String> {
+        self.inner
+            .save_state
+            .lock()
+            .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?
+            .request(preferences)
+    }
+
+    #[must_use]
+    pub fn chart_chrome_shutdown_wait(&self) -> ChartChromeShutdownWait {
+        ChartChromeShutdownWait {
+            inner: self.inner.clone(),
+            expected_generation: self
+                .inner
+                .save_state
+                .lock()
+                .map(|state| state.latest_requested_generation)
+                .map_err(|_| "desktop chart chrome persistence is unavailable".to_string()),
+        }
+    }
+
+    #[must_use]
+    pub fn chart_chrome_shutdown_generation_is_current(&self, generation: u64) -> bool {
+        self.inner
+            .save_state
+            .lock()
+            .is_ok_and(|state| chart_chrome_generation_is_current(&state, generation))
+    }
+
+    /// # Errors
+    /// Returns an error if the queued save cannot reach durable storage.
+    pub fn run_chart_chrome_preferences_save_worker(&self) -> Result<(), String> {
+        run_chart_chrome_preferences_save_worker_to(
+            &self.chart_chrome_path(),
+            &self.inner.save_state,
+        )
+    }
+}
 
 #[derive(Default)]
 struct ChartChromeSaveState {
@@ -503,6 +578,7 @@ impl ChartChromeSaveState {
         self.worker_active = false;
     }
 
+    #[cfg(test)]
     fn fail_latest(&mut self, error: String) {
         let generation = self.latest_requested_generation;
         self.latest = None;
@@ -516,21 +592,18 @@ impl ChartChromeSaveState {
     }
 }
 
-pub(crate) struct ChartChromeShutdownWait {
+pub struct ChartChromeShutdownWait {
+    inner: std::sync::Arc<DesktopPersistenceInner>,
     expected_generation: Result<u64, String>,
 }
 
 impl ChartChromeShutdownWait {
-    pub(crate) fn wait(self, timeout: Duration) -> Result<u64, String> {
+    /// # Errors
+    /// Returns an error on save failure, a newer request, or timeout.
+    pub fn wait(self, timeout: Duration) -> Result<u64, String> {
         let expected_generation = self.expected_generation?;
-        wait_for_chart_chrome_generation(&CHART_CHROME_SAVE_STATE, expected_generation, timeout)
+        wait_for_chart_chrome_generation(&self.inner.save_state, expected_generation, timeout)
     }
-}
-
-pub(crate) fn chart_chrome_shutdown_generation_is_current(generation: u64) -> bool {
-    CHART_CHROME_SAVE_STATE
-        .lock()
-        .is_ok_and(|state| chart_chrome_generation_is_current(&state, generation))
 }
 
 fn parse_chrome_flag(value: &str) -> bool {
@@ -618,20 +691,6 @@ pub fn encode_chart_chrome_preferences(preferences: ChartChromePreferences) -> S
     )
 }
 
-#[must_use]
-pub fn chart_chrome_state_path() -> Option<PathBuf> {
-    aeris_platform_runtime::native_data_root()
-        .ok()
-        .map(|root| root.join("desktop").join("chart-chrome"))
-}
-
-#[must_use]
-pub fn load_chart_chrome_preferences() -> ChartChromePreferences {
-    chart_chrome_state_path().map_or_else(ChartChromePreferences::default, |path| {
-        load_chart_chrome_preferences_from(&path)
-    })
-}
-
 fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
     fs::read_to_string(path)
         .or_else(|_| fs::read_to_string(path.with_extension("bak")))
@@ -639,44 +698,6 @@ fn load_chart_chrome_preferences_from(path: &Path) -> ChartChromePreferences {
         .as_deref()
         .map(parse_chart_chrome_preferences)
         .unwrap_or_default()
-}
-
-/// Coalesces one UI-owned preference snapshot. Returns whether the caller must
-/// start the single background saver. The lock protects only this tiny in-memory
-/// slot; filesystem work remains entirely off the GPUI thread.
-pub(crate) fn request_chart_chrome_preferences_save(
-    preferences: ChartChromePreferences,
-) -> Result<bool, String> {
-    let mut state = CHART_CHROME_SAVE_STATE
-        .lock()
-        .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
-    state.request(preferences)
-}
-
-pub(crate) fn chart_chrome_shutdown_wait() -> ChartChromeShutdownWait {
-    ChartChromeShutdownWait {
-        expected_generation: CHART_CHROME_SAVE_STATE
-            .lock()
-            .map(|state| state.latest_requested_generation)
-            .map_err(|_| "desktop chart chrome persistence is unavailable".to_string()),
-    }
-}
-
-/// Drains coalesced chart-chrome persistence until no newer UI snapshot remains.
-///
-/// # Errors
-///
-/// Returns an error when the per-user desktop directory or persistence worker
-/// state is unavailable, or when the latest pending snapshot cannot be saved.
-pub(crate) fn run_chart_chrome_preferences_save_worker() -> Result<(), String> {
-    let Some(path) = chart_chrome_state_path() else {
-        let error = "desktop chart chrome directory is unavailable".to_string();
-        if let Ok(mut state) = CHART_CHROME_SAVE_STATE.lock() {
-            state.fail_latest(error.clone());
-        }
-        return Err(error);
-    };
-    run_chart_chrome_preferences_save_worker_to(&path, &CHART_CHROME_SAVE_STATE)
 }
 
 fn run_chart_chrome_preferences_save_worker_to(
@@ -759,13 +780,10 @@ fn chart_chrome_generation_is_current(state: &ChartChromeSaveState, generation: 
 /// # Errors
 ///
 /// Returns an error when the target file cannot be created or replaced.
-pub fn save_chart_chrome_preferences_to(
+fn save_chart_chrome_preferences_to(
     path: &Path,
     preferences: ChartChromePreferences,
 ) -> Result<(), String> {
-    let _save_guard = CHART_CHROME_FILE_LOCK
-        .lock()
-        .map_err(|_| "desktop chart chrome persistence is unavailable".to_string())?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|_| "desktop chart chrome directory could not be created".to_string())?;
@@ -778,9 +796,10 @@ pub fn save_chart_chrome_preferences_to(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartChromePreferences, ChartChromeSaveState, DrawingFavorites, INDICATOR_SPECS,
-        IndicatorKind, IndicatorLocation, IndicatorParameters, InstrumentSearchCategories,
-        TradingShortcutMode, WindowFrame, encode_chart_chrome_preferences, filter_indicator_specs,
+        ChartChromePreferences, ChartChromeSaveState, DesktopPersistence, DrawingFavorites,
+        INDICATOR_SPECS, IndicatorKind, IndicatorLocation, IndicatorParameters,
+        InstrumentSearchCategories, TradingShortcutMode, WindowFrame,
+        encode_chart_chrome_preferences, filter_indicator_specs,
         load_chart_chrome_preferences_from, parse_chart_chrome_preferences,
         run_chart_chrome_preferences_save_worker_to, save_chart_chrome_preferences_to,
         wait_for_chart_chrome_generation,
@@ -802,6 +821,50 @@ mod tests {
     fn remove_chart_chrome_test_files(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("bak"));
+    }
+
+    #[test]
+    fn two_desktop_persistence_owners_keep_preferences_and_shutdown_receipts_separate() {
+        let first_root = temporary_chart_chrome_path("first-owner");
+        let second_root = temporary_chart_chrome_path("second-owner");
+        let first = DesktopPersistence::new(first_root.clone());
+        let second = DesktopPersistence::new(second_root.clone());
+        let selected = ChartChromePreferences {
+            chart_type: ChartType::Line,
+            ..ChartChromePreferences::default()
+        };
+        assert!(
+            first
+                .request_chart_chrome_preferences_save(selected)
+                .expect("first queued")
+        );
+        assert!(
+            first
+                .chart_chrome_shutdown_wait()
+                .wait(Duration::ZERO)
+                .is_err()
+        );
+        assert_eq!(
+            second.chart_chrome_shutdown_wait().wait(Duration::ZERO),
+            Ok(0)
+        );
+        first
+            .run_chart_chrome_preferences_save_worker()
+            .expect("first durable");
+        assert_eq!(
+            first.chart_chrome_shutdown_wait().wait(Duration::ZERO),
+            Ok(1)
+        );
+        assert_eq!(first.load_chart_chrome_preferences(), selected);
+        assert_eq!(
+            second.load_chart_chrome_preferences(),
+            ChartChromePreferences::default()
+        );
+        assert_ne!(first.workspace_path(), second.workspace_path());
+        std::fs::remove_file(first.chart_chrome_path()).expect("first fixture removed");
+        std::fs::remove_dir_all(first_root).expect("first fixture directory removed");
+        // The second composition never wrote any file.
+        assert!(!second_root.exists());
     }
 
     fn starred_trend_line_and_star() -> DrawingFavorites {
