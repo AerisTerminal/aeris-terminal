@@ -3569,10 +3569,8 @@ impl WorkspaceSurface {
             MarketWorkerMessage::PriceAlertTriggered(trigger) => {
                 self.apply_price_alert_trigger(&trigger, cx);
             }
-            MarketWorkerMessage::PriceAlertSyncFailed(error) => {
-                self.price_alert_message = Some(error);
-                cx.notify();
-            }
+            MarketWorkerMessage::PriceAlertSyncFailed => self.apply_price_alert_sync(false, cx),
+            MarketWorkerMessage::PriceAlertSyncSucceeded => self.apply_price_alert_sync(true, cx),
             MarketWorkerMessage::ChartViewport {
                 start_unix_nanos,
                 end_unix_nanos,

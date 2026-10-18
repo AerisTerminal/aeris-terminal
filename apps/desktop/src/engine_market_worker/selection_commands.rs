@@ -398,10 +398,13 @@ fn replace_price_alerts(
     alerts: &[MarketPriceAlert],
 ) -> Result<(), String> {
     match market.replace_price_alerts(client_id, endpoint.consumer_id, alerts) {
-        Ok(()) => Ok(()),
-        Err(error) => endpoint
+        Ok(()) => endpoint
             .messages
-            .send(MarketWorkerMessage::PriceAlertSyncFailed(error))
+            .send(MarketWorkerMessage::PriceAlertSyncSucceeded)
+            .map_err(|error| error.to_string()),
+        Err(_error) => endpoint
+            .messages
+            .send(MarketWorkerMessage::PriceAlertSyncFailed)
             .map_err(|error| error.to_string()),
     }
 }

@@ -338,6 +338,14 @@ impl Toaster {
         self.notices.notices()
     }
 
+    #[cfg(test)]
+    pub(super) fn live_notice_cards(&self, stack: ToastStack) -> usize {
+        self.toasts
+            .iter()
+            .filter(|toast| toast.stack == stack && toast.notice_key.is_some() && toast.is_live())
+            .count()
+    }
+
     /// A keyed notice has one presentation card even if the failure repeats. The center is the
     /// owner of its lifetime and bound; the toast is only the animated visible projection.
     pub(super) fn post_notice(&mut self, stack: ToastStack, notice: UserNotice, now: Instant) {

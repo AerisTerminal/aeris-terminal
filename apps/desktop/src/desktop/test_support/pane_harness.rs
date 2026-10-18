@@ -166,6 +166,64 @@ fn pane_harness_disconnected_order_book_request_renders_one_notice(cx: &mut Test
 }
 
 #[gpui::test]
+fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    for _ in 0..2 {
+        harness
+            .publications
+            .send(MarketWorkerMessage::PriceAlertSyncFailed)
+            .expect("fixture alert failure enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(
+            pane.price_alert_message.as_deref(),
+            Some("Price alerts could not be monitored")
+        );
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Price alerts unavailable");
+        assert_eq!(
+            toaster.notices()[0].key.scope,
+            harness.pane.entity_id().as_u64()
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "alert failure rendered a card"
+    );
+
+    harness
+        .publications
+        .send(MarketWorkerMessage::PriceAlertSyncSucceeded)
+        .expect("fixture alert success enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        assert_eq!(harness.pane.read(cx).price_alert_message, None);
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices(), []);
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            0
+        );
+    });
+}
+
+#[gpui::test]
 fn pane_harness_smoke_disconnected_fixture_renders_pane(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     cx.read(|cx| assert!(harness.pane.read(cx).chart.is_none()));

@@ -8,6 +8,7 @@ const PRICE_SCALE_LEFT: u32 = 1;
 const PRICE_SCALE_OVERLAY: u32 = 2;
 /// Triggers a pane holds until the toaster takes them; older ones give way past this.
 const PENDING_ANNOUNCEMENTS: usize = 8;
+const PRICE_ALERT_SYNC_FAILURE_MESSAGE: &str = "Price alerts could not be monitored";
 
 /// "NQZ6 crossed 31258.00" over "Last trade 31258.25", in the runtime's exact values.
 pub(super) fn price_alert_trigger_text(trigger: &MarketPriceAlertTrigger) -> (String, String) {
@@ -172,6 +173,31 @@ fn new_alert_id(alerts: &[WorkspacePriceAlertState]) -> Result<String, String> {
 }
 
 impl WorkspaceSurface {
+    pub(super) fn apply_price_alert_sync(&mut self, succeeded: bool, cx: &mut Context<Self>) {
+        let key = notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind: "price_alert_sync",
+        };
+        if succeeded {
+            if self.price_alert_message.as_deref() == Some(PRICE_ALERT_SYNC_FAILURE_MESSAGE) {
+                self.price_alert_message = None;
+            }
+            cx.emit(PaneNoticeEvent::Clear(key));
+        } else {
+            self.price_alert_message = Some(PRICE_ALERT_SYNC_FAILURE_MESSAGE.into());
+            cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+                key,
+                severity: notification_center::NoticeSeverity::Error,
+                tone: notification_center::NoticeTone::Loss,
+                source: notification_center::NoticeSource::Workspace,
+                title: "Price alerts unavailable",
+                detail: "Live alert monitoring could not be updated. Try again later.".into(),
+                lifetime: notification_center::NoticeLifetime::UntilCleared,
+            }));
+        }
+        cx.notify();
+    }
+
     pub(super) fn open_price_alert_dialog(&mut self, request: ChartAlertCreateRequest) {
         let Some(instrument) = self.product.clone() else {
             self.price_alert_message =

@@ -308,7 +308,8 @@ pub enum MarketWorkerMessage {
     OrderBook(OrderBookFrame),
     TradeTape(MarketTradeTapeSnapshot),
     PriceAlertTriggered(MarketPriceAlertTrigger),
-    PriceAlertSyncFailed(String),
+    PriceAlertSyncFailed,
+    PriceAlertSyncSucceeded,
     StudyRegistered {
         request_sequence: u64,
         study_id: StudyInstanceId,

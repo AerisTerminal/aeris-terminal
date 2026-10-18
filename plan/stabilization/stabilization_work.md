@@ -882,6 +882,13 @@ Status: pending
     repeated failure through the actual pane and rendered toast. M6.2 remains unchecked:
     restore setters, price-alert processing, symbol-search notices, the other injected
     failures, complete source/action variants and remaining discard/unwrap cleanup follow.
+  - Part 5: market-runtime price-alert processing reports sanitized failure/success
+    controls to the pane. Repeated failures post one pane-keyed TerminalApp notice and
+    show a safe dialog message; a later successful runtime replacement clears both.
+    The worker no longer transfers raw processing errors to the UI. PaneHarness drives
+    the bounded publication mailbox, checks one rendered card, then success clearing.
+    M6.2 remains unchecked: restore setters, symbol search, remaining injected failures,
+    source/action variants and discarded-result/unwrap cleanup follow.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1199,6 +1206,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 2 fix(desktop): removed dead provider and selector-pending parameters, made shell initialization, workspace factory absence and window opening explicit failures rather than production panics. An initial cold parallel check hit MSVC LNK1114 in aws-lc-sys; CARGO_BUILD_JOBS=1 rebuilt successfully and the full workspace fmt/check/strict Clippy/tests/naming_check gate passed. M6.2 remains unchecked pending notice consolidation and the four injected-failure tests.
 - 2026-10-18 M6.2 Part 3 test(trading): extended only the seeded-property test's bounded shutdown wait from 2 to 10 seconds to tolerate concurrent workspace scheduling; 200 seeds and 500 steps per seed, all invariant/restart assertions unchanged. The focused property run and the full workspace fmt/check/strict Clippy/tests/naming_check gate passed with CARGO_BUILD_JOBS=1; M6.2 remains unchecked pending pane notices and the four injected-failure tests.
 - 2026-10-18 M6.2 Part 4 fix(desktop): routed order-book demand failure/clear events from each pane to the single TerminalApp toaster with pane-scoped deduplication and retired-pane cleanup; injected disconnected command delivery in PaneHarness and asserted the rendered notice. Full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after a cold aws-lc-sys MSVC LNK1114 retry. M6.2 stays open for the remaining pane error sources, injected failures and discarded-result cleanup.
+- 2026-10-18 M6.2 Part 5 fix(desktop): sent sanitized price-alert processing failure/success controls through the bounded market mailbox to the pane notice bridge; repeated failures render one card and successful processing clears it in PaneHarness. Focused regression and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for restore setters, symbol search, source/action variants, remaining injected failures and discarded-result cleanup.
 
 ## 7. Known gaps / deferred
 
