@@ -4,3 +4,7 @@ pub mod account;
 pub mod command_registry;
 pub mod market_worker;
 pub mod trading;
+
+#[cfg(any(test, feature = "diagnostics"))]
+#[path = "desktop/test_support/mod.rs"]
+pub mod test_support;

@@ -104,6 +104,9 @@ violations and missing verification explicitly, and never describe them as satis
   cancellation behavior.
 - The desktop must stay provider-neutral. It does not own provider adapters, storage implementations,
   or canonical candle state.
+- `FixtureMarketWorker` lives only under `apps/desktop/src/desktop/test_support/`; the module is
+  compiled only for tests or the explicit `diagnostics` feature. Default desktop builds cannot
+  construct fixture market publications. The diagnostic conformance command is gated likewise.
 - The desktop stores `ChartInterval` and must not construct `SeriesCadence`; interval-to-cadence mapping
   belongs to `market_runtime`.
 - Market history is loaded on demand and bounded; do not restore market-history persistence or a

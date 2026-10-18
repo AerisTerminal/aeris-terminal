@@ -1,13 +1,9 @@
-//! Desktop market presentation mailbox and deterministic disconnected fixture.
+//! Desktop market presentation mailbox.
 //!
-//! This module does not implement or claim a socket, WebSocket, live provider,
-//! entitlement service, or production transport. The fixture exercises the same
-//! application replay model used by engine publications without inventing a
-//! second desktop wire protocol.
+//! This module does not implement a socket, live provider or production transport.
 
 use aeris_application::ReplayRecoveryCommand;
 use aeris_application::{
-    EmbeddedReplaySource, LoadEmbeddedReplay, MarketBarClientModel, MarketBarModelOutcome,
     MarketGeneration, ProvenancedMarketBar, ReplaySnapshot, ReplayStreamUpdate,
 };
 use aeris_contracts::{
@@ -79,8 +75,6 @@ impl std::fmt::Display for ProviderCommandUnavailable {
 
 impl std::error::Error for ProviderCommandUnavailable {}
 
-const SUBSCRIPTION_ID: &str = "desktop_fixture_market_bars";
-const MODEL_ITEM_CAPACITY: usize = 600;
 const CONTROL_RESERVE: usize = 8;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -1587,112 +1581,15 @@ impl MarketWorkerRetirement {
     }
 }
 
-pub struct FixtureMarketWorker {
-    source: EmbeddedReplaySource,
-    model: MarketBarClientModel,
-}
-
-impl FixtureMarketWorker {
-    /// Creates a deterministic disconnected fixture worker.
-    ///
-    /// # Errors
-    /// Retained for the common worker-start contract; construction is infallible.
-    pub fn try_new() -> Result<Self, String> {
-        Ok(Self {
-            source: EmbeddedReplaySource,
-            model: MarketBarClientModel::new(
-                NonZeroUsize::new(MODEL_ITEM_CAPACITY).unwrap_or(NonZeroUsize::MIN),
-            ),
-        })
-    }
-
-    /// Loads and publishes a bounded fixture snapshot.
-    ///
-    /// # Errors
-    /// Returns an error if loading, decoding, validation, or publication fails.
-    pub fn publish_snapshot(&mut self, bar_count: usize) -> Result<MarketWorkerBootstrap, String> {
-        let snapshot = self
-            .source
-            .load_snapshot(LoadEmbeddedReplay { bar_count })
-            .map_err(|error| error.to_string())?;
-        let generation = self.model.current_generation().map_or(
-            Ok(snapshot.evidence().publication_generation),
-            |current| {
-                current
-                    .publication_generation()
-                    .checked_add(1)
-                    .ok_or_else(|| "desktop fixture generation overflow".to_string())
-            },
-        )?;
-        let snapshot = snapshot
-            .try_with_publication_generation(generation)
-            .map_err(|error| error.to_string())?;
-        let publication =
-            self.finish_publication(ReplayStreamUpdate::Snapshot(snapshot.clone()))?;
-        let ReplayStreamUpdate::Snapshot(decoded_snapshot) = publication.update else {
-            return Err("fixture snapshot published a delta".to_string());
-        };
-        let generation = self
-            .model
-            .current_generation()
-            .cloned()
-            .ok_or_else(|| "fixture snapshot did not retain a generation".to_string())?;
-        Ok(MarketWorkerBootstrap {
-            snapshot: decoded_snapshot,
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            generation,
-            worker_label: "deterministic fixture · disconnected".to_string(),
-        })
-    }
-
-    /// Loads and publishes the fixture delta following `previous_sequence`.
-    ///
-    /// # Errors
-    /// Returns an error if loading, decoding, validation, or publication fails.
-    pub fn publish_delta(
-        &mut self,
-        previous_sequence: u64,
-    ) -> Result<Option<MarketWorkerPublication>, String> {
-        let Some(delta) = self
-            .source
-            .load_delta(previous_sequence)
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(None);
-        };
-        self.finish_publication(ReplayStreamUpdate::Delta(delta))
-            .map(Some)
-    }
-
-    fn finish_publication(
-        &mut self,
-        update: ReplayStreamUpdate,
-    ) -> Result<MarketWorkerPublication, String> {
-        let outcome = self
-            .model
-            .apply_update(update.clone())
-            .map_err(|error| error.to_string())?;
-        let MarketBarModelOutcome::Published(generation) = outcome else {
-            return Err("fixture update did not publish a client generation".to_string());
-        };
-        Ok(MarketWorkerPublication {
-            update,
-            generation: MarketPublicationGeneration::from_generation(&generation),
-            subscription_id: SUBSCRIPTION_ID.to_string(),
-            worker_label: "deterministic fixture · disconnected".to_string(),
-            ui_diagnostics: None,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ChartState, ChartViewportUpdate, ConsumerResourceClass, FixtureMarketWorker,
-        MarketDataWorker, MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
+        ChartState, ChartViewportUpdate, ConsumerResourceClass, MarketDataWorker,
+        MarketPublicationGeneration, MarketRecoveryFailure, MarketWorkerCommand,
         MarketWorkerMessage, MarketWorkerPublication, PendingUiDiagnostics, ProviderCatalogCommand,
         ProviderCatalogEvent, UiDiagnosticsFeedback, market_worker_channel, ui_diagnostics_channel,
     };
+    use crate::test_support::FixtureMarketWorker;
     use aeris_application::{
         Provenanced, ReplayStreamUpdate, ReplayTailOperation, ReplayTailUpdate,
     };

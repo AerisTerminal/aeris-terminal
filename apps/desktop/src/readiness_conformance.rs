@@ -14,9 +14,10 @@ use aeris_application::{
     ReplaySnapshot, ReplayStreamUpdate, ResnapshotReason,
 };
 use aeris_desktop::market_worker::{
-    FixtureMarketWorker, MarketPublicationGeneration, MarketWorkerMessage, MarketWorkerPublication,
+    MarketPublicationGeneration, MarketWorkerMessage, MarketWorkerPublication,
     MarketWorkerReceiver, MarketWorkerSendError, MarketWorkerSender, market_worker_channel,
 };
+use aeris_desktop::test_support::FixtureMarketWorker;
 use aeris_instruments::InstrumentPrecision;
 use aeris_market_data::{
     BookSide, DepthDelta, DepthLevel, DepthSnapshot, EventMetadata, MarketEvent, OrderBook,

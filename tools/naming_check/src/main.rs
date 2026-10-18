@@ -229,6 +229,15 @@ fn violates_desktop_quote_boundary(path: &str, source: &str) -> bool {
         && production_source_prefix(source).contains("SimulatedMarketObservation")
 }
 
+// The fixture is available to the diagnostic executable and tests, never to the default
+// desktop. The only diagnostic caller is the explicitly gated conformance command.
+fn violates_fixture_market_boundary(path: &str, source: &str) -> bool {
+    path.starts_with("apps/desktop/src/")
+        && !path.starts_with("apps/desktop/src/desktop/test_support/")
+        && path != "apps/desktop/src/readiness_conformance.rs"
+        && production_source_prefix(source).contains("FixtureMarketWorker")
+}
+
 fn inspect_desktop_quote_boundary(
     root: &Path,
     directory: &Path,
@@ -240,10 +249,11 @@ fn inspect_desktop_quote_boundary(
             inspect_desktop_quote_boundary(root, &path, violations)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             let relative = relative_to(root, &path);
-            if violates_desktop_quote_boundary(
-                &relative.to_string_lossy().replace('\\', "/"),
-                &fs::read_to_string(&path)?,
-            ) {
+            let relative_path = relative.to_string_lossy().replace('\\', "/");
+            let source = fs::read_to_string(&path)?;
+            if violates_desktop_quote_boundary(&relative_path, &source)
+                || violates_fixture_market_boundary(&relative_path, &source)
+            {
                 violations.push(relative);
             }
         }
@@ -1637,6 +1647,54 @@ mod tests {
             "crates/trading_runtime/src/core/mod.rs",
             "fn owner() { SimulatedMarketObservation; }"
         ));
+    }
+
+    #[test]
+    fn fixture_market_boundary_accepts_only_gated_test_and_diagnostic_sources() {
+        let fixture = "apps/desktop/src/desktop/test_support/fixture_market.rs";
+        let diagnostic = "apps/desktop/src/readiness_conformance.rs";
+        let production = "apps/desktop/src/market_worker.rs";
+        assert!(!super::violates_fixture_market_boundary(
+            fixture,
+            "pub struct FixtureMarketWorker;"
+        ));
+        assert!(!super::violates_fixture_market_boundary(
+            diagnostic,
+            "use aeris_desktop::test_support::FixtureMarketWorker;"
+        ));
+        assert!(!super::violates_fixture_market_boundary(
+            production,
+            "#[cfg(test)] mod tests { use FixtureMarketWorker; }\nfn production() {}"
+        ));
+        let library = manifest("apps/desktop/src/lib.rs");
+        let desktop = manifest("apps/desktop/src/desktop.rs");
+        assert!(library.contains(
+            "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"desktop/test_support/mod.rs\"]"
+        ));
+        assert!(desktop.contains(
+            "#[cfg(any(test, feature = \"diagnostics\"))]\n#[path = \"readiness_conformance.rs\"]"
+        ));
+    }
+
+    #[test]
+    fn fixture_market_boundary_rejects_production_after_test_module() {
+        assert!(super::violates_fixture_market_boundary(
+            "apps/desktop/src/market_worker.rs",
+            "#[cfg(test)] mod tests { use FixtureMarketWorker; }\nstruct Production(FixtureMarketWorker);"
+        ));
+    }
+
+    #[test]
+    fn fixture_market_worker_stays_inside_test_support() {
+        for path in production_sources_under("apps/desktop/src") {
+            let relative = relative_string(&path);
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"));
+            assert!(
+                !super::violates_fixture_market_boundary(&relative, &source),
+                "{relative} exposes the fixture outside desktop test support"
+            );
+        }
     }
 
     #[test]
