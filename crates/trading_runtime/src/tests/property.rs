@@ -13,6 +13,10 @@ use super::{
 };
 use crate::clock::Clock;
 
+// This test restarts its SQLite-backed owner repeatedly alongside the parallel workspace suite.
+// Keep a finite shutdown deadline while allowing for heavily contended CI scheduling.
+const PROPERTY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// One deterministic run seeds 200 worlds and drives 500 random steps through each: submits,
 /// cancels, modifies, quotes, partial closes, scale-ins, restarts, kill switches, unlocks and
 /// retention runs. After every step the group coverage, fill-eligibility, DAY-expiry, balance
@@ -459,7 +463,7 @@ fn run_property_steps(
     restart_with_durable_checks(world, directory, configuration)?;
     world
         .service
-        .shutdown(Duration::from_secs(2))
+        .shutdown(PROPERTY_SHUTDOWN_TIMEOUT)
         .map_err(|error| format!("shutdown: {error}"))?;
     Ok(())
 }
@@ -845,7 +849,7 @@ fn restart_with_durable_checks(
     let now = world.wall();
     world
         .service
-        .shutdown(Duration::from_secs(2))
+        .shutdown(PROPERTY_SHUTDOWN_TIMEOUT)
         .map_err(|error| format!("restart shutdown: {error}"))?;
 
     check_durable_identity(directory, &before, now, world.step)?;
