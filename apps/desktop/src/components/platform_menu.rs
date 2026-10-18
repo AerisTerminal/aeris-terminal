@@ -526,10 +526,10 @@ fn run_account_action(
     cx: &mut Context<TerminalApp>,
 ) {
     match action {
-        AccountAction::SignIn => TerminalApp::request_sign_in(cx),
-        AccountAction::Cancel => TerminalApp::cancel_sign_in(cx),
-        AccountAction::SignOut | AccountAction::RetrySignOut => TerminalApp::sign_out(cx),
-        AccountAction::Reopen => TerminalApp::reopen_browser_page(cx),
+        AccountAction::SignIn => terminal.request_sign_in(cx),
+        AccountAction::Cancel => terminal.cancel_sign_in(cx),
+        AccountAction::SignOut | AccountAction::RetrySignOut => terminal.sign_out(cx),
+        AccountAction::Reopen => terminal.reopen_browser_page(cx),
         AccountAction::ManageProfile => {
             if let Err(error) = aeris_desktop::account::open_manage_profile() {
                 diagnostic!("Aeris profile browser open degraded: {error}");

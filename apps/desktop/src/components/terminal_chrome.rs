@@ -197,6 +197,7 @@ pub(super) struct WorkspaceTabBarState<'a> {
     pub(super) error: Option<&'a str>,
     pub(super) workspace_drag: Option<WorkspaceDragState>,
     pub(super) app_view: super::market_screener::AppView,
+    pub(super) account: Option<&'a aeris_desktop::account::DesktopAccount>,
     pub(super) theme: AerisTheme,
 }
 
@@ -276,7 +277,8 @@ pub(super) fn workspace_title_bar(
             .flex_1(),
         terminal,
     );
-    let account = aeris_desktop::account::DesktopAccount::shared()
+    let account = state
+        .account
         .map_or_else(aeris_desktop::account::unavailable_menu_state, |account| {
             account.menu_state()
         });

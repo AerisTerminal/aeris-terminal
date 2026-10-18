@@ -8,14 +8,14 @@ pub const AUTH_BACKEND_CONFIGURED: bool = cfg!(test);
 use aeris_observability::diagnostic;
 use std::{
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
     time::{Duration, Instant},
 };
 
-use aeris_account_runtime::{AccountRefreshQuiesce, AccountService, AccountServiceConfig};
+use aeris_account_runtime::AccountService;
 use aeris_contracts::{AccountSessionState, AccountView, LoginAuthorization};
 
 /// Production account hub used by the native Manage Profile action.
@@ -82,24 +82,6 @@ fn open_login_browser_with(
 /// Returns an error when the account runtime request fails or the reply is invalid.
 pub fn fetch_account_status(service: &AccountService) -> Result<AccountView, String> {
     Ok(service.account_status())
-}
-
-/// Prevents the process-global account runtime from starting another refresh
-/// grant while desktop shutdown or an update restart is being prepared.
-///
-/// # Errors
-///
-/// Returns a redacted error when the runtime cannot install the bounded
-/// lifecycle claim.
-pub fn begin_refresh_quiesce() -> Result<AccountRefreshQuiesce, String> {
-    account_service().begin_refresh_quiesce()
-}
-
-/// Initializes the process-global account owner without starting saved-session
-/// network restoration. Desktop startup uses this before installing native
-/// process/session shutdown fencing.
-pub fn prepare_for_process_lifecycle() {
-    let _ = account_service();
 }
 
 /// Cancels one pending account-runtime-owned login transaction.
@@ -403,9 +385,6 @@ pub struct DesktopAccount {
     authoritative_runtime: Option<AccountService>,
 }
 
-static INSTALLED_ACCOUNT: OnceLock<DesktopAccount> = OnceLock::new();
-static INSTALL_LOCK: Mutex<()> = Mutex::new(());
-
 /// How often the runtime account view refreshes while a browser transaction is open.
 /// Fast enough that runtime completion reaches the UI within a frame
 /// budget, slow enough to keep one bounded runtime fetch in flight. Idle
@@ -420,37 +399,17 @@ const PROFILE_REFRESH_POLL_WINDOW: Duration = Duration::from_secs(10);
 const IDLE_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 impl DesktopAccount {
-    /// Installs the shared account session once per desktop process.
-    ///
-    /// The first install wins; subsequent calls return the installed
-    /// session unchanged.
-    ///
+    /// Creates one account session for the desktop instance.
     /// # Errors
     ///
     /// Returns an error when the background account client cannot start.
-    pub fn install() -> Result<Self, String> {
-        if let Some(installed) = INSTALLED_ACCOUNT.get() {
-            return Ok(installed.clone());
-        }
-        let _guard = INSTALL_LOCK
-            .lock()
-            .map_err(|_| "account session install failed".to_string())?;
-        if let Some(installed) = INSTALLED_ACCOUNT.get() {
-            return Ok(installed.clone());
-        }
-        account_service().start_restore();
-        let session = Self::spawn()?;
-        let _ = INSTALLED_ACCOUNT.set(session);
-        INSTALLED_ACCOUNT
-            .get()
-            .cloned()
-            .ok_or_else(|| "account session install failed".to_string())
-    }
-
-    /// Returns the installed shared session, if any.
-    #[must_use]
-    pub fn shared() -> Option<Self> {
-        INSTALLED_ACCOUNT.get().cloned()
+    pub fn install(service: AccountService) -> Result<Self, String> {
+        service.start_restore();
+        let handler = service.clone();
+        Self::spawn_with_runtime(
+            move |request| handle_account_request(&handler, request),
+            Some(service),
+        )
     }
 
     /// Returns whether the engine has verified a usable account session.
@@ -486,10 +445,6 @@ impl DesktopAccount {
                 // refresh/link verification finishes.
                 view.request_generation == 0 && view.state == AccountSessionState::Authorizing
             })
-    }
-
-    fn spawn() -> Result<Self, String> {
-        Self::spawn_with_runtime(handle_account_request, Some(account_service().clone()))
     }
 
     /// Spawns one isolated session with a scripted worker. Production uses
@@ -1073,8 +1028,7 @@ fn run_account_client_with(
     }
 }
 
-fn handle_account_request(request: AccountRequest) -> AccountResponse {
-    let service = account_service();
+fn handle_account_request(service: &AccountService, request: AccountRequest) -> AccountResponse {
     match request {
         AccountRequest::BeginLogin { generation } => match start_login(service, generation) {
             Ok(authorization) => AccountResponse::Authorized(authorization),
@@ -1109,11 +1063,6 @@ fn handle_account_request(request: AccountRequest) -> AccountResponse {
             },
         },
     }
-}
-
-fn account_service() -> &'static AccountService {
-    static SERVICE: OnceLock<AccountService> = OnceLock::new();
-    SERVICE.get_or_init(|| AccountService::new(AccountServiceConfig::from_environment()))
 }
 
 /// Signs out the shared account-runtime-owned session.
@@ -1715,12 +1664,26 @@ mod tests {
         // Install uses the production worker, so only synchronous local
         // state is asserted here: worker replies race the test thread and
         // are covered by the scripted sessions below.
-        let session = DesktopAccount::install().expect("account session installs");
+        let session =
+            DesktopAccount::install(AccountService::new(AccountServiceConfig::from_environment()))
+                .expect("account session installs");
         let presentation = session.presentation();
         assert_eq!(presentation.action, "Sign in");
         assert!(!presentation.pending);
         let menu = session.menu_state();
         assert_eq!(menu.presentation.action, "Sign in");
+    }
+
+    #[test]
+    fn account_sessions_are_isolated_by_injected_service() {
+        let first =
+            DesktopAccount::install(AccountService::new(AccountServiceConfig::from_environment()))
+                .expect("first account client");
+        let second =
+            DesktopAccount::install(AccountService::new(AccountServiceConfig::from_environment()))
+                .expect("second account client");
+        assert!(!Arc::ptr_eq(&first.shared, &second.shared));
+        assert!(Arc::ptr_eq(&first.shared, &first.clone().shared));
     }
 
     #[test]

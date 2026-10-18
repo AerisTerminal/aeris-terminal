@@ -332,9 +332,12 @@ fn retain_account_refresh_quiesce_for_exit<Q: AccountRefreshExitClaim>(
     Ok(())
 }
 
-fn exit_after_account_refresh_quiesce(exit_code: i32) -> ! {
+fn exit_after_account_refresh_quiesce(
+    account_service: &aeris_account_runtime::AccountService,
+    exit_code: i32,
+) -> ! {
     let exit_code = match retain_account_refresh_quiesce_for_exit(
-        aeris_desktop::account::begin_refresh_quiesce(),
+        account_service.begin_refresh_quiesce(),
         "process exit",
     ) {
         Ok(()) => exit_code,
@@ -4163,6 +4166,7 @@ fn quarantine_trading_database(database: &std::path::Path) -> Result<std::path::
 }
 
 fn handle_trading_corruption(
+    account_service: &aeris_account_runtime::AccountService,
     path: &std::path::Path,
     newest_backup: Option<&std::path::Path>,
     detail: &str,
@@ -4180,22 +4184,28 @@ fn handle_trading_corruption(
                     quarantine.display()
                 );
                 fatal_startup(
+                    account_service,
                     "The corrupt trading database was quarantined. Restart Aeris to create a new database.",
                 );
             }
             Err(error) => {
                 diagnostic!("Aeris trading database quarantine failed: {error}");
                 fatal_startup(
+                    account_service,
                     "The corrupt trading database could not be quarantined and was not recreated.",
                 );
             }
         },
         Ok(false) => {
-            fatal_startup("The corrupt trading database was left untouched. Aeris cannot start.");
+            fatal_startup(
+                account_service,
+                "The corrupt trading database was left untouched. Aeris cannot start.",
+            );
         }
         Err(error) => {
             diagnostic!("Aeris corruption confirmation dialog failed: {error}");
             fatal_startup(
+                account_service,
                 "Aeris could not obtain confirmation. The corrupt trading database was left untouched.",
             );
         }
@@ -5478,7 +5488,7 @@ fn configured_market_workers(
             if argument == "--rithmic" {
                 if arguments.next().is_some() {
                     diagnostic!("usage: aeris_desktop --rithmic");
-                    exit_after_account_refresh_quiesce(2);
+                    exit_after_account_refresh_quiesce(&services.account_service, 2);
                 }
                 let lifecycle = configure_desktop_state();
                 (
@@ -5492,7 +5502,7 @@ fn configured_market_workers(
             } else if argument == "--multi-chart" {
                 if arguments.next().is_some() {
                     diagnostic!("usage: aeris_desktop --multi-chart");
-                    exit_after_account_refresh_quiesce(2);
+                    exit_after_account_refresh_quiesce(&services.account_service, 2);
                 }
                 let lifecycle = configure_desktop_state();
                 (
@@ -5504,7 +5514,7 @@ fn configured_market_workers(
             } else if argument == "--workspace-tabs" {
                 if arguments.next().is_some() {
                     diagnostic!("usage: aeris_desktop --workspace-tabs");
-                    exit_after_account_refresh_quiesce(2);
+                    exit_after_account_refresh_quiesce(&services.account_service, 2);
                 }
                 let lifecycle = configure_desktop_state();
                 layout = DesktopLayout::WorkspaceTabs;
@@ -5517,7 +5527,7 @@ fn configured_market_workers(
                 (Vec::new(), group.initial, lifecycle, workspace_notice)
             } else {
                 diagnostic!("unsupported argument: {}", argument.to_string_lossy());
-                exit_after_account_refresh_quiesce(2);
+                exit_after_account_refresh_quiesce(&services.account_service, 2);
             }
         } else {
             // The installed desktop is a persisted workspace, not the legacy
@@ -5603,6 +5613,9 @@ pub(super) fn run(
     if let Err(error) = aeris_platform_runtime::migrate_legacy_native_data_root() {
         diagnostic!("Aeris legacy local state migration deferred: {error}");
     }
+    let account_service = aeris_account_runtime::AccountService::new(
+        aeris_account_runtime::AccountServiceConfig::from_environment(),
+    );
     let launcher_promotion = command_arguments.is_empty().then(|| {
         aeris_platform_runtime::active_data_root()
             .ok()
@@ -5622,10 +5635,10 @@ pub(super) fn run(
             path,
             newest_backup,
             detail,
-        }) => handle_trading_corruption(&path, newest_backup.as_deref(), &detail),
+        }) => handle_trading_corruption(&account_service, &path, newest_backup.as_deref(), &detail),
         Err(error) => {
             diagnostic!("Aeris trading owner could not start: {error}");
-            fatal_startup("The trading service could not start.");
+            fatal_startup(&account_service, "The trading service could not start.");
         }
     };
     let context = match start_context_service() {
@@ -5633,22 +5646,33 @@ pub(super) fn run(
         Err(error) => {
             diagnostic!("Aeris context owner could not start: {error}");
             let _ = trading.shutdown(Duration::from_secs(2));
-            fatal_startup("The context service could not start.");
+            fatal_startup(&account_service, "The context service could not start.");
         }
     };
-    let services = aeris_desktop::services::DesktopServices::new(trading.clone());
+    let mut services =
+        aeris_desktop::services::DesktopServices::new(trading.clone(), account_service);
+    if let Err(error) = services.start_account() {
+        diagnostic!("Aeris account session could not start: {error}");
+        fatal_startup(
+            &services.account_service,
+            "The account session could not start.",
+        );
+    }
     let configured = match configured_market_workers(command_arguments, &services) {
         Ok(Some(configured)) => configured,
         Ok(None) => {
             let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
-            exit_after_account_refresh_quiesce(0);
+            exit_after_account_refresh_quiesce(&services.account_service, 0);
         }
         Err(error) => {
             diagnostic!("Aeris market worker could not start: {error}");
             let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
-            fatal_startup("The market service could not start.");
+            fatal_startup(
+                &services.account_service,
+                "The market service could not start.",
+            );
         }
     };
     let market = match engine_market_worker::shared_market_runtime() {
@@ -5657,7 +5681,10 @@ pub(super) fn run(
             diagnostic!("Aeris practice market calendar could not start: {error}");
             let _ = context.shutdown(Duration::from_secs(2));
             let _ = trading.shutdown(Duration::from_secs(2));
-            fatal_startup("The practice market calendar could not start.");
+            fatal_startup(
+                &services.account_service,
+                "The practice market calendar could not start.",
+            );
         }
     };
     // cTrader demo trading is optional: without it the desktop still runs, and broker
@@ -5667,7 +5694,10 @@ pub(super) fn run(
     }
     if let Err(error) = attach_trading_market_feed(&trading, &market) {
         diagnostic!("Aeris trading market feed could not attach: {error}");
-        fatal_startup("The trading market feed could not start.");
+        fatal_startup(
+            &services.account_service,
+            "The trading market feed could not start.",
+        );
     }
     let lifecycle = DesktopLifecycle::new(services, context, instance_lock);
     #[cfg(debug_assertions)]
@@ -5691,7 +5721,7 @@ fn attach_trading_market_feed(
     })
 }
 
-fn fatal_startup(message: &str) -> ! {
+fn fatal_startup(account_service: &aeris_account_runtime::AccountService, message: &str) -> ! {
     let diagnostics_log_path = aeris_platform_runtime::native_data_root().map_or_else(
         |_| std::path::PathBuf::from("aeris.log"),
         |root| root.join("logs").join("aeris.log"),
@@ -5701,7 +5731,7 @@ fn fatal_startup(message: &str) -> ! {
         diagnostics_log_path.display()
     );
     let _ = aeris_platform_runtime::message_box("Aeris Terminal", &detail);
-    exit_after_account_refresh_quiesce(1);
+    exit_after_account_refresh_quiesce(account_service, 1);
 }
 
 fn schedule_versioned_launcher_promotion() -> Result<(), String> {

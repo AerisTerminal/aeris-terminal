@@ -778,7 +778,14 @@ Status: pending
     positive and negative examples. Independent in-memory desktop compositions retain separate
     trading owners. The feedback mailbox, account gate,
     market factory, persistence, clock and PaneHarness remain for subsequent M6.1 parts.
-    The global trading, account and market handles and `PaneHarness` remain for subsequent parts.
+  - Part 3: the composition root constructs one account runtime per desktop instance and
+    supplies it through `DesktopServices` to the account client, title bar, menu, lifecycle
+    quiesce and workspace actions. The process-global `DesktopAccount::shared()` and
+    account-service singleton are deleted together; a naming rule rejects their return,
+    including production code after test modules. Two injected account sessions are
+    independently allocated in the deterministic account test. The full workspace gate
+    passed. Market, feedback, persistence, clock and PaneHarness remain for later parts;
+    M6.1 stays unchecked.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place

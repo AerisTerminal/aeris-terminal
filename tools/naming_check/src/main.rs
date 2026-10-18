@@ -29,6 +29,18 @@ fn has_process_global_desktop_trading(source: &str) -> bool {
     .iter()
     .any(|forbidden| production.contains(forbidden))
 }
+
+fn has_process_global_desktop_account(source: &str) -> bool {
+    let production = production_source_prefix(source);
+    [
+        "DesktopAccount::shared(",
+        "static INSTALLED_ACCOUNT",
+        "static SERVICE: OnceLock<AccountService>",
+        "account::begin_refresh_quiesce(",
+    ]
+    .iter()
+    .any(|forbidden| production.contains(forbidden))
+}
 const MARKET_CHARACTERIZATION_TESTS: &[&str] = &[
     "characterization_reseed_during_live_flow_keeps_one_forming_bar_and_contiguous_history",
     "characterization_outbox_overflow_emits_covering_snapshot",
@@ -265,6 +277,7 @@ fn inspect_desktop_boundaries(
             if violates_desktop_quote_boundary(&relative_path, &source)
                 || violates_fixture_market_boundary(&relative_path, &source)
                 || has_process_global_desktop_trading(&source)
+                || has_process_global_desktop_account(&source)
             {
                 violations.push(relative);
             }
@@ -2960,7 +2973,7 @@ mod tests {
             .expect("update restart preparation boundary");
         let prepare = &workspace_tabs[prepare_start..prepare_end];
         assert!(
-            prepare.contains("aeris_desktop::account::begin_refresh_quiesce()")
+            prepare.contains("self.lifecycle.account_service().begin_refresh_quiesce()")
                 && prepare.contains("account_refresh.wait()?")
                 && prepare.contains("drop(account_refresh)"),
             "update restart must quiesce account refresh and release its claim on cancellation"
@@ -2982,7 +2995,7 @@ mod tests {
 
         let lifecycle = manifest("apps/desktop/src/desktop/lifecycle.rs");
         assert!(
-            lifecycle.contains("aeris_desktop::account::begin_refresh_quiesce()")
+            lifecycle.contains("self.account_service().begin_refresh_quiesce()")
                 && lifecycle.contains(
                     "retain_account_refresh_quiesce_for_exit(account_refresh, \"desktop exit\")"
                 )
@@ -4106,7 +4119,7 @@ jobs:
         }
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(desktop.contains("start_trading_service"));
-        assert!(desktop.contains("DesktopServices::new(trading.clone())"));
+        assert!(desktop.contains("DesktopServices::new(trading.clone(), account_service)"));
         assert!(
             manifest("apps/desktop/src/desktop/lifecycle.rs")
                 .contains("trading.shutdown(Duration::from_secs(2))")
@@ -4143,6 +4156,37 @@ jobs:
             assert!(
                 !super::has_process_global_desktop_trading(&source),
                 "{} bypasses injected desktop trading",
+                relative_string(&path)
+            );
+        }
+    }
+
+    #[test]
+    fn injected_desktop_account_accepts_instance_handles_and_test_only_globals() {
+        assert!(!super::has_process_global_desktop_account(
+            "fn account(services: &DesktopServices) { services.account_service.account_status(); }\n\
+             #[cfg(test)] mod tests { static INSTALLED_ACCOUNT: u8 = 0; }\n"
+        ));
+    }
+
+    #[test]
+    fn injected_desktop_account_rejects_globals_after_test_modules() {
+        assert!(super::has_process_global_desktop_account(
+            "#[cfg(test)] mod tests { fn hidden() {} }\n\
+             fn after() { DesktopAccount::shared(); }\n"
+        ));
+        assert!(super::has_process_global_desktop_account(
+            "static SERVICE: OnceLock<AccountService> = OnceLock::new();"
+        ));
+    }
+
+    #[test]
+    fn desktop_account_service_has_no_process_global_lookup() {
+        for path in production_sources_under("apps/desktop/src") {
+            let source = fs::read_to_string(&path).expect("desktop source");
+            assert!(
+                !super::has_process_global_desktop_account(&source),
+                "{} bypasses injected desktop account",
                 relative_string(&path)
             );
         }

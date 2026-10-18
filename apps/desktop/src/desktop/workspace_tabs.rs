@@ -1748,7 +1748,7 @@ impl TerminalApp {
             // handle cannot block GPUI on process shutdown.
             drop(cleanup);
         }
-        if let Some(account) = aeris_desktop::account::DesktopAccount::shared() {
+        if let Some(account) = self.lifecycle.account() {
             let _ = account.request_profile_refresh();
         }
     }
@@ -1761,7 +1761,7 @@ impl TerminalApp {
         self.update_restart_persistence_pending = false;
         let Some(updater) = self.updater.as_mut() else {
             drop(account_refresh);
-            if let Some(account) = aeris_desktop::account::DesktopAccount::shared() {
+            if let Some(account) = self.lifecycle.account() {
                 let _ = account.request_profile_refresh();
             }
             self.workspace_error = Some("update client is unavailable".to_string());
@@ -1795,7 +1795,8 @@ impl TerminalApp {
             .as_ref()
             .map(WorkspaceLayoutPersistence::shutdown_wait);
         let chart_chrome_wait = chart_chrome::chart_chrome_shutdown_wait();
-        let account_refresh = aeris_desktop::account::begin_refresh_quiesce();
+        let account_refresh = self.lifecycle.account_service().begin_refresh_quiesce();
+        let account = self.lifecycle.account().cloned();
 
         self.update_restart_persistence_pending = true;
         let durability = cx.background_executor().spawn(async move {
@@ -1850,9 +1851,7 @@ impl TerminalApp {
                 }
                 terminal_cx.notify();
             });
-            if update.is_err()
-                && let Some(account) = aeris_desktop::account::DesktopAccount::shared()
-            {
+            if update.is_err() && let Some(account) = account {
                 let _ = account.request_profile_refresh();
             }
         })
@@ -1887,7 +1886,9 @@ impl TerminalApp {
         cx: &App,
     ) -> Option<AnyElement> {
         let anchor = self.platform_menu_anchor?;
-        let account = aeris_desktop::account::DesktopAccount::shared()
+        let account = self
+            .lifecycle
+            .account()
             .map_or_else(aeris_desktop::account::unavailable_menu_state, |account| {
                 account.menu_state()
             });
@@ -2917,10 +2918,10 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn request_sign_in(cx: &mut Context<Self>) {
-        let result = aeris_desktop::account::DesktopAccount::shared().map_or_else(
+    pub(super) fn request_sign_in(&self, cx: &mut Context<Self>) {
+        let result = self.lifecycle.account().map_or_else(
             || Err("sign-in is unavailable".to_string()),
-            |account| account.request_sign_in(),
+            aeris_desktop::account::DesktopAccount::request_sign_in,
         );
         if let Err(error) = result {
             diagnostic!("Aeris sign-in degraded: {error}");
@@ -2928,10 +2929,10 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn sign_out(cx: &mut Context<Self>) {
-        let result = aeris_desktop::account::DesktopAccount::shared().map_or_else(
+    pub(super) fn sign_out(&self, cx: &mut Context<Self>) {
+        let result = self.lifecycle.account().map_or_else(
             || Err("sign-in is unavailable".to_string()),
-            |account| account.request_sign_out(),
+            aeris_desktop::account::DesktopAccount::request_sign_out,
         );
         if let Err(error) = result {
             diagnostic!("Aeris sign-out degraded: {error}");
@@ -2939,10 +2940,10 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn reopen_browser_page(cx: &mut Context<Self>) {
-        let result = aeris_desktop::account::DesktopAccount::shared().map_or_else(
+    pub(super) fn reopen_browser_page(&self, cx: &mut Context<Self>) {
+        let result = self.lifecycle.account().map_or_else(
             || Err("sign-in is unavailable".to_string()),
-            |account| account.reopen_browser(),
+            aeris_desktop::account::DesktopAccount::reopen_browser,
         );
         if let Err(error) = result {
             diagnostic!("Aeris browser reopen degraded: {error}");
@@ -2950,10 +2951,10 @@ impl TerminalApp {
         cx.notify();
     }
 
-    pub(super) fn cancel_sign_in(cx: &mut Context<Self>) {
-        let result = aeris_desktop::account::DesktopAccount::shared().map_or_else(
+    pub(super) fn cancel_sign_in(&self, cx: &mut Context<Self>) {
+        let result = self.lifecycle.account().map_or_else(
             || Err("sign-in is unavailable".to_string()),
-            |account| account.request_cancel(),
+            aeris_desktop::account::DesktopAccount::request_cancel,
         );
         if let Err(error) = result {
             diagnostic!("Aeris sign-in cancellation degraded: {error}");
@@ -3153,7 +3154,7 @@ impl TerminalApp {
         if became_active {
             if self.profile_refresh_on_activation {
                 self.profile_refresh_on_activation = false;
-                if let Some(account) = aeris_desktop::account::DesktopAccount::shared()
+                if let Some(account) = self.lifecycle.account()
                     && let Err(error) = account.request_profile_refresh()
                 {
                     diagnostic!("Aeris profile refresh degraded: {error}");
@@ -3188,7 +3189,7 @@ impl TerminalApp {
         window.on_next_frame(move |window, cx| {
             let diagnostics = terminal.update(cx, |terminal, cx| {
                 terminal.frame_poll_gate.complete();
-                if let Some(account) = aeris_desktop::account::DesktopAccount::shared()
+                if let Some(account) = terminal.lifecycle.account()
                     && account.poll()
                 {
                     cx.notify();
@@ -3286,7 +3287,7 @@ impl TerminalApp {
                             );
                             return;
                         }
-                        if let Some(account) = aeris_desktop::account::DesktopAccount::shared()
+                        if let Some(account) = terminal.lifecycle.account()
                             && account.poll()
                         {
                             terminal.schedule_market_frame(window, terminal_cx);

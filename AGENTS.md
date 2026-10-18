@@ -86,6 +86,8 @@ violations and missing verification explicitly, and never describe them as satis
   or a due deadline and drives synchronous `TradingCore::handle`, `on_market`, and `on_timer`.
 - Desktop trading command handles come from the instance's `DesktopServices`, not a
   process-wide `TRADING_SERVICE` or `trading::handle()`/`trading::install()` lookup.
+- Desktop account clients and refresh quiesce use the instance's `DesktopServices` account
+  owner; no process-wide `DesktopAccount::shared()` or account-service singleton lookup.
 - Trading orders and their client, broker, open-scope and executable indexes are owned together by
   `book::OrderBook`; inserts, status replacements and removals must update those indexes through that owner.
 - Simulated fill price and quantity policies belong only to `trading_runtime::execution`;

@@ -58,6 +58,9 @@ impl DesktopLifecycle {
             shutdown_started: Rc::new(Cell::new(false)),
             services: aeris_desktop::services::DesktopServices::new(
                 super::tests::test_trading_service(),
+                aeris_account_runtime::AccountService::new(
+                    aeris_account_runtime::AccountServiceConfig::from_environment(),
+                ),
             ),
             context: None,
             instance_lock: None,
@@ -72,6 +75,14 @@ impl DesktopLifecycle {
 
     pub(super) fn trading(&self) -> &aeris_trading_runtime::TradingService {
         &self.services.trading
+    }
+
+    pub(super) fn account(&self) -> Option<&aeris_desktop::account::DesktopAccount> {
+        self.services.account.as_ref()
+    }
+
+    pub(super) fn account_service(&self) -> &aeris_account_runtime::AccountService {
+        &self.services.account_service
     }
 
     pub(super) fn context_service(&self) -> Option<aeris_context_runtime::ContextService> {
@@ -106,7 +117,7 @@ impl DesktopLifecycle {
         if self.shutdown_started.replace(true) {
             return None;
         }
-        let account_refresh = aeris_desktop::account::begin_refresh_quiesce();
+        let account_refresh = self.account_service().begin_refresh_quiesce();
         let terminals = self.terminals.borrow_mut().drain(..).collect::<Vec<_>>();
         for terminal in terminals {
             terminal

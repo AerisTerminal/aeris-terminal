@@ -599,6 +599,7 @@ impl TerminalApp {
                 error: self.workspace_error.as_deref(),
                 workspace_drag: self.workspace_drag,
                 app_view: self.pages.view,
+                account: self.lifecycle.account(),
                 theme: self.theme,
             },
             window,
