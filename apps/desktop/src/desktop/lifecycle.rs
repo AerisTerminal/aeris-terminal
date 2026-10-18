@@ -66,6 +66,7 @@ impl DesktopLifecycle {
                     std::env::temp_dir()
                         .join(format!("aeris-desktop-lifecycle-{}", std::process::id())),
                 ),
+                Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
             ),
             context: None,
             instance_lock: None,
@@ -80,6 +81,10 @@ impl DesktopLifecycle {
 
     pub(super) fn trading(&self) -> &aeris_trading_runtime::TradingService {
         &self.services.trading
+    }
+
+    pub(super) fn clock(&self) -> &dyn aeris_trading_runtime::clock::Clock {
+        self.services.clock.as_ref()
     }
 
     pub(super) fn trading_feedback(&self) -> &aeris_desktop::trading::TradingFeedback {

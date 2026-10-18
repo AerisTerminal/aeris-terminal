@@ -171,14 +171,6 @@ fn new_alert_id(alerts: &[WorkspacePriceAlertState]) -> Result<String, String> {
     Err("a unique alert identity could not be allocated".to_string())
 }
 
-fn now_unix_nanos() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-        .unwrap_or(i64::MAX)
-}
-
 impl WorkspaceSurface {
     pub(super) fn open_price_alert_dialog(&mut self, request: ChartAlertCreateRequest) {
         let Some(instrument) = self.product.clone() else {
@@ -295,7 +287,7 @@ impl WorkspaceSurface {
             condition: dialog.condition as i32,
             frequency: dialog.frequency as i32,
             status: PriceAlertStatus::Active as i32,
-            created_at_unix_nanos: now_unix_nanos(),
+            created_at_unix_nanos: self.lifecycle.clock().wall_unix_nanos(),
         };
         let mut next = self.price_alerts.clone();
         next.push(alert);

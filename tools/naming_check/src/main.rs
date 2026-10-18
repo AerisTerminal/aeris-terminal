@@ -27,6 +27,8 @@ fn has_process_global_desktop_trading(source: &str) -> bool {
         "trading::install(",
         "static TRADING_FEEDBACK",
         "trading::latest_feedback()",
+        "trading::now()",
+        "static DESKTOP_CLOCK",
     ]
     .iter()
     .any(|forbidden| production.contains(forbidden))
@@ -4197,6 +4199,25 @@ jobs:
     }
 
     #[test]
+    fn injected_desktop_clock_accepts_instance_time_and_test_only_global() {
+        assert!(!super::has_process_global_desktop_trading(
+            "fn stamp(services: &DesktopServices) { services.clock.wall_unix_nanos(); }\n\
+             #[cfg(test)] mod tests { static DESKTOP_CLOCK: u8 = 0; }\n"
+        ));
+    }
+
+    #[test]
+    fn injected_desktop_clock_rejects_global_time_after_test_module() {
+        assert!(super::has_process_global_desktop_trading(
+            "#[cfg(test)] mod tests { fn hidden() {} }\n\
+             fn stamp() { aeris_desktop::trading::now(); }\n"
+        ));
+        assert!(super::has_process_global_desktop_trading(
+            "static DESKTOP_CLOCK: OnceLock<SystemClock> = OnceLock::new();"
+        ));
+    }
+
+    #[test]
     fn desktop_trading_service_has_no_process_global_lookup() {
         for path in production_sources_under("apps/desktop/src") {
             let source = fs::read_to_string(&path).expect("desktop source");
@@ -4274,9 +4295,7 @@ jobs:
     fn injected_desktop_persistence_accepts_instance_owner_and_test_globals() {
         let desktop = manifest("apps/desktop/src/desktop.rs");
         assert!(desktop.contains("DesktopServices::new("));
-        assert!(
-            desktop.contains("trading.clone(),\n        account_service,\n        persistence,")
-        );
+        assert!(desktop.contains("trading,\n        account_service,\n        persistence,"));
         assert!(!super::has_process_global_desktop_persistence(
             "fn save(services: &DesktopServices) { services.persistence.chart_chrome_path(); }\n\
              #[cfg(test)] mod tests { static CHART_CHROME_SAVE_STATE: u8 = 0; }\n"

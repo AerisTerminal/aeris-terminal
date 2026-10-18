@@ -6,6 +6,8 @@ use crate::trading::TradingFeedback;
 use aeris_account_runtime::AccountService;
 use aeris_market_runtime::MarketService;
 use aeris_trading_runtime::TradingService;
+use aeris_trading_runtime::clock::Clock;
+use std::sync::Arc;
 
 /// Cloneable command handles for one desktop instance. Runtime owners remain in
 /// their respective runtimes; this value does not own trading state.
@@ -17,6 +19,7 @@ pub struct DesktopServices {
     pub account_service: AccountService,
     pub account: Option<DesktopAccount>,
     pub persistence: DesktopPersistence,
+    pub clock: Arc<dyn Clock>,
 }
 
 impl DesktopServices {
@@ -26,14 +29,16 @@ impl DesktopServices {
         trading: TradingService,
         account_service: AccountService,
         persistence: DesktopPersistence,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             market,
             trading,
-            trading_feedback: TradingFeedback::default(),
+            trading_feedback: TradingFeedback::with_clock(Arc::clone(&clock)),
             account_service,
             account: None,
             persistence,
+            clock,
         }
     }
 
@@ -52,6 +57,7 @@ impl DesktopServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aeris_trading_runtime::clock::ManualClock;
 
     fn trading() -> TradingService {
         TradingService::start(aeris_trading_runtime::TradingServiceConfig {
@@ -71,6 +77,7 @@ mod tests {
             DesktopPersistence::new(
                 std::env::temp_dir().join(format!("aeris-desktop-services-{}", std::process::id())),
             ),
+            std::sync::Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
         )
     }
 
@@ -151,6 +158,32 @@ mod tests {
                 .revision,
             1
         );
+    }
+
+    #[test]
+    fn desktop_services_clock_drives_shared_trading_feedback_without_cross_instance_time() {
+        let first_clock = Arc::new(ManualClock::new(1_000_000_000));
+        let second_clock = Arc::new(ManualClock::new(2_000_000_000));
+        let first = DesktopServices::new(
+            MarketService::start().expect("first market"),
+            trading(),
+            AccountService::new(aeris_account_runtime::AccountServiceConfig::from_environment()),
+            DesktopPersistence::new(std::env::temp_dir().join("aeris-clock-first")),
+            first_clock.clone(),
+        );
+        let second = DesktopServices::new(
+            MarketService::start().expect("second market"),
+            trading(),
+            AccountService::new(aeris_account_runtime::AccountServiceConfig::from_environment()),
+            DesktopPersistence::new(std::env::temp_dir().join("aeris-clock-second")),
+            second_clock,
+        );
+        let pane_feedback = first.trading_feedback.clone();
+        assert_eq!(pane_feedback.now(), first.clock.wall_unix_nanos());
+        assert_eq!(second.trading_feedback.now(), 2_000_000_000);
+        first_clock.set_wall_unix_nanos(3_000_000_000);
+        assert_eq!(pane_feedback.now(), 3_000_000_000);
+        assert_eq!(second.trading_feedback.now(), 2_000_000_000);
     }
 
     #[test]

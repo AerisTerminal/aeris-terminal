@@ -507,7 +507,7 @@ impl TerminalApp {
         if maximum_lead_seconds == 0 {
             return;
         }
-        let observed_unix_nanos = aeris_desktop::trading::now();
+        let observed_unix_nanos = self.lifecycle.clock().wall_unix_nanos();
         self.event_risk_dispatches.retain(|_, scheduled| {
             scheduled
                 .checked_add(EVENT_GRACE_NANOS)

@@ -2427,7 +2427,7 @@ fn chart_order_from_intent(
         .quantity
         .and_then(|quantity| chart_quantity_fixed_point(quantity, product.quantity_scale))
         .ok_or(ChartIntentRejection::InvalidQuantity)?;
-    let submitted_unix_nanos = aeris_desktop::trading::now();
+    let submitted_unix_nanos = app.lifecycle.clock().wall_unix_nanos();
     let provenance = aeris_trading::TradingProvenance {
         venue_id: "aeris-sim".to_string(),
         provider_id: frame.provider_id.clone(),
@@ -2732,7 +2732,7 @@ fn chart_modify_from_intent(
             return Err(ChartIntentRejection::Unsupported);
         }
     };
-    let modified_unix_nanos = aeris_desktop::trading::now();
+    let modified_unix_nanos = app.lifecycle.clock().wall_unix_nanos();
     Ok(aeris_trading_runtime::ModifyOrder {
         client_order_id,
         time_in_force: order.time_in_force,
@@ -5717,6 +5717,21 @@ fn start_desktop_persistence(
     chart_chrome::DesktopPersistence::new(root)
 }
 
+fn compose_desktop_services(
+    market: aeris_market_runtime::MarketService,
+    trading: aeris_trading_runtime::TradingService,
+    account_service: aeris_account_runtime::AccountService,
+    persistence: chart_chrome::DesktopPersistence,
+) -> aeris_desktop::services::DesktopServices {
+    aeris_desktop::services::DesktopServices::new(
+        market,
+        trading,
+        account_service,
+        persistence,
+        Arc::new(aeris_trading_runtime::clock::SystemClock::default()),
+    )
+}
+
 pub(super) fn run(
     mut command_arguments: Vec<std::ffi::OsString>,
     instance_lock: aeris_platform_runtime::InstanceLock,
@@ -5775,12 +5790,8 @@ pub(super) fn run(
         }
     };
     let persistence = start_desktop_persistence(&account_service);
-    let mut services = aeris_desktop::services::DesktopServices::new(
-        market,
-        trading.clone(),
-        account_service,
-        persistence,
-    );
+    let mut services =
+        compose_desktop_services(market, trading.clone(), account_service, persistence);
     if let Err(error) = services.start_account() {
         diagnostic!("Aeris account session could not start: {error}");
         fatal_startup(

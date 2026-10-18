@@ -89,6 +89,9 @@ violations and missing verification explicitly, and never describe them as satis
 - Desktop trading command feedback belongs to the instance's `DesktopServices`; command
   writers and pane readers use its shared handle, never a process-global
   `TRADING_FEEDBACK` or `trading::latest_feedback()` lookup.
+- Desktop trading instruction and pane alert timestamps use the instance's
+  `DesktopServices` clock; do not restore `trading::now()` or a process-global
+  desktop clock.
 - Desktop account clients and refresh quiesce use the instance's `DesktopServices` account
   owner; no process-wide `DesktopAccount::shared()` or account-service singleton lookup.
 - Desktop market consumers, bridge wakes and shutdown use the instance's `DesktopServices` market

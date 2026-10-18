@@ -1,6 +1,7 @@
 //! Desktop command access to the single in-process trading owner.
 
 use aeris_instruments::InstrumentId;
+use aeris_trading_runtime::clock::{Clock, SystemClock};
 use aeris_trading_runtime::{
     CreatePracticeAccount, ModifyOrder, PlaceBracket, PlaceOrder, TradeCopierConfig, TradingService,
 };
@@ -20,13 +21,35 @@ struct TradingFeedbackState {
 }
 
 /// The status of commands issued by one desktop instance, shared with its panes.
-#[derive(Clone, Default)]
-pub struct TradingFeedback(Arc<Mutex<TradingFeedbackState>>);
+#[derive(Clone)]
+pub struct TradingFeedback {
+    state: Arc<Mutex<TradingFeedbackState>>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Default for TradingFeedback {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(SystemClock::default()))
+    }
+}
 
 impl TradingFeedback {
+    #[must_use]
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(TradingFeedbackState::default())),
+            clock,
+        }
+    }
+
+    #[must_use]
+    pub fn now(&self) -> i64 {
+        self.clock.wall_unix_nanos()
+    }
+
     pub fn record(&self, result: Result<String, String>) {
         let mut state = self
-            .0
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.revision = state.revision.saturating_add(1).max(1);
@@ -47,7 +70,7 @@ impl TradingFeedback {
 
     #[must_use]
     pub fn latest(&self) -> Option<TradingCommandFeedback> {
-        self.0
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .latest
@@ -293,6 +316,7 @@ pub fn dispatch_simulated_order(
     let service = service.clone();
     let feedback = feedback.clone();
     let Some(command) = prepare_simulated_order(
+        feedback.now(),
         frame,
         side,
         selection.account_key,
@@ -340,6 +364,7 @@ pub fn dispatch_simulated_selected_order(
     let service = service.clone();
     let feedback = feedback.clone();
     let Some(entry) = prepare_simulated_order(
+        feedback.now(),
         frame,
         side,
         selection.account_key,
@@ -423,6 +448,7 @@ pub fn dispatch_simulated_order_at_price(
     let service = service.clone();
     let feedback = feedback.clone();
     let Some(mut command) = prepare_simulated_order(
+        feedback.now(),
         frame,
         order.side,
         order.account_key,
@@ -551,7 +577,7 @@ pub fn modify_simulated_order_at_price(
     }
     let service = service.clone();
     let feedback = feedback.clone();
-    let modified_unix_nanos = now();
+    let modified_unix_nanos = feedback.now();
     let provenance = aeris_trading::TradingProvenance {
         venue_id: "aeris-sim".to_string(),
         provider_id: frame.provider_id.clone(),
@@ -616,7 +642,7 @@ pub fn kill_simulated_account(
     let feedback = feedback.clone();
     let account =
         account_key.and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok());
-    let locked_at = now();
+    let locked_at = feedback.now();
     cx.background_executor()
         .spawn(async move {
             feedback.record(kill_feedback(
@@ -661,7 +687,7 @@ pub fn kill_simulated_accounts(
 ) {
     let service = service.clone();
     let feedback = feedback.clone();
-    let locked_at = now();
+    let locked_at = feedback.now();
     cx.background_executor()
         .spawn(async move {
             feedback.record(kill_feedback(
@@ -695,10 +721,12 @@ pub fn register_trade_copier(
 /// Prepares a validated local market order and its optional BBO observation.
 #[must_use]
 pub fn prepare_simulated_market_order(
+    submitted_unix_nanos: i64,
     frame: &aeris_market_data::OrderBookFrame,
     side: aeris_trading::OrderSide,
 ) -> Option<PlaceOrder> {
     prepare_simulated_order(
+        submitted_unix_nanos,
         frame,
         side,
         None,
@@ -711,6 +739,7 @@ pub fn prepare_simulated_market_order(
 /// Prepares an identity-bearing order instruction; the owner prices it from its quote book.
 #[must_use]
 pub fn prepare_simulated_order(
+    submitted_unix_nanos: i64,
     frame: &aeris_market_data::OrderBookFrame,
     side: aeris_trading::OrderSide,
     selected_account_key: Option<String>,
@@ -721,7 +750,6 @@ pub fn prepare_simulated_order(
     if frame.state != aeris_market_data::OrderBookState::Ready {
         return None;
     }
-    let submitted_unix_nanos = now();
     let account_id = selected_account_key
         .and_then(|value| aeris_trading::TradingAccountId::try_new(value).ok())?;
     let instrument_id = InstrumentId::try_new(frame.instrument_id.clone()).ok()?;
@@ -866,15 +894,6 @@ pub fn prepare_flatten_for(
     ))
 }
 
-#[must_use]
-pub fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-        .unwrap_or(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{parse_usd_equity, prepare_simulated_order};
@@ -917,6 +936,7 @@ mod tests {
         let account_id =
             aeris_trading::TradingAccountId::try_new("aeris-sim-2").expect("account id");
         let order = prepare_simulated_order(
+            1_000_000_000,
             &order_book_frame(),
             aeris_trading::OrderSide::Sell,
             Some(account_id.as_str().to_string()),
@@ -934,6 +954,8 @@ mod tests {
         );
         assert!(order.limit_price.is_none());
         assert!(order.stop_price.is_none());
+        assert_eq!(order.submitted_unix_nanos, 1_000_000_000);
+        assert_eq!(order.provenance.observed_unix_nanos, 1_000_000_000);
     }
 
     #[test]
@@ -941,6 +963,7 @@ mod tests {
         let mut frame = order_book_frame();
         frame.quantity_scale = 3;
         let order = prepare_simulated_order(
+            1_000_000_000,
             &frame,
             aeris_trading::OrderSide::Buy,
             Some("aeris-practice-1".to_string()),
@@ -1037,6 +1060,7 @@ mod tests {
         frame.state = aeris_market_data::OrderBookState::Stale;
         assert!(
             prepare_simulated_order(
+                1_000_000_000,
                 &frame,
                 aeris_trading::OrderSide::Buy,
                 Some("aeris-practice-1".into()),

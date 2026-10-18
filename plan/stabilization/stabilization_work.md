@@ -818,6 +818,17 @@ Status: pending
     unrelated parallel GPUI allocations cannot be charged to its process RSS.
     Production endurance and its wall-clock bound are unchanged. Clock
     injection and PaneHarness remain; M6.1 stays unchecked.
+  - Part 8: the composition root supplies a per-instance clock through
+    `DesktopServices` and the shared trading feedback handle. Chart intents,
+    simulated ticket/ladder orders, modifications, kill-switch commands,
+    economic-event dispatch, alert creation and pane time-zone labels now
+    read that injected clock instead of `trading::now()` or local wall-clock
+    lookups. The old trading timestamp helper is deleted and naming_check
+    guards against its return; independent ManualClock instances prove pane
+    feedback sees its own clock. Market worker publication/session timestamps
+    and remaining desktop wall-clock presentation paths require the next
+    clock-routing part; FixtureMarket/PaneHarness and VAL-DSK-001/002
+    closeout remain. M6.1 stays unchecked.
 - [ ] M6.2 notification-center - One `UserNotice` model and `NotificationCenter`
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place

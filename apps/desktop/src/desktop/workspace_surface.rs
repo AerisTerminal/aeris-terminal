@@ -2137,11 +2137,11 @@ impl WorkspaceSurface {
             .value()
             .trim()
             .to_ascii_lowercase();
-        let utc_seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-            .unwrap_or(0);
+        let utc_seconds = self
+            .lifecycle
+            .clock()
+            .wall_unix_nanos()
+            .div_euclid(1_000_000_000);
         AerisChartView::supported_time_zones()
             .iter()
             .copied()
@@ -2179,11 +2179,11 @@ impl WorkspaceSurface {
 
     /// Header clock in the pane's selected zone. It needs no chart, so it shows at startup.
     pub(super) fn chart_time_zone_clock(&self) -> String {
-        let utc_seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|now| i64::try_from(now.as_secs()).ok())
-            .unwrap_or(0);
+        let utc_seconds = self
+            .lifecycle
+            .clock()
+            .wall_unix_nanos()
+            .div_euclid(1_000_000_000);
         AerisChartView::time_zone_clock_label_for(&self.chart_time_zone, utc_seconds)
     }
 
