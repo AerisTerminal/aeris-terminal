@@ -9,7 +9,6 @@ use super::chrome_menu::{
 pub(super) fn indicator_selector(
     app: Entity<WorkspaceSurface>,
     _input: Entity<InputState>,
-    _message: Option<String>,
     enabled: bool,
     theme: &AerisTheme,
 ) -> impl IntoElement {
@@ -40,7 +39,6 @@ pub(super) fn indicator_selector(
 pub(super) struct IndicatorDialogState<'a> {
     pub(super) extent: ChromeMenuExtent,
     pub(super) input: &'a Entity<InputState>,
-    pub(super) message: Option<&'a str>,
     pub(super) keyboard_selection: usize,
     pub(super) keyboard_active: bool,
     pub(super) scroll: &'a ScrollHandle,
@@ -90,9 +88,7 @@ pub(super) fn indicator_dialog_content(
         .iter()
         .filter(|entry| matches!(entry, IndicatorMenuEntry::Indicator(_)))
         .count();
-    let hint = state
-        .message
-        .map_or_else(|| format!("{native_count} native"), str::to_string);
+    let hint = format!("{native_count} native");
     let highlighted = state.keyboard_active.then_some(state.keyboard_selection);
     let mut list = chrome_menu_scroll_body();
     if entries.is_empty() {

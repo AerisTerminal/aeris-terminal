@@ -256,7 +256,6 @@ pub(super) fn chrome_overlay_content(
             IndicatorDialogState {
                 extent,
                 input: &app_state.indicator_input,
-                message: app_state.indicator_message.as_deref(),
                 keyboard_selection: app_state.chrome_selection,
                 keyboard_active: app_state.menu_state.chrome_list_keyboard,
                 scroll: &app_state.scrolls.indicator,

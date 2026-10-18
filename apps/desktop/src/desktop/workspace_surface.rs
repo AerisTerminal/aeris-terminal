@@ -180,7 +180,6 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         indicator_input: init.indicator_input,
         timeframe_input: init.timeframe_input,
         time_zone_input: init.time_zone_input,
-        indicator_message: None,
         studies: init.studies,
         indicator_settings_dialog: None,
         chrome_overlay: None,
@@ -1610,7 +1609,7 @@ fn default_study_line_width(identifier: &str) -> u8 {
     }
 }
 
-fn legacy_runtime_study(
+pub(super) fn legacy_runtime_study(
     local_id: u64,
     indicator: ChartIndicator,
     visible: bool,
@@ -2196,27 +2195,72 @@ impl WorkspaceSurface {
 
     pub(super) fn set_chart_time_zone(&mut self, time_zone: &str, cx: &mut Context<Self>) -> bool {
         if !aeris_chart_integration::TRADINGVIEW_TIME_ZONES.contains(&time_zone) {
-            self.indicator_message = Some(format!("Unsupported chart time zone: {time_zone}"));
+            Self::post_indicator_failure(
+                "chart_time_zone",
+                "Chart settings unavailable",
+                "The selected chart time zone is unsupported.",
+                cx,
+            );
             return false;
         }
         if let Some(chart) = &self.chart
-            && let Err(error) = chart.update(cx, |chart, chart_cx| {
-                let changed = chart.set_time_zone(time_zone)?;
-                if changed {
-                    chart_cx.notify();
-                }
-                Ok::<_, String>(changed)
-            })
+            && chart
+                .update(cx, |chart, chart_cx| {
+                    let changed = chart.set_time_zone(time_zone)?;
+                    if changed {
+                        chart_cx.notify();
+                    }
+                    Ok::<_, String>(changed)
+                })
+                .is_err()
         {
-            self.indicator_message = Some(error);
+            Self::post_indicator_failure(
+                "chart_time_zone",
+                "Chart settings unavailable",
+                "The chart time zone could not be applied.",
+                cx,
+            );
             return false;
         }
+        Self::clear_indicator_failure("chart_time_zone", cx);
         if self.chart_time_zone != time_zone {
             self.chart_time_zone = time_zone.to_string();
             self.chart_persistence_dirty = true;
             cx.notify();
         }
         true
+    }
+
+    pub(super) fn post_indicator_failure(
+        kind: &'static str,
+        title: &'static str,
+        detail: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+            key: notification_center::NoticeKey {
+                scope: cx.entity_id().as_u64(),
+                kind,
+            },
+            severity: notification_center::NoticeSeverity::Warning,
+            tone: notification_center::NoticeTone::Warning,
+            source: notification_center::NoticeSource::Workspace,
+            title,
+            detail: detail.into(),
+            lifetime: notification_center::NoticeLifetime::UntilCleared,
+        }));
+        cx.notify();
+    }
+
+    pub(super) fn clear_indicator_failure(kind: &'static str, cx: &mut Context<Self>) {
+        cx.emit(PaneNoticeEvent::Clear(notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind,
+        }));
+    }
+
+    fn post_study_failure(detail: &'static str, cx: &mut Context<Self>) {
+        Self::post_indicator_failure("study", "Study unavailable", detail, cx);
     }
 
     pub(super) fn apply_highlighted_time_zone(
@@ -3561,21 +3605,21 @@ impl WorkspaceSurface {
                 request_sequence,
                 message,
             } => self.apply_study_registration_failed(request_sequence, message, cx),
-            MarketWorkerMessage::StudyReinitializationFailed { study_id, message } => {
-                self.studies.cancel_reinitialization(study_id);
-                if let Some(dialog) = self.study_settings_dialog_mut()
-                    && dialog.study_id == study_id
-                {
-                    dialog.message = Some(message.clone());
-                }
-                self.indicator_message = Some(message);
-                cx.notify();
-            }
-            MarketWorkerMessage::StudyRemovalFailed { study_id, message } => {
-                if study_removal_failed(&mut self.studies, study_id) {
-                    self.indicator_message = None;
-                } else {
-                    self.indicator_message = Some(message);
+            MarketWorkerMessage::StudyReinitializationFailed {
+                study_id,
+                message: _,
+            } => self.apply_study_reinitialization_failure(study_id, cx),
+            MarketWorkerMessage::StudyRemovalFailed {
+                study_id,
+                message: _,
+            } => {
+                if !study_removal_failed(&mut self.studies, study_id) {
+                    Self::post_indicator_failure(
+                        "study",
+                        "Study unavailable",
+                        "The study could not be removed. Try again.",
+                        cx,
+                    );
                 }
                 cx.notify();
             }
@@ -3737,9 +3781,14 @@ impl WorkspaceSurface {
         };
         let state = self.studies.deferred.remove(index);
         if let Err(error) = self.enqueue_runtime_study(state) {
-            let (state, message) = *error;
+            let (state, _) = *error;
             self.studies.deferred.insert(index, state);
-            self.indicator_message = Some(message);
+            Self::post_indicator_failure(
+                "study",
+                "Study unavailable",
+                "The study could not be queued. Try again.",
+                cx,
+            );
         }
         if !self.studies.deferred.is_empty() {
             cx.notify();
@@ -3805,11 +3854,16 @@ impl WorkspaceSurface {
             .map(|state| state.study_id)
             .collect::<Vec<_>>();
         for study_id in stale {
-            if let Err(message) =
-                self.queue_runtime_study_reinitialization(study_id, series.clone())
+            if self
+                .queue_runtime_study_reinitialization(study_id, series.clone())
+                .is_err()
             {
-                self.indicator_message = Some(message);
-                cx.notify();
+                Self::post_indicator_failure(
+                    "study",
+                    "Study unavailable",
+                    "The study could not be updated. Try again.",
+                    cx,
+                );
             }
         }
     }
@@ -3847,7 +3901,7 @@ impl WorkspaceSurface {
                 }
             });
         }
-        self.indicator_message = None;
+        Self::clear_indicator_failure("study", cx);
         self.synchronize_runtime_studies(cx);
         cx.notify();
     }
@@ -3855,7 +3909,7 @@ impl WorkspaceSurface {
     fn apply_study_registration_failed(
         &mut self,
         request_sequence: u64,
-        message: String,
+        _message: String,
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.studies.pending.remove(&request_sequence) else {
@@ -3865,7 +3919,6 @@ impl WorkspaceSurface {
             self.chart_persistence_dirty = true;
         }
         if state.remove_on_registration {
-            self.indicator_message = None;
             cx.notify();
             return;
         }
@@ -3874,8 +3927,12 @@ impl WorkspaceSurface {
             state.blocked = true;
             self.studies.deferred.insert(0, state);
         }
-        self.indicator_message = Some(message);
-        cx.notify();
+        Self::post_indicator_failure(
+            "study",
+            "Study unavailable",
+            "The study could not be added. Try again.",
+            cx,
+        );
     }
 
     fn apply_study_reinitialized(&mut self, study_id: StudyInstanceId, cx: &mut Context<Self>) {
@@ -3891,8 +3948,22 @@ impl WorkspaceSurface {
         {
             self.indicator_settings_dialog = None;
         }
-        self.indicator_message = None;
+        Self::clear_indicator_failure("study", cx);
         cx.notify();
+    }
+
+    fn apply_study_reinitialization_failure(
+        &mut self,
+        study_id: StudyInstanceId,
+        cx: &mut Context<Self>,
+    ) {
+        self.studies.cancel_reinitialization(study_id);
+        if let Some(dialog) = self.study_settings_dialog_mut()
+            && dialog.study_id == study_id
+        {
+            dialog.message = Some("Study settings could not be applied. Try again.".into());
+        }
+        Self::post_study_failure("Study settings could not be applied. Try again.", cx);
     }
 
     fn apply_study_output(
@@ -3984,6 +4055,7 @@ impl WorkspaceSurface {
         let removed_runtime = self.studies.remove_runtime_subtree(&removed.study_ids);
         if removed_runtime {
             self.chart_persistence_dirty = true;
+            Self::clear_indicator_failure("study", cx);
         }
         if self
             .study_settings_dialog()
@@ -4705,6 +4777,7 @@ impl WorkspaceSurface {
             Ok::<_, String>(changed)
         }) {
             Ok(true) => {
+                Self::clear_indicator_failure("order_flow", cx);
                 self.chart_persistence_dirty = true;
                 if let Some(snapshot) = self.trade_tape.clone() {
                     self.apply_trade_tape_to_chart(&snapshot, cx);
@@ -4712,7 +4785,12 @@ impl WorkspaceSurface {
                 cx.notify();
             }
             Ok(false) => {}
-            Err(error) => self.indicator_message = Some(error),
+            Err(_) => Self::post_indicator_failure(
+                "order_flow",
+                "Order flow unavailable",
+                "The order-flow settings could not be applied.",
+                cx,
+            ),
         }
     }
 
@@ -4932,10 +5010,12 @@ impl WorkspaceSurface {
                 chart.clear_order_flow_trades();
                 chart_cx.notify();
             });
-            self.indicator_message = Some(format!(
-                "Footprint is unavailable: {} has no published price increment",
-                product.display_symbol
-            ));
+            Self::post_indicator_failure(
+                "order_flow",
+                "Order flow unavailable",
+                "Footprint needs a published price increment for this market.",
+                cx,
+            );
             return;
         };
         let result = chart.update(cx, |chart, chart_cx| {
@@ -4951,23 +5031,29 @@ impl WorkspaceSurface {
             }
             result
         });
-        if let Err(error) = result {
-            self.indicator_message = Some(format!(
-                "Order-flow chart could not apply the current trade tape: {error}"
-            ));
+        if result.is_err() {
+            Self::post_indicator_failure(
+                "order_flow",
+                "Order flow unavailable",
+                "The current trade tape could not be applied to the chart.",
+                cx,
+            );
+        } else {
+            Self::clear_indicator_failure("order_flow", cx);
         }
     }
 
     pub(super) fn set_chart_type(&mut self, chart_type: ChartType, cx: &mut Context<Self>) {
         if !super::provider_chart_types(self.provider).contains(&chart_type) {
-            self.indicator_message = Some(format!(
-                "{} charts need trade prints, which {} does not publish.",
-                chart_type.label(),
-                super::terminal_provider_display(self.provider)
-            ));
-            cx.notify();
+            Self::post_indicator_failure(
+                "chart_type",
+                "Chart settings unavailable",
+                "This chart type needs trade prints that the selected market does not publish.",
+                cx,
+            );
             return;
         }
+        Self::clear_indicator_failure("chart_type", cx);
         self.chart_chrome.chart_type = chart_type;
         if let Some(chart) = &self.chart {
             chart.update(cx, |chart, chart_cx| {
@@ -5736,8 +5822,7 @@ impl WorkspaceSurface {
         if self.studies.removing.contains(&study_id)
             || self.studies.reinitializing.contains_key(&study_id)
         {
-            self.indicator_message = Some("Study settings are busy; try again".to_string());
-            cx.notify();
+            Self::post_study_failure("Study settings are busy. Try again.", cx);
             return;
         }
         let Some(active) = self
@@ -5747,35 +5832,26 @@ impl WorkspaceSurface {
             .find(|state| state.study_id == study_id)
             .cloned()
         else {
-            self.indicator_message = Some("Study is no longer active".to_string());
-            cx.notify();
+            Self::post_study_failure("This study is no longer active.", cx);
             return;
         };
-        let series = match self.current_runtime_series() {
-            Ok(series) => series,
-            Err(message) => {
-                self.indicator_message = Some(message);
-                cx.notify();
-                return;
-            }
+        let Ok(series) = self.current_runtime_series() else {
+            Self::post_study_failure("Chart data is not available for this study yet.", cx);
+            return;
         };
-        let registration =
-            match runtime_study_registration(&active.persisted, &series, &self.studies.active) {
-                Ok(registration) => registration,
-                Err(message) => {
-                    self.indicator_message = Some(message);
-                    cx.notify();
-                    return;
-                }
-            };
+        let Ok(registration) =
+            runtime_study_registration(&active.persisted, &series, &self.studies.active)
+        else {
+            Self::post_study_failure("Study settings could not be loaded.", cx);
+            return;
+        };
         let mut draft_values = BTreeMap::new();
         let mut inputs = HashMap::new();
         let mut subscriptions = Vec::new();
         let surface = cx.entity();
         for spec in &registration.definition.settings {
             let Some(value) = registration.settings.get(&spec.identifier).cloned() else {
-                self.indicator_message = Some("Study settings are incomplete".to_string());
-                cx.notify();
+                Self::post_study_failure("Study settings are incomplete.", cx);
                 return;
             };
             if let Some(text) = study_setting_input_text(&value) {
@@ -5842,8 +5918,14 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         self.close_drawing_settings_dialog(false, cx);
+        let kind = match &dialog {
+            IndicatorSettingsDialog::Study(_) => "study",
+            IndicatorSettingsDialog::Volume(_) => "volume_settings",
+            IndicatorSettingsDialog::BigTrades(_) => "big_trades_settings",
+            IndicatorSettingsDialog::Drawing(_) => "drawing",
+        };
         self.indicator_settings_dialog = Some(dialog);
-        self.indicator_message = None;
+        Self::clear_indicator_failure(kind, cx);
         self.chrome_overlay = None;
         self.timeframe_menu_flyout = None;
         self.chrome_selection = 0;
@@ -6061,8 +6143,12 @@ impl WorkspaceSurface {
             .iter()
             .any(|state| state.study_id == study_id)
         {
-            self.indicator_message = Some("Study is no longer active".to_string());
-            cx.notify();
+            Self::post_indicator_failure(
+                "study",
+                "Study unavailable",
+                "This study is no longer active.",
+                cx,
+            );
             return;
         }
         match self.market_worker.try_remove_study(study_id) {
@@ -6074,11 +6160,15 @@ impl WorkspaceSurface {
                 {
                     self.indicator_settings_dialog = None;
                 }
-                self.indicator_message = None;
+                Self::clear_indicator_failure("study", cx);
             }
             Err(_) => {
-                self.indicator_message =
-                    Some("Study removal queue is busy or unavailable".to_string());
+                Self::post_indicator_failure(
+                    "study",
+                    "Study unavailable",
+                    "The study could not be removed. Try again.",
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -6259,8 +6349,12 @@ impl WorkspaceSurface {
             return;
         };
         let Some(settings) = settings else {
-            self.indicator_message = Some("Big trades is no longer on this chart".to_string());
-            cx.notify();
+            Self::post_indicator_failure(
+                "big_trades_settings",
+                "Order flow unavailable",
+                "Big trades is no longer on this chart.",
+                cx,
+            );
             return;
         };
         let (intensity, fixed_minimum) = big_trades_filter_draft(settings.filter);
@@ -6401,8 +6495,12 @@ impl WorkspaceSurface {
             return;
         };
         let Some(settings) = settings else {
-            self.indicator_message = Some("Volume is no longer on this chart".to_string());
-            cx.notify();
+            Self::post_indicator_failure(
+                "volume_settings",
+                "Study unavailable",
+                "Volume is no longer on this chart.",
+                cx,
+            );
             return;
         };
         let average_length =
@@ -6621,8 +6719,12 @@ impl WorkspaceSurface {
                     self.studies.removing.insert(study_id);
                 }
                 Err(_) => {
-                    self.indicator_message =
-                        Some("Study removal queue is busy or unavailable".to_string());
+                    Self::post_indicator_failure(
+                        "study",
+                        "Study unavailable",
+                        "Some studies could not be removed. Try again.",
+                        cx,
+                    );
                 }
             }
         }
@@ -6657,33 +6759,26 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(chart) = self.chart.clone() else {
-            self.indicator_message = Some("Chart data is not available yet".to_string());
-            cx.notify();
+            Self::post_study_failure("Chart data is not available yet.", cx);
             return false;
         };
         let maximum = current_plan_limits().indicators_per_chart;
         let runtime_count = runtime_study_count(&self.studies);
         if chart.read(cx).indicator_states().len() + runtime_count >= maximum {
-            self.indicator_message = Some(format!(
-                "Your plan supports at most {maximum} indicators per chart"
-            ));
-            cx.notify();
+            Self::post_study_failure("This chart has reached its indicator limit.", cx);
             return false;
         }
         if runtime_managed_indicator(indicator) {
-            if let Err(message) = self.current_runtime_series() {
-                self.indicator_message = Some(message);
-                cx.notify();
+            if self.current_runtime_series().is_err() {
+                Self::post_study_failure("Chart data is not available for this study yet.", cx);
                 return false;
             }
             let Some(local_id) = self.studies.allocate_local_id() else {
-                self.indicator_message = Some("Study identity space is exhausted".to_string());
-                cx.notify();
+                Self::post_study_failure("Study identity space is exhausted.", cx);
                 return false;
             };
             let Some(persisted) = legacy_runtime_study(local_id, indicator, true) else {
-                self.indicator_message = Some("Study implementation is unavailable".to_string());
-                cx.notify();
+                Self::post_study_failure("Study implementation is unavailable.", cx);
                 return false;
             };
             let state = PendingRuntimeStudyState {
@@ -6693,20 +6788,14 @@ impl WorkspaceSurface {
                 persist_on_registration: true,
                 blocked: false,
             };
-            return match self.enqueue_runtime_study(state) {
-                Ok(_) => {
-                    self.indicator_message = None;
-                    self.chart_persistence_dirty = true;
-                    cx.notify();
-                    true
-                }
-                Err(error) => {
-                    let (_, message) = *error;
-                    self.indicator_message = Some(message);
-                    cx.notify();
-                    false
-                }
-            };
+            if self.enqueue_runtime_study(state).is_err() {
+                Self::post_study_failure("The study could not be queued. Try again.", cx);
+                return false;
+            }
+            Self::clear_indicator_failure("study", cx);
+            self.chart_persistence_dirty = true;
+            cx.notify();
+            return true;
         }
         let result = chart.update(cx, |chart, chart_cx| {
             let result = chart.add_indicator(indicator);
@@ -6715,18 +6804,16 @@ impl WorkspaceSurface {
             }
             result
         });
-        match result {
-            Ok(_) => {
-                self.indicator_message = None;
-                self.retain_chart_presentation(cx);
-                true
-            }
-            Err(error) => {
-                self.indicator_message = Some(error.to_string());
-                cx.notify();
-                false
-            }
+        if result.is_err() {
+            Self::post_study_failure("The indicator could not be added.", cx);
+            return false;
         }
+        Self::clear_indicator_failure("study", cx);
+        if indicator == ChartIndicator::Volume {
+            Self::clear_indicator_failure("volume_settings", cx);
+        }
+        self.retain_chart_presentation(cx);
+        true
     }
 
     /// Reports what the header's undo and redo controls may offer for the active chart.

@@ -614,7 +614,12 @@ impl WorkspaceSurface {
             began
         });
         if !began {
-            self.indicator_message = Some("This drawing cannot be edited right now".to_string());
+            Self::post_indicator_failure(
+                "drawing",
+                "Drawing unavailable",
+                "This drawing cannot be edited right now.",
+                cx,
+            );
             cx.notify();
             return;
         }

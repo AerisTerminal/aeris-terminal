@@ -571,6 +571,150 @@ fn pane_harness_alert_delete_queue_failure_renders_once_then_success_clears(
 }
 
 #[gpui::test]
+fn pane_harness_unsupported_zone_renders_one_sanitized_notice_and_valid_zone_clears(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = PaneHarness::open(cx);
+    let private_zone = "private-credential-sentinel/Zone";
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            assert!(!pane.set_chart_time_zone(private_zone, cx));
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Chart settings unavailable");
+        assert!(!toaster.notices()[0].detail.contains(private_zone));
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(cx.debug_bounds("toast").is_some(), "zone failure rendered");
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.set_chart_time_zone("Etc/UTC", cx));
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_study_registration_failures_redact_and_success_clears(cx: &mut TestAppContext) {
+    let (harness, cx) = PaneHarness::open(cx);
+    for sequence in 1..=2 {
+        harness.pane.update(cx, |pane, _| {
+            pane.studies.pending.insert(
+                sequence,
+                PendingRuntimeStudyState {
+                    persisted: workspace_surface::legacy_runtime_study(
+                        sequence,
+                        ChartIndicator::Sma,
+                        true,
+                    )
+                    .expect("fixture study"),
+                    resolved_chart_series: None,
+                    remove_on_registration: false,
+                    persist_on_registration: true,
+                    blocked: false,
+                },
+            );
+        });
+        harness
+            .publications
+            .send(MarketWorkerMessage::StudyRegistrationFailed {
+                request_sequence: sequence,
+                message: "private-credential-sentinel".into(),
+            })
+            .expect("fixture study failure enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Study unavailable");
+        assert!(
+            !toaster.notices()[0]
+                .detail
+                .contains("private-credential-sentinel")
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(cx.debug_bounds("toast").is_some(), "study failure rendered");
+    harness.pane.update(cx, |pane, _| {
+        pane.studies.pending.insert(
+            3,
+            PendingRuntimeStudyState {
+                persisted: workspace_surface::legacy_runtime_study(3, ChartIndicator::Sma, true)
+                    .expect("fixture study"),
+                resolved_chart_series: None,
+                remove_on_registration: false,
+                persist_on_registration: true,
+                blocked: false,
+            },
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::StudyRegistered {
+            request_sequence: 3,
+            study_id: StudyInstanceId::try_from_u64(3).expect("fixture identity"),
+        })
+        .expect("fixture registration enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_removed_volume_settings_renders_once_and_readd_clears(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    for _ in 0..2 {
+        cx.update(|window, cx| {
+            harness.pane.update(cx, |pane, cx| {
+                pane.open_volume_dialog(window, cx);
+                assert!(pane.volume_dialog().is_none());
+            });
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Study unavailable");
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "settings failure rendered"
+    );
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.add_indicator(ChartIndicator::Volume, cx));
+    });
+    cx.update(|window, cx| {
+        harness.pane.update(cx, |pane, cx| {
+            pane.open_volume_dialog(window, cx);
+            assert!(pane.volume_dialog().is_some());
+        });
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
 fn pane_harness_smoke_disconnected_fixture_renders_pane(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     cx.read(|cx| assert!(harness.pane.read(cx).chart.is_none()));

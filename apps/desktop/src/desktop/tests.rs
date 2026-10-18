@@ -615,12 +615,6 @@ mod timeframe_input {
         surface.update(cx, |surface, cx| {
             surface.set_chart_type(ChartType::Footprint, cx);
             assert_ne!(surface.chart_chrome.chart_type, ChartType::Footprint);
-            assert!(
-                surface
-                    .indicator_message
-                    .as_deref()
-                    .is_some_and(|message| message.contains("cTrader does not publish"))
-            );
         });
     }
 
@@ -885,16 +879,6 @@ mod timeframe_input {
         })
     }
 
-    fn assert_no_indicator_message(surface: &Entity<WorkspaceSurface>, cx: &VisualTestContext) {
-        cx.read(|cx| {
-            let message = surface.read(cx).indicator_message.clone();
-            assert!(
-                message.is_none(),
-                "unexpected indicator message: {message:?}"
-            );
-        });
-    }
-
     #[gpui::test]
     fn interval_switch_keeps_order_flow_off_the_superseded_chart(cx: &mut TestAppContext) {
         let product = InstallProviderInstrument {
@@ -913,9 +897,6 @@ mod timeframe_input {
             |chart: &Entity<AerisChartView>, minutes: u64, cx: &VisualTestContext| {
                 applied_order_flow_ordinal(chart, &product.instrument_id, minutes, cx)
             };
-        let assert_no_order_flow_error = |cx: &VisualTestContext| {
-            assert_no_indicator_message(&surface, cx);
-        };
 
         cx.update(|_, cx| {
             surface.update(cx, |surface, cx| {
@@ -936,7 +917,6 @@ mod timeframe_input {
         );
         let one_minute = cx.read(|cx| surface.read(cx).chart.clone().expect("installed chart"));
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
-        assert_no_order_flow_error(cx);
 
         // The 5m selection is committed while the 1m chart stays on screen until the 5m
         // covering snapshot arrives; the instrument's tape keeps streaming meanwhile.
@@ -952,7 +932,6 @@ mod timeframe_input {
             MarketWorkerMessage::TradeTape(order_flow_tape(&product, 2, 5)),
             cx,
         );
-        assert_no_order_flow_error(cx);
         assert_eq!(
             applied_ordinal(&one_minute, 1, cx),
             Some(3),
@@ -966,7 +945,6 @@ mod timeframe_input {
             MarketWorkerMessage::TradeTape(order_flow_tape(&product, 3, 6)),
             cx,
         );
-        assert_no_order_flow_error(cx);
         assert_eq!(applied_ordinal(&one_minute, 1, cx), Some(3));
 
         deliver(
@@ -988,7 +966,6 @@ mod timeframe_input {
             cx,
         );
         assert_eq!(applied_ordinal(&replacement, 15, cx), Some(7));
-        assert_no_order_flow_error(cx);
     }
 
     #[gpui::test]
@@ -1403,16 +1380,11 @@ mod timeframe_input {
                 surface.open_big_trades_dialog(window, cx);
                 assert!(surface.big_trades_dialog().is_none());
                 assert!(
-                    surface.indicator_message.is_some(),
-                    "a settings request for a removed indicator is reported"
-                );
-                assert!(
                     surface
                         .add_order_flow_study(workspace_surface::OrderFlowMenuStudy::BigTrades, cx)
                 );
                 surface.open_big_trades_dialog(window, cx);
                 assert!(surface.big_trades_dialog().is_some());
-                assert!(surface.indicator_message.is_none());
             });
         });
         assert_eq!(
@@ -1615,14 +1587,9 @@ mod timeframe_input {
                 surface.chart = Some(cx.new(|_| AerisChartView::new()));
                 surface.open_volume_dialog(window, cx);
                 assert!(surface.volume_dialog().is_none());
-                assert!(
-                    surface.indicator_message.is_some(),
-                    "a settings request for a removed indicator is reported"
-                );
             });
         });
         open_volume_dialog_on_a_volume_chart(&surface, cx);
-        assert!(cx.read(|cx| surface.read(cx).indicator_message.is_none()));
         assert!(cx.debug_bounds("volume_dialog").is_some());
         let input = volume_length_input(&surface, cx);
         cx.read(|cx| {

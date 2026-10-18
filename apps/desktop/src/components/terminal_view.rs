@@ -35,7 +35,6 @@ fn active_header_state(
                     .find(|account| &account.id == id)
             })
             .map(|account| account.display_name.clone()),
-        indicator_message: workspace.indicator_message.clone(),
         series_message: workspace.series_message.clone(),
         pending: HeaderPendingState {
             symbol_selection: workspace.market_state.symbol_selection_pending,

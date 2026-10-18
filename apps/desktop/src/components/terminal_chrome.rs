@@ -540,7 +540,6 @@ pub(super) fn header_controls(
         .child(indicator_selector(
             app.clone(),
             state.indicator_input,
-            state.indicator_message,
             state.controls.enabled(HeaderControls::INDICATOR),
             &state.theme,
         ))
