@@ -131,6 +131,21 @@ fn write_v19_bracket_fixture(path: &std::path::Path, only_awaiting: bool) {
         .expect("fixture rows");
 }
 
+/// Writes the VAL-TRD-050/051 desktop fixture: a V19 store with awaiting, active, completed and
+/// cancelled managed brackets plus a standalone protective order.
+#[test]
+#[ignore = "writes the documented V19 fixture path for desktop validation"]
+fn generate_v19_bracket_fixture_for_validation() {
+    let path = std::env::var_os("AERIS_V19_FIXTURE_OUT")
+        .map(std::path::PathBuf::from)
+        .expect("set AERIS_V19_FIXTURE_OUT to the output trading.sqlite3 path");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("fixture parent");
+    }
+    write_v19_bracket_fixture(&path, false);
+    println!("generated V19 bracket fixture at {}", path.display());
+}
+
 /// The pre-migration backup keeps the schema and rows the fixture started with.
 fn assert_v19_backup(directory: &TestDirectory) {
     let backups = std::fs::read_dir(directory.0.join("backups"))

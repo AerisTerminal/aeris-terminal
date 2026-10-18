@@ -20,8 +20,8 @@ const FIXTURE_PROVENANCE: &str = "{\"venue_id\":\"aeris-sim\",\"provider_id\":\"
 /// working GTC orders (the last two Inactive held legs), `fills` alternating fills netting one
 /// long contract, and the matching open position. Returns after the first service boot has
 /// migrated/backfilled the account and registered the fixture instrument.
-fn write_load_fixture(directory: &TestDirectory, terminal: usize, open: usize, fills: usize) {
-    let path = config(directory).database_path;
+fn write_load_fixture(database_path: &std::path::Path, terminal: usize, open: usize, fills: usize) {
+    let path = database_path.to_path_buf();
     std::fs::create_dir_all(path.parent().expect("store directory")).expect("fixture directory");
     {
         let connection = rusqlite::Connection::open(&path).expect("fixture database");
@@ -34,8 +34,12 @@ fn write_load_fixture(directory: &TestDirectory, terminal: usize, open: usize, f
             )
             .expect("fixture account");
     }
-    let mut configuration = config(directory);
-    configuration.retention = TradingRetention::default();
+    let configuration = TradingServiceConfig {
+        database_path: path.clone(),
+        retention: TradingRetention::default(),
+        clock: std::sync::Arc::new(crate::clock::SystemClock::default()),
+        execution: ExecutionPolicy::default(),
+    };
     let service = start_service_with_config(configuration);
     service
         .register_instrument(instrument())
@@ -50,6 +54,18 @@ fn write_load_fixture(directory: &TestDirectory, terminal: usize, open: usize, f
         .expect("fixture transaction");
     write_load_rows(&transaction, &instrument_id, terminal, open, fills);
     transaction.commit().expect("fixture commit");
+}
+
+/// Writes the VAL-TRD-068 desktop fixture: a current-schema store with more than 10,000
+/// terminal orders, one open position and one working limit (plus two inactive held legs).
+#[test]
+#[ignore = "writes the documented load fixture path for desktop validation"]
+fn generate_gui_load_fixture_for_validation() {
+    let path = std::env::var_os("AERIS_LOAD_FIXTURE_OUT")
+        .map(std::path::PathBuf::from)
+        .expect("set AERIS_LOAD_FIXTURE_OUT to the output trading.sqlite3 path");
+    write_load_fixture(&path, 10_001, 3, LOAD_FILLS);
+    println!("generated GUI load fixture at {}", path.display());
 }
 
 /// Writes the order, event, fill and position rows for the load fixture in one transaction.
@@ -200,7 +216,7 @@ fn working_set_and_snapshot_stay_bounded_at_50000_orders() {
     // newest 500 fills; the compatibility snapshot succeeds far beyond 10,000 orders.
     let directory = TestDirectory::new("publication-load");
     write_load_fixture(
-        &directory,
+        &config(&directory).database_path,
         LOAD_TERMINAL_ORDERS,
         LOAD_OPEN_ORDERS,
         LOAD_FILLS,
@@ -255,7 +271,7 @@ fn history_pages_return_every_order_exactly_once_in_order() {
     // exactly once in insertion order, and the reader connection rejects writes.
     let directory = TestDirectory::new("publication-history");
     write_load_fixture(
-        &directory,
+        &config(&directory).database_path,
         LOAD_TERMINAL_ORDERS,
         LOAD_OPEN_ORDERS,
         LOAD_FILLS,
