@@ -5117,7 +5117,7 @@ impl WorkspaceSurface {
 
     pub(super) fn submit_symbol_input(&mut self, cx: &mut Context<Self>) -> bool {
         let entries = self.instrument_entries(cx);
-        match symbol_submit_decision(self.symbol_provider, entries.len(), self.chrome_selection) {
+        match symbol_submit_decision(entries.len(), self.chrome_selection) {
             SymbolSubmitDecision::Select(index) => entries.get(index).is_some_and(|entry| {
                 self.select_instrument(entry.selection, self.symbol_selection_target, cx)
             }),

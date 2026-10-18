@@ -2377,19 +2377,13 @@ fn symbol_input_searches_only_on_change_events() {
 #[test]
 fn enter_closes_only_for_an_available_provider_selection() {
     assert_eq!(
-        symbol_submit_decision(TerminalProvider::Rithmic, 3, 1),
+        symbol_submit_decision(3, 1),
         SymbolSubmitDecision::Select(1)
     );
+    assert_eq!(symbol_submit_decision(0, 0), SymbolSubmitDecision::Search);
+    assert_eq!(symbol_submit_decision(1, 2), SymbolSubmitDecision::Search);
     assert_eq!(
-        symbol_submit_decision(TerminalProvider::Rithmic, 0, 0),
-        SymbolSubmitDecision::Search
-    );
-    assert_eq!(
-        symbol_submit_decision(TerminalProvider::Rithmic, 1, 2),
-        SymbolSubmitDecision::Search
-    );
-    assert_eq!(
-        symbol_submit_decision(TerminalProvider::Rithmic, 2, 0),
+        symbol_submit_decision(2, 0),
         SymbolSubmitDecision::Select(0)
     );
 }
@@ -3488,13 +3482,9 @@ fn chart_error_and_stale_notices_use_truthful_severity() {
 
 #[test]
 fn contextual_labels_keep_contract_and_pending_series_truthful() {
-    assert_eq!(instrument_selector_label(None, false), "Contract");
+    assert_eq!(instrument_selector_label(None), "Contract");
     assert_eq!(
-        instrument_selector_label(Some(("MNQU6", "CME")), false),
-        "MNQU6 / CME"
-    );
-    assert_eq!(
-        instrument_selector_label(Some(("MNQU6", "CME")), true),
+        instrument_selector_label(Some(("MNQU6", "CME"))),
         "MNQU6 / CME"
     );
     assert_eq!(series_selector_label(ChartInterval::Minute1), "1m");

@@ -3159,15 +3159,10 @@ enum SymbolSubmitDecision {
     Search,
 }
 
-const fn symbol_submit_decision(
-    provider: TerminalProvider,
-    result_count: usize,
-    highlighted: usize,
-) -> SymbolSubmitDecision {
+const fn symbol_submit_decision(result_count: usize, highlighted: usize) -> SymbolSubmitDecision {
     if highlighted < result_count {
         return SymbolSubmitDecision::Select(highlighted);
     }
-    let _ = provider;
     SymbolSubmitDecision::Search
 }
 
@@ -3628,8 +3623,7 @@ const fn connectivity_chart_state(
     }
 }
 
-fn instrument_selector_label(selected: Option<(&str, &str)>, selection_pending: bool) -> String {
-    let _ = selection_pending;
+fn instrument_selector_label(selected: Option<(&str, &str)>) -> String {
     selected.map_or_else(
         || "Contract".to_string(),
         |(symbol, exchange)| format!("{symbol} / {exchange}"),
@@ -3643,15 +3637,12 @@ fn terminal_instrument_label(app: &WorkspaceSurface) -> String {
             |product| product.display_symbol.clone(),
         );
     }
-    instrument_selector_label(
-        app.symbol_browser.selected().map(|selection| {
-            (
-                selection.instrument.symbol.as_str(),
-                selection.instrument.exchange.as_str(),
-            )
-        }),
-        app.market_state.symbol_selection_pending,
-    )
+    instrument_selector_label(app.symbol_browser.selected().map(|selection| {
+        (
+            selection.instrument.symbol.as_str(),
+            selection.instrument.exchange.as_str(),
+        )
+    }))
 }
 
 fn series_selector_label(selected: ChartInterval) -> String {
@@ -3711,8 +3702,22 @@ fn terminal_startup_state(
 ) -> TerminalStartupState {
     match startup {
         MarketWorkerStartup::Rithmic => {
-            let shell =
-                rithmic_shell::RithmicShellState::local().expect("fixed Rithmic profile validates");
+            let Ok(shell) = rithmic_shell::RithmicShellState::local() else {
+                diagnostic!("Aeris market connection shell could not be initialized");
+                let message = "Market connection could not be initialized".to_string();
+                return TerminalStartupState {
+                    chart: None,
+                    chart_state: ChartState::Error,
+                    chart_state_message: message.clone(),
+                    replay_label: message.clone(),
+                    worker_label: "Market worker".to_string(),
+                    subscription_id: "Unavailable".to_string(),
+                    connection_state: Some(FeedConnectionState::Disconnected),
+                    connection_message: Some(message),
+                    provider: TerminalProvider::Rithmic,
+                    product: None,
+                };
+            };
             let profile = shell.profile_label();
             let connection = shell.connection();
             let message = shell.message().to_string();
@@ -5991,14 +5996,17 @@ fn mount_desktop(
                     existing_root = Some(build(window, cx));
                 } else {
                     let options = desktop_window_options(window_index, cx);
-                    cx.open_window(options, build)
-                        .expect("the Aeris terminal window opens");
+                    if let Err(error) = cx.open_window(options, build) {
+                        diagnostic!("Aeris terminal window could not open: {error}");
+                    }
                 }
             }
         }
         DesktopLayout::WorkspaceTabs => {
-            let workspace_factory =
-                workspace_factory.expect("workspace layout has a market workspace factory");
+            let Some(workspace_factory) = workspace_factory else {
+                diagnostic!("Aeris workspace factory is unavailable");
+                return None;
+            };
             let build = move |window: &mut Window, cx: &mut App| {
                 workspace_tabs_root(
                     workspace_panes,
@@ -6017,8 +6025,9 @@ fn mount_desktop(
                 existing_root = Some(build(window, cx));
             } else {
                 let options = desktop_window_options(0, cx);
-                cx.open_window(options, build)
-                    .expect("the Aeris workspace window opens");
+                if let Err(error) = cx.open_window(options, build) {
+                    diagnostic!("Aeris workspace window could not open: {error}");
+                }
             }
         }
     }
