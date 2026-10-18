@@ -12,15 +12,49 @@ use std::collections::BTreeSet;
 const LOAD_TERMINAL_ORDERS: usize = 50_000;
 const LOAD_OPEN_ORDERS: usize = 100;
 const LOAD_FILLS: usize = 601;
+struct LoadFixtureShape {
+    instrument: TradingInstrument,
+    quantity_units: i64,
+    fill_price_units: i64,
+    limit_price_units: i64,
+}
+
+fn desktop_load_shape() -> LoadFixtureShape {
+    LoadFixtureShape {
+        instrument: high_precision_crypto_instrument(),
+        quantity_units: 10_000_000, // 0.1 BTC at the live instrument's scale of 8
+        fill_price_units: 8_150_000_000_000, // 81,500 USD
+        limit_price_units: 7_800_000_000_000, // 78,000 USD, resting below the market
+    }
+}
+
+fn test_load_shape() -> LoadFixtureShape {
+    LoadFixtureShape {
+        instrument: instrument(),
+        quantity_units: 1,
+        fill_price_units: 5_000,
+        limit_price_units: 5_000,
+    }
+}
 /// The provenance every fixture row carries, in the store's encoded shape.
 const FIXTURE_PROVENANCE: &str = "{\"venue_id\":\"aeris-sim\",\"provider_id\":\"fixture\",\
     \"session_generation\":1,\"source_sequence\":1,\"observed_unix_nanos\":1}";
 
 /// Builds a file-backed store at the current schema with `terminal` terminal orders, `open`
 /// working GTC orders (the last two Inactive held legs), `fills` alternating fills netting one
-/// long contract, and the matching open position. Returns after the first service boot has
+/// long fixture quantity, and the matching open position. Returns after the first service boot has
 /// migrated/backfilled the account and registered the fixture instrument.
 fn write_load_fixture(database_path: &std::path::Path, terminal: usize, open: usize, fills: usize) {
+    write_load_fixture_with_shape(database_path, terminal, open, fills, &test_load_shape());
+}
+
+fn write_load_fixture_with_shape(
+    database_path: &std::path::Path,
+    terminal: usize,
+    open: usize,
+    fills: usize,
+    shape: &LoadFixtureShape,
+) {
     let path = database_path.to_path_buf();
     std::fs::create_dir_all(path.parent().expect("store directory")).expect("fixture directory");
     {
@@ -42,29 +76,45 @@ fn write_load_fixture(database_path: &std::path::Path, terminal: usize, open: us
     };
     let service = start_service_with_config(configuration);
     service
-        .register_instrument(instrument())
+        .register_instrument(shape.instrument.clone())
         .expect("fixture instrument");
     service
         .shutdown(Duration::from_secs(2))
         .expect("boot stops");
-    let instrument_id = instrument().instrument_id.as_str().to_string();
+    let instrument_id = shape.instrument.instrument_id.as_str().to_string();
     let connection = rusqlite::Connection::open(&path).expect("fixture database");
     let transaction = connection
         .unchecked_transaction()
         .expect("fixture transaction");
-    write_load_rows(&transaction, &instrument_id, terminal, open, fills);
+    write_load_rows(&transaction, &instrument_id, terminal, open, fills, shape);
     transaction.commit().expect("fixture commit");
 }
 
 /// Writes the VAL-TRD-068 desktop fixture: a current-schema store with more than 10,000
-/// terminal orders, one open position and one working limit (plus two inactive held legs).
+/// terminal orders, one BTC-USDC position and one working BTC-USDC limit (plus two
+/// inactive held legs), all at the live instrument's price and quantity scales.
 #[test]
 #[ignore = "writes the documented load fixture path for desktop validation"]
 fn generate_gui_load_fixture_for_validation() {
     let path = std::env::var_os("AERIS_LOAD_FIXTURE_OUT")
         .map(std::path::PathBuf::from)
         .expect("set AERIS_LOAD_FIXTURE_OUT to the output trading.sqlite3 path");
-    write_load_fixture(&path, 10_001, 3, LOAD_FILLS);
+    write_load_fixture_with_shape(&path, 10_001, 3, LOAD_FILLS, &desktop_load_shape());
+    let connection = rusqlite::Connection::open(&path).expect("inspect fixture");
+    let (terminal, working, position): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM orders WHERE status IN ('filled', 'cancelled')),
+                (SELECT COUNT(*) FROM orders WHERE status = 'working'
+                    AND instrument_id = 'hyperliquid:perp:BTC'),
+                (SELECT COUNT(*) FROM positions WHERE net_units != 0
+                    AND instrument_id = 'hyperliquid:perp:BTC')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("fixture counts");
+    assert!(terminal >= 10_001);
+    assert_eq!((working, position), (1, 1));
     println!("generated GUI load fixture at {}", path.display());
 }
 
@@ -75,6 +125,7 @@ fn write_load_rows(
     terminal: usize,
     open: usize,
     fills: usize,
+    shape: &LoadFixtureShape,
 ) {
     let mut sequence = 1_i64;
     {
@@ -106,9 +157,17 @@ fn write_load_rows(
                     if is_open { "gtc" } else { "day" },
                     status,
                     submitted,
-                    i64::from(has_fill),
+                    if has_fill { shape.quantity_units } else { 0 },
                     if is_open { None } else { Some(submitted + 1) },
                     FIXTURE_PROVENANCE,
+                    shape.quantity_units,
+                    shape.instrument.quantity_scale,
+                    if is_open {
+                        shape.limit_price_units
+                    } else {
+                        shape.fill_price_units
+                    },
+                    shape.instrument.price_scale,
                 ])
                 .expect("fixture order");
             event_statement
@@ -131,6 +190,10 @@ fn write_load_rows(
                         if index % 2 == 0 { "buy" } else { "sell" },
                         submitted + 5,
                         FIXTURE_PROVENANCE,
+                        shape.fill_price_units,
+                        shape.instrument.price_scale,
+                        shape.quantity_units,
+                        shape.instrument.quantity_scale,
                     ])
                     .expect("fixture fill");
                 accounting_statement
@@ -138,17 +201,23 @@ fn write_load_rows(
                     .expect("fixture accounting");
             }
         }
-        // The fills alternate buy/sell from an even count start, netting one long contract at
-        // 50.00 with zero realized P&L.
-        assert_eq!(fills % 2, 1, "the fixture nets exactly one long contract");
+        // Alternating equal fills net one long quantity with zero realized P&L.
+        assert_eq!(fills % 2, 1, "the fixture nets exactly one long quantity");
         let last_fill_at = i64::try_from(fills - 1).expect("fill index") * 10 + 15;
         transaction
             .execute(
                 "INSERT INTO positions(account_id, instrument_id, net_units, net_scale,
                     average_units, average_scale, realized_units, realized_scale,
                     unrealized_units, unrealized_scale, last_fill_unix_nanos)
-                 VALUES ('aeris-sim-1', ?1, 1, 0, 5000, 2, 0, 2, 0, 2, ?2)",
-                rusqlite::params![instrument_id, last_fill_at],
+                 VALUES ('aeris-sim-1', ?1, ?2, ?3, ?4, ?5, 0, 2, 0, 2, ?6)",
+                rusqlite::params![
+                    instrument_id,
+                    shape.quantity_units,
+                    shape.instrument.quantity_scale,
+                    shape.fill_price_units,
+                    shape.instrument.price_scale,
+                    last_fill_at
+                ],
             )
             .expect("fixture position");
         transaction
@@ -176,8 +245,8 @@ fn load_fixture_statements<'a>(
                 limit_scale, status, submitted_unix_nanos, provenance_json, filled_units,
                 filled_scale, terminal_unix_nanos, accepted_unix_nanos, updated_unix_nanos,
                 eligible_after_unix_nanos)
-             VALUES (?1, ?2, 'aeris-sim-1', ?3, 'buy', 'limit', ?4, 1, 0, 5000, 2, ?5,
-                ?6, ?9, ?7, 0, ?8, ?6, ?6, ?6)",
+             VALUES (?1, ?2, 'aeris-sim-1', ?3, 'buy', 'limit', ?4, ?10, ?11, ?12, ?13, ?5,
+                ?6, ?9, ?7, ?11, ?8, ?6, ?6, ?6)",
         )
         .expect("order statement");
     let event = transaction
@@ -192,7 +261,7 @@ fn load_fixture_statements<'a>(
             "INSERT INTO fills(id, order_id, account_id, instrument_id, side, price_units,
                 price_scale, quantity_units, quantity_scale, execution_unix_nanos,
                 provenance_json)
-             VALUES (?1, ?2, 'aeris-sim-1', ?3, ?4, 5000, 2, 1, 0, ?5, ?6)",
+             VALUES (?1, ?2, 'aeris-sim-1', ?3, ?4, ?7, ?8, ?9, ?10, ?5, ?6)",
         )
         .expect("fill statement");
     let accounting = transaction
@@ -208,6 +277,42 @@ fn load_service(directory: &TestDirectory) -> TradingService {
     let mut configuration = config(directory);
     configuration.retention = TradingRetention::default();
     start_service_with_config(configuration)
+}
+
+#[test]
+fn desktop_load_fixture_recovers_btc_position_and_working_limit() {
+    let directory = TestDirectory::new("publication-desktop-btc");
+    write_load_fixture_with_shape(
+        &config(&directory).database_path,
+        10_001,
+        3,
+        LOAD_FILLS,
+        &desktop_load_shape(),
+    );
+    let service = load_service(&directory);
+    let snapshot = service.snapshot().expect("load fixture snapshot");
+    assert_eq!(snapshot.orders.len(), 10_004);
+    assert_eq!(snapshot.positions.len(), 1);
+    assert_eq!(
+        snapshot.positions[0].instrument_id.as_str(),
+        "hyperliquid:perp:BTC"
+    );
+    assert_eq!(
+        snapshot.positions[0].net_quantity,
+        FixedPoint::try_new(10_000_000, 8).expect("BTC quantity")
+    );
+    assert_eq!(
+        snapshot
+            .orders
+            .iter()
+            .filter(|order| {
+                order.status == OrderStatus::Working
+                    && order.instrument_id.as_str() == "hyperliquid:perp:BTC"
+            })
+            .count(),
+        1
+    );
+    service.shutdown(Duration::from_secs(5)).expect("shutdown");
 }
 
 #[test]
