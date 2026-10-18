@@ -1531,9 +1531,16 @@ impl MarketDataWorker {
             return None;
         }
         if let Some(commands) = self.commands.take() {
-            let _ = commands
-                .try_send(MarketWorkerCommand::Shutdown)
-                .inspect(|()| commands.notify());
+            match commands.try_send(MarketWorkerCommand::Shutdown) {
+                Ok(()) | Err(TrySendError::Full(_)) => {
+                    // A full queue drains before sender closure ends the worker;
+                    // wake it even when Shutdown itself did not fit.
+                    commands.notify();
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    // The background consumer has already retired.
+                }
+            }
             drop(commands);
         }
         drop(self.messages.take());
@@ -1558,7 +1565,7 @@ impl Drop for MarketDataWorker {
         // hands the acknowledgement to DesktopLifecycle, which waits for it on
         // the background executor. An unexpected drop still requests shutdown
         // and releases the receiver; it simply does not block its caller.
-        let _ = self.begin_retirement();
+        drop(self.begin_retirement());
     }
 }
 
@@ -1610,7 +1617,7 @@ mod tests {
     use std::{
         sync::{
             Arc,
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
             mpsc::{self, TrySendError},
         },
         thread,
@@ -1688,6 +1695,40 @@ mod tests {
             .expect("drop does not wait for the worker acknowledgement");
         release_tx.send(()).expect("release worker acknowledgement");
         drop_thread.join().expect("drop caller exits");
+        worker_thread.join().expect("worker exits");
+    }
+
+    #[test]
+    fn full_retirement_queue_wakes_and_closes_after_draining() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (_message_tx, message_rx) = market_worker_channel(NonZeroUsize::MIN);
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wakes);
+        let mut worker =
+            MarketDataWorker::from_channels(command_tx, message_rx, shutdown_rx, None, None)
+                .with_command_wake(Arc::new(move || {
+                    wake_counter.fetch_add(1, Ordering::Relaxed);
+                }));
+        worker
+            .try_set_market_resource_class(ConsumerResourceClass::Background)
+            .expect("fill the bounded worker queue");
+        let worker_thread = thread::spawn(move || {
+            release_rx.recv().expect("allow retirement to drain");
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(MarketWorkerCommand::ResourceClass(
+                    ConsumerResourceClass::Background
+                ))
+            ));
+            assert!(command_rx.recv().is_err(), "sender closure ends the worker");
+            shutdown_tx.send(()).expect("acknowledge retirement");
+        });
+        let retirement = worker.begin_retirement().expect("retirement receipt");
+        assert_eq!(wakes.load(Ordering::Relaxed), 2, "full retirement wakes");
+        release_tx.send(()).expect("release worker");
+        assert!(retirement.wait());
         worker_thread.join().expect("worker exits");
     }
 

@@ -965,6 +965,23 @@ Status: pending
     safe platform opener, and ConnectProvider requires M6.9 descriptor-driven
     login rather than another provider switch; connection/series feedback and
     discarded-result/unwrap cleanup also remain.
+  - Part 14: audited the bounded market/workspace discards. Failed pane
+    resource-class demand now posts one sanitized, keyed notice through the
+    existing owner; a successfully queued class clears it. Detached shutdown
+    treats a closed receiver as expected, reports queue saturation only to
+    diagnostics and clears stale demand notices. A full worker retirement queue
+    explicitly wakes and drains before sender closure; implicit Drop abandons
+    only the acknowledgement, never blocks the UI. Failed automatic study
+    removal and an invalid previously accepted search retained for retry are
+    diagnosed without duplicating user notices. Default-listing searches already
+    post a keyed notice on failure, while a pending search retains the replacement;
+    empty-chart precision `false` is not an error. The existing order-book
+    request and pending price-alert handlers already post keyed notices, so
+    neither needed another path. PaneHarness and worker tests cover saturated
+    demand, deduplication, recovery, detached shutdown and full-queue retirement.
+    M6.2 remains unchecked: GPUI owner-update discards, account profile refresh,
+    market bridge feedback sends, other shutdown/diagnostic discards, connection
+    and series feedback, deferred source/actions and unwrap cleanup remain.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1291,6 +1308,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 11 fix(desktop): removed per-pane chart-state message storage; chart status derives from typed chart/connection state, pending timeframe and sanitized failure cause, retaining distinct unsupported-restore and worker-stop status. Runtime failures post one pane-keyed notice and successful coverage clears it; PaneHarness exercises redaction, rendered one-card deduplication and recovery. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for startup chart setters, other pane feedback, source/action variants and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 12 fix(desktop): deferred fallible empty-chart startup setters until after pane notice subscription; their real errors post the same sanitized chart-restore key as snapshot chart restore, with no duplicate state. PaneHarness exercises actual Rithmic startup creation, initial failure, repeated keyed one-card rendering and corrected-zone replacement snapshot clearing. Focused and full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for connection/series feedback, source/action variants and discarded-result/unwrap cleanup.
 - 2026-10-18 M6.2 Part 13 fix(desktop): classified existing pane notices by pane and provider selection by the registered provider ID; added one real Retry action for chart-preference save failure through the existing toaster to TerminalApp's async save. Rendered click, keyed replacement, pane source and provider-selection tests passed; full workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1. M6.2 remains open for Trading(RequestId), OpenFolder/ConnectProvider prerequisites, connection/series feedback and discarded-result/unwrap cleanup.
+- 2026-10-18 M6.2 Part 14 fix(desktop): handled saturated pane resource-class demand with one keyed notice and successful clear, distinguished detached shutdown and market worker full-queue retirement, and documented/diagnosed pending search, automatic study removal and empty-chart precision outcomes. PaneHarness and worker retirement regressions plus full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for GPUI owner-update, profile refresh, market bridge and shutdown discards, other source/actions, connection/series feedback and unwrap cleanup.
 
 ## 7. Known gaps / deferred
 

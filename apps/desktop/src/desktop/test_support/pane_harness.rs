@@ -507,6 +507,47 @@ fn pane_harness_disconnected_order_book_request_renders_one_notice(cx: &mut Test
 }
 
 #[gpui::test]
+fn pane_harness_resource_class_failure_deduplicates_and_retry_clears(cx: &mut TestAppContext) {
+    let (mut harness, cx) =
+        PaneHarness::open_with_restore_and_full_queue(WorkspaceSurfaceRestore::default(), true, cx);
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            pane.set_market_resource_class(ConsumerResourceClass::Background, cx);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].key.kind, "market_resource_class");
+        assert_eq!(
+            notices[0].source,
+            notification_center::NoticeSource::Pane(harness.pane.entity_id().as_u64())
+        );
+        assert_eq!(
+            harness
+                .window
+                .read(cx)
+                .toaster
+                .live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    while harness.commands.as_ref().unwrap().try_recv().is_ok() {}
+    harness.pane.update(cx, |pane, cx| {
+        pane.set_market_resource_class(ConsumerResourceClass::Foreground, cx);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+    drop(harness.commands.take());
+    harness.pane.update(cx, |pane, cx| {
+        pane.set_market_resource_class(ConsumerResourceClass::Detached, cx);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
 fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
     cx: &mut TestAppContext,
 ) {

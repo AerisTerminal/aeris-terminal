@@ -2003,11 +2003,47 @@ impl WorkspaceSurface {
         }
     }
 
-    pub(super) fn set_market_resource_class(&mut self, resource_class: ConsumerResourceClass) {
+    pub(super) fn set_market_resource_class(
+        &mut self,
+        resource_class: ConsumerResourceClass,
+        cx: &mut Context<Self>,
+    ) {
         self.resource_class = resource_class;
-        let _ = self
+        let key = notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind: "market_resource_class",
+        };
+        match self
             .market_worker
-            .try_set_market_resource_class(resource_class);
+            .try_set_market_resource_class(resource_class)
+        {
+            Ok(()) => cx.emit(PaneNoticeEvent::Clear(key)),
+            Err(TrySendError::Disconnected(_))
+                if resource_class == ConsumerResourceClass::Detached =>
+            {
+                // The retiring pane has already lost its receiver; shutdown still
+                // retires the consumer through the lifecycle owner.
+                cx.emit(PaneNoticeEvent::Clear(key));
+            }
+            Err(TrySendError::Full(_)) if resource_class == ConsumerResourceClass::Detached => {
+                diagnostic!("Detached pane market demand queue was full during retirement");
+                cx.emit(PaneNoticeEvent::Clear(key));
+            }
+            Err(error) => {
+                diagnostic!("Pane market demand could not be updated: {error}");
+                cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+                    key,
+                    severity: notification_center::NoticeSeverity::Warning,
+                    tone: notification_center::NoticeTone::Warning,
+                    source: notification_center::NoticeSource::Pane(cx.entity_id().as_u64()),
+                    title: "Market demand unavailable",
+                    detail: "This chart's market priority could not be updated. Try switching tabs again."
+                        .into(),
+                    action: None,
+                    lifetime: notification_center::NoticeLifetime::UntilCleared,
+                }));
+            }
+        }
     }
 
     pub(super) fn set_market_message_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
@@ -3900,7 +3936,11 @@ impl WorkspaceSurface {
         if state.remove_on_registration {
             self.studies.active.push(runtime_state);
             self.studies.automatic_removals.insert(study_id);
-            let _ = self.retry_automatic_study_removals();
+            if !self.retry_automatic_study_removals() {
+                // The pending removal stays owned by RuntimeStudiesState and
+                // subsequent study synchronization retries it.
+                diagnostic!("Automatic study removal is waiting for market worker capacity");
+            }
             self.chart_persistence_dirty = true;
             cx.notify();
             return;
@@ -4510,7 +4550,9 @@ impl WorkspaceSurface {
                 self.chart_chrome.indicator_price_lines_visible,
             );
             chart.set_chart_type(self.chart_chrome.chart_type);
-            let _ = chart.apply_price_axis_menu_action(
+            // A false result means unchanged or no target series on an empty chart,
+            // not a failed settings write; retained precision remains authoritative.
+            chart.apply_price_axis_menu_action(
                 0,
                 false,
                 PriceAxisMenuAction::SetPrecision(self.retained_chart_presentation.price_precision),
@@ -5100,7 +5142,9 @@ impl WorkspaceSurface {
         ) {
             return;
         }
-        let _ = self.search_symbol_query(default_listing_query(self.symbol_provider), cx);
+        // The search path posts its own keyed failure notice; a pending query
+        // retains the latest request rather than reporting a second failure.
+        self.search_symbol_query(default_listing_query(self.symbol_provider), cx);
     }
 
     fn post_symbol_search_notice(detail: &'static str, cx: &mut Context<Self>) {
@@ -5220,7 +5264,11 @@ impl WorkspaceSurface {
             true
         } else {
             self.symbol_browser.reject_search(request_id);
-            let _ = self.symbol_browser.retain_latest_search(&retained_query);
+            if let Err(error) = self.symbol_browser.retain_latest_search(&retained_query) {
+                // This query passed begin_search validation; the same keyed
+                // notice below covers dispatch failure without exposing input.
+                diagnostic!("Validated market search could not be retained: {error}");
+            }
             Self::post_symbol_search_notice(
                 "The market search could not complete. Try again later.",
                 cx,
@@ -5333,7 +5381,9 @@ impl WorkspaceSurface {
                 if !self.market_state.rithmic_autoload_started {
                     self.market_state.rithmic_autoload_started = true;
                     self.market_state.rithmic_autoload_selection_pending = true;
-                    let _ = self.search_symbol_query(default_listing_query(self.provider), cx);
+                    // The search path owns dispatch failure feedback and queued
+                    // replacement requests while catalog startup is pending.
+                    self.search_symbol_query(default_listing_query(self.provider), cx);
                 }
             }
             ProviderCatalogEvent::CommandRejected { rejection, command } => {

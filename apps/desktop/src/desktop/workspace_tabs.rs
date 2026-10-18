@@ -113,9 +113,9 @@ impl TerminalApp {
             };
             for pane in &workspace.panes {
                 Self::wire_pane_notices(&pane.surface, cx);
-                pane.surface.update(cx, |surface, _| {
+                pane.surface.update(cx, |surface, surface_cx| {
                     surface.set_market_message_wake(market_frame_wake.callback());
-                    surface.set_market_resource_class(resource_class);
+                    surface.set_market_resource_class(resource_class, surface_cx);
                 });
                 cx.observe(&pane.surface, |app, surface, cx| {
                     if surface.update(cx, |surface, _| surface.take_chart_persistence_dirty()) {
@@ -731,8 +731,8 @@ impl TerminalApp {
     ) {
         if let Some(workspace) = self.workspaces.get(workspace_index) {
             for pane in &workspace.panes {
-                pane.surface.update(cx, |surface, _| {
-                    surface.set_market_resource_class(resource_class);
+                pane.surface.update(cx, |surface, surface_cx| {
+                    surface.set_market_resource_class(resource_class, surface_cx);
                 });
             }
         }
@@ -2710,7 +2710,7 @@ impl TerminalApp {
         }
         for pane in removed.panes {
             pane.surface.update(cx, |workspace, workspace_cx| {
-                workspace.set_market_resource_class(ConsumerResourceClass::Detached);
+                workspace.set_market_resource_class(ConsumerResourceClass::Detached, workspace_cx);
                 workspace.retire_market_worker(workspace_cx);
             });
         }
@@ -2888,7 +2888,7 @@ impl TerminalApp {
         Self::wire_pane_notices(&surface, cx);
         surface.update(cx, |surface, surface_cx| {
             surface.apply_theme(&self.theme, surface_cx);
-            surface.set_market_resource_class(ConsumerResourceClass::Foreground);
+            surface.set_market_resource_class(ConsumerResourceClass::Foreground, surface_cx);
             surface.set_market_message_wake(self.market_frame_wake.callback());
             surface.select_drawing_tool(drawing_tool, surface_cx);
             surface.side_panel_width = side_panel_width;
@@ -2911,7 +2911,7 @@ impl TerminalApp {
             .split(source_pane_id, split_direction, pane.pane_id)
         {
             surface.update(cx, |surface, surface_cx| {
-                surface.set_market_resource_class(ConsumerResourceClass::Detached);
+                surface.set_market_resource_class(ConsumerResourceClass::Detached, surface_cx);
                 surface.retire_market_worker(surface_cx);
             });
             self.workspace_error = Some(error.to_string());
@@ -3001,7 +3001,7 @@ impl TerminalApp {
         workspace.generation = workspace.generation.saturating_add(1);
         removed.surface.update(cx, |surface, surface_cx| {
             surface.apply_side_panels(SidePanelVisibility::default(), surface_cx);
-            surface.set_market_resource_class(ConsumerResourceClass::Detached);
+            surface.set_market_resource_class(ConsumerResourceClass::Detached, surface_cx);
             surface.retire_market_worker(surface_cx);
         });
         workspace.panes[recipient]
