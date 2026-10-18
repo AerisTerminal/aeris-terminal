@@ -50,6 +50,28 @@ fn template_json(id: &str, stop_ticks: u32, target_ticks: u32) -> String {
 /// bracket, an active bracket, a completed bracket, a cancelled bracket and a standalone
 /// protective order.
 fn write_v19_bracket_fixture(path: &std::path::Path, only_awaiting: bool) {
+    write_v19_priced_fixture(
+        path,
+        only_awaiting,
+        "BTC-USDC",
+        10_000,
+        9_800,
+        10_200,
+        9_900,
+    );
+}
+
+/// The same fixture with a caller-chosen instrument and prices (scale 2), so desktop
+/// validation can seed a chartable live instrument with prices near the current market.
+fn write_v19_priced_fixture(
+    path: &std::path::Path,
+    only_awaiting: bool,
+    instrument: &str,
+    entry: i64,
+    stop: i64,
+    target: i64,
+    protect: i64,
+) {
     let connection = Connection::open(path).expect("fixture database");
     crate::store::create_schema_at(&connection, 19);
     let priced = contract_json(
@@ -61,23 +83,24 @@ fn write_v19_bracket_fixture(path: &std::path::Path, only_awaiting: bool) {
         &serde_json::json!({"kind": "unknown"}),
     );
     let provenance = r#"{"venue_id":"aeris-sim","provider_id":"fixture","session_generation":1,"source_sequence":1,"observed_unix_nanos":1}"#;
+    let awaiting_template = template_json("legacy-awaiting", 8, 8);
     let batch = format!(
         "INSERT INTO accounts(id,display_name,environment,currency,currency_scale,venue_id)
          VALUES ('sim','SIM • Legacy','simulated','USD',2,'aeris-sim');
          INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
-         VALUES ('BTC-USDC',2,0,'{priced}');
+         VALUES ('{instrument}',2,0,'{priced}');
          INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
              time_in_force,quantity_units,quantity_scale,filled_units,filled_scale,
              limit_units,limit_scale,status,submitted_unix_nanos,provenance_json)
-         VALUES ('ord-awaiting','awaiting-entry','sim','BTC-USDC','buy','limit','gtc',
-                 2,0,0,0,10000,2,'working',1,'{provenance}');
+         VALUES ('ord-awaiting','awaiting-entry','sim','{instrument}','buy','limit','gtc',
+                 2,0,0,0,{entry},2,'working',1,'{provenance}');
          INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
              stop_client_order_id,target_client_order_ids_json,status)
-         VALUES ('awaiting-entry','{}','awaiting-entry',NULL,'[]','awaiting_entry');",
-        template_json("legacy-awaiting", 8, 8),
+         VALUES ('awaiting-entry','{awaiting_template}','awaiting-entry',NULL,'[]','awaiting_entry');"
     );
     let mut batches = vec![batch];
     if !only_awaiting {
+        let nogrid_template = template_json("legacy-nogrid", 4, 4);
         batches.push(format!(
             "INSERT INTO instruments(id,price_scale,quantity_scale,contract_json)
              VALUES ('NOGRID',2,0,'{unpriced}');
@@ -88,42 +111,41 @@ fn write_v19_bracket_fixture(path: &std::path::Path, only_awaiting: bool) {
                      1,0,0,0,500,2,'working',1,'{provenance}');
              INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
                  stop_client_order_id,target_client_order_ids_json,status)
-             VALUES ('nogrid-entry','{}','nogrid-entry',NULL,'[]','awaiting_entry');",
-            template_json("legacy-nogrid", 4, 4),
+             VALUES ('nogrid-entry','{nogrid_template}','nogrid-entry',NULL,'[]','awaiting_entry');"
         ));
+        let active_template = template_json("legacy-active", 8, 8);
+        let done_template = template_json("legacy-done", 8, 8);
+        let dead_template = template_json("legacy-dead", 8, 8);
         batches.push(format!(
             "INSERT INTO orders(id,client_order_id,account_id,instrument_id,side,order_type,
                  time_in_force,quantity_units,quantity_scale,filled_units,filled_scale,
                  limit_units,limit_scale,stop_units,stop_scale,status,submitted_unix_nanos,
                  provenance_json)
-             VALUES ('ord-active-entry','active-entry','sim','BTC-USDC','buy','limit','gtc',
-                     2,0,2,0,10000,2,NULL,NULL,'filled',1,'{provenance}'),
-                    ('ord-active-stop','active-stop','sim','BTC-USDC','sell','stop','gtc',
-                     2,0,0,0,NULL,NULL,9800,2,'working',2,'{provenance}'),
-                    ('ord-active-target','active-target','sim','BTC-USDC','sell','limit','gtc',
-                     2,0,0,0,10200,2,NULL,NULL,'working',2,'{provenance}'),
-                    ('ord-done-entry','done-entry','sim','BTC-USDC','buy','limit','gtc',
-                     1,0,1,0,10000,2,NULL,NULL,'filled',1,'{provenance}'),
-                    ('ord-done-stop','done-stop','sim','BTC-USDC','sell','stop','gtc',
-                     1,0,1,0,NULL,NULL,9800,2,'filled',2,'{provenance}'),
-                    ('ord-dead-entry','dead-entry','sim','BTC-USDC','buy','limit','gtc',
-                     1,0,0,0,10000,2,NULL,NULL,'cancelled',1,'{provenance}'),
-                    ('ord-protect','protect-client','sim','BTC-USDC','sell','stop','gtc',
-                     1,0,0,0,NULL,NULL,9900,2,'working',1,'{provenance}');
+             VALUES ('ord-active-entry','active-entry','sim','{instrument}','buy','limit','gtc',
+                     2,0,2,0,{entry},2,NULL,NULL,'filled',1,'{provenance}'),
+                    ('ord-active-stop','active-stop','sim','{instrument}','sell','stop','gtc',
+                     2,0,0,0,NULL,NULL,{stop},2,'working',2,'{provenance}'),
+                    ('ord-active-target','active-target','sim','{instrument}','sell','limit','gtc',
+                     2,0,0,0,{target},2,NULL,NULL,'working',2,'{provenance}'),
+                    ('ord-done-entry','done-entry','sim','{instrument}','buy','limit','gtc',
+                     1,0,1,0,{entry},2,NULL,NULL,'filled',1,'{provenance}'),
+                    ('ord-done-stop','done-stop','sim','{instrument}','sell','stop','gtc',
+                     1,0,1,0,NULL,NULL,{stop},2,'filled',2,'{provenance}'),
+                    ('ord-dead-entry','dead-entry','sim','{instrument}','buy','limit','gtc',
+                     1,0,0,0,{entry},2,NULL,NULL,'cancelled',1,'{provenance}'),
+                    ('ord-protect','protect-client','sim','{instrument}','sell','stop','gtc',
+                     1,0,0,0,NULL,NULL,{protect},2,'working',1,'{provenance}');
              INSERT INTO protective_orders(client_order_id,role)
              VALUES ('protect-client','stop_loss');
              INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
                  stop_client_order_id,target_client_order_ids_json,status,
                  entry_price_units,entry_price_scale)
-             VALUES ('active-entry','{}','active-entry','active-stop','[\"active-target\"]','active',
-                     10000,2);
+             VALUES ('active-entry','{active_template}','active-entry','active-stop','[\"active-target\"]','active',
+                     {entry},2);
              INSERT INTO managed_brackets(bracket_id,template_json,entry_client_order_id,
                  stop_client_order_id,target_client_order_ids_json,status)
-             VALUES ('done-entry','{}','done-entry','done-stop','[]','completed'),
-                    ('dead-entry','{}','dead-entry',NULL,'[]','cancelled');",
-            template_json("legacy-active", 8, 8),
-            template_json("legacy-done", 8, 8),
-            template_json("legacy-dead", 8, 8),
+             VALUES ('done-entry','{done_template}','done-entry','done-stop','[]','completed'),
+                    ('dead-entry','{dead_template}','dead-entry',NULL,'[]','cancelled');"
         ));
     }
     connection
@@ -132,7 +154,9 @@ fn write_v19_bracket_fixture(path: &std::path::Path, only_awaiting: bool) {
 }
 
 /// Writes the VAL-TRD-050/051 desktop fixture: a V19 store with awaiting, active, completed and
-/// cancelled managed brackets plus a standalone protective order.
+/// cancelled managed brackets plus a standalone protective order. The instrument is the live
+/// `hyperliquid:perp:BTC` so the desktop default chart shows the migrated legs; the prices sit
+/// near the October 2026 BTC range and only affect the chart viewport.
 #[test]
 #[ignore = "writes the documented V19 fixture path for desktop validation"]
 fn generate_v19_bracket_fixture_for_validation() {
@@ -142,7 +166,15 @@ fn generate_v19_bracket_fixture_for_validation() {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("fixture parent");
     }
-    write_v19_bracket_fixture(&path, false);
+    write_v19_priced_fixture(
+        &path,
+        false,
+        "hyperliquid:perp:BTC",
+        8_150_000,
+        8_120_000,
+        8_210_000,
+        8_130_000,
+    );
     println!("generated V19 bracket fixture at {}", path.display());
 }
 
