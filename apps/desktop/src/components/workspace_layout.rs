@@ -416,13 +416,7 @@ pub(super) fn workspace_market_area(
     let price_alert_dialog = workspace.panes.iter().find_map(|pane| {
         let surface = pane.surface.read(cx);
         surface.price_alert_dialog.as_ref().map(|dialog| {
-            price_alert_dialog_layer(
-                &pane.surface,
-                dialog,
-                &surface.price_alerts,
-                surface.price_alert_message.as_deref(),
-                theme,
-            )
+            price_alert_dialog_layer(&pane.surface, dialog, &surface.price_alerts, theme)
         })
     });
     let surface = active_surface.read(cx);

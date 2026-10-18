@@ -900,7 +900,7 @@ struct WorkspaceSurface {
     last_chart_user_state_revision: u64,
     price_alerts: Vec<WorkspacePriceAlertState>,
     price_alert_dialog: Option<PriceAlertDialogState>,
-    price_alert_message: Option<String>,
+    price_alert_restore_status: PriceAlertRestoreStatus,
     pending_price_alert_announcements: VecDeque<PriceAlertAnnouncement>,
     #[cfg(feature = "diagnostics")]
     foreground_interactions: ForegroundInteractionDiagnostics,
@@ -908,6 +908,12 @@ struct WorkspaceSurface {
     live_evidence_enabled: bool,
     #[cfg(feature = "diagnostics")]
     live_evidence_publications: u16,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PriceAlertRestoreStatus {
+    PendingFailure,
+    Handled,
 }
 
 /// Pane-originated notice changes are delivered to the window's single toast owner.
@@ -3127,7 +3133,7 @@ fn observe_chart(chart: Option<&Entity<AerisChartView>>, cx: &mut Context<Worksp
                 app.pending_study_remove_request = Some(study_id);
             }
             if let Some(request) = alert_request {
-                app.open_price_alert_dialog(request);
+                app.open_price_alert_dialog(request, cx);
             }
             if activate
                 || had_menu

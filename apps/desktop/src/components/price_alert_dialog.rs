@@ -8,7 +8,6 @@ const PRICE_SCALE_LEFT: u32 = 1;
 const PRICE_SCALE_OVERLAY: u32 = 2;
 /// Triggers a pane holds until the toaster takes them; older ones give way past this.
 const PENDING_ANNOUNCEMENTS: usize = 8;
-const PRICE_ALERT_SYNC_FAILURE_MESSAGE: &str = "Price alerts could not be monitored";
 
 /// "NQZ6 crossed 31258.00" over "Last trade 31258.25", in the runtime's exact values.
 pub(super) fn price_alert_trigger_text(trigger: &MarketPriceAlertTrigger) -> (String, String) {
@@ -173,18 +172,47 @@ fn new_alert_id(alerts: &[WorkspacePriceAlertState]) -> Result<String, String> {
 }
 
 impl WorkspaceSurface {
-    pub(super) fn apply_price_alert_sync(&mut self, succeeded: bool, cx: &mut Context<Self>) {
+    pub(super) fn emit_initial_price_alert_restore_notice(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(
+            &mut self.price_alert_restore_status,
+            PriceAlertRestoreStatus::Handled,
+        ) == PriceAlertRestoreStatus::PendingFailure
+        {
+            Self::apply_price_alert_sync(false, cx);
+        }
+    }
+
+    fn post_price_alert_action_notice(detail: &'static str, cx: &mut Context<Self>) {
+        cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
+            key: notification_center::NoticeKey {
+                scope: cx.entity_id().as_u64(),
+                kind: "price_alert_action",
+            },
+            severity: notification_center::NoticeSeverity::Warning,
+            tone: notification_center::NoticeTone::Warning,
+            source: notification_center::NoticeSource::Workspace,
+            title: "Price alert could not be changed",
+            detail: detail.into(),
+            lifetime: notification_center::NoticeLifetime::UntilCleared,
+        }));
+        cx.notify();
+    }
+
+    fn clear_price_alert_action_notice(cx: &mut Context<Self>) {
+        cx.emit(PaneNoticeEvent::Clear(notification_center::NoticeKey {
+            scope: cx.entity_id().as_u64(),
+            kind: "price_alert_action",
+        }));
+    }
+
+    pub(super) fn apply_price_alert_sync(succeeded: bool, cx: &mut Context<Self>) {
         let key = notification_center::NoticeKey {
             scope: cx.entity_id().as_u64(),
             kind: "price_alert_sync",
         };
         if succeeded {
-            if self.price_alert_message.as_deref() == Some(PRICE_ALERT_SYNC_FAILURE_MESSAGE) {
-                self.price_alert_message = None;
-            }
             cx.emit(PaneNoticeEvent::Clear(key));
         } else {
-            self.price_alert_message = Some(PRICE_ALERT_SYNC_FAILURE_MESSAGE.into());
             cx.emit(PaneNoticeEvent::Post(notification_center::UserNotice {
                 key,
                 severity: notification_center::NoticeSeverity::Error,
@@ -198,10 +226,16 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    pub(super) fn open_price_alert_dialog(&mut self, request: ChartAlertCreateRequest) {
+    pub(super) fn open_price_alert_dialog(
+        &mut self,
+        request: ChartAlertCreateRequest,
+        cx: &mut Context<Self>,
+    ) {
         let Some(instrument) = self.product.clone() else {
-            self.price_alert_message =
-                Some("Select a live market before creating an alert".to_string());
+            Self::post_price_alert_action_notice(
+                "Select a live market before creating an alert.",
+                cx,
+            );
             return;
         };
         self.price_alert_dialog = Some(PriceAlertDialogState {
@@ -217,12 +251,12 @@ impl WorkspaceSurface {
             request,
             open_dropdown: None,
         });
-        self.price_alert_message = None;
+        Self::clear_price_alert_action_notice(cx);
     }
 
     pub(super) fn close_price_alert_dialog(&mut self, cx: &mut Context<Self>) {
         self.price_alert_dialog = None;
-        self.price_alert_message = None;
+        Self::clear_price_alert_action_notice(cx);
         cx.notify();
     }
 
@@ -234,7 +268,7 @@ impl WorkspaceSurface {
         if let Some(dialog) = &mut self.price_alert_dialog {
             dialog.condition = condition;
             dialog.open_dropdown = None;
-            self.price_alert_message = None;
+            Self::clear_price_alert_action_notice(cx);
             cx.notify();
         }
     }
@@ -247,7 +281,7 @@ impl WorkspaceSurface {
         if let Some(dialog) = &mut self.price_alert_dialog {
             dialog.frequency = frequency;
             dialog.open_dropdown = None;
-            self.price_alert_message = None;
+            Self::clear_price_alert_action_notice(cx);
             cx.notify();
         }
     }
@@ -273,35 +307,30 @@ impl WorkspaceSurface {
 
     pub(super) fn create_price_alert(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.price_alert_dialog.clone() else {
-            self.price_alert_message =
-                Some("Select a live market before creating an alert".to_string());
-            cx.notify();
+            Self::post_price_alert_action_notice(
+                "Select a live market before creating an alert.",
+                cx,
+            );
             return;
         };
         let instrument = dialog.instrument;
         if self.price_alerts.len() >= MAXIMUM_PRICE_ALERTS_PER_CONSUMER {
-            self.price_alert_message = Some(format!(
-                "A chart supports at most {MAXIMUM_PRICE_ALERTS_PER_CONSUMER} alerts"
-            ));
-            cx.notify();
+            Self::post_price_alert_action_notice("This chart has reached its alert limit.", cx);
             return;
         }
         let Some(price) = scaled_price(dialog.request.price, instrument.price_scale) else {
-            self.price_alert_message = Some("The selected alert price is invalid".to_string());
-            cx.notify();
+            Self::post_price_alert_action_notice("The selected alert price is invalid.", cx);
             return;
         };
-        let id = match new_alert_id(&self.price_alerts) {
-            Ok(id) => id,
-            Err(error) => {
-                self.price_alert_message = Some(error);
-                cx.notify();
-                return;
-            }
+        let Ok(id) = new_alert_id(&self.price_alerts) else {
+            Self::post_price_alert_action_notice(
+                "An alert identity could not be allocated. Try again.",
+                cx,
+            );
+            return;
         };
         let Ok(pane_index) = u32::try_from(dialog.request.pane_index) else {
-            self.price_alert_message = Some("The selected chart pane is invalid".to_string());
-            cx.notify();
+            Self::post_price_alert_action_notice("The selected chart pane is invalid.", cx);
             return;
         };
         let alert = WorkspacePriceAlertState {
@@ -322,14 +351,15 @@ impl WorkspaceSurface {
             .try_replace_price_alerts(runtime_price_alerts(&next))
             .is_err()
         {
-            self.price_alert_message =
-                Some("Market data is unavailable; alert was not created".to_string());
-            cx.notify();
+            Self::post_price_alert_action_notice(
+                "Market data is unavailable; alert was not created.",
+                cx,
+            );
             return;
         }
         self.price_alerts = next;
         self.price_alert_dialog = None;
-        self.price_alert_message = None;
+        Self::clear_price_alert_action_notice(cx);
         self.chart_persistence_dirty = true;
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
@@ -351,14 +381,15 @@ impl WorkspaceSurface {
             .try_replace_price_alerts(runtime_price_alerts(&next))
             .is_err()
         {
-            self.price_alert_message =
-                Some("Market data is unavailable; alert was not removed".to_string());
-            cx.notify();
+            Self::post_price_alert_action_notice(
+                "Market data is unavailable; alert was not removed.",
+                cx,
+            );
             return;
         }
         self.price_alerts = next;
         self.chart_persistence_dirty = true;
-        self.price_alert_message = None;
+        Self::clear_price_alert_action_notice(cx);
         replace_chart_price_alert_lines(
             self.chart.as_ref(),
             &self.price_alerts,
@@ -658,7 +689,6 @@ fn price_alert_dialog_body(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
     existing: &[WorkspacePriceAlertState],
-    message: Option<&str>,
     theme: &AerisTheme,
 ) -> AnyElement {
     let colors = theme.colors;
@@ -694,12 +724,6 @@ fn price_alert_dialog_body(
                 .text_color(gpui_color(colors.text_secondary))
                 .child("Aeris monitors accepted live trades and sends an operating-system notification while the desktop app is running."),
         )
-        .children(message.map(|message| {
-            div()
-                .text_sm()
-                .text_color(gpui_color(colors.danger))
-                .child(message.to_string())
-        }))
         .children((!existing.is_empty()).then(|| {
             div()
                 .mt_2()
@@ -730,7 +754,6 @@ pub(super) fn price_alert_dialog_layer(
     app: &Entity<WorkspaceSurface>,
     dialog: &PriceAlertDialogState,
     alerts: &[WorkspacePriceAlertState],
-    message: Option<&str>,
     theme: &AerisTheme,
 ) -> AnyElement {
     let dismiss = app.clone();
@@ -748,9 +771,7 @@ pub(super) fn price_alert_dialog_layer(
     })
     .title("Create price alert")
     .subtitle(price_alert_dialog_subtitle(symbol, &price))
-    .child(price_alert_dialog_body(
-        app, dialog, &existing, message, theme,
-    ))
+    .child(price_alert_dialog_body(app, dialog, &existing, theme))
     .action(
         Button::new("price_alert_cancel", theme)
             .variant(ButtonVariant::Outline)

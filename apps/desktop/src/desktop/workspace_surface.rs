@@ -108,7 +108,7 @@ struct WorkspaceSurfaceInitialization {
     symbol_browser: rithmic_shell::RithmicSymbolBrowser,
     studies: RuntimeStudiesState,
     price_alerts: Vec<WorkspacePriceAlertState>,
-    price_alert_message: Option<String>,
+    price_alert_restore_status: PriceAlertRestoreStatus,
     bridge_label: String,
     order_book: Entity<ReadOnlyOrderBookView>,
     context_view: Option<ContextView>,
@@ -220,7 +220,7 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
         last_chart_user_state_revision: 0,
         price_alerts: init.price_alerts,
         price_alert_dialog: None,
-        price_alert_message: init.price_alert_message,
+        price_alert_restore_status: init.price_alert_restore_status,
         pending_price_alert_announcements: VecDeque::new(),
         #[cfg(feature = "diagnostics")]
         foreground_interactions: ForegroundInteractionDiagnostics::default(),
@@ -234,19 +234,20 @@ fn workspace_surface_from_initialization(init: WorkspaceSurfaceInitialization) -
 fn restore_price_alerts(
     restored_chart_state: Option<&WorkspaceChartState>,
     market_worker: &MarketDataWorker,
-) -> (Vec<WorkspacePriceAlertState>, Option<String>) {
+) -> (Vec<WorkspacePriceAlertState>, PriceAlertRestoreStatus) {
     let alerts = restored_chart_state
         .map(|state| state.price_alerts.clone())
         .unwrap_or_default();
-    let message = (!alerts.is_empty())
-        .then(|| {
-            market_worker
-                .try_replace_price_alerts(runtime_price_alerts(&alerts))
-                .err()
-        })
-        .flatten()
-        .map(|_| "Price alerts could not be queued for live monitoring".to_string());
-    (alerts, message)
+    let failed = !alerts.is_empty()
+        && market_worker
+            .try_replace_price_alerts(runtime_price_alerts(&alerts))
+            .is_err();
+    let status = if failed {
+        PriceAlertRestoreStatus::PendingFailure
+    } else {
+        PriceAlertRestoreStatus::Handled
+    };
+    (alerts, status)
 }
 
 fn chart_bridge_label(chart: Option<&Entity<AerisChartView>>, cx: &App) -> String {
@@ -1716,12 +1717,12 @@ fn restored_workspace_records(
 ) -> (
     RuntimeStudiesState,
     Vec<WorkspacePriceAlertState>,
-    Option<String>,
+    PriceAlertRestoreStatus,
 ) {
     let studies = restored_runtime_studies(restored_chart_state);
-    let (price_alerts, price_alert_message) =
+    let (price_alerts, price_alert_restore_status) =
         restore_price_alerts(restored_chart_state, market_worker);
-    (studies, price_alerts, price_alert_message)
+    (studies, price_alerts, price_alert_restore_status)
 }
 
 fn initialize_restored_chart(
@@ -1904,7 +1905,7 @@ impl WorkspaceSurface {
         let symbol_browser = initial_symbol_browser(&startup);
         let startup_state = terminal_startup_state(startup, cx);
         let interval = restored_rithmic.map_or(ChartInterval::Minute1, |restored| restored.0);
-        let (studies, price_alerts, price_alert_message) =
+        let (studies, price_alerts, price_alert_restore_status) =
             restored_workspace_records(restored_chart_state.as_ref(), &market_worker);
         initialize_restored_chart(startup_state.chart.as_ref(), chart_chrome, cx);
         replace_chart_price_alert_lines(
@@ -1964,7 +1965,7 @@ impl WorkspaceSurface {
             symbol_browser,
             studies,
             price_alerts,
-            price_alert_message,
+            price_alert_restore_status,
             bridge_label,
             order_book,
             context_view,
@@ -3588,8 +3589,8 @@ impl WorkspaceSurface {
             MarketWorkerMessage::PriceAlertTriggered(trigger) => {
                 self.apply_price_alert_trigger(&trigger, cx);
             }
-            MarketWorkerMessage::PriceAlertSyncFailed => self.apply_price_alert_sync(false, cx),
-            MarketWorkerMessage::PriceAlertSyncSucceeded => self.apply_price_alert_sync(true, cx),
+            MarketWorkerMessage::PriceAlertSyncFailed => Self::apply_price_alert_sync(false, cx),
+            MarketWorkerMessage::PriceAlertSyncSucceeded => Self::apply_price_alert_sync(true, cx),
             MarketWorkerMessage::ChartViewport {
                 start_unix_nanos,
                 end_unix_nanos,

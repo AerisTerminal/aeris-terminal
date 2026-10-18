@@ -54,6 +54,14 @@ impl PaneHarness {
         restore: WorkspaceSurfaceRestore,
         cx: &mut TestAppContext,
     ) -> (Self, &mut VisualTestContext) {
+        Self::open_with_restore_and_full_queue(restore, false, cx)
+    }
+
+    fn open_with_restore_and_full_queue(
+        restore: WorkspaceSurfaceRestore,
+        fill_command_queue: bool,
+        cx: &mut TestAppContext,
+    ) -> (Self, &mut VisualTestContext) {
         let product = local_state::default_workspace().watchlist_entries[0]
             .instrument
             .clone()
@@ -68,6 +76,13 @@ impl PaneHarness {
             None,
             Some(Arc::new(AtomicU64::new(1))),
         );
+        if fill_command_queue {
+            for _ in 0..8 {
+                worker
+                    .try_set_order_book_visible(true)
+                    .expect("fill bounded command queue before restore");
+            }
+        }
         let (view, cx) = cx.add_window_view(move |window, cx| {
             gpui_base::init(cx);
             let pane = workspace_surface_entity(
@@ -102,6 +117,9 @@ impl PaneHarness {
                 },
             )
             .detach();
+            pane.update(cx, |pane, cx| {
+                pane.emit_initial_price_alert_restore_notice(cx);
+            });
             PaneWindow {
                 pane,
                 toaster: Toaster::default(),
@@ -310,11 +328,6 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
     }
     cx.run_until_parked();
     cx.read(|cx| {
-        let pane = harness.pane.read(cx);
-        assert_eq!(
-            pane.price_alert_message.as_deref(),
-            Some("Price alerts could not be monitored")
-        );
         let toaster = &harness.window.read(cx).toaster;
         assert_eq!(toaster.notices().len(), 1);
         assert_eq!(toaster.notices()[0].title, "Price alerts unavailable");
@@ -341,7 +354,6 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
     });
     cx.run_until_parked();
     cx.read(|cx| {
-        assert_eq!(harness.pane.read(cx).price_alert_message, None);
         let toaster = &harness.window.read(cx).toaster;
         assert_eq!(toaster.notices(), []);
         assert_eq!(
@@ -349,6 +361,101 @@ fn pane_harness_price_alert_processing_failure_renders_once_and_success_clears(
             0
         );
     });
+}
+
+#[gpui::test]
+fn pane_harness_alert_restore_failure_renders_and_processing_success_clears(
+    cx: &mut TestAppContext,
+) {
+    let restore = WorkspaceSurfaceRestore {
+        chart: Some(WorkspaceChartState {
+            price_alerts: vec![WorkspacePriceAlertState {
+                id: "restored-alert".into(),
+                ..WorkspacePriceAlertState::default()
+            }],
+            ..WorkspaceChartState::default()
+        }),
+        ..WorkspaceSurfaceRestore::default()
+    };
+    let (harness, cx) = PaneHarness::open_with_restore_and_full_queue(restore, true, cx);
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(toaster.notices()[0].title, "Price alerts unavailable");
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "restore failure rendered"
+    );
+    harness
+        .publications
+        .send(MarketWorkerMessage::PriceAlertSyncSucceeded)
+        .expect("fixture success enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
+fn pane_harness_alert_delete_queue_failure_renders_once_then_success_clears(
+    cx: &mut TestAppContext,
+) {
+    let restore = WorkspaceSurfaceRestore {
+        chart: Some(WorkspaceChartState {
+            price_alerts: vec![WorkspacePriceAlertState {
+                id: "restored-alert".into(),
+                ..WorkspacePriceAlertState::default()
+            }],
+            ..WorkspaceChartState::default()
+        }),
+        ..WorkspaceSurfaceRestore::default()
+    };
+    let (harness, cx) = PaneHarness::open_with_restore(restore, cx);
+    let commands = harness.commands.as_ref().expect("command receiver");
+    harness.pane.update(cx, |pane, _| {
+        for _ in 0..7 {
+            pane.market_worker
+                .try_set_order_book_visible(true)
+                .expect("fill remaining command slots");
+        }
+    });
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            pane.delete_price_alert("restored-alert", cx);
+            assert_eq!(pane.price_alerts.len(), 1);
+        });
+    }
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let toaster = &harness.window.read(cx).toaster;
+        assert_eq!(toaster.notices().len(), 1);
+        assert_eq!(
+            toaster.notices()[0].title,
+            "Price alert could not be changed"
+        );
+        assert_eq!(
+            toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+            1
+        );
+    });
+    assert!(
+        cx.debug_bounds("toast").is_some(),
+        "delete failure rendered"
+    );
+    while commands.try_recv().is_ok() {}
+    harness.pane.update(cx, |pane, cx| {
+        pane.delete_price_alert("restored-alert", cx);
+        assert_eq!(pane.price_alerts.len(), 0);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
 }
 
 #[gpui::test]

@@ -141,6 +141,9 @@ impl TerminalApp {
             cx.notify();
         })
         .detach();
+        surface.update(cx, |surface, cx| {
+            surface.emit_initial_price_alert_restore_notice(cx);
+        });
     }
 
     fn start_workspace_layout_persistence(
