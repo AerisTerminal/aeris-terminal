@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -415,9 +416,9 @@ fn stable_launcher() -> Result<PathBuf, String> {
 fn launcher_is_trusted(launcher: &Path, active_signed_launcher: &Path) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     let active = aeris_platform_runtime::current_release_identity();
-    launcher_is_trusted_with(launcher, active_signed_launcher, |path| {
-        #[cfg(target_os = "windows")]
-        {
+    #[cfg(target_os = "windows")]
+    {
+        launcher_is_trusted_with(launcher, active_signed_launcher, |path| {
             if aeris_platform_runtime::verify_windows_publisher_signature(path).is_err() {
                 return false;
             }
@@ -432,13 +433,12 @@ fn launcher_is_trusted(launcher: &Path, active_signed_launcher: &Path) -> Result
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
             })
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = path;
-            false
-        }
-    })
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        launcher_is_trusted_with(launcher, active_signed_launcher, |_| false)
+    }
 }
 
 fn launcher_is_trusted_with<F>(
@@ -470,11 +470,11 @@ fn launcher_identity(launcher: &Path) -> Result<LauncherIdentityReport, String> 
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                cleanup_after_failure(&mut child);
                 return Err("installed Aeris launcher identity query timed out".to_string());
             }
             Err(_) => {
+                cleanup_after_failure(&mut child);
                 return Err("installed Aeris launcher identity query failed".to_string());
             }
         }
@@ -588,11 +588,13 @@ fn run_launcher_report(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                cleanup_after_failure(&mut child);
                 return Err(timeout_error.to_string());
             }
-            Err(_) => return Err("update launcher process failed".to_string()),
+            Err(_) => {
+                cleanup_after_failure(&mut child);
+                return Err("update launcher process failed".to_string());
+            }
         }
     };
     if !status.success() {
@@ -697,19 +699,80 @@ impl Drop for PreparedRestart {
             return;
         }
         let slot = self.slot.take();
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.take() {
             // Entity teardown may drop the updater on GPUI. Reaping an
             // uncommitted helper belongs to a detached process-cleanup worker;
             // closing this value on GPUI must never wait for process exit. Keep
             // the single-flight slot until that old helper has actually gone.
-            let _ = thread::Builder::new()
+            let cleanup = Arc::new(Mutex::new(Some((child, slot))));
+            let worker_cleanup = Arc::clone(&cleanup);
+            if thread::Builder::new()
                 .name("aeris-update-restart-cleanup".to_string())
                 .spawn(move || {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    drop(slot);
-                });
+                    if let Some((mut child, slot)) = worker_cleanup
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        match terminate_and_reap(&mut child) {
+                            Ok(_) => drop(slot),
+                            Err(reason) => {
+                                aeris_observability::diagnostic!("{}", reason);
+                                // Still-running ownership is uncertain; do not
+                                // release the single-flight reservation.
+                                std::mem::forget(slot);
+                            }
+                        }
+                    }
+                })
+                .is_err()
+            {
+                aeris_observability::diagnostic!("update restart cleanup worker could not start");
+                // No process operation may run on GPUI. Retain the helper and
+                // its single-flight slot rather than allow another restart
+                // while the old helper may still be running.
+                std::mem::forget(cleanup);
+            }
         }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ChildCleanup {
+    AlreadyExited,
+    Terminated,
+}
+
+// Only called on update/cleanup workers, never on the GPUI thread.
+fn terminate_and_reap(child: &mut Child) -> Result<ChildCleanup, &'static str> {
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(ChildCleanup::AlreadyExited),
+        Ok(None) => {}
+        Err(_) => {
+            // A failed status probe is not evidence of exit. Still attempt
+            // termination so a surviving helper is not abandoned.
+            aeris_observability::diagnostic!(
+                "update helper status could not be checked during cleanup"
+            );
+        }
+    }
+    match child.kill() {
+        Ok(()) => {
+            let reaped = child.wait();
+            reaped
+                .map(|_| ChildCleanup::Terminated)
+                .map_err(|_| "update helper could not be reaped after termination")
+        }
+        Err(_) => match child.try_wait() {
+            Ok(Some(_)) => Ok(ChildCleanup::AlreadyExited),
+            _ => Err("update helper could not be terminated during cleanup"),
+        },
+    }
+}
+
+fn cleanup_after_failure(child: &mut Child) {
+    if let Err(reason) = terminate_and_reap(child) {
+        aeris_observability::diagnostic!("{}", reason);
     }
 }
 
@@ -763,8 +826,7 @@ fn send_restart_commit(child: &mut Child) -> Result<(), String> {
 
 fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
     let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        cleanup_after_failure(&mut child);
         return Err("update restart acknowledgement is unavailable".to_string());
     };
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -783,11 +845,15 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
                     }
                     validate_restart_acknowledgement(&line)
                 });
-            let _ = ready_tx.send(result);
+            // A timeout may retire the receiver before this bounded reader finishes.
+            if ready_tx.send(result).is_err() {
+                aeris_observability::diagnostic!(
+                    "update restart acknowledgement reader finished after its receiver retired"
+                );
+            }
         });
     if reader.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
+        cleanup_after_failure(&mut child);
         return Err("update restart acknowledgement could not be monitored".to_string());
     }
 
@@ -800,25 +866,26 @@ fn wait_for_restart_ready(mut child: Child) -> Result<Child, String> {
                         thread::sleep(Duration::from_millis(10));
                     }
                     Ok(None) => return Ok(child),
-                    Ok(Some(_)) | Err(_) => {
+                    Ok(Some(_)) => {
+                        return Err("update restart helper stopped before shutdown".to_string());
+                    }
+                    Err(_) => {
+                        cleanup_after_failure(&mut child);
                         return Err("update restart helper stopped before shutdown".to_string());
                     }
                 }
             }
         }
         Ok(Err(error)) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            cleanup_after_failure(&mut child);
             Err(error)
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            cleanup_after_failure(&mut child);
             Err("update restart acknowledgement timed out".to_string())
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            cleanup_after_failure(&mut child);
             Err("update restart acknowledgement failed".to_string())
         }
     }
@@ -844,11 +911,12 @@ mod tests {
     };
 
     use super::{
-        CHECK_RETRY_INITIAL, CHECK_RETRY_MAXIMUM, DesktopUpdater, LauncherUpdateCheck,
-        PERIODIC_CHECK_INTERVAL, PreparedRestart, RestartSlot, UpdatePresentation, UpdateRequest,
-        UpdateResult, UpdateState, claim_restart_slot, launcher_files_match,
-        launcher_is_trusted_with, release_restart_slot, send_restart_commit,
-        validate_launcher_report, validate_restart_acknowledgement, wait_for_restart_ready,
+        CHECK_RETRY_INITIAL, CHECK_RETRY_MAXIMUM, ChildCleanup, DesktopUpdater,
+        LauncherUpdateCheck, PERIODIC_CHECK_INTERVAL, PreparedRestart, RestartSlot,
+        UpdatePresentation, UpdateRequest, UpdateResult, UpdateState, claim_restart_slot,
+        launcher_files_match, launcher_is_trusted_with, release_restart_slot, send_restart_commit,
+        terminate_and_reap, validate_launcher_report, validate_restart_acknowledgement,
+        wait_for_restart_ready,
     };
 
     #[cfg(target_os = "windows")]
@@ -1165,8 +1233,24 @@ mod tests {
         let child = acknowledgement_child(false);
         let mut child = wait_for_restart_ready(child).expect("living helper is accepted");
         assert!(child.try_wait().expect("helper state reads").is_none());
-        let _ = child.kill();
-        let _ = child.wait();
+        assert_eq!(terminate_and_reap(&mut child), Ok(ChildCleanup::Terminated));
+    }
+
+    #[test]
+    fn update_helper_cleanup_distinguishes_exited_from_running() {
+        let mut exited = commit_receiver_child();
+        drop(exited.stdin.take());
+        exited.wait().expect("receiver exits when stdin closes");
+        assert_eq!(
+            terminate_and_reap(&mut exited),
+            Ok(ChildCleanup::AlreadyExited)
+        );
+
+        let mut running = commit_receiver_child();
+        assert_eq!(
+            terminate_and_reap(&mut running),
+            Ok(ChildCleanup::Terminated)
+        );
     }
 
     #[test]

@@ -1060,6 +1060,33 @@ Status: pending
     VAL-DSK-003..007 identifiers were not found in this checkout's
     stabilization reports, so their external acceptance evidence was not
     asserted.
+  - Part 20: classified dormant update launcher/helper termination and
+    reaping results on the update worker, including already-exited children,
+    OS failures with sanitized diagnostics, and a bounded detached cleanup
+    worker for teardown without process waiting on GPUI. A failed cleanup
+    worker spawn retains the process and single-flight slot rather than
+    permitting concurrent restarts; a termination failure also retains the
+    slot. The retired acknowledgement receiver is diagnosed without printing
+    wire data. A subprocess test covers both exited and running helpers.
+    Automatic updates remain disabled; no release was installed/published.
+    Re-audited against the active mission's `validation-contract.md`:
+    VAL-DSK-003 has four passing notification tests and a 32-notice bound;
+    VAL-DSK-004 has zero named legacy message fields and a toaster rendering
+    test; VAL-DSK-005 has PaneHarness cases for restore, order-book, alert
+    processing and search with deduplication, but not every case explicitly
+    asserts both source and severity; VAL-DSK-006 logs only the static title
+    and severity and tests that secret input is absent from retained notices,
+    but the test does not capture/assert the diagnostic line. VAL-DSK-007:
+    `let _ = provider;` has zero matches. The listed production `expect`
+    calls are the commented, tested constant startup-root and exhaustive
+    command-registry invariants; `desktop.rs` matches are test-only.
+    The contract's literal zero-match `selection_pending` check cannot pass:
+    actively used selection state/parameters remain in desktop and symbol
+    menu. Removing them solely for the textual assertion would change
+    selection behavior; reconcile that contract with the specific dead
+    parameter intended before claiming closure. M6.2 remains unchecked for
+    these evidence gaps and the blocked Trading/OpenFolder/ConnectProvider
+    sources/actions described in Part 19.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1392,6 +1419,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.2 Part 17 fix(desktop): classified account profile-refresh rollback/activation results as signed-out teardown or live bounded-queue failure, with sanitized keyed UI notice or detached-owner diagnostic; diagnosed optional login cancellation failure without enabling authentication. Deterministic account queue tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
 - 2026-10-19 M6.2 Part 18 fix(desktop): routed stopped-connection and series-dispatch failures into the existing sanitized keyed pane notice bridge, preserved typed loading/status projection and removed unused connection/header display strings. PaneHarness repeated-error/redaction/recovery tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for deferred notice sources/actions and remaining unwrap/discard cleanup.
 - 2026-10-19 M6.2 Part 19 fix(desktop): handled chart trading/overlay/plan setter errors through one pane-keyed redacted notice and successful clear, removed a redundant context discard, and documented exact request-ID, safe-folder-opener and descriptor-connect blockers rather than fake actions. Focused PaneHarness and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains unchecked for blocked source/action variants and update-process result cleanup.
+- 2026-10-19 M6.2 Part 20 fix(desktop): classified update child cleanup, reaping and detached worker failures without GPUI waiting, and verified exited/running helper paths. Audited VAL-DSK-003..007 against the active mission contract: 005/006 have missing exact evidence, and 007's literal selection_pending zero-match conflicts with active selection state. Focused and full serial workspace fmt/check/strict Clippy/tests/naming_check passed; M6.2 remains unchecked for those gaps and deferred real source/actions.
 
 ## 7. Known gaps / deferred
 
