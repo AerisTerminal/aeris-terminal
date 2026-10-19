@@ -3687,11 +3687,7 @@ impl WorkspaceSurface {
                     self.apply_market_session_status(status, cx);
                 }
             }
-            MarketWorkerMessage::OrderBook(frame) => {
-                self.order_book.update(cx, |order_book, order_book_cx| {
-                    order_book.replace_frame(frame, order_book_cx)
-                });
-            }
+            MarketWorkerMessage::OrderBook(frame) => self.apply_order_book_frame(frame, cx),
             MarketWorkerMessage::TradeTape(snapshot) => self.apply_trade_tape(snapshot, cx),
             MarketWorkerMessage::StudyOutput(snapshot) => self.apply_study_output(&snapshot, cx),
             MarketWorkerMessage::StudyOutputsInvalidated(invalidated) => {
@@ -3835,6 +3831,21 @@ impl WorkspaceSurface {
             self.apply_trade_tape_to_chart(&snapshot, cx);
             self.trade_tape = Some(snapshot);
             cx.notify();
+        }
+    }
+
+    fn apply_order_book_frame(
+        &mut self,
+        frame: aeris_market_data::OrderBookFrame,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .chart_pane_controller
+            .accept_publication(frame.selection_generation)
+        {
+            self.order_book.update(cx, |order_book, order_book_cx| {
+                order_book.replace_frame(frame, order_book_cx)
+            });
         }
     }
 

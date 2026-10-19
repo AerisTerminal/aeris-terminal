@@ -281,6 +281,95 @@ fn pane_harness_session_status_rejects_retired_selection_after_marker(cx: &mut T
 }
 
 #[gpui::test]
+fn pane_harness_order_book_rejects_retired_selection_even_with_higher_revision(
+    cx: &mut TestAppContext,
+) {
+    use aeris_market_data::{OrderBookFrame, OrderBookState};
+
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let product = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("fixture product")
+    });
+    let frame = |generation, revision| OrderBookFrame {
+        provider_id: product.provider.clone(),
+        instrument_id: product.instrument_id.clone(),
+        entitlement_id: product.entitlement_id.clone(),
+        session_generation: 1,
+        selection_generation: generation,
+        revision,
+        source_watermark: revision,
+        bbo_source_watermark: revision,
+        state: OrderBookState::Ready,
+        price_scale: 2,
+        quantity_scale: 0,
+        price_increment: Some(1),
+        best_bid: None,
+        best_ask: None,
+        traded_volumes: std::collections::BTreeMap::default(),
+        trade_source_watermark: revision,
+        top_of_book_only: false,
+        rows: Vec::new(),
+    };
+    harness
+        .publications
+        .send(MarketWorkerMessage::OrderBook(frame(1, 1)))
+        .expect("initial order book");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(
+            pane.order_book.read(cx).frame().map(|f| f.revision),
+            Some(1)
+        );
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::OrderBook(frame(sequence, 90)))
+        .expect("early replacement frame");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_ne!(
+            pane.order_book.read(cx).frame().map(|f| f.revision),
+            Some(90)
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("selection marker");
+    harness
+        .publications
+        .send(MarketWorkerMessage::OrderBook(frame(1, 99)))
+        .expect("retired higher revision");
+    harness
+        .publications
+        .send(MarketWorkerMessage::OrderBook(frame(sequence, 2)))
+        .expect("current frame");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 3);
+        let book = pane.order_book.read(cx);
+        assert_eq!(book.frame().map(|f| f.selection_generation), Some(sequence));
+        assert_eq!(book.frame().map(|f| f.revision), Some(2));
+    });
+}
+
+#[gpui::test]
 fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
     cx: &mut TestAppContext,
 ) {
