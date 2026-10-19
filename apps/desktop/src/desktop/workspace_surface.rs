@@ -3657,9 +3657,10 @@ impl WorkspaceSurface {
             MarketWorkerMessage::EngineSelectionFailed { sequence } => {
                 self.reject_pending_engine_selection(sequence, cx);
             }
-            MarketWorkerMessage::SelectedInstrument(instrument) => {
-                self.apply_selected_instrument(instrument);
-            }
+            MarketWorkerMessage::SelectedInstrument {
+                generation,
+                instrument,
+            } => self.apply_selected_instrument(generation, instrument),
             MarketWorkerMessage::CatalogSwitchCommitted {
                 sequence,
                 browser_generation,
@@ -3754,7 +3755,17 @@ impl WorkspaceSurface {
         }
     }
 
-    fn apply_selected_instrument(&mut self, instrument: InstallProviderInstrument) {
+    fn apply_selected_instrument(
+        &mut self,
+        generation: u64,
+        instrument: InstallProviderInstrument,
+    ) {
+        if !self
+            .chart_pane_controller
+            .accept_initial_instrument(generation)
+        {
+            return;
+        }
         if self.product.as_ref().is_some_and(|product| {
             product.provider == instrument.provider
                 && product.instrument_id == instrument.instrument_id

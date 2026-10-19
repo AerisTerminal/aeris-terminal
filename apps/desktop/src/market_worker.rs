@@ -335,7 +335,10 @@ pub enum MarketWorkerMessage {
     EngineSelectionFailed {
         sequence: u64,
     },
-    SelectedInstrument(InstallProviderInstrument),
+    SelectedInstrument {
+        generation: u64,
+        instrument: InstallProviderInstrument,
+    },
     CatalogSwitchCommitted {
         sequence: u64,
         browser_generation: u64,

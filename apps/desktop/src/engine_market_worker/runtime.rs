@@ -496,7 +496,10 @@ fn apply_selection_outcome(
                     record
                         .endpoint
                         .messages
-                        .send(MarketWorkerMessage::SelectedInstrument(selected))
+                        .send(MarketWorkerMessage::SelectedInstrument {
+                            generation: generation.0.get(),
+                            instrument: selected,
+                        })
                         .map_err(|error| error.to_string())?;
                 }
                 record.endpoint.active_generation = generation.0.get();

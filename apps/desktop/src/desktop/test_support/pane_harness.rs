@@ -475,6 +475,61 @@ fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn pane_harness_retired_initial_descriptor_does_not_rewrite_selected_terms(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let mut stale = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .product
+            .clone()
+            .expect("initial instrument")
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("command receiver")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("interval selection");
+    stale.price_increment = Some(999);
+    for marker_first in [false, true] {
+        if marker_first {
+            harness
+                .publications
+                .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+                .expect("marker enters mailbox");
+        }
+        harness
+            .publications
+            .send(MarketWorkerMessage::SelectedInstrument {
+                generation: sequence.saturating_sub(1),
+                instrument: stale.clone(),
+            })
+            .expect("retired descriptor enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(
+                pane.poll_market_worker(cx),
+                if marker_first { 2 } else { 1 }
+            );
+            assert_ne!(
+                pane.product.as_ref().and_then(|p| p.price_increment),
+                Some(999)
+            );
+        });
+    }
+}
+
+#[gpui::test]
 fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
