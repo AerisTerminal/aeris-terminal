@@ -226,6 +226,7 @@ pub struct MarketWorkerPublication {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MarketPublicationGeneration {
+    selection_generation: u64,
     publication_generation: u64,
     retained_items: usize,
     first_sequence: u64,
@@ -237,6 +238,7 @@ impl MarketPublicationGeneration {
     pub fn from_generation(generation: &DesktopMarketGeneration) -> Self {
         let (first_sequence, last_sequence) = generation.sequence_range();
         Self {
+            selection_generation: 1,
             publication_generation: generation.publication_generation(),
             retained_items: generation.items().len(),
             first_sequence,
@@ -252,11 +254,23 @@ impl MarketPublicationGeneration {
         last_sequence: u64,
     ) -> Self {
         Self {
+            selection_generation: 1,
             publication_generation,
             retained_items,
             first_sequence,
             last_sequence,
         }
+    }
+
+    #[must_use]
+    pub const fn with_selection_generation(mut self, selection_generation: u64) -> Self {
+        self.selection_generation = selection_generation;
+        self
+    }
+
+    #[must_use]
+    pub const fn selection_generation(self) -> u64 {
+        self.selection_generation
     }
 
     #[must_use]

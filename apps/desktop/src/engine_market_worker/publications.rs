@@ -257,7 +257,12 @@ fn apply_realtime_snapshot(
     }
     let replay = replay_runtime_snapshot(snapshot, Some(instrument), received_unix_nanos)?;
     let provider = snapshot.snapshot.series.provider_id.as_str();
-    send_publication(messages, ReplayStreamUpdate::Snapshot(replay), provider)
+    send_publication(
+        messages,
+        ReplayStreamUpdate::Snapshot(replay),
+        provider,
+        active_generation,
+    )
 }
 
 fn apply_realtime_update(
@@ -279,7 +284,12 @@ fn apply_realtime_update(
     }
     let tail = replay_runtime_tail_update(update, received_unix_nanos)?;
     let provider = update.series.provider_id.as_str();
-    send_publication(messages, ReplayStreamUpdate::Tail(tail), provider)
+    send_publication(
+        messages,
+        ReplayStreamUpdate::Tail(tail),
+        provider,
+        active_generation,
+    )
 }
 
 fn apply_realtime_series_state(
@@ -514,6 +524,7 @@ pub(super) fn send_publication(
     messages: &MarketWorkerSender,
     update: ReplayStreamUpdate,
     provider: &str,
+    selection_generation: u64,
 ) -> Result<(), String> {
     let generation = match &update {
         ReplayStreamUpdate::Snapshot(snapshot) => {
@@ -546,7 +557,7 @@ pub(super) fn send_publication(
     messages
         .send(MarketWorkerMessage::Update(MarketWorkerPublication {
             update,
-            generation,
+            generation: generation.with_selection_generation(selection_generation),
             subscription_id: subscription_id.to_string(),
             worker_label: worker_label.to_string(),
             ui_diagnostics: None,

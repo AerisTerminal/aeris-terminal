@@ -965,7 +965,7 @@ mod timeframe_input {
             MarketWorkerMessage::TradeTape(order_flow_tape(&product, fifteen_minutes, 1, 6)),
             cx,
         );
-        publish_snapshot(&surface, cx);
+        publish_snapshot_at_selection(&surface, fifteen_minutes, cx);
         let replacement = cx.read(|cx| surface.read(cx).chart.clone().expect("replacement chart"));
         assert_ne!(one_minute.entity_id(), replacement.entity_id());
         assert_eq!(
@@ -1175,6 +1175,14 @@ mod timeframe_input {
     }
 
     fn publish_snapshot(surface: &Entity<WorkspaceSurface>, cx: &mut VisualTestContext) {
+        publish_snapshot_at_selection(surface, 1, cx);
+    }
+
+    fn publish_snapshot_at_selection(
+        surface: &Entity<WorkspaceSurface>,
+        selection_generation: u64,
+        cx: &mut VisualTestContext,
+    ) {
         let snapshot = aeris_application::EmbeddedReplaySource
             .load_snapshot(aeris_application::LoadEmbeddedReplay { bar_count: 8 })
             .expect("embedded replay");
@@ -1186,7 +1194,8 @@ mod timeframe_input {
                         generation:
                             aeris_desktop::market_worker::MarketPublicationGeneration::from_tail(
                                 1, 8, 1, 8,
-                            ),
+                            )
+                            .with_selection_generation(selection_generation),
                         subscription_id: "timeframe_test".into(),
                         worker_label: "timeframe_test".into(),
                         ui_diagnostics: None,

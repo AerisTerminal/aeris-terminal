@@ -602,6 +602,95 @@ fn pane_harness_interval_switch_keeps_chart_uncovered_until_replacement(cx: &mut
 }
 
 #[gpui::test]
+fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let original = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .chart
+            .as_ref()
+            .expect("original chart")
+            .entity_id()
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    let snapshot = harness.market.publish_snapshot(13).expect("fixture bars");
+    let publication = |selection_generation| MarketWorkerPublication {
+        update: ReplayStreamUpdate::Snapshot(snapshot.snapshot.clone()),
+        generation: MarketPublicationGeneration::from_generation(&snapshot.generation)
+            .with_selection_generation(selection_generation),
+        subscription_id: snapshot.subscription_id.clone(),
+        worker_label: snapshot.worker_label.clone(),
+        ui_diagnostics: None,
+    };
+    harness
+        .publications
+        .send(MarketWorkerMessage::Update(publication(sequence)))
+        .expect("early replacement snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.interval, ChartInterval::Minute1);
+        assert_eq!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker");
+    harness
+        .publications
+        .send(MarketWorkerMessage::Update(publication(1)))
+        .expect("retired snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 2);
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+        assert_eq!(
+            pane.chart.as_ref().map(Entity::entity_id),
+            Some(original),
+            "retired bars must not install into the new selection"
+        );
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::Update(publication(sequence)))
+        .expect("replacement snapshot");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_ne!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
+    });
+    let current_label = cx.read(|cx| harness.pane.read(cx).replay_label.clone());
+    let previous_sequence = snapshot.snapshot.sequence_range().1;
+    let stale_delta = harness
+        .market
+        .publish_delta(previous_sequence)
+        .expect("fixture delta")
+        .expect("next fixture bar");
+    harness
+        .publications
+        .send(MarketWorkerMessage::Update(MarketWorkerPublication {
+            generation: stale_delta.generation.with_selection_generation(1),
+            ..stale_delta
+        }))
+        .expect("retired update");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.replay_label, current_label);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);

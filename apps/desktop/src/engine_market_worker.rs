@@ -2958,8 +2958,13 @@ mod tests {
             replay_runtime_snapshot(&snapshot, None, 1_000_000_000).expect("HL snapshot converts");
         let (sender, receiver) = market_worker_channel(NonZeroUsize::MIN);
 
-        send_publication(&sender, ReplayStreamUpdate::Snapshot(replay), "hyperliquid")
-            .expect("publication queues");
+        send_publication(
+            &sender,
+            ReplayStreamUpdate::Snapshot(replay),
+            "hyperliquid",
+            8,
+        )
+        .expect("publication queues");
 
         let (messages, disconnected) = receiver.drain();
         assert!(!disconnected);
@@ -2968,6 +2973,7 @@ mod tests {
             [MarketWorkerMessage::Update(publication)]
                 if publication.subscription_id == HYPERLIQUID_SUBSCRIPTION_ID
                     && publication.worker_label == HYPERLIQUID_WORKER_LABEL
+                    && publication.generation.selection_generation() == 8
         ));
     }
 

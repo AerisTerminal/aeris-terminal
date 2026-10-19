@@ -3369,6 +3369,12 @@ impl WorkspaceSurface {
         publication: MarketWorkerPublication,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .chart_pane_controller
+            .accept_publication(publication.generation.selection_generation())
+        {
+            return;
+        }
         #[cfg(feature = "diagnostics")]
         self.record_live_evidence_publication(&publication.update);
         let MarketWorkerPublication {
