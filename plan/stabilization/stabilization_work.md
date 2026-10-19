@@ -1013,6 +1013,16 @@ Status: pending
     remaining unwrap/discard cleanup remain. Update-process cleanup, optional
     auth cancellation, and chart change booleans are separate follow-ups; no
     M6.6 bridge collapse was attempted.
+  - Part 17: account profile refresh after aborted update restart and window
+    activation now skips signed-out teardown and diagnoses bounded-queue
+    failures without exposing account details. Live UI failures post one
+    workspace-keyed sanitized notice; a released UI owner uses diagnostics.
+    Browser-open login cancellation failure is diagnostic only; disabled
+    production authentication remains disabled, with no new backend traffic
+    or desktop-owned account state. Account tests cover signed-out, live
+    success, and full-queue failure. M6.2 remains unchecked for
+    connection/series feedback, deferred Trading/OpenFolder/ConnectProvider
+    sources/actions, and remaining unwrap/discard cleanup.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
@@ -1342,6 +1352,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-18 M6.2 Part 14 fix(desktop): handled saturated pane resource-class demand with one keyed notice and successful clear, distinguished detached shutdown and market worker full-queue retirement, and documented/diagnosed pending search, automatic study removal and empty-chart precision outcomes. PaneHarness and worker retirement regressions plus full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for GPUI owner-update, profile refresh, market bridge and shutdown discards, other source/actions, connection/series feedback and unwrap cleanup.
 - 2026-10-18 M6.2 Part 15 fix(desktop): handled weak-owner update outcomes for pane/workspace callbacks without duplicate state: released owners cancel quietly, live update failures reach diagnostics. Preserved the tested constant-layout and complete-command-registry startup invariants instead of arbitrary fallbacks. Focused timer-fence tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for profile refresh, market bridge and shutdown discards, connection/series feedback, deferred source/actions and other unwrap cleanup.
 - 2026-10-19 M6.2 Part 16 fix(desktop): classified bounded bridge send failures and retired receivers, surfaced startup/shutdown cleanup failures through stderr-safe diagnostics, and preserved chart-failure notice ownership. Focused mailbox and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for account profile refresh, connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
+- 2026-10-19 M6.2 Part 17 fix(desktop): classified account profile-refresh rollback/activation results as signed-out teardown or live bounded-queue failure, with sanitized keyed UI notice or detached-owner diagnostic; diagnosed optional login cancellation failure without enabling authentication. Deterministic account queue tests and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains open for connection/series feedback, deferred notice variants, and remaining unwrap/discard cleanup.
 
 ## 7. Known gaps / deferred
 

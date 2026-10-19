@@ -1805,7 +1805,27 @@ impl TerminalApp {
         }
     }
 
-    fn cancel_update_restart_after_persistence_failure(&mut self, error: String, _cx: &App) {
+    fn resume_profile_after_failed_restart(&mut self, cx: &mut Context<Self>) {
+        if self
+            .lifecycle
+            .account()
+            .is_some_and(|account| account.request_profile_refresh_if_active().is_err())
+        {
+            diagnostic!("Aeris account profile refresh could not resume after update rollback");
+            self.post_workspace_notice(
+                "profile_refresh",
+                "Account profile refresh unavailable",
+                notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
+                cx,
+            );
+        }
+    }
+
+    fn cancel_update_restart_after_persistence_failure(
+        &mut self,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
         self.update_restart_persistence_pending = false;
         self.workspace_error = Some(error.clone());
         if let Some(cleanup) = self
@@ -1818,9 +1838,7 @@ impl TerminalApp {
             // handle cannot block GPUI on process shutdown.
             drop(cleanup);
         }
-        if let Some(account) = self.lifecycle.account() {
-            let _ = account.request_profile_refresh();
-        }
+        self.resume_profile_after_failed_restart(cx);
     }
 
     fn commit_update_restart_after_persistence(
@@ -1831,9 +1849,7 @@ impl TerminalApp {
         self.update_restart_persistence_pending = false;
         let Some(updater) = self.updater.as_mut() else {
             drop(account_refresh);
-            if let Some(account) = self.lifecycle.account() {
-                let _ = account.request_profile_refresh();
-            }
+            self.resume_profile_after_failed_restart(cx);
             self.workspace_error = Some("update client is unavailable".to_string());
             cx.notify();
             return;
@@ -1921,8 +1937,13 @@ impl TerminalApp {
                 }
                 terminal_cx.notify();
             });
-            if update.is_err() && let Some(account) = account {
-                let _ = account.request_profile_refresh();
+            if update.is_err()
+                && let Some(account) = account
+                && account.request_profile_refresh_if_active().is_err()
+            {
+                // The UI owner is gone; only diagnostics can receive this
+                // live-account failure during shutdown.
+                diagnostic!("Aeris account profile refresh could not resume after update rollback");
             }
         })
         .detach();
@@ -3282,9 +3303,15 @@ impl TerminalApp {
             if self.profile_refresh_on_activation {
                 self.profile_refresh_on_activation = false;
                 if let Some(account) = self.lifecycle.account()
-                    && let Err(error) = account.request_profile_refresh()
+                    && account.request_profile_refresh_if_active().is_err()
                 {
-                    diagnostic!("Aeris profile refresh degraded: {error}");
+                    diagnostic!("Aeris profile refresh degraded");
+                    self.post_workspace_notice(
+                        "profile_refresh",
+                        "Account profile refresh unavailable",
+                        notification_center::NoticeLifetime::Timed(Duration::from_secs(6)),
+                        cx,
+                    );
                 }
             }
             self.schedule_market_frame(window, cx);

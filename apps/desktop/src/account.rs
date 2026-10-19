@@ -59,7 +59,12 @@ pub fn start_login(
         &authorization.authorization_url,
         aeris_platform_runtime::open_system_browser,
     ) {
-        let _ = service.cancel_login(authorization.request_generation);
+        if service
+            .cancel_login(authorization.request_generation)
+            .is_err()
+        {
+            diagnostic!("Aeris login cancellation after browser failure degraded");
+        }
         return Err(error);
     }
     Ok(authorization)
@@ -736,6 +741,29 @@ impl DesktopAccount {
             })
     }
 
+    /// Resumes profile polling after an aborted restart only while the
+    /// runtime-owned view still has a verified account. Signed-out teardown
+    /// needs no refresh.
+    ///
+    /// # Errors
+    /// Returns an error if the account view is unavailable or a live account
+    /// cannot queue its refresh.
+    pub fn request_profile_refresh_if_active(&self) -> Result<bool, String> {
+        let refreshable = self
+            .shared
+            .view
+            .lock()
+            .map_err(|_| "account profile view is unavailable".to_string())?
+            .state;
+        if !matches!(
+            refreshable,
+            AccountSessionState::Active | AccountSessionState::OfflineLease
+        ) {
+            return Ok(false);
+        }
+        self.request_profile_refresh().map(|()| true)
+    }
+
     /// Applies worker results and keeps the runtime account view fresh. Status
     /// polling runs fast while a browser transaction is open and slowly
     /// when idle, so restored sessions and runtime expiry reach the UI
@@ -1261,6 +1289,66 @@ mod tests {
             email: String::new(),
             photo_url: String::new(),
         }
+    }
+
+    #[test]
+    fn rollback_profile_refresh_skips_signed_out_and_queues_for_live_account() {
+        let (session, engine) = scripted_session();
+        wait_for(&session, "initial signed-out status", || {
+            !session.verification_pending()
+        });
+        assert_eq!(session.request_profile_refresh_if_active(), Ok(false));
+
+        engine.lock().expect("engine locks").view = view(AccountSessionState::Active);
+        session.queue_status();
+        wait_for(&session, "verified account status", || {
+            session.authenticated()
+        });
+        assert_eq!(session.request_profile_refresh_if_active(), Ok(true));
+        wait_for(&session, "profile refresh reply", || {
+            session
+                .shared
+                .profile_refresh_until
+                .lock()
+                .expect("refresh window locks")
+                .is_some()
+        });
+    }
+
+    #[test]
+    fn rollback_profile_refresh_distinguishes_retirement_from_full_queue() {
+        use std::sync::mpsc;
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let session = DesktopAccount::spawn_with(move |request| {
+            if matches!(request, AccountRequest::RefreshStatus { .. }) {
+                entered_tx.send(()).expect("startup request entered worker");
+                release_rx.recv().expect("test releases worker");
+            }
+            inert_engine(request)
+        })
+        .expect("isolated account session spawns");
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("startup request blocks worker");
+        let requests = &session.shared.requests;
+        for _ in 0..2 {
+            requests
+                .try_send(AccountRequest::RefreshProfile { epoch: 0 })
+                .expect("bounded account queue accepts control");
+        }
+        assert_eq!(
+            session.request_profile_refresh_if_active(),
+            Ok(false),
+            "signed-out teardown needs no request even when the queue is full"
+        );
+        *session.shared.view.lock().expect("view locks") = view(AccountSessionState::Active);
+        assert_eq!(
+            session.request_profile_refresh_if_active(),
+            Err("account profile refresh is already queued".to_string())
+        );
+        release_tx.send(()).expect("worker resumes");
     }
 
     #[test]
