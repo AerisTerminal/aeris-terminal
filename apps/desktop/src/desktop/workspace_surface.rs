@@ -3643,6 +3643,9 @@ impl WorkspaceSurface {
             MarketWorkerMessage::EngineSwitchMarker { sequence } => {
                 self.apply_rithmic_switch_marker(sequence, cx);
             }
+            MarketWorkerMessage::EngineSelectionFailed { sequence } => {
+                self.reject_pending_engine_selection(sequence, cx);
+            }
             MarketWorkerMessage::SelectedInstrument(instrument) => {
                 self.apply_selected_instrument(instrument);
             }
@@ -4322,6 +4325,34 @@ impl WorkspaceSurface {
             self.post_symbol_selection_notice("Market selection failed. Try again.", cx);
             cx.notify();
         }
+    }
+
+    fn reject_pending_engine_selection(&mut self, sequence: u64, cx: &mut Context<Self>) {
+        if self.rithmic_pending_sequence != Some(sequence) || !self.rithmic_switch.is_pending() {
+            return;
+        }
+        let failed_interval = self.rithmic_pending_interval.take();
+        let instrument_switch = self.rithmic_pending_product.take().is_some();
+        self.rithmic_pending_sequence = None;
+        self.pending_linked_instrument = None;
+        self.market_state.symbol_selection_pending = false;
+        self.rithmic_switch = RithmicSwitchState::Idle;
+        self.chart_state = if self.chart.is_some() {
+            ChartState::Ready
+        } else {
+            ChartState::Loading
+        };
+        if !instrument_switch && failed_interval.is_some_and(|interval| interval != self.interval) {
+            Self::post_indicator_failure(
+                "series_selection",
+                "Timeframe unavailable",
+                "Market history could not start. Try again.",
+                cx,
+            );
+        } else {
+            self.post_symbol_selection_notice("Market selection failed. Try again.", cx);
+        }
+        cx.notify();
     }
 
     /// Commits a Rithmic switch's identity without touching the chart.

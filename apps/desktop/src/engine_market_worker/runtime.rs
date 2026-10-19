@@ -523,21 +523,15 @@ fn apply_selection_outcome(
                             detail: format!("{error:?}"),
                         })
                         .map_err(|send| send.to_string())?;
+                } else {
+                    record
+                        .endpoint
+                        .messages
+                        .send(MarketWorkerMessage::EngineSelectionFailed {
+                            sequence: generation.0.get(),
+                        })
+                        .map_err(|send| send.to_string())?;
                 }
-                record
-                    .endpoint
-                    .messages
-                    .send(MarketWorkerMessage::State {
-                        state: if record.endpoint.live {
-                            ChartState::Ready
-                        } else {
-                            ChartState::Loading
-                        },
-                        message: format!(
-                            "Market selection failed; retaining previous chart: {error:?}"
-                        ),
-                    })
-                    .map_err(|error| error.to_string())?;
             }
         }
     }

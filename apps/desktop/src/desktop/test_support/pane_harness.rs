@@ -192,6 +192,152 @@ impl PaneHarness {
 }
 
 #[gpui::test]
+fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
+    cx: &mut TestAppContext,
+) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let (old_chart, old_product) = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        (
+            pane.chart.clone().expect("original chart"),
+            pane.product.clone(),
+        )
+    });
+    for _ in 0..2 {
+        harness.pane.update(cx, |pane, cx| {
+            assert!(pane.select_interval(ChartInterval::Minute5, cx));
+        });
+        let sequence = harness
+            .commands
+            .as_ref()
+            .expect("command receiver")
+            .try_iter()
+            .find_map(|command| match command {
+                MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+                _ => None,
+            })
+            .expect("selection request");
+        harness
+            .publications
+            .send(MarketWorkerMessage::EngineSelectionFailed { sequence })
+            .expect("selection failure enters mailbox");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let pane = harness.pane.read(cx);
+            assert_eq!(
+                pane.chart.as_ref().map(Entity::entity_id),
+                Some(old_chart.entity_id())
+            );
+            assert_eq!(pane.product, old_product);
+            assert_eq!(pane.interval, ChartInterval::Minute1);
+            assert_eq!(pane.chart_state, ChartState::Ready);
+            let toaster = &harness.window.read(cx).toaster;
+            assert_eq!(toaster.notices().len(), 1);
+            assert_eq!(toaster.notices()[0].title, "Timeframe unavailable");
+            assert_eq!(
+                toaster.live_notice_cards(toaster::ToastStack::of(&harness.pane)),
+                1
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let requests = harness.commands.as_ref().expect("command receiver");
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let first = requests
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("first selection");
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute15, cx));
+    });
+    let second = requests
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("replacement selection");
+    assert_ne!(first, second);
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionFailed { sequence: first })
+        .expect("retired failure enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.rithmic_pending_sequence, Some(second));
+        assert_eq!(pane.rithmic_pending_interval, Some(ChartInterval::Minute15));
+        assert_eq!(pane.chart_state, ChartState::Loading);
+        assert_eq!(harness.window.read(cx).toaster.notices(), []);
+    });
+}
+
+#[gpui::test]
+fn pane_harness_failed_pending_instrument_keeps_previous_identity(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let (old_chart, product) = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        (
+            pane.chart.clone().expect("original chart"),
+            pane.product.clone().expect("instrument"),
+        )
+    });
+    let mut replacement = product.clone();
+    replacement.instrument_id = "different-instrument".into();
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_installed_instrument(&replacement, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("command receiver")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("instrument selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSelectionFailed { sequence })
+        .expect("failure enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.product.as_ref(), Some(&product));
+        assert_eq!(
+            pane.chart.as_ref().map(Entity::entity_id),
+            Some(old_chart.entity_id())
+        );
+        assert_eq!(pane.interval, ChartInterval::Minute1);
+        let notices = harness.window.read(cx).toaster.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "Market selection unavailable");
+    });
+}
+
+#[gpui::test]
 fn pane_harness_invalid_restored_chart_zone_renders_one_notice_on_repeat(cx: &mut TestAppContext) {
     let restore = WorkspaceSurfaceRestore {
         chart: Some(WorkspaceChartState {

@@ -332,6 +332,9 @@ pub enum MarketWorkerMessage {
     EngineSwitchMarker {
         sequence: u64,
     },
+    EngineSelectionFailed {
+        sequence: u64,
+    },
     SelectedInstrument(InstallProviderInstrument),
     CatalogSwitchCommitted {
         sequence: u64,
