@@ -3657,6 +3657,11 @@ impl WorkspaceSurface {
             MarketWorkerMessage::State { state, message } => {
                 self.apply_market_state_message(state, message, cx);
             }
+            MarketWorkerMessage::SeriesState {
+                generation,
+                state,
+                message,
+            } => self.apply_series_state_message(generation, state, message, cx),
             MarketWorkerMessage::EngineSwitchMarker { sequence } => {
                 self.apply_rithmic_switch_marker(sequence, cx);
             }
@@ -3682,9 +3687,7 @@ impl WorkspaceSurface {
                 state,
                 message: _,
                 transport_rtt_nanos,
-            } => {
-                self.apply_market_connection_message(state, transport_rtt_nanos, cx);
-            }
+            } => self.apply_market_connection_message(state, transport_rtt_nanos, cx),
             MarketWorkerMessage::ProviderCatalog(event) => {
                 self.apply_provider_catalog_event(event, cx);
             }
@@ -4237,6 +4240,18 @@ impl WorkspaceSurface {
                 chart_cx.notify();
             }
         });
+    }
+
+    fn apply_series_state_message(
+        &mut self,
+        generation: u64,
+        state: ChartState,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chart_pane_controller.accept_publication(generation) {
+            self.apply_market_state_message(state, message, cx);
+        }
     }
 
     fn apply_market_state_message(

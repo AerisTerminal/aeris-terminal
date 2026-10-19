@@ -1395,7 +1395,14 @@ mod tests {
             .0
             .into_iter()
             .filter_map(|message| match message {
-                MarketWorkerMessage::State { state, message } => Some((state, message)),
+                MarketWorkerMessage::SeriesState {
+                    generation,
+                    state,
+                    message,
+                } => {
+                    assert!(generation > 0, "runtime series state carries a selection");
+                    Some((state, message))
+                }
                 _ => None,
             })
             .collect()

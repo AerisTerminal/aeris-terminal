@@ -31,9 +31,11 @@ pub(super) fn apply_series_state(
 ) -> Result<(), String> {
     let provider_name = provider_display_name(provider);
     let load_state = state.state;
+    let generation = state.generation.0.get();
     let announce = |chart_state: ChartState, message: String| {
         messages
-            .send(MarketWorkerMessage::State {
+            .send(MarketWorkerMessage::SeriesState {
+                generation,
                 state: chart_state,
                 message,
             })
@@ -344,7 +346,8 @@ pub(super) fn apply_realtime_demand_error(
     }
     if error.code == EngineFaultCode::Retryable {
         messages
-            .send(MarketWorkerMessage::State {
+            .send(MarketWorkerMessage::SeriesState {
+                generation: error.generation.0.get(),
                 state: ChartState::Recovering,
                 message: detail,
             })

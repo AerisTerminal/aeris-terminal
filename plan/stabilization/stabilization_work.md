@@ -1219,6 +1219,13 @@ Status: pending
     gates. ChartState and auxiliary messages, legacy switch guards, exhaustive
     interleavings, cover-through-ready and guarded GUI storms remain; M6.3
     stays unchecked.
+  - Part 12: runtime series-readiness and retryable demand-error states now
+    carry their selection generation through the pane mailbox. The controller
+    rejects states for a pending replacement and a retired selection before
+    presentation mutation; a GPUI regression checks both and a committed
+    state. The legacy unfenced worker-error/startup state, connection and
+    auxiliary messages, switch guards, exhaustive interleavings,
+    cover-through-ready and guarded GUI storms remain. M6.3 stays unchecked.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1563,6 +1570,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 9 fix(desktop): the pane now fences order-book frames before ladder mutation; a failing-first GPUI test proved an early replacement frame previously overwrote the displayed book, and covers a higher-revision retired frame after selection commit. Full serial gate results accompany this commit; M6.3 remains unchecked pending state, bars, auxiliary messages, switch-guard removal, interleavings and guarded GUI storms. CARGO_BUILD_JOBS=1 was used for the cold rebuild.
 - 2026-10-19 M6.3 Part 10 fix(desktop): selection changes no longer reject a current tape just because the previous provider session had a higher epoch; a failing-first GPUI interval-switch test covers the lower-generation replacement. Full gate results accompany the commit. M6.3 remains unchecked pending state and bar fencing, auxiliary messages, switch-guard removal, interleavings and GUI storm.
 - 2026-10-19 M6.3 Part 11 fix(desktop): stamped runtime bar snapshots and updates with the exact pane selection and rejected retired data before any presentation mutation; the new GPUI regression initially failed to compile without selection stamping and now passes with all 29 pane tests. One existing order-flow fixture needed the committed selection stamp; the first full suite caught it, and the corrected full workspace test suite, fmt, check, strict Clippy and naming check passed. A 31.7 GiB target was cleaned, and CARGO_BUILD_JOBS=1 avoided the documented cold MSVC linker issue. M6.3 remains unchecked pending ChartState and auxiliary fences, switch-guard removal, interleavings and GUI storms.
+- 2026-10-19 M6.3 Part 12 fix(desktop): exact-selection runtime series-readiness and retryable demand-error states pass the pane fence; the new GPUI regression covers early replacement, retired and accepted committed state. The first full suite exposed three existing state tests filtering only the old message variant; their drain helper now asserts the runtime selection is stamped. Cold target above 25 GiB was cleaned (twice during the gate); CARGO_BUILD_JOBS=1 was used. M6.3 remains unchecked pending the remaining state sources, auxiliary messages, legacy switch-guard deletion, interleavings and GUI storms.
 
 ## 7. Known gaps / deferred
 

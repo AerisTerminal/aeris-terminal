@@ -312,6 +312,11 @@ pub enum MarketWorkerMessage {
         state: ChartState,
         message: String,
     },
+    SeriesState {
+        generation: u64,
+        state: ChartState,
+        message: String,
+    },
     Connection {
         state: FeedConnectionState,
         message: String,

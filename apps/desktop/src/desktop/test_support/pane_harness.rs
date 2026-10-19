@@ -691,6 +691,64 @@ fn pane_harness_bar_publications_reject_retired_selection(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("selection");
+    let state = |generation, chart_state| MarketWorkerMessage::SeriesState {
+        generation,
+        state: chart_state,
+        message: "fixture series state".into(),
+    };
+    let pending_state = cx.read(|cx| harness.pane.read(cx).chart_state);
+    harness
+        .publications
+        .send(state(sequence, ChartState::Ready))
+        .expect("early state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, pending_state);
+        assert_eq!(pane.interval, ChartInterval::Minute1);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let committed_state = cx.read(|cx| harness.pane.read(cx).chart_state);
+    harness
+        .publications
+        .send(state(1, ChartState::Error))
+        .expect("retired state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, committed_state);
+    });
+    harness
+        .publications
+        .send(state(sequence, ChartState::Recovering))
+        .expect("current state");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.chart_state, ChartState::Recovering);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);
