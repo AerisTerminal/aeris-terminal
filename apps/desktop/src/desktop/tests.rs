@@ -2612,21 +2612,22 @@ fn a_superseded_chart_is_covered_and_named_not_left_looking_current() {
 fn engine_switch_keeps_partial_replacement_covered_until_handoff_is_current() {
     assert!(!switch_requires_chart_cover(
         false,
-        RithmicSwitchState::Pending
-    ));
-    assert!(!switch_requires_chart_cover(true, RithmicSwitchState::Idle));
-    assert!(switch_requires_chart_cover(
         true,
         RithmicSwitchState::Pending
     ));
-    assert!(switch_requires_chart_cover(
+    assert!(!switch_requires_chart_cover(
         true,
-        RithmicSwitchState::Swapping
-    ));
-    assert!(switch_requires_chart_cover(
         true,
-        RithmicSwitchState::Initializing
+        RithmicSwitchState::Idle
     ));
+    for phase in [
+        RithmicSwitchState::Pending,
+        RithmicSwitchState::Swapping,
+        RithmicSwitchState::Initializing,
+    ] {
+        assert!(!switch_requires_chart_cover(true, false, phase));
+        assert!(switch_requires_chart_cover(true, true, phase));
+    }
 }
 
 #[test]

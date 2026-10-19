@@ -247,6 +247,109 @@ fn pane_harness_failed_pending_interval_restores_chart_and_deduplicates_notice(
 }
 
 #[gpui::test]
+fn pane_harness_interval_switch_keeps_chart_uncovered_until_replacement(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let original = cx.read(|cx| {
+        harness
+            .pane
+            .read(cx)
+            .chart
+            .as_ref()
+            .expect("original chart")
+            .entity_id()
+    });
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("command receiver")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("interval selection");
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(
+            !pane.showing_superseded_series(),
+            "pending interval-only switch"
+        );
+        assert_eq!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(
+            !pane.showing_superseded_series(),
+            "committed interval-only switch"
+        );
+        assert_eq!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+    });
+}
+
+#[gpui::test]
+fn pane_harness_instrument_switch_covers_original_through_marker(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let (original, mut replacement) = cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        (
+            pane.chart.as_ref().expect("original chart").entity_id(),
+            pane.product.clone().expect("original instrument"),
+        )
+    });
+    replacement.instrument_id = "different-instrument".into();
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_installed_instrument(&replacement, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("command receiver")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("instrument selection");
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(
+            pane.showing_superseded_series(),
+            "pending instrument switch"
+        );
+        assert_eq!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("marker enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert!(
+            pane.showing_superseded_series(),
+            "committed instrument switch"
+        );
+        assert_eq!(pane.chart.as_ref().map(Entity::entity_id), Some(original));
+        assert_eq!(pane.product.as_ref(), Some(&replacement));
+    });
+}
+
+#[gpui::test]
 fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);

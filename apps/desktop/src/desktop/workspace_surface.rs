@@ -3550,17 +3550,28 @@ impl WorkspaceSurface {
         diagnostic!("market worker invalidated the stream");
     }
 
-    /// Reports whether an engine selection handoff must keep the chart covered.
+    /// Reports whether an instrument handoff must keep the chart covered.
     ///
     /// Before the replacement snapshot arrives, the pixels belong to the series
-    /// the trader just left. After that first snapshot arrives, the replacement
-    /// can still be retained/partial history until the provider-history/live
-    /// handoff declares it current. Both phases are deliberately hidden behind
-    /// the neutral loading surface so a stale range cannot appear to "wake up"
-    /// and jump when current coverage lands.
+    /// the trader just left. An interval-only switch retains that instrument
+    /// on screen while its replacement history loads; only a different
+    /// instrument needs the neutral cover until its handoff is current.
     pub(super) fn showing_superseded_series(&self) -> bool {
+        let instrument_changed = if self.rithmic_switch.is_pending() {
+            self.rithmic_pending_product
+                .as_ref()
+                .is_some_and(|product| Some(product) != self.product.as_ref())
+        } else {
+            self.rithmic_previous_selection
+                .as_ref()
+                .is_some_and(|(product, _)| product != &self.product)
+        };
         super::provider_presentation(self.provider).is_some()
-            && switch_requires_chart_cover(self.chart.is_some(), self.rithmic_switch)
+            && switch_requires_chart_cover(
+                self.chart.is_some(),
+                instrument_changed,
+                self.rithmic_switch,
+            )
     }
 
     fn set_chart_state(&mut self, state: ChartState, _message: String, cx: &mut Context<Self>) {

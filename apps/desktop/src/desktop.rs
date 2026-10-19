@@ -1733,8 +1733,12 @@ impl RithmicSwitchState {
     }
 }
 
-const fn switch_requires_chart_cover(has_chart: bool, state: RithmicSwitchState) -> bool {
-    has_chart && state.in_progress()
+const fn switch_requires_chart_cover(
+    has_chart: bool,
+    instrument_changed: bool,
+    state: RithmicSwitchState,
+) -> bool {
+    has_chart && instrument_changed && state.in_progress()
 }
 
 /// A `Ready` control message can still be queued for the previously selected

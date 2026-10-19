@@ -1130,6 +1130,20 @@ Status: pending
     interleaved with a newer request. This fixes the pre-marker failure path
     only. The unified binding, post-marker failure restoration, one acceptance
     point, switch-guard removal, full interleavings and GUI storm remain pending.
+  - Part 3: interval-only selection keeps the previous instrument's chart
+    visible without the instrument-change cover in both pending and committed
+    phases; a different instrument remains covered through its handoff. A
+    failing-first GPUI pane regression and instrument countercase exercise the
+    actual selection commands and mailbox marker. The focused binary
+    `PaneHarness` tests require
+    `cargo test -p aeris_desktop --all-features --locked <test-name>`:
+    Cargo builds the binary test against the desktop library without
+    `cfg(test)`, so its fixture export is unavailable without the explicit
+    `diagnostics` feature. Default production builds intentionally cannot
+    construct `FixtureMarketWorker`. The prior default-feature focused
+    invocation failed; it was not a passing check. Exact-generation binding,
+    post-marker failure restoration, switch-guard deletion, interleavings and
+    GUI storm remain pending.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1466,6 +1480,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.2 closeout docs(plan): reconciled VAL-DSK-007 against live selection guarding, closed the bounded notice/toaster and injected-failure item, and recorded real owners for deferred ConnectProvider (M6.9), Trading request feedback (M6.10), guarded OpenFolder (M7.8), and the final discard policy (M6.12) in tracker, work items and architecture. No no-op action was added. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 on a cold target.
 - 2026-10-19 M6.3 Part 1 fix(desktop): fenced tape prefix invalidation from the superseded chart during an interval selection; the strengthened GPUI switch test first failed with a cleared ordinal and passed after the fix. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after cleaning the 31.2 GiB generated target. M6.3 stays unchecked pending the unified ChartBinding and exact-generation contract.
 - 2026-10-19 M6.3 Part 2 fix(desktop): delivered exact-sequence pre-marker selection failures to the pane, restoring the previous chart instead of leaving a pending loading cover; tested interval retry deduplication, instrument rollback and retired failure interleaving in GPUI. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after cleaning a 30.5 GiB generated target. M6.3 remains unchecked pending the unified ChartBinding and exact-generation contract.
+- 2026-10-19 M6.3 Part 3 fix(desktop): kept interval-only chart selection uncovered while retaining the instrument-change cover; failing-first GPUI interval regression and instrument countercase passed under --all-features. Documented why the earlier default-feature PaneHarness invocation fails and preserved fixture exclusion from production. Full gate evidence is recorded in the commit verification; M6.3 remains unchecked pending exact-generation binding and GUI storm.
 
 ## 7. Known gaps / deferred
 
