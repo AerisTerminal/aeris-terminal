@@ -923,10 +923,11 @@ mod timeframe_input {
             },
             cx,
         );
-        deliver(
-            MarketWorkerMessage::TradeTape(order_flow_tape(&product, 2, 5)),
-            cx,
-        );
+        // A rewritten prefix must not invalidate the old chart's resume cursor.
+        // The rewrite belongs to the replacement, which has not been drawn yet.
+        let mut rewritten = order_flow_tape(&product, 2, 5);
+        rewritten.rewrite_generation = 1;
+        deliver(MarketWorkerMessage::TradeTape(rewritten), cx);
         assert_eq!(
             applied_ordinal(&one_minute, 1, cx),
             Some(3),

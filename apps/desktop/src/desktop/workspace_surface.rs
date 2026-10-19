@@ -5028,6 +5028,12 @@ impl WorkspaceSurface {
         cx: &mut Context<Self>,
     ) {
         const SWEEP_CLASSIFICATION_WINDOW: usize = 512;
+        // Retain the replacement's tape, but do not even invalidate the old
+        // chart's resume cursor when its prefix was rewritten. Installation of
+        // the covering snapshot projects the retained tape into the new chart.
+        if self.rithmic_switch.awaits_replacement_chart() {
+            return;
+        }
         let (Some(chart), Some(product)) = (self.chart.as_ref(), self.product.as_ref()) else {
             return;
         };
@@ -5077,12 +5083,6 @@ impl WorkspaceSurface {
         };
         let recent_start = trades.len().saturating_sub(SWEEP_CLASSIFICATION_WINDOW);
         self.trade_sweeps = classify_order_flow_sweeps(&trades[recent_start..]).into();
-        // The identity and aggregation above belong to the committed selection, which the
-        // chart on screen may not show yet. The retained tape is projected into the
-        // replacement chart when its covering snapshot installs it.
-        if self.rithmic_switch.awaits_replacement_chart() {
-            return;
-        }
         let Some(tick_size) = tick_size else {
             chart.update(cx, |chart, chart_cx| {
                 chart.clear_order_flow_trades();

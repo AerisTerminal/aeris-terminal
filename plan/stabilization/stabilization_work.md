@@ -1113,6 +1113,14 @@ Status: pending
     wires trusted-location `OpenFolder`. M6.12 enforces remaining desktop-wide
     discards. No placeholder action or parallel owner is introduced.
 - [ ] M6.3 chart-binding-generation-fence - Per-chart `ChartBinding` drops stale publications in one place
+  - Part 1: fixed a replacement tape rewrite invalidating the still-displayed
+    chart's order-flow resume cursor before its covering snapshot. The tape
+    remains retained for projection into the replacement chart. The existing
+    interval-switch GPUI regression now delivers a rewritten prefix, asserts
+    that the old chart retains its ordinal, and verifies the replacement
+    receives the latest tape. This is not the full binding migration:
+    per-message exact fencing, switch-guard deletion, interleavings,
+    failure restoration and switch-storm GUI evidence remain outstanding.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1447,6 +1455,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.2 Part 20 fix(desktop): classified update child cleanup, reaping and detached worker failures without GPUI waiting, and verified exited/running helper paths. Audited VAL-DSK-003..007 against the active mission contract: 005/006 have missing exact evidence, and 007's literal selection_pending zero-match conflicts with active selection state. Focused and full serial workspace fmt/check/strict Clippy/tests/naming_check passed; M6.2 remains unchecked for those gaps and deferred real source/actions.
 - 2026-10-19 M6.2 Part 21 fix(desktop): aligned four injected pane failure notices to Error severity and asserted source, single rendered card and repeated-key behavior; captured a real diagnostic sink in an isolated child test to verify secret-bearing restore errors never reach notice detail or the logged public title line. Focused and full serial workspace fmt/check/strict Clippy/tests/naming_check passed. M6.2 remains unchecked for active VAL-DSK-007 selection-state wording and blocked Trading/OpenFolder/ConnectProvider sources/actions.
 - 2026-10-19 M6.2 closeout docs(plan): reconciled VAL-DSK-007 against live selection guarding, closed the bounded notice/toaster and injected-failure item, and recorded real owners for deferred ConnectProvider (M6.9), Trading request feedback (M6.10), guarded OpenFolder (M7.8), and the final discard policy (M6.12) in tracker, work items and architecture. No no-op action was added. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 on a cold target.
+- 2026-10-19 M6.3 Part 1 fix(desktop): fenced tape prefix invalidation from the superseded chart during an interval selection; the strengthened GPUI switch test first failed with a cleared ordinal and passed after the fix. Full serial workspace fmt/check/strict Clippy/tests/naming_check passed with CARGO_BUILD_JOBS=1 after cleaning the 31.2 GiB generated target. M6.3 stays unchecked pending the unified ChartBinding and exact-generation contract.
 
 ## 7. Known gaps / deferred
 
