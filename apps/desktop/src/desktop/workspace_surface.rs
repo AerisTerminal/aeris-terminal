@@ -3478,7 +3478,9 @@ impl WorkspaceSurface {
         result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
         cx: &mut Context<Self>,
     ) {
-        if self.chart_pane_controller.accept_publication(generation) {
+        // A recovery result is a lifecycle outcome, not an incremental bar.
+        // The still-displayed series cannot settle a replacement request.
+        if self.chart_pane_controller.accept_series_state(generation) {
             self.apply_recovery(request_id, result, cx);
         }
     }

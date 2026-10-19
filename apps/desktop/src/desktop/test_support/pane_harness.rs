@@ -852,6 +852,74 @@ fn pane_harness_series_state_rejects_early_and_retired_selection(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn pane_harness_old_recovery_failure_during_pending_switch_keeps_request(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    harness
+        .publications
+        .send(MarketWorkerMessage::SeriesState {
+            generation: 1,
+            state: ChartState::Stale,
+            message: "fixture stream invalid".into(),
+        })
+        .expect("stream invalidation");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    let request_id = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::Recovery { command, .. } => Some(command.request_id),
+            _ => None,
+        })
+        .expect("recovery request");
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+    });
+    let sequence = harness
+        .commands
+        .as_ref()
+        .expect("commands")
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("replacement selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::Recovery {
+            generation: 1,
+            request_id,
+            result: Err(aeris_desktop::market_worker::MarketRecoveryFailure::Failed(
+                "private old recovery failure".into(),
+            )),
+        })
+        .expect("old recovery");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(
+            pane.chart_pane_controller.pending_selection(),
+            Some(sequence)
+        );
+        assert_eq!(pane.chart_failure, None);
+    });
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("replacement marker");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+        assert_eq!(pane.chart_failure, None);
+    });
+    cx.read(|cx| assert_eq!(harness.window.read(cx).toaster.notices(), []));
+}
+
+#[gpui::test]
 fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection(
     cx: &mut TestAppContext,
 ) {
