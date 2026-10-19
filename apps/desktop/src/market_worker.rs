@@ -305,6 +305,7 @@ pub enum MarketWorkerMessage {
     StudyRemoved(MarketStudyRemoved),
     Diagnostics(Box<FeedDiagnosticsSnapshot>),
     Recovery {
+        generation: u64,
         request_id: u64,
         result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
     },
@@ -2728,6 +2729,7 @@ mod tests {
         assert!(
             recovery_sender
                 .send(MarketWorkerMessage::Recovery {
+                    generation: 1,
                     request_id: 7,
                     result: Err(MarketRecoveryFailure::Failed("recovery failed".to_string())),
                 })
@@ -2769,6 +2771,7 @@ mod tests {
         assert!(
             covered_sender
                 .send(MarketWorkerMessage::Recovery {
+                    generation: 1,
                     request_id: 8,
                     result: Ok(bootstrap),
                 })
@@ -2796,6 +2799,7 @@ mod tests {
         assert!(
             stale_sender
                 .send(MarketWorkerMessage::Recovery {
+                    generation: 1,
                     request_id: 9,
                     result: Ok(stale_bootstrap),
                 })

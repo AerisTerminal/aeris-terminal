@@ -3470,6 +3470,18 @@ impl WorkspaceSurface {
         );
     }
 
+    fn apply_recovery_message(
+        &mut self,
+        generation: u64,
+        request_id: u64,
+        result: Result<MarketWorkerBootstrap, MarketRecoveryFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chart_pane_controller.accept_publication(generation) {
+            self.apply_recovery(request_id, result, cx);
+        }
+    }
+
     fn apply_recovery(
         &mut self,
         request_id: u64,
@@ -3651,9 +3663,11 @@ impl WorkspaceSurface {
                 #[cfg(not(feature = "diagnostics"))]
                 drop(snapshot);
             }
-            MarketWorkerMessage::Recovery { request_id, result } => {
-                self.apply_recovery(request_id, result, cx);
-            }
+            MarketWorkerMessage::Recovery {
+                generation,
+                request_id,
+                result,
+            } => self.apply_recovery_message(generation, request_id, result, cx),
             MarketWorkerMessage::CatalogFailure { message: _ } => {
                 Self::post_symbol_search_notice(
                     "The market catalog is unavailable. Try again later.",

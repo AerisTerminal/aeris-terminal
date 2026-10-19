@@ -22,6 +22,7 @@ pub(super) fn fence_recovery_command(
     endpoint
         .messages
         .send(MarketWorkerMessage::Recovery {
+            generation: selection_generation.unwrap_or(endpoint.active_generation),
             request_id: command.request_id,
             result: Err(MarketRecoveryFailure::Superseded),
         })

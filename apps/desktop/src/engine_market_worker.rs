@@ -1679,6 +1679,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [MarketWorkerMessage::Recovery {
+                generation: 3,
                 request_id: 9,
                 result: Ok(bootstrap),
             }] if bootstrap.generation.publication_generation() == 1
@@ -1727,6 +1728,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [MarketWorkerMessage::Recovery {
+                generation: 3,
                 request_id: 9,
                 result: Err(MarketRecoveryFailure::Superseded),
             }]
@@ -1787,6 +1789,7 @@ mod tests {
         assert!(matches!(
             messages.as_slice(),
             [MarketWorkerMessage::Recovery {
+                generation: 7,
                 request_id: 10,
                 result: Err(MarketRecoveryFailure::Superseded),
             }]

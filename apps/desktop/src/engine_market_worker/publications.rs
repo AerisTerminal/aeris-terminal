@@ -432,6 +432,7 @@ pub(super) fn send_recovery(
         endpoint
             .messages
             .send(MarketWorkerMessage::Recovery {
+                generation: endpoint.active_generation,
                 request_id: previous.request_id,
                 result: Err(MarketRecoveryFailure::Superseded),
             })
@@ -457,6 +458,7 @@ pub(super) fn send_recovery(
         endpoint
             .messages
             .send(MarketWorkerMessage::Recovery {
+                generation: endpoint.active_generation,
                 request_id: pending.request_id,
                 result: Err(MarketRecoveryFailure::Failed(error)),
             })
@@ -473,6 +475,7 @@ pub(super) fn cancel_pending_recovery(endpoint: &mut WorkerEndpoint) -> Result<(
     endpoint
         .messages
         .send(MarketWorkerMessage::Recovery {
+            generation: endpoint.active_generation,
             request_id: pending.request_id,
             result: Err(MarketRecoveryFailure::Superseded),
         })
@@ -501,6 +504,7 @@ pub(super) fn complete_pending_recovery(
             endpoint
                 .messages
                 .send(MarketWorkerMessage::Recovery {
+                    generation: endpoint.active_generation,
                     request_id: command.request_id,
                     result: Ok(MarketWorkerBootstrap {
                         snapshot: replay,
@@ -521,6 +525,7 @@ pub(super) fn complete_pending_recovery(
             endpoint
                 .messages
                 .send(MarketWorkerMessage::Recovery {
+                    generation: endpoint.active_generation,
                     request_id: command.request_id,
                     result: Err(MarketRecoveryFailure::Failed(demand_error(error))),
                 })
