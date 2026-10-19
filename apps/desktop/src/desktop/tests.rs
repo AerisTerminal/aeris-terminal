@@ -23,13 +23,12 @@ use super::{
     fullscreen_escape_command, gpui_color, instrument_listing_refresh_needed,
     instrument_row_highlighted, instrument_selector_label, instrument_target_after_close,
     overlay_height, price_axis_flyout_rows, price_axis_root_rows, publication_chart_state,
-    ready_state_can_complete_switch, reconciled_bridge_state, reorder_workspace_ids,
-    series_selector_label, should_finish_chrome_overlay_close, stabilized_connection_state,
-    switch_requires_chart_cover, symbol_input_action, symbol_submit_decision,
-    timeframe_flyout_height, timeframe_flyout_offset, timeframe_flyout_row_is_active,
-    timeframe_group_intervals, timeframe_interval_group, timeframe_menu_groups,
-    timeframe_menu_row_label, timeframe_overlay_extent, timeframe_overlay_left,
-    watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
+    reconciled_bridge_state, reorder_workspace_ids, series_selector_label,
+    should_finish_chrome_overlay_close, stabilized_connection_state, switch_requires_chart_cover,
+    symbol_input_action, symbol_submit_decision, timeframe_flyout_height, timeframe_flyout_offset,
+    timeframe_flyout_row_is_active, timeframe_group_intervals, timeframe_interval_group,
+    timeframe_menu_groups, timeframe_menu_row_label, timeframe_overlay_extent,
+    timeframe_overlay_left, watchlist_drag_destination, watchlist_drag_translation, watchlist_step,
     window_move_gesture_transition, workspace_drag_destination, workspace_drag_translation,
     workspace_label, workspace_maximize_transition, workspace_split_ratio, workspace_switch,
     wrapped_workspace_index,
@@ -2653,20 +2652,6 @@ fn engine_switch_keeps_partial_replacement_covered_until_handoff_is_current() {
         assert!(!switch_requires_chart_cover(true, false, phase));
         assert!(switch_requires_chart_cover(true, true, phase));
     }
-}
-
-#[test]
-fn old_ready_cannot_cancel_a_pending_symbol_or_timeframe_switch() {
-    assert!(ready_state_can_complete_switch(RithmicSwitchState::Idle));
-    assert!(!ready_state_can_complete_switch(
-        RithmicSwitchState::Pending
-    ));
-    assert!(!ready_state_can_complete_switch(
-        RithmicSwitchState::Swapping
-    ));
-    assert!(ready_state_can_complete_switch(
-        RithmicSwitchState::Initializing
-    ));
 }
 
 #[test]

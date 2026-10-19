@@ -1743,19 +1743,6 @@ const fn switch_requires_chart_cover(
     has_chart && instrument_changed && state.in_progress()
 }
 
-/// A `Ready` control message can still be queued for the previously selected
-/// series while a catalog selection is making its UI -> worker round trip.
-/// Letting that old readiness retire `Pending` (or the pre-snapshot `Swapping`
-/// phase) drops the switch marker that follows and leaves the chart on the old
-/// symbol. Only an idle series or a replacement that has already installed its
-/// covering snapshot (`Initializing`) may complete on `Ready`.
-const fn ready_state_can_complete_switch(state: RithmicSwitchState) -> bool {
-    matches!(
-        state,
-        RithmicSwitchState::Idle | RithmicSwitchState::Initializing
-    )
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChromeOverlay {
     Instrument,

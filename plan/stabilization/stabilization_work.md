@@ -1375,6 +1375,14 @@ Status: pending
       a chart selection generation. This audit does not claim that the legacy
       switch guards are gone or that all interleavings have passed; those are
       Parts 25 and 26 respectively.
+  - Part 25a: removed `stale_settled_state_during_engine_switch` and
+    `ready_state_can_complete_switch`, which duplicated the controller's
+    exact-generation lifecycle fence for Ready and AwaitingData. The GPUI
+    pending-switch regression now delivers both old-series settled states in
+    addition to Error, and checks that the exact pending selection survives.
+    This is a verified guard-removal slice, not Part 25 closure: remove
+    `RithmicSwitchState`, the marker wrapper and `rithmic_pending_*` fields
+    next, then proceed to Part 26 permutations and seeded interleavings.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model

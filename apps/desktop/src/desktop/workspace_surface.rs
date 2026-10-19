@@ -4304,12 +4304,7 @@ impl WorkspaceSurface {
         message: String,
         cx: &mut Context<Self>,
     ) {
-        // The pending-switch tracker is provider-neutral: both engine
-        // providers resolve selections through the same marker flow.
         let engine_provider = super::provider_presentation(self.provider).is_some();
-        if self.stale_settled_state_during_engine_switch(state, engine_provider) {
-            return;
-        }
         if state == ChartState::Error && engine_provider {
             let restoring_chart = self.rithmic_switch.is_swapping()
                 && self.chart.is_some()
@@ -4377,23 +4372,6 @@ impl WorkspaceSurface {
             None
         };
         self.apply_connection_state(state, cx);
-    }
-
-    fn stale_settled_state_during_engine_switch(
-        &self,
-        state: ChartState,
-        engine_provider: bool,
-    ) -> bool {
-        // The previous series can report one last Ready after the catalog
-        // response but before the worker processes the new EngineSelect
-        // command. Keep the switch pending until its marker/snapshot lands.
-        // The same holds for a settled no-data state queued before the marker.
-        engine_provider
-            && match state {
-                ChartState::Ready => !ready_state_can_complete_switch(self.rithmic_switch),
-                ChartState::AwaitingData => self.rithmic_switch.is_pending(),
-                _ => false,
-            }
     }
 
     fn apply_provider_catalog_event(

@@ -954,6 +954,24 @@ fn pane_harness_old_series_error_during_pending_switch_does_not_cancel_selection
         );
         assert_eq!(pane.chart_state, ChartState::Loading);
     });
+    for state in [ChartState::Ready, ChartState::AwaitingData] {
+        harness
+            .publications
+            .send(MarketWorkerMessage::SeriesState {
+                generation: 1,
+                state,
+                message: "retired series settled".into(),
+            })
+            .expect("old series lifecycle");
+        harness.pane.update(cx, |pane, cx| {
+            assert_eq!(pane.poll_market_worker(cx), 1);
+            assert_eq!(
+                pane.chart_pane_controller.pending_selection(),
+                Some(sequence)
+            );
+            assert_eq!(pane.chart_state, ChartState::Loading);
+        });
+    }
     harness
         .publications
         .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
