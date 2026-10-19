@@ -3683,7 +3683,7 @@ impl WorkspaceSurface {
                 message,
             } => self.apply_series_state_message(generation, state, message, cx),
             MarketWorkerMessage::EngineSwitchMarker { sequence } => {
-                self.apply_rithmic_switch_marker(sequence, cx);
+                self.commit_pending_selection(sequence, cx);
             }
             MarketWorkerMessage::EngineSelectionFailed { sequence } => {
                 self.reject_pending_engine_selection(sequence, cx);
@@ -4428,7 +4428,7 @@ impl WorkspaceSurface {
         self.rithmic_pending_product = Some(instrument);
         self.rithmic_pending_interval = Some(interval);
         self.rithmic_switch = RithmicSwitchState::Pending;
-        self.apply_rithmic_switch_marker(sequence, cx);
+        self.commit_pending_selection(sequence, cx);
     }
 
     fn reject_catalog_switch(
@@ -4449,7 +4449,7 @@ impl WorkspaceSurface {
     }
 
     fn reject_pending_engine_selection(&mut self, sequence: u64, cx: &mut Context<Self>) {
-        if !self.rithmic_switch.is_pending() || !self.chart_pane_controller.reject(sequence) {
+        if !self.chart_pane_controller.reject(sequence) {
             return;
         }
         let failed_interval = self.rithmic_pending_interval.take();
@@ -4475,16 +4475,15 @@ impl WorkspaceSurface {
         cx.notify();
     }
 
-    /// Commits a Rithmic switch's identity without touching the chart.
+    /// Commits the exact pending selection's identity without touching the chart.
     ///
     /// The marker only says "everything after this belongs to the new
     /// selection". The chart the trader is looking at is left on screen — still
     /// its own series, still correct — under a loading notice, and is replaced
     /// in `apply_publication` when the replacement's covering snapshot arrives.
     /// Dropping it here is what produced the blank surface on every switch.
-    fn apply_rithmic_switch_marker(&mut self, sequence: u64, cx: &mut Context<Self>) {
+    fn commit_pending_selection(&mut self, sequence: u64, cx: &mut Context<Self>) {
         if super::provider_presentation(self.provider).is_none()
-            || !self.rithmic_switch.is_pending()
             || !self.chart_pane_controller.accept(sequence)
         {
             return;

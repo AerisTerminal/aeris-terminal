@@ -1272,6 +1272,37 @@ fn pane_harness_retired_selection_failure_cannot_cancel_new_request(cx: &mut Tes
 }
 
 #[gpui::test]
+fn pane_harness_selection_outcome_uses_controller_not_legacy_switch_flag(cx: &mut TestAppContext) {
+    let (mut harness, cx) = PaneHarness::open(cx);
+    harness.publish_snapshot(12, cx);
+    let requests = harness.commands.as_ref().expect("command receiver");
+    harness.pane.update(cx, |pane, cx| {
+        assert!(pane.select_interval(ChartInterval::Minute5, cx));
+        // The controller, not the legacy presentation flag, owns outcome acceptance.
+        pane.rithmic_switch = RithmicSwitchState::Idle;
+    });
+    let sequence = requests
+        .try_iter()
+        .find_map(|command| match command {
+            MarketWorkerCommand::EngineSelect(request) => Some(request.sequence),
+            _ => None,
+        })
+        .expect("pending selection");
+    harness
+        .publications
+        .send(MarketWorkerMessage::EngineSwitchMarker { sequence })
+        .expect("selection outcome enters mailbox");
+    harness.pane.update(cx, |pane, cx| {
+        assert_eq!(pane.poll_market_worker(cx), 1);
+    });
+    cx.read(|cx| {
+        let pane = harness.pane.read(cx);
+        assert_eq!(pane.chart_pane_controller.pending_selection(), None);
+        assert_eq!(pane.interval, ChartInterval::Minute5);
+    });
+}
+
+#[gpui::test]
 fn pane_harness_failed_pending_instrument_keeps_previous_identity(cx: &mut TestAppContext) {
     let (mut harness, cx) = PaneHarness::open(cx);
     harness.publish_snapshot(12, cx);

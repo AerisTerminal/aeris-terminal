@@ -1383,6 +1383,13 @@ Status: pending
     This is a verified guard-removal slice, not Part 25 closure: remove
     `RithmicSwitchState`, the marker wrapper and `rithmic_pending_*` fields
     next, then proceed to Part 26 permutations and seeded interleavings.
+  - Part 25b1: selection commit and pre-marker rejection now rely on
+    `ChartPaneController`'s exact pending generation, without a second legacy
+    switch-flag acceptance check. The commit method is named for its selection
+    outcome rather than a provider-specific marker. PaneHarness verifies that
+    an exact pending outcome commits even if the obsolete flag disagrees.
+    This does not close Part 25: remove `RithmicSwitchState`, the mailbox
+    marker wrapper and `rithmic_pending_*` fields next.
 - [ ] M6.4 pane-presentation - `PanePresentation` applies every user chart property in one place
 - [ ] M6.5 select-and-demand-panes - One `select_and_demand` per selection; startup resolution leaves the desktop
 - [ ] M6.6 bridge-message-collapse - Collapse the parallel desktop market message model
@@ -1739,6 +1746,7 @@ Append-only, newest last: `YYYY-MM-DD <item id> <commit subject> - <one-line not
 - 2026-10-19 M6.3 Part 22 fix(desktop): record catalog chart selection at dispatch and reject stale lifecycle during catalog resolution; GPUI regression and serial full gates recorded with this commit. M6.3 remains unchecked pending auxiliary audit, switch guards, fixed permutations, 100+ interleavings, cover-through-ready and guarded GUI storms.
 - 2026-10-19 M6.3 Part 23 fix(desktop): old-series recovery results now use the lifecycle acceptance fence while a replacement is pending; the failing-first GPUI regression and all five serial workspace gates passed after cleaning 29.0 GiB with CARGO_BUILD_JOBS=1. M6.3 remains unchecked pending the rest of the auxiliary audit, switch guards, exhaustive interleavings, cover-through-ready and guarded GUI storms.
 - 2026-10-19 M6.3 Part 24 docs(desktop): audited every market-worker mailbox variant delivered to the chart pane and recorded its exact generation, lifecycle, pending-selection, consumer-scoped or app-scoped acceptance above. No new unfenced selection-bound route was found. M6.3 remains unchecked; Part 25 removes legacy switch guards, then Part 26 exercises fixed permutations and seeded interleavings, Part 27 verifies cover-through-ready and Part 28 runs isolated GUI storms.
+- 2026-10-20 M6.3 Part 25b1 refactor(desktop): removed duplicate legacy-flag acceptance from both selection commit and rejection, with a GPUI controller-authority regression; the remaining legacy switch state, marker variant and pending targets still need removal before Part 26.
 
 ## 7. Known gaps / deferred
 
